@@ -2918,6 +2918,10 @@ class DatabaseManager:
     def has_any_subscription(self):
         return self._subscription_ops.has_any_subscription()
 
+    def list_agents_awaiting_first_credential(self):
+        """ent#582: agents the install's first Claude credential should reach."""
+        return self._subscription_ops.list_agents_awaiting_first_credential()
+
     def list_subscriptions_with_agents(self, owner_id: int = None):
         return self._subscription_ops.list_subscriptions_with_agents(owner_id)
 
@@ -3115,6 +3119,10 @@ class DatabaseManager:
     def get_agent_last_execution_at(self, agent_name: str):
         """#1854: all-time MAX(started_at) for the agent (MCP-key `stale` health)."""
         return self._schedule_ops.get_agent_last_execution_at(agent_name)
+
+    def agent_has_running_execution(self, agent_name: str):
+        """ent#582: would a restart kill a turn right now?"""
+        return self._schedule_ops.agent_has_running_execution(agent_name)
 
     def get_schedule_analytics(self, schedule_id: str, hours: int,
                                 agent_name: str):

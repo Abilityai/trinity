@@ -255,14 +255,22 @@ class TestManualReassignHotReload:
 def register_env(monkeypatch):
     """Stub the db + the key-rollover fan-out for the register/upsert endpoint."""
     import routers.subscriptions as rs  # lazy: see module docstring
+    from datetime import datetime, timezone
+    from db_models import SubscriptionCredential
 
     fake_db = MagicMock()
     fake_db.get_user_by_username.return_value = {"id": 1}
-    created = MagicMock()
-    created.id = "sub-x"
-    created.name = "sub-X"
+    # A real model, not a MagicMock: since ent#582 the route returns it copied
+    # into `SubscriptionRegistration` (+ `connected_agents`).
+    now = datetime.now(timezone.utc)
+    created = SubscriptionCredential(id="sub-x", name="sub-X", owner_id=1, created_at=now, updated_at=now)
     fake_db.create_subscription.return_value = created
     monkeypatch.setattr(rs, "db", fake_db)
+    # Not the install's first credential: keeps the ent#582 first-credential
+    # connect (pinned in test_ent582_platform_keys.py) off the real test DB.
+    import importlib
+    monkeypatch.setattr(importlib.import_module("services.subscription_service"),
+                        "is_claude_auth_configured", lambda: True)
 
     # register_subscription 503s without an encryption key configured.
     monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "0" * 64)
@@ -294,7 +302,7 @@ class TestRegisterKeyRollover:
 
         result = await register_env.rs.register_subscription(request, current_user=admin_user)
 
-        assert result is register_env.created
+        assert result.id == register_env.created.id and result.connected_agents == 0
         assert register_env.fanout_calls == ["sub-x"]  # fanned out to the upserted sub id
 
     @pytest.mark.asyncio
@@ -312,7 +320,7 @@ class TestRegisterKeyRollover:
 
         result = await register_env.rs.register_subscription(request, current_user=admin_user)
 
-        assert result is register_env.created  # upsert NOT failed by the fan-out error
+        assert result.id == register_env.created.id  # upsert NOT failed by the fan-out error
 
     @pytest.mark.asyncio
     async def test_non_admin_rejected(self, register_env, owner_user):

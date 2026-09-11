@@ -218,13 +218,41 @@ async def ensure_first_run_seeded() -> dict:
         ):
             _notify_cornelius_failure(cornelius_result.get("message"))
         try:
-            return await system_seed_service.ensure_seeded(fresh=fresh)
+            result = await system_seed_service.ensure_seeded(fresh=fresh)
         except Exception as e:  # belt: keeps the entry point's never-raises contract
             logger.error("Default-system seed pass failed unexpectedly: %s", e)
-            return {"system": None, "action": "create_failed", "status": "error",
-                    "message": f"seed pass failed: {e}"}
+            result = {"system": None, "action": "create_failed", "status": "error",
+                      "message": f"seed pass failed: {e}"}
+        _connect_seeded_agents(cornelius_result, result)
+        return result
     finally:
         pass_lock.release_if_owned()
+
+
+def _connect_seeded_agents(*results) -> None:
+    """Re-run the idempotent first-credential connect after a pass that created agents (ent#582).
+
+    Seeding runs in the background right after /setup, while the operator is
+    already on the first-run Claude step. An agent whose create straddles that
+    save is baked without the credential (its env — #74 auto-assign included —
+    is built before the save) yet registered in the DB after the save-time
+    connect has read the rows, so nothing would ever connect it. Agents created
+    wholly after the save get it at create. Never raises.
+    """
+    if not any(isinstance(r, dict) and r.get("action") == "created" for r in results):
+        return
+    try:
+        from services.subscription_service import (
+            connect_agents_to_first_credential,
+            is_claude_auth_configured,
+            select_subscription_for_new_agent,
+        )
+        if not is_claude_auth_configured():
+            return
+        sub = select_subscription_for_new_agent()
+        connect_agents_to_first_credential(sub.id if sub else None)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ent#582] post-seed credential connect failed: %s", e)
 
 
 class SystemSeedService:

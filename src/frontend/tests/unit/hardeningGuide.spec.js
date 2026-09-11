@@ -54,14 +54,9 @@ import { resetInFlight } from '@/utils/inflight'
 import {
   HARDENING_GUIDE_DISMISSED_KEY,
   DOMAIN_POSTURE,
-  HARDENING_GUIDE_TUNNEL_DISMISSED_KEY,
   POSTURE_COPY,
-  dismissKeyForStage,
   hardeningStage,
-  isHardeningGuideVisible,
-  persistHardeningGuideDismissed,
   postureCopy,
-  readHardeningGuideDismissed,
 } from '@/components/onboarding/hardeningGuide'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
@@ -94,15 +89,6 @@ const withoutComments = (source) => {
   return out
 }
 
-/** A marketplace droplet still advertising HTTPS at its bare IP, seen by an admin. */
-const marketplaceIp = {
-  featureFlagsLoaded: true,
-  isAdmin: true,
-  hardeningGuideEligible: true,
-  installTlsPosture: 'https-ip',
-  dismissed: false,
-}
-
 let store
 
 beforeEach(() => {
@@ -113,103 +99,27 @@ beforeEach(() => {
   store = useSessionsStore()
 })
 
-describe('visibility', () => {
-  it('shows on a marketplace install advertising HTTPS at a bare IP', () => {
-    expect(isHardeningGuideVisible(marketplaceIp)).toBe(true)
-  })
-
-  it('shows on a marketplace install with no public URL, and on plain HTTP', () => {
-    expect(isHardeningGuideVisible({ ...marketplaceIp, installTlsPosture: 'unconfigured' })).toBe(true)
-    expect(isHardeningGuideVisible({ ...marketplaceIp, installTlsPosture: 'http' })).toBe(true)
-  })
-
-  it('stays hidden when the install is not a marketplace one', () => {
-    // The whole managed fleet lands here: plain HTTP behind Tailscale is
-    // indistinguishable from an unhardened droplet by every other signal, so
-    // provenance is the only gate that can tell them apart.
-    expect(isHardeningGuideVisible({ ...marketplaceIp, hardeningGuideEligible: false })).toBe(false)
-    expect(
-      isHardeningGuideVisible({ ...marketplaceIp, hardeningGuideEligible: false, installTlsPosture: 'http' })
-    ).toBe(false)
-  })
-
-  it('shows on a droplet installed from the DigitalOcean deploy doc', () => {
-    // #2380's original AC said the guide renders ONLY for a marketplace value.
-    // Amended by the issue author: somebody who followed the DigitalOcean deploy
-    // doc is on the same public droplet at the same bare IP and needs the same
-    // advice. The eligibility set is widened server-side; the browser only sees
-    // the resolved boolean, so this case is identical here by construction and
-    // the widening is pinned in `tests/unit/test_2380_provision_single_source`
-    // and the backend flag test.
-    expect(isHardeningGuideVisible({ ...marketplaceIp, hardeningGuideEligible: true })).toBe(true)
-  })
-
-  it('renders nothing before the flags load', () => {
-    expect(isHardeningGuideVisible({ ...marketplaceIp, featureFlagsLoaded: false })).toBe(false)
-  })
-
-  it('stays hidden for a non-admin on a marketplace install', () => {
-    // Not cosmetics. `general` is `adminOnly`, so `resolveTabFromQuery` drops a
-    // non-admin on the default tab — the card's only action dead-ends for the
-    // person reading it, under a headline about this box being unencrypted.
-    expect(isHardeningGuideVisible({ ...marketplaceIp, isAdmin: false })).toBe(false)
-    expect(
-      isHardeningGuideVisible({ ...marketplaceIp, isAdmin: false, installTlsPosture: 'http' })
-    ).toBe(false)
-  })
-
-  it('stays hidden while the profile is still unverified', () => {
-    // `authStore.role` answers 'user' until /api/users/me lands, so the SFC
-    // ANDs `profileVerified` in before asking the predicate — otherwise the card
-    // flashes for a non-admin on every page load (#2198). The getter is `role`:
-    // this spec used to pin `userRole`, which the store never defined, so the
-    // card it guards had been permanently hidden (ent#437 eyeball finding;
-    // `authRoleGetterContract.spec.js` now pins the name repo-wide).
-    const unverifiedAdmin = false // profileVerified && role === 'admin'
-    expect(isHardeningGuideVisible({ ...marketplaceIp, isAdmin: unverifiedAdmin })).toBe(false)
-    // ent#581: the admin term is built once, by the overlay's ctx, and the
-    // registry predicate reads it — so the same two-part gate is pinned there.
+describe('stage', () => {
+  it('builds the admin term once, in the overlay, from the getter that exists', () => {
+    // `authStore.role` answers 'user' until /api/users/me lands, so the term
+    // ANDs `profileVerified` in — otherwise the step flashes for a non-admin on
+    // every page load (#2198). The getter is `role`: an older spec pinned
+    // `userRole`, which the store never defined, so the card it guarded had
+    // been permanently hidden (ent#437; `authRoleGetterContract.spec.js`).
     expect(OVERLAY_SFC).toMatch(/isAdmin:\s*auth\.profileVerified && auth\.role === 'admin'/)
     expect(OVERLAY_SFC).not.toMatch(/userRole/)
     expect(GUIDE_SFC).not.toMatch(/userRole/)
   })
 
-  it('shows for a verified admin on a marketplace install', () => {
-    expect(isHardeningGuideVisible({ ...marketplaceIp, isAdmin: true })).toBe(true)
-  })
-
-  it('predicate: a configured domain ADVANCES the card, it does not retire it', () => {
-    // The guide advises two steps. Retiring on step one meant step two was
-    // mentioned once and then never again, on the only surface that raises it —
-    // so `https-domain` now selects the tunnel stage instead of hiding.
+  it('a configured domain ADVANCES to the tunnel stage; everything short of one is step one', () => {
     expect(DOMAIN_POSTURE).toBe('https-domain')
-    expect(isHardeningGuideVisible({ ...marketplaceIp, installTlsPosture: DOMAIN_POSTURE })).toBe(true)
     expect(hardeningStage(DOMAIN_POSTURE)).toBe('tunnel')
-    // Everything short of a domain is still step one.
     for (const posture of ['unconfigured', 'http', 'https-ip']) {
       expect(hardeningStage(posture)).toBe('address')
     }
-    // A dismissal is now the only thing that ends the guide.
-    expect(
-      isHardeningGuideVisible({ ...marketplaceIp, installTlsPosture: DOMAIN_POSTURE, dismissed: true })
-    ).toBe(false)
   })
 
-  it('scopes dismissal per stage, so step one cannot silently spend step two', () => {
-    // One key would let "you are on a bare IP, go away" also consume tunnel
-    // advice the operator has never been shown — the same shape as the ent#437
-    // warm ask being spent behind another card.
-    expect(dismissKeyForStage('address')).toBe(HARDENING_GUIDE_DISMISSED_KEY)
-    expect(dismissKeyForStage('tunnel')).toBe(HARDENING_GUIDE_TUNNEL_DISMISSED_KEY)
-    expect(dismissKeyForStage('address')).not.toBe(dismissKeyForStage('tunnel'))
-
-    // Dismissing the address stage leaves the tunnel stage unread.
-    persistHardeningGuideDismissed('address')
-    expect(readHardeningGuideDismissed('address')).toBe(true)
-    expect(readHardeningGuideDismissed('tunnel')).toBe(false)
-
-    // The address key keeps its original name, so an existing dismissal holds
-    // with nothing to migrate.
+  it('keeps the retired card\'s dismissal key name, so the upgrade skip still finds it', () => {
     expect(HARDENING_GUIDE_DISMISSED_KEY).toBe('trinity_hardening_guide_dismissed')
   })
 
@@ -231,55 +141,6 @@ describe('visibility', () => {
     expect(body).toContain('sessionsStore.loadFeatureFlags(true)')
     // Before the catch, i.e. on the success path only.
     expect(body.indexOf('loadFeatureFlags(true)')).toBeLessThan(body.indexOf('} catch'))
-  })
-
-  it('stays hidden once dismissed', () => {
-    expect(isHardeningGuideVisible({ ...marketplaceIp, dismissed: true })).toBe(false)
-  })
-
-  it('defaults every term to hidden when called with nothing', () => {
-    expect(isHardeningGuideVisible()).toBe(false)
-    expect(isHardeningGuideVisible({})).toBe(false)
-  })
-})
-
-describe('dismissal', () => {
-  it('writes the documented key and is honoured on the next read', () => {
-    expect(readHardeningGuideDismissed()).toBe(false)
-
-    expect(persistHardeningGuideDismissed()).toBe(true)
-
-    expect(localStorage.getItem(HARDENING_GUIDE_DISMISSED_KEY)).toBe('1')
-    expect(HARDENING_GUIDE_DISMISSED_KEY).toBe('trinity_hardening_guide_dismissed')
-    expect(readHardeningGuideDismissed()).toBe(true)
-    expect(isHardeningGuideVisible({ ...marketplaceIp, dismissed: readHardeningGuideDismissed() })).toBe(false)
-  })
-
-  it('reports the refusal without throwing when storage rejects the write', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const setItem = localStorage.setItem
-    localStorage.setItem = () => { throw new Error('quota') }
-
-    expect(persistHardeningGuideDismissed()).toBe(false)
-
-    localStorage.setItem = setItem
-    expect(warn).toHaveBeenCalled()
-    warn.mockRestore()
-  })
-
-  it('reads as not-dismissed when storage cannot be read at all', () => {
-    const getItem = localStorage.getItem
-    localStorage.getItem = () => { throw new Error('private mode') }
-
-    // Safe direction for a security nudge: show it again, it is one click away.
-    expect(readHardeningGuideDismissed()).toBe(false)
-
-    localStorage.getItem = getItem
-  })
-
-  it('does not reach the network — dismissal is per-browser only', () => {
-    persistHardeningGuideDismissed()
-    expect(axios.get).not.toHaveBeenCalled()
   })
 })
 
@@ -576,15 +437,6 @@ describe('the store fails closed', () => {
     expect(store.installSource).toBe('do-marketplace')
     expect(store.hardeningGuideEligible).toBe(true)
     expect(store.installTlsPosture).toBe('https-ip')
-    expect(
-      isHardeningGuideVisible({
-        featureFlagsLoaded: store.featureFlagsLoaded,
-        isAdmin: true, // held constant: these cases exercise the flag path
-        hardeningGuideEligible: store.hardeningGuideEligible,
-        installTlsPosture: store.installTlsPosture,
-        dismissed: false,
-      })
-    ).toBe(true)
   })
 
   it('falls back to the closed values when the payload omits them', async () => {
@@ -597,7 +449,7 @@ describe('the store fails closed', () => {
     expect(store.installTlsPosture).toBe('unconfigured')
   })
 
-  it('fails CLOSED when the flag read fails, so the card stays hidden', async () => {
+  it('fails CLOSED when the flag read fails, so the step stays out', async () => {
     axios.get.mockRejectedValueOnce(new Error('boom'))
     await store.loadFeatureFlags()
 
@@ -605,15 +457,5 @@ describe('the store fails closed', () => {
     expect(store.hardeningGuideEligible).toBe(false)
     expect(store.installTlsPosture).toBe('unconfigured')
     expect(store.featureFlagsLoaded).toBe(true) // resolved, just not to a gate
-
-    expect(
-      isHardeningGuideVisible({
-        featureFlagsLoaded: store.featureFlagsLoaded,
-        isAdmin: true, // held constant: these cases exercise the flag path
-        hardeningGuideEligible: store.hardeningGuideEligible,
-        installTlsPosture: store.installTlsPosture,
-        dismissed: false,
-      })
-    ).toBe(false)
   })
 })

@@ -215,14 +215,22 @@
   re-bakes a running container. So when a write makes the install go from *no
   Claude credential* to *one* (`POST /api/subscriptions`,
   `PUT /api/settings/api-keys/anthropic`), every agent that could not
-  authenticate — Claude runtime, not ephemeral, no subscription,
-  `use_platform_api_key` on — is connected: a subscription is assigned to it, and
-  running ones are restarted in the background so the new env is baked (an
-  auth-mode change is a recreate). Agents with `use_platform_api_key` off keep
-  their own `.env`/terminal auth and are never touched; an install that already
-  had a credential is never touched. The response names the agents
-  (`connected_agents`). After this step the operator can reach a running execution
-  with nothing else configured.
+  authenticate is connected. Candidates are the DB agent rows (not the container
+  list, which reads empty on a Docker fault): Claude runtime, not ephemeral, no
+  subscription, `use_platform_api_key` on, and **no successful execution ever** —
+  a success proves the agent authenticates another way (its own `.env` key or a
+  terminal login) that a subscription would shadow (#2114). A subscription is
+  assigned to each; agents whose container is running are restarted in the
+  background so the new env is baked (an auth-mode change is a recreate), except
+  one with a **running execution** (left alone; it picks the credential up on its
+  next start) or whose env already carries it. Agents with `use_platform_api_key`
+  off are never touched; an install that already had a credential is never
+  touched. Both responses carry `connected_agents: int` — how many agents now use
+  it. Because first-run seeding runs in the background right after `/setup`, a
+  seed pass that created agents re-runs the same idempotent connect at its end, so
+  an agent whose create straddled the save is not left without a credential.
+  After this step the operator can reach a running execution with nothing else
+  configured.
 - **`claude_auth_configured`** (feature flags) is true for every credential the
   step accepts — a platform API key (settings or env) OR any registered
   subscription — resolved by one helper

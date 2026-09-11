@@ -150,6 +150,18 @@ export function isFirstRunOverlayVisible(ctx = {}) {
   return applicableSteps(ctx).some((s) => !s.ridesAlong && !skipped.includes(s.key))
 }
 
+/**
+ * Does this open start the activation funnel (`setup_started`, ent#184 /
+ * ent#437)? Keeps the ent#52 wizard's meaning — it auto-opened only for an
+ * operator with nothing running yet — so: an open on its own (never `forced`)
+ * over a Claude credential still to connect or no agent of your own. A re-run,
+ * or a new browser opening for email / sharing / secure on an established
+ * fleet, would inflate the top of the funnel.
+ */
+export function countsAsSetupStart(ctx = {}) {
+  return !ctx.forced && FIRST_RUN_STEPS.some((s) => ['claude', 'agent'].includes(s.key) && s.applies(ctx))
+}
+
 /** Rail state for one step. Completion is DERIVED, never stored. */
 export function stepState({ step, currentKey, ctx = {}, skipped = [], completed = [] }) {
   if (step.key === currentKey) return 'current'

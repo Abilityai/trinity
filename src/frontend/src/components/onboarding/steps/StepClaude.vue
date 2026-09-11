@@ -97,9 +97,10 @@ import {
   CLAUDE_DOCS_URL,
   CLAUDE_TABS,
   CLAUDE_TAB_COPY,
+  CLAUDE_ALREADY_CONNECTED,
   FIRST_RUN_SUBSCRIPTION_NAME,
-  SETTINGS_PATH,
   claudeCredentialError,
+  claudeSavedText,
   claudeTabFor,
   describeKeyTest,
 } from './credentialSteps'
@@ -122,6 +123,7 @@ const verbError = ref('')
 const busy = ref(false)
 const busyLabel = ref('')
 const savedHere = ref(false)
+const connectedAgents = ref(null) // the save response's `connected_agents`
 
 const copy = computed(() => CLAUDE_TAB_COPY[tab.value])
 const connected = computed(() => savedHere.value || !!props.ctx.claudeAuthConfigured)
@@ -133,11 +135,7 @@ const lead =
   "this is the one step you can't skip. It is checked with Anthropic before it is saved, and stored encrypted."
 
 const connectedText = computed(() =>
-  savedHere.value
-    ? 'Connected. Agents that had no Claude credential now use this one — running ones restart in the ' +
-      `background, which takes about a minute. Manage it later in ${SETTINGS_PATH}.`
-    : 'This instance already has a Claude credential, so agents can run. Paste another below to add or ' +
-      'replace one, or continue.'
+  savedHere.value ? claudeSavedText(connectedAgents.value) : CLAUDE_ALREADY_CONNECTED
 )
 
 // A new paste, or a tab change, clears the verdict about the previous one.
@@ -167,8 +165,10 @@ async function connect() {
       return
     }
     busyLabel.value = 'Saving…'
-    if (isToken) await subscriptions.registerToken(FIRST_RUN_SUBSCRIPTION_NAME, credential)
-    else await keys.save('anthropic', { api_key: credential })
+    const saved = isToken
+      ? await subscriptions.registerToken(FIRST_RUN_SUBSCRIPTION_NAME, credential)
+      : await keys.save('anthropic', { api_key: credential })
+    connectedAgents.value = saved?.connected_agents
     value.value = ''
     warning.value = result.warning
     savedHere.value = true

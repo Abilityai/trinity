@@ -381,26 +381,76 @@ def test_claude_auth_configured_is_true_with_a_subscription_and_no_api_key():
         db.delete_subscription(sub.id)
 
 
-def _agents():
-    A = types.SimpleNamespace
-    return [
-        A(name="seeded", runtime="claude-code", ephemeral=False, status="running"),
-        A(name="stopped", runtime=None, ephemeral=False, status="stopped"),
-        A(name="has-sub", runtime="claude-code", ephemeral=False, status="running"),
-        A(name="own-key", runtime="claude-code", ephemeral=False, status="running"),
-        A(name="codex", runtime="codex", ephemeral=False, status="running"),
-        A(name="ghost", runtime="claude-code", ephemeral=True, status="running"),
-    ]
+# The fleet the first credential meets. The DB query is exercised for real
+# against the conftest SQLite; names are prefixed because that DB is shared.
+_P = "ent582-f-"
+
+
+@pytest.fixture
+def agent_rows():
+    """Real agent_ownership + schedule_executions rows, removed afterwards."""
+    from sqlalchemy import text
+    live_db = _live("database").db
+    engine = _live("db.engine").get_engine()
+    _admin_user_id()
+    owner = live_db.get_user_by_username("ent582-admin")
+    sub = live_db.create_subscription(name="ent582-fleet-sub", token="sk-ant-oat01-fleet", owner_id=owner["id"])
+
+    def agent(name, **kw):
+        live_db.register_agent_owner(_P + name, owner["username"], **kw)
+        return _P + name
+
+    def execution(name, status):
+        ex = live_db.create_task_execution(_P + name, "hello")
+        live_db.update_execution_status(ex.id, status)
+
+    for n in ("fresh", "stopped", "busy", "worked", "has-sub", "own-key", "gone"):
+        agent(n)
+    agent("ghost", is_ephemeral=True)
+    execution("worked", "success")          # authenticated some other way
+    execution("busy", "failed")             # a failure proves nothing
+    live_db.create_task_execution(_P + "busy", "mid-run")   # stays `running`
+    live_db.assign_subscription_to_agent(_P + "has-sub", sub.id)
+    live_db.set_use_platform_api_key(_P + "own-key", False)
+    live_db.delete_agent_ownership(_P + "gone")             # soft-deleted
+    yield live_db
+    live_db.delete_subscription(sub.id)
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM schedule_executions WHERE agent_name LIKE :p"), {"p": _P + "%"})
+        conn.execute(text("DELETE FROM agent_ownership WHERE agent_name LIKE :p"), {"p": _P + "%"})
+
+
+def test_candidates_come_from_db_rows_and_skip_agents_that_ever_succeeded(agent_rows):
+    """(a) + (b): rows, not containers; a success, a subscription, an own key,
+    a ghost or a soft-delete each take an agent out."""
+    mine = [n for n in agent_rows.list_agents_awaiting_first_credential() if n.startswith(_P)]
+    assert mine == [_P + "busy", _P + "fresh", _P + "stopped"]
+
+
+def test_running_execution_is_seen_by_the_db(agent_rows):
+    assert agent_rows.agent_has_running_execution(_P + "busy") is True
+    assert agent_rows.agent_has_running_execution(_P + "worked") is False
+    assert agent_rows.agent_has_running_execution(_P + "fresh") is False
 
 
 @pytest.fixture
 def fleet(monkeypatch):
+    """The service over a fixed candidate list, with Docker and restarts faked."""
     live_db = _live("database").db
     ss = _live("services.subscription_service")
+    ds = _live("services.docker_service")
     state = {"assigned": [], "restarted": [], "ss": ss}
-    monkeypatch.setattr(_live("services.docker_service"), "list_all_agents_fast", _agents)
-    monkeypatch.setattr(live_db, "get_agent_subscription_id", lambda n: "s0" if n == "has-sub" else None)
-    monkeypatch.setattr(live_db, "get_use_platform_api_key", lambda n: n != "own-key")
+    monkeypatch.setattr(live_db, "list_agents_awaiting_first_credential",
+                        lambda: ["seeded", "stopped", "codex", "creating"])
+    monkeypatch.setattr(ds, "agent_container_runtimes",
+                        lambda: {"seeded": "claude-code", "codex": "codex"})  # stopped: no label
+    monkeypatch.setattr(ds, "agent_container_states",
+                        lambda: {"seeded": "running", "stopped": "stopped", "codex": "running"})
+
+    def no_containers_list():
+        raise AssertionError("list_all_agents_fast swallows Docker errors — must not be the source")
+
+    monkeypatch.setattr(ds, "list_all_agents_fast", no_containers_list)
     monkeypatch.setattr(live_db, "assign_subscription_to_agent",
                         lambda n, s: state["assigned"].append((n, s)))
 
@@ -419,44 +469,140 @@ def _run_connect(fleet, subscription_id=None):
     return asyncio.run(go())
 
 
-def test_first_subscription_connects_only_agents_that_could_not_authenticate(fleet):
-    assert _run_connect(fleet, "sub-1") == ["seeded", "stopped"]
-    assert fleet["assigned"] == [("seeded", "sub-1"), ("stopped", "sub-1")]
-    assert fleet["restarted"] == ["seeded"]  # stopped picks it up on next start
+def test_first_subscription_connects_claude_rows_and_restarts_only_running_containers(fleet):
+    """(a) + (d): `creating` has a row but no container yet — assigned, not restarted."""
+    assert _run_connect(fleet, "sub-1") == 3
+    assert fleet["assigned"] == [("seeded", "sub-1"), ("stopped", "sub-1"), ("creating", "sub-1")]
+    assert fleet["restarted"] == ["seeded"]
 
 
 def test_first_api_key_restarts_the_same_agents_without_assigning(fleet):
-    assert _run_connect(fleet, None) == ["seeded", "stopped"]
+    assert _run_connect(fleet, None) == 3
     assert fleet["assigned"] == []
     assert fleet["restarted"] == ["seeded"]
 
 
-def test_api_key_save_connects_the_fleet_only_when_it_is_the_first_credential(monkeypatch):
+def test_docker_unreadable_still_connects_in_the_db_but_restarts_nothing(fleet, monkeypatch):
+    ds = _live("services.docker_service")
+    monkeypatch.setattr(ds, "agent_container_runtimes", lambda: None)
+    monkeypatch.setattr(ds, "agent_container_states", lambda: None)
+    assert _run_connect(fleet, "sub-1") == 4  # runtime unknown → claude-code (ent#403)
+    assert fleet["restarted"] == []
+
+
+def test_restart_skips_a_running_execution_and_an_already_current_env(monkeypatch):
+    """(c): checked per agent at restart time, under the switch lock."""
+    live_db = _live("database").db
+    ss = _live("services.subscription_service")
+    sas = _live("services.subscription_auto_switch")
+    sas._reset_locks_for_test()
+    restarted = []
+
+    async def fake_restart_agent(name):
+        restarted.append(name)
+        return "success"
+
+    monkeypatch.setattr(sas, "_restart_agent", fake_restart_agent)
+    monkeypatch.setattr(live_db, "agent_has_running_execution", lambda n: n == "busy")
+    monkeypatch.setattr(ss, "_auth_env_is_current", lambda n: n == "current")
+    asyncio.run(ss._restart_connected_agents(["busy", "current", "idle"]))
+    assert restarted == ["idle"]
+
+
+def test_api_key_save_returns_an_int_count_only_for_the_first_credential(monkeypatch):
     calls = []
-    monkeypatch.setattr(sr, "connect_agents_to_first_credential", lambda: calls.append(1) or ["seeded"])
+    monkeypatch.setattr(sr, "connect_agents_to_first_credential", lambda: calls.append(1) or 2)
     client = _client()
 
     monkeypatch.setattr(sr, "is_claude_auth_configured", lambda: False)
     r = client.put("/api/settings/api-keys/anthropic", json={"api_key": "sk-ant-api03-first"})
-    assert r.status_code == 200 and r.json()["connected_agents"] == ["seeded"]
+    assert r.status_code == 200 and r.json()["connected_agents"] == 2
 
     monkeypatch.setattr(sr, "is_claude_auth_configured", lambda: True)
     r = client.put("/api/settings/api-keys/anthropic", json={"api_key": "sk-ant-api03-second"})
-    assert r.json()["connected_agents"] == []
+    assert r.json()["connected_agents"] == 0
     assert calls == [1]
 
 
-def test_first_subscription_registration_connects_the_fleet(monkeypatch):
+@pytest.mark.parametrize("first,expected", [(True, 3), (False, 0)])
+def test_subscription_registration_returns_connected_agents_through_the_response_model(monkeypatch, first, expected):
+    """(d): `response_model` would silently strip a field the model lacks."""
     connected = []
     ss = _live("services.subscription_service")  # the router imports it at call time
     monkeypatch.setattr(ss, "connect_agents_to_first_credential",
-                        lambda sid: connected.append(sid) or [])
-    monkeypatch.setattr(ss, "is_claude_auth_configured", lambda: False)
+                        lambda sid: connected.append(sid) or 3)
+    monkeypatch.setattr(ss, "is_claude_auth_configured", lambda: not first)
     uid = _admin_user_id()
     monkeypatch.setattr(subs_router.db, "get_user_by_username", lambda u: {"id": uid})
     r = _client().post("/api/subscriptions", json={"name": "ent582-first", "token": "sk-ant-oat01-x"})
     try:
         assert r.status_code == 200
-        assert connected == [r.json()["id"]]
+        body = r.json()
+        assert body["connected_agents"] == expected and isinstance(body["connected_agents"], int)
+        assert body["name"] == "ent582-first" and body["id"]
+        assert connected == ([body["id"]] if first else [])
     finally:
         db.delete_subscription(r.json()["id"])
+
+
+# ---------------------------------------------------------------------------
+# Agents whose create straddles the save — the post-seed re-run
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def seed_connect(monkeypatch):
+    ss = _live("services.subscription_service")
+    calls = []
+    monkeypatch.setattr(ss, "connect_agents_to_first_credential", lambda sid=None: calls.append(sid) or 0)
+    monkeypatch.setattr(ss, "select_subscription_for_new_agent", lambda: types.SimpleNamespace(id="sub-9"))
+    monkeypatch.setattr(ss, "is_claude_auth_configured", lambda: True)
+    return ss, calls
+
+
+def test_a_seed_pass_that_created_agents_reruns_the_connect(seed_connect):
+    seed = _live("services.system_seed_service")
+    _, calls = seed_connect
+    seed._connect_seeded_agents({"action": "none"}, {"action": "created"})
+    assert calls == ["sub-9"]
+
+
+def test_a_seed_pass_that_created_nothing_or_has_no_credential_does_not(seed_connect, monkeypatch):
+    seed = _live("services.system_seed_service")
+    ss, calls = seed_connect
+    seed._connect_seeded_agents({"action": "none"}, {"action": "skipped"})
+    monkeypatch.setattr(ss, "is_claude_auth_configured", lambda: False)
+    seed._connect_seeded_agents({"action": "created"}, None)
+    assert calls == []
+
+
+def test_the_rerun_uses_the_platform_key_when_there_is_no_subscription(seed_connect, monkeypatch):
+    seed = _live("services.system_seed_service")
+    ss, calls = seed_connect
+    monkeypatch.setattr(ss, "select_subscription_for_new_agent", lambda: None)
+    seed._connect_seeded_agents({"action": "created"}, {"action": "none"})
+    assert calls == [None]
+
+
+# ---------------------------------------------------------------------------
+# Gemini-runtime agents get the saved key at create
+# ---------------------------------------------------------------------------
+
+def test_gemini_runtime_agent_gets_the_saved_key_then_the_env(monkeypatch):
+    from services.agent_service import crud
+    monkeypatch.setenv("OTEL_ENABLED", "0")
+    cfg = types.SimpleNamespace(runtime="gemini-cli")
+
+    env = {}
+    crud._apply_gemini_and_otel_env(cfg, env)
+    assert "GEMINI_API_KEY" not in env
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-env-only")
+    monkeypatch.setattr(_live("config"), "GEMINI_API_KEY", "AIza-env-only")  # config coalesces at import
+    env = {}
+    crud._apply_gemini_and_otel_env(cfg, env)
+    assert env["GEMINI_API_KEY"] == "AIza-env-only"
+
+    assert _client().put("/api/settings/api-keys/gemini", json={"api_key": "AIza-saved"}).status_code == 200
+    env = {}
+    crud._apply_gemini_and_otel_env(cfg, env)
+    assert env["GEMINI_API_KEY"] == "AIza-saved"

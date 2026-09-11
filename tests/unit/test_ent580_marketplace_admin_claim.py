@@ -14,11 +14,14 @@ other two on its own:
   persists that marker, because it is also the documented UPDATE path: a re-run
   that generated a password would have the backend re-sync it over the one the
   operator chose in the browser. Without the marker it behaves exactly as before.
-* **compose** — `${ADMIN_PASSWORD?}`: unset still refuses to render, an explicit
-  blank renders. `:?` refused the claim path outright.
+* **compose** — hosted only: `${ADMIN_PASSWORD?}` (unset still refuses to render,
+  an explicit blank renders) plus `ADMIN_PASSWORD_SOURCE=${…:-unset}`. Prod keeps
+  `:?` — nothing that claims in the browser runs it.
+* **the /setup backstop** — blank + `ADMIN_PASSWORD_SOURCE=unset` (a hand-run
+  hosted compose) is refused; absent (dev) and `browser` are not.
 * **the MOTD** — prints the URL to claim, never a password.
-* **the backend** — no logic changed; the blank-env branch already existed. What
-  is pinned is the end-to-end contract: blank → no admin, flag false, /setup
+* **the backend** — the blank-env branch already existed; the only new logic is
+  the /setup backstop above. What is pinned is the end-to-end contract: blank → no admin, flag false, /setup
   provisions, and a reboot never re-syncs over the browser-set password; set →
   admin at boot, flag true, /setup refuses.
 * **J01** — the journey catalog names both variants.
@@ -48,7 +51,9 @@ _START = _ROOT / "scripts" / "deploy" / "start.sh"
 _ENV_FILE_SH = _ROOT / "scripts" / "deploy" / "env-file.sh"
 _FIRSTBOOT = _ROOT / "packer/digitalocean/files/opt/trinity-firstboot/firstboot.sh"
 _MOTD = _ROOT / "packer/digitalocean/files/etc/update-motd.d/99-trinity"
-_COMPOSES = ("docker-compose.prod.yml", "docker-compose.hosted.yml")
+# Hosted only: the marketplace (and `start.sh --hosted`) runs it; nothing that
+# claims in the browser runs prod, which keeps `:?` (pinned below).
+_COMPOSES = ("docker-compose.hosted.yml",)
 
 _BASH = shutil.which("bash") is not None
 _SYS_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -191,8 +196,40 @@ def test_firstboot_exports_the_key_start_sh_reads() -> None:
     )
 
 
+_EMPTY_FORMS = ['ADMIN_PASSWORD=""\n', "ADMIN_PASSWORD=''\n", "ADMIN_PASSWORD= \n"]
+
+
+@pytest.mark.skipif(not _BASH, reason="bash required")
+@pytest.mark.parametrize("line", _EMPTY_FORMS)
+def test_quoted_or_space_empty_is_blank_unattended_generates(tmp_path, line):
+    """Compose renders these EMPTY; a raw `=.+` grep called them set, so an
+    unattended run booted a hosted stack with no password and no marker."""
+    r, vals, dot = _ensure_admin_password(tmp_path, "ADMIN_USERNAME=admin\n" + line, {"UNATTENDED": "1"})
+    assert r.returncode == 0, r.stderr
+    assert re.fullmatch(r"[A-Za-z0-9]{16,24}", vals["GENERATED"]), vals
+    assert _lines(dot, "ADMIN_PASSWORD") == [f"ADMIN_PASSWORD={vals['GENERATED']}"]
+
+
+@pytest.mark.skipif(not _BASH, reason="bash required")
+@pytest.mark.parametrize("line", _EMPTY_FORMS)
+def test_quoted_or_space_empty_is_blank_interactive_refuses(tmp_path, line):
+    r, _, _ = _ensure_admin_password(tmp_path, line, {})
+    assert r.returncode == 1
+    assert "ERROR: ADMIN_PASSWORD is blank in .env." in r.stderr
+
+
+@pytest.mark.skipif(not _BASH, reason="bash required")
+@pytest.mark.parametrize("line", _EMPTY_FORMS)
+def test_quoted_or_space_empty_with_the_marker_stays_blank(tmp_path, line):
+    before = line + "ADMIN_PASSWORD_SOURCE=browser\n"
+    r, vals, dot = _ensure_admin_password(tmp_path, before, {"UNATTENDED": "1"})
+    assert r.returncode == 0, r.stderr
+    assert vals == {"GENERATED": "", "IN_BROWSER": "1"}
+    assert dot == before, "a blank line compose already reads as empty is left alone"
+
+
 # ---------------------------------------------------------------------------
-# compose — prod and hosted (twins, parity-tested by test_2280)
+# compose — hosted relaxes, prod does not
 # ---------------------------------------------------------------------------
 
 def _env_list(compose: str, service: str) -> list[str]:
@@ -207,6 +244,22 @@ def test_compose_refuses_unset_but_accepts_blank(compose, service, var):
     assert entry.startswith(f"{var}=${{ADMIN_PASSWORD?"), (
         f"{compose} {service}: `${{ADMIN_PASSWORD?...}}` is the contract — `:?` "
         f"refuses the browser-claim path, `:-` would let an UNSET password through"
+    )
+
+
+@pytest.mark.parametrize(("service", "var"), [("backend", "ADMIN_PASSWORD"), ("mcp-server", "TRINITY_PASSWORD")])
+def test_prod_compose_still_refuses_a_blank_password(service, var):
+    entry = next(e for e in _env_list("docker-compose.prod.yml", service) if e.startswith(f"{var}="))
+    assert entry.startswith(f"{var}=${{ADMIN_PASSWORD:?"), (
+        f"docker-compose.prod.yml {service}: must stay `:?` — source builds run it "
+        f"and nothing claims in the browser there"
+    )
+
+
+def test_hosted_backend_forwards_the_claim_marker_defaulting_to_unset():
+    """The /setup backstop's input: a hand-run hosted compose with no marker."""
+    assert "ADMIN_PASSWORD_SOURCE=${ADMIN_PASSWORD_SOURCE:-unset}" in _env_list(
+        "docker-compose.hosted.yml", "backend"
     )
 
 
@@ -226,30 +279,44 @@ def _compose_available() -> bool:
         return False
 
 
-@pytest.mark.skipif(not _compose_available(), reason="docker compose CLI not available")
-@pytest.mark.parametrize("compose", _COMPOSES)
-def test_compose_render_unset_fails_blank_renders(compose, tmp_path):
-    """Resolved by Compose itself, not read off the YAML: `.env`'s `KEY=` is
-    what start.sh writes on the claim path."""
+def _render(compose: str, tmp_path: Path, dotenv_text: str):
+    """Resolved by Compose itself, not read off the YAML."""
     redis = secrets.token_hex(24)
     base_env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "DOCKER_HOST", "DOCKER_CONFIG")}
     dotenv = tmp_path / "claim.env"
+    dotenv.write_text(dotenv_text + f"REDIS_PASSWORD={redis}\nREDIS_BACKEND_PASSWORD={redis}\n")
+    return subprocess.run(
+        ["docker", "compose", "--env-file", str(dotenv), "-f", compose, "config"],
+        cwd=_ROOT, capture_output=True, text=True, timeout=120, env=base_env,
+    )
 
-    def render(dotenv_text: str):
-        dotenv.write_text(dotenv_text + f"REDIS_PASSWORD={redis}\nREDIS_BACKEND_PASSWORD={redis}\n")
-        return subprocess.run(
-            ["docker", "compose", "--env-file", str(dotenv), "-f", compose, "config"],
-            cwd=_ROOT, capture_output=True, text=True, timeout=120, env=base_env,
-        )
 
-    unset = render("")
+@pytest.mark.skipif(not _compose_available(), reason="docker compose CLI not available")
+@pytest.mark.parametrize("compose", _COMPOSES)
+def test_compose_render_unset_fails_blank_renders(compose, tmp_path):
+    """`.env`'s `KEY=` is what start.sh writes on the claim path."""
+    unset = _render(compose, tmp_path, "")
     assert unset.returncode != 0 and "ADMIN_PASSWORD" in unset.stderr, "an unset password must still refuse"
 
-    blank = render("ADMIN_PASSWORD=\nADMIN_PASSWORD_SOURCE=browser\n")
+    blank = _render(compose, tmp_path, "ADMIN_PASSWORD=\nADMIN_PASSWORD_SOURCE=browser\n")
     assert blank.returncode == 0, blank.stderr
     services = yaml.safe_load(blank.stdout)["services"]
     assert services["backend"]["environment"]["ADMIN_PASSWORD"] == ""
+    assert services["backend"]["environment"]["ADMIN_PASSWORD_SOURCE"] == "browser"
     assert services["mcp-server"]["environment"]["TRINITY_PASSWORD"] == ""
+
+    # Hand-run with no marker: renders, but /setup sees `unset` and refuses.
+    no_marker = _render(compose, tmp_path, "ADMIN_PASSWORD=\n")
+    assert no_marker.returncode == 0, no_marker.stderr
+    assert yaml.safe_load(no_marker.stdout)["services"]["backend"]["environment"]["ADMIN_PASSWORD_SOURCE"] == "unset"
+
+
+@pytest.mark.skipif(not _compose_available(), reason="docker compose CLI not available")
+def test_prod_compose_render_refuses_a_blank_password(tmp_path):
+    blank = _render("docker-compose.prod.yml", tmp_path, "ADMIN_PASSWORD=\nADMIN_PASSWORD_SOURCE=browser\n")
+    assert blank.returncode != 0 and "ADMIN_PASSWORD" in blank.stderr, (
+        "prod must refuse a blank password even with the marker — only hosted is claimable"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +486,49 @@ def test_supplied_password_boot_closes_the_wizard(tmp_path, monkeypatch):
         _claim(conn, monkeypatch)
     assert exc.value.status_code == 403
     assert ops.get_user_by_username("admin")["password"] == provisioned
+
+
+def _marker(monkeypatch, source):
+    if source is None:
+        monkeypatch.delenv("ADMIN_PASSWORD_SOURCE", raising=False)
+    else:
+        monkeypatch.setenv("ADMIN_PASSWORD_SOURCE", source)
+
+
+@pytest.mark.parametrize("source", ["browser", None], ids=["marketplace", "absent-dev-compose"])
+def test_blank_password_is_claimable_with_the_marker_or_without_the_variable(tmp_path, monkeypatch, source):
+    conn, cur = _mkdb(tmp_path)
+    _boot(conn, cur, monkeypatch, "")
+    _marker(monkeypatch, source)
+    assert _claim(conn, monkeypatch)["success"] is True
+
+
+def test_blank_password_on_a_hand_run_hosted_compose_is_refused(tmp_path, monkeypatch):
+    """Hosted renders `ADMIN_PASSWORD_SOURCE=unset` when nothing opted in: the
+    instance is not the marketplace, so its first visitor must not own it."""
+    conn, cur = _mkdb(tmp_path)
+    _boot(conn, cur, monkeypatch, "")
+    _marker(monkeypatch, "unset")
+    monkeypatch.setattr(_setup(), "hash_password", lambda p: pytest.fail("hashed before refusing"))
+    with pytest.raises(HTTPException) as exc:
+        _claim(conn, monkeypatch)
+    assert exc.value.status_code == 403
+    assert "ADMIN_PASSWORD" in exc.value.detail and "start.sh --hosted" in exc.value.detail
+    ops = _SqliteSetupDB(conn)
+    assert ops.get_user_by_username("admin") is None
+    assert ops.get_setting_value("setup_completed", "false") != "true"
+
+
+def test_existing_admin_refusal_still_comes_first(tmp_path, monkeypatch):
+    """#2381's check is unchanged and runs before the backstop."""
+    conn, cur = _mkdb(tmp_path)
+    _boot(conn, cur, monkeypatch, "Supplied-Pass-2026!")
+    monkeypatch.setenv("ADMIN_PASSWORD", "")
+    _marker(monkeypatch, "unset")
+    with pytest.raises(HTTPException) as exc:
+        _claim(conn, monkeypatch)
+    assert exc.value.status_code == 403
+    assert "already has an administrator account" in exc.value.detail
 
 
 # ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+# mcp: subscriptions.ts (register_subscription, list_subscriptions, assign_subscription, clear_agent_subscription, get_agent_auth, delete_subscription)
 """
 Subscription credential management routes (SUB-002).
 
@@ -15,7 +16,7 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional, List
 
-from models import SubscriptionHeadroomHistory, SubscriptionTokenTest, User
+from models import SubscriptionHeadroomHistory, SubscriptionRegistration, SubscriptionTokenTest, User
 from database import db
 from dependencies import get_current_user, assert_admin, assert_agent_access, assert_agent_owner
 from db_models import (
@@ -45,7 +46,7 @@ async def get_encryption_status(
     return {"configured": bool(key and len(key) >= 64)}
 
 
-@router.post("", response_model=SubscriptionCredential)
+@router.post("", response_model=SubscriptionRegistration)
 async def register_subscription(
     request: SubscriptionCredentialCreate,
     current_user: User = Depends(get_current_user)
@@ -111,10 +112,9 @@ async def register_subscription(
         # ent#582: the first credential reaches the agents created without one
         # (the seeded fleet) — assigned now, running ones restarted in the
         # background. Never fails the registration.
-        if first_credential:
-            connect_agents_to_first_credential(subscription.id)
+        connected = connect_agents_to_first_credential(subscription.id) if first_credential else 0
 
-        return subscription
+        return SubscriptionRegistration(**subscription.model_dump(), connected_agents=connected)
 
     except HTTPException:
         raise  # Let HTTP exceptions propagate as-is

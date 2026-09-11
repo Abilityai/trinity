@@ -214,7 +214,7 @@ async function handleSubmit() {
   error.value = null
 
   try {
-    await axios.post('/api/setup/admin-password', {
+    const { data } = await axios.post('/api/setup/admin-password', {
       email: email.value.trim(),
       password: password.value,
       confirm_password: confirmPassword.value,
@@ -225,9 +225,14 @@ async function handleSubmit() {
     // Clear the cache so the router knows setup is done.
     clearSetupCache()
     // Sign straight in with what was just chosen (ent#580/#581): the next
-    // screen is the first-run overlay, not a second password prompt. Any
-    // failure (a 2FA challenge, a race) falls back to the login page as before.
-    const signedIn = await authStore.loginWithCredentials('admin', password.value)
+    // screen is the first-run overlay, not a second password prompt. By the
+    // email just claimed, never a literal 'admin': the account is created under
+    // ADMIN_USERNAME (#2381), and the backend accepts the admin's email as the
+    // username. Any failure (email not bound, a 2FA challenge, a race) falls
+    // back to the login page as before.
+    const signedIn =
+      data?.email_registered !== false &&
+      (await authStore.loginWithCredentials(email.value.trim(), password.value))
     router.push(signedIn ? '/' : '/login')
   } catch (e) {
     if (e.response?.status === 403) {

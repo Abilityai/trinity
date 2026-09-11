@@ -3,14 +3,19 @@
  * (StepClaude, StepKeys) and the Settings key fields that reuse them.
  */
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
+  CLAUDE_ALREADY_CONNECTED,
   CLAUDE_TABS,
   CLAUDE_TAB_COPY,
+  FIRST_RUN_SUBSCRIPTION_NAME,
   KEY_ORDER,
   KEY_PROVIDERS,
   OAT_IN_API_KEY_TAB,
   SETTINGS_PATH,
   claudeCredentialError,
+  claudeSavedText,
   claudeTabFor,
   configuredLine,
   describeKeyTest,
@@ -49,6 +54,48 @@ describe('Claude step', () => {
     expect(CLAUDE_TAB_COPY.api_key.help).toMatch(/no terminal/)
     expect(CLAUDE_TAB_COPY.subscription.help).toMatch(/No terminal\? Use the API key tab/)
     for (const t of CLAUDE_TABS) expect(CLAUDE_TAB_COPY[t.id].providerUrl).toMatch(/^https:\/\//)
+  })
+})
+
+describe('Claude step — what the save did', () => {
+  it('names the real number of agents the save connected', () => {
+    expect(claudeSavedText(3)).toMatch(/^Connected 3 agents that had no Claude credential/)
+    expect(claudeSavedText(1)).toMatch(/^Connected 1 agent that/)
+  })
+
+  it('says a save that connected nobody is saved for new agents, without claiming any', () => {
+    expect(claudeSavedText(0)).toMatch(/^Saved\. New agents will use it\./)
+    expect(claudeSavedText(0)).not.toMatch(/connected/i)
+  })
+
+  it.each([[undefined], [null], ['2'], [['seeded']], [-1], [1.5]])(
+    'claims neither outcome when the count is missing or not a count: %j',
+    (value) => {
+      const text = claudeSavedText(value)
+      expect(text).toMatch(/^Saved\. Manage it later/)
+      expect(text).not.toMatch(/agent/i)
+    }
+  )
+
+  it('every outcome says where to manage it', () => {
+    for (const v of [0, 2, undefined]) expect(claudeSavedText(v)).toContain(SETTINGS_PATH)
+  })
+
+  it('says plainly that a second paste replaces the saved credential (the name is an upsert key)', () => {
+    expect(FIRST_RUN_SUBSCRIPTION_NAME).toBe('primary')
+    expect(CLAUDE_ALREADY_CONNECTED).toContain(`"${FIRST_RUN_SUBSCRIPTION_NAME}" subscription`)
+    expect(CLAUDE_ALREADY_CONNECTED).toMatch(/replacing whatever is saved there now/)
+    expect(CLAUDE_ALREADY_CONNECTED).not.toMatch(/\badd\b/)
+  })
+
+  it('the step shows the count from the save response, not a fixed sentence', () => {
+    const step = readFileSync(
+      fileURLToPath(new URL('../../src/components/onboarding/steps/StepClaude.vue', import.meta.url)),
+      'utf8'
+    )
+    expect(step).toContain('connectedAgents.value = saved?.connected_agents')
+    expect(step).toContain('claudeSavedText(connectedAgents.value)')
+    expect(step).toContain('CLAUDE_ALREADY_CONNECTED')
   })
 })
 

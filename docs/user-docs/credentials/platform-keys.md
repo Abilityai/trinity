@@ -22,7 +22,7 @@ Two ways to connect — pick one tab:
 
 Pasting a subscription token into the API key tab (or the other way round) is caught before anything is sent, and the step offers to move it to the right tab.
 
-**What happens when you connect the first credential.** Agents that were created before any Claude credential existed — for example the starter fleet a fresh install comes with — are switched onto it automatically. Running ones restart in the background, which takes about a minute. Agents that were deliberately set up with their own key are left alone. New agents pick up a credential when they are created.
+**What happens when you connect the first credential.** Agents that were created before any Claude credential existed — for example the starter fleet a fresh install comes with — are switched onto it automatically. Running ones restart in the background, which takes about a minute — except one in the middle of a task, which picks the credential up the next time it starts. Agents that were deliberately set up with their own key, or have already completed a run, are left alone. New agents pick up a credential when they are created.
 
 Manage it later: **Settings → Integrations** — the API key field, and the Subscriptions panel for tokens (auto-assign, auto-switch, usage). See [Subscription Credentials](subscription-credentials.md).
 

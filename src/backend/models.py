@@ -12,6 +12,7 @@ from enum import Enum
 
 from utils.helpers import parse_iso_timestamp, to_utc_iso
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
+from db_models import SubscriptionCredential
 
 
 # Fork-to-own destination: "owner/name". Owner per GitHub rules (alphanumeric +
@@ -3688,6 +3689,13 @@ class SubscriptionTokenTest(BaseModel):
     """Body for POST /api/subscriptions/test (ent#582) — a token to validate
     BEFORE it is registered. Never persisted, never echoed."""
     token: str
+
+
+class SubscriptionRegistration(SubscriptionCredential):
+    """POST /api/subscriptions response: the subscription plus how many agents
+    it just connected as the install's FIRST Claude credential (ent#582; 0
+    otherwise). The first-run Claude step reads `connected_agents` as an int."""
+    connected_agents: int = 0
 
 
 class OpsSettingsUpdate(BaseModel):

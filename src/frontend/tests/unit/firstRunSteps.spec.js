@@ -30,6 +30,7 @@ import {
   FIRST_RUN_STEPS,
   applicableSteps,
   canContinue,
+  countsAsSetupStart,
   eligibleSteps,
   estimateMinutes,
   isFirstRunOverlayVisible,
@@ -210,6 +211,39 @@ describe('forced reopen keeps completed steps complete', () => {
 
   it('an auto-open shows only what applies', () => {
     expect(keys(stepsForSession({ ...established, hasEmail: false }))).toEqual(['email', 'keys'])
+  })
+})
+
+describe('setup_started — the top of the activation funnel (ent#184 / ent#437)', () => {
+  it('counts an auto-open over Claude still to connect, or no agent of your own', () => {
+    expect(countsAsSetupStart(freshMarketplace)).toBe(true)
+    expect(countsAsSetupStart({ ...established, claudeAuthConfigured: false })).toBe(true)
+    // A non-admin on a seeded install: the ent#52 wizard opened for them too.
+    expect(countsAsSetupStart({ ...established, isAdmin: false, firstRun: true })).toBe(true)
+  })
+
+  it('never counts a forced re-run, even on a fresh install', () => {
+    expect(countsAsSetupStart({ ...freshMarketplace, forced: true })).toBe(false)
+  })
+
+  it.each([
+    ['email', { hasEmail: false }],
+    ['sharing', { telemetryDismissed: false }],
+    ['secure', { tlsPosture: 'https-ip' }],
+  ])('never counts an established fleet reopening for %s alone', (_key, override) => {
+    const ctx = { ...established, ...override }
+    expect(isFirstRunOverlayVisible(ctx)).toBe(true)
+    expect(countsAsSetupStart(ctx)).toBe(false)
+  })
+
+  it('never counts a non-admin who already has an agent', () => {
+    expect(countsAsSetupStart({ ...freshMarketplace, isAdmin: false, firstRun: false })).toBe(false)
+  })
+
+  it('the overlay records it only through this predicate', () => {
+    const overlay = read('../../src/components/onboarding/FirstRunOverlay.vue')
+    expect(overlay).toContain("if (countsAsSetupStart(ctx.value)) telemetry.record('setup_started')")
+    expect(overlay.match(/'setup_started'/g)).toHaveLength(1)
   })
 })
 

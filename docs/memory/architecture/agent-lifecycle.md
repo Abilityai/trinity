@@ -82,14 +82,17 @@ requirements §8.10 (`infrastructure.md`).
   2026-01-15 (~6-day `shortlived` profile) and DigitalOcean's own 1-Click rules
   ship Caddy with them, so a droplet can boot on genuinely trusted HTTPS — just
   on a short renewal cycle at an unmemorable address.
-- **The card** (`components/onboarding/HardeningGuide.vue`) renders only when the
-  flags have loaded AND `marketplace_install` AND not dismissed AND posture ≠
-  `https-domain`. Dismissal is localStorage (the ent#319 precedent — no new
-  endpoint); retirement is server state, so a configured domain hides it with no
-  client state. Server *state*, not verified fact: the posture reads an
-  operator-declared address, so an admin who types any https domain suppresses
-  the card. That is deliberate — it is the AC's completion condition, and an
-  admin can already dismiss it outright — but it is NOT the standard PROV-003
+- **The guide** is the `secure` step of the first-run overlay since ent#581
+  (`components/onboarding/FirstRunOverlay.vue` over the `firstRunSteps.js`
+  registry; it replaced `HardeningGuide.vue`). It applies only when the flags
+  have loaded AND the admin is on a `marketplace_install` AND posture ≠
+  `https-domain`, and a skipped step does not re-open the overlay. Skipping is
+  localStorage (the ent#319 precedent — no new endpoint; a pre-ent#581 guide
+  dismissal counts as a skip); retirement is server state, so a configured
+  domain retires it with no client state. Server *state*, not verified fact: the
+  posture reads an operator-declared address, so an admin who types any https
+  domain completes the step. That is deliberate — it is the AC's completion
+  condition, and an admin can already skip it outright — but it is NOT the standard PROV-003
   holds provenance to, and the difference is that this one gates a nudge while
   that one gates whether the nudge may exist at all. It offers a real domain and
   a VPN as **complementary** paths, and says plainly that Trinity issues no
@@ -113,9 +116,9 @@ requirements §8.10 (`infrastructure.md`).
 
 **What the wizard is now for.** It renders exactly where it has work to do: an install with **no** admin account — blank `ADMIN_PASSWORD` dev, hand-rolled, and (ent#580) a marketplace one-click image — where login is blocked by the same flag and the wizard is the only way in. It disappears where `ADMIN_PASSWORD` provisioned an admin at boot: `start.sh` (refuses blank), `--unattended` (auto-generates), a marketplace image given a user-data password. This closes ent#49's tokenless first-run window **without reinstating the token**: ent#49 priced that tradeoff on the premise *there is no admin yet*, which is true only for the installs that still get the wizard.
 
-**Marketplace claim (ent#580).** A one-click droplet has no deploy-time input form, so first boot (`packer/digitalocean/files/opt/trinity-firstboot/firstboot.sh`) no longer generates a password: with no user-data password it exports `ADMIN_PASSWORD_SOURCE=browser`, and `start.sh::ensure_admin_password` writes `ADMIN_PASSWORD=` (explicitly blank) plus that marker to `.env` instead of refusing or generating. The marker is what keeps later `start.sh --hosted` runs — the documented update path — from generating a password that `_ensure_admin_user` would re-sync over the browser-set one on the next boot; a blank env never re-syncs. Prod/hosted compose moved from `${ADMIN_PASSWORD:?}` to `${ADMIN_PASSWORD?}` for the same reason (unset still refuses to render; the two files stay parity-identical). No backend logic changed — the no-admin branch of `_ensure_admin_user` / `_mark_setup_completed_if_provisioned` already existed; it just stopped being dev-only. The MOTD prints the URL (and, via `/api/setup/status`, whether it has been claimed), never a password. The creation-to-first-visit window is an accepted risk (`docs/DEPLOYMENT.md` → Security Recommendations). Guards: `tests/unit/test_ent580_marketplace_admin_claim.py`, `tests/unit/test_2281_firstboot_password.py`.
+**Marketplace claim (ent#580).** A one-click droplet has no deploy-time input form, so first boot (`packer/digitalocean/files/opt/trinity-firstboot/firstboot.sh`) no longer generates a password: with no user-data password it exports `ADMIN_PASSWORD_SOURCE=browser`, and `start.sh::ensure_admin_password` writes `ADMIN_PASSWORD=` (explicitly blank) plus that marker to `.env` instead of refusing or generating. The marker is what keeps later `start.sh --hosted` runs — the documented update path — from generating a password that `_ensure_admin_user` would re-sync over the browser-set one on the next boot; a blank env never re-syncs. `start.sh` decides blank with `env_value` (compose's reading), so `ADMIN_PASSWORD=""`, `=''` and a trailing space are blank, not set. Only the hosted compose moved from `${ADMIN_PASSWORD:?}` to `${ADMIN_PASSWORD?}` (unset still refuses to render); prod keeps `:?`, since the marketplace runs hosted, and the parity test allowlists exactly that env difference. Hosted also forwards `ADMIN_PASSWORD_SOURCE=${ADMIN_PASSWORD_SOURCE:-unset}` so `routers/setup.py` can refuse a hand-run hosted compose's blank password (403) — the one backend change; the no-admin branch of `_ensure_admin_user` / `_mark_setup_completed_if_provisioned` already existed and just stopped being dev-only. The MOTD prints the URL (and, via `/api/setup/status`, whether it has been claimed), never a password. The creation-to-first-visit window is an accepted risk (`docs/DEPLOYMENT.md` → Security Recommendations). Guards: `tests/unit/test_ent580_marketplace_admin_claim.py`, `tests/unit/test_2281_firstboot_password.py`.
 
-**Collateral the wizard used to carry.** It was the only capture point for the admin sign-in email and for the ent#38 product-updates opt-in. The email moves to a dismissible post-login prompt (since ent#437 the first section of `components/onboarding/FinishSetupCard.vue`, formerly `AdminEmailNudge.vue`; admin-only, `profileVerified`-gated, derivation-only so it vanishes the moment an email exists anywhere) — strictly better placed, since an unauthenticated wizard's "admin email" could be typed by whoever loaded the page first on a hosted install. The opt-in has no second home and needs one: `abilityai/trinity-enterprise#463`. Note the sibling telemetry-sharing consent (ent#12) is unaffected — it has always had its own Settings surface.
+**Collateral the wizard used to carry.** It was the only capture point for the admin sign-in email and for the ent#38 product-updates opt-in. The email moves to a skippable post-login prompt (since ent#581 the `email` step of the first-run overlay, `components/onboarding/FirstRunOverlay.vue` over `firstRunSteps.js` — formerly `FinishSetupCard.vue` section 1, before that `AdminEmailNudge.vue`; admin-only, `profileVerified`-gated, derivation-only so it is done the moment an email exists anywhere) — strictly better placed, since an unauthenticated wizard's "admin email" could be typed by whoever loaded the page first on a hosted install. The opt-in has no second home and needs one: `abilityai/trinity-enterprise#463`. Note the sibling telemetry-sharing consent (ent#12) is unaffected — it has always had its own Settings surface.
 
 **Adjacent fix, same PR.** `docker-compose.prod.yml` never passed `ADMIN_USERNAME` (present in `docker-compose.yml` and `.env.example`), so the variable was inert in production — the #1707 packaging-gap class. Proven by `docker compose config` resolution, not grep.
 

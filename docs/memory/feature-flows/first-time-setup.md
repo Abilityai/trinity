@@ -23,8 +23,12 @@ First-time setup wizard for admin password and API key configuration. On an inst
 > `start.sh`), so the no-admin branch above is its normal first run: the first
 > visitor lands on `/setup` and creates the admin — no terminal, no password in
 > the MOTD. With a user-data password the image takes the provisioned branch
-> instead. No backend code changed for this; the accepted creation-to-first-visit
-> risk is in `docs/DEPLOYMENT.md` → Security Recommendations.
+> instead. Only `docker-compose.hosted.yml` renders a blank password (prod keeps
+> `:?`), and it forwards `ADMIN_PASSWORD_SOURCE=${…:-unset}`: the one backend
+> change is that `POST /api/setup/admin-password` refuses (403) a blank password
+> under `unset` — a hand-run hosted stack — after the existing-admin check and
+> before hashing. The accepted creation-to-first-visit risk is in
+> `docs/DEPLOYMENT.md` → Security Recommendations.
 >
 > Two consequences for the flows documented below:
 >
@@ -37,11 +41,12 @@ First-time setup wizard for admin password and API key configuration. On an inst
 >    priced the tradeoff on "there is no admin yet", which is now true exactly
 >    where the wizard still renders).
 > 2. The **admin sign-in email** is no longer captured here for most installs.
->    It moves to a dismissible post-login prompt
->    (since ent#437 section 1 of `components/onboarding/FinishSetupCard.vue`,
->    formerly `AdminEmailNudge.vue` → Settings → General). The **product-updates
+>    It moves to a skippable post-login prompt (since ent#581 the `email` step of
+>    the first-run overlay, `components/onboarding/FirstRunOverlay.vue` over
+>    `firstRunSteps.js`; formerly `FinishSetupCard.vue` section 1, before that
+>    `AdminEmailNudge.vue` → Settings → General). The **product-updates
 >    opt-in** got its Settings home in `abilityai/trinity-enterprise#463`; the
->    usage-sharing consent is section 2 of the same card
+>    usage-sharing consent is the overlay's `sharing` step
 >    ([telemetry-sharing.md](telemetry-sharing.md)).
 >
 > Canonical description: `docs/memory/architecture.md` →

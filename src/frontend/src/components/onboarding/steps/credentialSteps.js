@@ -90,8 +90,35 @@ export function claudeTabFor(tab, raw) {
   return null
 }
 
-/** The name a first-run subscription is registered under (an upsert key). */
+/**
+ * The name a first-run subscription is registered under. An upsert key: a
+ * second token pasted here REPLACES the first for every agent using it, so the
+ * copy below says "replace", never "add".
+ */
 export const FIRST_RUN_SUBSCRIPTION_NAME = 'primary'
+
+/** Shown when the instance already had a Claude credential before this step. */
+export const CLAUDE_ALREADY_CONNECTED =
+  'This instance already has a Claude credential, so agents can run. Continue, or paste a new one ' +
+  `below: a token is saved as the "${FIRST_RUN_SUBSCRIPTION_NAME}" subscription and an API key as ` +
+  'the platform key, replacing whatever is saved there now for every agent that uses it.'
+
+/**
+ * The line after a validated save. `connectedAgents` is the save response's
+ * `connected_agents` (subscription POST / anthropic-key PUT): how many agents
+ * that had no Claude credential now use this one. Anything but a count — an
+ * older backend, a malformed body — gets wording that claims neither outcome.
+ */
+export function claudeSavedText(connectedAgents) {
+  const later = `Manage it later in ${SETTINGS_PATH}.`
+  if (!Number.isInteger(connectedAgents) || connectedAgents < 0) return `Saved. ${later}`
+  if (connectedAgents === 0) return `Saved. New agents will use it. ${later}`
+  const agents = connectedAgents === 1 ? '1 agent' : `${connectedAgents} agents`
+  return (
+    `Connected ${agents} that had no Claude credential — running ones restart in the ` +
+    `background, which takes about a minute. ${later}`
+  )
+}
 
 // ---------------------------------------------------------------------------
 // The optional keys

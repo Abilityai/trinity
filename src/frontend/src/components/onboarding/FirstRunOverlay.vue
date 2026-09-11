@@ -159,6 +159,7 @@ import StepSharing from './steps/StepSharing.vue'
 import {
   FIRST_RUN_STEPS,
   canContinue,
+  countsAsSetupStart,
   isFirstRunOverlayVisible,
   litNodes,
   persistFirstRunClosed,
@@ -284,7 +285,7 @@ function start() {
   currentKey.value = 'welcome'
   furthest.value = 0
   open.value = true
-  telemetry.record('setup_started')
+  if (countsAsSetupStart(ctx.value)) telemetry.record('setup_started')
 }
 
 // The predicate only OPENS the overlay. Once open it stays open until the

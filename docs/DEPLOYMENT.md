@@ -406,11 +406,14 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
    window: the admin is provisioned during startup and the endpoint is closed
    before the first request is served. `scripts/deploy/start.sh` refuses to run
    without one (auto-generating it under `--unattended`), so following it is
-   sufficient. `docker-compose.prod.yml` and `docker-compose.hosted.yml` refuse to
-   render with `ADMIN_PASSWORD` **unset**, but do render an **explicitly blank**
-   one (`ADMIN_PASSWORD=`, as `.env.example` ships it) — that is the marketplace
-   claim path below. Running either file directly, without `start.sh`, is
-   therefore only safe with the password filled in.
+   sufficient. `docker-compose.prod.yml` refuses to render with `ADMIN_PASSWORD`
+   unset **or** blank. `docker-compose.hosted.yml` alone refuses only an
+   **unset** one and renders an **explicitly blank** one (`ADMIN_PASSWORD=`, as
+   `.env.example` ships it) — that is the marketplace claim path below, which
+   `start.sh --hosted` marks with `ADMIN_PASSWORD_SOURCE=browser`. Without that
+   marker the hosted file passes `ADMIN_PASSWORD_SOURCE=unset` and `/setup`
+   refuses to create an admin, so a hand-run hosted stack with a blank password
+   is not claimable either: set the password in `.env` and restart.
 
    The window is still open on an install with **no** admin — a blank
    `ADMIN_PASSWORD`, or a hand-rolled backend — because there the wizard is the

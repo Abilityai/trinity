@@ -497,8 +497,10 @@ ensure_hex32_secret AGENT_AUTH_SECRET
 # the top of a one-screen install script; without this, every such script has to
 # hand-roll its own `.env` writer — which is exactly the duplication --provision
 # exists to remove. `.env` wins if it already has one: this never overwrites a
-# password an install has already committed to.
-if [ -n "${ADMIN_PASSWORD:-}" ] && ! grep -qE '^ADMIN_PASSWORD=.+' .env 2>/dev/null; then
+# password an install has already committed to. "Has one" is decided by
+# `env_value`, i.e. the way compose reads it: `ADMIN_PASSWORD=""`, `=''` and a
+# trailing space are all blank, not set (a raw `=.+` grep called them set).
+if [ -n "${ADMIN_PASSWORD:-}" ] && [ -z "$(env_value ADMIN_PASSWORD)" ]; then
     set_env_key ADMIN_PASSWORD "$ADMIN_PASSWORD"
     echo "Wrote ADMIN_PASSWORD from the environment to .env."
 fi
@@ -520,22 +522,21 @@ fi
 GENERATED_ADMIN_PASSWORD=""
 ADMIN_IN_BROWSER=0
 ensure_admin_password() {
-    grep -qE '^ADMIN_PASSWORD=.+' .env 2>/dev/null && return 0
+    # Blank vs set is compose's reading (`env_value`), not a raw grep: `=""`,
+    # `=''` and `= ` render EMPTY in the hosted compose, so they are blank here.
+    [ -n "$(env_value ADMIN_PASSWORD)" ] && return 0
     local src="${ADMIN_PASSWORD_SOURCE:-$(env_value ADMIN_PASSWORD_SOURCE)}"
     if [ "$src" = "browser" ]; then
-        # Explicitly blank, not absent: the prod/hosted compose files render an
-        # empty ADMIN_PASSWORD (`${ADMIN_PASSWORD?}`) but still refuse an unset one.
-        grep -qE '^ADMIN_PASSWORD=$' .env 2>/dev/null || set_env_key ADMIN_PASSWORD ""
+        # Explicitly blank, not absent: the hosted compose file renders an empty
+        # ADMIN_PASSWORD (`${ADMIN_PASSWORD?}`) but still refuses an unset one.
+        # Any `ADMIN_PASSWORD=` line already reads blank (checked above).
+        grep -qE '^ADMIN_PASSWORD=' .env 2>/dev/null || set_env_key ADMIN_PASSWORD ""
         [ "$(env_value ADMIN_PASSWORD_SOURCE)" = "browser" ] || set_env_key ADMIN_PASSWORD_SOURCE browser
         ADMIN_IN_BROWSER=1
         echo "ADMIN_PASSWORD left blank (ADMIN_PASSWORD_SOURCE=browser): the first visitor creates the admin at /setup."
     elif [ "$UNATTENDED" = "1" ]; then
         GENERATED_ADMIN_PASSWORD=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 24)
-        if grep -qE '^ADMIN_PASSWORD=$' .env 2>/dev/null; then
-            sed -i.bak "s|^ADMIN_PASSWORD=$|ADMIN_PASSWORD=${GENERATED_ADMIN_PASSWORD}|" .env && rm -f .env.bak
-        else
-            echo "ADMIN_PASSWORD=${GENERATED_ADMIN_PASSWORD}" >> .env
-        fi
+        set_env_key ADMIN_PASSWORD "$GENERATED_ADMIN_PASSWORD"
         echo "Auto-generated ADMIN_PASSWORD (unattended) — shown in the summary below."
     else
         cat >&2 <<EOF

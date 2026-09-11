@@ -952,7 +952,7 @@ async def update_anthropic_key(
 
         # Store in settings — AES-256-GCM encrypted at rest (ent#435)
         set_secret_setting('anthropic_api_key', key)
-        connected = connect_agents_to_first_credential() if first_credential else []
+        connected = connect_agents_to_first_credential() if first_credential else 0
 
         # SEC-001: audit API key change
         await platform_audit_service.log(
@@ -969,8 +969,8 @@ async def update_anthropic_key(
         return {
             "success": True,
             "masked": mask_api_key(key),
-            # ent#582: agents that had no Claude credential and now use this one
-            # (running ones restart in the background).
+            # ent#582: HOW MANY agents had no Claude credential and now use this
+            # one (int; running ones restart in the background).
             "connected_agents": connected,
         }
     except HTTPException:

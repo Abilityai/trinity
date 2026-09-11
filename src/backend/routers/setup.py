@@ -35,8 +35,18 @@ between instance creation and that first visit, in which anyone who finds the
 address can claim it — was accepted on 2026-09-10 as the operator's
 responsibility (the instance is empty then, and a squatted one can be destroyed).
 See `docs/DEPLOYMENT.md` → Security Recommendations.
+
+That acceptance covers the marketplace only, so nothing else may become
+claimable by it. Only `docker-compose.hosted.yml` renders a blank
+`ADMIN_PASSWORD` (prod keeps `:?`), and it forwards
+`ADMIN_PASSWORD_SOURCE=${ADMIN_PASSWORD_SOURCE:-unset}`. A blank password with
+`ADMIN_PASSWORD_SOURCE=unset` is therefore a HAND-RUN hosted compose — not the
+marketplace (start.sh writes `browser`) — and this endpoint refuses it (403),
+after the #2381 existing-admin check and before any password work. An ABSENT
+variable (the dev compose, ent#49's blank dev install) and `browser` still pass.
 """
 import logging
+import os
 import re
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -133,6 +143,19 @@ async def set_admin_password(
                 "This instance already has an administrator account. "
                 "Sign in with its password; this endpoint only provisions the "
                 "very first account."
+            ),
+        )
+
+    # ent#580 backstop: a blank password is claimable only where it was meant to
+    # be. `unset` is what the hosted compose renders when nothing opted in (see
+    # module docstring); absent (dev compose) and `browser` fall through.
+    if not os.getenv("ADMIN_PASSWORD") and os.getenv("ADMIN_PASSWORD_SOURCE") == "unset":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This instance has no admin password and was not set up to be "
+                "claimed in the browser. Set ADMIN_PASSWORD in .env and restart "
+                "Trinity, or run ./scripts/deploy/start.sh --hosted."
             ),
         )
 
