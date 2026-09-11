@@ -615,6 +615,14 @@
                         ? 'text-status-danger-600 dark:text-status-danger-400'
                         : 'text-status-warning-700 dark:text-status-warning-300'"
                     >{{ sttCapability.hint }}</p>
+                    <!-- #2696: the operator half of a client's "voice input failed" —
+                         the client got a category sentence; the provider's status
+                         word lives only here, on the admin panel. -->
+                    <p
+                      v-if="sttLastFailure"
+                      data-testid="elevenlabs-stt-last-failure"
+                      class="mt-1 text-xs text-status-danger-600 dark:text-status-danger-400"
+                    >{{ sttLastFailure.text }}<span v-if="sttLastFailure.at"> — {{ new Date(sttLastFailure.at * 1000).toLocaleString() }}</span></p>
                   </div>
 
                   <!-- Default voice id -->
@@ -2151,7 +2159,7 @@ import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
 import { readOpsBool, opsBoolValue } from '../utils/opsSettings'
-import { describeSttCapability } from '../utils/sttCapability'
+import { describeSttCapability, describeSttLastFailure } from '../utils/sttCapability'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
@@ -2579,7 +2587,9 @@ const elevenLabs = reactive({
   // capable | refused | unknown | unconfigured, plus its own status word.
   sttCapability: 'unconfigured',
   sttDetail: null,
+  sttLastFailure: null,   // #2696: {category, provider_status, detail, at} | null
 })
+const sttLastFailure = computed(() => describeSttLastFailure(elevenLabs.sttLastFailure))
 const sttCapability = computed(() => describeSttCapability({
   key_configured: elevenLabs.keyConfigured,
   stt_capability: elevenLabs.sttCapability,
@@ -3091,6 +3101,7 @@ function applyElevenLabsState(state) {
   // "unverified", never as "capable" — see describeSttCapability.
   elevenLabs.sttCapability = state.stt_capability
   elevenLabs.sttDetail = state.stt_detail ?? null
+  elevenLabs.sttLastFailure = state.stt_last_failure ?? null
 }
 
 async function loadElevenLabsSettings() {

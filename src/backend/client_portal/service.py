@@ -1500,10 +1500,17 @@ async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
         raise ClientPortalError(502, "Voice input failed — please type instead")
     if resp.status_code != 200:
         logger.warning("portal STT provider error %s: %s", resp.status_code, resp.text[:500])
-        # #2695: a real refusal is the best evidence there is — remember it so
-        # the next roster load hides the mic instead of offering it again.
-        stt_capability_service.record_live_refusal(elevenlabs_key, resp.status_code, resp.text)
-        raise ClientPortalError(422, "Could not transcribe the audio")
+        # #2696: say WHY. One category per provider condition — permission,
+        # rejected key, quota/plan, rate limit, bad audio, provider outage —
+        # each with its own client sentence and status, instead of one opaque
+        # 422 that made an operator read this log line to answer the question.
+        # The client sentence never carries the provider's body; the status
+        # word is remembered for the admin Settings panel. #2695: a 401/403
+        # also teaches the capability cache, so the next roster load hides
+        # the mic instead of offering it again.
+        failure = stt_capability_service.record_live_failure(
+            elevenlabs_key, resp.status_code, resp.text)
+        raise ClientPortalError(failure.http_status, failure.client_message)
     text = ((resp.json() or {}).get("text") or "").strip()
     if not text:
         logger.warning("portal STT empty transcript — provider body: %s", resp.text[:500])

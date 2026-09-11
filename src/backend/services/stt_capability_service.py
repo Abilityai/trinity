@@ -27,6 +27,13 @@ cached, and keeps the answer fail-soft:
   Redis down ⇒ a per-process fallback with the same key and TTLs, so the two
   workers can at worst each probe once.
 
+* **Says WHY (#2696).** `classify_stt_failure()` maps a live `/stt` provider
+  error onto a category, an HTTP status and a client-facing sentence, so an
+  auth/permission failure, a quota/plan condition, a provider rate limit and a
+  rejected audio container stop collapsing into one opaque 422. The client
+  never sees the provider's body; the operator sees the status word and the
+  category on the admin Settings panel via `record_live_failure()`.
+
 * **Fails SOFT.** `unknown` renders the mic. Hiding a control that would have
   worked is the defect this exists to prevent in the other direction, so only a
   definitive provider refusal hides it. The live `/stt` call feeds back: a real
@@ -172,22 +179,32 @@ def invalidate(api_key: str) -> None:
 
 # ---- probe ------------------------------------------------------------------
 
+def provider_status_word(body: str) -> Optional[str]:
+    """The provider's own short status token (`missing_permissions`,
+    `quota_exceeded`, `invalid_audio`, ...) out of an ElevenLabs error body,
+    or None. Bounded and never the free-text message when a token exists — the
+    token is what an operator greps the provider's docs for."""
+    try:
+        d = json.loads(body or "{}")
+    except Exception:  # noqa: BLE001
+        return None
+    det = d.get("detail") if isinstance(d, dict) else None
+    if isinstance(det, dict):
+        word = det.get("status") or det.get("code") or det.get("message")
+    elif isinstance(det, str):
+        word = det
+    else:
+        word = None
+    return str(word)[:120] if word else None
+
+
 def classify_response(status_code: int, body: str) -> SttCapability:
     """Map one provider answer to a verdict. Pure, so the partition is testable
     without HTTP. The provider authorises before it validates the upload, which
     is what makes an invalid body a free permission probe."""
     now = time.time()
     if status_code in (401, 403):
-        detail = None
-        try:
-            d = json.loads(body or "{}")
-            det = d.get("detail") if isinstance(d, dict) else None
-            if isinstance(det, dict):
-                detail = det.get("status") or det.get("message")
-            elif isinstance(det, str):
-                detail = det
-        except Exception:  # noqa: BLE001
-            detail = None
+        detail = provider_status_word(body)
         return SttCapability(VERDICT_REFUSED, detail=(detail or f"http_{status_code}")[:120],
                              checked_at=now)
     if status_code < 500:
@@ -264,10 +281,144 @@ def record_live_refusal(api_key: str, status_code: int, body: str) -> None:
         store(api_key, classify_response(status_code, body))
 
 
-def describe(cap: SttCapability) -> dict:
-    """The admin-panel shape: verdict + detail + when, never the key."""
+# ---- live-failure mapping (#2696) ---------------------------------------------
+
+CATEGORY_PERMISSION = "permission"    # the key may not call speech-to-text
+CATEGORY_AUTH = "auth"                # the key itself was rejected
+CATEGORY_QUOTA = "quota"              # credits / plan / entitlement
+CATEGORY_RATE_LIMIT = "rate_limit"    # transient; retry
+CATEGORY_AUDIO = "audio"              # the recording was rejected, not the key
+CATEGORY_PROVIDER = "provider"        # the provider itself failed
+CATEGORY_UNKNOWN = "unknown"
+
+# Provider status words that mean "the account cannot pay for this", seen on
+# 401/402 bodies. Matched as substrings of the status token, lower-cased.
+_QUOTA_WORDS = ("quota", "credit", "plan", "payment", "subscription", "billing",
+                "insufficient", "free_users", "entitlement", "trial")
+
+
+@dataclass(frozen=True)
+class SttFailure:
+    category: str
+    http_status: int          # what the client receives
+    client_message: str       # never carries the provider's body
+    provider_status: int      # what the provider answered
+    detail: Optional[str]     # the provider's status word, operator-facing only
+
+    def to_json(self) -> str:
+        return json.dumps({**asdict(self), "at": time.time()})
+
+
+_LAST_FAILURE_PREFIX = "stt:last_failure:"
+TTL_LAST_FAILURE_SECONDS = 24 * 3600
+# Per-process fallback, {row: (expires_at, json)} — the same shape as `_local`.
+_local_failures: dict[str, tuple[float, str]] = {}
+
+
+def _failure_row(api_key: str) -> str:
+    return _LAST_FAILURE_PREFIX + cache_key(api_key)[len(_CACHE_PREFIX):]
+
+_MSG_PERMISSION = ("Voice input is not enabled for this workspace: the speech "
+                   "recognition key is missing the speech-to-text permission. "
+                   "Ask your operator to update it — you can type instead.")
+_MSG_AUTH = ("Voice input is not working: the speech recognition key was rejected. "
+             "Ask your operator to check it — you can type instead.")
+_MSG_QUOTA = ("Voice input is unavailable: the speech recognition account is out of "
+              "credits or not on a plan that allows it. Ask your operator — "
+              "you can type instead.")
+_MSG_RATE_LIMIT = "Too many voice messages just now — wait a moment and try again."
+_MSG_AUDIO = ("That recording could not be read. Try again — or type your message instead.")
+_MSG_PROVIDER = "Voice input failed — please type instead"
+_MSG_UNKNOWN = ("Voice input failed (the speech recognition service answered with an "
+                "error). Try again, or type your message instead.")
+
+
+def classify_stt_failure(status_code: int, body: str) -> SttFailure:
+    """One live `/stt` provider error → what the client is told and what the
+    operator is shown. Pure. Every status lands in a NAMED category; there is
+    no arm that hands back the old opaque string, so an unrecognised provider
+    answer is `unknown` — still specific about who failed — never a regression
+    to "Could not transcribe the audio"."""
+    word = provider_status_word(body)
+    lw = (word or "").lower()
+
+    if status_code in (401, 403):
+        if "permission" in lw:
+            return SttFailure(CATEGORY_PERMISSION, 503, _MSG_PERMISSION, status_code, word)
+        if any(q in lw for q in _QUOTA_WORDS):
+            return SttFailure(CATEGORY_QUOTA, 503, _MSG_QUOTA, status_code, word)
+        return SttFailure(CATEGORY_AUTH, 503, _MSG_AUTH, status_code, word)
+    if status_code == 402:
+        return SttFailure(CATEGORY_QUOTA, 503, _MSG_QUOTA, status_code, word)
+    if status_code == 429:
+        return SttFailure(CATEGORY_RATE_LIMIT, 429, _MSG_RATE_LIMIT, status_code, word)
+    if status_code in (400, 413, 415, 422):
+        return SttFailure(CATEGORY_AUDIO, 422, _MSG_AUDIO, status_code, word)
+    if status_code >= 500:
+        return SttFailure(CATEGORY_PROVIDER, 502, _MSG_PROVIDER, status_code, word)
+    return SttFailure(CATEGORY_UNKNOWN, 502, _MSG_UNKNOWN, status_code, word)
+
+
+def record_live_failure(api_key: str, status_code: int, body: str) -> SttFailure:
+    """A genuine `/stt` call failed at the provider. Classify it, remember the
+    operator-facing half beside the key's capability row (so Settings → Voice
+    can name the cause without a container log), and — for a 401/403 — let
+    the capability verdict learn from it (#2695). Returns the classification
+    so the caller can raise the client-facing half."""
+    failure = classify_stt_failure(status_code, body)
+    record_live_refusal(api_key, status_code, body)
+    if api_key:
+        k = _failure_row(api_key)
+        payload = failure.to_json()
+        _local_failures[k] = (time.monotonic() + TTL_LAST_FAILURE_SECONDS, payload)
+        r = _redis()
+        if r is not None:
+            try:
+                r.set(k, payload, ex=TTL_LAST_FAILURE_SECONDS)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("stt last-failure write failed-open (%s)", e)
+    return failure
+
+
+def read_last_failure(api_key: str) -> Optional[dict]:
+    """The most recent live failure for THIS key, as stored — operator-facing."""
+    if not api_key:
+        return None
+    k = _failure_row(api_key)
+    raw = None
+    r = _redis()
+    if r is not None:
+        try:
+            raw = r.get(k)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("stt last-failure read failed-open (%s)", e)
+    if not raw:
+        hit = _local_failures.get(k)
+        if hit and hit[0] > time.monotonic():
+            raw = hit[1]
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return None
     return {
+        "category": d.get("category"),
+        "provider_status": d.get("provider_status"),
+        "detail": d.get("detail"),
+        "at": d.get("at"),
+    }
+
+
+def describe(cap: SttCapability, api_key: Optional[str] = None) -> dict:
+    """The admin-panel shape: verdict + detail + when, never the key. With the
+    key, also the last live failure (#2696) so an operator can read the cause
+    of a client's "voice input failed" without a container log."""
+    out = {
         "stt_capability": cap.verdict,
         "stt_detail": cap.detail,
         "stt_checked_at": cap.checked_at,
     }
+    if api_key is not None:
+        out["stt_last_failure"] = read_last_failure(api_key)
+    return out
