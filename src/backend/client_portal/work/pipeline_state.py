@@ -34,11 +34,12 @@ import json
 import logging
 import re
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from utils.helpers import parse_iso_timestamp
+from utils.helpers import parse_iso_timestamp, utc_now_iso
 from utils.safe_yaml import AliasPolicy, HardenedYamlError, load_hardened_yaml
 
 from .models import WorkStage, WorkSteps
@@ -59,7 +60,34 @@ HTTP_TIMEOUT_SECONDS = 2.0     # httpx per-phase, like `_BRIEFING_HTTP_TIMEOUT_S
 WALL_BUDGET_SECONDS = 3.0      # one agent's whole read, like `_BRIEFING_BUDGET_SECONDS`
 CACHE_TTL_SECONDS = 10.0
 
-_cache: Dict[str, Tuple[float, WorkSteps]] = {}
+#: Notices accepted per agent per window before the rest are coalesced away.
+#: Generous on purpose: the canonical `pipeline-tick` writer runs every 15
+#: minutes, so this is a ceiling on pathology, not on normal use.
+NOTIFY_LIMIT = 20
+NOTIFY_WINDOW_SECONDS = 10
+#: TTL on the change generation. Longer than CACHE_TTL_SECONDS by a wide margin
+#: (a generation that expired before the entry it invalidates would resurrect a
+#: stale entry), short enough to leave nothing behind for a deleted agent.
+_GEN_TTL_SECONDS = 120
+
+#: (stored_at, generation_seen, steps). The generation is what makes this work
+#: on more than one worker — see `mark_changed`.
+_cache: Dict[str, Tuple[float, Optional[str], WorkSteps]] = {}
+
+#: Injected from main.py (the `report_service` pattern, #918). `None` until
+#: wiring runs, and a notice must still succeed then.
+_websocket_manager = None
+_filtered_websocket_manager = None
+
+
+def set_websocket_manager(manager) -> None:
+    global _websocket_manager
+    _websocket_manager = manager
+
+
+def set_filtered_websocket_manager(manager) -> None:
+    global _filtered_websocket_manager
+    _filtered_websocket_manager = manager
 
 _UNKNOWN = WorkSteps(state="unknown")
 _NONE = WorkSteps(state="none")
@@ -270,13 +298,127 @@ async def _read(agent_name: str, started_at: Optional[str], roster: Optional[set
         return fold(definition, state, executing_agent=agent_name, roster=roster)
 
 
+# ---------------------------------------------------------------------------
+# Change notification (trinity-enterprise#533)
+#
+# The agent owns the file and its container, so only the agent knows when it
+# changed; the agent server notices and POSTs
+# `/api/agents/{name}/pipeline-state/changed`. Trinity learns exactly one
+# thing — *a file changed* — publishes a thin trigger, and lets the existing
+# access-controlled read do the rest. No stage is advanced here, nothing is
+# persisted, and the 12 s poll stays as the fallback (CLAUDE.md Rule #8).
+# ---------------------------------------------------------------------------
+def _gen_key(agent_name: str) -> str:
+    return f"pipeline_state:gen:{agent_name}"
+
+
+def _get_redis():
+    """The shared Redis client, or None when it is unavailable.
+
+    Lazy import + swallow-everything, exactly like `heartbeat_service._get_redis`:
+    every caller here treats None as "no generation", which degrades to the
+    TTL-only cache ent#525 shipped rather than to no cache at all.
+    """
+    try:
+        from routers.auth import get_redis_client
+        return get_redis_client()
+    except Exception:  # noqa: BLE001 — Redis-None fail-soft is the contract
+        logger.debug("[ent#533] get_redis_client failed", exc_info=True)
+        return None
+
+
+def _current_gen(agent_name: str) -> Optional[str]:
+    """The agent's current change generation, or None (no Redis / no notice)."""
+    redis = _get_redis()
+    if redis is None:
+        return None
+    try:
+        value = redis.get(_gen_key(agent_name))
+    except Exception:  # noqa: BLE001 — never raise into the Work read
+        logger.debug("[ent#533] generation read failed for %s", agent_name, exc_info=True)
+        return None
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:  # pragma: no cover — defensive
+            return None
+    return value if isinstance(value, str) else None
+
+
+def mark_changed(agent_name: str) -> None:
+    """Invalidate this agent's steps everywhere. Best-effort.
+
+    Two halves, and the second is the one that matters. Dropping the local
+    entry fixes the worker that received the notice; production runs
+    `uvicorn --workers 2`, so without a SHARED marker the other worker keeps
+    serving its own ≤10 s-old entry — and dev, with one `--reload` worker,
+    passes green. The generation is that marker: every worker compares it on
+    the next read and misses once.
+    """
+    _cache.pop(agent_name, None)
+    redis = _get_redis()
+    if redis is None:
+        return
+    try:
+        redis.setex(_gen_key(agent_name), _GEN_TTL_SECONDS, uuid.uuid4().hex)
+    except Exception:  # noqa: BLE001 — a notice must never 500 the route
+        logger.debug("[ent#533] generation bump failed for %s", agent_name, exc_info=True)
+
+
+async def notify_changed(agent_name: str, payload: Any) -> bool:
+    """Handle one change notice. Returns whether a trigger was published.
+
+    ``payload`` carries the already-validated ``pipeline_id`` / ``instance_id``
+    / ``stage`` (duck-typed so this module keeps no import edge to
+    ``models.py``). Over the per-agent budget the notice is dropped and the
+    caller answers 200 with ``published: false``: the agent ignores the body
+    either way, a burst is its normal, and the poll already covers the gap —
+    a 429 would only invite a retry Trinity does not want.
+    """
+    from services import rate_limiter
+
+    allowed = rate_limiter.check(
+        f"pipeline_state_notify:{agent_name}", NOTIFY_LIMIT, NOTIFY_WINDOW_SECONDS
+    ).allowed
+    if not allowed:
+        logger.debug("[ent#533] coalesced a notice for %s", agent_name)
+        return False
+
+    mark_changed(agent_name)
+
+    # The dict literal is built HERE, in the same function that broadcasts it:
+    # ent#467's AST discovery guard resolves `event` using only this function's
+    # own assignments, and `agent_name` top-level is what makes the event
+    # agent-keyed (so the event bus needs no change at all).
+    event = {
+        "type": "pipeline_state_changed",
+        "event": "pipeline_state_changed",
+        "agent_name": agent_name,
+        "pipeline_id": payload.pipeline_id,
+        "instance_id": payload.instance_id,
+        "stage": payload.stage,
+        # Server-stamped: the agent's clock is not evidence, and `/ws` is
+        # SCOPE_ALL so nothing agent-supplied rides it that need not.
+        "changed_at": utc_now_iso(),
+    }
+    if _websocket_manager:
+        await _websocket_manager.broadcast(json.dumps(event))
+    if _filtered_websocket_manager:
+        await _filtered_websocket_manager.broadcast_filtered(event)
+    return True
+
+
 async def read_pipeline_steps(agent_name: str, started_at: Optional[str] = None,
                               roster: Optional[set] = None) -> WorkSteps:
     """The steps for the ONE execution running on ``agent_name`` — never raises."""
     now = time.monotonic()
+    # Read the generation BEFORE the read, not after: a notice that lands while
+    # this read is in flight must invalidate the entry it is about to store,
+    # not be stamped onto it as already-seen.
+    gen = _current_gen(agent_name)
     hit = _cache.get(agent_name)
-    if hit and now - hit[0] < CACHE_TTL_SECONDS:
-        return hit[1]
+    if hit and now - hit[0] < CACHE_TTL_SECONDS and hit[1] == gen:
+        return hit[2]
     try:
         result = await asyncio.wait_for(_read(agent_name, started_at, roster), WALL_BUDGET_SECONDS)
     except (asyncio.TimeoutError, httpx.HTTPError) as e:
@@ -285,7 +427,7 @@ async def read_pipeline_steps(agent_name: str, started_at: Optional[str] = None,
     except Exception:  # noqa: BLE001 — a card must never 500 the Work read
         logger.warning("[ent#525] pipeline read for %s failed", agent_name, exc_info=True)
         result = _UNKNOWN
-    _cache[agent_name] = (now, result)
+    _cache[agent_name] = (now, gen, result)
     return result
 
 

@@ -2522,6 +2522,46 @@ class HeartbeatPayload(BaseModel):
     uptime_s: Optional[float] = None
 
 
+class PipelineStateChangedPayload(BaseModel):
+    """The agent server's notice that one of its own #919 pipeline-state files
+    changed (trinity-enterprise#533).
+
+    The two fields are asymmetric on purpose. The **ids** ride into a download
+    path on the read side, so they are grammar-checked here and a bad one is a
+    422 before anything is published. The **stage** is an opaque, free-form id
+    by schema, so it is normalised (trimmed, bounded, control characters and
+    blanks to ``None``) rather than rejected — a weird stage id must cost the
+    *field*, never the notice.
+    """
+    pipeline_id: str
+    instance_id: str
+    stage: Optional[str] = None
+
+    @field_validator("pipeline_id", "instance_id")
+    @classmethod
+    def _check_id_grammar(cls, value: str) -> str:
+        # Imported inside the validator so models.py — the leaf every layer
+        # imports FROM — keeps no module-scope edge into client_portal. The
+        # grammar itself is deliberately not restated here: one copy of
+        # `pipelines.ts`'s rule, in the module that also builds the paths.
+        from client_portal.work.pipeline_state import valid_id
+        if not valid_id(value):
+            raise ValueError("must match ^[A-Za-z0-9._-]{1,128}$ and contain no '..'")
+        return value
+
+    @field_validator("stage")
+    @classmethod
+    def _normalise_stage(cls, value: Optional[str]) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        if not value or len(value) > 80:
+            return None
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            return None
+        return value
+
+
 # =============================================================================
 # Audit Log Models (routers/audit_log.py)
 # =============================================================================
