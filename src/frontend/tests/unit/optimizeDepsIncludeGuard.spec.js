@@ -55,7 +55,7 @@ const x = 1
 </template>
 <script>
 const a = await import('first-pkg')
-</script>
+</script >
 <script setup>
 const b = await import("@scope/second/sub")
 </script>`
