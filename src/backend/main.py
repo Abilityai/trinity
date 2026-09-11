@@ -44,6 +44,7 @@ from opentelemetry.instrumentation.redis import RedisInstrumentor
 # Import routers
 from routers.auth import router as auth_router
 from routers.agents import router as agents_router, set_websocket_manager as set_agents_ws_manager, set_filtered_websocket_manager as set_agents_filtered_ws_manager
+from routers.agent_pipeline_state import router as agent_pipeline_state_router  # ent#533
 from routers.agent_config import router as agent_config_router
 from routers.agent_data import router as agent_data_router
 from routers.agent_files import router as agent_files_router
@@ -129,6 +130,10 @@ from services.ws_identity_service import accessible_agents_for, resolve_ws_ident
 # keeps the move reviewable as a move.
 from client_portal.asks.router import router as portal_asks_router
 from client_portal.work.router import router as portal_work_router
+from client_portal.work.pipeline_state import (  # ent#533: the notice's thin /ws trigger
+    set_websocket_manager as set_pipeline_state_ws_manager,
+    set_filtered_websocket_manager as set_pipeline_state_filtered_ws_manager,
+)
 from client_portal.router import router as client_portal_router
 from shared_sessions.router import budget_router as room_budget_router
 from shared_sessions.router import router as rooms_router
@@ -310,6 +315,8 @@ set_opqueue_sync_ws_manager(manager)
 set_event_subs_ws_manager(manager)
 set_event_subs_filtered_ws_manager(filtered_manager)
 set_loop_ws_manager(manager)  # #740
+set_pipeline_state_ws_manager(manager)            # ent#533: pipeline_state_changed
+set_pipeline_state_filtered_ws_manager(filtered_manager)
 
 # NOTE: Trinity platform instructions are now injected at runtime via
 # --append-system-prompt on every chat/task request (Issue #136).
@@ -1272,6 +1279,7 @@ async def add_security_headers(request: Request, call_next):
 # Include all routers
 app.include_router(auth_router)
 app.include_router(agents_router)
+app.include_router(agent_pipeline_state_router)  # ent#533: POST /{name}/pipeline-state/changed
 app.include_router(agent_config_router)
 app.include_router(agent_data_router)  # #1169: data export/import
 app.include_router(agent_files_router)

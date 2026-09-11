@@ -376,6 +376,13 @@ Watch loop (5s)        heartbeat_service        Redis              monitoring_al
 - **Agent Lifecycle** ([agent-lifecycle.md](agent-lifecycle.md)) /
   **Agent Rename** ([agent-rename.md](agent-rename.md)) — the delete/rename
   sites that call `clear_heartbeat()`.
+- **Workspace Work** ([workspace-work.md](workspace-work.md)) — `ent#533`
+  reuses this flow's two exports on a second agent→backend seam: the loop
+  shape (`pipeline_state_watch.py` mirrors `heartbeat.py`, same env gate, same
+  silent-by-design contract) and the predicate itself
+  (`heartbeat_service.authorize_heartbeat` now guards
+  `POST /api/agents/{name}/pipeline-state/changed` as well). **Tightening that
+  predicate changes two routes, not one.**
 
 ---
 

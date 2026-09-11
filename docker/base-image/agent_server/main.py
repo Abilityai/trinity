@@ -31,6 +31,7 @@ from .services.execution_env import arm_subscription_auth_guard
 from .services.trinity_mcp import inject_trinity_mcp_if_configured
 from .auto_sync import schedule_auto_sync_if_enabled
 from .heartbeat import schedule_heartbeat
+from .pipeline_state_watch import schedule_pipeline_state_watch
 from .services.result_callback import schedule_pending_result_resend
 from .services.orphan_sweeper import schedule_orphan_sweeper
 from .utils.thread_diagnostics import (
@@ -93,6 +94,13 @@ schedule_auto_sync_if_enabled(app)
 # RELIABILITY-004 / #307: liveness heartbeat loop. Gated on TRINITY_BACKEND_URL
 # + TRINITY_MCP_API_KEY both present, so old-image agents simply never beat.
 schedule_heartbeat(app)
+
+# ent#533: pipeline-state change watch. The #919 state files are OURS, so we
+# are the only party that can know when a stage advanced — the backend can
+# only poll. One scandir per second, no network while nothing changes, and the
+# SAME env gate as the heartbeat above, so an old-image or mis-provisioned
+# agent simply never notifies and the Workspace card keeps its 12 s poll.
+schedule_pipeline_state_watch(app)
 
 # #1083 fire-and-forget: on startup re-send any result-callback envelope left on
 # disk by a crash/restart mid-callback, so completed work isn't lost to a phantom

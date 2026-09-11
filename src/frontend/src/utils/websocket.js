@@ -204,6 +204,14 @@ export function useWebSocket() {
           reportsStore.handleWebSocketEvent(data)
           fleetReportsStore.handleWebSocketEvent(data)
         }
+        // ent#533: a participant advanced a stage in its own #919
+        // pipeline-state file — a thin trigger (ids + stage). The steps come
+        // back through the access-controlled Work read, so this only says
+        // "look again, sooner". A no-op unless the rail is scoped to the
+        // agent, and the 12 s poll still covers a notice that never arrives.
+        if (data.type === 'pipeline_state_changed') {
+          portalWorkStore.handleWebSocketEvent(data)
+        }
         // ent#170: shared-session (room) events. Thin payloads (room_id + seq /
         // state / stop_reason); the store filters to the room on screen and
         // refetches over REST (#918 pattern). No-op when Sessions isn't mounted.

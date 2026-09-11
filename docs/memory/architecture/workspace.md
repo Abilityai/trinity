@@ -463,9 +463,22 @@ one agent so no instance can be attributed) — a stopped agent must never be de
 that does not report. The #919 read (`work/pipeline_state.py`) mirrors `pipelines.ts`'s
 hardening: id grammar before any path, `size` from the listing before the download, a streamed
 byte budget, `safe_yaml`, no retries, 2 s per call in a 3 s wall budget, a 10 s per-agent
-cache. Frontend: `stores/portalWork.js` is fed by `usePortalRailFeeds` (the ONE owner), polls
+cache. **Stage advances are pushed (ent#533):** the agent server watches its own
+`~/.trinity/pipeline-state/` and POSTs `/api/agents/{name}/pipeline-state/changed` with its own
+agent-scoped MCP key (the #307 heartbeat's auth, never the internal secret and never an admin
+gate); the backend coalesces 20 notices / 10 s per agent and publishes the thin
+`pipeline_state_changed` trigger (ids + stage, `agent_name` top-level so ent#467 scopes it).
+The notice ALSO bumps a **Redis generation** that the 10 s cache checks alongside its TTL —
+`_cache` is per-process and prod runs `uvicorn --workers 2`, so a purely in-memory
+invalidation would refresh the receiving worker and leave the other one stale for up to 10 s
+while dev's single `--reload` worker passed green. Fail-open: Redis down ⇒ generation `None`
+on both sides ⇒ today's TTL-only behaviour. The poll is untouched — a dropped notice is
+invisible. Frontend: `stores/portalWork.js` is fed by `usePortalRailFeeds` (the ONE owner), polls
 12 s **only while something is live**, refreshes on `agent_activity` (started AND terminal) and
-loop events for a participant (debounced 2 s); the Work signal is **one merged set** — the
+loop events for a participant (debounced 2 s) and on `pipeline_state_changed` (500 ms), where
+the **earlier deadline wins** (a later 2 s push must not postpone a pending stage refetch) under
+a 1500 ms floor between push-driven refreshes (a burst must never reach the per-viewer
+120/60 s read limiter, whose 429 renders as visible error text); the Work signal is **one merged set** — the
 feed's live rows plus the conversation's in-flight emit joined **by execution id**
 (`workSignalFromItems`), never two signals summed. `PortalWorkCard` is the one card for the chat
 (under the message; the stream's last line is the current step while live; the terminal card
