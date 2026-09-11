@@ -255,6 +255,7 @@ class PublicChatOperations:
         session_id: str,
         limit: int = 20,
         sender_email: Optional[str] = None,
+        since: Optional[str] = None,
     ) -> List[PublicChatMessage]:
         """
         Get the most recent N messages, ordered for display (oldest first).
@@ -265,10 +266,16 @@ class PublicChatOperations:
                 MEM-001 summarizer passes the current user's email so a shared
                 channel thread never leaks another participant's turns into
                 their memory.
+            since: When set, only rows at or after this ``utc_now_iso()``-shaped
+                cutoff (ent#600 — the group-context rolling window). Build it
+                with ``iso_cutoff()``; ``timestamp`` is an ISO-Z TEXT column,
+                so the comparison is lexicographic (Invariant #16).
         """
         conditions = [public_chat_messages.c.session_id == session_id]
         if sender_email is not None:
             conditions.append(public_chat_messages.c.sender_email == sender_email)
+        if since is not None:
+            conditions.append(public_chat_messages.c.timestamp >= since)
         with get_engine().connect() as conn:
             # Get the most recent N messages, then reverse for chronological order
             recent = (
@@ -282,6 +289,33 @@ class PublicChatOperations:
                 select(recent).order_by(recent.c.timestamp.asc())
             ).mappings().all()
             return [self._row_to_message(row) for row in rows]
+
+    def prune_session(self, session_id: str, keep: int) -> int:
+        """Delete every message of a session except the newest ``keep`` (ent#600).
+
+        Bounds a Telegram group session, which now records every message the
+        bot can see, not just turns. ``message_count`` on the session row is
+        deliberately left alone — it is the lifetime count, and the sessions
+        UI reads it as such. Returns the number of rows deleted.
+        """
+        if keep <= 0:
+            return 0
+        newest = (
+            select(public_chat_messages.c.id)
+            .where(public_chat_messages.c.session_id == session_id)
+            .order_by(public_chat_messages.c.timestamp.desc())
+            .limit(keep)
+        )
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                delete(public_chat_messages).where(
+                    and_(
+                        public_chat_messages.c.session_id == session_id,
+                        public_chat_messages.c.id.not_in(newest),
+                    )
+                )
+            )
+            return result.rowcount or 0
 
     def clear_session(self, session_id: str) -> bool:
         """

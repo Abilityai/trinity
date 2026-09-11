@@ -135,6 +135,12 @@ def green_harnesses(junit_dir: str) -> set[str]:
     return {f for f, ok in seen.items() if ok and f in passed}
 
 
+def _issue_ref(issue) -> str:
+    """`#N` for a public-tracker number; a string is a fully-qualified
+    `owner/repo#N` (private tracker) and is rendered as written."""
+    return issue if isinstance(issue, str) else f"#{issue}"
+
+
 def render(catalog: dict, junit_dir: str | None) -> str:
     rows = []
     built = green = 0
@@ -156,7 +162,7 @@ def render(catalog: dict, junit_dir: str | None) -> str:
             f"| **{j['id']}** | {j['promise']} | {j['actor']} | "
             f"{', '.join(j['lanes'])} | {j['tier']} | "
             f"{'yes' if j['built'] else '**no**'}{state} | {harness} | {inv} | "
-            f"#{j['issue']} |"
+            f"{_issue_ref(j['issue'])} |"
         )
 
     out = [GENERATED_HEADER, "# Journeys\n",

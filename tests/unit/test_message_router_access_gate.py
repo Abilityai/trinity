@@ -43,6 +43,8 @@ def _make_adapter(channel: str = "telegram") -> MagicMock:
     a.resolve_verified_email = AsyncMock(return_value=None)
     a.record_inbound_activity = AsyncMock(return_value=None)  # #1533 roster counter
     a.is_group_verified = AsyncMock(return_value=False)
+    a.group_context_enabled = AsyncMock(return_value=True)  # ent#600 group-context hooks
+    a.note_untagged_seen = AsyncMock()
     a.set_group_verified = AsyncMock()
     a.prompt_group_auth = AsyncMock()
     a.prompt_auth = AsyncMock()

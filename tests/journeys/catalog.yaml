@@ -170,6 +170,22 @@ journeys:
     # must not strand a delivered thread when the agent goes away.
     invariants: [E-01, E-05, L-03]
 
+  - id: J12
+    # The first messenger/channel journey. Lives in the private tracker, so the
+    # reference is fully qualified — a bare number would name the wrong repo.
+    issue: "abilityai/trinity-enterprise#600"
+    promise: "I can tag the agent in our group chat and it already knows what we've been talking about."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    # Telegram gives bots no history and no un-tagged messages under Privacy
+    # Mode, so the harness needs a bot with Privacy Mode off in a real group —
+    # nothing in the invariant catalog covers a channel adapter yet.
+    invariants: []
+
 # The agent-lifecycle journey #2336 shipped is NOT a journey of its own — it is
 # J03's first half. Recording it here rather than minting a J11 keeps the
 # catalog a list of PROMISES; "an agent can be restarted" is a step inside

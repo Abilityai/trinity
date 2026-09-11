@@ -25,6 +25,7 @@ import httpx
 from database import db
 from adapters.base import ChannelAdapter, FileAttachment, NormalizedMessage, ChannelResponse
 from services.email_service import EmailService
+from services.telegram_group_context import fetch_can_read_all_group_messages
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,21 @@ class TelegramAdapter(ChannelAdapter):
     def get_session_identifier(self, message: NormalizedMessage) -> str:
         bot_id = message.metadata.get("bot_id", "unknown")
         chat_id = message.channel_id
+        if message.metadata.get("is_group"):
+            # ent#600: a group's session is keyed per CHAT, not per sender — it
+            # is the shared, attributed context every tagged turn reads and
+            # every observed message writes. DM history can never land here
+            # (a DM key carries the sender and its chat_id is the user id), so
+            # the reason TGRAM-GROUP ran groups with fresh context still holds.
+            # Forum supergroups: each topic is its own conversation.
+            # #1649 pinned the previous per-sender shape as a known limitation
+            # and asked for exactly this re-decision; proactive broadcasts now
+            # land in the session a reply reads.
+            key = f"{bot_id}:group:{chat_id}"
+            topic_id = message.metadata.get("topic_id")
+            if topic_id:
+                key = f"{key}:topic:{topic_id}"
+            return key
         return f"{bot_id}:{message.sender_id}:{chat_id}"
 
     def get_source_identifier(self, message: NormalizedMessage) -> str:
@@ -182,23 +198,34 @@ class TelegramAdapter(ChannelAdapter):
         # everything there). Observe mode stays excluded so the indicator
         # never reveals a silently-observing bot.
         progress_ack_eligible = True
+        # ent#600: `untagged` — a group message that did not address the bot;
+        # `observe_only` — an untagged message in mention mode, which the
+        # router RECORDS as group context and never executes (no reply, no
+        # typing, no reaction, no rate-limit charge).
+        untagged = False
+        observe_only = False
         if is_group:
             is_mentioned = self._is_bot_mentioned(message, bot_username)
             is_reply = self._is_reply_to_bot(message, bot_id)
-            progress_ack_eligible = is_mentioned or is_reply
+            is_addressed_command = self._is_command_addressed_to_bot(message, bot_username)
+            is_tagged = is_mentioned or is_reply or is_addressed_command
+            progress_ack_eligible = is_tagged
+            untagged = not is_tagged
 
-            if not is_mentioned and not is_reply:
-                # Check trigger mode — if "all" or "observe", process anyway
-                # Issue #349: "observe" mode passes all messages but agent can return [NO_REPLY]
+            if untagged:
+                # Check trigger mode — "all" / "observe" execute every message
+                # (Issue #349: "observe" lets the agent return [NO_REPLY]);
+                # "mention" observes it instead of dropping it (ent#600).
                 binding = db.get_telegram_binding(agent_name)
-                if binding:
-                    group_config = db.get_telegram_group_config(binding["id"], chat_id)
-                    trigger_mode = group_config.get("trigger_mode") if group_config else None
-                    if trigger_mode not in ("all", "observe"):
-                        return None
+                if not binding:
+                    return None
+                group_config = db.get_telegram_group_config(binding["id"], chat_id)
+                trigger_mode = group_config.get("trigger_mode") if group_config else None
+                if trigger_mode in ("all", "observe"):
                     progress_ack_eligible = trigger_mode == "all"
                 else:
-                    return None
+                    observe_only = True
+                    progress_ack_eligible = False
 
         # Extract text content
         text = message.get("text", "").strip()
@@ -223,6 +250,38 @@ class TelegramAdapter(ChannelAdapter):
         if not text and files:
             text = "(file upload)"
 
+        metadata = {
+            "bot_id": bot_id,
+            "bot_username": bot_username,
+            "agent_name": agent_name,
+            "username": username,
+            "is_group": is_group,
+            "chat_type": chat_type,
+            "chat_title": chat.get("title"),
+            "has_photo": "photo" in message,
+            "has_document": "document" in message,
+            "raw_message": message,
+            # ent#264: True for DMs, mention/reply-triggered group turns,
+            # and `all`-trigger-mode groups; False for observe-mode
+            # un-mentioned turns (typing only — no visible indicator).
+            "progress_ack_eligible": progress_ack_eligible,
+            # ent#600: see the group-filtering block above.
+            "untagged": untagged,
+            "observe_only": observe_only,
+        }
+        if is_group:
+            # ent#600: speaker labels for attributed history replay (#903's
+            # `_sender_label` reads these). Groups only — DM transcripts (and
+            # the MEM-001 summaries built from them) keep today's shape.
+            first_name = (from_user.get("first_name") or "").strip()
+            if first_name:
+                metadata["sender_display_name"] = first_name
+            if username:
+                metadata["sender_username"] = username
+            # Forum supergroups: a topic is its own conversation.
+            if message.get("is_topic_message") and message.get("message_thread_id"):
+                metadata["topic_id"] = str(message["message_thread_id"])
+
         return NormalizedMessage(
             sender_id=user_id,
             text=text,
@@ -230,22 +289,7 @@ class TelegramAdapter(ChannelAdapter):
             thread_id=str(message.get("message_id", "")),
             timestamp=str(message.get("date", "")),
             files=files,
-            metadata={
-                "bot_id": bot_id,
-                "bot_username": bot_username,
-                "agent_name": agent_name,
-                "username": username,
-                "is_group": is_group,
-                "chat_type": chat_type,
-                "chat_title": chat.get("title"),
-                "has_photo": "photo" in message,
-                "has_document": "document" in message,
-                "raw_message": message,
-                # ent#264: True for DMs, mention/reply-triggered group turns,
-                # and `all`-trigger-mode groups; False for observe-mode
-                # un-mentioned turns (typing only — no visible indicator).
-                "progress_ack_eligible": progress_ack_eligible,
-            }
+            metadata=metadata,
         )
 
     async def send_response(
@@ -625,6 +669,19 @@ class TelegramAdapter(ChannelAdapter):
         return False
 
     @staticmethod
+    def _is_command_addressed_to_bot(message: dict, bot_username: str) -> bool:
+        """``/reset@mybot`` addresses the bot even though Telegram files it as a
+        ``bot_command`` entity, not a ``mention`` (ent#600). A bare ``/reset``
+        in a group is addressed to nobody in particular and stays untagged."""
+        if not bot_username:
+            return False
+        text = (message.get("text") or "").strip()
+        if not text.startswith("/"):
+            return False
+        first = text.split()[0]
+        return first.lower().endswith(f"@{bot_username.lower()}")
+
+    @staticmethod
     def _is_reply_to_bot(message: dict, bot_id: str) -> bool:
         """Check if this message is a reply to one of the bot's own messages."""
         reply_to = message.get("reply_to_message")
@@ -681,10 +738,54 @@ class TelegramAdapter(ChannelAdapter):
                 chat_title=chat_title,
                 chat_type=chat_type,
             )
+            # ent#600: re-adding the bot is the documented way to apply a
+            # Privacy Mode change, so this is the moment to re-read getMe.
+            # Best-effort — the config above is already written; a Telegram
+            # hiccup leaves the stored flag as it was.
+            await self._refresh_can_read_all_group_messages(binding["agent_name"])
         elif new_status in ("left", "kicked") and old_status in ("member", "administrator"):
             # Bot was removed from group — deactivate config
             logger.info(f"Bot removed from group '{chat_title}' (chat_id={chat_id}) for agent={binding['agent_name']}")
             db.deactivate_telegram_group_config(binding["id"], chat_id)
+
+    async def _refresh_can_read_all_group_messages(self, agent_name: str) -> None:
+        """ent#600: store ``getMe.can_read_all_group_messages`` for the binding.
+        Never raises — an event handler must not die on a Telegram hiccup."""
+        try:
+            bot_token = db.get_telegram_bot_token(agent_name)
+            if not bot_token:
+                return
+            value = await fetch_can_read_all_group_messages(bot_token)
+            db.set_telegram_can_read_all_group_messages(agent_name, value)
+        except Exception as e:  # noqa: BLE001 — best-effort refresh
+            # Type only: an httpx error's message can carry the request URL,
+            # and the getMe URL embeds the bot token.
+            logger.debug(
+                f"[TELEGRAM] getMe refresh failed for {agent_name} (non-fatal): {type(e).__name__}"
+            )
+
+    # =========================================================================
+    # Group conversation context hooks (ent#600)
+    # =========================================================================
+
+    async def group_context_enabled(self, message: NormalizedMessage, agent_name: str) -> bool:
+        """Per-group opt-out (default ON; a missing row reads as ON)."""
+        binding = db.get_telegram_binding(agent_name)
+        if not binding:
+            return True
+        cfg = db.get_telegram_group_config(binding["id"], message.channel_id)
+        if not cfg:
+            return True
+        value = cfg.get("context_enabled")
+        return True if value is None else bool(value)
+
+    async def note_untagged_seen(self, message: NormalizedMessage, agent_name: str) -> None:
+        """An un-tagged message reached the bot in this group — the per-group
+        proof that Privacy Mode is effectively off (drives the panel status)."""
+        binding = db.get_telegram_binding(agent_name)
+        if not binding:
+            return
+        db.touch_telegram_group_untagged_seen(binding["id"], message.channel_id)
 
     async def _handle_user_member_change(self, event: dict, binding: dict) -> None:
         """Handle a user joining or leaving a group (welcome messages)."""

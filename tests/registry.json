@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent600_telegram_group_context.py",
+      "feature": "ent#600",
+      "added": "2026-09-11",
+      "categories": [
+        "backend",
+        "telegram",
+        "channels"
+      ],
+      "description": "Telegram group conversation context (ent#600, TGRAM-GROUP-CTX): parse_message marks untagged mention-mode group messages observe-only instead of dropping them (commands addressed to the bot count as tagged; DMs untouched; group speaker labels + forum-topic key); per-chat group session key (#1649 broadcast recall); router observe path records attributed context without executing / rate-limiting / indicating (locked any_verified group + per-group toggle-off record nothing; bare commands skipped; prune cadence; db failure swallowed); group turn prompt carries the bounded attributed history block, reply-quote line, persists the tagged user turn before execution, DM path unchanged; transport keeps untagged bare commands inert; pure renderer (NO_REPLY filter, clamp, delimiter/label neutralisation) + status derivation (evidence beats getMe flag, toggle off wins); adapter hooks; getMe refresh on bot-added is best-effort; PublicChatOperations since-window + prune on tmp SQLite."
+    },
+    {
       "file": "unit/test_157_a2a_inbound_server.py",
       "feature": "ent#157",
       "added": "2026-07-15",

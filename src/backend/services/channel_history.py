@@ -30,7 +30,12 @@ logger = logging.getLogger(__name__)
 
 
 def session_key_for_telegram_group(bot_id: str, sender_id: str, chat_id: str) -> str:
-    """Session key for a Telegram group message, via the adapter itself."""
+    """Session key for a Telegram group message, via the adapter itself.
+
+    Since ent#600 group sessions are keyed per chat, so ``sender_id`` no longer
+    shapes the key (kept for the signature) and a broadcast lands in the very
+    session a participant's reply reads — the recall #1649 deferred.
+    """
     from adapters.base import NormalizedMessage
     from adapters.telegram_adapter import TelegramAdapter
 

@@ -183,7 +183,7 @@
   - Auto-created group configs on first interaction (no manual setup required)
   - Bot added/removed from group detection via `my_chat_member` update events
   - User join/leave detection via `chat_member` events (requires bot admin in group)
-  - Fresh context per group message (no prior session history to prevent context bleed)
+  - Group turns read only the group's own per-chat session — never DM history (superseded the original "fresh context per group message" rule; see TGRAM-GROUP-CTX, §15.1e-ctx)
   - Silent rate limit drops in groups (no error messages visible to all members)
   - Mention text stripped from agent input for cleaner prompts
   - Commands support @botname suffix in groups (e.g., `/help@mybot`)
@@ -207,6 +207,29 @@
   - Bot loop prevention inherited from TGRAM-001 (`is_bot` check)
 - **Frontend**: TelegramChannelPanel extended with group list, trigger mode radio, welcome message config
 - **Flow**: `docs/memory/feature-flows/telegram-integration.md`
+
+### 15.1e-ctx Telegram Group Conversation Context (TGRAM-GROUP-CTX — ent#600)
+- **Status**: 🔨 In Progress (2026-09-11)
+- **Requirement ID**: TGRAM-GROUP-CTX
+- **Priority**: P1
+- **Description**: In a Telegram group the agent still *speaks* only per the group's trigger mode, but it *knows* the group's recent conversation when it does. Un-tagged messages the bot receives are recorded as attributed context without spending an agent turn; a tagged turn is answered with that bounded history. Replaces TGRAM-GROUP's "fresh context per group message" rule — the reason for that rule (DM history must never reach a group reply) is preserved by construction, because the group's context lives in its own session.
+- **Key Features**:
+  - Group sessions are keyed per chat (`{bot_id}:group:{chat_id}`, plus `:topic:{message_thread_id}` in forum supergroups), not per sender. DMs keep their per-user key; nothing from a DM or another group can appear in a group reply.
+  - In `mention` mode an un-tagged group message is **observed**: persisted to the group session with its speaker label, never executed — no reply, no typing, no reaction, no rate-limit charge. Bare `/commands` are neither executed nor recorded; a command addressed to the bot (`/reset@bot`) counts as tagged.
+  - Every group turn (mention / all / observe) is built as sender identity + a bounded, attributed "recent group conversation" block (default 40 messages within 24 h; `[NO_REPLY]` turns skipped; lines clamped) + the tagged message. The tagged user turn is persisted *before* execution so stored order matches what the group saw. Observed history is untrusted third-party input and is rendered inside a delimited block with sanitized labels.
+  - Zero-config slice: a tagged message that replies to someone else's message carries `[Replying to <name>: "<quote>"]` — works with Privacy Mode on.
+  - Proactive `send_group_message` broadcasts now land in the same group session, closing #1649's "agent can't recall its own broadcast" limitation.
+  - Per-group `context_enabled` (default ON; owner-editable via the existing group PUT + panel row). OFF ⇒ nothing recorded and group turns run with fresh context (pre-ent#600 behaviour). Not required config.
+  - Storage bound: a group session is pruned to its newest 500 rows on every 50th observed insert. Bounds are env-overridable (`TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES`, `TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS`).
+  - Honest status per group: `context_status` ∈ `all_messages` (an un-tagged message has reached the bot here) / `tagged_only` (getMe reports Privacy Mode on; hint names `/setprivacy` → Disable, re-add the bot, or make it a group admin) / `unconfirmed` (Privacy Mode off or unknown, nothing un-tagged seen yet; hint names re-add / Verify) / `off` (toggle off). `can_read_all_group_messages` is refreshed from `getMe` at connect, at Verify, and when the bot is added to a group.
+  - Graceful degradation: with Privacy Mode on the bot never receives un-tagged messages, so behaviour is exactly TGRAM-GROUP's.
+- **Database Changes** (dual-track: `telegram_group_context` + Alembic `0059_telegram_group_context`; all additive, nullable/defaulted):
+  - `telegram_bindings.can_read_all_group_messages INTEGER` (NULL = never checked)
+  - `telegram_group_configs.last_untagged_seen_at TEXT`, `telegram_group_configs.context_enabled INTEGER DEFAULT 1`
+- **API Changes**: `GET /api/agents/{name}/telegram/groups` items gain `context_enabled`, `context_status`, `context_hint`, `last_untagged_seen_at`; `PUT …/groups/{id}` accepts `context_enabled`. MCP `list_channel_groups` passes `context_status` through (Invariant #13).
+- **Known limitations**: no backfill — context starts when the bot can see messages; a group locked by `group_auth_mode=any_verified` records nothing until unlocked; ent#265 completion reports are not written into group context; `/reset@bot` by any member clears the group's shared context.
+- **Journey**: J12 (`tests/journeys/catalog.yaml`, `built: no`)
+- **Flow**: `docs/memory/feature-flows/telegram-integration.md` → Group Conversation Context
 
 ### 15.1h Channel Completion Report-Back (CHANNEL-REPORT — ent#224 Slack, ent#265 Telegram)
 - **Status**: ✅ Slack (2026-07, ent#224) · ✅ Telegram (2026-07, ent#265)

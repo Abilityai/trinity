@@ -95,9 +95,13 @@ class TelegramWebhookTransport(ChannelTransport):
             text = message.get("text", "")
 
             if text.startswith("/"):
-                # Handle commands directly in the adapter
+                # Handle commands directly in the adapter. ent#600: an untagged
+                # command in a mention-mode group (bare `/reset`, `/help`) used
+                # to be inert only because parse_message returned None; it now
+                # parses as observe-only, so gate here — trigger rules must not
+                # change. `/reset@bot` is the deliberate group-reset gesture.
                 normalized = self.adapter.parse_message(update)
-                if normalized:
+                if normalized and not normalized.metadata.get("observe_only"):
                     command_response = await self.adapter.handle_command(normalized)
                     if command_response:
                         bot_token = db.get_telegram_bot_token(binding["agent_name"])

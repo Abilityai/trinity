@@ -118,6 +118,16 @@
               </button>
             </div>
 
+            <!-- Group context status (ent#600) — honest state + the next action.
+                 Evidence-based on the backend: "sees all messages" only once an
+                 un-tagged message has actually reached the bot in this group. -->
+            <div class="flex items-start gap-2 mb-2">
+              <BaseBadge :variant="contextBadgeVariant(group)" dot class="mt-0.5 shrink-0">
+                {{ contextBadgeLabel(group) }}
+              </BaseBadge>
+              <p class="text-xs text-gray-500 dark:text-gray-400">{{ group.context_hint }}</p>
+            </div>
+
             <!-- Trigger Mode -->
             <div class="flex items-center gap-4 text-xs flex-wrap">
               <label class="flex items-center gap-1.5 cursor-pointer">
@@ -196,6 +206,22 @@
                 Posts a completion notice for delegated or background tasks started from this group.
               </p>
             </div>
+
+            <!-- Group context (ent#600) — per-group opt-out; default on. -->
+            <div class="mt-2">
+              <label class="flex items-center gap-1.5 cursor-pointer text-xs">
+                <input
+                  type="checkbox"
+                  :checked="group.context_enabled"
+                  @change="updateGroup(group, { context_enabled: !group.context_enabled })"
+                  class="rounded text-action-primary-600 focus:ring-action-primary-500"
+                />
+                <span class="text-gray-600 dark:text-gray-400">Group context</span>
+              </label>
+              <p class="mt-0.5 text-xs text-gray-400">
+                Remembers the group's recent conversation so a tagged reply answers in context. Off: a tagged turn sees only the tagged message.
+              </p>
+            </div>
           </div>
         </div>
       </div>
@@ -254,6 +280,22 @@
 import { ref, onMounted, watch } from 'vue'
 import api from '../api'
 import VoiceChannelToggle from './VoiceChannelToggle.vue'
+import BaseBadge from './base/BaseBadge.vue'
+
+// ent#600: one badge per context state; the hint text comes from the backend
+// so the "next action" wording lives in one place.
+const CONTEXT_BADGE = {
+  all_messages: { variant: 'success', label: 'Sees all messages' },
+  tagged_only: { variant: 'warning', label: 'Tagged messages only' },
+  unconfirmed: { variant: 'info', label: 'Not confirmed yet' },
+  off: { variant: 'neutral', label: 'Context off' },
+}
+function contextBadgeVariant(group) {
+  return (CONTEXT_BADGE[group.context_status] || CONTEXT_BADGE.unconfirmed).variant
+}
+function contextBadgeLabel(group) {
+  return (CONTEXT_BADGE[group.context_status] || CONTEXT_BADGE.unconfirmed).label
+}
 
 const props = defineProps({
   agentName: {
@@ -347,6 +389,9 @@ async function verifyBot() {
     })
     if (response.data.ok) {
       message.value = { type: 'success', text: response.data.message }
+      // ent#600: Verify re-reads the bot's Privacy Mode — refresh the per-group
+      // context status in place so a BotFather change shows without a reload.
+      await loadGroups()
     } else {
       message.value = { type: 'error', text: response.data.message || 'Verification failed' }
     }

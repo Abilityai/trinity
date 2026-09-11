@@ -106,6 +106,7 @@ class TelegramChannelOperations:
         telegram_bindings.c.telegram_secret_token,
         telegram_bindings.c.last_update_id,
         telegram_bindings.c.progress_indicator_enabled,  # ent#264
+        telegram_bindings.c.can_read_all_group_messages,  # ent#600: getMe fact, NULL = never checked
         telegram_bindings.c.created_at,
         telegram_bindings.c.updated_at,
     )
@@ -195,6 +196,22 @@ class TelegramChannelOperations:
         )
         with get_engine().begin() as conn:
             conn.execute(stmt)
+
+    def set_can_read_all_group_messages(self, agent_name: str, value: Optional[bool]) -> bool:
+        """ent#600 — store Telegram's ``getMe.can_read_all_group_messages``
+        (Privacy Mode off ⇒ True). ``None`` records "Telegram did not say".
+        Returns False when no binding exists."""
+        stmt = (
+            update(telegram_bindings)
+            .where(telegram_bindings.c.agent_name == agent_name)
+            .values(
+                can_read_all_group_messages=(None if value is None else (1 if value else 0)),
+                updated_at=utc_now_iso(),
+            )
+        )
+        with get_engine().begin() as conn:
+            result = conn.execute(stmt)
+        return (result.rowcount or 0) > 0
 
     def update_last_update_id(self, agent_name: str, update_id: int) -> None:
         """Update the last processed update_id for dedup."""
@@ -485,6 +502,8 @@ class TelegramChannelOperations:
         telegram_group_configs.c.verified_by_email,
         telegram_group_configs.c.verified_at,
         telegram_group_configs.c.allow_proactive,  # ent#265: completion-report consent
+        telegram_group_configs.c.last_untagged_seen_at,  # ent#600: proof the bot sees untagged messages
+        telegram_group_configs.c.context_enabled,  # ent#600: per-group context toggle (default ON)
     )
 
     def get_or_create_group_config(
@@ -543,6 +562,9 @@ class TelegramChannelOperations:
                     # (uniform with the migration's DEFAULT 1 — no dead-default
                     # split; the toggle is an opt-out mute).
                     allow_proactive=1,
+                    # ent#600: group context default ON (uniform with the migration's
+                    # DEFAULT 1; the toggle is an opt-out).
+                    context_enabled=1,
                 )
             )
 
@@ -591,6 +613,7 @@ class TelegramChannelOperations:
         welcome_enabled: Optional[bool] = None,
         welcome_text: Optional[str] = None,
         allow_proactive: Optional[bool] = None,
+        context_enabled: Optional[bool] = None,
     ) -> Optional[dict]:
         """Update group config settings."""
         now = utc_now_iso()
@@ -605,6 +628,9 @@ class TelegramChannelOperations:
         if allow_proactive is not None:
             # ent#265: per-group completion-report consent (opt-out mute)
             values["allow_proactive"] = 1 if allow_proactive else 0
+        if context_enabled is not None:
+            # ent#600: per-group conversation-context toggle (opt-out)
+            values["context_enabled"] = 1 if context_enabled else 0
 
         select_stmt = select(*self._GROUP_CONFIG_COLUMNS).where(
             telegram_group_configs.c.id == group_config_id
@@ -618,6 +644,24 @@ class TelegramChannelOperations:
 
             row = conn.execute(select_stmt).mappings().first()
         return self._row_to_group_config(row) if row else None
+
+    def touch_group_untagged_seen(self, binding_id: int, chat_id: str) -> bool:
+        """ent#600 — record that an un-tagged message reached the bot in this
+        group (the per-group proof that Privacy Mode is effectively off).
+        Returns False when the group row does not exist."""
+        stmt = (
+            update(telegram_group_configs)
+            .where(
+                and_(
+                    telegram_group_configs.c.binding_id == binding_id,
+                    telegram_group_configs.c.chat_id == chat_id,
+                )
+            )
+            .values(last_untagged_seen_at=utc_now_iso())
+        )
+        with get_engine().begin() as conn:
+            result = conn.execute(stmt)
+        return (result.rowcount or 0) > 0
 
     def deactivate_group_config(self, binding_id: int, chat_id: str) -> bool:
         """Mark a group config as inactive (bot removed from group)."""
@@ -733,6 +777,11 @@ class TelegramChannelOperations:
             "allow_proactive": (
                 True if row["allow_proactive"] is None else bool(row["allow_proactive"])
             ),
+            # ent#600: NULL reads as "never seen"; context default ON on NULL too.
+            "last_untagged_seen_at": row.get("last_untagged_seen_at"),
+            "context_enabled": (
+                True if row.get("context_enabled") is None else bool(row["context_enabled"])
+            ),
         }
 
     def _row_to_binding(self, row) -> dict:
@@ -749,6 +798,11 @@ class TelegramChannelOperations:
             # ent#264: raw value (may be NULL on edge writes) — readers apply
             # the Python-side default-ON predicate `v is None or v != 0`.
             "progress_indicator_enabled": row["progress_indicator_enabled"],
+            # ent#600: None = never checked, else bool (getMe.can_read_all_group_messages)
+            "can_read_all_group_messages": (
+                None if row.get("can_read_all_group_messages") is None
+                else bool(row["can_read_all_group_messages"])
+            ),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
