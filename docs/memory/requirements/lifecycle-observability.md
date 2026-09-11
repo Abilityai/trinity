@@ -290,7 +290,12 @@ anonymous usage telemetry tracked separately (#758 / trinity-enterprise#12).
   read-shaped path** (a GET, a status readback) uses the non-minting twin
   `get_installation_id()` and reports `None` honestly when nothing has minted
   it yet (ent#545), because a `get_or_create_*` on a read path is a durable
-  write with a race (learnings 2026-08-05). The last such caller, the
+  write with a race (learnings 2026-08-05). That writer set is pinned in CI:
+  `tests/unit/test_2669_minting_accessor_callers.py` fails the build on any use
+  of a minting accessor (`get_or_create_installation_id`,
+  `get_or_mint_sharing_id`, `get_instance_label`) outside its reasoned
+  allowlist, and on any write of the identity keys outside their home modules
+  (#2669; the private tree's twin is trinity-enterprise#575). The last such caller, the
   enterprise activation-funnel read, adopts the twin in trinity-enterprise#570;
   a public tree ahead of that submodule pointer still mints on the tab's first
   open. The mint itself is a **write-once

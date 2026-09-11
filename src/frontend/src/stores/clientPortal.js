@@ -1233,14 +1233,23 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // chat survives a refresh / re-sign-in. With `sessionId` loads that thread;
     // without, the most-recent. Returns `{ session_id, messages }` so the caller
     // can adopt the resolved thread when it didn't specify one.
-    async fetchHistory(agentName, sessionId = null) {
+    // #2694: two reads by intent. No `limit` → the thread WINDOW (the newest
+    // 100 typed turns plus the spoken rows of the calls among them; `truncated`
+    // when the row ceiling cut the old end). `limit` (≤ 50) → the newest N rows
+    // whatever their source — the reply poll's narrow read, which runs every
+    // few hundred milliseconds and only needs the newest reply.
+    async fetchHistory(agentName, sessionId = null, { limit = null } = {}) {
+      const params = {}
+      if (sessionId) params.session_id = sessionId
+      if (limit) params.limit = limit
       const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/history`,
-        { headers: this.authHeader, params: sessionId ? { session_id: sessionId } : {} }
+        { headers: this.authHeader, params }
       )
       return {
         sessionId: data.session_id || null,
         messages: data.messages || [],
+        truncated: data.truncated === true,
         // ent#286: non-null when a turn is running on this thread right now —
         // what a client that reloaded mid-turn resubscribes to.
         inFlightExecutionId: data.in_flight_execution_id || null,

@@ -265,6 +265,14 @@
              keyed on the call id (`groupVoiceBlocks`), placed where the call
              started. Visibly spoken — no rating control, a mic glyph, the
              label the call wrote ("Voice call · N min", and how it ended). -->
+        <!-- #2694: the window is counted in typed turns under a row ceiling.
+             When the ceiling cut the OLD end, say so — a thread that silently
+             starts mid-call is the very symptom the window fix removes. -->
+        <p
+          v-if="historyTruncated"
+          :class="PLATFORM_LINE_CLASS"
+          data-testid="portal-history-truncated"
+        >Earlier messages in this chat aren't shown</p>
         <template v-for="(item, k) in threadItems" :key="item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`">
         <details
           v-if="item.kind === 'voice-call'"
@@ -297,7 +305,7 @@
         <div v-else>
         <p
           v-if="item.message.role === 'system'"
-          class="my-3 text-center text-xs text-gray-400 dark:text-gray-500"
+          :class="PLATFORM_LINE_CLASS"
           data-testid="portal-system-line"
         >{{ item.message.content }}</p>
         <div v-else :class="item.message.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
@@ -734,7 +742,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import PortalTypeahead from './PortalTypeahead.vue'
@@ -900,6 +908,14 @@ const loadingHistory = ref(false)
 // condition). Never goes false again on this instance, so the adoption-path
 // refetch swaps messages in place with no beam; `convKey` remounts re-derive it.
 const historyLoaded = ref(!(props.sessionId && !props.newChat))
+// #2694: the history window is counted in typed turns and bounded by a row
+// ceiling; true when the ceiling cut rows off the OLD end of this thread.
+const historyTruncated = ref(false)
+// The platform speaking ABOUT the thread — one look for the ent#523 system
+// line and the #2694 window notice: centred, muted, no avatar, so neither is
+// read as something the agent said. Dark meta text stops at gray-400 (the
+// contract's ink floor).
+const PLATFORM_LINE_CLASS = 'my-3 text-center text-xs text-gray-400 dark:text-gray-400'
 const input = ref('')
 const sending = ref(false)
 // ent#523 — Reset, offered on Main only.
@@ -1102,6 +1118,7 @@ const dismissed = ref(null)
 async function loadThread(sessionId) {
   loadingHistory.value = true
   messages.value = []
+  historyTruncated.value = false
   terminalOutcome.value = null
   let inFlight = null
   let inFlightBudget = null
@@ -1109,8 +1126,9 @@ async function loadThread(sessionId) {
   let outcome = null
   try {
     const { sessionId: resolved, messages: msgs, inFlightExecutionId, inFlightWaitBudgetSeconds,
-            lastTurnOutcome } =
+            lastTurnOutcome, truncated } =
       await store.fetchHistory(props.agent.name, sessionId || null)
+    historyTruncated.value = truncated === true
     // #2214: the budget is the marker's REMAINING TTL, honest only from the
     // instant it was measured — stamp that instant beside the fetch, not when
     // the (possibly long) reattached stream later ends.
@@ -1198,9 +1216,10 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
   // The baseline is what is on screen right now: this client reloaded INTO a
   // running turn, so every assistant message it can see predates that turn.
-  // Passing nothing made `assistants.length > undefined` false on every poll,
-  // so the reply never rendered and the user had to reload a second time.
-  const baseline = messages.value.filter((m) => m.role === 'assistant').length
+  // Passing nothing made the poll's comparison false on every poll, so the
+  // reply never rendered and the user had to reload a second time. #2694: the
+  // baseline is the newest TYPED reply's identity (`replyBaseline`), not a count.
+  const baseline = replyBaseline(messages.value)
   try {
     await store.streamPortalExecution(props.agent.name, executionId, onStreamEvent)
     const data = await awaitPersistedReply(currentSessionId.value, baseline,
@@ -1600,7 +1619,7 @@ async function deliver(text) {
     let started = null
     // Read before anything is dispatched: after the fact it is impossible to
     // tell this turn's reply from the previous one's.
-    const baseline = await persistedAssistantCount(currentSessionId.value)
+    const baseline = await persistedReplyBaseline(currentSessionId.value)
     // ent#403: read the choice ONCE, here, so the streaming dispatch and its
     // synchronous fallback below run the same turn on the same model — a value
     // re-read between the two could differ if the record settled in between.
@@ -1864,10 +1883,15 @@ function onStreamEvent(evt) {
 // live, billed turns "not delivered" and offered a Retry that ran and billed
 // them a second time.
 //
-// `baselineAssistants` is the count read from the SERVER before dispatch. Using
-// the local list instead let a retry return the PREVIOUS turn's reply on its
-// first poll — the answer to the wrong question, while a second turn ran unseen.
+// The baseline is read from the SERVER before dispatch (`persistedReplyBaseline`).
+// Using the local list instead let a retry return the PREVIOUS turn's reply on
+// its first poll — the answer to the wrong question, while a second turn ran unseen.
 const REPLY_POLL_MS = 700
+// #2694: how many of the newest rows the poll reads. The reply it waits for is
+// the newest row of the thread (the composer is inert during a call and a call
+// cannot start over a reply in flight), so a handful is enough; the server
+// caps the parameter at 50.
+const REPLY_POLL_ROWS = 8
 // Time-based, NOT poll-count-based. With the backoff below, 8 polls is up to
 // 8 x 15s = 120s late in a turn — so a count silently stretched this debounce
 // into two minutes of spinner before the no-answer message appeared.
@@ -1905,7 +1929,7 @@ function replyPollInterval(elapsedMs) {
 // is matched against it before it is believed — a thread can hold a verdict from
 // an earlier turn, and reporting that one as this turn's failure would be a new
 // way to lie about the same thing.
-async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
+async function awaitPersistedReply(sessionId, baseline, budgetSeconds,
                                    dispatchedAtMs, executionId = null) {
   let idleSince = null
   // Measured from DISPATCH, not from when this function was reached. The
@@ -1925,7 +1949,11 @@ async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
     if (Date.now() > deadline) return { lost: true }
     let data
     try {
-      data = await store.fetchHistory(props.agent.name, sessionId || null)
+      // #2694: the NARROW read — the newest few rows, never the thread window.
+      // This runs every 700 ms early in a turn; the window (100 typed turns
+      // plus their calls) is the wrong thing to pay for here, and a count over
+      // it is the wrong thing to compare (see `replyFromHistory`).
+      data = await store.fetchHistory(props.agent.name, sessionId || null, { limit: REPLY_POLL_ROWS })
     } catch {
       // A hiccup reading history is not evidence the turn failed.
       await wait()
@@ -1935,7 +1963,7 @@ async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
     // caller's own rating out with the text. They were always in hand here —
     // this reads the row the server WROTE — and were being dropped, which is
     // the whole of the "not rateable until reload" defect.
-    const reply = replyFromHistory(data.messages, baselineAssistants)
+    const reply = replyFromHistory(data.messages, baseline)
     if (reply) return { ...reply, session_id: data.sessionId || sessionId }
     // #2320: the server told us how this turn ended. Authoritative regardless
     // of the marker — a verdict naming THIS execution means it is over — and
@@ -1959,14 +1987,16 @@ async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
   }
 }
 
-// Assistant count as the SERVER sees it — the baseline a reply must exceed.
-async function persistedAssistantCount(sessionId) {
-  if (!sessionId) return 0
+// The newest typed reply as the SERVER sees it — the baseline this turn's
+// reply must differ from (#2694: by identity, read from the same narrow rows
+// the poll reads, so the two can never disagree about the window).
+async function persistedReplyBaseline(sessionId) {
+  if (!sessionId) return replyBaseline([])
   try {
-    const data = await store.fetchHistory(props.agent.name, sessionId)
-    return (data.messages || []).filter((m) => m.role === 'assistant').length
+    const data = await store.fetchHistory(props.agent.name, sessionId, { limit: REPLY_POLL_ROWS })
+    return replyBaseline(data.messages)
   } catch {
-    return 0
+    return replyBaseline([])
   }
 }
 

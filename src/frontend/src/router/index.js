@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { setBaseTitle } from '@/utils/tabTitle'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'
@@ -423,7 +424,13 @@ const BASE_TITLE = 'Trinity'
 router.afterEach((to) => {
   const raw = to.meta?.title
   const label = typeof raw === 'function' ? raw(to) : raw
-  document.title = label ? `${BASE_TITLE} — ${label}` : `${BASE_TITLE} — Agent Orchestration`
+  // ent#557: routed THROUGH `setBaseTitle` rather than assigned here. The
+  // Workspace's unread count is a prefix on this string and changes on its own
+  // schedule, so with two direct writers the last one to fire would erase the
+  // other's half — a navigation would drop the count, a count update would drop
+  // the label. `utils/tabTitle.js` holds both halves and renders the whole
+  // string; this line still owns what the LABEL says.
+  setBaseTitle(label ? `${BASE_TITLE} — ${label}` : `${BASE_TITLE} — Agent Orchestration`)
 })
 
 // Clear setup cache on successful setup
