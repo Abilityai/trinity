@@ -2867,6 +2867,19 @@
         "unit"
       ],
       "description": "Operator intake (ent#38): never fires unless enabled, never double-submits (the marker is claimed before the POST), never raises, never fires without an email; delivery-failure observability (#1593): a non-2xx logs at WARNING with a coded detail only, a connect failure at INFO, the email never reaches a log line. ent#545: the non-minting read twin get_installation_id (None on a fresh store with a store that refuses every write, the stored id verbatim, blank/non-string as not minted, a read failure propagated rather than rendered as not minted, writer and reader as one key), the writers' mint as a write-once claim (a worker whose claim loses returns the winner's id, never an upsert), and the self-heal of a corrupt row (blank, whitespace, non-string) on both the FakeDB and the real SettingsOperations layer."
+    },
+    {
+      "file": "unit/test_2669_minting_accessor_callers.py",
+      "feature": "#2669",
+      "added": "2026-09-10",
+      "categories": [
+        "backend",
+        "telemetry",
+        "security",
+        "static-guard",
+        "unit"
+      ],
+      "description": "Static AST guard (#2669): every use of an identity-minting accessor -- get_or_create_installation_id, get_or_mint_sharing_id, get_instance_label -- sits at a (path, enclosing qualname, name) listed with the reason that site needs the identity to exist; a read-shaped path must use the non-minting twin. An import is a binding that feeds a per-file alias map, so an aliased or re-bound call is a hit at the CALL. The identity keys (installation_id, telemetry_sharing_id) are written only by their home modules. The read twin get_installation_id is pinned to exist. OSS tree only (the private twin is trinity-enterprise#575); token-prefiltered on case-folded bytes so unrelated files never trip an interpreter-skew parse failure, while a token-bearing file that cannot be parsed fails closed naming the interpreter. Self-tests drive every spelling family, the scope attribution (nested/async/class/lambda/decorator), the key-write detector and the judge in both directions through the same scan the live tree uses."
     }
   ]
 }
