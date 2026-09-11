@@ -56,11 +56,19 @@
            room that closes at a cap with no prior warning reads as the agents
            going quiet. Shown from ~80% so there is time to react, not as a
            permanent gauge nobody asked for. -->
-      <div v-if="budgetWarning" class="ml-auto mr-2 text-xs text-status-warning-600 dark:text-status-warning-400 truncate" :title="budgetWarning">
-        {{ budgetWarning }}
+      <div
+        v-if="notice"
+        class="ml-auto mr-2 truncate text-xs"
+        :class="notice.level === 'critical'
+          ? 'text-status-danger-600 dark:text-status-danger-400 font-medium'
+          : 'text-status-warning-600 dark:text-status-warning-400'"
+        :title="`${notice.headline}. ${notice.detail}`"
+        data-testid="room-budget-headline"
+      >
+        {{ notice.headline }}
       </div>
 
-      <div class="flex items-center gap-1 shrink-0" :class="{ 'ml-auto': !budgetWarning }">
+      <div class="flex items-center gap-1 shrink-0" :class="{ 'ml-auto': !notice }">
         <!-- ent#359 AC #4: star from the header, same as a 1:1. -->
         <PortalStarButton
           :starred="starred"
@@ -95,8 +103,11 @@
       <p v-if="addError" class="mt-1.5 text-xs text-status-danger-600 dark:text-status-danger-400">{{ addError }}</p>
     </div>
 
-    <!-- Transcript -->
-    <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
+    <!-- Transcript. The wrapper is the jump-to-latest control's positioned box
+         (#2624) — it floats over the transcript rather than taking layout, so
+         appearing and disappearing never reflows what is being read. -->
+    <div class="relative flex-1 min-h-0 flex flex-col">
+    <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5" @scroll.passive="onTranscriptScroll">
       <div class="max-w-[var(--ws-message-max,64rem)] mx-auto space-y-6">
         <p v-if="loading" class="text-center text-sm text-gray-400">Loading…</p>
 
@@ -163,6 +174,8 @@
         </div>
       </div>
     </div>
+    <PortalJumpToLatest :show="showJumpToLatest" :count="unreadBelow" @jump="scrollToLatest" />
+    </div>
 
     <!-- ent#474: the rail's mobile collapsed form — see PortalConversation. -->
     <slot name="rail-strip" />
@@ -180,6 +193,27 @@
              recipients named — a room's upload is a fan-out and the person
              should see who received it. -->
         <p v-if="batchNotice" class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300">{{ batchNotice }}</p>
+        <!-- #2620 — the proactive half. Placed ABOVE the attachments
+             block on purpose: the composer below is a `v-else` chained to that
+             block's `v-if`, and `v-else` binds to the immediately preceding
+             element — so a conditional dropped between them silently steals
+             the chain and the composer vanishes exactly when this banner
+             appears. Pinned by `roomComposerChain.spec.js`.
+
+             The header line is ambient; this is
+             where the person is about to SPEND one, so the last few messages
+             say so in full, once, right above the box. Only at `critical`: a
+             banner that is always there is a banner nobody reads. -->
+        <div
+          v-if="notice && notice.level === 'critical'"
+          class="mb-2 rounded-lg border border-status-danger-200 bg-status-danger-50 px-3 py-2 text-xs text-status-danger-800 dark:border-status-danger-800 dark:bg-status-danger-900/30 dark:text-status-danger-200"
+          data-testid="room-budget-banner"
+          role="status"
+        >
+          <span class="font-medium">{{ notice.headline }}.</span>
+          {{ notice.detail }}
+        </div>
+
         <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
           <span
             v-for="(f, i) in attachments"
@@ -198,48 +232,58 @@
             <span v-else class="opacity-70">· to {{ recipientLabel }}</span>
           </span>
         </div>
-        <form v-else class="flex items-end gap-2" @submit.prevent="send">
-          <!-- ent#392: `@` typeahead over the room's WAKE-SET. Same anchored
-               wrapper as the 1:1 composer; it must carry the flex sizing the
-               textarea used to hold, or the field collapses to content width.
-
-               #2259: and the same `block` on the textarea. A `<textarea>` is
-               inline-block, so in this block wrapper it sat on the baseline and
-               the line box reserved 6px below it; `items-end` then aligned Send
-               to that dead space instead of to the visible input edge. Twin of
-               PortalConversation — the two composers are the same markup in two
-               files, so a fix landing in only one silently keeps the bug. -->
-          <div ref="composerWrap" class="relative flex-1 min-w-0">
-            <PortalTypeahead
-              v-if="typeaheadOpen"
-              kind="@"
-              :rows="typeaheadRows"
-              :active-index="activeIndex"
-              :overflow="typeaheadBound.overflow"
-              :empty-message="typeaheadEmpty || ''"
-              @pick="acceptActive"
-              @hover="activeIndex = $event"
-            />
-            <textarea
-              ref="textarea"
-              v-model="input"
-              rows="1"
-              :placeholder="placeholder"
-              class="block w-full resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
-              @keydown="onComposerKeydown"
-              @input="onComposerInput"
-              @click="onComposerCaret"
-              @select="onComposerCaret"
-            ></textarea>
-          </div>
-          <button
-            type="submit"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
-            :disabled="!input.trim() || sending"
-            title="Send"
+        <form v-else @submit.prevent="send">
+          <!-- #2662: the same composer shell as the 1:1 thread — field on top,
+               controls in a row inside it. The two composers are the same
+               markup in two files (the #2211 lesson recorded in
+               `portalComposerAlignment.spec.js`), so this shape lands in BOTH
+               or the room composer visibly diverges from the chat it sits
+               beside. The room has no model picker — that is per-agent and a
+               room has several — so its control row holds Send alone. -->
+          <div
+            class="rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
+            @click="focusComposerFromShell"
           >
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
-          </button>
+            <!-- ent#392: `@` typeahead over the room's WAKE-SET. Same anchored
+                 wrapper as the 1:1 composer, same ref name, and the same
+                 `block` on the textarea (#2259). It sheds `flex-1 min-w-0`
+                 with its twin: it is the shell's first row, not a flex item. -->
+            <div ref="composerWrap" class="relative">
+              <PortalTypeahead
+                v-if="typeaheadOpen"
+                kind="@"
+                :rows="typeaheadRows"
+                :active-index="activeIndex"
+                :overflow="typeaheadBound.overflow"
+                :empty-message="typeaheadEmpty || ''"
+                @pick="acceptActive"
+                @hover="activeIndex = $event"
+              />
+              <textarea
+                ref="textarea"
+                v-model="input"
+                rows="1"
+                :placeholder="placeholder"
+                class="block w-full resize-none border-0 bg-transparent text-sm px-2 py-2 leading-6 focus:outline-none focus:ring-0 max-h-40"
+                @keydown="onComposerKeydown"
+                @input="onComposerInput"
+                @click="onComposerCaret"
+                @select="onComposerCaret"
+              ></textarea>
+            </div>
+            <div class="mt-1 flex items-center gap-1">
+              <div class="ml-auto flex items-center gap-1 min-w-0">
+                <button
+                  type="submit"
+                  class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
+                  :disabled="!input.trim() || sending"
+                  title="Send"
+                >
+                  <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
+                </button>
+              </div>
+            </div>
+          </div>
         </form>
         <p v-if="sendError" class="mt-1.5 text-xs text-status-danger-600 dark:text-status-danger-400">{{ sendError }}</p>
       </div>
@@ -269,6 +313,7 @@
  */
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import { budgetNotice } from '@/utils/roomBudgets'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
@@ -277,8 +322,10 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
+import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import { workSignalFromRoom } from './portalRail'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import { useStickToBottom } from '@/composables/useStickToBottom'
 import {
   applyTypeaheadInsert,
   boundCandidates,
@@ -328,6 +375,19 @@ const sending = ref(false)
 const sendError = ref(null)
 const input = ref('')
 const scrollEl = ref(null)
+// #2624: an arriving message must not move a transcript the reader is holding.
+// The 3s poll below is the worst offender on this surface — several agents can
+// be replying at once, so reading anything but the tail used to be impossible.
+// The rule lives in the composable, shared with `PortalConversation`.
+const {
+  unread: unreadBelow,
+  showJumpToLatest,
+  onScroll: onTranscriptScroll,
+  onArrive: onMessagesArrived,
+  pinToBottom,
+  scrollToLatest,
+  reset: resetFollowing,
+} = useStickToBottom(scrollEl)
 const addOpen = ref(false)
 const adding = ref(false)
 const addError = ref(null)
@@ -407,26 +467,10 @@ function elapsedOf(it) { return liveElapsedSeconds(it, { fetchedAtMs: workStore.
 watch(agentParticipants, (list) => emit('participants-changed', list), { immediate: true, deep: true })
 watch(workingAgents, (list) => emit('work-state', workSignalFromRoom(list)), { immediate: true, deep: true })
 
-// ent#381: the near-limit signal the Sessions page used to own. Same 80%
-// threshold, same two budgets — messages and cost — so a client sees a room
-// approaching its end rather than discovering it after the fact.
-const BUDGET_WARN_AT = 0.8
-
-const budgetWarning = computed(() => {
-  const r = room.value
-  if (!r || r.status !== 'open') return null
-  const used = r.message_count ?? 0
-  const maxMsgs = r.max_messages ?? 0
-  if (maxMsgs && used / maxMsgs >= BUDGET_WARN_AT) {
-    return `${used}/${maxMsgs} messages`
-  }
-  const cost = r.cost ?? 0
-  const maxCost = r.max_cost_usd ?? 0
-  if (maxCost && cost / maxCost >= BUDGET_WARN_AT) {
-    return `$${cost.toFixed(2)}/$${maxCost.toFixed(2)}`
-  }
-  return null
-})
+// #2620 — the notice now names the CONSEQUENCE, not just the ratio. The rule
+// is pure and lives in `utils/roomBudgets.js`, where a node-env test can reach
+// it; this component only decides where it appears.
+const notice = computed(() => budgetNotice(room.value))
 
 const closedReason = computed(() => ({
   max_messages: 'message limit reached',
@@ -582,6 +626,18 @@ function onComposerInput(e) {
 }
 
 function onComposerCaret(e) { refreshTypeahead(e?.target) }
+/**
+ * #2662: the shell owns the chrome, so the visible box is bigger than the field
+ * and a click on its padding used to land on <body>. Twin of the 1:1 composer's
+ * handler, guard included — the typeahead picks on `mousedown` and the click
+ * that follows would otherwise arrive here. No `voiceCallActive` arm: a room has
+ * no call. The room's shell chrome is unconditional for the same reason.
+ */
+const SHELL_INTERACTIVE = 'button, select, textarea, input, a, [role="listbox"], [role="option"]'
+function focusComposerFromShell(event) {
+  if (event.target?.closest?.(SHELL_INTERACTIVE)) return
+  textarea.value?.focus()
+}
 
 function onComposerKeydown(e) {
   const length = typeaheadBound.value.visible.length
@@ -655,7 +711,12 @@ async function load({ full = false } = {}) {
     const incoming = data.messages || []
     if (full) messages.value = incoming
     else if (incoming.length) messages.value = messages.value.concat(incoming)
-    if (incoming.length) await scrollDown()
+    // #2624: a FULL load is opening the room — an intent, so it pins. An
+    // incremental load is the poll, i.e. somebody else's message arriving:
+    // it follows only if the reader was already at the bottom, and otherwise
+    // counts toward the jump-to-latest control.
+    if (full) await pinToBottom()
+    else if (incoming.length) await onMessagesArrived(incoming.length)
   } catch (err) {
     if (full) sendError.value = 'Could not load this conversation.'
   } finally {
@@ -685,7 +746,10 @@ async function send() {
     resetTypeahead()
   } finally {
     sending.value = false
-    await scrollDown()
+    // Sending is an explicit intent to follow the bottom — it pins and re-arms
+    // whatever the prior position, so a reader who was scrolled up is not
+    // handed an unread badge for their own message.
+    await pinToBottom()
   }
 }
 
@@ -705,11 +769,6 @@ async function addAgent(name) {
   }
 }
 
-async function scrollDown() {
-  await nextTick()
-  if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight
-}
-
 function startPolling() {
   stopPolling()
   pollTimer = setInterval(() => {
@@ -726,6 +785,9 @@ watch(() => props.roomId, async () => {
   messages.value = []
   loading.value = true
   resetTypeahead()
+  // #2624: the outgoing room's element is about to be replaced, so re-arm
+  // WITHOUT scrolling it; the incoming room's full load pins.
+  resetFollowing()
   await load({ full: true })
   // Same reason as on mount: switching rooms can swap a closed room for an open
   // one, which mounts a fresh textarea that has never been measured.

@@ -802,6 +802,27 @@ class Canvas(CanvasSummary):
     blocks: List[Dict] = Field(default_factory=list)
 
 
+class CanvasWriteResult(Canvas):
+    """Write-response model — the canvas, plus whether the writer can be seen (#2577).
+
+    A SUBCLASS rather than a wrapper: the MCP tool echoes this object back as
+    `canvas`, and nesting it under a new key would change that shape for every
+    existing caller to no benefit. `list`/`get` keep the narrower `Canvas` —
+    they answer about a canvas, not about a requester, so a verdict there would
+    be a claim with no session to make it about.
+
+    Both fields are three-state, and default to "no claim". Widening a canvas to
+    `roster` publishes it to everyone the agent is shared with, so a wrong
+    `False` costs an over-share — "could not tell" must stay distinguishable
+    from "no" (#2196). A write with no resolvable `execution_id` therefore
+    answers `None` and says nothing.
+    """
+    #: True / False when the writing session's reader is known, else None.
+    visible_to_requester: Optional[bool] = None
+    #: Present only when there is something actionable to say.
+    visibility_note: Optional[str] = None
+
+
 class CanvasPinRequest(BaseModel):
     """Pin or unpin one canvas (ent#553).
 
@@ -2178,7 +2199,18 @@ class ExecutionResultEnvelope(BaseModel):
     metadata: Optional[Dict] = None
     execution_log: Optional[List] = None
     session_id: Optional[str] = None
-    execution_time_ms: Optional[int] = None
+    # #2434: agent-supplied and previously unbounded — it arrives on the #1083
+    # async result callback (`routers/agents.py`), the one duration on this
+    # surface a caller chooses rather than the backend measuring. Today it lands
+    # only in JSON (the activity `details` blob and the #1578 event payload):
+    # `schedule_executions.duration_ms` is recomputed from `started_at`, and the
+    # `execution_time_ms` int4 columns (`chat_messages`,
+    # `agent_session_messages`) are written from the backend's own in-request
+    # measurement, never from this field. So this is a boundary check, not a
+    # live overflow path: it is bounded HERE, at the contract, so a future
+    # writer that does persist it inherits the guarantee instead of rediscovering
+    # the int4 ceiling in production. A bad value is a clean 422.
+    execution_time_ms: Optional[int] = Field(None, ge=0, le=2**31 - 1)
 
 
 # =============================================================================

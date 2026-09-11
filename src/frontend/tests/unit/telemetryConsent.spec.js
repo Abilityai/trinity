@@ -110,7 +110,10 @@ describe('CONSENT_COPY promises only what the payload earns', () => {
 describe('receiverCopy', () => {
   it('states a default-URL 404 as a 404, never as "not live yet" (the receiver has been live since 2026-09-04)', () => {
     expect(receiverCopy('receiver_not_live')).toMatch(/answered 404/)
-    expect(receiverCopy('receiver_not_live')).toMatch(/retried daily/)
+    // #2618: a failed send is retried at the next wake, not "daily" — the copy must not name a cadence
+    expect(receiverCopy('receiver_not_live')).toMatch(/retried automatically/)
+    expect(receiverCopy('receiver_not_live')).not.toMatch(/daily/)
+    expect(receiverCopy('failed')).not.toMatch(/daily/)
     expect(receiverCopy('receiver_not_live')).not.toMatch(/not live/i)
     expect(receiverCopy('receiver_not_live')).not.toMatch(/your/i)
   })

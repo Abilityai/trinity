@@ -403,3 +403,70 @@ describe("#279 credential-vault tools are operator-scope only", () => {
     );
   });
 });
+
+describe("ent#500 get_agent_assignments is operator-scope only", () => {
+  // The tool names a real person — the human an agent works for. A connector key
+  // is an end-user consumption credential bound to one agent, and an anonymous
+  // session is pre-login; neither may ever see staff identities. The `agent`
+  // scope IS in the allow-list, which is why the BACKEND self-scopes an agent
+  // principal to its own roster: advertisement is not authorization, and an
+  // agent-scoped key resolves to its owner carrying the owner's role.
+  const operatorOnly = makeOperatorOnly(true);
+
+  it("advertises to user, agent and system scopes", () => {
+    for (const scope of ["user", "agent", "system"]) {
+      assert.equal(
+        operatorOnly({ scope }),
+        true,
+        `${scope} should see get_agent_assignments`,
+      );
+    }
+  });
+
+  it("hides it from connector and anonymous sessions", () => {
+    for (const scope of ["connector", "anonymous"]) {
+      assert.equal(
+        operatorOnly({ scope }),
+        false,
+        `${scope} must not see get_agent_assignments`,
+      );
+    }
+  });
+
+  it("hides it from a scope nobody has thought of yet (fails CLOSED)", () => {
+    assert.equal(operatorOnly({ scope: "portal_delegate" }), false);
+    assert.equal(operatorOnly({ scope: "some_future_tier" }), false);
+  });
+
+  it("registers the tool in the operator group, not the connector one", async () => {
+    const { createAssignmentTools } = await import("./tools/assignments.js");
+    const tools = createAssignmentTools(
+      { getBaseUrl: () => "http://x" } as any,
+      false,
+    );
+    assert.deepEqual(Object.values(tools).map((t: any) => t.name), [
+      "get_agent_assignments",
+    ]);
+    const serverSrc = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("./server.ts", import.meta.url), "utf8"),
+    );
+    assert.match(serverSrc, /createAssignmentTools\(client, requireApiKey\)/);
+    assert.doesNotMatch(serverSrc, /connectorGroup\s*=\s*createAssignmentTools/);
+  });
+
+  it("exposes no write tool — an assignment is a grant, and the backend " +
+     "refuses every non-interactive principal on the write path", async () => {
+    const { createAssignmentTools } = await import("./tools/assignments.js");
+    const tools = createAssignmentTools(
+      { getBaseUrl: () => "http://x" } as any,
+      false,
+    );
+    for (const tool of Object.values(tools) as any[]) {
+      assert.doesNotMatch(
+        tool.name,
+        /^(create|set|update|delete|assign|remove)_/,
+        `${tool.name} looks like a write tool; assignments are read-only over MCP`,
+      );
+    }
+  });
+});

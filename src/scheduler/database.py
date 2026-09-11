@@ -16,7 +16,12 @@ from typing import Optional, List
 
 from .config import config
 from .models import Schedule, ScheduleExecution, ExecutionStatus, ProcessSchedule, ProcessScheduleExecution, Reminder
-from .utils import utc_now_iso, to_utc_iso, parse_scheduler_ts
+from .utils import (
+    duration_ms_between,
+    parse_scheduler_ts,
+    to_utc_iso,
+    utc_now_iso,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -611,10 +616,22 @@ class SchedulerDatabase:
 
             started_at = parse_scheduler_ts(row["started_at"])
             completed_at = datetime.utcnow()
-            # Clock skew between the writer of started_at and this process can
-            # make the subtraction negative; clamp so a poisoned duration never
-            # reaches the analytics chart (#1832).
-            duration_ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
+            # Both ends guarded at the write (#1832 low, #2434 high): clock skew
+            # between the writer of started_at and this process can go negative,
+            # and a started_at older than 24.8 days exceeds the PostgreSQL
+            # INTEGER column this finalizer writes through _PgConn. None there,
+            # never a raise. Both datetimes are NAIVE here (parse_scheduler_ts /
+            # utcnow) — the helper never resolves "now" itself for that reason.
+            duration_ms = duration_ms_between(started_at, completed_at)
+            if duration_ms is None:
+                logger.warning(
+                    "[Scheduler] #2434 unrepresentable duration for execution "
+                    "%s: started_at=%s is %.1f days before completion — "
+                    "recording NULL.",
+                    execution_id,
+                    row["started_at"],
+                    (completed_at - started_at).total_seconds() / 86400,
+                )
 
             cursor.execute("""
                 UPDATE schedule_executions
@@ -1276,10 +1293,20 @@ class SchedulerDatabase:
 
             started_at = parse_scheduler_ts(row["started_at"])
             completed_at = datetime.utcnow()
-            # Clock skew between the writer of started_at and this process can
-            # make the subtraction negative; clamp so a poisoned duration never
-            # reaches the analytics chart (#1832).
-            duration_ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
+            # Both ends guarded at the write (#1832 low, #2434 high). This is
+            # the ONLY mitigation process_schedule_executions.duration_ms will
+            # get: that table exists in neither db/schema.py, db/tables.py, nor
+            # any Alembic revision, so no column-widening migration can reach it.
+            duration_ms = duration_ms_between(started_at, completed_at)
+            if duration_ms is None:
+                logger.warning(
+                    "[Scheduler] #2434 unrepresentable duration for process "
+                    "execution %s: started_at=%s is %.1f days before "
+                    "completion — recording NULL.",
+                    execution_id,
+                    row["started_at"],
+                    (completed_at - started_at).total_seconds() / 86400,
+                )
 
             cursor.execute("""
                 UPDATE process_schedule_executions

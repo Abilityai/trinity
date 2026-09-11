@@ -1,10 +1,10 @@
 # Voice Chat — Gemini 2.5 Flash Native Audio
 
-**Status**: ✅ Phase 1 + Tool Calling + Workspace Mode Complete · **the Workspace is the front door (ent#534, 2026-09-07)**
-**Date**: 2026-09-07 (ent#534: Workspace voice mode — session lifetime, cap notice, `saved` frame; earlier: 2026-05-30 #979 prod-CSP fix)
+**Status**: ✅ Phase 1 + Tool Calling + Workspace Mode Complete · **the Workspace is the ONLY front door (#2559, 2026-09-07)**
+**Date**: 2026-09-07 (#2559: the Agent Detail overlay retired, Talk becomes a door; ent#534: Workspace voice mode — session lifetime, cap notice, `saved` frame; earlier: 2026-05-30 #979 prod-CSP fix)
 **Priority**: P1
 
-> **Front doors.** Two surfaces start this session: the **Workspace conversation** (ent#534 — the modal call with the orb and the canvas column; the transcript lands in the Workspace thread; see [workspace-voice-conversation.md](workspace-voice-conversation.md)) and the Agent Detail chat panel (`VoiceOverlay` over the chat; transcript → `chat_messages`; retires with trinity#2559). The session, the tools, the canvas verbs and the WebSocket bridge below are shared; only the start route and the transcript's home differ.
+> **One front door (#2559).** The **Workspace conversation** is the only surface that starts this session — the modal call with the orb and the canvas column, transcript into the Workspace thread; see [workspace-voice-conversation.md](workspace-voice-conversation.md). Agent Detail offers a **door into it**, not a second surface: a `Talk` button in `AgentHeader` that navigates to `/workspace?agent=<name>&voice=1`. The chat-panel overlay that used to run a parallel call — its own start route, its own transcript home in `chat_messages`, its own per-agent availability probe — is retired. The session, the tools, the canvas verbs and the WebSocket bridge below are the shared machinery both start routes drive.
 
 ---
 
@@ -26,59 +26,45 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 
 ## Architecture
 
-### Standard Mode (Chat Tab overlay)
+### Front doors
+
+Both diagrams that used to sit here described surfaces that no longer exist: the
+Agent Detail chat-tab overlay (retired by #2559) and the standalone
+`/agents/:name/workspace` page (retired by #2484, and still documented here for
+three releases after it was gone). What starts a call today:
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                     Browser (Agent Detail)                  │
-│                                                            │
-│  ┌──────────────┐    ┌──────────────────────────────────┐  │
-│  │  Chat Panel  │    │  VoiceOverlay.vue (canvas orb)   │  │
-│  │  (existing)  │    │  Canvas orb — value noise + curl │  │
-│  │  ... msgs    │    │  State hues + tool_calling badge  │  │
-│  │              │    │  [Mute] [End Call]                │  │
-│  └──────────────┘    └──────────────┬───────────────────┘  │
-└─────────────────────────────────────┼───────────────────────┘
-                                      │ useVoiceSession.js (workspace_mode=false)
-                                      │ WebSocket
-                                      ▼ Trinity Backend
+Agent Detail (AgentHeader)                     Workspace conversation
+  [ Talk ]  ── router.push ──▶  /workspace?agent=<name>&voice=1
+                                        │
+                                        │  armed one-shot, consumed once
+                                        ▼
+                          PortalConversation.startVoiceCall()
+                                        │
+                                        │  POST /api/enterprise/client-portal/
+                                        │       agents/{name}/voice/start
+                                        │       (workspace_mode=True,
+                                        │        canvas_audience="operator")
+                                        ▼
+                       VoiceOverlay (orb)  +  PortalVoiceCanvas (40/60)
+                                        │
+                                        │  useVoiceSession.startWith(…, {restStop:false})
+                                        │  WebSocket  /ws/voice/{session_id}
+                                        ▼
+                              Trinity Backend (routers/voice.py)
+                                        │
+                                        ├─ panel tools in-process (_execute_panel_tool)
+                                        │    show_markdown, show_diagram, show_image,
+                                        │    update_panel, append_to_panel, clear_panel
+                                        │    → session.panel_state (capped 512 KB)
+                                        │
+                                        └─ run_task → Agent Container (Claude Code)
 ```
 
-### Workspace Mode (Separate page `/agents/:name/workspace`, BETA)
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│                    /agents/:name/workspace                          │
-│                                                                    │
-│  ┌─────────────────────────┐  ┌───────────────────────────────┐   │
-│  │  Left Panel (40%)       │  │  Right Panel (60%)            │   │
-│  │  bg-black               │  │  bg-gray-900 (canvas)         │   │
-│  │                         │  │                               │   │
-│  │  <canvas> orb (same     │  │  Panel content rendered via   │   │
-│  │   particle system as    │  │  show_markdown → renderMarkdown│  │
-│  │   VoiceOverlay)         │  │  html/mermaid → DOMPurify     │   │
-│  │                         │  │  in parent DOM (H-005);       │   │
-│  │  Status label           │  │  scripts stripped — no JS     │   │
-│  │  Tool name badge        │  │                               │   │
-│  │  [Mute] [Start/End]     │  │  Polled 300ms; updated_at     │   │
-│  │  Voice selector         │  │  gate + in-flight guard       │   │
-│  └─────────────────────────┘  └───────────────────────────────┘   │
-└────────────────────────────────────────────────────────────────────┘
-         │
-         │ useVoiceSession.js (workspace_mode=true)
-         │ WebSocket (same as standard mode)
-         ▼
-   Trinity Backend (routers/voice.py)
-         │
-         ├─ Panel tools handled in-process (_execute_panel_tool)
-         │   show_markdown, show_diagram, show_image,
-         │   update_panel, append_to_panel, clear_panel
-         │   → session.panel_state (in-memory, capped at 512 KB)
-         │   show_image src validated by _classify_image_src
-         │   (web URL | workspace-confined path; rejects traversal)
-         │
-         └─ run_task → Agent Container (Claude Code)
-```
+The Workspace header's own **Call** control is the second door onto the same
+function; the Talk button differs only in that it arrives from another page and
+carries the intent with it. The OSS `POST /api/agents/{name}/voice/start` route
+still exists and is unchanged — it simply has no first-party caller now.
 
 ### Canvas enrichment (#979 / VOICE-009)
 
@@ -111,43 +97,65 @@ and a `prefers-reduced-motion`-aware cross-fade on canvas updates.
 
 ## User Flow
 
-### Starting a Voice Session (Standard Mode)
+### Starting a call — through the Talk door
 
-1. User is on Agent Detail page, Chat tab (authenticated)
-2. User clicks **"Talk"** button (microphone icon) next to the chat input
-3. `POST /api/agents/{name}/voice/start` with optional `voice_name`
-4. Backend prepares the voice session:
-   a. 3-level system prompt fallback: DB field → container file `voice-agent-system-prompt.md` → auto-generate from template info → generic
-   b. Fetches recent chat history for context injection
-5. Backend opens connection to Gemini Live API with `tools=[_RUN_TASK_TOOL]`
-6. WebSocket bridge established: browser ↔ backend ↔ Gemini
-7. Canvas orb overlay appears; state transitions drive hue rotation
+1. User is on Agent Detail, any tab (authenticated, platform principal).
+2. User clicks **Talk** in the header, beside **Workspace**. It is always there:
+   not gated on the platform voice flag, not disabled for a stopped agent. The
+   destination reports availability, in words (ent#438's ruling).
+3. `AgentHeader.goToTalk()` **arms** the one-shot (`armVoiceAutoStart()`) and
+   `router.push`es `/workspace?agent=<name>&voice=1` — same tab, so the
+   navigation is same-document and the Workspace's `AudioContext` stays
+   resumable from the click that started it.
+4. `Portal.bootstrap()` fetches the roster and threads, `resolveAgentQuery()`
+   lands on the agent's most recent thread, and — only if the intent is armed,
+   the agent landed, and the principal is a platform session — records
+   `pendingVoiceStart`.
+5. `bootstrap()`'s `finally` strips `voice` from the URL and disarms, once, on
+   every exit path. Then, after a `nextTick`, the shell calls the conversation's
+   exposed `startVoiceCall()` through a template ref.
+6. From there it is the Workspace's own start (below): thread created if needed,
+   `POST /api/enterprise/client-portal/agents/{name}/voice/start`, WebSocket
+   bridge, orb up.
 
-### During the Voice Session
+A pasted, bookmarked or mailed `/workspace?agent=X&voice=1` lands on a **fresh
+document**, where the armed flag is false: the conversation opens, the URL is
+cleaned, and no call starts. That includes the signed-out variant — `bootstrap()`
+does not run while signed out, so the link would otherwise survive until exactly
+the sign-in click that satisfies a browser activation heuristic, which is why the
+rule is an in-app intent rather than `navigator.userActivation`.
+
+### Starting a call — from inside the Workspace
+
+The conversation header's **Call** control, driven by
+`portalVoiceMode.js::voiceEntryState`: rendered for platform sessions only,
+enabled when the roster's `realtime_voice.available` is true, and otherwise
+disabled **with the reason** ("voice is turned off", "no voice provider key").
+Same `startVoiceCall()` as the door.
+
+### During the call
 
 - User speaks; Gemini responds in real-time (~280ms TTFT)
 - When Gemini calls `run_task`, backend dispatches `asyncio.create_task(_execute_and_respond())` (30s timeout)
 - `tool_call` WS frame sent → orb shows amber badge; `tool_result` frame sent → orb returns to listening state
 - All tool calls written to platform audit log
 - Backend accumulates transcript from Gemini `serverContent` messages
+- Panel verbs redraw the canvas column beside the orb
 
-### Ending a Voice Session
+### Ending the call
 
-1. User clicks **"End"** button or closes overlay
-2. Backend closes Gemini session, cancels any pending `_pending_tool_tasks`
-3. Transcript saved as `ChatMessage` rows in existing `chat_messages` table
-4. Chat panel refreshes showing voice conversation inline with text messages
+1. User clicks **End**, clicks the orb, or presses Escape (or the cap fires).
+2. Backend closes the Gemini session, cancels any pending `_pending_tool_tasks`.
+3. The transcript is already in the Workspace thread — written **turn by turn**
+   as `enterprise_portal_messages` rows (`source='voice'`, `voice_call_id`) —
+   and the call closes with one `system` label row, "Voice call · N min".
+4. The conversation reloads the thread; the call renders as one collapsed block.
 
-### Starting a Voice Session (Workspace Mode)
-
-1. User is on Agent Detail page (agent must be running)
-2. **Workspace button** in AgentHeader (shown only when `voice_available=true` from feature flags)
-3. Router navigates to `/agents/:name/workspace` — `AgentWorkspace.vue`
-4. Same `POST /api/agents/{name}/voice/start` with `workspace_mode: true`
-5. Backend appends `WORKSPACE_PANEL_INSTRUCTIONS` to the system prompt (describes 4 panel tools)
-6. WebSocket established; panel poll starts at 300ms interval
-7. Agent may call panel tools during conversation — panel content updated in-memory
-8. Frontend polls `GET /api/agents/{name}/voice/{session_id}/panel` and re-renders canvas
+The OSS save-at-end path (`routers/voice.py::_save_transcript` →
+`chat_messages.source='voice'`) is unchanged but no longer reached: the retired
+overlay was the only caller that supplied an Agent Detail chat session id.
+**Historic rows still render their badge** — `ChatBubble.vue` is their reader and
+is deliberately untouched.
 
 ### Session lifetime — the session outlives the provider connection (ent#534)
 
@@ -169,11 +177,25 @@ close, which is what a client reloads on. Per-session caps: `VOICE_MAX_DURATION`
 (Agent Detail, 300), `WORKSPACE_VOICE_MAX_DURATION` (Workspace, 1800),
 `VOIP_MAX_CALL_DURATION` (phone, 600).
 
-### Feature Flag: voice_available
+### Availability — one fact, reported by the destination
 
-`GET /api/settings/feature-flags` returns `voice_available: VOICE_ENABLED && bool(GEMINI_API_KEY)`.
-Stored in `sessions.js` Pinia store as `voiceAvailable`. Passed as prop to `AgentHeader.vue`.
-Button hidden entirely when `voiceAvailable=false`.
+`GET /api/settings/feature-flags` returns
+`voice_available: VOICE_ENABLED && bool(GEMINI_API_KEY)`, and the Workspace
+roster's `realtime_voice {available, reason}`
+(`client_portal/voice.py::realtime_voice_capability`) computes the **same two
+facts** for a platform principal, as does `gemini_voice.is_available()`. The
+retired per-agent `GET /api/agents/{name}/voice/status` was a third spelling of
+it.
+
+Because the door's gate and the destination's gate are the same boolean, #2559
+**gates nothing on the door**: Talk renders unconditionally, and the Workspace
+disables its Call control *with the reason*. Gating the door would have bought
+nothing and cost two defects — a cold-load pop-in (the flag arrives after first
+paint, so the button appears a beat late) and a sticky-false hide (a failed
+flags fetch sets it to `false` and no retry clears it, hiding a working feature).
+`sessions.js::voiceAvailable` is still parsed off that payload but has no reader
+in `src/` after #2559; it is kept with a comment and registered on the same
+follow-up as the caller-less backend routes.
 
 ---
 
@@ -219,15 +241,16 @@ Button hidden entirely when `voiceAvailable=false`.
 
 ### VOICE-004: Frontend Voice UI
 
-**Status**: ✅ Implemented
+**Status**: ✅ Implemented · the Agent Detail surface is a **door** since #2559
 
 | Requirement | Detail |
 |-------------|--------|
-| Trigger | Microphone icon button next to chat input textarea |
-| Voice overlay | `VoiceOverlay.vue` — full canvas orb, pure JS (no CDN) |
+| Trigger (Workspace) | **Call** control in the conversation header — `voiceEntryState`: platform sessions only, disabled *with the reason* when the instance cannot |
+| Trigger (Agent Detail) | **Talk** button in `AgentHeader.vue`, beside Workspace. A door, not a surface: `armVoiceAutoStart()` + `router.push('/workspace?agent=<name>&voice=1')`. **Ungated** — no `v-if`, no stopped-agent disable |
+| Voice overlay | `VoiceOverlay.vue` — full canvas orb, pure JS (no CDN). **One consumer**: `PortalConversation.vue` |
 | Particle system | Value noise + curl noise, 220 smoke particles in 3 layers, 9 pre-rendered sprite canvases |
 | State hues | idle/connecting: 0°, listening: +90° (green), speaking: +210° (indigo), tool_calling: amber badge |
-| Controls | Mute mic toggle, End call button |
+| Controls | Mute mic toggle, End call button (and the orb itself, and Escape) |
 | Amplitude polling | `setInterval(30ms)` via `amplitude` ref in composable |
 | Audio capture | `navigator.mediaDevices.getUserMedia({ audio: true })` |
 | Audio playback | AudioWorklet with ScriptProcessor fallback |
@@ -281,22 +304,34 @@ Uvicorn runs `--workers 2` in production. HTTP requests (REST `/voice/start`, `/
 |-------------|--------|
 | Function declaration | `_RUN_TASK_TOOL` (`FunctionDeclaration` for `run_task`) registered in `LiveConnectConfig` |
 | Spoken-filler etiquette | `run_task` is a **blocking** Gemini function call — the model emits no audio from the moment it decides to call until `send_tool_response` returns (up to ~30s), which on a phone call reads as dead air. `_TOOL_ETIQUETTE_INSTRUCTION` is appended to every session's `system_instruction` (in `connect_and_stream`, so it covers browser **and** phone) and the `run_task` description is sharpened, instructing the model to say a brief filler ("let me check that for you") before calling. Prompt-side fix; no SDK change. A future upgrade to non-blocking async function calling (`Behavior.NON_BLOCKING` + `FunctionResponseScheduling`) would remove the dead air entirely; this became available once `google-genai` was bumped `1.12.1 → 1.63.0` for the Brain Orb voice tile (trinity-enterprise#60), but the etiquette prompt-fix stays until the non-blocking path is wired. |
-| Execution | `_execute_and_respond()` coroutine, `asyncio.create_task` per call, 30s `wait_for` timeout |
-| Agent call | `agent_client.task(prompt)` (lazy import), truncated to `_TOOL_PROMPT_MAX=2000` chars |
+| Execution | `_execute_and_respond()` coroutine, `asyncio.create_task` per call. The bound depends on the path (below) |
+| **Where the task runs (ent#535)** | **A Workspace call runs the turn AS THE AGENT, in the thread the call is bound to** — `_run_task_in_chat` → `client_portal.service.portal_chat` → the resumable-turn engine → the thread's `cached_claude_session_id`. Same pipeline a typed message takes, so the agent has its own skills, files, memory and mid-work state, and the answer lands in that chat as a turn (and on the canvas if it drew). A call with **no** thread (VoIP, the legacy Agent Detail session) keeps the container path — there is nothing to run it in. The split is `_is_workspace_bound`: **both** `portal_session_id` and `client_email`, because a thread with no email cannot be attributed and an email with no thread has nowhere to land |
+| **Spoken budget (ent#535)** | `_SPOKEN_BUDGET_SECONDS = 20`. It bounds **speech, not the task**: past it the model is told the work is still running and keeps the floor, while the turn CONTINUES and its reply lands in the chat. The old 30s `wait_for` cancelled the turn — throwing away work that was already done and paid for. The detached turn is strongly referenced (`_detached_turns`) so it cannot be collected mid-flight, and it deliberately outlives the call: a turn the person asked for is worth landing whether or not they are still on the line. When it lands, `_on_tool_result` fires so the surface's badge clears on the real event rather than on a timer |
+| Agent call (container path only) | `agent_client.task(prompt)` (lazy import), 30s `wait_for`, prompt truncated to `_TOOL_PROMPT_MAX=2000` via the shared `_tool_prompt` |
+| **Locked manifest (ent#535)** | `services/voice_tools.py` owns the policy. The manifest is resolved **once at session start** (`resolve_manifest`) and locked onto the session; `_build_live_config` builds the config **from it**, and `_execute_and_respond` refuses any name outside it *before reading an argument* — defence in depth, the Brain Orb `/action` shape. A per-agent declaration may only **narrow**: `template.yaml` is agent-writable, so a declaration that could ADD would let an agent grant itself a capability by editing itself. Intersection only |
+| **Manifest is tri-state** | `None` = never resolved → the platform default (the pre-ent#535 surface, the safe answer). `frozenset()` = a decision → refuse everything. Reading an empty set as "unset" would hand the strongest narrowing the widest manifest — which the first cut of this did |
+| **Manifest is PERSISTED, and the tri-state survives the round trip** | It rides the Redis session blob as `sorted(...)`/`null` (`json.dumps` cannot serialize a set, and writing it raw would raise inside the try and lose the whole blob). Without it the lock is silently undone by the cross-worker rebuild: production runs `--workers 2`, the WebSocket routinely lands on a worker other than the one `/voice/start` ran on, and `get_session` reconstructing from a blob with no manifest reads `None` as "never resolved" and returns the **full** platform default — in the config AND in the dispatcher, with no log line, because from that worker's view nothing was ever narrowed. `_manifest_from_meta` restores three inputs to two answers: absent or `null` → unresolved; a list, **including `[]`** → a decision; anything else → unresolved rather than a crash in the audio loop |
+| **`include_owned` is the session's, not the turn's** | `VoiceSession.is_platform` (default **False**) is written by `start_workspace_voice`, the function that refuses a non-platform caller — so the gate that authorizes the wider roster read is the one that records it. `_portal_turn` reads it instead of re-asserting `True`, which would widen `agent_on_roster` for any future path that sets `portal_session_id` + `client_email` without passing that gate, with no diff at that line (Invariant #8). `canvas_audience` already travels for exactly this reason |
+| **No fleet tools (ent#535)** | No `list_agents`, `chat_with_agent`, `fan_out`. Recorded as a decision, and enforced by `PLATFORM_VOICE_TOOLS` being the only door a name can enter through |
+| Transcript | A container-path task appends a `system` entry (`[ran a task] …`) — the only record that path has. A Workspace task appends nothing: the turn **is** a row in the thread, which is a better record, and a note would read as a second turn beside the real one |
 | Error handling | `AgentNotReachableError` → "not currently running"; `AgentRequestError` → "Task error: ..." |
-| Empty prompt | Falls back to "No prompt" |
+| Empty prompt | `"No prompt provided."`, with **zero side effects**, on BOTH paths. The container path has always had it; the ent#535 chat path dropped it at first, and `portal_chat` calls `_persist_user_turn` unconditionally — so a blank `run_task` would have written an empty user row into the person's Workspace thread and dispatched a real, cost-tracked execution. `required=["prompt"]` makes that unlikely, not impossible: the argument is model-generated. Stripped, not merely falsy, and worded identically on both paths so the model cannot tell which one it reached |
 | Session tracking | `_pending_tool_tasks` dict on `VoiceSession`; all cancelled on `end_session()` |
 | WS events | `{type: "tool_call", tool_name: "run_task"}` and `{type: "tool_result", ...}` frames |
 | Audit | Platform audit log written on each tool call via `on_tool_call` callback; `actor_user=types.SimpleNamespace(id=..., email=...)` pattern (#705 — legacy `actor_type=`/`actor_id=`/`actor_email=` kwargs caused silent TypeError) |
 
 ### VOICE-008: Workspace Mode + Canvas Panel (BETA)
 
-**Status**: ✅ Implemented (2026-05-07, issue #699)
+**Status**: ⛔ **Retired (#2484)** — the page and its route are gone, and
+`AgentWorkspace.vue` with them. Kept here for the panel-tool contract it
+introduced, which VOICE-009 enriched and VOICE-010 inherited: the canvas column
+beside the Workspace orb speaks exactly these verbs. The rows below describe the
+retired page; where they name an entry point or a route, read VOICE-010.
 
 | Requirement | Detail |
 |-------------|--------|
-| Entry point | "Workspace" button in `AgentHeader.vue` (hidden when `voice_available=false`) |
-| Route | `/agents/:name/workspace` → `AgentWorkspace.vue` |
+| Entry point | *(retired)* "Workspace" button in `AgentHeader.vue`; today that button opens THE Workspace (ent#438) and its neighbour **Talk** opens it with the call starting (#2559) |
+| Route | *(retired)* `/agents/:name/workspace` → `AgentWorkspace.vue` |
 | Layout | Left 40% (orb + controls) + Right 60% (canvas panel) |
 | `workspace_mode` flag | Passed in `POST /voice/start` body; appends `WORKSPACE_PANEL_INSTRUCTIONS` to system prompt |
 | Panel tools | `show_markdown`, `show_diagram`, `show_image`, `update_panel`, `append_to_panel`, `clear_panel` — handled in-process via `_execute_panel_tool()`, never forwarded to agent container |
@@ -415,16 +450,18 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 
 | Layer | File | Purpose |
 |-------|------|---------|
-| **Backend** | `src/backend/routers/voice.py` | Voice endpoints + WebSocket handler (JWT decoded before the session lookup), `/panel` endpoint, `on_tool_call`/`on_tool_result`/`on_turn` callbacks, the `saved` frame, the idempotent Agent Detail `_save_transcript` |
+| **Backend** | `src/backend/routers/voice.py` | Voice endpoints + WebSocket handler (JWT decoded before the session lookup), `/panel` endpoint, `on_tool_call`/`on_tool_result`/`on_turn` callbacks, the `saved` frame, the idempotent OSS `_save_transcript` (caller-less since #2559) |
 | **Backend** | `src/backend/services/voice_prompt_service.py` | `get_voice_system_prompt` — the 3-level resolver, lifted out of the router (ent#534) so `client_portal` can share it |
 | **Backend** | `src/backend/client_portal/voice.py` + `client_portal/router.py` | The Workspace front door: `POST /api/enterprise/client-portal/agents/{name}/voice/start`, turn-by-turn persistence into the thread (ent#534) |
 | **Backend** | `src/backend/services/gemini_voice.py` | `VoiceSession` (+ `workspace_mode`, `panel_state`), `_RUN_TASK_TOOL`, `_PANEL_TOOLS`, `_execute_panel_tool()`, `WORKSPACE_PANEL_INSTRUCTIONS` |
 | **Backend** | `src/backend/routers/settings.py` | `voice_available` feature flag in `GET /api/settings/feature-flags` |
-| **Frontend** | `src/frontend/src/views/AgentWorkspace.vue` | Full workspace page (orb + canvas panel, particle system inlined, panel polling) |
-| **Frontend** | `src/frontend/src/components/chat/VoiceOverlay.vue` | Standard mode orb overlay (unchanged) |
-| **Frontend** | `src/frontend/src/components/AgentHeader.vue` | Workspace button (`goToWorkspace()`, shown when `voiceAvailable=true`) |
-| **Frontend** | `src/frontend/src/composables/useVoiceSession.js` | `start(sessionId, voiceName, workspaceMode)` — passes `workspace_mode` to backend |
-| **Frontend** | `src/frontend/src/stores/sessions.js` | `voiceAvailable` state from feature flags |
+| **Frontend** | `src/frontend/src/components/portal/PortalConversation.vue` | The **only** consumer of the orb: `startVoiceCall()` / `endVoiceCall()`, the modal call, `defineExpose({ startVoiceCall })` for the Talk door |
+| **Frontend** | `src/frontend/src/components/portal/portalVoiceMode.js` | Every voice RULE as a pure function: `voiceEntryState`, `voicePreflight`, `voiceHeaderLine`, `groupVoiceBlocks` — plus the `?voice=1` armed one-shot (`armVoiceAutoStart` / `voiceAutoStart`, #2559) |
+| **Frontend** | `src/frontend/src/views/Portal.vue` | Consumes the intent once in `bootstrap()`, strips the key in the `finally`, hands off via a template ref |
+| **Frontend** | `src/frontend/src/components/chat/VoiceOverlay.vue` | The orb (unchanged). Mounted only by `PortalConversation.vue` since #2559 |
+| **Frontend** | `src/frontend/src/components/AgentHeader.vue` | `goToWorkspace()` and — since #2559 — `goToTalk()`: the ungated **Talk** door that arms the one-shot and pushes `?voice=1` |
+| **Frontend** | `src/frontend/src/composables/useVoiceSession.js` | `startWith(requestFn, {restStop})` / `stop()`. The Agent-Detail-shaped `start(sessionId, voiceName, workspaceMode)` was removed with its only caller (#2559) |
+| **Frontend** | `src/frontend/src/stores/sessions.js` | `voiceAvailable` from feature flags — **no reader in `src/` since #2559**; kept pending the follow-up that retires the caller-less voice surface |
 | **Frontend** | `src/frontend/src/utils/audio.js` | AudioWorklet-first capture/playback, `getAmplitude()` via `AnalyserNode` |
 | **Tests** | `tests/unit/test_voice_tools.py` | 58 unit tests: tool execution (`run_task` reads `.response_text`, guards the #979 regression), panel tool handlers, `show_diagram`/`show_image` registration, image-src classification, content cap, routing guard, Redis session fallback (#704) |
 | **Tests** | `tests/unit/test_voice_auth.py` | 19 unit tests: WS auth, stop auth, panel ownership, audit attribution kwargs (#705) |
@@ -471,6 +508,15 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 - ✅ `update_panel` HTML + `show_diagram` Mermaid render **in-parent** via DOMPurify (H-005); scripts stripped, no JS execution (#979 — replaced the #981 `srcdoc` iframe that the production CSP blocked)
 - ⏳ Export panel content as PDF/markdown
 - ⏳ Multi-page / tabbed canvas
+- ⛔ The page itself was **retired by #2484** — one Workspace, `/workspace?agent=`
+
+### Phase 5: One front door ✅ Complete (2026-09-07, ent#534 + #2559)
+
+- ✅ The call lives inside the Workspace conversation, modal, with the canvas column (ent#534)
+- ✅ The transcript is written turn by turn into the Workspace thread, not saved at end
+- ✅ The Agent Detail chat-panel overlay is retired; `AgentHeader` offers a **Talk** door instead (#2559)
+- ✅ `?voice=1` is an in-app armed one-shot, stripped once on every exit — a pasted link never starts a call
+- ⏳ Retire the now caller-less OSS `/voice/start|stop|status` routes, after a release
 
 ---
 
@@ -488,14 +534,16 @@ an edition-agnostic OSS primitive like `voice_system_prompt`):
   (`VoiceStartRequest.voice_name`) → persisted `voice_name` → `Kore`. The read
   path (`db.get_voice_name`) falls back to `Kore` for an unset or no-longer-valid
   persisted value.
-- The **Workspace** ephemeral picker (`AgentWorkspace.vue`) now defaults its
-  selection to the persisted voice; the picker list is the shared
-  `src/constants/voices.js` module. The persisted voice also drives outbound VoIP
-  calls — see `voip-telephony.md`.
+- The retired page's ephemeral picker (`AgentWorkspace.vue`, deleted with the page
+  in #2484) defaulted its selection to the persisted voice; the picker list is the
+  shared `src/constants/voices.js` module, still the source for the per-agent
+  Settings picker. The persisted voice also drives outbound VoIP calls — see
+  `voip-telephony.md`.
 
 ## Related Documentation
 
 - [Authenticated Chat Tab](./authenticated-chat-tab.md) — Existing chat implementation
 - [Persistent Chat Tracking](./persistent-chat-tracking.md) — Message storage
 - [Gemini Runtime](./gemini-runtime.md) — Existing Gemini integration
+- [Workspace voice conversation](./workspace-voice-conversation.md) — the modal call, and the `?voice=1` entry contract the Talk door uses
 - [Gemini Live API Docs](https://ai.google.dev/gemini-api/docs/live-api) — Official API reference

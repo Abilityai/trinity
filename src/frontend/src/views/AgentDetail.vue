@@ -109,7 +109,6 @@
             @change-subscription="changeSubscription"
             :has-avatar-prompt="!!avatarIdentityPrompt"
             :emotion-avatar-url="emotionAvatarUrl"
-            :voice-available="sessionsStore.voiceAvailable"
             :brain-available="sessionsStore.brainOrbAvailable && hasBrainOrb"
           />
 
@@ -239,7 +238,7 @@
 
             <!-- Canvas Tab Content (ent#438) -->
             <div v-if="activeTab === 'canvas'">
-              <AgentCanvasTab :agent-name="agent.name" />
+              <AgentCanvasTab :agent-name="agent.name" :can-manage="agent.can_share" />
             </div>
 
             <!-- Loops Tab Content (#1106 / #740 Phase 2) -->

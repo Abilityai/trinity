@@ -762,8 +762,9 @@
   flight, no cancel is already running, the key is not a composed IME candidate,
   no other handler has claimed it, and nothing else currently owns Escape.
   What owns it is declared PER SURFACE and declared generously — Agent Detail
-  lists the voice overlay and the session menu, the Workspace lists the composer
-  typeahead, the agent picker and dictation — because a missed cancel costs one
+  lists the session menu (its voice overlay is retired, #2559), the Workspace
+  lists the composer typeahead, the agent picker, dictation and the voice call
+  — because a missed cancel costs one
   click on Stop while a wrong one destroys work the user is still waiting for.
   Escape with nothing running is a no-op that never clears the input.
 - **Restoring the words never destroys a draft**: the cancelled text is
@@ -1417,7 +1418,9 @@ well, and the agent never touches CSS.
   mobile tap); `PortalFilesPanel.vue` is deleted; per-agent inbox scoping is
   unchanged (the same client-portal routes). Uploads are read from the
   container inbox, so they are fetched only while Files is the open active
-  tab and after an upload.
+  tab, after an upload **from any surface** (§5.30 — the upload notifies the
+  rail owner through the store funnel, not only from this body), and after a
+  delete.
 - **AC-3 — Canvas tab**: the participating agents' canvases through the
   SAME `CanvasPanel` + `store.fetchAgentCanvas(es)` the Workspace agent page
   uses — one rendering layer, one store, the #438 staleness mark included.
@@ -1439,7 +1442,12 @@ well, and the agent never touches CSS.
   tab. Feeds refresh on: participants change, a conversation turn ending, a
   room's `working` list going idle, `loop_*` and terminal `agent_activity`
   events for a participant (platform sessions, debounced 2s), the tab being
-  opened, and a successful upload. No timer while idle.
+  opened, and a successful upload. No timer while idle. **§5.30 widens the
+  Files signal to cover the viewer's own uploads**: it is derived from
+  `filesSignalItems(documents, uploads)` — one projection read by both the
+  signal and the seen-marking — so a file the client just sent lights the dot
+  the same way an agent's share does. The two collections stay separate; only
+  the signal merges them.
 - **AC-5 — nothing lost**: checked against ent#458's and ent#438's lists —
   start with guardrails, Stop, grouping, teaching empty state, live push →
   poll backstop (unchanged in the store); canvas kinds, addressability,
@@ -2420,11 +2428,56 @@ no such record gets one `client` bucket, since that browser holds one portal
 token at a time. **Never derived from token material** — the key is written back
 to localStorage in the clear.
 
-- Clamps: sidebar 200–480, side panel 280–560, and the conversation has a 480px
-  floor. When the viewport cannot fit all three the **rail auto-collapses** —
-  the conversation is never the column that gets squeezed — checked on window
-  resize as well as on drag, because a window dragged narrower is the same
-  situation arrived at differently.
+- Clamps: sidebar and side panel have pixel MINIMA (200 / 280 — where a column
+  stops being able to do its job) and **viewport-derived MAXIMA** (#2617). When
+  the viewport cannot fit all three the **rail auto-collapses** — the
+  conversation is never the column that gets squeezed — checked on window resize
+  as well as on drag, because a window dragged narrower is the same situation
+  arrived at differently.
+- **The maxima are derived, not constants (#2617, 2026-09-09).** They shipped as
+  `SIDEBAR_MAX = 480` / `RAIL_MAX = 560`, applied unconditionally, which made the
+  share a person could give a column *shrink* as their screen grew: the rail
+  stopped at ~22% of a 2560px display. Reported by the operator — *"it does not
+  go bigger than like 20% or something. I should be able to make it whatever I
+  want, say half the screen width."* — and it contradicted the file's own stated
+  intent ("deliberately generous — this is a person arranging their own screen"),
+  which an absolute pixel number cannot express. The replacement was already in
+  the file: a column may take everything left after its neighbour and
+  `CONVERSATION_MIN`, so the conversation's readable floor is the one rule that
+  stops a drag, at every screen size. `railMaxFor(viewport, sidebar)` /
+  `sidebarMaxFor(viewport, rail)`; both floored at the column's own minimum,
+  because a ceiling under the floor would invert the clamp and pin the column to
+  the *maximum*. The sidebar got the same treatment though nobody had hit its
+  cap: leaving one derived and one fixed would leave the next reader guessing
+  which rule the file follows.
+- **Desired width and effective width are two numbers (#2617, AC 4).** What is
+  stored and dragged is what the person asked for; what the grid renders is
+  `min(desired, derived max)`. So a layout arranged on a 2560px monitor is
+  clamped down for display on a laptop and comes back intact on the monitor —
+  clamping at the persistence boundary instead would have written the laptop's
+  ceiling over their choice on the first `commit()`, which is "silently
+  discarded" wearing a clamp. `enforceFit` therefore tests the EFFECTIVE widths:
+  testing the desired one would collapse a rail that fits, purely because a
+  wider one was once arranged elsewhere. Since the drag is now bounded by the
+  same floor `fitsThreeColumns` asks about, a drag can no longer break the fit
+  at all — what remains for auto-collapse is the case it was written for, a
+  window too narrow for three columns at their minima.
+- **The sidebar's ceiling is billed against what the rail RENDERS, and the
+  handle reports the effective width (#2617 review).** Two mistakes of one shape,
+  both caught in review. `sidebarMax` was measured against `effectiveRail`, which
+  carries no open/closed term, so a COLLAPSED rail was still charged at its full
+  open width — at 1280px the ceiling landed at 416 while 752 was free, *below*
+  the `SIDEBAR_MAX = 480` constant being replaced, so a narrow window came out
+  worse than before the change. It is measured against `railWidth` (the rendered
+  width: effective when open, the 48px strip when closed). And the two handles
+  bound `:value` to the DESIRE while `:max` was the derived ceiling — which lets
+  `aria-valuenow` exceed `aria-valuemax`, and makes `startValue` begin every drag
+  at a position the clamp discards, so the handle is inert for the whole distance
+  between the desire and the ceiling (several hundred px on a laptop). They bind
+  `columns.effectiveSidebar` / `columns.effectiveRail`. The desire still survives
+  untouched in storage and returns when there is room; a drag from a clamped
+  position deliberately replaces it, because the person is moving the handle they
+  can see.
 - The message cap has ONE definition (`--ws-message-max`, 1100px, wider than the
   `max-w-4xl` it replaces) and `PortalSkeleton` shares it: the skeleton exists to
   hold the footprint the loaded surface lands on (#2540), so a placeholder capped
@@ -2560,3 +2613,261 @@ to localStorage in the clear.
   ledger entry, carry the flag and the identifier together and let the consumer
   refuse to act on an empty id. System, spoken (voice-call) and progress items
   stay deliberately unrateable.
+
+### 5.31 Workspace Files tab — uploads at once, an honest Download, preview and delete (trinity#2582, trinity-enterprise#548)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_FILES_TAB_ACTIONS`
+- **Description**: An operator tested the ent#475 Files tab on `dev` (2026-09-07)
+  and found three defects and asked for two capabilities. Both halves ship as
+  one change set, because both edit `PortalRailFiles.vue` and splitting them
+  would relocate the contention rather than remove it. OSS-core and deliberately
+  ungated by the standing Workspace ruling (ent#356).
+- **AC-1 — an upload appears at once**: a file sent from ANY surface (the
+  conversation composer, a room's fan-out, the Files tab's own drop zone)
+  appears under "Files you sent" **before any agent reply**, and lights the rail
+  dot. The notification happens in `stores/clientPortal.js::uploadDocument` —
+  the single funnel all three surfaces already go through — as a **pending-agent
+  SET** drained by the rail owner, never a scalar. A scalar re-breaks the defect
+  it fixes: a multi-file drop uploads sequentially without awaiting the feed
+  re-read (so a later file is missing from a listing snapshotted before it
+  landed), and a room fan-out mutates the same signal three times inside one
+  Vue flush window (so only the last agent survives). The drain coalesces
+  **leading and trailing** and is ordered against `refresh()` by a **per-agent
+  inbox epoch** the refresh snapshots before its awaits, so a refresh issued
+  before an upload but resolving after it cannot clobber the fresh listing.
+  Per agent and not one shared counter: a room's drop runs three of these
+  concurrently for three different agents, and a shared counter lets each
+  invalidate the last — two of the three listings silently discarded.
+- **AC-2 — own uploads are downloadable**: "Files you sent" carries the same
+  Download control the agent's shares carry.
+  `GET /api/enterprise/client-portal/agents/{name}/uploads/{filename}` reads the
+  file back out of the per-client inbox and serves it
+  `Content-Disposition: attachment`. Roster-gated (uniform 404), two-tier
+  rate-limited, audited.
+- **AC-3 — Download saves, it does not open a tab**: `GET /api/files/{id}`
+  and its `HEAD` accept a **one-way** `?download=1` flag that may only ever
+  force `attachment`. There is no `?disposition=`, and no way to force
+  `inline` — that direction is the ent#461 XSS defence and stays server-decided
+  from `is_inline_safe()`. The flag is parsed **tolerantly** (`Optional[str]`,
+  truthy check), never as `bool`: this is the public link opened from Telegram /
+  WhatsApp / iOS, and a `bool` query param 422s on `?download=` or `?download=x`
+  — a new failure mode on a route that today ignores a malformed query. The
+  Files tab's URL carries the flag; the agent's own chat link does not, so
+  ent#461's mobile inline path is untouched. Download itself takes TWO paths, and the split is what
+  makes the flag load-bearing rather than decorative: an agent share is saved by
+  a plain anchor click on its already-`attachment` URL (natively streamed, no
+  memory spike, and no programmatic blob save — the classic iOS Safari failure
+  on a mobile-first surface), while a client upload, which has no URL at all,
+  goes through the authenticated portal route as a blob because there is no
+  alternative. AC-3's `download` **attribute** is set on that anchor as
+  belt-and-braces; a browser ignores it cross-origin, which is precisely why the
+  server-side flag and not the attribute is the mechanism.
+- **AC-4 — preview (ent#548)**: images (png/jpg/gif/webp/**svg**) and displayable
+  text (md, txt, csv, json, code) open in a modal over the Workspace with
+  **next / previous across the previewable files in the current list**, keyboard
+  arrows and Escape, and a Download action inside the modal. Non-previewable
+  types show name / size / type with Download — **never a blank modal**, and a
+  failed byte fetch degrades to that same card rather than a retry loop. SVG
+  renders through `<img :src="objectUrl">` only — never inline `<svg>`, never
+  `v-html` — because an uploaded SVG is a script host. Markdown goes through the
+  one sanitiser (`PortalMarkdown`); other text renders in a `<pre>`, escaped by
+  interpolation, **capped at 256 KB with the cap stated in the UI** ("Showing the
+  first 256 KB of 1.1 MB · Download the full file"); an image over 10 MB shows
+  the card instead of fetching. Bytes are fetched **whole and sliced
+  client-side, with no `Range` header** — `main.py`'s CORS `allow_headers` does
+  not list `Range`, so a ranged preview dies silently on any deployment whose
+  portal base URL differs from the API's origin, and slicing also keeps preview
+  off the download-counter path entirely.
+- **AC-5 — delete (ent#548)**, backend-enforced with the UI mirroring it off the
+  roster payload (#2128):
+
+  | Case | Affordance | Mechanism |
+  |---|---|---|
+  | My own upload | **Delete** (real) | `rm -f --` in the agent container's inbox |
+  | Agent-shared, I am a viewer | **Remove from my list** | a `portal_file_dismissals` row; the share is untouched |
+  | Agent-shared, I am the agent's owner **in a platform session** | both, "Delete for everyone" offered | `db.revoke_agent_shared_file` (soft; the sweeper reclaims the bytes) |
+
+  **The matrix is session-type dependent, and the UI copy says so.**
+  `PortalPrincipal` is `(email, is_platform)` and carries no role, so
+  `include_owned` is `principal.is_platform` at every call site (ent#358). Two
+  consequences, both intended: a **non-owner admin is a viewer** in the
+  Workspace (stricter than the platform surface, and correct), and an **owner
+  signed in with a magic-link portal token also gets the viewer affordance**.
+  Because the ownership predicate is the *same* membership the roster card
+  renders (`portal_owns_agent`), the UI and the enforcement cannot disagree —
+  the affordance is simply not offered. Every verb is confirmed once with the
+  consequence restated, audited (`portal_upload_download`, `portal_upload_delete`,
+  `portal_share_revoke`, `portal_share_dismiss` — `actor_email` carries the
+  principal, which has no user row), refreshes the list **and** moves the rail
+  dot, and names its own failure reason next to the control.
+- **AC-6 — scoping unchanged**: a client sees and can act on their own uploads
+  and the agent's active shares, never another client's inbox. The inbox
+  directory is the isolation (ent#308) and it is untouched.
+- **Storage**: new OSS table `portal_file_dismissals(client_email, file_id,
+  agent_name, dismissed_at)`, PK `(client_email, file_id)`, both migration tracks
+  (Invariant #9), registered in `db/agent_cleanup.py::AGENT_REFS`. `agent_name`
+  is load-bearing: `agent_shared_files` is a CASCADE ref, so deleting an agent
+  hard-deletes its shares without going through the sweeper and would orphan
+  every dismissal keyed on those ids forever. A dismissal **does not validate
+  the `file_id`** — a 404 for an unknown id would be an existence oracle over
+  every share in the install (Invariant #8), exactly as `set_chat_star` already
+  resolved it — and is **row-capped** instead.
+- **Stated limits**: `feeds.uploads` is populated only on tab-open,
+  turn-end-while-open, or a `noteUpload`, so on a fresh page load with Files
+  closed the dot cannot light for an upload made on another device or in a
+  previous session (this also avoids a one-time false-dot burst on deploy). A
+  preview no longer inflates the owner's `download_count` — a ranged prefix read
+  is still audited, marked `ranged_prefix: true`, but does not bump the counter.
+  Every rostered client of an agent already sees every active share of that
+  agent; a dismissal is a preference, not authorization (follow-up with the
+  audience model, ent#484/#489).
+- **Flow**: `docs/memory/feature-flows/workspace-rail.md` (Slice 3),
+  `file-sharing-outbound.md`
+
+### 5.32 Workspace chat — a user-friendly model dropdown (trinity-enterprise#403)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_MODEL_CHOICE`
+- **Description**: The Workspace composer had no model control: every turn ran on
+  whatever the agent defaulted to, and the person in the conversation could
+  neither see it nor change it. It gains a **short, curated, plain-language**
+  dropdown for **platform users** — three tiers, not the operator combobox
+  (`ModelSelector.vue` is a preset list plus free-text over raw model ids: right
+  for an operator panel, wrong in front of a client). The control's default
+  option plainly reads as the agent's own choice, and nothing is preselected that
+  makes it look like the user picked it.
+- **AC-1 — curation is a policy dimension on the ONE catalog**: `workspace` +
+  `workspace_tier` are appended to `ModelEntry` (`services/model_catalog.py`,
+  §47.2 in `public-access.md`), never a second hand-typed list — the drift the
+  #2086 registry exists to prevent. Three entries carry it: `claude-opus-5`
+  ("Most capable"), `claude-sonnet-5` ("Balanced — fast and smart"),
+  `claude-haiku-4-5-20251001` ("Fastest"). Fable 5 is out (its `note` also reads
+  "Most capable"; Opus-vs-Fable is an operator distinction), and every "Legacy"
+  entry is out — a client-facing surface offering "Claude Opus 4.6 — Legacy" *is*
+  the combobox this reacts against. Two import-time assertions make the
+  subset rule and the missing-tier case build failures:
+  `WORKSPACE_MODELS ⊆ PUBLIC_CHANNEL_MODELS`, and every workspace entry has a
+  tier.
+- **AC-2 — three states, not two** (the #894 shape preserved): explicit choice →
+  the agent's `public_channel_model` → the platform default. **AC 5 is settled as
+  *inherit*, never a third model source** — the whole point of the issue is not
+  leaving two sources silently disagreeing. Blank (`""`), whitespace and an
+  omitted field all mean inherit and are normalised to `None` **before**
+  validation, copying `PUT /api/agents/{name}/public-channel-model`'s own idiom;
+  without that normalisation every default turn 422s.
+- **AC-3 — the capability channel is the roster** (#2128): the option list rides
+  `PortalRoster.model_options` (instance-level, like `realtime_voice` and
+  `multi_agent_chat_available` — options on every card would ship N copies on the
+  path #2159/#2163 exist to protect) and the resolved default rides
+  `PortalAgentCard.model_default {model, label, source}`. Both **fail closed**:
+  an older client, a partial payload, an empty list or a failed read renders no
+  control rather than a dead one. `model_default` is `None` for every
+  non-platform principal and for a **non-Claude runtime** (a Claude-model list on
+  a Codex agent is a dead affordance — the platform does not pass `--model` to
+  that runtime at all). A UI gate written against `GET
+  /api/settings/feature-flags` would be dead for exactly this audience; the gate
+  is the platform-session bit the payload already carries.
+- **AC-4 — the choice is the user's server record, not the browser's**:
+  `"workspace_model"` is one line in `user_preferences_service.PREFERENCE_KEYS`
+  (never a new table — the record is generic by design), value shape
+  `{"<agent_name>": "<model-id>"}`, consumed through the existing
+  `stores/userPreferences.js` engine (debounce, CAS, 409 adoption). Per
+  **(user, agent)** by construction — the server knows who is asking — so "never
+  leaks between agents or between clients" is a property of the storage rather
+  than of a key we have to get right. It also dissolves the
+  `useColumnResize`-documented trap: the portal store's `clientEmail` starts
+  `null` and is filled from a network response, so a browser key built on it
+  reads `anon` on every reload and writes under the email a moment later.
+- **AC-5 — self-healing**: the stored value is a raw model id and the catalog
+  churns by design, so a stored id absent from `model_options` is **dropped on
+  load** and the control falls back to inherit — mirroring what
+  `db.get_public_channel_model` already does for a retired
+  `public_channel_model`. Without it a retired id is sent on every turn, refused
+  every time, forever, with nothing pointing at the stored preference.
+- **AC-6 — honest degradation, and never a lie about billing**: an unselectable
+  model is refused up front — 422 with a **string** detail naming the rejected
+  value (a refused id has no tier — only curated entries carry one)
+  (`deliveryFailureReason` returns `detail` only when it is a string; anything
+  else degrades to "error 422"). A model that cannot be *served* is **not**
+  reclassified: there is no `model` code in the #2320 error ladder, and the
+  `AUTH`/`BILLING` branch merges into one "reached its usage limit" answer — so
+  rewording it whenever a model was chosen would blame the model for an exhausted
+  subscription. Only the **generic `agent_error`** branch names the chosen model,
+  and it **clears the stored choice**, so the sentence it prints is true and the
+  user is not looped into the same failure on every retry. The clear runs on the
+  settle of a turn **this tab actually sent**, and deliberately not on the
+  load/reattach path (review, 2026-09-08): the durable verdict lives 15 minutes,
+  so clearing there re-fired on every reload inside that window and wiped a
+  deliberate re-pick. A re-send is the only way the loop can recur, and a re-send
+  settles through the arm that is kept.
+- **AC-7 — the model reaches the row, on EVERY turn**: the ladder's last rung is
+  the **platform default as a concrete id**, not `None` (review, 2026-09-08).
+  `schedule_executions.model_used` is
+  written **only at row creation**, and both portal turn paths pre-create the row
+  (`start_portal_turn`, `_precreate_sync_execution`) — so this is a row-creation
+  change at two sites, not a kwarg change (the #2426 class, named in
+  `_precreate_sync_execution`'s own docstring). The value is resolved **once**,
+  immediately after the availability gate, and threaded to both the row and the
+  turn; a cold retry (`session_turn_service`) creates a second row and stamps it
+  from the same forwarded value, so the two rows agree. **Deferral, stated:**
+  `model_used` records the model *requested at dispatch*, not one reconciled with
+  what the agent actually ran — matching `execute_task`'s own semantics. The last
+  rung reads `settings_service.get_platform_default_model()`, the same function
+  `execute_task` calls, so the row and the turn hold one opinion rather than two;
+  stopping at `None` (the shape reviewed out) recorded NULL for the default state
+  of every agent — no pick, no override — which is most Workspace turns, blanking
+  exactly the execution-page display AC 7 pairs with. `None` still reaches the row
+  when the platform default itself is unreadable: worse than a stamped row, better
+  than a refused turn.
+- **AC-8 — the room transition**: an `@mention` diverts the send into
+  `escalate-to-room`, and `PortalRoom.vue` has its own composer with no dropdown.
+  The select is therefore **disabled with a title while the draft is room-bound**
+  rather than displaying a setting it is not honouring.
+- **Deliberate behaviour change (AC 2 reads against this)**: the
+  `public_channel_model` rung applies to **every** portal turn, not only a
+  platform user's. The issue calls its absence a defect ("not consulted on the
+  Workspace path, even though a Workspace turn dispatches as
+  `triggered_by="public"`"), and applying it only for platform principals would
+  leave the streaming route and the synchronous ent#83 route resolving
+  differently — a brand-new "two sources silently disagree". So on deploy, the
+  model changes for existing external-client conversations wherever an owner set
+  `public_channel_model`. Pinned by a test that a non-platform principal resolves
+  the same ladder. `triggered_by` stays `"public"` on every path.
+- **Accepted exposure, reviewed and not overlooked** (operator call, 2026-09-07):
+  **there is no ownership check on the override.** `is_platform` is the whole
+  door, per the ruling that the Workspace audience is internal users. But
+  `_roster_rows` unions agents merely *shared with* the caller, so a rostered
+  non-owner can pin every turn to Opus and beat the owner's deliberate Haiku
+  setting — while #894 itself is owner-gated (`assert_agent_owner`) precisely
+  because the model is a cost decision. Raised by three reviewers and knowingly
+  accepted: the roster gate is the control and the execution row's `model_used`
+  is the after-the-fact audit. Existing rate limits bound request *count*, not
+  spend. **The smallest reversal is one `assert_agent_owner` call at each of the
+  two router entry points — no payload or UI change.**
+- **Security**: one new request field, `PortalChatRequest.model`. It reaches the
+  agent as `cmd.extend(["--model", model])` — an argv list with no `shell=True`,
+  so there is no shell-injection path, but an arbitrary string as a CLI value is
+  argv/flag-smuggling surface against the agent runtime, and the Workspace does
+  not send a model today, so this field *creates* it. **The closed allowlist is
+  the security control** (never a regex, never a prefix check), enforced at the
+  router — the payload gate is cosmetic. A `model` from a principal without the
+  control is refused 403. ent#163 `/auth/exchange` mints a *portal session*, so a
+  delegated principal is `is_platform=False` and the gate is not bypassable
+  there. The **requested** model joins the streaming route's idempotency scope, so
+  a retry with a different model is a real turn rather than a silent replay of the
+  old snapshot (Invariant #18). The requested value and not the resolved one,
+  deliberately: an owner editing `public_channel_model` between two genuine
+  retries of ONE request must not fork the scope and turn a replay into a second
+  billed turn.
+- **Out of scope (stated)**: the operator `ModelSelector.vue` (untouched); a
+  capability *probe* asking whether an instance can serve a model;
+  **per-instance curation** (narrowing or disabling the control is a code change,
+  not a setting); multi-agent **rooms** (only the transition out of the composer
+  is handled).
+- **Backend**: `services/model_catalog.py`, `services/user_preferences_service.py`,
+  `client_portal/{db,models,service,router}.py`,
+  `services/docker_service.py::agent_container_runtimes`. No table, no migration,
+  no Alembic revision. OSS-core, deliberately ungated (the standing Workspace
+  ruling, ent#356).
+- **Tests**: `tests/unit/test_ent403_workspace_model.py`;
+  `src/frontend/tests/unit/portalModelChoice.spec.js`.
+- **Flow**: `docs/memory/feature-flows/workspace-model-choice.md`

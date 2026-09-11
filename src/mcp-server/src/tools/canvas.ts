@@ -141,7 +141,10 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         "asked for. Use `report` instead for a thing that happened once and should accumulate as a record " +
         "(a weekly summary, a completed run). Writing the same canvas_id again REPLACES it, " +
         "which is the point — that is how the surface stays current; to change a few blocks of a large " +
-        "canvas use `patch_canvas`. Your default canvas is 'main' — the one your voice mode draws on too.",
+        "canvas use `patch_canvas`. Your default canvas is 'main' — the one your voice mode draws on too. " +
+        "Pass `execution_id` and the result carries `visible_to_requester`: false means the audience you " +
+        "chose does not reach the person in this conversation, and `visibility_note` says what to do " +
+        "about it. null means it could not be determined — not that they cannot see it.",
       parameters: z.object({
         canvas_id: z.string().optional().describe(
           "The canvas to write. Omit for your default canvas 'main'; name another (e.g. 'pipeline', " +
@@ -158,7 +161,10 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         audience: z.enum(["operator", "roster"]).optional().describe(
           "Who sees it. 'operator' (default) = only your operator, on Agent Detail. " +
           "'roster' = also the people this agent is shared with, on your agent's Workspace page. " +
-          "Choose 'roster' only for output you mean for them — it is how a canvas reaches a customer.",
+          "Choose 'roster' only for output you mean for them — it is how a canvas reaches a customer. " +
+          "The default is usually WRONG when you are not talking to your operator: someone reaching " +
+          "you through a public link or the Workspace reads the Workspace page, where an 'operator' " +
+          "canvas does not appear at all. The result tells you — check `visible_to_requester`.",
         ),
         template: z.enum(CANVAS_TEMPLATES).optional().describe(
           "Optional starter layout. Each names the slots blocks fill via their `slot`: " +

@@ -709,6 +709,12 @@ TABLES = {
             created_by TEXT,
             status TEXT NOT NULL DEFAULT 'open',      -- open | closed
             stop_reason TEXT,                          -- user_closed|max_messages|max_cost|expired
+            -- The effective default is `service.DEFAULT_MAX_MESSAGES` (200
+            -- since #2620); every insert supplies this column explicitly, so
+            -- this DDL value only ever applies to a row written around the
+            -- accessor. Left at 60 because the applied Alembic revision
+            -- (0044) carries the same literal and rewriting an applied
+            -- migration is worse than a fallback nobody reaches.
             max_messages INTEGER NOT NULL DEFAULT 60,
             max_cost_usd REAL,                         -- NULL = uncapped
             expires_at TEXT,                           -- ISO-Z; NULL = no TTL
@@ -869,6 +875,30 @@ TABLES = {
             last_downloaded_at TEXT,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
                 ON DELETE CASCADE ON UPDATE CASCADE
+        )
+    """,
+
+    # #2582 / ent#548 — per-viewer dismissal of an agent-shared file.
+    #
+    # `agent_shared_files` carries no audience, so `portal_documents` lists every
+    # active share of an agent to every rostered client. "Remove it from MY list"
+    # therefore needs its own storage: the one generic per-user preference store
+    # (`user_ui_preferences`) is FK'd to `users.id`, and a Workspace client has no
+    # user row. No `enterprise_` prefix — that prefix on the portal tables is
+    # retained history, not a convention to extend.
+    #
+    # PK leads with `client_email` because the read is `WHERE client_email = ?`,
+    # once per participant per turn end; the secondary index on `file_id` serves
+    # the sweeper, the only reader that asks the other question. `agent_name` is
+    # what makes the row follow the agent's lifecycle (`AGENT_REFS`, CASCADE) —
+    # without it every dismissal outlives the share it names, invisibly.
+    "portal_file_dismissals": """
+        CREATE TABLE IF NOT EXISTS portal_file_dismissals (
+            client_email TEXT NOT NULL,
+            file_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            dismissed_at TEXT NOT NULL,
+            PRIMARY KEY (client_email, file_id)
         )
     """,
 
@@ -1835,6 +1865,10 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_agent_files_agent ON agent_shared_files(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_agent_files_token ON agent_shared_files(download_token)",
     "CREATE INDEX IF NOT EXISTS idx_agent_files_expires ON agent_shared_files(expires_at) WHERE revoked_at IS NULL",
+    # #2582 — the PK's leading column already serves `dismissed_file_ids(email)`;
+    # this one is for the sweeper, which purges by the share id.
+    "CREATE INDEX IF NOT EXISTS idx_portal_file_dismissals_file "
+    "ON portal_file_dismissals(file_id)",
 
     # Public links indexes
     "CREATE INDEX IF NOT EXISTS idx_public_links_token ON agent_public_links(token)",

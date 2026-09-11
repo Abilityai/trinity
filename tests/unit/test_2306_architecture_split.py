@@ -7,9 +7,11 @@ The split only pays if three things stay true, and each fails silently:
 2. The map and the files stay in bijection. An area file with no map row is
    unreachable (nothing tells an agent it exists); a row with no file points at
    nothing.
-3. The hook and the map cannot drift. The hook deliberately has NO map of its
-   own — it parses the core's table — so this suite proves the parse still
-   agrees with the published table rather than trusting the comment that says so.
+3. The map has one reader and no second copy. `scripts/docs/architecture_map.py`
+   parses the core's table — it carries no map of its own — so this suite proves
+   the parse still agrees with the published table rather than trusting the
+   comment that says so. Loading an area file is a deliberate step (#2642):
+   the core must say so, and nothing may promise an ambient hook again.
 
 Also guards link integrity across the new file boundary: the split turned ~79
 in-page `(#anchor)` links into cross-file links, and a wrong one is invisible
@@ -17,14 +19,8 @@ until a human clicks it.
 """
 from __future__ import annotations
 
-import ast
 import importlib.util
-import io
-import json
 import re
-import subprocess
-import sys
-import uuid
 import unicodedata
 from pathlib import Path
 
@@ -33,14 +29,15 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 CORE = REPO / "docs/memory/architecture.md"
 AREA_DIR = REPO / "docs/memory/architecture"
-HOOK = REPO / "scripts/docs/architecture_context_hook.py"
+MAP_MODULE = REPO / "scripts/docs/architecture_map.py"
+RETIRED_HOOK = REPO / "scripts/docs/architecture_context_hook.py"
 CLAUDE_MD = REPO / "CLAUDE.md"
 
 CORE_LINE_BUDGET = 500
 
 
-def _load_hook():
-    spec = importlib.util.spec_from_file_location("arch_hook", HOOK)
+def _load_map_module():
+    spec = importlib.util.spec_from_file_location("architecture_map", MAP_MODULE)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -104,7 +101,7 @@ def test_only_the_core_is_auto_imported():
 # ---------------------------------------------------------------- map <-> disk
 
 def test_map_and_area_files_are_in_bijection():
-    mapped = {name for name, _, _ in _load_hook().parse_map(CORE)}
+    mapped = {name for name, _, _ in _load_map_module().parse_map(CORE)}
     on_disk = {p.name for p in _area_files()}
     assert mapped == on_disk, (
         f"map rows without a file: {sorted(mapped - on_disk)}; "
@@ -114,8 +111,8 @@ def test_map_and_area_files_are_in_bijection():
 
 
 def test_every_map_row_carries_owned_paths_and_a_consequence():
-    for name, globs, why in _load_hook().parse_map(CORE):
-        assert globs, f"{name}: no owned code paths — the hook can never fire for it"
+    for name, globs, why in _load_map_module().parse_map(CORE):
+        assert globs, f"{name}: no owned code paths — nothing can ever resolve to it"
         for g in globs:
             root = g.split("*")[0].rstrip("/")
             assert (REPO / root).exists(), f"{name}: owned path {g!r} does not exist in the repo"
@@ -141,15 +138,17 @@ def test_area_files_carry_the_standard_header():
 
 # ---------------------------------------------------------------- anti-drift
 
-def test_hook_has_no_map_of_its_own():
+def test_map_module_has_no_map_of_its_own():
     """The table in the core is the only source. A second copy is a second drift.
 
     Checked over the AST rather than the raw text, so prose is exempt by
     construction: comments never reach the AST, and docstrings are skipped
     explicitly. An area filename appearing in *executable* string data is a
-    routing decision the hook made for itself.
+    routing decision the module made for itself.
     """
-    tree = ast.parse(HOOK.read_text(encoding="utf-8"))
+    import ast
+
+    tree = ast.parse(MAP_MODULE.read_text(encoding="utf-8"))
     docstrings = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -164,14 +163,14 @@ def test_hook_has_no_map_of_its_own():
     for lit in literals:
         for area in areas:
             assert area not in lit, (
-                f"{area} is hardcoded in the hook (string literal {lit!r}). The hook must "
-                "derive its map from the core's Architecture Map table so the two cannot "
-                "disagree (#2306)."
+                f"{area} is hardcoded in scripts/docs/architecture_map.py (string literal "
+                f"{lit!r}). The module must derive its map from the core's Architecture Map "
+                "table so the two cannot disagree (#2306)."
             )
 
 
-def test_hook_parse_matches_the_published_table():
-    """Parse the markdown table independently and require the hook to agree."""
+def test_parse_matches_the_published_table():
+    """Parse the markdown table independently and require the module to agree."""
     text = CORE.read_text(encoding="utf-8")
     section = text[text.index("## Architecture Map"):]
     nxt = section.find("\n## ", 1)
@@ -179,7 +178,50 @@ def test_hook_parse_matches_the_published_table():
         section = section[:nxt]
     rows = re.findall(r"^\|\s*\[`([^`]+\.md)`\]", section, re.M)
     assert rows, "no rows found in the Architecture Map table"
-    assert [n for n, _, _ in _load_hook().parse_map(CORE)] == rows
+    assert [n for n, _, _ in _load_map_module().parse_map(CORE)] == rows
+
+
+@pytest.mark.parametrize("rel,expected", [
+    ("src/backend/services/cleanup_service.py", "reliability.md"),
+    ("src/backend/dependencies.py", "security.md"),
+    ("src/backend/db/schema.py", "database.md"),
+    ("docker/base-image/agent_server/state.py", "agent-runtime.md"),
+    ("src/backend/client_portal/service.py", "workspace.md"),
+    # falls through to the catalog: owned only by the broad services glob
+    ("src/backend/services/settings_service.py", "backend.md"),
+])
+def test_owner_resolution_prefers_the_most_specific_row(rel, expected):
+    """cleanup_service.py is matched by backend.md's broad services glob too.
+
+    A resolver that named both would point at the catalog on every service
+    edit; a skill acting on that would read the wrong file first.
+    """
+    owners = _load_map_module().owner_for(rel, CORE)
+    assert [f for f, _ in owners] == [expected], f"{rel} resolved to {owners}"
+
+
+def test_owner_resolution_is_empty_for_unowned_paths():
+    assert _load_map_module().owner_for("README.md", CORE) == []
+
+
+# ---------------------------------------------------------------- deliberate loading (#2642)
+
+def test_core_states_the_deliberate_read_rule():
+    """Area files are read as an explicit step. The core must say so where a
+    reader is looking, and must not promise an ambient hook that was never
+    wired anywhere (#2642)."""
+    text = CORE.read_text(encoding="utf-8")
+    section = text[text.index("## Architecture Map"):]
+    assert "deliberate step" in section, "the Architecture Map no longer states the deliberate-read rule"
+    for stale in ("PreToolUse", "architecture_context_hook", "Hook setup", "#hook-setup"):
+        assert stale not in text, f"core still refers to the retired hook: {stale!r}"
+
+
+def test_no_surface_promises_the_retired_hook():
+    assert not RETIRED_HOOK.exists(), "scripts/docs/architecture_context_hook.py is back (#2642 deleted it)"
+    claude_md = CLAUDE_MD.read_text(encoding="utf-8")
+    assert "PreToolUse` hook will point you at it" not in claude_md
+    assert "architecture_context_hook" not in claude_md
 
 
 # ---------------------------------------------------------------- link integrity
@@ -205,80 +247,3 @@ def test_no_dangling_anchor_links_across_the_split():
             if owner is None or anchor not in headings[owner]:
                 dangling.append(f"{p.name}: ]({target}#{anchor})")
     assert not dangling, "anchor links with no target heading:\n  " + "\n  ".join(dangling)
-
-
-# ---------------------------------------------------------------- hook behaviour
-
-def _run_hook(payload: dict) -> tuple[int, str]:
-    proc = subprocess.run(
-        [sys.executable, str(HOOK)], input=json.dumps(payload),
-        capture_output=True, text=True, cwd=str(REPO),
-    )
-    return proc.returncode, proc.stdout
-
-
-@pytest.mark.parametrize("rel,expected", [
-    ("src/backend/services/cleanup_service.py", "reliability.md"),
-    ("src/backend/dependencies.py", "security.md"),
-    ("src/backend/db/schema.py", "database.md"),
-    ("docker/base-image/agent_server/state.py", "agent-runtime.md"),
-    ("src/backend/client_portal/service.py", "workspace.md"),
-    # falls through to the catalog: owned only by the broad services glob
-    ("src/backend/services/settings_service.py", "backend.md"),
-])
-def test_hook_routes_paths_to_the_owning_area(rel, expected):
-    code, out = _run_hook({
-        "session_id": f"t-{rel}-{uuid.uuid4()}", "cwd": str(REPO), "tool_name": "Edit",
-        "tool_input": {"file_path": str(REPO / rel)},
-    })
-    assert code == 0
-    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-    assert f"architecture/{expected}" in ctx, f"{rel} routed to the wrong area:\n{ctx}"
-
-
-def test_hook_prefers_the_most_specific_owner():
-    """cleanup_service.py is matched by backend.md's broad services glob too.
-
-    Emitting both would point at the 90 KB catalog on every service edit, which
-    is the noise that gets a hook switched off.
-    """
-    _, out = _run_hook({
-        "session_id": f"specificity-{uuid.uuid4()}", "cwd": str(REPO), "tool_name": "Edit",
-        "tool_input": {"file_path": str(REPO / "src/backend/services/cleanup_service.py")},
-    })
-    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-    assert "architecture/backend.md" not in ctx
-
-
-def test_hook_is_silent_for_unowned_paths():
-    code, out = _run_hook({
-        "session_id": f"unowned-{uuid.uuid4()}", "cwd": str(REPO), "tool_name": "Edit",
-        "tool_input": {"file_path": str(REPO / "README.md")},
-    })
-    assert code == 0 and out.strip() == ""
-
-
-def test_hook_injects_each_area_once_per_session():
-    payload = {
-        "session_id": f"once-only-{uuid.uuid4()}", "cwd": str(REPO), "tool_name": "Edit",
-        "tool_input": {"file_path": str(REPO / "src/backend/dependencies.py")},
-    }
-    first_code, first = _run_hook(payload)
-    second_code, second = _run_hook(payload)
-    assert first_code == second_code == 0
-    assert "architecture/security.md" in first
-    assert second.strip() == "", "area re-injected in the same session"
-
-
-@pytest.mark.parametrize("payload", [
-    "not json at all",
-    "{}",
-    '{"tool_input": {}}',
-    '{"tool_input": {"file_path": "/definitely/outside/the/repo.py"}}',
-])
-def test_hook_never_blocks_an_edit(payload):
-    """Advisory only: any malformed or foreign input exits 0 and emits nothing."""
-    proc = subprocess.run([sys.executable, str(HOOK)], input=payload,
-                          capture_output=True, text=True, cwd=str(REPO))
-    assert proc.returncode == 0
-    assert proc.stdout.strip() == ""

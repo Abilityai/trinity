@@ -42,6 +42,9 @@ None — backend-only feature. The execution context block is assembled server-s
 - **Model**: claude-sonnet-4-6
 - **Timeout**: 900s — plan to finish well within this budget
 - **Agent**: oracle-1
+- **Execution ID**: exec-8f21
+- **Primary human**: A. Smith (role: head-of-ops) — proactive contact NOT yet permitted; do not message them unprompted
+- **Stakeholders**: approver: B. Jones, viewer: C. Okafor
 - **Collaborators**: researcher-1, writer-1
 - **Timestamp**: 2026-04-14T09:00:00Z
 - **Platform**: https://your-domain.com
@@ -52,6 +55,9 @@ and return your results. Plan your work to finish well within the timeout budget
 
 Fields that don't apply are omitted (chat mode has no timeout; non-scheduled
 runs have no schedule block; empty collaborators list is omitted entirely).
+The two assignment lines (trinity-enterprise#500) are omitted on any build with
+no registered provider, and on every outside-facing turn — see
+[role-assignments.md](role-assignments.md).
 
 ## Backend Layer
 
@@ -125,13 +131,24 @@ compatible — no scheduler update required to ship this).
 
 ### Auto-resolved fields
 
-`compose_system_prompt` fills two fields from the DB when the caller leaves
-them `None`, without mutating the caller's dataclass:
+`compose_system_prompt` fills these from the DB / the seam when the caller
+leaves them `None`, without mutating the caller's dataclass:
 
 - `collaborators` → `db.get_permitted_agents(agent_name)` (from `agent_permissions` table)
 - `platform_url` → `db.get_setting_value("public_chat_url")`
+- `primary_user_display` / `role_id` / `stakeholders` / `proactive_consent` →
+  `services/assignment_provider.resolve_assignment(agent_name, triggered_by)`
+  (trinity-enterprise#500). All four come from ONE provider answer, so they are
+  resolved together in a single call rather than per field.
 
-Both lookups are wrapped in try/except and degrade to empty / omitted on failure.
+Each lookup degrades to empty / omitted on failure.
+
+**The `replace` guard is part of the contract, not an optimisation.** It reads
+`if ctx.collaborators is None or ctx.platform_url is None or needs_assignment`.
+Before `needs_assignment` joined it, a caller that pre-filled BOTH older
+auto-filled fields skipped the whole block — and the assignment lines never
+rendered, for that caller only, with nothing to notice. Any future auto-filled
+field must extend this guard, or it inherits the same silent hole.
 
 ### Prompt Injection Defense
 
@@ -142,7 +159,9 @@ system prompt. Every rendered user-controlled string flows through
 1. Replaces control characters (`\x00–\x1f`, `\x7f`) — including newlines and tabs — with spaces
 2. Replaces backticks with single quotes
 3. Collapses `##` → `#` and `---` → `-` (neutralizes markdown heading injection)
-4. Truncates to a per-field cap (80 chars default, 60 for collaborator names, 40 for timestamps, 200 for platform URL)
+4. Truncates to a per-field cap (80 chars default, 60 for collaborator names, 40 for timestamps, 200 for platform URL, 120 for a person's display name, 64 for a role id, 140 for a stakeholder entry — the assignment fields get their own bounds because the 80-char default truncates a real name mid-word)
+
+The assignment fields add a second defence that is not about escaping: the rendered identity is a **display name**, and the provider answer contract has no email-shaped key at all. This block reaches anonymous public-link and paid turns, so an address here would be third-party PII in front of an outside audience — a new disclosure class, since `collaborators` are agent names and `source_user_email` is the caller's own address. The audience gate is the other half: `triggered_by` is forwarded to the provider, which suppresses on an outside audience and fails closed on a label it does not recognise.
 
 Covered by unit tests:
 - `test_schedule_name_injection_attempt_neutralized`
@@ -214,9 +233,22 @@ No schema changes. Reads from existing:
 - `compose_system_prompt` ordering, collaborator auto-fill, kill-switch flag
 - Operator kill-switch parsing for truthy/falsy setting values
 
-Run: `.venv/bin/python -m pytest tests/test_platform_prompt_unit.py -v`
+`tests/unit/test_ent500_execution_context_fields.py` — the assignment fields:
+rendering and ordering, the dedicated bounds, the stakeholder cap, the
+resolve-exactly-once property, the pre-filled-caller `replace`-guard path, and a
+raising provider still yielding the full block (platform prompt included).
+
+`tests/unit/test_ent500_assignment_provider.py` — the seam's three degrade paths
+(no provider / raising / malformed shape) and the guard-file membership assert.
+
+`tests/unit/test_ent500_public_turn_no_pii.py` — an outside turn renders no
+assignment line, an inside turn still does, an unrecognised label is suppressed,
+and the outside-facing routers use only suppressed trigger labels.
+
+Run: `.venv/bin/python -m pytest tests/unit/test_platform_prompt_unit.py tests/unit/test_ent500_*.py -v`
 
 ## Related Flows
 - [system-wide-trinity-prompt.md](system-wide-trinity-prompt.md) — parent feature (admin-configurable platform instructions)
 - [task-execution-service.md](task-execution-service.md) — primary wiring site
 - [parallel-headless-execution.md](parallel-headless-execution.md) — headless task path
+- [role-assignments.md](role-assignments.md) — where the assignment fields come from (trinity-enterprise#500)

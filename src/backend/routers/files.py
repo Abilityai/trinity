@@ -1,3 +1,4 @@
+# mcp: none — public token-gated download; no agent caller
 """
 Public download endpoint for outbound agent file sharing (FILES-001 Step 4).
 
@@ -216,14 +217,55 @@ def parse_range_header(value: Optional[str], file_size: int):
 def _format_disposition(filename: str, *, inline: bool) -> str:
     """RFC 6266 Content-Disposition with a UTF-8 fallback.
 
-    `inline` is decided by the caller from `is_inline_safe()` — never from
+    `inline=True` is decided by the caller from `is_inline_safe()` — never from
     anything the agent or the requester supplies.
+
+    **The rule is asymmetric, and the asymmetry is the design (#2582).** A
+    requester MAY force `attachment` via `?download=1` (see
+    `_apply_download_flag`), because `attachment` is the strictly-safer
+    disposition and choosing to be more restricted about your own download
+    grants you nothing. A requester may NEVER force `inline` — that direction is
+    the stored-XSS this route's allowlist exists to prevent, since it serves
+    agent-authored bytes from the same origin as public chat. So: one way only.
+    Do not "fix" the apparent contradiction by adding a `?disposition=`.
     """
     disposition = "inline" if inline else "attachment"
     ascii_name = filename.encode("ascii", "replace").decode("ascii")
     safe_ascii = ascii_name.replace('"', "").replace("\\", "")
     utf8_encoded = quote(filename, safe="")
     return f'{disposition}; filename="{safe_ascii}"; filename*=UTF-8\'\'{utf8_encoded}'
+
+
+def _is_download_forced(download: Optional[str]) -> bool:
+    """Tolerant read of the one-way `?download=` flag (#2582).
+
+    Deliberately NOT typed `bool` on the route. FastAPI returns **422** for a
+    `bool` query param it cannot parse, and this is the PUBLIC link opened from
+    Telegram, WhatsApp and an iOS in-app browser — the exact path ent#461 exists
+    to keep working. `?download=` (empty) or `?download=x` must be ignored the
+    way every other unrecognised query pair on this route already is, not turned
+    into a new failure mode.
+
+    Absent / empty / `0` / `false` / `no` → not forced. Anything else → forced,
+    which can only ever move the response toward `attachment`.
+    """
+    if download is None:
+        return False
+    return download.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _apply_download_flag(headers: dict, filename: str, download: Optional[str]) -> dict:
+    """Return `headers` with `Content-Disposition` forced to `attachment`, or
+    unchanged (#2582).
+
+    A NEW dict, replacing exactly one key: `nosniff`, `Accept-Ranges`, the CORP
+    header and `Cache-Control` are all load-bearing (ent#461) and are carried
+    through untouched. The 206 branch merges `{**headers, ...}`, so applying the
+    flag here covers both the full and the ranged response.
+    """
+    if not _is_download_forced(download):
+        return headers
+    return {**headers, "Content-Disposition": _format_disposition(filename, inline=False)}
 
 
 def _cache_control_for(row) -> str:
@@ -354,6 +396,8 @@ async def download_shared_file(
     request: Request,
     sig: Optional[str] = None,
     download_token: Optional[str] = None,
+    download: Optional[str] = None,
+    preview: Optional[str] = None,
 ):
     """
     Serve a file previously registered via POST /api/internal/agent-files/share.
@@ -361,14 +405,28 @@ async def download_shared_file(
     Query parameters:
     - sig (required): 192-bit token minted at share time, sole auth credential.
 
+    - download (optional, #2582): ONE-WAY. Any truthy value forces
+      `Content-Disposition: attachment`; nothing can force `inline`, which stays
+      the server's `is_inline_safe()` decision (ent#461). Parsed tolerantly, so
+      a malformed value is ignored rather than 422'd — see `_is_download_forced`.
+
+    - preview (optional, #2582): marks a full-blob preview for auditing and
+      excludes it from the download count. Does not alter authorization, link
+      consumption, or Content-Disposition.
+
     `download_token` is accepted as a legacy alias but deprecated —
     Trinity's credential sanitizer redacts `...TOKEN...=value` query
     pairs from agent responses, stripping the token in transit. New
     URLs emit `?sig=...`.
+
+    Note the flag cannot break the credential: `sig` is a STORED bearer token
+    compared with `secrets.compare_digest` against the row, not an HMAC over the
+    URL, so appending `&download=1` leaves it valid.
     """
     row, storage_path, headers, mime_type, client_ip, file_size = await _validate_download_request(
         file_id, request, sig, download_token,
     )
+    headers = _apply_download_flag(headers, row["filename"], download)
     agent_name = row["agent_name"]
 
     # ent#461: Range handling. Without a 206 an iOS player will not start audio
@@ -391,12 +449,25 @@ async def download_shared_file(
     # keep meaning "someone fetched this file".
     is_transfer_start = rng is None or rng[0] == 0
 
+    # #2582: a ranged PREFIX read is not a download. The Workspace preview
+    # fetches the head of a file to render it, and its range starts at byte 0 —
+    # so without this every preview would bump the owner's `download_count` and
+    # write an indistinguishable audit row, breaking the counter's stated purpose
+    # ("the numbers keep meaning *someone fetched this file*") and burying the
+    # log. The two events stay SEPARABLE rather than one of them disappearing:
+    # the audit row is still written and carries this flag; only the counter is
+    # gated on a full transfer.
+    is_ranged_prefix = rng is not None and rng[1] < file_size - 1
+    # Workspace previews fetch whole blobs; range size cannot identify intent.
+    is_preview = (preview or "").strip().lower() in ("1", "true", "yes", "on")
+
     if is_transfer_start:
         # Counters — best-effort
-        try:
-            db.mark_shared_file_downloaded(file_id)
-        except Exception as e:  # pragma: no cover
-            logger.warning("[files] failed to mark_downloaded for %s: %s", file_id, e)
+        if not is_ranged_prefix and not is_preview:
+            try:
+                db.mark_shared_file_downloaded(file_id)
+            except Exception as e:  # pragma: no cover
+                logger.warning("[files] failed to mark_downloaded for %s: %s", file_id, e)
 
         # Audit — best-effort
         try:
@@ -413,6 +484,10 @@ async def download_shared_file(
                     "size_bytes": file_size,
                     "mime_type": mime_type,
                     "ranged": rng is not None,
+                    # #2582 — a partial read of the head of the file (a preview),
+                    # distinguishable forever from a real transfer.
+                    "ranged_prefix": is_ranged_prefix,
+                    "preview": is_preview,
                     "user_agent": (request.headers.get("user-agent") or "")[:200],
                 },
                 endpoint=str(request.url.path),
@@ -447,6 +522,7 @@ async def head_shared_file(
     request: Request,
     sig: Optional[str] = None,
     download_token: Optional[str] = None,
+    download: Optional[str] = None,
 ):
     """
     HEAD handler for link previewers / CDNs that probe before GET.
@@ -456,10 +532,15 @@ async def head_shared_file(
     download counter bump, no audit row. Follows RFC 7231 §4.3.2:
     HEAD is identical to GET except the server MUST NOT return a
     message-body.
+
+    That identity is why `download` is accepted here too (#2582): a client that
+    probes with HEAD and then GETs the same URL must be told the same
+    disposition, or it plans for one response and receives another.
     """
     _row, _storage_path, headers, mime_type, _client_ip, file_size = await _validate_download_request(
         file_id, request, sig, download_token,
     )
+    headers = _apply_download_flag(headers, _row["filename"], download)
     # ent#461: HEAD must carry `Accept-Ranges` and the true `Content-Length` —
     # it is the probe a player makes BEFORE deciding whether it can stream, so a
     # HEAD that omits them defeats Range support even though GET implements it.

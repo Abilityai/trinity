@@ -264,6 +264,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // control is not rendered at all. Named for the capability, not the
     // provider (ent#354).
     realtimeVoice: { available: false, reason: null },
+    // ent#403 — the curated model list the composer may offer, from the roster.
+    // Instance-level, so it rides the roster and not every card; empty is the
+    // fail-closed value and renders no control, exactly like the two flags
+    // above. The per-agent resolved default lives on the CARD
+    // (`agent.model_default`), because that is the only part that varies.
+    modelOptions: [],
     // Set once a roster attempt REACHED A VERDICT for this session. The room
     // route needs to tell "still loading" from "loaded, and the answer is no" —
     // without it a hard-loaded /workspace/r/:id would flash a refusal it then
@@ -319,6 +325,23 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // object there would be handed to the renderer and presented as a report.
     reportErrors: {},
     _reportInFlight: {},
+
+    // --- Files tab (#2582) ---
+    // Agents whose inbox has just gained a file and whose rail listing is
+    // therefore stale. A SET (as a plain object used as one, so Pinia's reactive
+    // proxy tracks it), never a scalar "last upload" — the two real gestures
+    // both defeat a scalar:
+    //
+    //   * a multi-file drop uploads SEQUENTIALLY and does not await the feed
+    //     re-read, so a scalar consumer that joins the in-flight read gets a
+    //     listing snapshotted before the later files landed;
+    //   * a room's drop is `for (const name of names) await uploadDocument(...)`
+    //     — one file into three DIFFERENT agents — and Vue coalesces mutations
+    //     landing in one flush window into a single watcher call carrying only
+    //     the last value, silently dropping the first two.
+    //
+    // The rail owner drains it (`usePortalRailFeeds`); nothing else reads it.
+    pendingUploadNotes: {},
   }),
 
   getters: {
@@ -448,6 +471,9 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // would read a stale one as authoritative.
       this.multiAgentChatAvailable = false
       this.realtimeVoice = { available: false, reason: null }
+      // ent#403: a per-session capability like the two above — a different
+      // client signing in on the same browser must not inherit this list.
+      this.modelOptions = []
       this.rosterLoaded = false
       // #2261: the primitive clears the suppression; `endSession({expired})`
       // re-arms it immediately afterwards. Keeping the clear HERE is what stops
@@ -528,10 +554,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // not "I don't know which". The backend cannot tell those apart from the
     // absence alone — which is why New chat used to land in the existing
     // conversation — and it ignores the flag when a session IS named.
-    async sendPortalChat(agentName, message, sessionId = null, { newThread = false } = {}) {
+    // ent#403: `model` is the user's explicit pick, or null/'' to inherit. Sent
+    // on BOTH turn actions — a field honoured by only one brings the bug back
+    // exactly when streaming fails and this fallback runs.
+    async sendPortalChat(agentName, message, sessionId = null, { newThread = false, model = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat`,
-        { message, session_id: sessionId, new_thread: newThread },
+        { message, session_id: sessionId, new_thread: newThread, model: model || null },
         { headers: this.authHeader }
       )
       return data
@@ -542,10 +571,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // `sendPortalChat` above is untouched — it stays the documented API surface
     // for headless clients (ent#83), and is still the fallback when streaming
     // is unavailable.
-    async startPortalChat(agentName, message, sessionId = null, { newThread = false } = {}) {
+    async startPortalChat(agentName, message, sessionId = null, { newThread = false, model = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
-        { message, session_id: sessionId, new_thread: newThread },
+        { message, session_id: sessionId, new_thread: newThread, model: model || null },
         { headers: this.authHeader }
       )
       return data   // {execution_id, session_id}
@@ -1262,6 +1291,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
 
     // Send a file TO a rostered agent (lands in its inbox). Multipart; let the
     // browser set the boundary — only add the portal auth header.
+    //
+    // #2582: this is the ONE funnel every upload surface goes through — the
+    // conversation composer, a room's fan-out, and the rail's Files tab — so it
+    // is where the rail learns a file arrived. Notifying here rather than from
+    // each surface is what lets "Files you sent" update before any agent reply
+    // WITHOUT touching PortalConversation.vue or PortalRoom.vue.
     async uploadDocument(agentName, file) {
       const form = new FormData()
       form.append('file', file)
@@ -1270,7 +1305,55 @@ export const useClientPortalStore = defineStore('clientPortal', {
         form,
         { headers: this.authHeader }
       )
+      this.noteUploadPending(agentName)
       return data
+    },
+
+    /** Mark one agent's inbox listing stale. Drained by the rail owner (#2582). */
+    noteUploadPending(agentName) {
+      if (!agentName) return
+      // A new object, not a mutation: the rail owner watches this by identity,
+      // and re-setting an already-present key must still re-fire (two uploads
+      // to the same agent in one gesture are two events, not one).
+      this.pendingUploadNotes = { ...this.pendingUploadNotes, [agentName]: (this.pendingUploadNotes[agentName] || 0) + 1 }
+    },
+
+    /** Clear the agents the rail owner has now read. */
+    clearUploadPending(agentNames) {
+      const drop = new Set(agentNames || [])
+      if (!drop.size) return
+      const next = {}
+      for (const [name, seq] of Object.entries(this.pendingUploadNotes)) {
+        if (!drop.has(name)) next[name] = seq
+      }
+      this.pendingUploadNotes = next
+    },
+
+    // #2582 — one of the client's OWN uploads, as bytes. A client upload has no
+    // DB row and therefore no signed URL, so this is the only way to read one
+    // back; the response is `attachment` and `no-store` server-side.
+    async fetchUploadBlob(agentName, filename) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/agents/${agentName}/uploads/${encodeURIComponent(filename)}`,
+        { headers: this.authHeader, responseType: 'blob' }
+      )
+      return data
+    },
+
+    async deleteUpload(agentName, filename) {
+      await portalHttp.delete(
+        `/api/enterprise/client-portal/agents/${agentName}/uploads/${encodeURIComponent(filename)}`,
+        { headers: this.authHeader }
+      )
+    },
+
+    // `scope`: 'me' hides it from this viewer's list only; 'everyone' revokes
+    // the share and needs the agent's owner in a platform session.
+    async deleteDocument(agentName, fileId, scope = 'me') {
+      await portalHttp.delete(
+        `/api/enterprise/client-portal/agents/${agentName}/documents/${encodeURIComponent(fileId)}`,
+        { headers: this.authHeader, params: { scope } }
+      )
     },
 
     // #138 / #2198: unified history across ALL rostered agents for the sidebar.
@@ -1521,6 +1604,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
           available: data.realtime_voice?.available === true,
           reason: typeof data.realtime_voice?.reason === 'string' ? data.realtime_voice.reason : null,
         }
+        // ent#403: same strictness, same fail-closed direction — an older
+        // backend without the field, or a shape that is not an array, reads as
+        // "no options", which renders no control rather than a dead one.
+        this.modelOptions = Array.isArray(data.model_options)
+          ? data.model_options.filter((o) => o && o.id && o.tier)
+          : []
         this.rosterLoaded = true
         // #2163: fired HERE and not from `Portal.vue::bootstrap()`, because
         // both "Try again" buttons call this action directly — a

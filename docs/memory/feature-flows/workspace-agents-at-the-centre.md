@@ -141,6 +141,36 @@ Both surfaces read one payload through `composables/usePortalAgentPage.js` —
 they are on screen at different times, and each issuing its own fetch would
 double every agent page load.
 
+**And both must say when that payload did not arrive (#2597).** The composable
+has always returned `error`, `loaded` and `reload`; each consumer ignored a
+different half of them, and the two failures are mirror images:
+
+| | failed FIRST load | failed REFRESH |
+|---|---|---|
+| `PortalAgentDetails` (before) | rendered an empty agent | — |
+| `PortalAgentBand` (before) | skeleton, forever | `InlineError` beside the numbers ✓ |
+| both (now) | `LoadFailed` + retry, in place of the region the payload feeds | `InlineError` beside the data ✓ |
+
+The details panel is the one that mattered: `header` is null on a failure, so
+identity degrades to the slug and the description disappears, and `capabilities`
+is `[]`, which renders **"This agent hasn't published anything it can do yet"** —
+a positive claim about the agent on no evidence, and indistinguishable from a
+real answer. "Your chats" kept working (it is a slice of the shell's thread list,
+not of `/page`), which made the rest read as loaded rather than broken. That is
+why the failure arm replaces only the regions `/page` feeds and deliberately
+leaves the chat list alone: one wrapper around the whole body would hide a list
+that is still perfectly good.
+
+The rule is ent#253's, stated in both directions: a failed **refresh** keeps the
+data it has and says so beside it; a failed **first** load says it failed. Both
+arms gate on the VERDICT (`loaded`), never on `loading` (#2540/#1927), so a
+background refresh cannot blank a panel that is already reading correctly.
+
+ent#547 is why it was worth fixing rather than recording: the body is now mounted
+once per participant in a room, so N independent chances to fail silently —
+including for a participant who is in the room but off the viewer's roster, where
+`client_portal/router.py::_require_roster` answers a uniform 404 by design.
+
 ### Agent details is a sibling of the rail
 
 Ruled 2026-09-05. `Portal.vue` renders `PortalAgentDetails` **or** `PortalRail`
@@ -203,6 +233,13 @@ rule is a plain function (the ent#392 precedent):
 a second, and the reason is in the defect it fixes: the gesture already existed
 on the Files panel, and the `files?.[0]` bug existed there too, because each
 surface had written its own.
+
+Since #2582 the upload also **announces itself to the rail owner** from the
+store funnel (`clientPortal.js::uploadDocument`, the one function all three
+consumers already call), so a file appears under "Files you sent" before any
+agent reply and lights the rail dot — with no edit to this file or to
+`PortalRoom.vue`. See `workspace-rail.md` Slice 3 for why the signal is a
+pending SET rather than a scalar.
 
 | Consumer | Destination |
 |---|---|

@@ -628,8 +628,14 @@ export function collapseSelection(selected, { multi = false } = {}) {
 // the previous session's agent name, surfaced to someone who never asked for
 // it. That is the same class the path guard exists to close, so it belongs in
 // the same predicate rather than in a second one somebody has to remember.
-export const STAGE_QUERY_KEYS = ['agent', 'new']
+export const STAGE_QUERY_KEYS = ['agent', 'new', 'voice']
 
+// The Workspace root. Two consumers: the stage guard below, and the brand
+// mark's link target (ent#556, `PortalBrand`). It is the only route the mark
+// may point at — a client session holds no `users` row, so a platform route
+// would be a door that 404s or bounces to `/login` for exactly the audience
+// this surface exists for, and a dead affordance is one of the two failures
+// the brand corner must not have (the other being an unlabelled one).
 export const WORKSPACE_ROOT = '/workspace'
 
 export function shouldEscapeStage(path, query) {
@@ -896,6 +902,39 @@ export function availabilityChip(agent, { detailed = false } = {}) {
       variant: 'danger',
       title: `This agent has no running container — ask ${who} to start it.`,
     }
+}
+
+/**
+ * #2641 — does THIS list of rows need the availability slot reserved at all?
+ *
+ * The slot's fixed footprint exists so a row does not reflow when an agent
+ * starts or stops between refreshes (#2196), and that is worth keeping. What
+ * was wrong is paying for it on every row unconditionally: `availabilityChip`
+ * returns null for every state except `stopped` and `unavailable`, so on a
+ * fleet where everything is running — the normal case — the strip is empty on
+ * EVERY row. That produced both halves of the reported defect at once: the
+ * dates stopped 72px short of the right edge, and 72px per row came out of the
+ * only element that wanted it, the name.
+ *
+ * The reservation is now a property of the LIST, not of a row: reserve on every
+ * row iff any row can actually show a chip. Uniform down the list, so #2580's
+ * identical truncation point survives, and free when there is nothing to hold
+ * space for.
+ *
+ * Takes the ROWS BEING RENDERED, not the whole roster — a stopped agent hidden
+ * by search or by the collapse limit would otherwise reserve width on a list
+ * that shows no chip, which is the original bug with extra steps.
+ *
+ * Residual, stated rather than discovered: the 0→1 transition (the first agent
+ * in view stops) reflows the whole list once, where before it reflowed nothing.
+ * That is the honest cost of not charging every row for the empty case, and it
+ * is the trade the issue delegates. Within a populated list nothing moves: a
+ * second agent stopping, or the first one restarting while another is still
+ * stopped, changes only that row's chip.
+ */
+export function reservesAvailabilitySlot(rows, opts = {}) {
+  if (!Array.isArray(rows)) return false
+  return rows.some((a) => availabilityChip(a, opts) !== null)
 }
 
 export const EMPTY_REASON_NO_PLAYBOOKS = 'No playbooks are available for this agent right now.'

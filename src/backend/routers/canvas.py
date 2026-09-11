@@ -35,6 +35,7 @@ from models import (
     CanvasBulkDeleteResult,
     CanvasPatch,
     CanvasPinRequest,
+    CanvasWriteResult,
     CanvasSummary,
     CanvasWrite,
     User,
@@ -95,6 +96,29 @@ def _gate_human_removal(current_user: User, name: str) -> None:
     if current_user.agent_name:
         _require_self(current_user, name)
         return
+    assert_agent_owner(current_user, name, detail="Only the agent's owner may change its canvases")
+
+
+def _gate_pin(current_user: User, name: str) -> None:
+    """Who may PIN a canvas (ent#553 review) — humans only, and the owner.
+
+    Deliberately NOT `_gate_human_removal`. That gate lets an agent-scoped key
+    act on its own canvases, which is right for delete ("an agent tidying up
+    after itself") and wrong for pin: a pin decides which canvas a whole roster
+    sees first, so an agent that could set it could promote itself up its own
+    list. Nothing in the agent-facing surface offers it — `pinned` is absent
+    from the MCP tools by design — but "no tool exposes it" is a property of the
+    client, and this route is reachable with the agent's own key.
+
+    `docs/user-docs/agents/agent-canvas.md` already tells users "the agent
+    cannot pin its own canvas". This is what makes that sentence true rather
+    than aspirational; the alternative was editing the doc to admit it could.
+    """
+    if current_user.agent_name:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="A pin is a human's ordering; an agent may not pin a canvas",
+        )
     assert_agent_owner(current_user, name, detail="Only the agent's owner may change its canvases")
 
 
@@ -177,7 +201,8 @@ async def bulk_delete_canvases(
         request_id=getattr(request.state, "request_id", None),
         # Ids only. A canvas's blocks are agent-authored free-form content and
         # the audit log is broadly readable (the G-04 rule).
-        details={"requested": len(body.canvas_ids), "deleted": deleted},
+        details={"requested": len(body.canvas_ids), "deleted": deleted,
+                 "surface": "agent_detail"},
     )
     return CanvasBulkDeleteResult(
         agent_name=name, requested=len(body.canvas_ids), deleted=deleted
@@ -292,7 +317,7 @@ async def get_canvas(name: AuthorizedAgent, canvas_id: str):
     return canvas_service.decorate([canvas], name)[0]
 
 
-@router.put("/{name}/canvas/{canvas_id}", response_model=Canvas)
+@router.put("/{name}/canvas/{canvas_id}", response_model=CanvasWriteResult)
 async def write_canvas(
     name: AuthorizedAgent,
     canvas_id: str,
@@ -323,7 +348,12 @@ async def write_canvas(
         )
     except CanvasError as e:
         raise _map(e)
-    return canvas_service.decorate([canvas], name)[0]
+    decorated = canvas_service.decorate([canvas], name)[0]
+    # #2577: say whether the audience just chosen reaches the session that
+    # asked. Resolved in the service (Invariant #1) off the STORED row, so the
+    # verdict describes the canvas that exists rather than the value requested.
+    visible, note = canvas_service.visibility_for_canvas(canvas, name)
+    return {**decorated, "visible_to_requester": visible, "visibility_note": note}
 
 
 @router.patch("/{name}/canvas/{canvas_id}", response_model=Canvas)
@@ -362,17 +392,24 @@ async def pin_canvas(
     name: AuthorizedAgent,
     canvas_id: str,
     body: CanvasPinRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ):
     """Pin or unpin one canvas so it sorts to the top (ent#553).
 
     Gated like delete, not like write: a pin is the READER's ordering and is
     stored once for everyone, so it is a human decision about a shared surface.
-    An agent-scoped key reaching this route can only ever pin its own canvas,
-    but nothing in the agent-facing surface offers it — `pinned` is deliberately
-    absent from the MCP tools, so an agent cannot promote itself up the list.
+
+    HUMANS ONLY — `_gate_pin`, not `_gate_human_removal`. That gate lets an
+    agent-scoped key act on its OWN canvases, which is right for delete (an
+    agent tidying up after itself) and wrong here: an agent that could pin would
+    promote itself to the top of its own list for everyone. `pinned` being
+    absent from the MCP tools is a property of the CLIENT, not of this route,
+    and the user documentation already promises the stronger thing.
+
+    Audited on both surfaces, because the Workspace twin is.
     """
-    _gate_human_removal(current_user, name)
+    _gate_pin(current_user, name)
     try:
         canvas_service.validate_canvas_id(canvas_id)
     except CanvasError as e:
@@ -382,6 +419,23 @@ async def pin_canvas(
     canvas = db.get_agent_canvas(name, canvas_id)
     if not canvas:
         raise HTTPException(status_code=404, detail="Canvas not found")
+    # Audited like delete (ent#553 review). A pin decides which canvas an entire
+    # roster sees first, so it is an administrative act on a shared surface, not
+    # a per-viewer preference — and its Workspace twin is audited, which is only
+    # worth anything if both surfaces record the same act.
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="canvas_pin",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=name,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={"canvas_id": canvas_id, "pinned": bool(body.pinned),
+                 "surface": "agent_detail"},
+    )
     return canvas_service.decorate([canvas], name)[0]
 
 
@@ -426,6 +480,6 @@ async def clear_canvas(
             target_id=name,
             endpoint=str(request.url.path),
             request_id=getattr(request.state, "request_id", None),
-            details={"canvas_id": canvas_id},
+            details={"canvas_id": canvas_id, "surface": "agent_detail"},
         )
     return {"canvas_id": canvas_id, "deleted": bool(deleted)}

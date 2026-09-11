@@ -30,10 +30,8 @@ import {
   writeStored,
   SIDEBAR_DEFAULT,
   SIDEBAR_MIN,
-  SIDEBAR_MAX,
   RAIL_DEFAULT,
   RAIL_MIN,
-  RAIL_MAX,
   RAIL_COLLAPSED,
   CONVERSATION_MIN,
   MESSAGE_MAX,
@@ -106,11 +104,17 @@ describe('ent#492 — whose layout is this', () => {
 
 describe('ent#492 — clamps', () => {
   it('bounds each column and rounds to whole pixels', () => {
+    // #2617: the ceiling is an ARGUMENT now — `SIDEBAR_MAX` / `RAIL_MAX` are
+    // gone, because a fixed pixel maximum is what stopped a 2560px screen
+    // giving its rail more than ~22%. The floors and the rounding, which is
+    // what this test is about, are unchanged.
     expect(clampSidebar(0)).toBe(SIDEBAR_MIN)
-    expect(clampSidebar(99999)).toBe(SIDEBAR_MAX)
+    expect(clampSidebar(99999, 480)).toBe(480)
     expect(clampSidebar(300.4)).toBe(300)
     expect(clampRail(0)).toBe(RAIL_MIN)
-    expect(clampRail(99999)).toBe(RAIL_MAX)
+    expect(clampRail(99999, 560)).toBe(560)
+    // With no ceiling given, a column is floored and otherwise left alone.
+    expect(clampRail(99999)).toBe(99999)
   })
 
   it('has defaults equal to the widths it replaced, so nothing moves on upgrade', () => {
@@ -142,7 +146,7 @@ describe('ent#492 — auto-collapse (AC 3)', () => {
   it('does not fit one pixel below it', () => {
     expect(fitsThreeColumns(SIDEBAR_DEFAULT + RAIL_DEFAULT + CONVERSATION_MIN - 1, SIDEBAR_DEFAULT, RAIL_DEFAULT))
       .toBe(false)
-    expect(fitsThreeColumns(900, SIDEBAR_MAX, RAIL_MAX)).toBe(false)
+    expect(fitsThreeColumns(900, 480, 560)).toBe(false)
   })
 
   it('is a decision, not an action — the caller owns the rail state', () => {
@@ -163,9 +167,13 @@ describe('ent#492 — persistence', () => {
     expect(readStored(s, 'sam')).toEqual({ sidebar: 320, rail: 420 })
   })
 
-  it('clamps on the way IN as well as out — a hand-edited value cannot break the layout', () => {
+  it('floors on the way IN as well as out — a hand-edited value cannot break the layout', () => {
+    // #2617: FLOORED here, not capped. What is stored is the width the person
+    // asked for; the viewport ceiling is applied where the number is used, so a
+    // layout arranged on a wide monitor survives a stint on a laptop. See
+    // `readStored`'s own comment and the AC-4 tests below.
     const s = fakeStorage({ 'trinity-workspace-columns:sam': JSON.stringify({ sidebar: 5, rail: 9999 }) })
-    expect(readStored(s, 'sam')).toEqual({ sidebar: SIDEBAR_MIN, rail: RAIL_MAX })
+    expect(readStored(s, 'sam')).toEqual({ sidebar: SIDEBAR_MIN, rail: 9999 })
   })
 
   it('reads corrupt, absent and unreadable storage as "no stored layout"', () => {

@@ -306,7 +306,6 @@ This mirrors the existing `/chat` (chat.py:242) and `CapacityFull` (chat.py:1577
 
 ### Reference docs
 
-- `docs/planning/PULL_PILOT_946_SOAK.md` — soak harness + go/no-go criteria
 - `docs/planning/ACTOR_MODEL_POSTCARD.md`, `docs/planning/TARGET_ARCHITECTURE.md` — pull-coordination direction (Epic #1045 / #1081)
 - `mcp-orchestration.md`, `task-execution-service.md`, `idempotency-keys.md`, `dispatch-circuit-breaker.md`
 

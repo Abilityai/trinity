@@ -1,3 +1,4 @@
+# mcp: none — Workspace client surface; no MCP tool targets it (#2198)
 """FastAPI router for the Workspace / client portal (epic #78, exposure #79).
 
 OSS core since ent#356 — mounted in every build, entitlement-free. Individual
@@ -15,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+from types import SimpleNamespace
 from typing import Optional
 
 import httpx
@@ -130,9 +132,28 @@ PORTAL_UPLOAD_HOURLY_LIMIT = int(os.getenv("PORTAL_UPLOAD_HOURLY_LIMIT", "100"))
 PORTAL_RATING_BURST_LIMIT = int(os.getenv("PORTAL_RATING_BURST_LIMIT", "60"))
 PORTAL_RATING_HOURLY_LIMIT = int(os.getenv("PORTAL_RATING_HOURLY_LIMIT", "300"))
 
+# #2582 — reading a file back out of an agent's inbox. TWO tiers, same rule as
+# above, and the burst tier is deliberately TIGHTER than the upload one on a
+# route that costs strictly more per request.
+#
+# This is the first time a rostered client can reach `extract_from_agent`, which
+# iterates the docker-py generator SYNCHRONOUSLY inside `async def` on the global
+# 4-worker executor shared with agent start/stop/reload, and holds ~3x the file
+# size in memory transiently (bytearray + bytes(buf) + extracted.read(), then the
+# Response body). There is no streaming primitive and building one was out of
+# scope, so this limiter IS the bound — which is why the burst tier is 20 and not
+# the 60/min a single-tier design would have used.
+PORTAL_FILE_BURST_LIMIT = int(os.getenv("PORTAL_FILE_BURST_LIMIT", "20"))
+PORTAL_FILE_HOURLY_LIMIT = int(os.getenv("PORTAL_FILE_HOURLY_LIMIT", "100"))
+# Delete gets its OWN, looser counter: an `rm` is one cheap exec, a
+# `get_archive` is a tar of up to 25 MiB through that same shared pool. Metering
+# them together would price the cheap verb at the expensive one's rate.
+PORTAL_FILE_DELETE_BURST_LIMIT = int(os.getenv("PORTAL_FILE_DELETE_BURST_LIMIT", "60"))
+
 _CHAT_LIMIT_DETAIL = "Too many messages to this agent."
 _UPLOAD_LIMIT_DETAIL = "Too many uploads."
 _RATING_LIMIT_DETAIL = "Too many ratings for this agent."
+_FILE_LIMIT_DETAIL = "Too many file requests just now."
 
 
 def _require_roster(agent_name: str, email: str, include_owned: bool = False) -> None:
@@ -736,18 +757,25 @@ def portal_agent_canvases(
 
 
 @router.post("/agents/{agent_name}/canvas/bulk-delete")
-def portal_bulk_delete_canvases(
+async def portal_bulk_delete_canvases(
     agent_name: str,
     body: CanvasBulkDelete,
+    request: Request,
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """Remove several of this agent's canvases from the Workspace (ent#553).
 
-    Declared above the parameterized canvas routes (Invariant #4).
+    Declared above the parameterized canvas routes (Invariant #4). Audited like
+    its operator twin — see `_audit_canvas_change`.
     """
     _require_roster(agent_name, principal.email, principal.is_platform)
     _require_canvas_manager(agent_name, principal)
     deleted = db.delete_agent_canvases(agent_name, body.canvas_ids)
+    await _audit_canvas_change(
+        request, principal, action="canvas_bulk_delete", agent_name=agent_name,
+        details={"requested": len(body.canvas_ids), "deleted": deleted,
+                 "surface": "workspace"},
+    )
     return {"agent_name": agent_name, "requested": len(body.canvas_ids),
             "deleted": deleted}
 
@@ -779,6 +807,70 @@ def portal_agent_canvas_detail(
     return canvas
 
 
+async def _audit_canvas_change(request: Request, principal: PortalPrincipal, *,
+                               action: str, agent_name: str, details: dict) -> None:
+    """One audit row per Workspace canvas delete/pin (ent#553 review).
+
+    The operator twins in `routers/canvas.py` have logged since they shipped and
+    `docs/user-docs/agents/agent-canvas.md` tells users deletion is audited —
+    these routes recorded nothing, so the claim was false for exactly the surface
+    an external-facing product is most often asked about.
+
+    **The actor is resolved to the real `users` row, not left as an email.**
+    Passing `actor_email` alone looks sufficient and is not: `_resolve_actor`
+    keys `actor_type` off `actor_user` / `actor_agent_name` / `mcp_scope` /
+    `mcp_key_id`, so an email-only call falls through to its last branch and the
+    row lands as `actor_type="system"`, `actor_id="trinity-system"` — a named
+    operator's deletion recorded as a PLATFORM action, invisible to any
+    `actor_type=user` query and to the per-actor filter the audit UI offers.
+    That is worse than the missing row this function was added to fix: a wrong
+    attribution is believed. (The #848 inline-auth precedent for `actor_email`
+    holds where the caller genuinely has no `users` row; here
+    `_require_canvas_manager` is platform-only and resolves through
+    `db.can_user_share_agent`, so a row exists by construction.)
+
+    The lookup is best-effort: if it somehow misses, the row is still written
+    with the email attached rather than dropped — an under-attributed audit
+    entry beats none — and the miss is logged, because it would mean the gate
+    admitted someone the user table does not know.
+
+    Ids and counts only — a canvas's blocks are agent-authored free-form content
+    and the audit log is broadly readable (the canary G-04 rule the operator
+    routes state).
+    """
+    actor_user = None
+    try:
+        row = db.get_user_by_email(principal.email)
+        if row:
+            actor_user = SimpleNamespace(
+                id=row.get("id"), email=row.get("email") or principal.email,
+                username=row.get("username"),
+            )
+    except Exception as e:  # noqa: BLE001 — attribution must not fail the action
+        logger.warning("canvas audit: could not resolve actor for %s: %s",
+                       principal.email, e)
+    if actor_user is None:
+        logger.warning(
+            "canvas audit: no users row for %s on a platform-only route; "
+            "recording the action with the email but no user attribution",
+            principal.email,
+        )
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action=action,
+        source="api",
+        actor_user=actor_user,
+        actor_email=principal.email,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details=details,
+    )
+
+
 def _require_canvas_manager(agent_name: str, principal: PortalPrincipal) -> None:
     """Owner-or-admin, platform-only — the ent#553 gate for changing a canvas.
 
@@ -793,34 +885,53 @@ def _require_canvas_manager(agent_name: str, principal: PortalPrincipal) -> None
 
 
 @router.delete("/agents/{agent_name}/canvas/{canvas_id}")
-def portal_delete_canvas(
+async def portal_delete_canvas(
     agent_name: str,
     canvas_id: str,
+    request: Request,
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """Remove one canvas from the Workspace (ent#553).
 
     Idempotent, matching the operator route: a list one poll out of date must
-    not turn a second click into an error.
+    not turn a second click into an error. Only a delete that REMOVED something
+    is audited — the same rule as the operator twin, for the same reason: a
+    repeat click is a no-op and logging those fills the trail with events where
+    nothing happened.
     """
     _require_roster(agent_name, principal.email, principal.is_platform)
     _require_canvas_manager(agent_name, principal)
     deleted = db.delete_agent_canvas(agent_name, canvas_id)
+    if deleted:
+        await _audit_canvas_change(
+            request, principal, action="canvas_delete", agent_name=agent_name,
+            details={"canvas_id": canvas_id, "surface": "workspace"},
+        )
     return {"canvas_id": canvas_id, "deleted": bool(deleted)}
 
 
 @router.put("/agents/{agent_name}/canvas/{canvas_id}/pin")
-def portal_pin_canvas(
+async def portal_pin_canvas(
     agent_name: str,
     canvas_id: str,
     body: CanvasPinRequest,
+    request: Request,
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
-    """Pin or unpin one canvas so it stays at the top of the rail (ent#553)."""
+    """Pin or unpin one canvas so it stays at the top of the rail (ent#553).
+
+    Audited: a pin is what decides which canvas a whole roster sees first, so it
+    is an administrative act on a shared surface, not a per-viewer preference.
+    """
     _require_roster(agent_name, principal.email, principal.is_platform)
     _require_canvas_manager(agent_name, principal)
     if not db.set_agent_canvas_pinned(agent_name, canvas_id, body.pinned):
         raise HTTPException(status_code=404, detail="Canvas not found")
+    await _audit_canvas_change(
+        request, principal, action="canvas_pin", agent_name=agent_name,
+        details={"canvas_id": canvas_id, "pinned": bool(body.pinned),
+                 "surface": "workspace"},
+    )
     return {"canvas_id": canvas_id, "pinned": body.pinned}
 
 
@@ -935,10 +1046,23 @@ async def portal_chat(
         f"portal_chat_hourly:{email}:{agent_name}", PORTAL_CHAT_HOURLY_LIMIT, 3600,
         detail=_CHAT_LIMIT_DETAIL,
     )
+    # ent#403: normalise blank → None, then authorise, then allow-list. The
+    # policy is one function shared with the streaming route below — enforcement
+    # at BOTH router entry points, because this route runs an inline path and
+    # the two must not disagree about which models exist. See
+    # `service.validate_requested_model` for why the order matters.
+    try:
+        requested_model = service.validate_requested_model(
+            body.model, is_platform=principal.is_platform
+        )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
     try:
         result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id,
                                           include_owned=include_owned,
-                                          new_thread=body.new_thread)
+                                          new_thread=body.new_thread,
+                                          model=requested_model)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
@@ -1353,6 +1477,162 @@ async def portal_uploads(agent_name: str, principal: PortalPrincipal = Depends(g
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
+@router.get("/agents/{agent_name}/uploads/{filename}")
+async def portal_download_upload(
+    agent_name: str,
+    filename: str,
+    request: Request,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Read back one of the caller's OWN uploads (#2582).
+
+    Roster-scoped (miss → uniform 404), and an unaddressable filename gets that
+    SAME 404 — a traversal attempt must not be distinguishable from a typo.
+    Served `attachment` unconditionally: these are client-supplied bytes with a
+    guessed type, so there is no `is_inline_safe` allowlist to consult and no
+    reason to render them in the browser.
+    """
+    email = principal.email
+    include_owned = principal.is_platform
+    from services import rate_limiter
+
+    _require_roster(agent_name, email, include_owned)
+    rate_limiter.enforce(
+        f"portal_file:{email}", PORTAL_FILE_BURST_LIMIT, 60, detail=_FILE_LIMIT_DETAIL
+    )
+    rate_limiter.enforce(
+        f"portal_file_hourly:{email}", PORTAL_FILE_HOURLY_LIMIT, 3600,
+        detail=_FILE_LIMIT_DETAIL,
+    )
+    try:
+        data, name, mime_type = await service.portal_download_upload(
+            agent_name, email, filename, include_owned=include_owned
+        )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+    # Function-local import: `routers.files` owns the RFC 6266 formatter, and
+    # importing it at module scope would pull the OSS router package into the
+    # portal package's import graph for one helper.
+    from routers.files import _format_disposition
+
+    await _audit_file_event(
+        request, principal, "portal_upload_download", agent_name,
+        {"filename": name, "size_bytes": len(data)},
+    )
+    return Response(
+        content=data,
+        media_type=mime_type,
+        headers={
+            "Content-Disposition": _format_disposition(name, inline=False),
+            "X-Content-Type-Options": "nosniff",
+            # Never cached: unlike `/api/files/{id}`, whose URL IS an
+            # unguessable time-boxed credential, this route is addressed by a
+            # plain filename and gated by the portal session.
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+@router.delete("/agents/{agent_name}/uploads/{filename}", status_code=204)
+async def portal_delete_upload(
+    agent_name: str,
+    filename: str,
+    request: Request,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Delete one of the caller's OWN uploads (ent#548). Idempotent."""
+    email = principal.email
+    include_owned = principal.is_platform
+    from services import rate_limiter
+
+    _require_roster(agent_name, email, include_owned)
+    rate_limiter.enforce(
+        f"portal_file_delete:{email}", PORTAL_FILE_DELETE_BURST_LIMIT, 60,
+        detail=_FILE_LIMIT_DETAIL,
+    )
+    try:
+        await service.portal_delete_upload(
+            agent_name, email, filename, include_owned=include_owned
+        )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    await _audit_file_event(
+        request, principal, "portal_upload_delete", agent_name, {"filename": filename},
+    )
+    return Response(status_code=204)
+
+
+@router.delete("/agents/{agent_name}/documents/{file_id}", status_code=204)
+async def portal_delete_document(
+    agent_name: str,
+    file_id: str,
+    request: Request,
+    scope: str = Query("me", pattern="^(me|everyone)$"),
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Remove an agent-shared file from the caller's list, or revoke it (ent#548).
+
+    `scope=me` (the default, and what every viewer gets) writes a per-viewer
+    dismissal; the share itself is untouched and every other client keeps seeing
+    it. `scope=everyone` is the owner's revoke — see
+    `service.portal_revoke_shared_file` for why its gate order is access-first
+    and why it 404s where its operator-facing sibling 204s.
+    """
+    email = principal.email
+    include_owned = principal.is_platform
+    from services import rate_limiter
+
+    _require_roster(agent_name, email, include_owned)
+    rate_limiter.enforce(
+        f"portal_file_delete:{email}", PORTAL_FILE_DELETE_BURST_LIMIT, 60,
+        detail=_FILE_LIMIT_DETAIL,
+    )
+    try:
+        if scope == "everyone":
+            service.portal_revoke_shared_file(
+                agent_name, email, file_id, include_owned=include_owned
+            )
+        else:
+            service.portal_dismiss_shared_file(
+                agent_name, email, file_id, include_owned=include_owned
+            )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    await _audit_file_event(
+        request, principal,
+        "portal_share_revoke" if scope == "everyone" else "portal_share_dismiss",
+        agent_name, {"file_id": file_id, "scope": scope},
+    )
+    return Response(status_code=204)
+
+
+async def _audit_file_event(request: Request, principal: PortalPrincipal,
+                            event_action: str, agent_name: str, details: dict) -> None:
+    """One audit shape for the three file verbs (#2582 / ent#548).
+
+    `actor_email` rather than `actor_user`: a `PortalPrincipal` is not a `User`
+    and has no row to resolve, and this is the field built for exactly that case
+    (#848). Best-effort, like every other audit call — a logging failure must
+    never fail the verb the client asked for.
+    """
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action=event_action,
+            source="api",
+            actor_email=principal.email,
+            actor_ip=request.client.host if request.client else None,
+            target_type="agent",
+            target_id=agent_name,
+            details=details,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except Exception as e:  # noqa: BLE001 — audit is best-effort
+        logger.warning("portal file audit failed (%s): %s", event_action, e)
+
+
 # --- Streaming turns (ent#286) -----------------------------------------------
 
 # How long to keep trying to attach to a turn the agent has not registered yet,
@@ -1404,7 +1684,23 @@ async def portal_chat_stream(
     # (500 at request time, not import time — so it only shows up when called).
     idempotency_key = request.headers.get("Idempotency-Key")
 
-    scope = f"portal_stream:{agent_name}:{email}"
+    # ent#403: same three steps as the synchronous route, before the idempotency
+    # scope is built — a refused model must not consume the key.
+    try:
+        requested_model = service.validate_requested_model(
+            body.model, is_platform=principal.is_platform
+        )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+    # Invariant #18, ent#403: the requested model is part of the scope. Without
+    # it, a client that re-sent the same Idempotency-Key with a DIFFERENT model
+    # would be handed the previous turn's snapshot — a silent replay that
+    # ignores the change the user just made. The REQUESTED value and not the
+    # resolved one, deliberately: an owner editing `public_channel_model`
+    # between two genuine retries of ONE request must not fork the scope and
+    # turn a replay into a second billed turn.
+    scope = f"portal_stream:{agent_name}:{email}:{requested_model or '-'}"
     decision = idempotency_service.begin(scope, idempotency_key)
     if decision.replay:
         if decision.in_flight:
@@ -1430,6 +1726,7 @@ async def portal_chat_stream(
             # one above is its fallback. A flag honoured by only one brings the
             # bug back exactly when streaming fails.
             new_thread=body.new_thread,
+            model=requested_model,   # ent#403, same rule as the flag above
         )
     except ClientPortalError as e:
         idempotency_service.fail(decision)

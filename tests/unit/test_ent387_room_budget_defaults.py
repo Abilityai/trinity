@@ -102,10 +102,16 @@ def _row(room):
 
 def test_workspace_client_cannot_set_its_own_budget(rooms_db, allow_all):
     """The defect this issue is really about: the bounded party setting the bound."""
+    from shared_sessions import service
     room = _mk_room(_WorkspaceClient(), max_messages=500, max_cost_usd=999.0, ttl_hours=168)
     row = _row(room)
 
-    assert row["max_messages"] == 60, "the client's 500 must not survive"
+    # Bound to the constant, not a literal: the property is "the client's value
+    # is discarded and the OPERATOR default applies", and #2620 changed that
+    # default (60 → 200). A hard-coded number turns a defaults change into a
+    # false failure here and says nothing extra when it passes.
+    assert row["max_messages"] == service.DEFAULT_MAX_MESSAGES, \
+        "the client's 500 must not survive"
     assert row["max_cost_usd"] is None, "the client's cost cap must not survive"
 
 
@@ -121,12 +127,13 @@ def test_a_portal_principal_missing_is_platform_fails_closed(rooms_db, allow_all
     """A portal principal that forgets to carry `is_platform` must not inherit the
     platform default. The absent-attribute default exists for `User` (which has no
     such field at all); a principal marked `is_portal` is a client either way."""
+    from shared_sessions import service
     class _Malformed:
         email = "client@example.com"
         is_portal = True          # no is_platform at all
 
     row = _row(_mk_room(_Malformed(), max_messages=500))
-    assert row["max_messages"] == 60
+    assert row["max_messages"] == service.DEFAULT_MAX_MESSAGES
 
 
 def test_an_agent_principal_is_treated_as_platform(rooms_db, allow_all):

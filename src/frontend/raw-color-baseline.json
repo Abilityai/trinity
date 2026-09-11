@@ -1,11 +1,31 @@
 {
-  "generated": "2026-07-31",
+  "generated": "2026-09-09",
   "branch": "dev",
-  "commit": "5b2899967ea13edb49cf5314ad00ffe02702ca4e",
+  "commit": "fdefeb9a6b12235e9524674bce80bf01b84fa845",
+  "refrozen": {
+    "issue": "#2605",
+    "why": "The ratchet was documented as enforced and nothing ran it, so the tree drifted past the 2026-07-31 freeze. This re-freeze is the deliberate disposition the issue asks for, in its own PR with the increases named \u2014 NOT a silent absorption into a feature diff. From here the guard (tests/unit/rawColorRatchet.spec.js) bites.",
+    "previous_freeze": "2026-07-31",
+    "named_increases": {
+      "raw_nongray": "737 -> 815 (+78). Grew in 4 baselined files (ReliabilityPanel +4, ReportsPanelFleet +4, Dashboard +5, enterprise/Audit +4) and arrived in 10 files created after the freeze, led by settings/PortalSessionPolicyPanel (30) and AgentListPanel (28). views/Portal.vue is NOT among them: its 6 amber-* classes from #2261 were paid down to semantic status-warning tokens in this PR, since the issue named them as the exact thing the ratchet exists to catch.",
+      "raw_gray": "6938 -> 8699 (+1761) across 24 baselined files plus 61 new ones. Gray is the neutral ink ladder and is ratcheted but not held to zero for new files.",
+      "hardcoded_colors": "383 -> 456 (+73), which the issue did not report. Almost all of it is FleetGrid.vue (102 -> 156); the other five are single hex literals in ExecutionsPanel, OverviewPanel, ReliabilityPanel, ScheduleAnalyticsCard and settings/TelemetrySharingPanel.",
+      "_merge_train_note": "merge-train 2026-09-09: +3 raw_gray in components/portal/PortalRailFiles.vue from #2608 (landed on dev after this branch), absorbed at regeneration; PortalFilePreview.vue is a new file from the same PR.",
+      "_2662_note": "#2662: +4 raw_gray in components/base/fieldClasses.js (11 -> 15) \u2014 the new FIELD_GHOST_CLASS recipe's resting ink and hover ground, light and dark. Gray is the neutral ink ladder and has no semantic token to move to; the recipe was trimmed from 6 to 4 by dropping the hover ink change, matching the Workspace agent picker it now sits beside. No other entry moves.",
+      "_2662_rebase_note": "#2662 regeneration after rebasing onto origin/dev @5a0cb0078: absorbs +1 raw_gray in components/portal/PortalJumpToLatest.vue, a file created on dev by #2652 after this branch was cut and never added to the baseline there. Nothing on this branch moved \u2014 fieldClasses.js stays 15, PortalConversation.vue 90, PortalRoom.vue 47. Totals were 8722/3997/197 against an actual 8723/4020/198 purely because the previous freeze was computed pre-rebase; the ratchet never reads totals, so this was cosmetic rather than a failing gate. Same shape as the _merge_train_note above."
+    },
+    "also_absorbed": "19 files had IMPROVED below their old entries; those are now recorded at their real values, so the stale-ceiling check has something true to compare against.",
+    "paying_down": "This freeze is a starting line, not an endorsement. Lowering an entry needs no ceremony \u2014 regenerate and the guard keeps biting at the new level."
+  },
   "files": {
     "src/frontend/src/App.vue": {
       "raw_nongray": 0,
       "raw_gray": 2,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/A2aPanel.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 104,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/AccessPanel.vue": {
@@ -15,8 +35,18 @@
     },
     "src/frontend/src/components/AgentHeader.vue": {
       "raw_nongray": 7,
-      "raw_gray": 129,
+      "raw_gray": 125,
       "hardcoded_colors": 3
+    },
+    "src/frontend/src/components/AgentListPanel.vue": {
+      "raw_nongray": 28,
+      "raw_gray": 159,
+      "hardcoded_colors": 3
+    },
+    "src/frontend/src/components/AgentMcpKeyPanel.vue": {
+      "raw_nongray": 13,
+      "raw_gray": 56,
+      "hardcoded_colors": 0
     },
     "src/frontend/src/components/AgentPermissionsMatrix.vue": {
       "raw_nongray": 0,
@@ -41,6 +71,11 @@
     "src/frontend/src/components/AvatarGenerateModal.vue": {
       "raw_nongray": 0,
       "raw_gray": 22,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/BindRepoPanel.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 46,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/BrainPanel.vue": {
@@ -90,7 +125,7 @@
     },
     "src/frontend/src/components/ConnectorChannelPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 41,
+      "raw_gray": 55,
       "hardcoded_colors": 3
     },
     "src/frontend/src/components/CreateAgentModal.vue": {
@@ -98,9 +133,14 @@
       "raw_gray": 135,
       "hardcoded_colors": 0
     },
+    "src/frontend/src/components/CredentialSetupChecklist.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 82,
+      "hardcoded_colors": 0
+    },
     "src/frontend/src/components/CredentialsPanel.vue": {
-      "raw_nongray": 12,
-      "raw_gray": 102,
+      "raw_nongray": 7,
+      "raw_gray": 65,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/CrossModelValidationPanel.vue": {
@@ -115,8 +155,8 @@
     },
     "src/frontend/src/components/ExecutionsPanel.vue": {
       "raw_nongray": 28,
-      "raw_gray": 127,
-      "hardcoded_colors": 0
+      "raw_gray": 125,
+      "hardcoded_colors": 1
     },
     "src/frontend/src/components/ExposedToolsPanel.vue": {
       "raw_nongray": 0,
@@ -141,7 +181,7 @@
     "src/frontend/src/components/FleetGrid.vue": {
       "raw_nongray": 0,
       "raw_gray": 0,
-      "hardcoded_colors": 102
+      "hardcoded_colors": 156
     },
     "src/frontend/src/components/FoldersPanel.vue": {
       "raw_nongray": 0,
@@ -155,7 +195,7 @@
     },
     "src/frontend/src/components/GitPanel.vue": {
       "raw_nongray": 24,
-      "raw_gray": 146,
+      "raw_gray": 152,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/GuardrailsPanel.vue": {
@@ -173,9 +213,34 @@
       "raw_gray": 7,
       "hardcoded_colors": 6
     },
+    "src/frontend/src/components/ImportIntentPicker.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 9,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/ImportValidationStep.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 55,
+      "hardcoded_colors": 0
+    },
     "src/frontend/src/components/InfoPanel.vue": {
       "raw_nongray": 16,
-      "raw_gray": 95,
+      "raw_gray": 103,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/InfoTile.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 0,
+      "hardcoded_colors": 16
+    },
+    "src/frontend/src/components/LibrarySkillsSection.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 34,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/LoadFailed.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 8,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/LogsPanel.vue": {
@@ -204,8 +269,8 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/NavBar.vue": {
-      "raw_nongray": 37,
-      "raw_gray": 132,
+      "raw_nongray": 35,
+      "raw_gray": 125,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/NeverminedPanel.vue": {
@@ -226,7 +291,7 @@
     "src/frontend/src/components/OverviewPanel.vue": {
       "raw_nongray": 0,
       "raw_gray": 150,
-      "hardcoded_colors": 0
+      "hardcoded_colors": 1
     },
     "src/frontend/src/components/PermissionsPanel.vue": {
       "raw_nongray": 0,
@@ -236,6 +301,11 @@
     "src/frontend/src/components/PlaybooksPanel.vue": {
       "raw_nongray": 4,
       "raw_gray": 48,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/PortalClientsPanel.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 42,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/PublicLinksPanel.vue": {
@@ -254,9 +324,9 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/ReliabilityPanel.vue": {
-      "raw_nongray": 22,
-      "raw_gray": 11,
-      "hardcoded_colors": 1
+      "raw_nongray": 26,
+      "raw_gray": 24,
+      "hardcoded_colors": 2
     },
     "src/frontend/src/components/ReplayTimeline.vue": {
       "raw_nongray": 12,
@@ -265,12 +335,12 @@
     },
     "src/frontend/src/components/ReportsPanel.vue": {
       "raw_nongray": 5,
-      "raw_gray": 25,
+      "raw_gray": 46,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/ReportsPanelFleet.vue": {
-      "raw_nongray": 3,
-      "raw_gray": 45,
+      "raw_nongray": 7,
+      "raw_gray": 57,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/ResourceModal.vue": {
@@ -291,16 +361,11 @@
     "src/frontend/src/components/ScheduleAnalyticsCard.vue": {
       "raw_nongray": 0,
       "raw_gray": 55,
-      "hardcoded_colors": 0
+      "hardcoded_colors": 1
     },
     "src/frontend/src/components/SchedulesPanel.vue": {
       "raw_nongray": 21,
-      "raw_gray": 315,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/SessionPanel.vue": {
-      "raw_nongray": 1,
-      "raw_gray": 52,
+      "raw_gray": 302,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/SharingPanel.vue": {
@@ -313,9 +378,14 @@
       "raw_gray": 6,
       "hardcoded_colors": 0
     },
+    "src/frontend/src/components/SkillSourcesPanel.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 75,
+      "hardcoded_colors": 0
+    },
     "src/frontend/src/components/SkillsPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 69,
+      "raw_gray": 63,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/SlackAgentBotPanel.vue": {
@@ -335,7 +405,7 @@
     },
     "src/frontend/src/components/StackedBarChart.vue": {
       "raw_nongray": 0,
-      "raw_gray": 13,
+      "raw_gray": 15,
       "hardcoded_colors": 1
     },
     "src/frontend/src/components/SystemViewEditor.vue": {
@@ -345,7 +415,7 @@
     },
     "src/frontend/src/components/SystemViewsSidebar.vue": {
       "raw_nongray": 16,
-      "raw_gray": 28,
+      "raw_gray": 29,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/TagsEditor.vue": {
@@ -355,12 +425,12 @@
     },
     "src/frontend/src/components/TasksPanel.vue": {
       "raw_nongray": 18,
-      "raw_gray": 142,
+      "raw_gray": 152,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/TelegramChannelPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 52,
+      "raw_gray": 64,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/TerminalPanelContent.vue": {
@@ -386,6 +456,71 @@
     "src/frontend/src/components/WhatsAppChannelPanel.vue": {
       "raw_nongray": 0,
       "raw_gray": 59,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/base/BaseBadge.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 4,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/base/BaseButton.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 8,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/base/BaseCard.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 3,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/base/BaseSelect.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 2,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/base/BaseToggle.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 5,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/base/fieldClasses.js": {
+      "raw_nongray": 0,
+      "raw_gray": 15,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/canvas/AgentCanvasTab.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 4,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/canvas/CanvasBlock.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 2,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/canvas/CanvasChart.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 6,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/canvas/CanvasDiagram.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 4,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/canvas/CanvasImage.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 12,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/canvas/CanvasPanel.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 46,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/canvas/CanvasPieChart.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 5,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/chat/ChatBubble.vue": {
@@ -433,9 +568,29 @@
       "raw_gray": 13,
       "hardcoded_colors": 0
     },
+    "src/frontend/src/components/onboarding/ActivationChecklist.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 16,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/onboarding/FinishSetupCard.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 44,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/onboarding/FrontDeskPanel.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 22,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/onboarding/HardeningGuide.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 28,
+      "hardcoded_colors": 0
+    },
     "src/frontend/src/components/operator/NotificationsPanel.vue": {
       "raw_nongray": 21,
-      "raw_gray": 134,
+      "raw_gray": 138,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/operator/QueueCard.vue": {
@@ -453,9 +608,49 @@
       "raw_gray": 17,
       "hardcoded_colors": 0
     },
+    "src/frontend/src/components/portal/PortalAgentBand.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 20,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalAgentBubble.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 9,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalAgentDetails.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 33,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalAgentPicker.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 25,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalAsks.vue": {
+      "raw_nongray": 8,
+      "raw_gray": 28,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalAvatar.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 2,
+      "hardcoded_colors": 0
+    },
     "src/frontend/src/components/portal/PortalBriefing.vue": {
       "raw_nongray": 0,
       "raw_gray": 9,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalChatRow.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 14,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalChatTabs.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 1,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalCodeInput.vue": {
@@ -465,17 +660,102 @@
     },
     "src/frontend/src/components/portal/PortalConversation.vue": {
       "raw_nongray": 0,
-      "raw_gray": 57,
-      "hardcoded_colors": 1
+      "raw_gray": 90,
+      "hardcoded_colors": 0
     },
-    "src/frontend/src/components/portal/PortalFilesPanel.vue": {
+    "src/frontend/src/components/portal/PortalDeliverables.vue": {
       "raw_nongray": 0,
-      "raw_gray": 25,
+      "raw_gray": 14,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalEditableTitle.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 8,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalFilePreview.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 35,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalJumpToLatest.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 1,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalLoops.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 40,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalMarkdown.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 13,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalRail.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 30,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalRailCanvas.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 5,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalRailFiles.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 28,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalRailStrip.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 8,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalRating.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 15,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalRoom.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 47,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalSidebar.vue": {
       "raw_nongray": 0,
-      "raw_gray": 33,
+      "raw_gray": 43,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalSkeleton.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 8,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalStarButton.vue": {
+      "raw_nongray": 3,
+      "raw_gray": 5,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalTypeahead.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 26,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalVoiceCanvas.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 14,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalWork.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 10,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalWorkCard.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 31,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/process/RoleMatrix.vue": {
@@ -484,8 +764,8 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/process/TemplateSelector.vue": {
-      "raw_nongray": 33,
-      "raw_gray": 60,
+      "raw_nongray": 32,
+      "raw_gray": 68,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/process/TrendChart.vue": {
@@ -500,16 +780,21 @@
     },
     "src/frontend/src/components/reports/ReportKpiTiles.vue": {
       "raw_nongray": 0,
-      "raw_gray": 7,
+      "raw_gray": 8,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/reports/ReportSummary.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 14,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/reports/ReportTable.vue": {
       "raw_nongray": 0,
-      "raw_gray": 8,
+      "raw_gray": 17,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/reports/ReportTimeline.vue": {
-      "raw_nongray": 1,
+      "raw_nongray": 0,
       "raw_gray": 9,
       "hardcoded_colors": 0
     },
@@ -530,17 +815,42 @@
     },
     "src/frontend/src/components/settings/ActivationFunnelPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 44,
-      "hardcoded_colors": 1
+      "raw_gray": 36,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/settings/CredentialVaultPanel.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 76,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/settings/FleetBenchmarkCard.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 30,
+      "hardcoded_colors": 0
     },
     "src/frontend/src/components/settings/McpKeysTab.vue": {
       "raw_nongray": 0,
       "raw_gray": 97,
       "hardcoded_colors": 0
     },
+    "src/frontend/src/components/settings/OperatorIntakePanel.vue": {
+      "raw_nongray": 6,
+      "raw_gray": 36,
+      "hardcoded_colors": 1
+    },
+    "src/frontend/src/components/settings/PortalSessionPolicyPanel.vue": {
+      "raw_nongray": 30,
+      "raw_gray": 25,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/settings/RoomBudgetDefaultsPanel.vue": {
+      "raw_nongray": 10,
+      "raw_gray": 28,
+      "hardcoded_colors": 0
+    },
     "src/frontend/src/components/settings/SettingsPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 14,
+      "raw_gray": 16,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/settings/SsoPanel.vue": {
@@ -548,9 +858,19 @@
       "raw_gray": 43,
       "hardcoded_colors": 0
     },
+    "src/frontend/src/components/settings/SubscriptionsPanel.vue": {
+      "raw_nongray": 4,
+      "raw_gray": 165,
+      "hardcoded_colors": 0
+    },
     "src/frontend/src/components/settings/TelemetrySharingPanel.vue": {
-      "raw_nongray": 6,
-      "raw_gray": 34,
+      "raw_nongray": 0,
+      "raw_gray": 60,
+      "hardcoded_colors": 1
+    },
+    "src/frontend/src/components/settings/TemplateRegistryPanel.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 27,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/settings/TwoFactorPanel.vue": {
@@ -560,8 +880,53 @@
     },
     "src/frontend/src/components/settings/UserGitHubPatPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 30,
+      "raw_gray": 27,
       "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/settings/fieldStyles.js": {
+      "raw_nongray": 2,
+      "raw_gray": 11,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/skills/AssignedAgents.vue": {
+      "raw_nongray": 6,
+      "raw_gray": 21,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/skills/SkillContractChips.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 11,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/systems/DeployResult.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 44,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/systems/ManifestPreview.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 91,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/systems/SystemInstallPanel.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 48,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/tiles/FleetSummaryTile.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 0,
+      "hardcoded_colors": 5
+    },
+    "src/frontend/src/components/tiles/RecentFailuresTile.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 0,
+      "hardcoded_colors": 4
+    },
+    "src/frontend/src/components/tiles/parts/TileRowList.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 0,
+      "hardcoded_colors": 5
     },
     "src/frontend/src/stores/operatorQueue.js": {
       "raw_nongray": 4,
@@ -580,22 +945,12 @@
     },
     "src/frontend/src/views/AgentDetail.vue": {
       "raw_nongray": 0,
-      "raw_gray": 15,
+      "raw_gray": 20,
       "hardcoded_colors": 1
     },
-    "src/frontend/src/views/AgentWorkspace.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 47,
-      "hardcoded_colors": 15
-    },
-    "src/frontend/src/views/Agents.vue": {
-      "raw_nongray": 28,
-      "raw_gray": 172,
-      "hardcoded_colors": 3
-    },
     "src/frontend/src/views/Dashboard.vue": {
-      "raw_nongray": 18,
-      "raw_gray": 77,
+      "raw_nongray": 23,
+      "raw_gray": 126,
       "hardcoded_colors": 2
     },
     "src/frontend/src/views/ExecutionDetail.vue": {
@@ -603,9 +958,14 @@
       "raw_gray": 107,
       "hardcoded_colors": 0
     },
+    "src/frontend/src/views/Library.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 91,
+      "hardcoded_colors": 0
+    },
     "src/frontend/src/views/Login.vue": {
-      "raw_nongray": 32,
-      "raw_gray": 123,
+      "raw_nongray": 31,
+      "raw_gray": 129,
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/MobileAdmin.vue": {
@@ -615,12 +975,12 @@
     },
     "src/frontend/src/views/Operations.vue": {
       "raw_nongray": 26,
-      "raw_gray": 50,
+      "raw_gray": 60,
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/Portal.vue": {
       "raw_nongray": 0,
-      "raw_gray": 20,
+      "raw_gray": 28,
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/PublicChat.vue": {
@@ -629,8 +989,8 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/Settings.vue": {
-      "raw_nongray": 63,
-      "raw_gray": 802,
+      "raw_nongray": 59,
+      "raw_gray": 690,
       "hardcoded_colors": 1
     },
     "src/frontend/src/views/SetupPassword.vue": {
@@ -638,14 +998,9 @@
       "raw_gray": 0,
       "hardcoded_colors": 48
     },
-    "src/frontend/src/views/Templates.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 66,
-      "hardcoded_colors": 0
-    },
     "src/frontend/src/views/enterprise/Audit.vue": {
-      "raw_nongray": 39,
-      "raw_gray": 235,
+      "raw_nongray": 43,
+      "raw_gray": 241,
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/enterprise/Index.vue": {
@@ -655,10 +1010,10 @@
     }
   },
   "totals": {
-    "raw_nongray": 737,
-    "raw_gray": 6959,
-    "hardcoded_colors": 383,
-    "semantic_tokens": 3459,
-    "files_with_violations": 130
+    "raw_nongray": 815,
+    "raw_gray": 8744,
+    "hardcoded_colors": 456,
+    "semantic_tokens": 4030,
+    "files_with_violations": 198
   }
 }

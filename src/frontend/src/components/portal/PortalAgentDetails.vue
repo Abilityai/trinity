@@ -41,6 +41,18 @@
       </div>
     </div>
 
+    <!-- #2597: a failed REFRESH keeps everything on screen and says so beside
+         it (ent#253) — the band's rule, applied to the panel that reads the
+         same payload. Sits at the top of the panel body; ent#547 removed the
+         `flex-1 … p-4 space-y-6` wrapper this used to live inside, so it is a
+         direct child now and the rule is unchanged. -->
+    <InlineError
+      v-if="pageError && pageLoaded"
+      :message="pageError"
+      retryable
+      @retry="reload"
+    />
+
     <p v-if="header?.description" class="text-sm text-gray-600 dark:text-gray-300">{{ header.description }}</p>
 
     <!-- ---------------------------- CHATS ------------------------------ -->
@@ -80,7 +92,20 @@
          and never auto-sends. -->
     <section>
       <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">What it can do</h2>
-      <p v-if="!capabilities.length" class="text-sm text-gray-400">
+      <!-- #2597: the failure arm comes FIRST, because the empty arm below it
+           is a positive claim ("hasn't published anything") that a failed
+           fetch supplies no evidence for. `LoadFailed` is the "failed" member
+           of the loading/empty/failed triad (#1926) precisely so a broken
+           fetch never borrows the empty state's copy and points the reader at
+           the wrong remedy. -->
+      <LoadFailed
+        v-if="pageFailed"
+        dense
+        title="Couldn't load this agent"
+        :message="pageError"
+        @retry="reload"
+      />
+      <p v-else-if="!capabilities.length" class="text-sm text-gray-400">
         This agent hasn't published anything it can do yet.
       </p>
       <div v-else class="space-y-2">
@@ -188,7 +213,26 @@ const openReport = ref(null)
 // The window is fixed here: this panel shows no windowed figure, and a second
 // selector disagreeing with the band's would be two controls for one fact.
 const timeWindow = ref('7d')
-const { header, capabilities } = usePortalAgentPage(toRef(props, 'agentName'), timeWindow)
+const { header, capabilities, loaded: pageLoaded, error: pageError, reload } =
+  usePortalAgentPage(toRef(props, 'agentName'), timeWindow)
+
+// #2597: the two faces of a failed `/page`, kept apart because the honest
+// answer differs (ent#253).
+//
+//   pageFailed — the FIRST load failed, so there is nothing to show. Every
+//     region fed by this payload must say so instead of rendering its own
+//     fallback: `header` is null, so identity degrades to the slug and the
+//     description disappears, and `capabilities` is `[]`, which renders "this
+//     agent hasn't published anything it can do yet" — a positive claim about
+//     the agent made on no evidence at all. That last one is the defect: it is
+//     indistinguishable from a real answer.
+//
+//   a failed REFRESH (`pageError && pageLoaded`) keeps the data it has and says
+//     so beside it, which is what the band already did.
+//
+// Gated on the VERDICT, never on `loading` (#2540/#1927): a background refresh
+// must not blank a panel that is already reading correctly.
+const pageFailed = computed(() => !!pageError.value && !pageLoaded.value)
 
 // `agentDisplayName` is the shared rule (§1.3.1 FR-3), the same one the
 // conversation header uses — not the sidebar's local `agentLabel` const,

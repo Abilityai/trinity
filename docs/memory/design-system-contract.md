@@ -5,9 +5,10 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 ## Color — token-only
 
 - Use semantic tokens for every color: `status-*` (result of an event), `state-*` (operating mode), `brand-*` (third-party identity), `accent-*` (decoration), `action-*` (interaction). Everything else is gray.
-- Never write a raw Tailwind palette class (`bg-green-500`, `text-red-600`) or a hex. CI ratchets raw-color counts down; new code must be at zero.
+- Never write a raw Tailwind palette class (`bg-green-500`, `text-red-600`) or a hex. `tests/unit/rawColorRatchet.spec.js` ratchets per-file counts down and holds a file with no baseline entry to **zero** non-gray palette classes — new code must be at zero, and that half is now machine-checked rather than prose (#2605).
 - Workhorse shades: 500/600 solids; 100 tinted grounds (light); 700 text-on-tint (light); 500/16% grounds + 300 text (dark); 400–500 solid accents (dark).
 - `gray-750` (#2a303c) is the custom dark chrome/border shade — use it, don't approximate it.
+- **Never put two utilities of the same CSS property in one class string and rely on which Tailwind emits last (#2662).** The class attribute's order is not the stylesheet's order, and the stylesheet's order is a per-plugin implementation detail — `.border-transparent` is emitted after `.border-gray-300` but `.bg-transparent` before `.bg-white`, so one visual pair can resolve in opposite directions. Put state-dependent colour on **mutually exclusive arms** (`:class="cond ? 'a' : 'b'"`) and leave the property out of the static class. A variant chain also buys specificity: `dark:hover:bg-*` compiles to `:hover:is(.dark *)` and ties an unvariated `disabled:hover:*`, so a reset that must hold in both themes is spelled in both arms. Three occurrences in #2662; every one was green under `test:unit`, `check:tokens` and the ratchet, because all three read the class string, not the cascade. Only `getComputedStyle` off a live render — in **both** themes — can see it.
 
 ## Themes — both first-class
 
@@ -22,6 +23,7 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 - Compose `BaseButton`, `BaseInput`, `BaseSelect`, `BaseToggle`, `BaseTextarea`, `BaseBadge`, `BaseCard`, the modal shell (`ConfirmDialog`), `OverflowTabs`, the bounded data table, and the failed-state pair `LoadFailed` (failed fetch) / `InlineError` (failed verb). Never hand-roll a lookalike — identical pixels from a class string is still a defect.
 - BaseButton: 4 variants (primary/secondary/danger/ghost) × 2 sizes (md 13.5 pad 7×14 · sm 12.5 pad 4×10), radius 6px. Disabled = opacity .45. In-flight = 16px spinner + progressive label. Focus ring on all variants.
 - BaseInput/BaseSelect: field bg, border-strong, radius 6px, pad 8×11; focus = accent border + 3px ring; errors name the problem, the fix, and an example — never a bare red border.
+- BaseSelect: 2 variants — `field` (default, the recipe above) and `ghost` (#2662: borderless, transparent, content-width, 44px tall, hover tints the ground only). Use `ghost` where a select is a lightweight preference beside content rather than a field in a form; a form keeps `field`. Reach for the variant, never a hand-rolled select in chat chrome. `ghost` flips the chevron up while the picker is open via `:open` (#2662) — the app's chevron idiom, which selects were excluded from only because a native picker cannot report its state; `field` deliberately does not, that being a change to Settings surfaces #2662 does not own. The selector is `[&:open~svg]` — a GENERAL sibling, so the chevron must FOLLOW the select as a sibling; an element between the two is harmless. What kills it silently is wrapping the svg, or moving it above the select.
 - BaseTextarea: min-height 84px, `resize: vertical` only, mono variant for prompts/config, same focus/error as inputs.
 - BaseBadge: pill, 11.5/550; light token-100 bg + token-700 text; dark token-500/16% + token-300; one fact per badge.
 - BaseCard: surface bg, 1px border, radius 8px, padding 16, shadow-sm — the only surface recipe.
@@ -92,7 +94,7 @@ Consistency:
 
 Before requesting review, verify:
 
-- [ ] Zero raw palette classes or hexes — semantic tokens only (`npm run check:tokens` passes; baseline not grown)
+- [ ] Zero raw palette classes or hexes — semantic tokens only (`npm run check:tokens` passes; baseline not grown — enforced by `tests/unit/rawColorRatchet.spec.js` under `npm run test:unit`, #2605). A deliberate increase is re-frozen in its OWN commit with the growth named, never absorbed into a feature diff: `node src/frontend/scripts/scan-raw-colors.mjs src/frontend --baseline src/frontend/raw-color-baseline.json`
 - [ ] Every button/input/select/toggle/textarea/badge/card/modal/tab/table is a Base* primitive, not hand-rolled
 - [ ] Verified in light AND dark; dark meta text is gray-300/400, never gray-500
 - [ ] Spacing on the 4px grid; radii 6px controls / 8–10px surfaces; type within the six-size scale

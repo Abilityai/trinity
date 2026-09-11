@@ -771,6 +771,25 @@ agent_shared_files = Table(
     Column("last_downloaded_at", Text),
 )
 
+# #2582 / ent#548 — a Workspace viewer removes an agent-shared file from THEIR
+# list without revoking the share. `agent_shared_files` has no audience column,
+# so every rostered client already sees every active share of that agent; this
+# is the per-viewer preference layered over it.
+#
+# `agent_name` is load-bearing, not decoration: `agent_shared_files` is
+# registered CASCADE in `db/agent_cleanup.py`, so deleting an agent hard-deletes
+# its share rows WITHOUT going through the revoke sweeper — every dismissal
+# keyed on those ids would be orphaned forever. It is also what keeps the table
+# inside the cleanup parity guard rather than sidestepping it.
+portal_file_dismissals = Table(
+    "portal_file_dismissals",
+    metadata,
+    Column("client_email", Text, primary_key=True),
+    Column("file_id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("dismissed_at", Text),
+)
+
 system_settings = Table(
     "system_settings",
     metadata,

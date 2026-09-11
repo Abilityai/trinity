@@ -91,11 +91,18 @@ services:
       - PORTAL_CHAT_HOURLY_LIMIT=${PORTAL_CHAT_HOURLY_LIMIT:-300}  # ... per 3600s
       - PORTAL_UPLOAD_BURST_LIMIT=${PORTAL_UPLOAD_BURST_LIMIT:-20} # portal uploads per email per 60s
       - PORTAL_UPLOAD_HOURLY_LIMIT=${PORTAL_UPLOAD_HOURLY_LIMIT:-100}  # ... per 3600s
+      - PORTAL_FILE_BURST_LIMIT=${PORTAL_FILE_BURST_LIMIT:-20}     # portal file downloads per email per 60s
+      - PORTAL_FILE_HOURLY_LIMIT=${PORTAL_FILE_HOURLY_LIMIT:-100}  # ... per 3600s — the tier that actually bounds it
+      - PORTAL_FILE_DELETE_BURST_LIMIT=${PORTAL_FILE_DELETE_BURST_LIMIT:-60}  # deletes per email per 60s
       - PORTAL_TITLE_MODEL=${PORTAL_TITLE_MODEL:-claude-haiku-4-5-20251001}  # thread-title model
       - PORTAL_TITLE_TIMEOUT_SECONDS=${PORTAL_TITLE_TIMEOUT_SECONDS:-15}
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Must reach the container or the .env lever is inert in prod (the #1039 packaging class).
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.
+      # The refusal names this number, so it must reach the container or the
+      # operator is told to raise a lever that is inert (the #1039 class).
+      - CANVAS_MAX_PER_AGENT=${CANVAS_MAX_PER_AGENT:-100}        # canvases per agent
       # Skills library lifecycle automation (ent#236). The reconcile cap is named in the
       # refusal alarm's own remediation text, so it must be tunable from .env or the
       # operator is told to raise a lever that never reaches the container.
