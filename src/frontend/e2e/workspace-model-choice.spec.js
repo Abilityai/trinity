@@ -71,6 +71,21 @@ for (const width of [375, 768, 1280]) {
 
     const input = page.locator('textarea')
     await input.fill('A readable message for the agent')
+    // Every box below is compared against every other, so they must all come
+    // from ONE settled render. The picker is a native <select> whose width is
+    // its widest option label, and that label re-measures when the web font
+    // lands (~150 ms after paint on a cold profile): a box taken before that
+    // and a box taken after disagree by ~12 px, which is enough for a later
+    // read of Send to fall left of an earlier `send.x` and be mistaken for an
+    // icon button. Wait for the fonts, then for the picker to hold its width
+    // across two consecutive reads.
+    await page.evaluate(() => document.fonts.ready)
+    await expect.poll(async () => {
+      const a = await page.getByTestId('portal-model-picker').boundingBox()
+      await page.waitForTimeout(100)
+      const b = await page.getByTestId('portal-model-picker').boundingBox()
+      return a && b && a.width === b.width && a.x === b.x
+    }, { timeout: 5000 }).toBe(true)
     const field = await input.boundingBox()
     const formEl = input.locator('xpath=ancestor::form')
     const form = await formEl.boundingBox()
@@ -90,9 +105,12 @@ for (const width of [375, 768, 1280]) {
     expect(Math.abs((picker.y + picker.height / 2) - (send.y + send.height / 2))).toBeLessThanOrEqual(2)
     const buttons = await formEl.locator('button').all()
     expect(buttons.length).toBeGreaterThan(1)
+    const sendHandle = await sendEl.elementHandle()
     for (const button of buttons) {
+      // Send is skipped by IDENTITY, never by coordinate — a coordinate test
+      // is the same race as above wearing a different hat.
+      if (await button.evaluate((el, s) => el === s, sendHandle)) continue
       const box = await button.boundingBox()
-      if (box.x >= send.x) continue                       // Send itself
       expect(box.x + box.width, 'an icon button sits right of the picker').toBeLessThanOrEqual(picker.x)
     }
 

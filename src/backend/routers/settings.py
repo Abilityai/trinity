@@ -2733,6 +2733,23 @@ def _elevenlabs_settings_state() -> dict:
     }
 
 
+async def _elevenlabs_settings_state_with_capability() -> dict:
+    """The panel view PLUS whether the key can actually transcribe (#2695).
+
+    `key_configured` is presence; `stt_capability` is what the provider said
+    when asked — `capable` / `refused` (with the provider's status word in
+    `stt_detail`) / `unknown` (could not ask) / `unconfigured`. Kept apart so an
+    operator can tell a key that is set from a key that works, without reading
+    container logs. Bounded like the roster read: a slow provider answers
+    `unknown` now and the probe completes in the background.
+    """
+    from services import stt_capability_service
+    state = _elevenlabs_settings_state()
+    cap = await stt_capability_service.ensure_capability()
+    state.update(stt_capability_service.describe(cap))
+    return state
+
+
 @router.get("/elevenlabs")
 async def get_elevenlabs_settings(
     request: Request,
@@ -2744,7 +2761,7 @@ async def get_elevenlabs_settings(
     key is surfaced as `key_configured: bool` + `key_source` only — never echoed.
     """
     assert_admin(current_user)
-    return _elevenlabs_settings_state()
+    return await _elevenlabs_settings_state_with_capability()
 
 
 @router.put("/elevenlabs")
@@ -2783,6 +2800,11 @@ async def update_elevenlabs_settings(
         if not key:
             raise HTTPException(status_code=400, detail="api_key must not be empty (use clear instead)")
         settings_service.set_elevenlabs_api_key(key)
+        # #2695: a NEW key is a cache miss by construction (the verdict is keyed
+        # on the key's digest); re-saving the SAME key after fixing its
+        # permissions at the provider is the case that needs an explicit forget.
+        from services import stt_capability_service
+        stt_capability_service.invalidate(key)
         changes["api_key"] = "set"
     elif "api_key" in clear:
         settings_service.clear_elevenlabs_api_key()
@@ -2816,7 +2838,7 @@ async def update_elevenlabs_settings(
             },
         )
 
-    after = _elevenlabs_settings_state()
+    after = await _elevenlabs_settings_state_with_capability()
     return {"success": True, **after}
 
 
