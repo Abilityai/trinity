@@ -141,13 +141,18 @@ def client(ps, monkeypatch):
         "user": _key("user"),
         "system": _key("system"),
     }
-    monkeypatch.setattr(
-        database, "db",
-        SimpleNamespace(validate_mcp_api_key=lambda token, track_usage=True: keys.get(token)),
-    )
+    validations = []
+
+    def _validate(token, track_usage=True):
+        validations.append({"token": token, "track_usage": track_usage})
+        return keys.get(token)
+
+    monkeypatch.setattr(database, "db", SimpleNamespace(validate_mcp_api_key=_validate))
     app = FastAPI()
     app.include_router(router)
-    return TestClient(app)
+    test_client = TestClient(app)
+    test_client.validations = validations
+    return test_client
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +230,14 @@ def test_own_key_publishes_a_thin_trigger(client, managers):
         "ent#467 scopes by the names ON the payload — an event that names no "
         "agent is delivered fleet-wide"
     )
+
+
+def test_the_key_is_validated_without_amplifying_its_usage_counter(client, managers):
+    """The heartbeat's rule, for the same reason: a notice is not a use. With
+    `track_usage=True` a chatty pipeline would inflate the key's usage_count
+    and write to SQLite on every tick."""
+    client.post(ROUTE, json=BODY, headers={"Authorization": "Bearer own"})
+    assert client.validations == [{"token": "own", "track_usage": False}]
 
 
 def test_a_notice_never_carries_the_file_body(client, managers):
@@ -353,6 +366,34 @@ def test_a_notice_bumps_the_generation_so_every_worker_rereads(ps, monkeypatch):
     # A second read on B is warm again at the new generation.
     _run(ps.read_pipeline_steps(AGENT))
     assert len(reads) == 3
+
+
+def test_a_notice_during_a_read_is_not_stamped_onto_the_entry_it_invalidates(ps, monkeypatch):
+    """The generation is sampled BEFORE the read, not after.
+
+    Sampling after would stamp a notice that arrived mid-read onto the very
+    entry it invalidates — the read returns pre-notice data carrying the
+    post-notice generation, and the card sits stale for the full TTL with
+    nothing left to signal it. This is the one ordering the design depends on
+    and the one a reader would most plausibly 'tidy up'.
+    """
+    import fakeredis
+    shared = fakeredis.FakeStrictRedis()
+    monkeypatch.setattr(ps, "_get_redis", lambda: shared)
+    reads = []
+
+    async def fake_read(agent_name, started_at, roster):
+        reads.append(agent_name)
+        if len(reads) == 1:
+            ps.mark_changed(agent_name)      # the agent advanced WHILE we read
+        return _fake_steps()
+
+    monkeypatch.setattr(ps, "_read", fake_read)
+    _run(ps.read_pipeline_steps(AGENT))
+    _run(ps.read_pipeline_steps(AGENT))
+    assert len(reads) == 2, (
+        "the mid-read notice was stamped onto the entry as already-seen"
+    )
 
 
 def test_the_generation_is_per_agent(ps, monkeypatch):
