@@ -93,6 +93,13 @@ interface SkillInjectionResult {
 /**
  * Create skills management tools with the given client
  */
+// #2703 — the backend's per-skill delivery report, passed through verbatim.
+interface SkillDelivery {
+  status: "injected" | "partial" | "pending_start" | "in_progress" | "not_delivered";
+  reason?: string;
+  skills: Record<string, { status: string; error?: string }>;
+}
+
 export function createSkillsTools(
   client: TrinityClient,
   requireApiKey: boolean
@@ -220,8 +227,13 @@ export function createSkillsTools(
     assignSkillToAgent: {
       name: "assign_skill_to_agent",
       description:
-        "Assign a skill to an agent. " +
-        "The skill will be injected when the agent starts, or you can use sync_agent_skills to inject immediately. " +
+        "Assign a skill to an agent and deliver it. On a running agent the package is injected " +
+        "immediately; the response's `delivery` block says what happened per skill: " +
+        "`injected` (available now), `pending_start` (agent stopped — applies on next start), " +
+        "`in_progress` (still installing; the listing updates when it lands), or " +
+        "`not_delivered` with a `reason` (`injection_in_progress`, `agent_not_ready`, " +
+        "`docker_unavailable`, `injection_error`) — the assignment is kept either way and " +
+        "sync_agent_skills is the manual retry. " +
         "Skills teach agents specific behaviors defined in SKILL.md files.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to assign the skill to"),
@@ -234,10 +246,14 @@ export function createSkillsTools(
         const authContext = context?.session;
         const apiClient = getClient(authContext);
 
+        // #2703: `delivery` rides the backend body unchanged (three-surface
+        // sync, Invariant #13) — the tool never re-derives it.
         const result = await apiClient.request<{
           success: boolean;
           message: string;
-          skill_name: string;
+          skill_name?: string;
+          skill?: unknown;
+          delivery?: SkillDelivery | null;
         }>(
           "POST",
           `/api/agents/${encodeURIComponent(agent_name)}/skills/${encodeURIComponent(skill_name)}`
@@ -254,7 +270,9 @@ export function createSkillsTools(
       name: "set_agent_skills",
       description:
         "Set all skills for an agent (replaces existing assignments). " +
-        "Use this to configure multiple skills at once.",
+        "Use this to configure multiple skills at once. Added skills are delivered to a running " +
+        "agent and dropped skills are removed from it; `delivery` and `removal` in the response " +
+        "report each half honestly (see assign_skill_to_agent for the delivery vocabulary).",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent"),
         skills: z.array(z.string()).describe("List of skill names to assign"),
@@ -271,6 +289,8 @@ export function createSkillsTools(
           agent_name: string;
           skills_assigned: number;
           skills: string[];
+          delivery?: SkillDelivery | null;
+          removal?: unknown;
         }>(
           "PUT",
           `/api/agents/${encodeURIComponent(agent_name)}/skills`,

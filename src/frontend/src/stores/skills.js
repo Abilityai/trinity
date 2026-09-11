@@ -18,6 +18,14 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import api from '../api'
 
+// #2703 — a bulk PUT that delivers several skills fires ONE `agent_skills_changed`,
+// but a Library click storm fires many; consumers refetch once per burst.
+export const SKILLS_CHANGED_DEBOUNCE_MS = 300
+// #2703 — the server awaits delivery for up to 20 s (SKILL_DELIVERY_BUDGET_SECONDS)
+// before answering `in_progress`; the axios default is 30 s, so leave margin
+// for the Docker read + the response rather than racing the budget.
+const ASSIGN_TIMEOUT_MS = 45000
+
 export const useSkillsStore = defineStore('skills', () => {
   const library = ref([])              // SkillInfo[] — the synced library
   const libraryStatus = ref(null)      // {configured, url, branch, last_sync, commit_sha, skill_count}
@@ -37,6 +45,29 @@ export const useSkillsStore = defineStore('skills', () => {
   const lastInjectionAt = ref(null)
 
   const assignedNames = computed(() => new Set(assigned.value.map(s => s.skill_name)))
+
+  // #2703 — the delivery report of the LAST save: {status, reason?, skills:{...}}
+  // — see `utils/skillDelivery.js` for the wording. Kept beside
+  // `injectionResults` for the same reason that one is separate from
+  // `assigned`: a delivery describes one moment, not durable state.
+  const lastDelivery = ref(null)
+
+  // #2703 — per-agent "the listing changed" ticks, driven by the thin
+  // `agent_skills_changed` WS trigger. Consumers that own a `loadPlaybooks()`
+  // (ChatPanel, PlaybooksPanel, usePlaybookAutocomplete) watch their agent's
+  // entry and refetch through the access-controlled route; the payload carries
+  // no skill names (the #918 / ent#305 rule). Debounced per agent here so the
+  // consumers stay dumb.
+  const changedAt = ref({})
+  const _pendingTicks = new Map()
+  function noteSkillsChanged(name) {
+    if (!name) return
+    if (_pendingTicks.has(name)) clearTimeout(_pendingTicks.get(name))
+    _pendingTicks.set(name, setTimeout(() => {
+      _pendingTicks.delete(name)
+      changedAt.value = { ...changedAt.value, [name]: Date.now() }
+    }, SKILLS_CHANGED_DEBOUNCE_MS))
+  }
 
   /** Library entries that are assigned to this agent, joined with their contract. */
   const assignedSkills = computed(() =>
@@ -103,7 +134,11 @@ export const useSkillsStore = defineStore('skills', () => {
     saving.value = true
     error.value = null
     try {
-      await api.put(`/api/agents/${agentName.value}/skills`, { skills: names })
+      const { data: saved } = await api.put(
+        `/api/agents/${agentName.value}/skills`, { skills: names }, { timeout: ASSIGN_TIMEOUT_MS },
+      )
+      // #2703: the PUT now delivers; `null` means nothing was added.
+      lastDelivery.value = saved?.delivery ?? null
       const { data } = await api.get(`/api/agents/${agentName.value}/skills`)
       assigned.value = data || []
       return true
@@ -152,13 +187,15 @@ export const useSkillsStore = defineStore('skills', () => {
     libraryStatus.value = null
     injectionResults.value = {}
     lastInjectionAt.value = null
+    lastDelivery.value = null
     error.value = null
   }
 
   return {
     library, libraryStatus, assigned, agentName,
     loading, saving, injecting, error,
-    injectionResults, lastInjectionAt,
+    injectionResults, lastInjectionAt, lastDelivery,
+    changedAt, noteSkillsChanged,
     assignedNames, assignedSkills, emptyReason,
     setAgent, load, saveAssignments, inject, clear,
   }
