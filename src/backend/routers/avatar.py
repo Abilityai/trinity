@@ -56,7 +56,7 @@ _AVATAR_ERROR_HTTP = {
     "not_configured": (
         501,
         "Avatar generation isn't configured on this server. Ask an admin "
-        "to set GEMINI_API_KEY.",
+        "to add a Gemini key in Settings → Integrations.",
     ),
     "invalid_input": (400, "Avatar request was rejected by the image service."),
     "safety_filter": (

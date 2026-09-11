@@ -1,5 +1,8 @@
 /**
- * The Finish-setup card's usage-sharing section (ent#437).
+ * The usage-sharing ask (ent#437) — the Finish-setup card's section until
+ * ent#581 made it the `sharing` step of the first-run overlay
+ * (`steps/StepSharing.vue`). The copy and the per-browser helpers below are
+ * unchanged; the step's own rules are pinned at the bottom of this file.
  *
  * Four rules carry this surface, none visible to a structural check:
  *   1. Never before the flags arrive, never to a non-admin, never when consent
@@ -12,6 +15,8 @@
  *      an overridden URL, a receiver that answered 404.
  */
 import { describe, it, expect, beforeEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   isTelemetryConsentVisible,
   consentVariant,
@@ -179,5 +184,48 @@ describe('per-browser state', () => {
     expect(readWarmShown()).toBe(false)
     expect(persistSnooze()).toBe(false)
     expect(persistWarmShown()).toBe(false)
+  })
+})
+
+describe('the sharing step (ent#581)', () => {
+  const STEP = readFileSync(
+    fileURLToPath(new URL('../../src/components/onboarding/steps/StepSharing.vue', import.meta.url)),
+    'utf8'
+  )
+
+  it('speaks CONSENT_COPY, never a second copy of it', () => {
+    expect(STEP).toMatch(/import \{[^}]*CONSENT_COPY[^}]*\} from '\.\.\/telemetryConsent'/)
+    expect(STEP).toContain('CONSENT_COPY.shared.detail')
+    expect(STEP).toContain('CONSENT_COPY.shared.share')
+    expect(STEP).toContain('CONSENT_COPY.shared.dontAsk')
+  })
+
+  /*
+   * The warm re-ask is one shot per browser, and it exists precisely because a
+   * cold ask at first login converts badly. On the old card stack a hidden
+   * card still MOUNTED, so it had to watch real visibility (#2380 regression).
+   * The step mounts only while it is the one on screen, so mounting IS being
+   * seen — but it must still spend the ask only for the warm variant, and
+   * never for an ask that is already decided.
+   */
+  it('spends the warm ask only when the warm variant actually renders', () => {
+    const mounted = STEP.slice(STEP.indexOf('onMounted(() => {'))
+    const body = mounted.slice(0, mounted.indexOf('})'))
+    expect(body).toContain('persistWarmShown()')
+    expect(body).toContain("variant === 'warm'")
+    expect(body).toContain('!decided.value')
+  })
+
+  it('writes the server marker for both answers and leaves "not now" to the chassis Skip', () => {
+    expect(STEP).toContain('store.setConsent(true, 30)')
+    expect(STEP).toContain('store.dismissAsk()')
+    expect(STEP).not.toContain('persistSnooze')
+    // A failed verb has a visible home (contract p.18).
+    expect(STEP).toContain('<InlineError')
+  })
+
+  it('loads the payload preview on expand, never on mount', () => {
+    expect(STEP).toMatch(/@toggle="onPreviewToggle"/)
+    expect(STEP).not.toMatch(/onMounted\([^)]*store\.load/)
   })
 })

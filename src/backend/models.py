@@ -3673,6 +3673,23 @@ class ApiKeyTest(BaseModel):
     api_key: str
 
 
+class ResendKeyRequest(BaseModel):
+    """Body for PUT and POST …/test on /api/settings/api-keys/resend (ent#582).
+
+    ``from_address`` is the sender Resend must be willing to send from (a
+    verified domain). Omitted → the address currently in force (setting →
+    ``SMTP_FROM`` env) is kept and checked.
+    """
+    api_key: str
+    from_address: Optional[str] = None
+
+
+class SubscriptionTokenTest(BaseModel):
+    """Body for POST /api/subscriptions/test (ent#582) — a token to validate
+    BEFORE it is registered. Never persisted, never echoed."""
+    token: str
+
+
 class OpsSettingsUpdate(BaseModel):
     """Request body for updating ops settings."""
     settings: Dict[str, str]

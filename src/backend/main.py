@@ -24,7 +24,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, Q
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-from config import CORS_ORIGINS, VOICE_ENABLED, GEMINI_API_KEY
+from config import CORS_ORIGINS, VOICE_ENABLED
 from models import User
 from dependencies import get_current_user, scope_may_open_event_stream
 from services.docker_service import docker_client, list_all_agents_fast
@@ -1823,7 +1823,8 @@ async def get_version(current_user: User = Depends(get_current_user)):
     # exec-sliced by its own tests and must stay stdlib-only.
     install_source = _settings_service.get_install_source()
     return _build_version_payload(
-        VOICE_ENABLED and bool(GEMINI_API_KEY), edition, features, install_source
+        VOICE_ENABLED and bool(_settings_service.get_gemini_api_key()),
+        edition, features, install_source,
     )
 
 

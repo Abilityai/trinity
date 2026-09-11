@@ -26,7 +26,7 @@ from models import (
 )
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin
 from database import db
-from config import GEMINI_API_KEY, VOICE_ENABLED, DEFAULT_VOICE_NAME, GEMINI_VOICE_NAMES
+from config import VOICE_ENABLED, DEFAULT_VOICE_NAME, GEMINI_VOICE_NAMES
 from services import canvas_service
 from services.gemini_voice import voice_service, WORKSPACE_PANEL_INSTRUCTIONS
 from services.agent_auth import agent_httpx_client

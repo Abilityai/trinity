@@ -1,5 +1,9 @@
 /**
- * The first-run hardening guide's contract (#2380).
+ * The first-run hardening guide's contract (#2380) — since ent#581 the
+ * `secure` step of the first-run overlay (`steps/StepSecure.vue`). Its
+ * visibility now comes from the registry (`firstRunSteps.spec.js` pins the
+ * provenance, admin and flags-loaded terms there); this file keeps the copy,
+ * the stage logic, the store's fail-closed read and the step's structure.
  *
  * Three rules carry this surface, and none of them is visible to a structural
  * check:
@@ -61,7 +65,8 @@ import {
 } from '@/components/onboarding/hardeningGuide'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
-const GUIDE_SFC = read('../../src/components/onboarding/HardeningGuide.vue')
+const GUIDE_SFC = read('../../src/components/onboarding/steps/StepSecure.vue')
+const OVERLAY_SFC = read('../../src/components/onboarding/FirstRunOverlay.vue')
 const SETTINGS_SFC = read('../../src/views/Settings.vue')
 
 /**
@@ -162,11 +167,11 @@ describe('visibility', () => {
     // `authRoleGetterContract.spec.js` now pins the name repo-wide).
     const unverifiedAdmin = false // profileVerified && role === 'admin'
     expect(isHardeningGuideVisible({ ...marketplaceIp, isAdmin: unverifiedAdmin })).toBe(false)
-    expect(GUIDE_SFC).toContain('authStore.profileVerified')
-    expect(GUIDE_SFC).toMatch(/authStore\.role === 'admin'/)
-    expect(GUIDE_SFC).not.toMatch(/authStore\.userRole/)
-    // The gate lives in the pure module, not in Dashboard.vue, so it is testable.
-    expect(GUIDE_SFC).toMatch(/isAdmin:\s*authStore\.profileVerified/)
+    // ent#581: the admin term is built once, by the overlay's ctx, and the
+    // registry predicate reads it — so the same two-part gate is pinned there.
+    expect(OVERLAY_SFC).toMatch(/isAdmin:\s*auth\.profileVerified && auth\.role === 'admin'/)
+    expect(OVERLAY_SFC).not.toMatch(/userRole/)
+    expect(GUIDE_SFC).not.toMatch(/userRole/)
   })
 
   it('shows for a verified admin on a marketplace install', () => {
@@ -208,13 +213,13 @@ describe('visibility', () => {
     expect(HARDENING_GUIDE_DISMISSED_KEY).toBe('trinity_hardening_guide_dismissed')
   })
 
-  it('the component resolves dismissal against the stage on screen', () => {
-    expect(GUIDE_SFC).toMatch(/hardeningStage\(store\.installTlsPosture\)/)
-    expect(GUIDE_SFC).toContain('dismissed: dismissed.value[stage.value]')
-    expect(GUIDE_SFC).toContain("persistHardeningGuideDismissed(stage.value)")
-    // Step one's action cannot render once the domain exists — there is nothing
-    // left to collect in-app, and a button that leads nowhere is the defect.
-    expect(GUIDE_SFC).toMatch(/v-if="stage === 'address'"[\s\S]{0,600}Add a domain/)
+  it('the step derives its stage from the posture on screen', () => {
+    // ent#581: dismissal is the overlay's per-step Skip now; the step itself
+    // only picks which copy speaks.
+    expect(GUIDE_SFC).toMatch(/hardeningStage\(props\.ctx\.tlsPosture\)/)
+    // Step one's field cannot render once the domain exists — there is nothing
+    // left to collect in-app, and a control that leads nowhere is the defect.
+    expect(GUIDE_SFC).toMatch(/<form v-if="stage === 'address'"[\s\S]{0,900}Save domain/)
   })
 
   it('advances in-session on the save that configures the domain', () => {
@@ -414,8 +419,9 @@ describe('the two paths are complementary, not alternatives', () => {
     expect(GUIDE_SFC).toMatch(/Give it a real name/)
     expect(GUIDE_SFC).toMatch(/Serve it without exposing it/)
     expect(GUIDE_SFC).toMatch(/A record/)
-    // Deep-links at the field that actually writes `public_chat_url`.
-    expect(GUIDE_SFC).toContain("/settings?tab=general")
+    // Writes the field that actually drives the posture, in place — leaving
+    // the Dashboard would leave the setup sequence (ent#581).
+    expect(GUIDE_SFC).toContain("updateSetting('public_chat_url'")
   })
 
   it('offers a Cloudflare Tunnel, not a VPN (#2380, decided 2026-09-01)', () => {
@@ -442,15 +448,16 @@ describe('the two paths are complementary, not alternatives', () => {
     expect(prose).toMatch(/happens on the host rather than from this page/)
   })
 
-  it('keeps one action on the card face and the reasoning behind a disclosure', () => {
-    // The card is a first-login nudge on a droplet that is answering the public
-    // internet; it must be actionable at a glance, not two columns of prose.
+  it('keeps one action on the step face and the reasoning behind a disclosure', () => {
+    // The step answers a droplet that is on the public internet right now; it
+    // must be actionable at a glance, not two columns of prose.
     expect(GUIDE_SFC).toContain('<details')
-    expect(GUIDE_SFC).toContain('data-testid="hardening-guide-why"')
-    // Exactly one non-dismiss button, and it is the one collectable-in-app step.
-    expect(GUIDE_SFC).toMatch(/variant="primary"[\s\S]{0,200}Add a domain/)
+    expect(GUIDE_SFC).toContain('data-testid="first-run-secure-why"')
+    // Exactly one button, and it is the one collectable-in-app step. Secondary:
+    // the overlay footer's Continue is the view's one primary (contract p.11).
+    expect(GUIDE_SFC).toMatch(/variant="secondary"[\s\S]{0,200}Save domain/)
     const buttons = GUIDE_SFC.match(/<BaseButton/g) || []
-    expect(buttons.length, 'one action + one dismiss').toBe(2)
+    expect(buttons.length, 'one action; Skip belongs to the chassis').toBe(1)
     // No host command on this card. Saving the field is the whole step; a shell
     // instruction reappearing here means that stopped being true.
     expect(GUIDE_SFC).not.toMatch(/sudo /)
@@ -482,30 +489,27 @@ describe('the two paths are complementary, not alternatives', () => {
     expect(prose.toLowerCase()).not.toMatch(/\beither\b|\bor instead\b|\balternatively\b/)
   })
 
-  it('carries the documented test hooks and an aria-label on dismiss', () => {
-    expect(GUIDE_SFC).toContain('data-testid="hardening-guide"')
-    expect(GUIDE_SFC).toContain('data-testid="hardening-guide-dismiss"')
-    expect(GUIDE_SFC).toMatch(/aria-label="Dismiss the instance hardening guide"/)
+  it('carries the documented test hooks', () => {
+    expect(GUIDE_SFC).toContain('data-testid="first-run-step-secure"')
+    expect(GUIDE_SFC).toContain('data-testid="first-run-public-url"')
   })
 
-  it('composes the primitives instead of hand-rolling a card, badge, or button', () => {
-    // The two neighbouring onboarding cards hand-roll their shell and are
-    // pre-ratchet; this one must not copy them (design-system-contract §Primitives).
-    for (const p of ['BaseCard', 'BaseBadge', 'BaseButton']) {
+  it('composes the primitives instead of hand-rolling a field, badge, or button', () => {
+    for (const p of ['BaseInput', 'BaseBadge', 'BaseButton', 'InlineError']) {
       expect(GUIDE_SFC, `${p} must be composed`).toContain(`import ${p} from`)
     }
   })
 })
 
 describe('step one is finishable from the browser (#2380, on-demand TLS)', () => {
-  it('sends the operator to the settings field and nowhere else', () => {
+  it('writes the Public URL setting and nothing else', () => {
     // Saving the Public URL completes step one only because Caddy obtains the
     // certificate on demand, asking the backend whether the name is allowed.
     // Before that, saving reconfigured nothing: the domain served a certificate
     // error, this card advanced to step two on the strength of the operator's
     // own input, and the address section that would have explained the fix was
     // `v-if`'d away with it.
-    expect(GUIDE_SFC).toContain('/settings?tab=general')
+    expect(GUIDE_SFC).toContain("updateSetting('public_chat_url'")
     expect(GUIDE_SFC).not.toMatch(/sudo /)
     expect(GUIDE_SFC).not.toMatch(/set-domain\.sh/)
   })

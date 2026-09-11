@@ -1,5 +1,8 @@
 /**
- * Decidable logic behind `HardeningGuide.vue` (#2380).
+ * Decidable logic behind the first-run hardening guide (#2380) — since ent#581
+ * the `secure` step of the first-run overlay (`steps/StepSecure.vue`), whose
+ * visibility is decided by the registry in `firstRunSteps.js`. The posture copy
+ * below is what that step speaks, unchanged.
  *
  * Split out of the SFC because `vitest.config.js` runs `environment: 'node'`
  * with no component-mount harness, so a decision left inside a component is one

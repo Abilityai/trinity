@@ -12,9 +12,8 @@ Nothing leaves the box until an admin turns sharing on. When they do, Trinity se
 
 | Surface | Where | Who | What it does |
 |---|---|---|---|
-| **Finish setup card** (ent#437) | Dashboard, `components/onboarding/FinishSetupCard.vue` | verified admin | Section 2 is the consent ask: **Share anonymous usage** / **Not now** (14-day per-browser snooze) / **Don't ask again** (server marker). Section 1 is the #2381 sign-in-email nudge, moved in from `AdminEmailNudge.vue`. |
+| **First-run overlay, `sharing` step** (ent#581; was the ent#437 Finish setup card) | Dashboard overlay, `components/onboarding/steps/StepSharing.vue` | verified admin | The consent ask as one step of the setup sequence: **Share anonymous usage** / **Don't ask again** (both write the server marker); the overlay's Skip replaces **Not now**. The sign-in-email nudge is the sibling `email` step. |
 | **Usage sharing panel** (ent#12) | Settings → General, `components/settings/TelemetrySharingPanel.vue` | admin | The reversible toggle, the backfill window choice, the exact payload preview, the share id and its rule, **Recent sends**. |
-| **Wizard ask** (ent#12) | `components/OnboardingWizard.vue` | first-run | Value-framed one-line ask; only renders on a zero-agent install, which seeding makes rare — a secondary surface since ent#437. |
 | **Feature flags** | `GET /api/settings/feature-flags` | any authenticated user | Four booleans: `telemetry_sharing_enabled` / `_hard_disabled` / `_dismissed` / `_first_value`. The card decides from these alone. |
 
 ## Backend flow

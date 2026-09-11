@@ -52,7 +52,7 @@ A per-agent toggle that prevents the agent from modifying source files (`*.py`, 
 
 ## Is it safe to expose a fresh Trinity install to the internet before setup?
 
-No. Until the admin account is created, the first-run setup form is reachable without authentication — whoever completes it first owns the instance. This window is deliberately an operator responsibility: deploy behind a VPN, tunnel, or firewall, complete setup, and only then consider opening public access. If you set `ADMIN_PASSWORD` in `.env` before first boot, the account is created automatically and no open setup window exists. See [Setup](../getting-started/setup.md).
+No. Until the admin account is created, the first-run setup form is reachable without authentication — whoever completes it first owns the instance. This window is deliberately an operator responsibility: deploy behind a VPN, tunnel, or firewall, complete setup, and only then consider opening public access. If you set `ADMIN_PASSWORD` in `.env` before first boot, the account is created automatically and no open setup window exists. A marketplace one-click droplet is in this state on purpose — you create its admin account in the browser, no terminal needed — so open it and create the account as soon as the droplet is up, or supply a password when creating it. See [Setup](../getting-started/setup.md).
 
 ## Is a webhook URL secure enough on its own?
 

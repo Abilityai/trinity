@@ -507,9 +507,29 @@ fi
 # boot into a state the operator can't log into (#443). Unattended (#39), we
 # generate a strong one and surface it in the final summary so an agent-run
 # install never hard-stops on a TTY.
+#
+# One deliberate exception (ent#580): ADMIN_PASSWORD_SOURCE=browser, which only
+# a marketplace first boot sets. There the blank IS the point — no admin is
+# provisioned, and the first person to open the instance creates it at /setup,
+# no terminal involved. The marker is persisted to `.env` because this script is
+# also the documented UPDATE path (`start.sh --hosted`, often --unattended): a
+# later run that had forgotten why the password is blank would generate one, and
+# the backend re-syncs `.env`'s password over the one the operator chose in the
+# browser on the very next boot. A real ADMIN_PASSWORD in `.env` still wins over
+# the marker, which is also the recovery path for a forgotten browser password.
 GENERATED_ADMIN_PASSWORD=""
-if ! grep -qE '^ADMIN_PASSWORD=.+' .env 2>/dev/null; then
-    if [ "$UNATTENDED" = "1" ]; then
+ADMIN_IN_BROWSER=0
+ensure_admin_password() {
+    grep -qE '^ADMIN_PASSWORD=.+' .env 2>/dev/null && return 0
+    local src="${ADMIN_PASSWORD_SOURCE:-$(env_value ADMIN_PASSWORD_SOURCE)}"
+    if [ "$src" = "browser" ]; then
+        # Explicitly blank, not absent: the prod/hosted compose files render an
+        # empty ADMIN_PASSWORD (`${ADMIN_PASSWORD?}`) but still refuse an unset one.
+        grep -qE '^ADMIN_PASSWORD=$' .env 2>/dev/null || set_env_key ADMIN_PASSWORD ""
+        [ "$(env_value ADMIN_PASSWORD_SOURCE)" = "browser" ] || set_env_key ADMIN_PASSWORD_SOURCE browser
+        ADMIN_IN_BROWSER=1
+        echo "ADMIN_PASSWORD left blank (ADMIN_PASSWORD_SOURCE=browser): the first visitor creates the admin at /setup."
+    elif [ "$UNATTENDED" = "1" ]; then
         GENERATED_ADMIN_PASSWORD=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 24)
         if grep -qE '^ADMIN_PASSWORD=$' .env 2>/dev/null; then
             sed -i.bak "s|^ADMIN_PASSWORD=$|ADMIN_PASSWORD=${GENERATED_ADMIN_PASSWORD}|" .env && rm -f .env.bak
@@ -529,7 +549,8 @@ ERROR: ADMIN_PASSWORD is blank in .env.
 EOF
         exit 1
     fi
-fi
+}
+ensure_admin_password
 
 # A model API key isn't required to BOOT (the stack starts fine), but agents
 # can't run without one. Warn now and surface it in the summary rather than let
@@ -1061,6 +1082,11 @@ if [ -n "$GENERATED_ADMIN_PASSWORD" ]; then
     echo ""
     echo "         admin / ${GENERATED_ADMIN_PASSWORD}"
     echo ""
+elif [ "$ADMIN_IN_BROWSER" = "1" ]; then
+    # ent#580: there is no password to show. The browser is the only way in.
+    echo "     No admin account exists yet: the first person to open it creates one"
+    echo "     (email + password). Do that now — until then, anyone who can reach"
+    echo "     this instance can. Already done? Sign in with that password."
 else
     # #2381: this used to say "then complete the first-run setup wizard". The
     # wizard only appears on an install with no admin account; setting

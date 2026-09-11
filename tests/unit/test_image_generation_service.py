@@ -85,6 +85,9 @@ def _load_service(api_key=""):
         )
         service_mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(service_mod)
+        # ent#582: the key resolves per call through `_gemini_key` (Settings →
+        # env), not a frozen config value — pin it to this test's key.
+        service_mod._gemini_key = lambda: api_key
         return service_mod
     finally:
         # Restore original sys.modules state

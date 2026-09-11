@@ -638,6 +638,13 @@ no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry
   (`telemetry_sharing_enabled` / `_hard_disabled` / `_dismissed` /
   `_first_value`) and calls the admin status route only when it will render;
   the payload preview loads lazily on expand (`?preview=0` skips the builder).
+  **Amended (ent#581):** the card is gone; the ask is the `sharing` step of the
+  first-run overlay (`components/onboarding/steps/StepSharing.vue`), same server
+  terms and the same `CONSENT_COPY`. **Not now** is the overlay's per-step Skip
+  (an unexpired legacy snooze still reads as skipped). The warm copy renders when
+  the step renders after the first autonomous success, and is spent on render;
+  it does **not** reopen an overlay the operator already closed — that would be
+  the "separate dialog that appears afterwards" ent#581 exists to remove.
   Steady-state cost on a Dashboard load: zero telemetry queries.
 - **FR-2 — Share identity is separate from the install identity**:
   `installation_id` (§43.1) travels with the operator's email and company in the

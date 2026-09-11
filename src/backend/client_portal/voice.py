@@ -68,10 +68,11 @@ def realtime_voice_capability(is_platform: bool) -> PortalRealtimeVoice:
     """
     if not is_platform:
         return PortalRealtimeVoice(available=False, reason=None)
-    from config import GEMINI_API_KEY, VOICE_ENABLED
+    from config import VOICE_ENABLED
+    from services.settings_service import get_gemini_api_key  # Settings → env (ent#582)
     if not VOICE_ENABLED:
         return PortalRealtimeVoice(available=False, reason=REASON_DISABLED)
-    if not GEMINI_API_KEY:
+    if not get_gemini_api_key():
         return PortalRealtimeVoice(available=False, reason=REASON_NO_KEY)
     return PortalRealtimeVoice(available=True, reason=None)
 

@@ -182,6 +182,12 @@
                The panel fetches the gated enterprise endpoint itself. -->
           <ActivationFunnelPanel v-if="activeTab === 'activation'" />
 
+          <!-- ent#581 — Re-run setup: reopens the first-run overlay the same
+               way `?onboarding=1` does, so a skipped step is recoverable. -->
+          <div v-if="activeTab === 'general'" class="mb-6">
+            <FirstRunRerunPanel />
+          </div>
+
           <!-- ent#12 — Tier-2 opt-in usage sharing. OSS-core, default-off,
                reversible. Admin-only (General tab), visible in every edition. -->
           <div v-if="activeTab === 'general'" class="mb-6">
@@ -893,6 +899,11 @@
                     with <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">repo</code> scope.
                   </p>
                 </div>
+
+                <!-- ent#582: the email-provider and Gemini keys — the same field
+                     the first-run flow uses, so a key set there is managed here. -->
+                <PlatformKeyField provider="resend" class="mt-6" />
+                <PlatformKeyField provider="gemini" class="mt-6" />
               </div>
             </div>
           </div>
@@ -2139,12 +2150,14 @@ import SsoPanel from '../components/settings/SsoPanel.vue'
 import CredentialVaultPanel from '../components/settings/CredentialVaultPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
+import FirstRunRerunPanel from '../components/settings/FirstRunRerunPanel.vue'
 import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
 import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
+import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const router = useRouter()

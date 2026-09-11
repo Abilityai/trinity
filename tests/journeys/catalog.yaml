@@ -47,6 +47,16 @@ journeys:
     built: false
     owner: operator
     invariants: []
+    # ent#580: on the digitalocean lane a cold install has two shapes, and J01
+    # holds only if it holds on both — the harness (#2340) must drive each. Until
+    # it exists, the image and installer halves are pinned by
+    # tests/unit/test_ent580_marketplace_admin_claim.py and
+    # tests/unit/test_2281_firstboot_password.py.
+    variants:
+      - name: claimable
+        promise: "I open my new one-click droplet in a browser and create the admin account there, without ever opening a terminal."
+      - name: pre-provisioned
+        promise: "I gave a password when I created the droplet, so it has an admin from the start and nobody else can claim it."
 
   - id: J02
     issue: 2341

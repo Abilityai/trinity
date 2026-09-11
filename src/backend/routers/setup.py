@@ -18,13 +18,23 @@ after the first success, so the exposure is limited to the pre-setup window only
 
 #2381 narrows that window to where ent#49's reasoning actually holds. ent#49
 priced the tradeoff on the premise *there is no admin yet, so there is nothing
-to hijack* — true for a blank-`ADMIN_PASSWORD` dev install, false for every
-install that boots with `ADMIN_PASSWORD` set (mandatory in prod compose, always
-present after `start.sh`), where `_ensure_admin_user` has already created a real
-admin. This endpoint now refuses whenever a usable admin account exists, so it
-provisions the first account and can never overwrite an existing one. The
-wizard therefore still renders for installs that genuinely have no way in, and
-disappears for installs where it had nothing left to do.
+to hijack* — true for a blank-`ADMIN_PASSWORD` install, false for every install
+that boots with `ADMIN_PASSWORD` set, where `_ensure_admin_user` has already
+created a real admin. This endpoint now refuses whenever a usable admin account
+exists, so it provisions the first account and can never overwrite an existing
+one. The wizard therefore still renders for installs that genuinely have no way
+in, and disappears for installs where it had nothing left to do.
+
+trinity-enterprise#580 makes that first case a product path, not a leftover: a
+marketplace one-click image boots with `ADMIN_PASSWORD` deliberately blank
+(`ADMIN_PASSWORD_SOURCE=browser`, set only by the image's first boot), so the
+first person to open the instance creates the admin here — no terminal. #2381's
+invariant is untouched: this still never renders over an existing admin; the
+marketplace path simply no longer pre-provisions one. The residual — the window
+between instance creation and that first visit, in which anyone who finds the
+address can claim it — was accepted on 2026-09-10 as the operator's
+responsibility (the instance is empty then, and a squatted one can be destroyed).
+See `docs/DEPLOYMENT.md` → Security Recommendations.
 """
 import logging
 import re
@@ -121,9 +131,8 @@ async def set_admin_password(
             status_code=403,
             detail=(
                 "This instance already has an administrator account. "
-                "Sign in with the admin password from your deployment "
-                "configuration; this endpoint only provisions the very first "
-                "account."
+                "Sign in with its password; this endpoint only provisions the "
+                "very first account."
             ),
         )
 

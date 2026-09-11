@@ -20,7 +20,7 @@ Yes. Ability.ai offers a cloud-hosted option where you sign up, copy an MCP conn
 
 ## What happens the first time I open Trinity in my browser?
 
-If you didn't set `ADMIN_PASSWORD` in `.env` before first boot, you see a one-page "Create your admin account" form: enter your admin email (required — it becomes your sign-in identity), a password of 12+ characters with mixed case, a number, and a special character, and optionally your company name. The form works exactly once and disables itself permanently after the admin account is created. If you did set `ADMIN_PASSWORD`, the account is created automatically and no setup screen appears. Note that until setup completes, the form is reachable without authentication — keep an internet-facing server behind a tunnel, VPN, or firewall until you've finished. See [Setup](../getting-started/setup.md).
+If you didn't set `ADMIN_PASSWORD` in `.env` before first boot, you see a one-page "Create your admin account" form: enter your admin email (required — it becomes your sign-in identity), a password of 12+ characters with mixed case, a number, and a special character, and optionally your company name. The form works exactly once and disables itself permanently after the admin account is created. If you did set `ADMIN_PASSWORD`, the account is created automatically and no setup screen appears. A marketplace one-click droplet shows this form on first visit — that is how you create its admin, with no terminal — unless you supplied a password when creating it. Note that until setup completes, the form is reachable without authentication — keep an internet-facing server behind a tunnel, VPN, or firewall until you've finished. See [Setup](../getting-started/setup.md).
 
 ## How do I log in to Trinity?
 
@@ -32,11 +32,11 @@ The email whitelist controls which email addresses can log in via the passwordle
 
 ## Why can't my teammate log in with their email?
 
-Two common reasons: their address isn't on the email whitelist, or no email service is configured so verification codes can't be delivered. Ask your admin to add the address under Settings > Email Whitelist, and check that `EMAIL_PROVIDER` in `.env` is set to a real provider. Without email service configuration, only admin password login is available. See [Setup](../getting-started/setup.md).
+Two common reasons: their address isn't on the email whitelist, or no email service is configured so verification codes can't be delivered. Ask your admin to add the address under Settings > Email Whitelist, and to add an email provider key under Settings > Integrations (or set `EMAIL_PROVIDER` in `.env` to a real provider). Without email service configuration, only admin password login is available. See [Platform Keys](../credentials/platform-keys.md#email-provider-resend).
 
 ## Why didn't I receive my 6-digit login code?
 
-The default email provider is `console`, which is meant for development — it prints the email (including the code) to the backend logs instead of sending it. For real delivery, set `EMAIL_PROVIDER` in `.env` to `smtp`, `sendgrid`, or `resend` and fill in the matching credentials. Also confirm your address is on the whitelist, since codes only go to allowed emails. See [Setup](../getting-started/setup.md).
+The default email provider is `console`, which is meant for development — it prints the email (including the code) to the backend logs instead of sending it. For real delivery, add a Resend key and a sender address under Settings > Integrations — no `.env` edit needed ([Platform Keys](../credentials/platform-keys.md#email-provider-resend)) — or set `EMAIL_PROVIDER` in `.env` to `smtp`, `sendgrid`, or `resend` and fill in the matching credentials. Also confirm your address is on the whitelist, since codes only go to allowed emails. See [Setup](../getting-started/setup.md).
 
 ## Why does nothing load when I open http://localhost?
 

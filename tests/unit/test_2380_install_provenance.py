@@ -1,7 +1,8 @@
 """#2380 — install provenance + the first-run hardening guide gate.
 
-A marketplace image boots into a public droplet with a default password and
-plain HTTP, so it needs a one-time hardening prompt. Every *managed* instance
+A marketplace image boots into a public droplet on a bare IP with no domain (and,
+since ent#580, no admin until the first browser visit), so it needs a one-time
+hardening prompt. Every *managed* instance
 serves the same plain HTTP over a Tailscale CGNAT address — encrypted transport
 that is indistinguishable, from inside the container, from an unhardened
 droplet. So the gate cannot key on observed TLS state without firing forever on

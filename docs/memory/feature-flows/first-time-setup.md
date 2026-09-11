@@ -11,11 +11,20 @@ First-time setup wizard for admin password and API key configuration. On an inst
 > `setup_completed` flag and the wizard is the only door in.
 >
 > It does **not** render on an install that boots with `ADMIN_PASSWORD` set
-> (mandatory in `docker-compose.prod.yml`, always present after
-> `scripts/deploy/start.sh`, baked into hosted/marketplace images).
+> (always present after `scripts/deploy/start.sh`, or given in user-data on a
+> marketplace image).
 > `_ensure_admin_user` provisions the admin during startup, and
 > `_mark_setup_completed_if_provisioned` then writes `setup_completed=true`, so
 > the operator logs straight in with the password from their deployment config.
+>
+> **Marketplace claim (trinity-enterprise#580, 2026-09-11).** A one-click
+> marketplace image boots with `ADMIN_PASSWORD` deliberately blank
+> (`ADMIN_PASSWORD_SOURCE=browser`, written by first boot and persisted by
+> `start.sh`), so the no-admin branch above is its normal first run: the first
+> visitor lands on `/setup` and creates the admin — no terminal, no password in
+> the MOTD. With a user-data password the image takes the provisioned branch
+> instead. No backend code changed for this; the accepted creation-to-first-visit
+> risk is in `docs/DEPLOYMENT.md` → Security Recommendations.
 >
 > Two consequences for the flows documented below:
 >

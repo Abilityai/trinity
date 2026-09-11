@@ -278,11 +278,6 @@
       "raw_gray": 109,
       "hardcoded_colors": 0
     },
-    "src/frontend/src/components/OnboardingWizard.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 39,
-      "hardcoded_colors": 0
-    },
     "src/frontend/src/components/OverflowTabs.vue": {
       "raw_nongray": 0,
       "raw_gray": 22,
@@ -571,21 +566,6 @@
     "src/frontend/src/components/onboarding/ActivationChecklist.vue": {
       "raw_nongray": 0,
       "raw_gray": 16,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/onboarding/FinishSetupCard.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 44,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/onboarding/FrontDeskPanel.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 22,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/onboarding/HardeningGuide.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 28,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/operator/NotificationsPanel.vue": {

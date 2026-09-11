@@ -211,6 +211,14 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
+    // Bind a sign-in email to the current account (#82 / #2381), then re-read
+    // the profile so `userEmail` — and every predicate reading it — updates in
+    // place. Throws on failure; the caller owns the InlineError (ent#581).
+    async setOwnEmail(email) {
+      await axios.put('/api/users/me/email', { email }, { headers: this.authHeader })
+      await this.fetchUserProfile()
+    },
+
     // Login with username/password (for admin login)
     async loginWithCredentials(username, password) {
       try {

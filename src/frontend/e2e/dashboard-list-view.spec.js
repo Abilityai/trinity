@@ -18,8 +18,8 @@ import { FIXTURE_LABEL, pickLabelFixture, readLabel, writeLabel } from './helper
  * toggle is guarded (grid parity) and whose Autonomy/ReadOnly toggles are
  * `invisible` by design.
  *
- * The auth storageState pre-seeds `trinity_onboarding_dismissed_v1`, so the
- * onboarding wizard never auto-opens under these tests; the explicit
+ * The auth storageState pre-seeds `trinity_first_run_closed`, so the
+ * first-run overlay (ent#581) never auto-opens under these tests; the explicit
  * `?onboarding=1` param bypasses that key (covered below).
  */
 
@@ -74,9 +74,10 @@ test.describe('dashboard list view (trinity-enterprise#260)', () => {
     // `view` is stripped; `onboarding` survives the query-preserving redirect
     // AND the Dashboard's param strip (it spreads the rest of the query).
     await expect(page).toHaveURL(/\?onboarding=1$/, { timeout: 10000 })
-    // Explicit ?onboarding=1 bypasses the pre-seeded dismissal key.
-    await expect(page.locator('#onboarding-title')).toBeVisible({ timeout: 15000 })
-    // Behind the wizard, the List pane mounted.
+    // Explicit ?onboarding=1 bypasses the pre-seeded close key.
+    await expect(page.getByTestId('first-run-overlay')).toBeVisible({ timeout: 15000 })
+    await expect(page.locator('#first-run-title')).toBeVisible()
+    // Behind the overlay, the List pane mounted.
     await expect(page.getByPlaceholder('Search agents...')).toBeVisible()
   })
 

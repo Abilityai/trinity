@@ -142,9 +142,12 @@ upgrade prompt, and must not read as a breakage warning.
 
 ## The card
 
-`components/onboarding/HardeningGuide.vue`, in the Dashboard onboarding stack
-above `FrontDeskPanel` and `ActivationChecklist` — a security-posture prompt
-outranks a getting-started nudge.
+**Since ent#581 this is the `secure` step of the first-run overlay**
+(`components/onboarding/steps/StepSecure.vue`; registry in
+`components/onboarding/firstRunSteps.js`, first in the fixed step order). The
+Public URL field sits in the step, dismissal is the overlay's per-step Skip, and
+`https-domain` reads the step as done. The history below describes the card it
+replaced (`HardeningGuide.vue`, deleted); the posture copy is unchanged.
 
 Renders only when: flags loaded **and** `marketplace_install` **and** not
 dismissed **and** posture ≠ `https-domain`. The flags-loaded term prevents a

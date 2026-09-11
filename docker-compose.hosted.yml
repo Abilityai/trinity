@@ -106,7 +106,11 @@ services:
       - "8000:8000"
     environment:
       - SECRET_KEY=${SECRET_KEY}
-      - "ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}"
+      # `?`, not `:?` (ent#580): an UNSET password still refuses to render, but an
+      # explicitly blank one is the marketplace browser-claim path — no admin at
+      # boot, the first visitor creates it at /setup. start.sh writes that blank
+      # only under ADMIN_PASSWORD_SOURCE=browser and refuses/generates otherwise.
+      - "ADMIN_PASSWORD=${ADMIN_PASSWORD?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}"
       # #2381: present in docker-compose.yml and .env.example but missing here,
       # so setting ADMIN_USERNAME never reached a production container. The
       # backend then provisioned `admin` while the operator believed otherwise —
@@ -762,8 +766,10 @@ services:
       - TRINITY_API_URL=http://backend:8000
       - TRINITY_USERNAME=${TRINITY_USERNAME:-admin}
       # MCP server uses ADMIN_PASSWORD for legacy non-API-key auth path.
-      # Fail-loud at compose render rather than silently use a well-known fallback (issue #692).
-      - "TRINITY_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env}"
+      # Fail-loud rather than silently use a well-known fallback (issue #692): unset
+      # refuses to render; blank (the ent#580 claim path) is refused by the server
+      # itself unless MCP_REQUIRE_API_KEY is true — the default, needing no password.
+      - "TRINITY_PASSWORD=${ADMIN_PASSWORD?ADMIN_PASSWORD must be set in .env}"
       - MCP_REQUIRE_API_KEY=${MCP_REQUIRE_API_KEY:-true}
       # #946 pull-pilot routing gate — see docker-compose.yml. Without this the
       # flag cannot be enabled in prod (the #1056/#1039 packaging-gap class).
