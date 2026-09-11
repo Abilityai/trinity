@@ -31,8 +31,9 @@ const NOT_BARE_RE = /^(?:\.{1,2}(?:\/|$)|\/|@\/|~\/|#|virtual:|\0|data:|https?:)
 const ASSET_RE = /\.(?:css|scss|sass|less|styl|svg|png|jpe?g|gif|webp|avif|ico|json|wasm|woff2?|ttf|otf|eot|mp3|mp4|webm)(?:\?.*)?$/i
 // `import(` that is a call, not `import.meta` (`.` ≠ `(`) and not `foo.import(`.
 const DYNAMIC_IMPORT_RE = /(?<![.\w$])import\s*\(\s*([^)]*?)\s*\)/g
-// The closing tag may carry whitespace before its `>` (`</script >` is valid HTML).
-const SCRIPT_BLOCK_RE = /<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi
+// The closing tag tolerates anything before its `>` (`</script >`, `</script foo>`
+// are both closing tags to a browser), the same shape as the opening tag.
+const SCRIPT_BLOCK_RE = /<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/gi
 
 /**
  * Blank comments, keep strings — a tokenizer, not a regex. `'image/*'`, `'**\/*.vue'`
