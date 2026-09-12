@@ -2432,7 +2432,7 @@ const voiceHeaderText = computed(() => voiceHeaderLine({
   toolName: voice.toolName.value,
   muted: voice.muted.value,
   error: voice.error.value,
-  backgroundTasks: voice.backgroundTasks.value.length,
+  backgroundTasks: voice.backgroundTasks.value,
 }))
 // The thread, with each voice call's rows folded into one block.
 const threadItems = computed(() => groupVoiceBlocks(messages.value))
@@ -2447,6 +2447,20 @@ watch([voiceCallActive, () => voice.voiceSessionId.value], ([on, sid]) => {
   emit('voice-call', { active: on, agentName: props.agent?.name, voiceSessionId: on ? sid : null })
 })
 watch(() => voice.panelVersion.value, (v) => emit('voice-panel', v))
+// ent#551: the thread is on screen for the whole call, so nothing that lands in
+// it during the call is unread — a spoken turn, or a background task's reply.
+// Without this the sidebar badge counted up while the person was talking to the
+// agent. The read cursor is advanced directly (no list refresh, no title-settle
+// cycle); the next chat-state fetch then reads zero. Debounced: turns land in
+// bursts.
+let voiceReadTimer = null
+watch([() => voice.transcriptEntries.value.length, () => voice.panelVersion.value], () => {
+  if (!voiceCallActive.value || !currentSessionId.value) return
+  clearTimeout(voiceReadTimer)
+  voiceReadTimer = setTimeout(() => {
+    if (voiceCallActive.value && currentSessionId.value) void store.markChatRead('thread', currentSessionId.value)
+  }, 800)
+})
 // The call ended — by End, by the cap, by the provider — and the bridge has
 // confirmed (or given up on) the write: reload the thread so the persisted
 // block replaces nothing local, and say why when it did not end by choice.

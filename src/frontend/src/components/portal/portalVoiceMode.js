@@ -133,11 +133,27 @@ export function applyTaskFrame(tasks = [], frame = {}) {
   return tasks.filter((t) => t.taskId !== id)
 }
 
-// The badge / header words for work in flight. Takes the list or a count.
+// The badge / header words for work in flight: WHAT is running, in one line,
+// not how many things are (the operator's first-run note — "a task" tells the
+// person nothing). Given the list, one task is its own label; several are the
+// count followed by their labels. Given only a count, the count.
+export const TASK_LABEL_MAX = 48
+export const TASKS_LINE_MAX = 96
+
+function clip(text, max) {
+  const t = String(text || '').trim()
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t
+}
+
 export function backgroundTasksLabel(tasks = []) {
-  const n = Array.isArray(tasks) ? tasks.length : Math.max(0, Number(tasks) || 0)
-  if (n === 0) return ''
-  return n === 1 ? '1 task running' : `${n} tasks running`
+  if (!Array.isArray(tasks)) {
+    const n = Math.max(0, Number(tasks) || 0)
+    return n === 0 ? '' : n === 1 ? '1 task running' : `${n} tasks running`
+  }
+  if (tasks.length === 0) return ''
+  if (tasks.length === 1) return clip(tasks[0].label, TASK_LABEL_MAX) || '1 task running'
+  const labels = tasks.map((t) => clip(t.label, TASK_LABEL_MAX)).filter(Boolean).join(' · ')
+  return clip(`${tasks.length} tasks · ${labels}`, TASKS_LINE_MAX)
 }
 
 // A typed row written by a task the agent ran during a voice call carries the

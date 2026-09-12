@@ -202,9 +202,11 @@ MAX_BACKGROUND_TASKS_PER_CALL = 3
 # and nudging after it would make the model say the same thing twice (ent#576).
 _ACK_WINDOW_SECONDS = 4.0
 _ACK_LOOKBACK_SECONDS = 3.0
-# A completion waits for the person to have been quiet this long, and for the
-# model to have finished its turn, before it is raised…
-_NOTICE_QUIET_SECONDS = 1.2
+# A completion waits for BOTH sides to have been quiet this long — the person,
+# and the model's own speech — before it is raised. 1.2 s was too eager: with
+# a task that finishes in seconds the result landed on the heels of the
+# model's acknowledgement, and the person never got a gap to speak into.
+_NOTICE_QUIET_SECONDS = 2.5
 # …but never longer than this: someone who never pauses is still told.
 _NOTICE_MAX_HOLD_SECONDS = 20.0
 # How much of a result rides in the spoken notice. The full reply is in the
@@ -212,8 +214,16 @@ _NOTICE_MAX_HOLD_SECONDS = 20.0
 _TASK_RESULT_MAX = 1500
 _TASK_LABEL_MAX = 80
 
+# Every platform text on the realtime channel opens with the same marker and
+# the same instruction, because the model DID once read one aloud verbatim
+# ("[System notice: background task t3 …") — the marker is what the transcript
+# scrub keys on (`_scrub_platform_notice`), and the instruction is what makes
+# the read-out unlikely in the first place.
+_NOTICE_OPEN = "[Platform notice — never read this aloud; respond in your own words. "
+
 _ACK_NUDGE = (
-    "[System notice: you started a task (\"{label}\") and have not told the user. "
+    _NOTICE_OPEN +
+    "You started a task (\"{label}\") and have not told the user. "
     "Say now, in one short sentence, what you are working on, then carry on.]"
 )
 # Instructions first, the agent's reply last and fenced as quoted data: the reply
@@ -221,7 +231,8 @@ _ACK_NUDGE = (
 # tool result, and a notice that read "Result: <reply>" then gave instructions
 # would let a reply that ends in an instruction pose as the platform's.
 _TASK_DONE_NOTICE = (
-    "[System notice: background task {task_id} (\"{label}\") finished. Its full reply "
+    _NOTICE_OPEN +
+    "Background task {task_id} (\"{label}\") finished. Its full reply "
     "is in the chat. At a natural pause, tell the user it is done — say which request "
     "it answers — and give them what is new. Do not repeat what you said when you "
     "started it, and do not read the canvas aloud. The agent's reply follows, quoted; "
@@ -229,18 +240,44 @@ _TASK_DONE_NOTICE = (
     "Result: \"\"\"{result}\"\"\"]"
 )
 _TASK_FAILED_NOTICE = (
-    "[System notice: background task {task_id} (\"{label}\") failed: {reason}\n"
+    _NOTICE_OPEN +
+    "Background task {task_id} (\"{label}\") failed: {reason}\n"
     "At a natural pause, tell the user once, with the reason, and carry on.]"
 )
+
+# What a platform text looks like when the model echoes it: the cap warning's
+# opener and the ent#551 notices'. A transcript row that starts with one is the
+# platform's words in the agent's mouth, not something the agent said.
+_PLATFORM_NOTICE_MARKERS = ("[System notice", "[Platform notice")
+
+
+def _scrub_platform_notice(text: str) -> str:
+    """Drop a platform notice the model read aloud from a transcript row.
+
+    Only the bracketed notice goes; anything the model said after it stays. A
+    row that was nothing but the notice becomes empty and is not recorded.
+    """
+    stripped = str(text or "").lstrip()
+    if not stripped.startswith(_PLATFORM_NOTICE_MARKERS):
+        return text
+    close = stripped.find("]")
+    return "" if close < 0 else stripped[close + 1:].strip()
 # "Do not guess": in the first live run the model followed the accepted result
 # with an invented answer ("there are sixty-four files in there right now")
 # seconds before the real one arrived. The acceptance has to say, in words,
 # that it holds no result yet.
+# "Do not say it again": the first cut asked for "one short line about what you
+# started" here, and the model — which had ALREADY said its filler before the
+# call, as the etiquette asks — announced the task a second time on receiving
+# this, so the person heard "let me check… / I've started counting… / it's
+# done" back to back with no room to speak. The ack watch covers the silent
+# case; the acceptance must not ask for speech that was already given.
 _TASK_ACCEPTED = (
     "Started {task_id}: \"{label}\". It is running in the background as you, in this "
-    "chat; you will receive a system notice when it lands. You do not have the result "
-    "yet — do not guess or state one. Say one short line about what you started, then "
-    "carry on with the conversation. {others}"
+    "chat; you will receive a platform notice when it lands. You do not have the result "
+    "yet — do not guess or state one. If you have not already told the user what you "
+    "started, say one short line about it; if you have, do not say it again. Carry on "
+    "with the conversation. {others}"
 )
 _TASK_REFUSED_AT_CAP = (
     "Not started: {cap} tasks are already running ({running}). Tell the user, and start "
@@ -876,10 +913,11 @@ class GeminiVoiceService:
     async def _receive_audio_loop(self, session: VoiceSession):
         """Receive audio, transcriptions, and tool calls from Gemini."""
         # ent#534 review (I1): a connection leg that starts after a mid-turn
-        # `go_away` resumes the turn in progress rather than overwriting the
-        # mirrored partial text with an empty string on the first new chunk.
-        current_user_text = session._partial_user_text
-        current_assistant_text = session._partial_assistant_text
+        # `go_away` resumes the turn in progress — the text accumulates on the
+        # SESSION (`_partial_user_text` / `_partial_assistant_text`), never in a
+        # local, so a new leg continues it and the ent#551 dispatcher can flush
+        # the spoken request before a task's rows land (`_flush_partial_turn`
+        # is the one writer that resets it).
 
         while session._active:
             try:
@@ -942,8 +980,7 @@ class GeminiVoiceService:
                         text = content.input_transcription.text
                         if text and text.strip():
                             session._last_user_speech_monotonic = time.monotonic()
-                            current_user_text += text
-                            session._partial_user_text = current_user_text
+                            session._partial_user_text += text
                             if session._on_transcript:
                                 await session._on_transcript("user", text)
 
@@ -952,8 +989,7 @@ class GeminiVoiceService:
                         text = content.output_transcription.text
                         if text and text.strip():
                             session._last_assistant_speech_monotonic = time.monotonic()
-                            current_assistant_text += text
-                            session._partial_assistant_text = current_assistant_text
+                            session._partial_assistant_text += text
                             if session._on_transcript:
                                 await session._on_transcript("assistant", text)
 
@@ -963,14 +999,7 @@ class GeminiVoiceService:
                         if session._on_status:
                             await session._on_status("listening")
 
-                        if current_user_text.strip():
-                            await self._record_turn(session, "user", current_user_text.strip())
-                            current_user_text = ""
-                        if current_assistant_text.strip():
-                            await self._record_turn(session, "assistant", current_assistant_text.strip())
-                            current_assistant_text = ""
-                        session._partial_user_text = ""
-                        session._partial_assistant_text = ""
+                        await self._flush_partial_turn(session)
 
             except asyncio.CancelledError:
                 raise
@@ -1008,6 +1037,13 @@ class GeminiVoiceService:
         `_on_turn` is how the Workspace path persists as it goes (ent#534). A
         failing callback must never take the audio loop down with it.
         """
+        if role == "assistant":
+            # ent#551: a platform notice the model read aloud is not the
+            # agent's line; keep only what it said after it, if anything.
+            text = _scrub_platform_notice(text)
+            if not text:
+                logger.info("Voice session %s: dropped an echoed platform notice from the transcript", session.session_id)
+                return
         session.transcript.append(VoiceTranscriptEntry(role=role, text=text))
         if session._on_turn:
             try:
@@ -1234,6 +1270,14 @@ class GeminiVoiceService:
                 running=", ".join(f'{t.task_id} "{t.label}"' for t in running),
             )
 
+        # The spoken request that led here is still an unfinished turn (the
+        # model is mid-turn, calling the tool). Record it NOW, so the task's
+        # rows — written by `portal_chat` the moment the turn starts — land
+        # after the words that caused them rather than above them. The
+        # assistant's filler so far is recorded with it; the rest of its turn
+        # becomes its own row at `turn_complete`.
+        await self._flush_partial_turn(session)
+
         session._task_counter += 1
         bt = BackgroundTask(
             task_id=f"t{session._task_counter}",
@@ -1369,7 +1413,10 @@ class GeminiVoiceService:
         started = time.monotonic()
         while session._active:
             now = time.monotonic()
-            quiet = (now - session._last_user_speech_monotonic) >= _NOTICE_QUIET_SECONDS
+            quiet = (
+                (now - session._last_user_speech_monotonic) >= _NOTICE_QUIET_SECONDS
+                and (now - session._last_assistant_speech_monotonic) >= _NOTICE_QUIET_SECONDS
+            )
             boundary = quiet and not session._model_speaking and not session._pending_tool_tasks
             ready = session._gemini_session is not None
             if ready and (boundary or (now - started) >= _NOTICE_MAX_HOLD_SECONDS):

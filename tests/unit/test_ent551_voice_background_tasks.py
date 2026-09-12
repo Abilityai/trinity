@@ -102,7 +102,7 @@ class TestDispatchReturnsImmediately:
                 assert time.monotonic() - t0 < 0.5
                 # The acceptance carries the id and what was started.
                 assert spoken.startswith('Started t1: "how many PRs are open?"')
-                assert "system notice" in spoken
+                assert "platform notice" in spoken
                 assert "t1" in session._background_tasks
                 # …and the turn is really running in the thread, as the agent.
                 release.set()
@@ -215,6 +215,49 @@ class TestConcurrencyIsBounded:
         # real one. The acceptance must say it holds no result.
         gv = _voice_module()
         assert "do not guess or state one" in gv._TASK_ACCEPTED
+
+    def test_the_acceptance_does_not_ask_for_a_second_announcement(self):
+        # Second live run: "Let me check the files… / I've started a process to
+        # count those files… / That file count is ready" back to back, because
+        # the acceptance asked for "one short line about what you started" from
+        # a model that had already said its filler. The ack watch covers the
+        # silent case; the acceptance must not ask for speech already given.
+        gv = _voice_module()
+        assert "if you have, do not say it again" in gv._TASK_ACCEPTED
+        assert "Say one short line about what you started, then" not in gv._TASK_ACCEPTED
+
+    def test_the_spoken_request_is_recorded_before_the_tasks_rows(self):
+        """Second live run: the task's ask row sat ABOVE the spoken request
+        that caused it, because spoken rows persist at `turn_complete` and the
+        task's rows at dispatch. The dispatcher now flushes the turn in
+        progress first."""
+        gv = _voice_module()
+        session = _session(gv)
+        session._partial_user_text = "count the files please"
+        session._partial_assistant_text = "let me count those"
+        order = []
+
+        async def _on_turn(role, text): order.append(("turn", role, text))
+        session._on_turn = _on_turn
+
+        async def _chat(*_a, **kw):
+            order.append(("task", kw.get("voice_call_id")))
+            return {"response": "ten"}
+
+        async def _drive():
+            with patch("client_portal.service.portal_chat", _chat), patch.object(gv, "_ACK_WINDOW_SECONDS", 60):
+                await svc._dispatch_task_in_chat(session, "count the files")
+                await asyncio.gather(*[b.task for b in session._background_tasks.values()])
+                await _settle()
+
+        svc = _svc(gv)
+        asyncio.run(_drive())
+        assert order[:3] == [
+            ("turn", "user", "count the files please"),
+            ("turn", "assistant", "let me count those"),
+            ("task", "vs_call"),
+        ]
+        assert session._partial_user_text == "" and session._partial_assistant_text == ""
 
     def test_the_acceptance_names_what_else_is_running(self):
         # "Is that done yet?" is answerable from what the model was told.
@@ -557,6 +600,77 @@ class TestTheCallEndingLosesNothing:
         assert "source=" not in user_src and "source=" not in reply_write
         assert portal._voice_attribution(None) == {}
         assert portal._voice_attribution("vs_call") == {"voice_call_id": "vs_call"}
+
+
+# ---------------------------------------------------------------------------
+# A platform notice the model reads aloud is not the agent's line
+# ---------------------------------------------------------------------------
+class TestAnEchoedNoticeIsNotTranscribed:
+    """Second live run: the assistant row at 10:45:54 was the raw notice —
+    `[System notice: background task t3 … finished…` — read aloud verbatim as
+    the person hung up. The speech cannot be unsaid; the transcript can refuse
+    to record the platform's words as the agent's."""
+
+    def test_every_platform_text_opens_with_the_marker_and_the_instruction(self):
+        gv = _voice_module()
+        for text in (gv._ACK_NUDGE, gv._TASK_DONE_NOTICE, gv._TASK_FAILED_NOTICE):
+            assert text.startswith(gv._NOTICE_OPEN)
+            assert "never read this aloud" in text
+        assert gv._CAP_WARNING_TEXT.startswith(gv._PLATFORM_NOTICE_MARKERS)
+
+    def test_the_scrub_drops_the_notice_and_keeps_what_followed(self):
+        gv = _voice_module()
+        assert gv._scrub_platform_notice("[Platform notice — x. Result: \"\"\"y\"\"\"]") == ""
+        assert gv._scrub_platform_notice("[System notice: wrap up.] Okay, we have to stop soon.") == "Okay, we have to stop soon."
+        assert gv._scrub_platform_notice("  [Platform notice — unterminated") == ""
+        assert gv._scrub_platform_notice("There are ten files.") == "There are ten files."
+
+    def test_record_turn_drops_a_notice_only_assistant_row_and_keeps_a_users_words(self):
+        gv = _voice_module()
+        session = _session(gv)
+        seen = []
+
+        async def _on_turn(role, text): seen.append((role, text))
+        session._on_turn = _on_turn
+        svc = _svc(gv)
+        asyncio.run(svc._record_turn(session, "assistant", gv._TASK_DONE_NOTICE.format(task_id="t3", label="x", result="r")))
+        asyncio.run(svc._record_turn(session, "assistant", "[System notice: wrap up.] We have to stop soon."))
+        # A person quoting the marker is still the person.
+        asyncio.run(svc._record_turn(session, "user", "[System notice: is that what it said?"))
+        assert seen == [("assistant", "We have to stop soon."), ("user", "[System notice: is that what it said?")]
+        assert [e.text for e in session.transcript] == ["We have to stop soon.", "[System notice: is that what it said?"]
+
+
+class TestACompletionWaitsForBothSidesToBeQuiet:
+    def test_the_models_own_speech_counts_as_noise(self):
+        # Second live run: with a task finishing in seconds the result landed
+        # on the heels of the model's acknowledgement and the person never got
+        # a gap. The quiet window is measured against the assistant's last
+        # speech too, and is long enough to speak into.
+        gv = _voice_module()
+        assert gv._NOTICE_QUIET_SECONDS >= 2.0
+        src = inspect.getsource(gv.GeminiVoiceService._deliver_task_notice)
+        assert "_last_assistant_speech_monotonic" in src and "_last_user_speech_monotonic" in src
+
+    def test_it_waits_while_the_model_just_spoke(self):
+        gv = _voice_module()
+        session = _session(gv)
+        session._gemini_session = _Live()
+        svc = _svc(gv)
+
+        async def _drive():
+            with patch("client_portal.service.portal_chat", AsyncMock(return_value={"response": "r"})), \
+                 patch.object(gv, "_NOTICE_QUIET_SECONDS", 0.5), \
+                 patch.object(gv, "_ACK_WINDOW_SECONDS", 60):
+                session._last_assistant_speech_monotonic = time.monotonic()   # it is finishing a sentence
+                await svc._dispatch_task_in_chat(session, "x")
+                await asyncio.gather(*[b.task for b in session._background_tasks.values()])
+                await asyncio.sleep(0.2)
+                assert session._gemini_session.send_realtime_input.await_count == 0
+                await asyncio.sleep(0.7)
+                assert session._gemini_session.send_realtime_input.await_count == 1
+
+        asyncio.run(_drive())
 
 
 # ---------------------------------------------------------------------------

@@ -642,19 +642,32 @@ describe('ent#551 — background tasks', () => {
     expect(applyTaskFrame([{ taskId: 't1', label: '' }], {})).toEqual([{ taskId: 't1', label: '' }])
   })
 
-  it('the badge words take a list or a count and say nothing for zero', () => {
+  it('the badge says WHAT is running, in one line; a bare count only when that is all it has', () => {
     expect(backgroundTasksLabel([])).toBe('')
     expect(backgroundTasksLabel(0)).toBe('')
-    expect(backgroundTasksLabel([{ taskId: 't1' }])).toBe('1 task running')
+    // One task: its own one-liner — "a task" told the person nothing.
+    expect(backgroundTasksLabel([{ taskId: 't1', label: 'Count files in home directory' }])).toBe('Count files in home directory')
+    expect(backgroundTasksLabel([{ taskId: 't1', label: '' }])).toBe('1 task running')
+    // Several: the count, then the labels.
+    expect(backgroundTasksLabel([{ taskId: 't1', label: 'Count files' }, { taskId: 't2', label: 'Write the audit note' }]))
+      .toBe('2 tasks · Count files · Write the audit note')
+    // Long labels are clipped, and the whole line is bounded.
+    const long = 'x'.repeat(200)
+    expect(backgroundTasksLabel([{ taskId: 't1', label: long }]).length).toBeLessThanOrEqual(48)
+    expect(backgroundTasksLabel([{ taskId: 't1', label: long }, { taskId: 't2', label: long }, { taskId: 't3', label: long }]).length)
+      .toBeLessThanOrEqual(96)
+    // A count alone.
+    expect(backgroundTasksLabel(1)).toBe('1 task running')
     expect(backgroundTasksLabel(2)).toBe('2 tasks running')
   })
 
   it('the header line carries the running count and never drops the state', () => {
-    expect(voiceHeaderLine({ status: 'listening', backgroundTasks: 1 })).toBe('Listening · 1 task running')
+    const one = [{ taskId: 't1', label: 'Counting files' }]
+    expect(voiceHeaderLine({ status: 'listening', backgroundTasks: one })).toBe('Listening · Counting files')
     expect(voiceHeaderLine({ status: 'speaking', backgroundTasks: 2 })).toBe('Speaking · 2 tasks running')
-    expect(voiceHeaderLine({ status: 'listening', muted: true, backgroundTasks: 1 })).toBe('Muted · 1 task running')
-    expect(voiceHeaderLine({ status: 'tool_calling', toolName: 'show_markdown', backgroundTasks: 1 }))
-      .toBe('Working: show markdown · 1 task running')
+    expect(voiceHeaderLine({ status: 'listening', muted: true, backgroundTasks: one })).toBe('Muted · Counting files')
+    expect(voiceHeaderLine({ status: 'tool_calling', toolName: 'show_markdown', backgroundTasks: one }))
+      .toBe('Working: show markdown · Counting files')
     // Nothing running: the line is exactly what it was before ent#551.
     expect(voiceHeaderLine({ status: 'listening' })).toBe('Listening')
     // An error still wins the whole line.
@@ -689,7 +702,12 @@ describe('ent#551 — background tasks', () => {
     expect(orb).toContain('data-testid="voice-background-tasks"')
     expect(orb).toContain('backgroundTasksLabel(voice.backgroundTasks.value)')
     const conv = read('../../src/components/portal/PortalConversation.vue')
-    expect(conv).toContain('backgroundTasks: voice.backgroundTasks.value.length')
+    expect(conv).toContain('backgroundTasks: voice.backgroundTasks.value,')
+    // While the call is on, what lands in the thread is read, not unread: the
+    // read cursor advances on spoken turns and task landings (no list refresh).
+    const marker = conv.split("watch([() => voice.transcriptEntries.value.length, () => voice.panelVersion.value]")[1] || ''
+    expect(marker).toContain("store.markChatRead('thread', currentSessionId.value)")
+    expect(marker.slice(0, 700)).not.toContain("emit('sessions-changed'")
     expect(conv).toContain('data-testid="portal-voice-task-caption"')
     expect(conv).toContain('voiceTaskCaption(item.message)')
   })

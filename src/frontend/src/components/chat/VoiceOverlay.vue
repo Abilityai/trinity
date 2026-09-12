@@ -47,7 +47,7 @@
       >
         <div
           v-if="voice.hasBackgroundTasks?.value"
-          class="absolute top-14 left-1/2 -translate-x-1/2 z-10 px-3 py-1 rounded-full text-xs font-medium tracking-widest uppercase bg-status-info-500/15 border border-status-info-400/40 text-status-info-200"
+          class="absolute top-14 left-1/2 -translate-x-1/2 z-10 max-w-[85%] truncate px-3 py-1 rounded-full text-xs font-medium bg-status-info-500/15 border border-status-info-400/40 text-status-info-200"
           :title="voice.backgroundTasks.value.map((t) => t.label).join(' · ')"
           data-testid="voice-background-tasks"
         >

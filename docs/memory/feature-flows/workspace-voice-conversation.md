@@ -483,17 +483,20 @@ seams had to learn what a call's own turn is: the live-call guard
 could not run a single task — and the delta cursor
 (`get_platform_rows_since_last_reply`) skips a reply that carries one, so a task
 landing mid-call cannot hide the call's first half from the next typed turn. When the task
-finishes (or fails, with its reason) the platform injects a system notice into
-the live call at a **natural boundary** — the model not mid-turn, the person
-quiet for 1.2 s, no other tool call pending; held at most 20 s — and the agent
-brings it up, naming which request it answers. At most **3** tasks run at once;
-at the cap the agent says so rather than queueing silently. If the model does
-not say what it started within 4 s of dispatch (a filler just before the call
-counts), the platform nudges it — the acknowledgement is structural, not a hope.
-Ending the call cancels nothing: a task still running completes and lands in
-the chat. The orb shows work in flight as a persistent "N tasks running" badge
-(the `task` frame), distinct from the amber per-call badge, and the canvas
-column refetches when a task lands.
+finishes (or fails, with its reason) the platform injects a notice into the
+live call at a **natural boundary** — the model not mid-turn, both sides quiet
+for 2.5 s, no other tool call pending; held at most 20 s — and the agent brings
+it up, naming which request it answers. The agent says what it started **once**
+(the acceptance asks for a line only if none was given), and a notice the model
+happens to read aloud is scrubbed from the transcript. At most **3** tasks run
+at once; at the cap the agent says so rather than queueing silently. If the
+model does not say what it started within 4 s of dispatch (a filler just before
+the call counts), the platform nudges it — the acknowledgement is structural,
+not a hope. Ending the call cancels nothing: a task still running completes and
+lands in the chat. The orb shows work in flight as a persistent badge naming
+the task (the `task` frame), distinct from the amber per-call badge; the canvas
+column refetches when a task lands; and the thread stays read while the call is
+on, so the sidebar never badges the conversation the person is in.
 
 The model is told **once** how to speak around tools, for the whole cycle
 (`spoken_etiquette_instruction`, built from the session's manifest): announce a
