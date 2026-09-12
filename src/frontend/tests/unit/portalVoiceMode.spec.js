@@ -44,8 +44,6 @@ import {
   isMuteHotkey,
   leaveCallCopy,
   taskItemLabel,
-  escapeCoolingDownAfterCall,
-  ESCAPE_COOLDOWN_AFTER_CALL_MS,
   applyTaskFrame,
   backgroundTasksLabel,
   voiceTaskCaption,
@@ -845,24 +843,5 @@ describe('background tasks are separate items, queued behind one another', () =>
     expect(taskItemLabel({ label: 'Research OpenAI', status: 'running' })).toBe('Research OpenAI')
     expect(taskItemLabel({ label: '' })).toBe('task')
     expect(taskItemLabel({ label: 'x'.repeat(100), status: 'queued' }).length).toBeLessThanOrEqual(48 + ' · queued'.length)
-  })
-})
-
-// ---- ent#551 QA — Escape right after a call does not cancel the task the call left running ----
-describe('Escape cools down after a call ends', () => {
-  it('the rule: within the window Escape is not a cancel; before any call, or after the window, it is', () => {
-    expect(escapeCoolingDownAfterCall({ callEndedAt: 0, now: 10_000 })).toBe(false)
-    expect(escapeCoolingDownAfterCall({ callEndedAt: 10_000, now: 10_000 + 3000 })).toBe(true)
-    expect(escapeCoolingDownAfterCall({ callEndedAt: 10_000, now: 10_000 + ESCAPE_COOLDOWN_AFTER_CALL_MS })).toBe(false)
-    expect(ESCAPE_COOLDOWN_AFTER_CALL_MS).toBeGreaterThanOrEqual(3000)
-  })
-  it('the conversation stamps the call end and lists the cooldown as an Escape owner', () => {
-    expect(CODE).toMatch(/watch\(voiceCallActive, async \(on, was\) => \{\s*if \(!was \|\| on\) return\s*voiceEndedAt\.value = Date\.now\(\)\s*escapeCooldown\.value = true/)
-    // The ref clears through the RULE, after the window.
-    expect(CODE).toContain('escapeCooldown.value = escapeCoolingDownAfterCall({ callEndedAt: voiceEndedAt.value })')
-    // …and is on the Escape rule's overlay list as a plain ref (the turnCancel
-    // guard parses that list and requires every entry to be a defined ref).
-    const esc = CODE.slice(CODE.indexOf('function onEscapeKeydown(event)'), CODE.indexOf('async function cancelTurn()'))
-    expect(esc).toMatch(/overlays: \[typeaheadOpen\.value, pickerOpen\.value, listening\.value, escapeCooldown\.value\]/)
   })
 })

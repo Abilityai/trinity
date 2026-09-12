@@ -253,20 +253,6 @@ export function voiceCallLabelFromTurns(turns = []) {
 
 // ---- Escape right after a call --------------------------------------------------
 
-// For a few seconds after a call ends, Escape does not cancel a turn. When the
-// call ends, the thread reattaches to any task the call left running, and
-// Escape on that surface means "stop the turn" — so the second press of the
-// key that just ended the call (habit, or "did that take?") cancelled the task
-// the person had just asked for. Twice in the eighth QA run, 3 s after End.
-// The Stop button stays live: a click is deliberate in a way a repeated key
-// is not.
-export const ESCAPE_COOLDOWN_AFTER_CALL_MS = 5000
-
-export function escapeCoolingDownAfterCall({ callEndedAt = 0, now = Date.now() } = {}) {
-  if (!callEndedAt) return false
-  return now - callEndedAt < ESCAPE_COOLDOWN_AFTER_CALL_MS
-}
-
 // ---- The mute hotkey ----------------------------------------------------------
 
 // M toggles the mic while a call is on. Plain M only — a modifier means some
