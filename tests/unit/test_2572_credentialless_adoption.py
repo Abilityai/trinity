@@ -948,6 +948,39 @@ class TestTriggerA2KeyDeletion:
         assert _audit_rows("subscription_auto_adopt") == []
 
     @pytest.mark.parametrize("route", ["dedicated", "catch_all"])
+    async def test_a_non_admin_cannot_reach_the_sweep(self, env, settings_router, route):
+        """The sweep GRANTS a credential, so it must stay human-admin-only
+        (Invariant #8's grant-vs-use line). It adds no gate of its own — it
+        inherits each route's existing `assert_admin`, which since #2323 is an
+        allowlist that rejects agent and connector principals in the gate
+        itself. This asserts the inheritance actually holds on BOTH routes."""
+        from fastapi import HTTPException
+
+        _seed_agent("scout")
+        _claude(env, "scout")
+        _make_subscription(env, "eugene-max")
+        _set_instance_key()
+
+        non_admin = _Admin(username="bob", role="user")
+
+        with pytest.raises(HTTPException) as exc:
+            if route == "dedicated":
+                await settings_router.delete_anthropic_key(
+                    request=_http_request("/api/settings/api-keys/anthropic"),
+                    current_user=non_admin,
+                )
+            else:
+                await settings_router.delete_setting(
+                    key="anthropic_api_key_encrypted",
+                    request=_http_request("/api/settings/anthropic_api_key_encrypted"),
+                    current_user=non_admin,
+                )
+
+        assert exc.value.status_code == 403
+        assert env.docker_calls == []          # the sweep never started
+        assert env.db.get_agent_subscription_id("scout") is None
+
+    @pytest.mark.parametrize("route", ["dedicated", "catch_all"])
     async def test_deleting_the_key_still_succeeds_when_the_sweep_raises(
         self, env, settings_router, monkeypatch, route
     ):
