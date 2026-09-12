@@ -400,6 +400,54 @@ def agent_container_runtimes() -> Optional[Dict[str, str]]:
         return None
 
 
+def agent_container_runtime_labels() -> Optional[Dict[str, Optional[str]]]:
+    """Every Trinity agent container's RAW ``trinity.agent-runtime`` label, in
+    ONE Docker round trip (#2572).
+
+    Returns ``{agent_name: label_or_None}``, or ``None`` when Docker could not
+    be asked — the same tri-state, keying and ``sparse=True`` cost bound as
+    :func:`agent_container_runtimes`, and the same trap: under ``sparse`` the
+    label must come from ``attrs["Labels"]`` because docker-py's
+    ``container.labels`` reads ``attrs["Config"]["Labels"]`` and **raises**.
+
+    The ONE difference from :func:`agent_container_runtimes` is the whole
+    reason this exists: that function resolves a missing label to
+    ``"claude-code"``, which is right for a UI affordance and **wrong** for
+    deciding whether to hand an agent a Claude subscription. ``trinity-system``
+    carries no ``trinity.agent-runtime`` label at all (see
+    ``system_agent_service._create_system_agent``'s label set), so a consumer
+    that must be label-STRICT — "adopt only on positive evidence of a Claude
+    runtime" (#1187 decision 7) — needs the raw value with absence preserved.
+    A name absent from the mapping means *this agent has no container*, which
+    is again distinct from both.
+    """
+    if not docker_client:
+        return None
+    try:
+        containers = docker_client.containers.list(
+            all=True,
+            filters={"label": "trinity.platform=agent"},   # server-side; unaffected by sparse
+            sparse=True,
+        )
+        labels_by_agent: Dict[str, Optional[str]] = {}
+        for container in containers:
+            raw = (container.attrs.get("Names") or [""])[0] or ""
+            name = raw.lstrip("/").removeprefix("agent-")
+            if not name:
+                continue
+            labels = container.attrs.get("Labels") or {}
+            if not isinstance(labels, dict):
+                labels = {}
+            labels_by_agent[name] = labels.get("trinity.agent-runtime")
+        return labels_by_agent
+    except Exception as e:  # noqa: BLE001 — unreadable Docker is a valid answer here
+        _warn_throttled(
+            "agent_container_runtime_labels",
+            "Failed to read agent container runtime labels from Docker: %s", e,
+        )
+        return None
+
+
 def agent_container_state(name: str) -> Optional[str]:
     """One agent's coarse state: ``"running"``/``"stopped"``/``"missing"``, or
     ``None`` when Docker could not be asked.
