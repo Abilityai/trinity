@@ -314,8 +314,10 @@ class TestCompletionReentersTheCall:
         assert 't1 ("the deck you asked for") finished' in said[0]
         assert "twelve slides, done" in said[0]
         assert "natural pause" in said[0] and "which request it answers" in said[0]
-        # ent#576, written into the notice: once, and not the canvas aloud.
-        assert "Do not repeat" in said[0] and "read the canvas aloud" in said[0]
+        # ent#576, written into the notice: once, short, and the canvas is
+        # pointed at (after drawing) rather than read.
+        assert "Do not repeat" in said[0] and "one or two sentences" in said[0]
+        assert "point at it rather than reading it" in said[0]
 
     def test_a_failure_is_raised_with_its_reason_and_the_surface_told(self):
         gv = _voice_module()
@@ -603,6 +605,126 @@ class TestTheCallEndingLosesNothing:
 
 
 # ---------------------------------------------------------------------------
+# The acceptance is context, not a turn (the structural fix for "said twice")
+# ---------------------------------------------------------------------------
+class TestTheAcceptanceIsNotATurn:
+    """Third live run: "Let me count the files for you." → task → "I'm checking
+    on that now. Anything else you're curious about while we wait?" — a second
+    line after the filler, no matter how the acceptance was worded, because a
+    blocking call's result IS a turn and the model answers it. The Live API's
+    own shape: declare the function NON_BLOCKING and return the acceptance
+    SILENT. Verified live: one line before the call, nothing after.
+    """
+
+    def test_a_workspace_session_declares_run_task_non_blocking(self):
+        gv = _voice_module()
+        t = gv.genai_types                      # the real SDK, or the shared stub
+        cfg = _svc(gv)._build_live_config(_session(gv, tool_manifest=frozenset({gv.RUN_TASK})))
+        [decl] = [d for tool in cfg.tools for d in tool.function_declarations]
+        assert decl.behavior == t.Behavior.NON_BLOCKING
+
+    def test_a_thread_less_session_keeps_the_blocking_declaration(self):
+        # VoIP / legacy Agent Detail: the result IS the answer and must be spoken.
+        gv = _voice_module()
+        t = gv.genai_types
+        session = _session(gv, workspace_mode=False, portal_session_id=None, client_email=None,
+                           tool_manifest=frozenset({gv.RUN_TASK}))
+        cfg = _svc(gv)._build_live_config(session)
+        [decl] = [d for tool in cfg.tools for d in tool.function_declarations]
+        assert decl.behavior in (None, t.Behavior.BLOCKING)
+        assert gv._RUN_TASK_TOOL.function_declarations[0].behavior in (None, t.Behavior.BLOCKING)
+
+    def _dispatch(self, gv, session, chat):
+        live = _Live()
+        live.send_tool_response = AsyncMock()
+        session._gemini_session = live
+        svc = _svc(gv)
+
+        async def _drive():
+            with patch("client_portal.service.portal_chat", chat), patch.object(gv, "_ACK_WINDOW_SECONDS", 60):
+                await svc._execute_and_respond(session, "c1", SimpleNamespace(name=gv.RUN_TASK, args={"prompt": "count"}))
+                await asyncio.gather(*[b.task for b in session._background_tasks.values() if b.task is not None],
+                                     return_exceptions=True)
+                await _settle()
+                session._active = False
+        asyncio.run(_drive())
+        [call] = live.send_tool_response.await_args_list
+        [fr] = call.kwargs["function_responses"]
+        return fr
+
+    def test_the_accepted_dispatch_is_returned_silent(self):
+        gv = _voice_module()
+        fr = self._dispatch(gv, _session(gv), AsyncMock(return_value={"response": "ten"}))
+        assert fr.response["output"].startswith(gv._ACCEPTED_PREFIX)
+        assert fr.scheduling == gv.genai_types.FunctionResponseScheduling.SILENT
+
+    def test_a_refusal_is_spoken_not_silent(self):
+        gv = _voice_module()
+        session = _session(gv)
+        for i in range(gv.MAX_BACKGROUND_TASKS_PER_CALL):
+            session._background_tasks[f"t{i}"] = gv.BackgroundTask(f"t{i}", "x", "x", 0.0)
+        fr = self._dispatch(gv, session, AsyncMock(return_value={"response": "never"}))
+        assert fr.response["output"].startswith("Not started")
+        assert fr.scheduling is None
+
+    def test_the_container_path_result_is_spoken(self):
+        gv = _voice_module()
+        session = _session(gv, workspace_mode=False, portal_session_id=None, client_email=None)
+        live = _Live(); live.send_tool_response = AsyncMock()
+        session._gemini_session = live
+        with patch.object(gv.GeminiVoiceService, "_execute_tool", AsyncMock(return_value="from the container")):
+            asyncio.run(_svc(gv)._execute_and_respond(session, "c1", SimpleNamespace(name=gv.RUN_TASK, args={"prompt": "hi"})))
+        [fr] = live.send_tool_response.await_args_list[0].kwargs["function_responses"]
+        assert fr.response["output"] == "from the container" and fr.scheduling is None
+
+
+class TestTheNoticeKeepsTheCanvasHonest:
+    def test_a_drawing_session_is_told_the_result_is_not_on_the_canvas(self):
+        # Third live run: "the canvas shows the breakdown of your files" and
+        # "I've put the weather up there" — with no canvas call and the canvas
+        # row untouched since 2026-09-07.
+        gv = _voice_module()
+        from services.voice_tools import PLATFORM_VOICE_TOOLS
+        session = _session(gv, tool_manifest=PLATFORM_VOICE_TOOLS)
+        session._gemini_session = _Live()
+        svc = _svc(gv)
+
+        async def _drive():
+            with patch("client_portal.service.portal_chat", AsyncMock(return_value={"response": "r"})), \
+                 patch.object(gv, "_NOTICE_QUIET_SECONDS", 0.0), patch.object(gv, "_ACK_WINDOW_SECONDS", 60):
+                await svc._dispatch_task_in_chat(session, "x")
+                await asyncio.gather(*[b.task for b in session._background_tasks.values()])
+                for _ in range(40):
+                    await asyncio.sleep(0.025)
+                    if session._gemini_session.send_realtime_input.await_count:
+                        break
+        asyncio.run(_drive())
+        [notice] = session._gemini_session.said
+        assert "NOT on the canvas" in notice
+        assert "put it on the canvas with `show_markdown` BEFORE you speak" in notice
+        assert "one or two sentences" in notice
+
+    def test_a_session_without_a_canvas_gets_no_canvas_hint(self):
+        gv = _voice_module()
+        session = _session(gv, tool_manifest=frozenset({gv.RUN_TASK}))
+        session._gemini_session = _Live()
+        svc = _svc(gv)
+
+        async def _drive():
+            with patch("client_portal.service.portal_chat", AsyncMock(return_value={"response": "r"})), \
+                 patch.object(gv, "_NOTICE_QUIET_SECONDS", 0.0), patch.object(gv, "_ACK_WINDOW_SECONDS", 60):
+                await svc._dispatch_task_in_chat(session, "x")
+                await asyncio.gather(*[b.task for b in session._background_tasks.values()])
+                for _ in range(40):
+                    await asyncio.sleep(0.025)
+                    if session._gemini_session.send_realtime_input.await_count:
+                        break
+        asyncio.run(_drive())
+        [notice] = session._gemini_session.said
+        assert "show_markdown" not in notice
+
+
+# ---------------------------------------------------------------------------
 # A platform notice the model reads aloud is not the agent's line
 # ---------------------------------------------------------------------------
 class TestAnEchoedNoticeIsNotTranscribed:
@@ -633,7 +755,7 @@ class TestAnEchoedNoticeIsNotTranscribed:
         async def _on_turn(role, text): seen.append((role, text))
         session._on_turn = _on_turn
         svc = _svc(gv)
-        asyncio.run(svc._record_turn(session, "assistant", gv._TASK_DONE_NOTICE.format(task_id="t3", label="x", result="r")))
+        asyncio.run(svc._record_turn(session, "assistant", gv._TASK_DONE_NOTICE.format(task_id="t3", label="x", result="r", canvas="")))
         asyncio.run(svc._record_turn(session, "assistant", "[System notice: wrap up.] We have to stop soon."))
         # A person quoting the marker is still the person.
         asyncio.run(svc._record_turn(session, "user", "[System notice: is that what it said?"))

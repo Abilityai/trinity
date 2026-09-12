@@ -170,6 +170,22 @@ class TestTheRules:
         block = gv.spoken_etiquette_instruction(frozenset({gv.RUN_TASK}))
         assert "never dressed up as success, never re-announced" in block
 
+    def test_lines_are_short(self):
+        # Operator, third live run: the confirmations were too long — and
+        # padded with "anything else while we wait?".
+        gv = _gv()
+        block = gv.spoken_etiquette_instruction(frozenset({gv.RUN_TASK}))
+        assert "An acknowledgement is one short sentence" in block
+        assert "anything else while we wait" in block
+        assert "A report is one or two sentences" in block
+
+    def test_the_canvas_is_never_claimed_unless_drawn(self):
+        gv = _gv()
+        from services.voice_tools import PLATFORM_VOICE_TOOLS
+        with_canvas = gv.spoken_etiquette_instruction(PLATFORM_VOICE_TOOLS, background=True)
+        assert "Never claim a canvas you did not draw" in with_canvas
+        assert "Never claim a canvas" not in gv.spoken_etiquette_instruction(frozenset({gv.RUN_TASK}), background=True)
+
 
 # ---------------------------------------------------------------------------
 # The other two prompt surfaces agree with the block
