@@ -235,3 +235,15 @@ class TestTheOtherSurfacesAgree:
         assert "don't mirror the canvas in your voice" in text
         assert "the canvas is the artefact, the voice is what it means" in text
         assert "never read the blocks aloud" in text
+
+    def test_the_voice_model_draws_and_never_delegates_or_clears_early(self):
+        # Fifth live run: asked to update a chart, the model dispatched a task
+        # AND cleared the panel; the agent replied "canvas tools aren't
+        # available in this environment", and the model then told the person
+        # it "can't generate the live chart" — for 90 s over a blank canvas.
+        gv = _gv()
+        text = gv.WORKSPACE_PANEL_INSTRUCTIONS
+        assert "YOU draw. Never ask a task to update the canvas" in text
+        assert "that is about the agent, not you" in text
+        assert "never before you have what replaces it" in text
+        assert "you have them; draw the data yourself" in gv._TASK_DONE_CANVAS_HINT

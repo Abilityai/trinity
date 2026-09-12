@@ -41,6 +41,7 @@ import {
   voiceEntryState,
   voiceHeaderLine,
   threadChangeEndsCall,
+  isMuteHotkey,
   applyTaskFrame,
   backgroundTasksLabel,
   voiceTaskCaption,
@@ -745,5 +746,42 @@ describe('a call started from a new chat is not ended by its own thread arriving
     // The policy LITERALS, not the comment above them that also says "script-src".
     expect(devCsp.match(/"script-src ([^;"]*);/)[1]).toBe("'self' 'unsafe-inline' 'unsafe-eval'")
     expect(prodCsp.match(/script-src ([^;]*);/)[1]).not.toContain('blob:')
+  })
+})
+
+// ---- ent#551 QA — the overlay's bottom stack, and M to mute ----
+describe('the status line never sits on the buttons, and M mutes', () => {
+  it('the rule: plain M during a call, not in a field, not a claimed key, no modifier', () => {
+    const ev = (over = {}) => ({ key: 'm', metaKey: false, ctrlKey: false, altKey: false, defaultPrevented: false, target: { tagName: 'DIV' }, ...over })
+    expect(isMuteHotkey(ev(), { callActive: true })).toBe(true)
+    expect(isMuteHotkey(ev({ key: 'M' }), { callActive: true })).toBe(true)
+    expect(isMuteHotkey(ev(), { callActive: false })).toBe(false)
+    expect(isMuteHotkey(ev({ key: 'n' }), { callActive: true })).toBe(false)
+    expect(isMuteHotkey(ev({ metaKey: true }), { callActive: true })).toBe(false)       // ⌘M is the window's
+    expect(isMuteHotkey(ev({ ctrlKey: true }), { callActive: true })).toBe(false)
+    expect(isMuteHotkey(ev({ defaultPrevented: true }), { callActive: true })).toBe(false) // an overlay claimed it
+    expect(isMuteHotkey(ev({ target: { tagName: 'INPUT' } }), { callActive: true })).toBe(false)
+    expect(isMuteHotkey(ev({ target: { tagName: 'TEXTAREA' } }), { callActive: true })).toBe(false)
+    expect(isMuteHotkey(ev({ target: { tagName: 'DIV', isContentEditable: true } }), { callActive: true })).toBe(false)
+    expect(isMuteHotkey(null, { callActive: true })).toBe(false)
+  })
+
+  it('the keydown handler mutes on the rule, after Escape and before the turn-cancel rule', () => {
+    const esc = CODE.slice(CODE.indexOf('function onEscapeKeydown(event)'), CODE.indexOf('async function cancelTurn()'))
+    const end = esc.indexOf('shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })')
+    const mute = esc.indexOf('isMuteHotkey(event, { callActive: voiceCallActive.value })')
+    expect(mute).toBeGreaterThan(end)
+    expect(mute).toBeLessThan(esc.indexOf('shouldCancelOnEscape(event'))
+    expect(esc.slice(mute, mute + 200)).toContain('voice.toggleMute()')
+  })
+
+  it('status text and controls are one bottom-anchored column (no overlap at any height)', () => {
+    const orb = read('../../src/components/chat/VoiceOverlay.vue')
+    expect(orb).toContain('data-testid="voice-bottom-stack"')
+    expect(orb).toMatch(/voice-bottom-stack"[\s\S]{0,40}/)
+    expect(orb).not.toContain('bottom-16')
+    const stack = orb.slice(orb.indexOf('voice-bottom-stack'))
+    expect(stack.indexOf('statusLabel')).toBeLessThan(stack.indexOf('voice.toggleMute()'))
+    expect(orb).toContain("'Unmute (M)' : 'Mute (M)'")
   })
 })

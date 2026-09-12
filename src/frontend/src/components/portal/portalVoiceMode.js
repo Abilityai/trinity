@@ -239,6 +239,22 @@ export function voiceCallLabelFromTurns(turns = []) {
   return `Voice call · ${n} spoken ${n === 1 ? 'turn' : 'turns'}`
 }
 
+// ---- The mute hotkey ----------------------------------------------------------
+
+// M toggles the mic while a call is on. Plain M only — a modifier means some
+// other shortcut (⌘M minimises a window); a key already claimed by an overlay
+// (`defaultPrevented`, the #2582 protocol) is not ours; and a key typed into a
+// field is text, not a command (the composer is inert during a call, but the
+// rename field and the picker's search are not).
+export function isMuteHotkey(event, { callActive = false } = {}) {
+  if (!callActive || !event || event.defaultPrevented) return false
+  if (event.key !== 'm' && event.key !== 'M') return false
+  if (event.metaKey || event.ctrlKey || event.altKey) return false
+  const tag = String(event.target?.tagName || '').toUpperCase()
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || event.target?.isContentEditable) return false
+  return true
+}
+
 // ---- Leaving mid-call ---------------------------------------------------------
 
 // Does a change of agent / thread props end the call? A route-driven thread

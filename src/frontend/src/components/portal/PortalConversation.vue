@@ -805,6 +805,7 @@ import {
   VOICE_UNAVAILABLE_FALLBACK,
   endedNotice,
   groupVoiceBlocks,
+  isMuteHotkey,
   startFailureReason,
   threadChangeEndsCall,
   voiceEntryState,
@@ -1816,6 +1817,13 @@ function onEscapeKeydown(event) {
   if (shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })) {
     event.preventDefault()
     void endVoiceCall()
+    return
+  }
+  // ent#551 QA: M mutes and unmutes the mic during a call (the overlay's mute
+  // button says so). Same shared-rule shape as Escape, for the same reason.
+  if (isMuteHotkey(event, { callActive: voiceCallActive.value })) {
+    event.preventDefault()
+    voice.toggleMute()
     return
   }
   if (!shouldCancelOnEscape(event, {

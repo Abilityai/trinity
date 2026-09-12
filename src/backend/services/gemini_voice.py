@@ -173,7 +173,8 @@ Guidelines:
 - Use `show_markdown` by default. Reach for `show_diagram` when a picture of the structure helps, `update_panel` only when custom layout genuinely adds value.
 - Don't mirror every voice response on the canvas — use it when structured content helps.
 - And don't mirror the canvas in your voice: the canvas is the artefact, the voice is what it means. Once something is on the canvas, point at it and interpret it ("top left is the split by channel") — never read the blocks aloud.
-- Clear when the topic changes significantly.
+- YOU draw. Never ask a task to update the canvas — a task brings back data; you put it on the canvas with these tools. If a task's reply says the agent has no canvas tools or could not draw, that is about the agent, not you.
+- Clear when the topic changes significantly — and never before you have what replaces it. A cleared canvas that waits on a task is a blank screen for the person.
 
 Fence payloads (inside `show_markdown`, JSON only — you provide the data, Trinity draws it):
 - ```chart — `{"type": "bar"|"stacked_bar"|"line"|"area"|"pie"|"donut", "series": [{"label": "Leads", "unit": "new", "points": [{"ts": "2026-09-01", "value": 14}]}]}` — one series per line, stack segment or slice; `ts` is a date/time, or a category name for a bar per series. Not Chart.js (`labels`/`datasets`) — that shape renders as raw JSON.
@@ -250,7 +251,8 @@ _TASK_DONE_NOTICE = (
 _TASK_DONE_CANVAS_HINT = (
     " If it is worth showing, put it on the canvas with `show_markdown` BEFORE you "
     "speak, then point at it rather than reading it; if you do not draw it, do not say "
-    "it is on the canvas."
+    "it is on the canvas. If the reply says the agent could not draw or has no canvas "
+    "tools, that is about the agent — you have them; draw the data yourself."
 )
 _TASK_FAILED_NOTICE = (
     _NOTICE_OPEN +
