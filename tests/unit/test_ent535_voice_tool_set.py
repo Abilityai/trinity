@@ -443,9 +443,14 @@ class TestTheRosterWideningTravelsOnTheSession:
         assert "is_platform=True" in src
         # ...and the turn does not re-assert it as a constant.
         gv = _voice_module()
+        # ent#551 split the turn: `_portal_turn` takes the per-call lock and
+        # delegates the call itself to `_portal_chat_call`, which is where the
+        # kwargs live now.
         turn_src = inspect.getsource(gv.GeminiVoiceService._portal_turn)
-        assert "include_owned=session.is_platform" in turn_src
-        assert "include_owned=True" not in turn_src
+        assert "_portal_chat_call(" in turn_src
+        call_src = inspect.getsource(gv.GeminiVoiceService._portal_chat_call)
+        assert "include_owned=session.is_platform" in call_src
+        assert "include_owned=True" not in call_src and "include_owned=True" not in turn_src
 
 
 def test_the_portal_turn_has_no_unreachable_tail():

@@ -47,11 +47,21 @@
       >
         <div
           v-if="voice.hasBackgroundTasks?.value"
-          class="absolute top-14 left-1/2 -translate-x-1/2 z-10 max-w-[85%] truncate px-3 py-1 rounded-full text-xs font-medium bg-status-info-500/15 border border-status-info-400/40 text-status-info-200"
-          :title="voice.backgroundTasks.value.map((t) => t.label).join(' · ')"
+          class="absolute top-14 left-1/2 -translate-x-1/2 z-10 max-w-[85%] flex flex-col items-center gap-1.5"
           data-testid="voice-background-tasks"
         >
-          {{ backgroundTasksLabel(voice.backgroundTasks.value) }}
+          <!-- One pill per task, never bunched: each names what it is doing and
+               whether it is queued behind another (one turn per thread). -->
+          <div
+            v-for="t in voice.backgroundTasks.value"
+            :key="t.taskId"
+            class="max-w-full truncate px-3 py-1 rounded-full text-xs font-medium bg-status-info-500/15 border border-status-info-400/40"
+            :class="t.status === 'queued' ? 'text-status-info-300/70' : 'text-status-info-200'"
+            :title="t.label"
+            data-testid="voice-background-task"
+          >
+            {{ taskItemLabel(t) }}
+          </div>
         </div>
       </Transition>
 
@@ -120,7 +130,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { backgroundTasksLabel } from '../portal/portalVoiceMode'
+import { taskItemLabel } from '../portal/portalVoiceMode'
 
 const props = defineProps({
   voice: { type: Object, required: true }

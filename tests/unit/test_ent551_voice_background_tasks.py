@@ -152,7 +152,7 @@ class TestDispatchReturnsImmediately:
         async def _drive():
             with patch("client_portal.service.portal_chat", _blocked_chat(release)):
                 await svc._dispatch_task_in_chat(session, "go")
-                assert events == [{"state": "started", "task_id": "t1", "label": "go", "running": 1}]
+                assert events == [{"state": "started", "task_id": "t1", "label": "go", "running": 1, "status": "running"}]
                 release.set()
                 await asyncio.gather(*[b.task for b in session._background_tasks.values()])
                 await _settle()
@@ -1022,3 +1022,146 @@ class TestTheCanvasIsInContext:
         notice = self._land(gv, _session(gv, tool_manifest=PLATFORM_VOICE_TOOLS), [("t0", "same"), ("t0", "same")])
         assert "NOT on the canvas" in notice and "show_markdown` BEFORE" in notice
         assert "changed while this task ran" not in notice
+
+
+# ---------------------------------------------------------------------------
+# Tasks run one at a time per call — the thread admits one turn
+# ---------------------------------------------------------------------------
+class TestTasksAreSerializedPerCall:
+    """Seventh live run: two tasks dispatched together, and the second failed
+    at once — "This conversation is already handling a message. Please try
+    again shortly." `portal_chat` admits one turn per thread, so the call's
+    tasks wait for each other; the surface shows the second as queued."""
+
+    def test_two_dispatches_never_overlap_in_the_thread(self):
+        gv = _voice_module()
+        session = _session(gv)
+        svc = _svc(gv)
+        events = []
+        inflight = {"now": 0, "max": 0}
+
+        async def _on_task(ev): events.append((ev["state"], ev["task_id"], ev["status"]))
+        session._on_task_event = _on_task
+
+        async def _chat(*_a, **_kw):
+            inflight["now"] += 1
+            inflight["max"] = max(inflight["max"], inflight["now"])
+            await asyncio.sleep(0.05)
+            inflight["now"] -= 1
+            return {"response": "ok"}
+
+        async def _drive():
+            with patch("client_portal.service.portal_chat", _chat), patch.object(gv, "_ACK_WINDOW_SECONDS", 60):
+                await svc._dispatch_task_in_chat(session, "research OpenAI")
+                await svc._dispatch_task_in_chat(session, "chart the table")
+                assert session._background_tasks["t1"].state == "running"
+                assert session._background_tasks["t2"].state == "queued"
+                await asyncio.gather(*[b.task for b in session._background_tasks.values()])
+                await _settle()
+                session._active = False
+
+        asyncio.run(_drive())
+        assert inflight["max"] == 1, "two turns ran in the thread at once"
+        assert ("started", "t1", "running") in events
+        assert ("started", "t2", "queued") in events
+        assert ("running", "t2", "running") in events           # promoted when it took the lock
+        assert [e for e in events if e[0] == "finished"] == [("finished", "t1", "running"), ("finished", "t2", "running")]
+
+    def test_the_cap_counts_queued_tasks_too(self):
+        gv = _voice_module()
+        assert "MAX_BACKGROUND_TASKS_PER_CALL" in inspect.getsource(gv.GeminiVoiceService._dispatch_task_in_chat)
+
+
+# ---------------------------------------------------------------------------
+# A promise to act with no tool call is nudged
+# ---------------------------------------------------------------------------
+class TestThePromiseWatch:
+    """Seventh live run: "creating that bar chart now", "looking into OpenAI's
+    marketing strategy now", "let me start that search now" — three promises,
+    zero tool calls, until the person asked "are you sure you ran the task?".
+    The ack watch's mirror: a promise with no call gets a nudge."""
+
+    def test_promise_phrases_are_recognised_and_plain_answers_are_not(self):
+        gv = _voice_module()
+        for said in ("creating that bar chart now. It'll compare the performance by quarter.",
+                     "looking into OpenAI's marketing strategy now.",
+                     "You know what, you're right. Let me start that search now.",
+                     "I'm on it, let me just count those files for you now.",
+                     "I've kicked off that market research now."):
+            assert gv.looks_like_a_promise(said), said
+        for said in ("There are seven items in your home directory.",
+                     "Yes, I can hear you clearly. What's on your mind?",
+                     "Let me know if you want more detail.",
+                     "Q2 is the strongest quarter on record."):
+            assert not gv.looks_like_a_promise(said), said
+
+    def _run(self, gv, session, said, *, call_after=None):
+        session._gemini_session = _Live()
+        svc = _svc(gv)
+
+        async def _drive():
+            with patch.object(gv, "_PROMISE_WATCH_SECONDS", 0.1):
+                await svc._record_turn(session, "assistant", said)
+                if call_after is not None:
+                    await asyncio.sleep(call_after)
+                    session._last_tool_call_monotonic = time.monotonic()
+                await asyncio.sleep(0.3)
+                session._active = False
+        asyncio.run(_drive())
+        return session._gemini_session.said
+
+    def test_a_promise_with_no_call_is_nudged_naming_what_was_said(self):
+        gv = _voice_module()
+        said = self._run(gv, _session(gv), "creating that bar chart now.")
+        assert len(said) == 1
+        assert 'You just said "creating that bar chart now."' in said[0]
+        assert "nothing has started" in said[0] and "Call it now" in said[0]
+        assert said[0].startswith(gv._NOTICE_OPEN)
+
+    def test_a_promise_followed_by_a_call_is_kept(self):
+        gv = _voice_module()
+        assert self._run(gv, _session(gv), "let me check that for you.", call_after=0.02) == []
+
+    def test_a_call_just_before_the_promise_counts(self):
+        # The etiquette ORDER is filler → call; the call can land a beat before
+        # the filler's turn completes.
+        gv = _voice_module()
+        session = _session(gv)
+        session._last_tool_call_monotonic = time.monotonic()
+        assert self._run(gv, session, "let me check that for you.") == []
+
+    def test_a_plain_answer_is_never_nudged(self):
+        gv = _voice_module()
+        assert self._run(gv, _session(gv), "There are seven items in your home directory.") == []
+
+    def test_a_session_without_run_task_is_never_nudged(self):
+        gv = _voice_module()
+        assert self._run(gv, _session(gv, tool_manifest=frozenset({"show_markdown"})), "let me check that.") == []
+
+    def test_nudges_are_rate_limited(self):
+        gv = _voice_module()
+        session = _session(gv)
+        session._gemini_session = _Live()
+        svc = _svc(gv)
+
+        async def _drive():
+            with patch.object(gv, "_PROMISE_WATCH_SECONDS", 0.05):
+                await svc._record_turn(session, "assistant", "let me check that.")
+                await asyncio.sleep(0.15)
+                await svc._record_turn(session, "assistant", "looking into it now.")
+                await asyncio.sleep(0.15)
+                session._active = False
+        asyncio.run(_drive())
+        assert len(session._gemini_session.said) == 1
+
+    def test_the_transcript_still_records_the_promise(self):
+        gv = _voice_module()
+        session = _session(gv)
+        self._run(gv, session, "creating that bar chart now.")
+        assert [e.text for e in session.transcript] == ["creating that bar chart now."]
+
+
+def test_run_task_is_not_for_the_canvas():
+    gv = _voice_module()
+    [decl] = gv._RUN_TASK_TOOL.function_declarations
+    assert "Not for the canvas" in decl.description and "never a task" in decl.description

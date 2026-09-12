@@ -43,6 +43,7 @@ import {
   threadChangeEndsCall,
   isMuteHotkey,
   leaveCallCopy,
+  taskItemLabel,
   applyTaskFrame,
   backgroundTasksLabel,
   voiceTaskCaption,
@@ -636,14 +637,14 @@ describe('the door and the hand-off are wired (source, since there is no mount h
 describe('ent#551 — background tasks', () => {
   it('a task frame adds by id, is idempotent on started, and clears on finished or failed', () => {
     let tasks = applyTaskFrame([], { state: 'started', task_id: 't1', label: 'the deck' })
-    expect(tasks).toEqual([{ taskId: 't1', label: 'the deck' }])
+    expect(tasks).toEqual([{ taskId: 't1', label: 'the deck', status: 'running' }])
     tasks = applyTaskFrame(tasks, { state: 'started', task_id: 't1', label: 'the deck' })
     expect(tasks).toHaveLength(1)
-    tasks = applyTaskFrame(tasks, { state: 'started', task_id: 't2', label: 'the numbers' })
+    tasks = applyTaskFrame(tasks, { state: 'started', task_id: 't2', label: 'the numbers', status: 'queued' })
     expect(tasks.map((t) => t.taskId)).toEqual(['t1', 't2'])
     // The first to land must not clear the other — a list by id, never a count.
     tasks = applyTaskFrame(tasks, { state: 'finished', task_id: 't1' })
-    expect(tasks).toEqual([{ taskId: 't2', label: 'the numbers' }])
+    expect(tasks).toEqual([{ taskId: 't2', label: 'the numbers', status: 'queued' }])
     tasks = applyTaskFrame(tasks, { state: 'failed', task_id: 't2' })
     expect(tasks).toEqual([])
     // Unknown ids and frames without one are no-ops.
@@ -709,7 +710,8 @@ describe('ent#551 — background tasks', () => {
   it('the orb shows work in flight as its own badge, and the conversation captions the ask', () => {
     const orb = read('../../src/components/chat/VoiceOverlay.vue')
     expect(orb).toContain('data-testid="voice-background-tasks"')
-    expect(orb).toContain('backgroundTasksLabel(voice.backgroundTasks.value)')
+    // ent#551 QA: one pill PER task, never bunched into one line.
+    expect(orb).toMatch(/v-for="t in voice\.backgroundTasks\.value"[\s\S]{0,400}data-testid="voice-background-task"[\s\S]{0,120}taskItemLabel\(t\)/)
     const conv = read('../../src/components/portal/PortalConversation.vue')
     expect(conv).toContain('backgroundTasks: voice.backgroundTasks.value,')
     // While the call is on, what lands in the thread is read, not unread: the
@@ -818,5 +820,28 @@ describe('leaving the stage mid-call asks first', () => {
     expect(CODE).toContain('defineExpose({ focusComposer, startVoiceCall, endVoiceCall })')
     // The End button itself is unchanged: immediate, no dialog.
     expect(CODE).toMatch(/data-testid="portal-voice-end"[\s\S]{0,40}@click="endVoiceCall\(\)"/)
+  })
+})
+
+// ---- ent#551 QA — tasks run one at a time per call, and the list shows each one ----
+describe('background tasks are separate items, queued behind one another', () => {
+  it('a started frame carries the status, a running frame promotes it, finished removes it', () => {
+    let tasks = applyTaskFrame([], { state: 'started', task_id: 't1', label: 'Research OpenAI', status: 'running' })
+    tasks = applyTaskFrame(tasks, { state: 'started', task_id: 't2', label: 'Chart the table', status: 'queued' })
+    expect(tasks).toEqual([
+      { taskId: 't1', label: 'Research OpenAI', status: 'running' },
+      { taskId: 't2', label: 'Chart the table', status: 'queued' },
+    ])
+    tasks = applyTaskFrame(tasks, { state: 'finished', task_id: 't1' })
+    tasks = applyTaskFrame(tasks, { state: 'running', task_id: 't2' })
+    expect(tasks).toEqual([{ taskId: 't2', label: 'Chart the table', status: 'running' }])
+    // An older frame without a status reads as running.
+    expect(applyTaskFrame([], { state: 'started', task_id: 't3', label: 'x' })[0].status).toBe('running')
+  })
+  it('each item says what it is and whether it is waiting its turn', () => {
+    expect(taskItemLabel({ label: 'Chart the table', status: 'queued' })).toBe('Chart the table · queued')
+    expect(taskItemLabel({ label: 'Research OpenAI', status: 'running' })).toBe('Research OpenAI')
+    expect(taskItemLabel({ label: '' })).toBe('task')
+    expect(taskItemLabel({ label: 'x'.repeat(100), status: 'queued' }).length).toBeLessThanOrEqual(48 + ' · queued'.length)
   })
 })

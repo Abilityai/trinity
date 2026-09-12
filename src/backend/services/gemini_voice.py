@@ -273,6 +273,45 @@ _TASK_FAILED_NOTICE = (
 # platform's words in the agent's mouth, not something the agent said.
 _PLATFORM_NOTICE_MARKERS = ("[System notice", "[Platform notice")
 
+# ent#551 — the promise watch, the mirror of the ack watch. The model says
+# "creating that bar chart now" / "looking into OpenAI's marketing strategy now"
+# and calls nothing; in the seventh live run it did so three times in a row
+# before the person asked "are you sure you ran the task?". A prompt rule did
+# not stop it, so the platform watches for it: an assistant turn that reads as
+# a promise to act, with no tool call in the turn or shortly after, gets a
+# nudge that names what was promised and says nothing has started.
+_PROMISE_STEMS = (
+    "let me check", "let me look", "let me count", "let me get", "let me pull", "let me try",
+    "let me start", "let me run", "let me hunt", "let me search", "let me find", "let me grab",
+    "let me see what", "let me dig",
+    "i'll check", "i'll look", "i'll get", "i'll pull", "i'll run", "i'll start", "i'll draft",
+    "i'll create", "i'll chart", "i'll search", "i'll research", "i'll find", "i'll gather",
+    "i'll grab", "i'll see what", "i'll dig", "i'll hunt", "i will check", "i will look",
+    "i'm checking", "i'm looking", "i'm searching", "i'm creating", "i'm drafting", "i'm working on",
+    "i'm gathering", "i'm pulling", "i'm starting", "i'm on it", "i'm re-running", "i'm running",
+    "i'm kicking off", "i've started", "i've kicked off", "i'm getting that",
+    "kicking off", "starting the task", "starting that", "creating that", "looking into",
+    "searching for", "finding the", "working on it", "working on that", "one moment", "give me a moment",
+    "give me a second", "should be ready", "should be up shortly", "right now, so it should",
+)
+_PROMISE_WATCH_SECONDS = 3.0      # how long after the promise a call may still arrive
+_PROMISE_NUDGE_COOLDOWN = 15.0    # never nudge twice inside this window
+_PROMISE_NUDGE = (
+    _NOTICE_OPEN +
+    "You just said \"{said}\" — but you called no tool, so nothing has started and the "
+    "user sees nothing. Call it now: `run_task` for work the agent must do, a canvas tool "
+    "for a drawing. If you are not going to, tell the user plainly that you have not "
+    "started it.]"
+)
+
+
+def looks_like_a_promise(text: str) -> bool:
+    """Does an assistant line read as 'I am doing / about to do something'?"""
+    low = " ".join(str(text or "").lower().split())
+    if not low or "let me know" == low.strip():
+        return False
+    return any(stem in low for stem in _PROMISE_STEMS)
+
 
 def _scrub_platform_notice(text: str) -> str:
     """Drop a platform notice the model read aloud from a transcript row.
@@ -323,6 +362,11 @@ class BackgroundTask:
     # the notice can say the canvas changed under the model (the agent drew
     # from inside the task) and what it shows now.
     canvas_updated_at: Optional[str] = None
+    # "queued" until the per-call turn lock is acquired, then "running". The
+    # portal runs ONE turn per thread — two tasks dispatched together made the
+    # second fail at once with "This conversation is already handling a
+    # message" — so tasks in flight wait their turn, and the surface says so.
+    state: str = "queued"
 
 
 def _one_line(text) -> str:
@@ -495,9 +539,10 @@ _RUN_TASK_DESCRIPTION = (
     "read a file, search for information, research, write, or perform an action. "
     "You cannot do any of this yourself: anything that must be looked up, counted, "
     "researched, written or fetched is a call to this tool, and saying you will do it "
-    "is not doing it. It takes time. Before calling it, say one short line naming what "
-    "you are starting — never call it silently — and when the result comes back add only "
-    "what is new; do not repeat that line."
+    "is not doing it. Not for the canvas: drawing or updating the canvas is show_markdown "
+    "or show_diagram, never a task — the agent has no canvas tools. It takes time. Before "
+    "calling it, say one short line naming what you are starting — never call it silently "
+    "— and when the result comes back add only what is new; do not repeat that line."
 )
 _RUN_TASK_PARAMETERS = genai_types.Schema(
     type=genai_types.Type.OBJECT,
@@ -722,6 +767,13 @@ class VoiceSession:
     _model_speaking: bool = False
     _last_user_speech_monotonic: float = 0.0
     _last_assistant_speech_monotonic: float = 0.0
+    # ent#551 — when the model last actually called a tool, and when the
+    # platform last nudged it for a promise without one (the promise watch).
+    _last_tool_call_monotonic: float = 0.0
+    _last_promise_nudge_monotonic: float = 0.0
+    # ent#551 — background turns run ONE at a time per call (the portal's
+    # one-turn-per-thread rule); created lazily on the running loop.
+    _turn_lock: object = field(default=None, repr=False)
     _gemini_session: object = field(default=None, repr=False)
     _send_task: object = field(default=None, repr=False)
     _receive_task: object = field(default=None, repr=False)
@@ -1105,6 +1157,7 @@ class GeminiVoiceService:
 
                     # Tool calls — spawn async task per call, keyed by call_id
                     if hasattr(response, 'tool_call') and response.tool_call:
+                        session._last_tool_call_monotonic = time.monotonic()
                         fc_list = getattr(response.tool_call, 'function_calls', []) or []
                         for fc in fc_list:
                             call_id = getattr(fc, 'id', None) or secrets.token_hex(8)
@@ -1203,6 +1256,7 @@ class GeminiVoiceService:
             if not text:
                 logger.info("Voice session %s: dropped an echoed platform notice from the transcript", session.session_id)
                 return
+            self._watch_promise(session, text)
         session.transcript.append(VoiceTranscriptEntry(role=role, text=text))
         if session._on_turn:
             try:
@@ -1459,7 +1513,7 @@ class GeminiVoiceService:
             started_monotonic=time.monotonic(),
             canvas_updated_at=self._canvas_state(session.agent_name)[0],
         )
-        turn = asyncio.create_task(self._portal_turn(session, prompt))
+        turn = asyncio.create_task(self._portal_turn(session, prompt, bt))
         bt.task = turn
         session._background_tasks[bt.task_id] = bt
         _detached_turns.add(turn)
@@ -1470,6 +1524,10 @@ class GeminiVoiceService:
             session.session_id, bt.task_id, len(session._background_tasks),
         )
 
+        # Told as queued when another task holds the thread; the turn itself
+        # reports "running" when it takes the lock.
+        if len(session._background_tasks) == 1:
+            bt.state = "running"
         await self._emit_task_event(session, "started", bt)
         self._spawn(self._ack_watch(session, bt))
 
@@ -1478,6 +1536,34 @@ class GeminiVoiceService:
             task_id=bt.task_id, label=bt.label,
             others=f"Also running: {others}." if others else "No other task is running.",
         )
+
+    def _watch_promise(self, session: VoiceSession, text: str) -> None:
+        """A completed assistant turn that reads as a promise to act starts the
+        promise watch — unless a tool was called in the last few seconds, in
+        which case the promise was kept."""
+        if RUN_TASK not in _session_manifest(session) or not session._active:
+            return
+        if not looks_like_a_promise(text):
+            return
+        if time.monotonic() - session._last_tool_call_monotonic < _PROMISE_WATCH_SECONDS * 2:
+            return
+        self._spawn(self._promise_watch(session, text, time.monotonic()))
+
+    async def _promise_watch(self, session: VoiceSession, said: str, promised_at: float) -> None:
+        await asyncio.sleep(_PROMISE_WATCH_SECONDS)
+        if not session._active:
+            return
+        if session._last_tool_call_monotonic >= promised_at - 1.0:
+            return  # a call arrived with or after the promise: kept
+        now = time.monotonic()
+        if now - session._last_promise_nudge_monotonic < _PROMISE_NUDGE_COOLDOWN:
+            return
+        session._last_promise_nudge_monotonic = now
+        logger.info(
+            "[ent#551] voice session %s: promise without a tool call (%r) — nudging",
+            session.session_id, said[:80],
+        )
+        await self._say_to_model(session, _PROMISE_NUDGE.format(said=_clip(_one_line(said), 120)))
 
     def _canvas_state(self, agent_name: str) -> tuple:
         """`(updated_at, text)` of the agent's canvas, or `(None, "")` when it
@@ -1520,6 +1606,8 @@ class GeminiVoiceService:
                 "task_id": bt.task_id,
                 "label": bt.label,
                 "running": len(session._background_tasks),
+                # "queued" | "running" — the list shows each task's own state.
+                "status": bt.state,
             })
         except Exception as e:  # noqa: BLE001 — a surface failure never touches the task
             logger.warning("Voice session %s: task event failed: %s", session.session_id, e)
@@ -1620,12 +1708,29 @@ class GeminiVoiceService:
             return
         await self._say_to_model(session, notice)
 
-    async def _portal_turn(self, session: VoiceSession, prompt: str) -> str:
+    async def _portal_turn(self, session: VoiceSession, prompt: str,
+                           bt: Optional[BackgroundTask] = None) -> str:
         """One `portal_chat` turn in the bound thread. Imported lazily: the
         portal service pulls in the whole execution stack, and the voice module
-        is imported by the VoIP path too."""
+        is imported by the VoIP path too.
+
+        Serialized per call: the portal admits ONE turn per thread, so two
+        tasks dispatched together used to make the second fail at once ("This
+        conversation is already handling a message"). Each waits for the
+        thread, then runs; the surface is told when it moves from queued to
+        running.
+        """
         from client_portal.service import portal_chat
 
+        if session._turn_lock is None:
+            session._turn_lock = asyncio.Lock()
+        async with session._turn_lock:
+            if bt is not None and bt.state != "running":
+                bt.state = "running"
+                await self._emit_task_event(session, "running", bt)
+            return await self._portal_chat_call(session, prompt, portal_chat)
+
+    async def _portal_chat_call(self, session: VoiceSession, prompt: str, portal_chat) -> str:
         result = await portal_chat(
             session.agent_name,
             prompt,

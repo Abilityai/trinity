@@ -128,9 +128,21 @@ export function applyTaskFrame(tasks = [], frame = {}) {
   if (!id) return tasks
   if (frame.state === 'started') {
     if (tasks.some((t) => t.taskId === id)) return tasks
-    return [...tasks, { taskId: id, label: frame.label || '' }]
+    return [...tasks, { taskId: id, label: frame.label || '', status: frame.status || 'running' }]
+  }
+  // ent#551 QA: tasks run one at a time per call (the thread admits one turn);
+  // `running` is the moment a queued task takes its turn.
+  if (frame.state === 'running') {
+    return tasks.map((t) => (t.taskId === id ? { ...t, status: 'running' } : t))
   }
   return tasks.filter((t) => t.taskId !== id)
+}
+
+// One line per task for the orb's list: the label, and "queued" while another
+// task holds the thread. Separate items, never bunched — the operator's note.
+export function taskItemLabel(task = {}) {
+  const label = clip(task.label, TASK_LABEL_MAX) || 'task'
+  return task.status === 'queued' ? `${label} · queued` : label
 }
 
 // The badge / header words for work in flight: WHAT is running, in one line,
