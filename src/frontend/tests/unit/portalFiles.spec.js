@@ -33,6 +33,7 @@ import {
   previewCapNotice,
   previewKind,
   sameOriginPath,
+  sharePreviewPath,
 } from '@/components/portal/portalFiles'
 
 const SRC = fileURLToPath(new URL('../../src', import.meta.url))
@@ -253,13 +254,62 @@ describe('#2582 — url and size helpers', () => {
   })
 
   it('leaves a genuinely cross-origin url alone rather than pretending', () => {
-    expect(sameOriginPath('https://elsewhere.example/api/files/f1', 'https://portal.example.com'))
-      .toBe('https://elsewhere.example/api/files/f1')
+    // Still the rule for anything OUTSIDE `/api/`: reducing such a url to a
+    // path would aim the fetch at a route this origin does not serve. The
+    // `/api/` case moved to the #2733 block below, where the same backend
+    // answers on both hostnames.
+    expect(sameOriginPath('https://elsewhere.example/static/logo.png', 'https://portal.example.com'))
+      .toBe('https://elsewhere.example/static/logo.png')
   })
 
   it('returns junk unchanged instead of throwing', () => {
     expect(sameOriginPath('')).toBe('')
     expect(sameOriginPath(null)).toBe('')
+  })
+
+  // -------------------------------------------------------------------------
+  // #2733 — a portal base URL on another origin is a supported topology
+  // -------------------------------------------------------------------------
+
+  it('reduces an /api/ url from a DIFFERENT origin to a path', () => {
+    // A deployment may front agents on a dedicated public hostname while the
+    // portal page is served from the app hostname, so `download_url` carries
+    // that other origin. The portal page's own origin proxies `/api/*`, so the
+    // bytes are reachable same-origin and the fetch must go there: CSP
+    // `connect-src 'self'` cannot list a per-deployment origin.
+    expect(sameOriginPath('https://files.example.com/api/files/f1?sig=t&download=1',
+                          'https://app.example.com'))
+      .toBe('/api/files/f1?sig=t&download=1')
+  })
+
+  it('previews a cross-origin share same-origin, keeping sig and preview', () => {
+    const path = sharePreviewPath('https://files.example.com/api/files/f1?sig=t&download=1',
+                                  'https://app.example.com')
+    expect(path.startsWith('/api/files/f1')).toBe(true)
+    expect(path).toContain('sig=t')
+    expect(path).toContain('preview=1')
+    expect(path).toContain('download=1')
+  })
+
+  it('previews a relative share exactly as before', () => {
+    // The default install has no portal base URL configured, so
+    // `portal_documents` emits a relative url. That path must not change.
+    expect(sharePreviewPath('/api/files/f1?sig=t&download=1', 'https://app.example.com'))
+      .toBe('/api/files/f1?sig=t&download=1&preview=1')
+  })
+
+  it('does not touch the download_url it was handed', () => {
+    // Download is an anchor navigation against the absolute url, which
+    // `connect-src` does not govern, so the shareable link must survive the
+    // preview rewrite untouched.
+    const downloadUrl = 'https://files.example.com/api/files/f1?sig=t&download=1'
+    sharePreviewPath(downloadUrl, 'https://app.example.com')
+    expect(downloadUrl).toBe('https://files.example.com/api/files/f1?sig=t&download=1')
+  })
+
+  it('still refuses to rewrite a cross-origin non-api url for preview', () => {
+    expect(sharePreviewPath('https://elsewhere.example/files/f1', 'https://app.example.com'))
+      .toBe('https://elsewhere.example/files/f1?preview=1')
   })
 
   it('states the cap only when something was actually truncated', () => {
@@ -499,7 +549,11 @@ describe('share preview URL', () => {
     expect(preview.searchParams.get('preview')).toBe('1')
     expect(preview.searchParams.get('download')).toBe('1')
     expect(download).not.toContain('preview')
+    // #2733 reversed this line. A portal base URL on another hostname is a
+    // supported topology, and `connect-src 'self'` blocked the cross-origin
+    // preview fetch outright, so an `/api/` url is now reduced to a path: the
+    // portal page's own origin answers it from the same backend.
     expect(sharePreviewPath('https://cdn.example.com/api/files/f1?sig=t', 'https://portal.example.com'))
-      .toBe('https://cdn.example.com/api/files/f1?sig=t&preview=1')
+      .toBe('/api/files/f1?sig=t&preview=1')
   })
 })

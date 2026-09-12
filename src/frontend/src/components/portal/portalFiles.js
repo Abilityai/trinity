@@ -159,16 +159,31 @@ export function fileActions(row, { owned = false } = {}) {
 }
 
 /**
+ * Routes the backend serves on EVERY hostname that fronts it. The portal page's
+ * own origin proxies `/api/*`, so a url under this prefix names bytes that are
+ * reachable same-origin whatever origin it was minted with.
+ */
+const BACKEND_API_PREFIX = '/api/'
+
+/**
  * A same-origin path for a `download_url` that may be absolute or relative.
  *
  * `base` is required because `portal_documents` emits a RELATIVE url whenever
  * no portal base URL is configured (`get_portal_base_url()` falls back to
  * `public_chat_url`, which can be `''`), and `new URL(relative)` throws.
  *
- * The invariant this rests on: the portal page and `/api` are same-origin by
- * construction. A deployment that configures a portal base URL pointing
- * somewhere else has a cross-origin fetch, and that is the deployment's problem
- * — we return the URL unchanged rather than pretending otherwise.
+ * A portal base URL that resolves to ANOTHER origin is a supported production
+ * topology, not a misconfiguration: a deployment may front its agents on a
+ * dedicated public hostname while the portal page is served from the app
+ * hostname (#2733). For `/api/*` that origin is decoration — the same backend
+ * answers on both, and a share's authority is its `?sig=` token rather than the
+ * hostname the url was built with — so the url is reduced to a path and the
+ * fetch stays inside CSP `connect-src 'self'`. Widening the CSP instead is not
+ * available: the portal base URL is a runtime setting and cannot be baked into
+ * a static nginx or Vite header.
+ *
+ * Any other cross-origin url is returned unchanged. Reducing one to a path
+ * would point the fetch at a route this origin does not serve.
  */
 export function sameOriginPath(url, base = '') {
   const raw = String(url || '')
@@ -176,7 +191,8 @@ export function sameOriginPath(url, base = '') {
   try {
     const parsed = new URL(raw, base || 'http://localhost')
     const origin = base ? new URL(base).origin : null
-    if (origin && parsed.origin !== origin) return raw
+    const crossOrigin = origin !== null && parsed.origin !== origin
+    if (crossOrigin && !parsed.pathname.startsWith(BACKEND_API_PREFIX)) return raw
     return `${parsed.pathname}${parsed.search}`
   } catch {
     return raw
@@ -224,7 +240,15 @@ export async function errorDetail(err, fallback = 'Something went wrong.') {
   return fallback
 }
 
-/** Mark a preview read without mutating the original download URL. */
+/**
+ * Mark a preview read without mutating the original download URL.
+ *
+ * The result is always same-origin for the `/api/files/...` url a share
+ * carries, so the preview `fetch()` is permitted by `connect-src 'self'` even
+ * when `download_url` was built off a portal base URL on another hostname
+ * (#2733). Download keeps the absolute url: it is the shareable link, and it
+ * saves through an anchor, which `connect-src` does not govern.
+ */
 export function sharePreviewPath(url, base) {
   const parsed = new URL(url, base)
   parsed.searchParams.set('preview', '1')
