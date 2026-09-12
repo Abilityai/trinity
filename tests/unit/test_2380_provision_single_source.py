@@ -230,12 +230,35 @@ def test_the_provisioned_caddyfile_gates_on_demand_tls_on_the_backend() -> None:
     until the Let's Encrypt account is rate-limited and the operator's own
     renewals start failing."""
     body = _code(_START)
-    assert "on_demand_tls" in body, "no on-demand TLS — adding a domain needs a host shell again"
-    assert "ask http://127.0.0.1:8000/api/public/tls-allowed" in body, "on-demand TLS has no ask gate"
-    assert "on_demand" in body
+    caddyfile = re.search(r"<<CADDY\n(.*?)\nCADDY\n", body, re.S)
+    assert caddyfile, "start.sh no longer writes a Caddyfile"
+    caddy = caddyfile.group(1)
+
+    assert "on_demand_tls" in caddy, "no on-demand TLS — adding a domain needs a host shell again"
+    assert "ask http://127.0.0.1:8000/api/public/tls-allowed" in caddy, (
+        "on-demand TLS has no ask gate"
+    )
+
+    # The catch-all site is what a saved domain actually lands on, and it is
+    # asserted as a BLOCK: `on_demand` anywhere in the file is satisfied by the
+    # global `on_demand_tls` option above, so deleting this site — which is the
+    # whole feature — passed the previous spelling of this test.
+    site = re.search(r"^https:// \{\n(.*?)^\}", caddy, re.S | re.M)
+    assert site, "the catch-all https:// site is gone — a saved domain reaches nothing"
+    assert re.search(r"tls \{[^}]*\bon_demand\b", site.group(1), re.S), (
+        "the catch-all site does not request an on-demand certificate"
+    )
+    assert "reverse_proxy 127.0.0.1:8081" in site.group(1), (
+        "the catch-all site serves no backend"
+    )
+
     # The bare-IP site keeps its own short-lived certificate: it is what the
     # instance answers to before any domain exists.
-    assert "profile shortlived" in body
+    ip_site = re.search(r"^https://\$\{ip\} \{\n(.*?)^\}", caddy, re.S | re.M)
+    assert ip_site, "the bare-IP site is gone"
+    assert "profile shortlived" in ip_site.group(1), (
+        "the IP site no longer asks for a short-lived certificate"
+    )
 
 
 def test_the_ask_endpoint_allows_exactly_the_configured_host() -> None:
