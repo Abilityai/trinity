@@ -599,6 +599,11 @@ describe('#2733 — a cross-origin portal base URL must not reach the preview fe
 
   it('is still the only thing the rail hands its share fetch', () => {
     expect(RAIL_FILES).toMatch(/fetch\(sharePreviewPath\(/)
+    // ...and no OTHER fetch takes the raw url. The positive match above still
+    // passes when a SECOND, unrewritten `fetch(row.item.download_url)` is added
+    // beside it — a retry path, an "open in a tab" — which is exactly how #2733
+    // returns: one rewritten caller and one that never was.
+    expect(RAIL_FILES).not.toMatch(/fetch\(\s*row\.item\.download_url/)
     // AC 4 — a client upload has no DB row and no url; it never reaches here.
     expect(RAIL_FILES).toMatch(/portal\.fetchUploadBlob\(/)
   })
