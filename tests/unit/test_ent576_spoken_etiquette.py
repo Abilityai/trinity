@@ -76,6 +76,7 @@ class TestOneBlockEverywhere:
         assert "runs in the background" in block
         assert "Background tasks" in block
         assert f"at most {gv.MAX_BACKGROUND_TASKS_PER_CALL} run at a time" in block
+        assert "Never state or guess a result before its notice arrives" in block
 
     def test_a_non_workspace_session_carries_the_same_rules_in_the_synchronous_wording(self):
         # VoIP and the legacy Agent Detail session: one thread-less call,

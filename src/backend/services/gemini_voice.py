@@ -232,10 +232,15 @@ _TASK_FAILED_NOTICE = (
     "[System notice: background task {task_id} (\"{label}\") failed: {reason}\n"
     "At a natural pause, tell the user once, with the reason, and carry on.]"
 )
+# "Do not guess": in the first live run the model followed the accepted result
+# with an invented answer ("there are sixty-four files in there right now")
+# seconds before the real one arrived. The acceptance has to say, in words,
+# that it holds no result yet.
 _TASK_ACCEPTED = (
     "Started {task_id}: \"{label}\". It is running in the background as you, in this "
-    "chat; you will receive a system notice when it lands. Say one short line about what "
-    "you started, then carry on with the conversation. {others}"
+    "chat; you will receive a system notice when it lands. You do not have the result "
+    "yet — do not guess or state one. Say one short line about what you started, then "
+    "carry on with the conversation. {others}"
 )
 _TASK_REFUSED_AT_CAP = (
     "Not started: {cap} tasks are already running ({running}). Tell the user, and start "
@@ -438,9 +443,10 @@ def spoken_etiquette_instruction(manifest, *, background: bool = False) -> str:
         lines.append(
             f"- **Background tasks.** `run_task` answers at once with a task id; at most "
             f"{MAX_BACKGROUND_TASKS_PER_CALL} run at a time, and at the cap say so rather than "
-            "queueing silently. When a task's system notice arrives, bring it up at a natural "
-            "pause, say which request it answers, and give what is new. Asked whether "
-            "something is done, answer from the notices you have received."
+            "queueing silently. Never state or guess a result before its notice arrives. "
+            "When a task's system notice arrives, bring it up at a natural pause, say which "
+            "request it answers, and give what is new. Asked whether something is done, "
+            "answer from the notices you have received."
         )
     return "\n".join(lines) + "\n"
 

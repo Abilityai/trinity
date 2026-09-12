@@ -209,6 +209,13 @@ class TestConcurrencyIsBounded:
 
         asyncio.run(_drive())
 
+    def test_the_acceptance_says_there_is_no_result_yet(self):
+        # First live run: "let me recount those files. There are sixty four
+        # files in there right now" — an invented answer, seconds before the
+        # real one. The acceptance must say it holds no result.
+        gv = _voice_module()
+        assert "do not guess or state one" in gv._TASK_ACCEPTED
+
     def test_the_acceptance_names_what_else_is_running(self):
         # "Is that done yet?" is answerable from what the model was told.
         gv = _voice_module()
@@ -550,6 +557,42 @@ class TestTheCallEndingLosesNothing:
         assert "source=" not in user_src and "source=" not in reply_write
         assert portal._voice_attribution(None) == {}
         assert portal._voice_attribution("vs_call") == {"voice_call_id": "vs_call"}
+
+
+# ---------------------------------------------------------------------------
+# The call's own turn passes the #2694 live-call guard
+# ---------------------------------------------------------------------------
+class TestTheCallsOwnTurnPassesTheLiveCallGuard:
+    """Found in the first live run: every `run_task` failed at once with
+    "A voice call is on in this chat — end it, then send." #2694 landed on dev
+    after ent#535 and its guard — right for a typed turn from a second tab —
+    refused the call's own turns too, so a call could not run a single task.
+    """
+
+    def test_a_typed_turn_is_still_refused_during_a_call(self, monkeypatch):
+        from client_portal import service as portal, voice as pv
+        monkeypatch.setattr(pv, "voice_call_active", lambda sid: True)
+        with pytest.raises(portal.ClientPortalError) as ei:
+            portal._refuse_turn_during_voice_call("thread-1")
+        assert ei.value.category == "voice_call_active"
+
+    def test_the_calls_own_turn_passes(self, monkeypatch):
+        from client_portal import service as portal, voice as pv
+        monkeypatch.setattr(pv, "voice_call_active", lambda sid: True)
+        portal._refuse_turn_during_voice_call("thread-1", voice_call_id="vs_call")   # no raise
+
+    def test_portal_chat_hands_the_guard_the_call_id(self):
+        from client_portal import service as portal
+        src = inspect.getsource(portal.portal_chat)
+        assert "_refuse_turn_during_voice_call(session_id, voice_call_id=voice_call_id)" in src
+        # The streaming entry is typed-only and keeps the plain refusal.
+        stream_src = inspect.getsource(portal.portal_chat_stream) if hasattr(portal, "portal_chat_stream") else ""
+        assert "voice_call_id=voice_call_id" not in stream_src.split("_refuse_turn_during_voice_call(", 1)[-1][:60]
+
+    def test_the_only_writer_of_the_call_id_is_the_voice_dispatcher(self):
+        # The bypass is safe because nothing a request can carry sets the id.
+        from client_portal import router
+        assert "voice_call_id" not in inspect.getsource(router)
 
 
 # ---------------------------------------------------------------------------

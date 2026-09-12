@@ -476,7 +476,13 @@ result when it lands.** `run_task` on a Workspace call answers the model at
 once with a task id (`t1`, `t2`, …); the turn runs as the agent in this thread
 (ent#535) in the background, and both its rows land here stamped with the
 call's id — typed rows with an *asked during a voice call* caption, outside the
-spoken block, so the #2694 delta logic never sees them as speech. When the task
+spoken block, so the #2694 delta logic never sees them as speech. Two #2694
+seams had to learn what a call's own turn is: the live-call guard
+(`_refuse_turn_during_voice_call`) lets a turn carrying `voice_call_id` through
+— it had refused every `run_task` since #2694 landed after ent#535, so the call
+could not run a single task — and the delta cursor
+(`get_platform_rows_since_last_reply`) skips a reply that carries one, so a task
+landing mid-call cannot hide the call's first half from the next typed turn. When the task
 finishes (or fails, with its reason) the platform injects a system notice into
 the live call at a **natural boundary** — the model not mid-turn, the person
 quiet for 1.2 s, no other tool call pending; held at most 20 s — and the agent

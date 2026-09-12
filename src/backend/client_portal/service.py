@@ -1980,7 +1980,7 @@ def _resolve_session_id(agent_name: str, email: str, session_id: str | None,
     return ensure_main_session(agent_name, email)
 
 
-def _refuse_turn_during_voice_call(session_id: str) -> None:
+def _refuse_turn_during_voice_call(session_id: str, *, voice_call_id: str | None = None) -> None:
     """#2694: no typed reply may land mid-call — the turn side of the rule
     whose call side is `start_workspace_voice`'s 409. A reply that lands
     between two spoken rows sits after the cursor the next typed turn uses to
@@ -1989,7 +1989,16 @@ def _refuse_turn_during_voice_call(session_id: str) -> None:
     `/chat` surface are not, so the server refuses — in both turn entries,
     BEFORE any row is created. Unbilled and retryable: nothing was dispatched,
     and sending again after the call is exactly right.
+
+    ent#551: a turn that IS the call's — a `run_task` the voice dispatcher
+    started, which is the only writer of `voice_call_id` — passes. #2694
+    landed after ent#535 and refused every such turn ("A voice call is on in
+    this chat"), so the call could not run a single task. Its rows carry the
+    call id, and `get_platform_rows_since_last_reply` skips them as a cursor,
+    so the delta the guard protects stays whole.
     """
+    if voice_call_id:
+        return
     from .voice import voice_call_active
     if voice_call_active(session_id):
         raise ClientPortalError(409, "A voice call is on in this chat — end it, then send.",
@@ -2532,7 +2541,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
 
     session_id = _resolve_session_id(agent_name, email, session_id,
                                      new_thread=new_thread)
-    _refuse_turn_during_voice_call(session_id)
+    _refuse_turn_during_voice_call(session_id, voice_call_id=voice_call_id)
     client_message = message  # what the client typed — persisted verbatim (no context/manifest)
 
     # ent#186: a thread is titled from its OPENING exchange. Read the row here
