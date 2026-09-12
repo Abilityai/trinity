@@ -1114,8 +1114,8 @@ class TestThePromiseWatch:
         gv = _voice_module()
         said = self._run(gv, _session(gv), "creating that bar chart now.")
         assert len(said) == 1
-        assert 'You just said "creating that bar chart now."' in said[0]
-        assert "nothing has started" in said[0] and "Call it now" in said[0]
+        assert 'You said "creating that bar chart now."' in said[0]
+        assert "no tool call arrived" in said[0] and "call the tool now" in said[0]
         assert said[0].startswith(gv._NOTICE_OPEN)
 
     def test_a_promise_followed_by_a_call_is_kept(self):
@@ -1165,3 +1165,73 @@ def test_run_task_is_not_for_the_canvas():
     gv = _voice_module()
     [decl] = gv._RUN_TASK_TOOL.function_declarations
     assert "Not for the canvas" in decl.description and "never a task" in decl.description
+
+
+# ---------------------------------------------------------------------------
+# The promise watch does not fire over work already in flight; the same request
+# twice is one task
+# ---------------------------------------------------------------------------
+class TestThePromiseWatchKnowsWhatIsRunning:
+    """Eighth live run: with two tasks in flight the model said "both … are
+    running now", the watch saw a promise with no fresh call, nudged, and the
+    model told the person "I misspoke, they weren't running before" and started
+    a duplicate of t1 — the identical prompt."""
+
+    def test_no_nudge_while_a_task_is_in_flight(self):
+        gv = _voice_module()
+        session = _session(gv)
+        session._gemini_session = _Live()
+        svc = _svc(gv)
+        release = asyncio.Event()
+
+        async def _drive():
+            with patch("client_portal.service.portal_chat", _blocked_chat(release)), \
+                 patch.object(gv, "_ACK_WINDOW_SECONDS", 60), patch.object(gv, "_PROMISE_WATCH_SECONDS", 0.05):
+                await svc._dispatch_task_in_chat(session, "research OpenAI")
+                session._last_tool_call_monotonic = 0.0          # pretend the call was long ago
+                await svc._record_turn(session, "assistant", "I'll get a general overview together for you.")
+                await asyncio.sleep(0.2)
+                release.set()
+                await asyncio.gather(*[b.task for b in session._background_tasks.values()])
+                session._active = False
+        asyncio.run(_drive())
+        assert not any("no tool call arrived" in s for s in session._gemini_session.said)
+
+    def test_a_status_line_about_running_work_is_not_a_promise(self):
+        gv = _voice_module()
+        for said in ("Both the quarterly comparison and the marketing research are running now.",
+                     "I'm still working on getting the latest news on OpenAI's marketing.",
+                     "I already started that for you.",
+                     "That one is in progress."):
+            assert not gv.looks_like_a_promise(said), said
+
+    def test_the_nudge_never_asserts_that_nothing_started(self):
+        gv = _voice_module()
+        assert "nothing has started" not in gv._PROMISE_NUDGE
+        assert "If that work is not already running" in gv._PROMISE_NUDGE
+        assert "without commenting on this notice" in gv._PROMISE_NUDGE
+
+    def test_the_same_request_while_it_runs_is_refused_as_a_duplicate(self):
+        gv = _voice_module()
+        session = _session(gv)
+        svc = _svc(gv)
+        release = asyncio.Event()
+
+        async def _drive():
+            with patch("client_portal.service.portal_chat", _blocked_chat(release)) as chat, \
+                 patch.object(gv, "_ACK_WINDOW_SECONDS", 60):
+                first = await svc._dispatch_task_in_chat(session, "Compare quarterly performance for 2025 and 2026.")
+                again = await svc._dispatch_task_in_chat(session, "compare  quarterly performance for 2025 and 2026.")
+                assert first.startswith("Started t1")
+                assert again.startswith("Already running as t1")
+                assert not again.startswith(gv._ACCEPTED_PREFIX)        # spoken, not silent
+                assert list(session._background_tasks) == ["t1"]
+                release.set()
+                await asyncio.gather(*[b.task for b in session._background_tasks.values()])
+                await _settle()
+                # …and the same request AFTER it landed is a new task.
+                later = await svc._dispatch_task_in_chat(session, "Compare quarterly performance for 2025 and 2026.")
+                assert later.startswith("Started t2")
+                await asyncio.gather(*[b.task for b in session._background_tasks.values()])
+                await _settle()
+        asyncio.run(_drive())

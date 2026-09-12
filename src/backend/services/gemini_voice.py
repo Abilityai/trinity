@@ -296,19 +296,32 @@ _PROMISE_STEMS = (
 )
 _PROMISE_WATCH_SECONDS = 3.0      # how long after the promise a call may still arrive
 _PROMISE_NUDGE_COOLDOWN = 15.0    # never nudge twice inside this window
+# Worded so the model cannot echo a false correction: the first cut said
+# "nothing has started", and the model — which HAD started two tasks — told
+# the person "I misspoke earlier, they weren't running before" and started a
+# duplicate. The nudge now states only what the platform knows (no call
+# arrived), conditions the action on "not already running", and forbids
+# commenting on the notice.
 _PROMISE_NUDGE = (
     _NOTICE_OPEN +
-    "You just said \"{said}\" — but you called no tool, so nothing has started and the "
-    "user sees nothing. Call it now: `run_task` for work the agent must do, a canvas tool "
-    "for a drawing. If you are not going to, tell the user plainly that you have not "
-    "started it.]"
+    "You said \"{said}\", but no tool call arrived for it. If that work is not already "
+    "running, call the tool now — `run_task` for work the agent must do, a canvas tool "
+    "for a drawing — without commenting on this notice. If you are not going to, tell "
+    "the user plainly that you have not started it.]"
 )
+
+# Lines about work ALREADY under way are status, not promises: "both are
+# running now", "I'm still working on the OpenAI research".
+_PROGRESS_MARKERS = ("already", "still working", "are running", "is running", "in progress")
 
 
 def looks_like_a_promise(text: str) -> bool:
-    """Does an assistant line read as 'I am doing / about to do something'?"""
+    """Does an assistant line read as 'I am about to do something' — and not as
+    a status report about something already under way?"""
     low = " ".join(str(text or "").lower().split())
     if not low or "let me know" == low.strip():
+        return False
+    if any(marker in low for marker in _PROGRESS_MARKERS):
         return False
     return any(stem in low for stem in _PROMISE_STEMS)
 
@@ -344,6 +357,18 @@ _TASK_REFUSED_AT_CAP = (
     "Not started: {cap} tasks are already running ({running}). Tell the user, and start "
     "this one after one of them finishes."
 )
+# The same request twice while the first is still running is one task, not
+# two. Eighth live run: a nudge made the model "restart" a task that was
+# already in flight, with the identical prompt — the person then had two
+# copies of the same work and a second copy of every result.
+_TASK_DUPLICATE = (
+    "Already running as {task_id}: \"{label}\" — the same request is in flight, so no new "
+    "task was started. Tell the user it is in progress; its result will come as a notice."
+)
+
+
+def _same_request(a: str, b: str) -> bool:
+    return " ".join(str(a or "").lower().split()) == " ".join(str(b or "").lower().split())
 
 
 @dataclass
@@ -1487,6 +1512,13 @@ class GeminiVoiceService:
             return "No prompt provided."
 
         running = list(session._background_tasks.values())
+        for other in running:
+            if _same_request(other.prompt, prompt):
+                logger.info(
+                    "[ent#551] voice session %s: duplicate of %s refused",
+                    session.session_id, other.task_id,
+                )
+                return _TASK_DUPLICATE.format(task_id=other.task_id, label=other.label)
         if len(running) >= MAX_BACKGROUND_TASKS_PER_CALL:
             logger.info(
                 "[ent#551] voice session %s at the task cap (%d) — refused",
@@ -1542,6 +1574,12 @@ class GeminiVoiceService:
         promise watch — unless a tool was called in the last few seconds, in
         which case the promise was kept."""
         if RUN_TASK not in _session_manifest(session) or not session._active:
+            return
+        # While a task is in flight the person can SEE work happening (the
+        # pill), and a promise-shaped line is far more likely to be about it
+        # than about something new. Nudging here is how the eighth live run
+        # got a duplicate task and a spoken "I misspoke".
+        if session._background_tasks:
             return
         if not looks_like_a_promise(text):
             return

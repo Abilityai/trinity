@@ -805,6 +805,8 @@ import {
   VOICE_UNAVAILABLE_FALLBACK,
   endedNotice,
   groupVoiceBlocks,
+  ESCAPE_COOLDOWN_AFTER_CALL_MS,
+  escapeCoolingDownAfterCall,
   isMuteHotkey,
   startFailureReason,
   threadChangeEndsCall,
@@ -1843,7 +1845,10 @@ function onEscapeKeydown(event) {
     // click on the Stop button, a wrong one destroys a turn the user is still
     // waiting for. So an overlay is added whenever it plausibly owns Escape,
     // not only when it provably does.
-    overlays: [typeaheadOpen.value, pickerOpen.value, listening.value],
+    // ent#551 QA: `escapeCooldown` is the seconds after a call ends — the
+    // thread has just reattached to the task the call left running, and a
+    // second Escape (the key that ended the call) must not cancel it.
+    overlays: [typeaheadOpen.value, pickerOpen.value, listening.value, escapeCooldown.value],
   })) return
   event.preventDefault()
   cancelTurn()
@@ -2481,8 +2486,20 @@ watch([() => voice.transcriptEntries.value.length, () => voice.panelVersion.valu
 // The call ended — by End, by the cap, by the provider — and the bridge has
 // confirmed (or given up on) the write: reload the thread so the persisted
 // block replaces nothing local, and say why when it did not end by choice.
+// ent#551 QA: when the call ended, and whether Escape is still cooling down
+// from it (`escapeCoolingDownAfterCall` is the rule; this ref is its value on
+// the Escape handler's overlay list, which must be plain refs).
+const voiceEndedAt = ref(0)
+const escapeCooldown = ref(false)
+let escapeCooldownTimer = null
 watch(voiceCallActive, async (on, was) => {
   if (!was || on) return
+  voiceEndedAt.value = Date.now()
+  escapeCooldown.value = true
+  clearTimeout(escapeCooldownTimer)
+  escapeCooldownTimer = setTimeout(() => {
+    escapeCooldown.value = escapeCoolingDownAfterCall({ callEndedAt: voiceEndedAt.value })
+  }, ESCAPE_COOLDOWN_AFTER_CALL_MS)
   voiceEndNotice.value = endedNotice({ reason: voice.endReason.value, message: voice.endMessage.value })
   if (voice.error.value && !voiceEndNotice.value) voiceError.value = voice.error.value
   if (currentSessionId.value) await loadThread(currentSessionId.value)
