@@ -9,10 +9,11 @@ Workspace call now runs the turn through `portal_chat`, the same pipeline a
 typed message takes, so the agent has its own skills, files, memory and
 mid-work state and the answer lands in that thread as a turn.
 
-**The spoken budget is not a cancellation.** Past 20s the model is told the work
-is still running and keeps the floor; the turn CONTINUES and its reply lands in
-the chat. The old 30s `wait_for` threw the work away with the task already done
-and paid for.
+**The turn is never cancelled by a clock.** The old 30s `wait_for` threw the
+work away with the task already done and paid for; ent#535 replaced it with a
+20s spoken budget, and ent#551 superseded that with immediate background
+dispatch (`test_ent551_voice_background_tasks.py`). What this file still pins
+is the invariant both shared: the turn runs to completion and lands in the chat.
 
 **The manifest is locked.** Resolved once at session start, narrowing-only, and
 refused by name at the dispatcher — so a tool the session was not granted cannot
@@ -105,6 +106,17 @@ def _voice_module():
     return gemini_voice
 
 
+async def _dispatch_and_land(svc, session, prompt):
+    """ent#551: the Workspace path answers at once and runs the turn in the
+    background — so to assert on the turn, dispatch, then await it."""
+    spoken = await svc._dispatch_task_in_chat(session, prompt)
+    turns = [bt.task for bt in session._background_tasks.values()]
+    if turns:
+        await asyncio.gather(*turns, return_exceptions=True)
+        await asyncio.sleep(0)  # let the done-callbacks run
+    return spoken
+
+
 def _session(gv, **over):
     base = dict(
         session_id="vs_test",
@@ -134,9 +146,11 @@ class TestRunTaskRunsInTheChat:
 
         chat = AsyncMock(return_value={"response": "seventeen open PRs"})
         with patch("client_portal.service.portal_chat", chat):
-            out = asyncio.run(svc._run_task_in_chat(session, "how many PRs?"))
+            out = asyncio.run(_dispatch_and_land(svc, session, "how many PRs?"))
 
-        assert out == "seventeen open PRs"
+        # ent#551: the model is answered with an acceptance, not the reply —
+        # the reply lands in the chat and re-enters the call as a notice.
+        assert out.startswith("Started t1")
         chat.assert_awaited_once()
         kwargs = chat.await_args.kwargs
         # The thread, and the caller — this is what makes it the agent's own
@@ -181,10 +195,12 @@ class TestRunTaskRunsInTheChat:
         assert gv._is_workspace_bound(_session(gv, portal_session_id=None)) is False
 
 
-class TestSpokenBudget:
-    def test_a_slow_turn_keeps_the_floor_and_still_lands(self):
-        """The contract: the model is answered inside the budget, the work is
-        NOT cancelled, and the reply reaches the chat."""
+class TestTheTurnIsNeverCancelledByAClock:
+    """ent#535's contract, kept under ent#551: a slow turn is not thrown away.
+    The model is answered promptly (now: at once, with an acceptance), and the
+    turn runs to completion, which is what puts the reply in the chat."""
+
+    def test_a_slow_turn_still_lands(self):
         gv = _voice_module()
         session = _session(gv)
         svc = gv.GeminiVoiceService.__new__(gv.GeminiVoiceService)
@@ -196,14 +212,14 @@ class TestSpokenBudget:
             return {"response": "the long answer"}
 
         async def _drive():
-            with patch("client_portal.service.portal_chat", _slow), \
-                 patch.object(gv, "_SPOKEN_BUDGET_SECONDS", 0.01):
-                spoken = await svc._run_task_in_chat(session, "long one")
-            # The model was answered promptly, with the still-working line...
-            assert spoken == gv._STILL_WORKING_RESULT
-            # ...and the turn was NOT cancelled: it runs to completion, which is
-            # what puts the reply in the chat.
-            await asyncio.wait_for(landed.wait(), timeout=1)
+            # The patch stays up while the turn runs: `_portal_turn` imports
+            # `portal_chat` lazily, inside the background task.
+            with patch("client_portal.service.portal_chat", _slow):
+                spoken = await svc._dispatch_task_in_chat(session, "long one")
+                # The model was answered promptly...
+                assert spoken.startswith("Started t1")
+                # ...and the turn was NOT cancelled: it runs to completion.
+                await asyncio.wait_for(landed.wait(), timeout=1)
 
         asyncio.run(_drive())
 
@@ -221,9 +237,8 @@ class TestSpokenBudget:
             return {"response": "done"}
 
         async def _drive():
-            with patch("client_portal.service.portal_chat", _slow), \
-                 patch.object(gv, "_SPOKEN_BUDGET_SECONDS", 0.01):
-                await svc._run_task_in_chat(session, "x")
+            with patch("client_portal.service.portal_chat", _slow):
+                await svc._dispatch_task_in_chat(session, "x")
             assert gv._detached_turns, "the detached turn was dropped"
             release.set()
             await asyncio.sleep(0)
@@ -231,19 +246,14 @@ class TestSpokenBudget:
 
         asyncio.run(_drive())
 
-    def test_a_failing_turn_is_spoken_not_raised(self):
+    def test_no_clock_bounds_the_workspace_turn(self):
+        # Neither the old `wait_for` nor the ent#535 budget race: the
+        # Workspace dispatcher never waits on the turn at all.
+        import inspect
         gv = _voice_module()
-        session = _session(gv)
-        svc = gv.GeminiVoiceService.__new__(gv.GeminiVoiceService)
-        with patch("client_portal.service.portal_chat", AsyncMock(side_effect=RuntimeError("nope"))):
-            out = asyncio.run(svc._run_task_in_chat(session, "x"))
-        assert "did not go through" in out
-
-    def test_the_budget_is_shorter_than_any_turn_timeout(self):
-        # It bounds SPEECH, not the task. A budget at or above the turn timeout
-        # would make the detach unreachable and restore the old behaviour.
-        gv = _voice_module()
-        assert 0 < gv._SPOKEN_BUDGET_SECONDS <= 30
+        src = inspect.getsource(gv.GeminiVoiceService._dispatch_task_in_chat)
+        assert "wait_for(" not in src and "asyncio.wait(" not in src
+        assert not hasattr(gv, "_SPOKEN_BUDGET_SECONDS")
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +348,7 @@ class TestConfigIsBuiltFromTheManifest:
 
     def test_a_session_without_run_task_is_not_told_to_narrate_it(self):
         # AC 6: the prompt must not advertise a tool the lock removed. The
-        # etiquette block is entirely about run_task's spoken filler.
+        # etiquette block (ent#576) is built from the manifest for this reason.
         gv = _voice_module()
         session = _session(gv, tool_manifest=frozenset({"show_markdown"}))
         svc = gv.GeminiVoiceService.__new__(gv.GeminiVoiceService)
@@ -375,9 +385,10 @@ class TestTheEmptyPromptGuardSurvivedTheNewPath:
         chat = AsyncMock(return_value={"response": "should never run"})
         with patch("client_portal.service.portal_chat", chat):
             for blank in ("", "   ", "\n\t "):
-                out = asyncio.run(svc._run_task_in_chat(session, blank))
+                out = asyncio.run(_dispatch_and_land(svc, session, blank))
                 assert out == "No prompt provided."
         chat.assert_not_awaited()
+        assert not session._background_tasks
 
     def test_it_matches_the_container_path_word_for_word(self):
         """Two paths, one answer — the model must not be able to tell which one
@@ -385,7 +396,7 @@ class TestTheEmptyPromptGuardSurvivedTheNewPath:
         import inspect
         gv = _voice_module()
         assert '"No prompt provided."' in inspect.getsource(gv.GeminiVoiceService._execute_tool)
-        assert '"No prompt provided."' in inspect.getsource(gv.GeminiVoiceService._run_task_in_chat)
+        assert '"No prompt provided."' in inspect.getsource(gv.GeminiVoiceService._dispatch_task_in_chat)
 
 
 class TestTheRosterWideningTravelsOnTheSession:
@@ -405,7 +416,7 @@ class TestTheRosterWideningTravelsOnTheSession:
         svc = gv.GeminiVoiceService.__new__(gv.GeminiVoiceService)
         chat = AsyncMock(return_value={"response": "ok"})
         with patch("client_portal.service.portal_chat", chat):
-            asyncio.run(svc._run_task_in_chat(session, "go"))
+            asyncio.run(_dispatch_and_land(svc, session, "go"))
         assert chat.await_args.kwargs["include_owned"] is True
 
     def test_a_session_that_is_not_platform_does_not_widen_the_roster(self):
@@ -414,7 +425,7 @@ class TestTheRosterWideningTravelsOnTheSession:
         svc = gv.GeminiVoiceService.__new__(gv.GeminiVoiceService)
         chat = AsyncMock(return_value={"response": "ok"})
         with patch("client_portal.service.portal_chat", chat):
-            asyncio.run(svc._run_task_in_chat(session, "go"))
+            asyncio.run(_dispatch_and_land(svc, session, "go"))
         assert chat.await_args.kwargs["include_owned"] is False
 
     def test_the_field_defaults_to_the_narrow_answer(self):

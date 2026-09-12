@@ -98,14 +98,56 @@ export const VOICE_STATE_LABELS = Object.freeze({
 
 // What the one status line says. `toolName` is shown beside "Working" so the
 // person sees WHAT the agent is doing (the amber badge on the orb says the
-// same); a muted mic overrides "Listening", since it is not.
-export function voiceHeaderLine({ status = 'idle', toolName = null, muted = false, error = '' } = {}) {
+// same); a muted mic overrides "Listening", since it is not. Background tasks
+// (ent#551) are appended: they outlive the tool call that started them, so the
+// line keeps saying so while the conversation moves on.
+export function voiceHeaderLine({ status = 'idle', toolName = null, muted = false, error = '', backgroundTasks = 0 } = {}) {
   if (error) return error
+  let line
   if (status === 'tool_calling') {
-    return toolName ? `Working: ${String(toolName).replace(/_/g, ' ')}` : 'Working…'
+    line = toolName ? `Working: ${String(toolName).replace(/_/g, ' ')}` : 'Working…'
+  } else if (status === 'listening' && muted) {
+    line = 'Muted'
+  } else {
+    line = VOICE_STATE_LABELS[status] ?? ''
   }
-  if (status === 'listening' && muted) return 'Muted'
-  return VOICE_STATE_LABELS[status] ?? ''
+  const tasks = backgroundTasksLabel(backgroundTasks)
+  if (!tasks) return line
+  return line ? `${line} · ${tasks}` : tasks
+}
+
+// ---- Background tasks (ent#551) ---------------------------------------------
+
+// The bridge's `task` frame: `{state: started|finished|failed, task_id, label}`.
+// A list keyed on the task id, never a count — two tasks can be in flight and
+// the first to finish must not clear the badge (the same reason the backend
+// keeps a dict). A frame for an unknown id is a no-op; a repeated `started` is
+// idempotent.
+export function applyTaskFrame(tasks = [], frame = {}) {
+  const id = frame?.task_id
+  if (!id) return tasks
+  if (frame.state === 'started') {
+    if (tasks.some((t) => t.taskId === id)) return tasks
+    return [...tasks, { taskId: id, label: frame.label || '' }]
+  }
+  return tasks.filter((t) => t.taskId !== id)
+}
+
+// The badge / header words for work in flight. Takes the list or a count.
+export function backgroundTasksLabel(tasks = []) {
+  const n = Array.isArray(tasks) ? tasks.length : Math.max(0, Number(tasks) || 0)
+  if (n === 0) return ''
+  return n === 1 ? '1 task running' : `${n} tasks running`
+}
+
+// A typed row written by a task the agent ran during a voice call carries the
+// call's id but NOT `source: 'voice'` (it was not spoken) — so it renders as an
+// ordinary turn, outside the collapsed block, with this caption on the ask.
+export const VOICE_TASK_CAPTION = 'asked during a voice call'
+
+export function voiceTaskCaption(message = {}) {
+  if (!message?.voiceCallId || message.source === VOICE_SOURCE) return ''
+  return message.role === 'user' ? VOICE_TASK_CAPTION : ''
 }
 
 // The sentence for a call that ended other than by the person pressing End.

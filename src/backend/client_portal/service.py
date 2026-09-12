@@ -2431,7 +2431,11 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       model: str | None = None,
                       # ent#403 — the fully-resolved model, passed by a caller
                       # that has ALREADY stamped it on a pre-created row.
-                      resolved_model: str | None = None) -> dict:
+                      resolved_model: str | None = None,
+                      # ent#551 — a turn dispatched from a voice call carries the
+                      # call's id on both its rows (typed rows, `source` NULL):
+                      # the attribution, and nothing else. Never from a request.
+                      voice_call_id: str | None = None) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -2616,7 +2620,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # the thread's title before this writes the derived one, and the history
     # context below must not contain the very message it is context FOR. Both
     # reads happen first, deliberately.
-    _persist_user_turn(agent_name, email, session_id, client_message)
+    _persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id)
 
     # ent#186 / #2579: title the thread NOW, concurrently with the turn.
     #
@@ -2937,7 +2941,8 @@ async def portal_chat(agent_name: str, message: str, email: str,
     try:
         now = utc_now_iso()
         new_message_id = uuid.uuid4().hex
-        db.add_portal_message(new_message_id, agent_name, email, "assistant", reply, cost, now, session_id=session_id)
+        db.add_portal_message(new_message_id, agent_name, email, "assistant", reply, cost, now,
+                              session_id=session_id, **_voice_attribution(voice_call_id))
         message_id = new_message_id
         db.touch_portal_session(session_id, now, added=1)
     except Exception as e:  # noqa: BLE001
@@ -2956,7 +2961,16 @@ async def portal_chat(agent_name: str, message: str, email: str,
             "message_id": message_id}
 
 
-def _persist_user_turn(agent_name: str, email: str, session_id: str, content: str) -> None:
+def _voice_attribution(voice_call_id: str | None) -> dict:
+    """ent#551: the `add_portal_message` kwargs that attribute a row to the
+    voice call whose `run_task` produced it — and NOTHING for a typed turn, so
+    the ordinary write is byte-identical to before (the `source` column stays
+    untouched either way: these rows were not spoken)."""
+    return {"voice_call_id": voice_call_id} if voice_call_id else {}
+
+
+def _persist_user_turn(agent_name: str, email: str, session_id: str, content: str,
+                       voice_call_id: str | None = None) -> None:
     """Write the client's own message, before the turn runs. Best-effort.
 
     Idempotent against a RETRY. The message is written before the turn so a
@@ -2984,7 +2998,7 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
     try:
         now = utc_now_iso()
         db.add_portal_message(uuid.uuid4().hex, agent_name, email, "user", content,
-                              None, now, session_id=session_id)
+                              None, now, session_id=session_id, **_voice_attribution(voice_call_id))
         db.touch_portal_session(session_id, now, added=1,
                                 title_if_empty=_derive_title(content))
     except Exception as e:  # noqa: BLE001 — never block a turn on bookkeeping

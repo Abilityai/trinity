@@ -329,8 +329,9 @@ stage and the canvas stays behind the strip's Canvas tab (mobile is
 trinity#710). It reads `GET /api/agents/{name}/voice/{sid}/panel` — the agent's
 `main` canvas whatever its audience — through `CanvasPanel` (one rendering
 layer), refetching when the bridge reports a panel verb finished
-(`panelVersion` bumps on `tool_result` frames whose tool is one of the six) plus
-a 3 s safety poll for boards rewritten some other way. The 300 ms poll of the
+(`panelVersion` bumps on `tool_result` frames whose tool is one of the six, and
+on a `task` frame whose state is `finished`/`failed` — a background task may
+have drawn, ent#551) plus a 3 s safety poll for boards rewritten some other way. The 300 ms poll of the
 retired page was ~6,000 reads per 30-minute call for a surface the socket
 already narrates. After the call the rail's Canvas tab shows the same board:
 a **platform principal reads every audience in the Workspace**
@@ -468,10 +469,44 @@ firing on a sub-pixel reflow would otherwise blank the orb continuously.
 | `tests/unit/test_ent534_workspace_voice.py` | the backend properties above (28 tests) |
 | `src/frontend/tests/unit/portalVoiceMode.spec.js` | the pure rules + the source guards (42 tests) |
 
+## Long tasks, and how the agent speaks around them (ent#551, ent#576)
+
+A call can **start a long task, say so, keep talking, and come back with the
+result when it lands.** `run_task` on a Workspace call answers the model at
+once with a task id (`t1`, `t2`, …); the turn runs as the agent in this thread
+(ent#535) in the background, and both its rows land here stamped with the
+call's id — typed rows with an *asked during a voice call* caption, outside the
+spoken block, so the #2694 delta logic never sees them as speech. When the task
+finishes (or fails, with its reason) the platform injects a system notice into
+the live call at a **natural boundary** — the model not mid-turn, the person
+quiet for 1.2 s, no other tool call pending; held at most 20 s — and the agent
+brings it up, naming which request it answers. At most **3** tasks run at once;
+at the cap the agent says so rather than queueing silently. If the model does
+not say what it started within 4 s of dispatch (a filler just before the call
+counts), the platform nudges it — the acknowledgement is structural, not a hope.
+Ending the call cancels nothing: a task still running completes and lands in
+the chat. The orb shows work in flight as a persistent "N tasks running" badge
+(the `task` frame), distinct from the amber per-call badge, and the canvas
+column refetches when a task lands.
+
+The model is told **once** how to speak around tools, for the whole cycle
+(`spoken_etiquette_instruction`, built from the session's manifest): announce a
+wait, not an action (no filler for a canvas write — the drawing appearing is the
+acknowledgement); say it once (after a result, add what is new; never restate
+the announced intention; never read the canvas aloud — point and interpret);
+one narration per sequence; report a failure once, with its reason. The
+mechanics live in [voice-chat.md § VOICE-007](voice-chat.md); the requirement is
+`runtimes.md` §29.7 / §29.11.
+
 ## Known limits
 
-- The Workspace client cannot yet tell the model to *act as the agent*
-  (`run_task` is the stateless task endpoint) — #535.
+- The completion notice is a text turn on the realtime channel (the ent#534
+  cap-warning path), so "natural boundary" is decided platform-side from the
+  provider's `model_turn` / `turn_complete` / `interrupted` signals and the
+  input-transcription clock — not by the provider's own scheduling. Native
+  non-blocking function calling (`Behavior.NON_BLOCKING` + `WHEN_IDLE`) would
+  hand that decision to the model; it is not wired because its support on the
+  current Live model is unverified.
 - Mobile keeps the orb full-stage with the canvas behind the strip (trinity#710).
 - Rooms are out of scope — turn-taking with several agents is a different problem.
 - The 30-minute default is trusted only after a live call past 15 minutes on a

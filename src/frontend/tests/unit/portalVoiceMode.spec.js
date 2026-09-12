@@ -40,6 +40,10 @@ import {
   voiceCallLabelFromTurns,
   voiceEntryState,
   voiceHeaderLine,
+  applyTaskFrame,
+  backgroundTasksLabel,
+  voiceTaskCaption,
+  VOICE_TASK_CAPTION,
   voicePreflight,
 } from '../../src/components/portal/portalVoiceMode'
 
@@ -616,5 +620,77 @@ describe('the door and the hand-off are wired (source, since there is no mount h
       // The rationale lives in comments; no CODE path may consult it.
       expect(stripComments(src)).not.toContain('userActivation')
     }
+  })
+})
+
+// ---- ent#551 — background tasks: a long task runs while the conversation continues ----
+describe('ent#551 — background tasks', () => {
+  it('a task frame adds by id, is idempotent on started, and clears on finished or failed', () => {
+    let tasks = applyTaskFrame([], { state: 'started', task_id: 't1', label: 'the deck' })
+    expect(tasks).toEqual([{ taskId: 't1', label: 'the deck' }])
+    tasks = applyTaskFrame(tasks, { state: 'started', task_id: 't1', label: 'the deck' })
+    expect(tasks).toHaveLength(1)
+    tasks = applyTaskFrame(tasks, { state: 'started', task_id: 't2', label: 'the numbers' })
+    expect(tasks.map((t) => t.taskId)).toEqual(['t1', 't2'])
+    // The first to land must not clear the other — a list by id, never a count.
+    tasks = applyTaskFrame(tasks, { state: 'finished', task_id: 't1' })
+    expect(tasks).toEqual([{ taskId: 't2', label: 'the numbers' }])
+    tasks = applyTaskFrame(tasks, { state: 'failed', task_id: 't2' })
+    expect(tasks).toEqual([])
+    // Unknown ids and frames without one are no-ops.
+    expect(applyTaskFrame(tasks, { state: 'finished', task_id: 't9' })).toEqual([])
+    expect(applyTaskFrame([{ taskId: 't1', label: '' }], {})).toEqual([{ taskId: 't1', label: '' }])
+  })
+
+  it('the badge words take a list or a count and say nothing for zero', () => {
+    expect(backgroundTasksLabel([])).toBe('')
+    expect(backgroundTasksLabel(0)).toBe('')
+    expect(backgroundTasksLabel([{ taskId: 't1' }])).toBe('1 task running')
+    expect(backgroundTasksLabel(2)).toBe('2 tasks running')
+  })
+
+  it('the header line carries the running count and never drops the state', () => {
+    expect(voiceHeaderLine({ status: 'listening', backgroundTasks: 1 })).toBe('Listening · 1 task running')
+    expect(voiceHeaderLine({ status: 'speaking', backgroundTasks: 2 })).toBe('Speaking · 2 tasks running')
+    expect(voiceHeaderLine({ status: 'listening', muted: true, backgroundTasks: 1 })).toBe('Muted · 1 task running')
+    expect(voiceHeaderLine({ status: 'tool_calling', toolName: 'show_markdown', backgroundTasks: 1 }))
+      .toBe('Working: show markdown · 1 task running')
+    // Nothing running: the line is exactly what it was before ent#551.
+    expect(voiceHeaderLine({ status: 'listening' })).toBe('Listening')
+    // An error still wins the whole line.
+    expect(voiceHeaderLine({ status: 'listening', error: 'Mic lost', backgroundTasks: 3 })).toBe('Mic lost')
+  })
+
+  it('a typed row from a voice-call task gets the caption; a spoken row and a reply do not', () => {
+    expect(voiceTaskCaption({ role: 'user', voiceCallId: 'vs_1', source: null })).toBe(VOICE_TASK_CAPTION)
+    expect(voiceTaskCaption({ role: 'assistant', voiceCallId: 'vs_1', source: null })).toBe('')
+    expect(voiceTaskCaption({ role: 'user', voiceCallId: 'vs_1', source: 'voice' })).toBe('')
+    expect(voiceTaskCaption({ role: 'user', voiceCallId: null })).toBe('')
+    expect(voiceTaskCaption(undefined)).toBe('')
+    // …and such a row stays OUT of the spoken block: it was not spoken.
+    const items = groupVoiceBlocks([
+      { id: 'a', role: 'user', content: 'hi', source: 'voice', voiceCallId: 'vs_1' },
+      { id: 'b', role: 'user', content: 'count the PRs', source: null, voiceCallId: 'vs_1' },
+    ])
+    expect(items.map((i) => i.kind)).toEqual(['voice-call', 'message'])
+  })
+
+  it('the composable keeps the tasks from the task frame and refetches the canvas when one lands', () => {
+    const src = read('../../src/composables/useVoiceSession.js')
+    expect(src).toContain("msg.type === 'task'")
+    expect(src).toContain('applyTaskFrame(backgroundTasks.value, msg)')
+    const branch = src.split("msg.type === 'task'")[1].split('} else if')[0]
+    expect(branch).toContain("if (msg.state !== 'started') panelVersion.value += 1")
+    expect(src).toContain('backgroundTasks, hasBackgroundTasks,')
+  })
+
+  it('the orb shows work in flight as its own badge, and the conversation captions the ask', () => {
+    const orb = read('../../src/components/chat/VoiceOverlay.vue')
+    expect(orb).toContain('data-testid="voice-background-tasks"')
+    expect(orb).toContain('backgroundTasksLabel(voice.backgroundTasks.value)')
+    const conv = read('../../src/components/portal/PortalConversation.vue')
+    expect(conv).toContain('backgroundTasks: voice.backgroundTasks.value.length')
+    expect(conv).toContain('data-testid="portal-voice-task-caption"')
+    expect(conv).toContain('voiceTaskCaption(item.message)')
   })
 })

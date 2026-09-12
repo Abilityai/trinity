@@ -33,6 +33,28 @@
         </div>
       </Transition>
 
+      <!-- ent#551: tasks running in the background. Persists across turns,
+           unlike the amber badge above, which is one tool call's moment; a
+           different hue so "the agent is thinking" and "the agent has work in
+           flight" never read as the same thing. -->
+      <Transition
+        enter-active-class="transition ease-out duration-200"
+        enter-from-class="opacity-0 translate-y-2"
+        enter-to-class="opacity-100 translate-y-0"
+        leave-active-class="transition ease-in duration-150"
+        leave-from-class="opacity-100 translate-y-0"
+        leave-to-class="opacity-0 translate-y-2"
+      >
+        <div
+          v-if="voice.hasBackgroundTasks?.value"
+          class="absolute top-14 left-1/2 -translate-x-1/2 z-10 px-3 py-1 rounded-full text-xs font-medium tracking-widest uppercase bg-status-info-500/15 border border-status-info-400/40 text-status-info-200"
+          :title="voice.backgroundTasks.value.map((t) => t.label).join(' · ')"
+          data-testid="voice-background-tasks"
+        >
+          {{ backgroundTasksLabel(voice.backgroundTasks.value) }}
+        </div>
+      </Transition>
+
       <!-- Status text -->
       <div class="absolute bottom-16 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2">
         <div
@@ -91,6 +113,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { backgroundTasksLabel } from '../portal/portalVoiceMode'
 
 const props = defineProps({
   voice: { type: Object, required: true }
