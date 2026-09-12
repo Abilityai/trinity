@@ -14,6 +14,7 @@ Architecture:
 import asyncio
 import json
 import logging
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -254,6 +255,13 @@ _TASK_DONE_CANVAS_HINT = (
     "it is on the canvas. If the reply says the agent could not draw or has no canvas "
     "tools, that is about the agent — you have them; draw the data yourself."
 )
+# When the agent drew from inside the task (its own `set_canvas`), the model is
+# told, and told what is there — otherwise it keeps describing a canvas that no
+# longer exists.
+_TASK_DONE_CANVAS_CHANGED = (
+    " The canvas changed while this task ran and now shows:\n{summary}\n"
+    "Point at it and interpret it; do not read it aloud."
+)
 _TASK_FAILED_NOTICE = (
     _NOTICE_OPEN +
     "Background task {task_id} (\"{label}\") failed: {reason}\n"
@@ -311,6 +319,92 @@ class BackgroundTask:
     prompt: str
     started_monotonic: float
     task: object = field(default=None, repr=False)
+    # The canvas's `updated_at` when the task started; compared at landing so
+    # the notice can say the canvas changed under the model (the agent drew
+    # from inside the task) and what it shows now.
+    canvas_updated_at: Optional[str] = None
+
+
+def _one_line(text) -> str:
+    return " ".join(str(text or "").split())
+
+
+def canvas_context_text(canvas: Optional[dict], *, limit: int = 1500) -> str:
+    """What is on a canvas, as text the voice model can hold in context.
+
+    The sixth live run had the model say "I don't have a current table on the
+    canvas" while a sales table sat in the right column — it had never been
+    told what the person was looking at. One line per block: kind, title, slot
+    and a short extract of the payload (markdown text, KPI tiles, table columns
+    and first row, chart type and series). Bounded, because it rides the
+    system prompt.
+    """
+    blocks = (canvas or {}).get("blocks") or []
+    if not blocks:
+        return "The canvas is empty."
+    lines: list[str] = []
+    if (canvas or {}).get("title"):
+        lines.append(f"Title: {_one_line(canvas['title'])}")
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        kind = b.get("kind") or "block"
+        payload = b.get("payload") if isinstance(b.get("payload"), dict) else {}
+        head = f"- {kind}"
+        if b.get("title"):
+            head += f" “{_one_line(b['title'])}”"
+        if b.get("slot"):
+            head += f" [{b['slot']}]"
+        if b.get("id") == "voice":
+            head += " (your voice block)"
+        if kind == "markdown":
+            # Markdown may carry inline HTML (a `<span class="ck-muted">`); the
+            # model needs the words, not the tags.
+            body = _one_line(re.sub(r"<[^>]+>", " ", payload.get("markdown") or ""))
+        elif kind == "kpi":
+            body = "; ".join(
+                f"{t.get('label')}: {t.get('value')}" + (f" {t.get('unit')}" if t.get("unit") else "")
+                for t in (payload.get("tiles") or []) if isinstance(t, dict)
+            )
+        elif kind == "table":
+            cols = payload.get("columns") or []
+            rows = payload.get("rows") or []
+            body = f"columns {', '.join(map(str, cols))}; {len(rows)} rows"
+            if rows:
+                body += f"; first row {_one_line(json.dumps(rows[0]))}"
+        elif kind == "chart":
+            series = [str(s.get("label")) for s in (payload.get("series") or []) if isinstance(s, dict)]
+            body = f"{payload.get('type')} chart; series {', '.join(series) or 'unnamed'}"
+        elif kind == "diagram":
+            body = "a Mermaid diagram"
+        elif kind == "image":
+            body = f"image {_one_line(payload.get('src'))[:80]}" + (f" — {_one_line(payload.get('caption'))}" if payload.get("caption") else "")
+        elif kind == "html":
+            body = _one_line(re.sub(r"<[^>]+>", " ", payload.get("html") or ""))
+        else:
+            body = _one_line(json.dumps(payload))
+        lines.append(f"{head}: {body[:240]}")
+    text = "\n".join(lines)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def canvas_context_section(agent_name: str) -> str:
+    """The system-prompt section a Workspace call starts with: what is on the
+    agent's canvas right now. Empty on any read failure — context is
+    best-effort, the call is not."""
+    try:
+        from database import db
+        canvas = db.get_agent_canvas(agent_name, DEFAULT_CANVAS_ID)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("voice: canvas context read failed for %s: %s", agent_name, e)
+        return ""
+    return (
+        "\n\n## On the canvas now\n"
+        "What the person sees beside you as the call starts. Your canvas tools redraw the "
+        "`voice` block; blocks written earlier stay unless you clear them. Refer to what is "
+        "here by what it shows, not by reading it out.\n"
+        + canvas_context_text(canvas)
+    )
 
 
 def _task_label(prompt: str) -> str:
@@ -398,10 +492,11 @@ def _is_workspace_bound(session: "VoiceSession") -> bool:
 
 _RUN_TASK_DESCRIPTION = (
     "Execute a task in the agent's workspace — look something up, "
-    "read a file, search for information, or perform an action. "
-    "Use this when you need live data or agent capabilities to answer accurately. "
-    "It takes time. Before calling it, say one short line naming what you are "
-    "starting — never call it silently — and when the result comes back add only "
+    "read a file, search for information, research, write, or perform an action. "
+    "You cannot do any of this yourself: anything that must be looked up, counted, "
+    "researched, written or fetched is a call to this tool, and saying you will do it "
+    "is not doing it. It takes time. Before calling it, say one short line naming what "
+    "you are starting — never call it silently — and when the result comes back add only "
     "what is new; do not repeat that line."
 )
 _RUN_TASK_PARAMETERS = genai_types.Schema(
@@ -475,6 +570,15 @@ def spoken_etiquette_instruction(manifest, *, background: bool = False) -> str:
     if not has_task and not has_canvas:
         return ""
     lines = ["", "", SPOKEN_ETIQUETTE_HEADING, ""]
+    if has_task:
+        # Sixth live run: three requests ("do some research about recent news
+        # by OpenAI, just go do that"), three spoken promises, zero tool calls.
+        lines.append(
+            "- **Doing means calling.** You have no files, web, memory or skills of your own — "
+            "anything that must be looked up, counted, researched, written or fetched is a "
+            "`run_task` call. Saying you will do it is not doing it: if you did not call the "
+            "tool, nothing happened, and you must not talk as if it had."
+        )
     if has_task and background:
         lines.append(
             "- **Announce a wait, not an action.** Before `run_task`, say one short line naming "
@@ -1353,6 +1457,7 @@ class GeminiVoiceService:
             label=_task_label(prompt),
             prompt=prompt,
             started_monotonic=time.monotonic(),
+            canvas_updated_at=self._canvas_state(session.agent_name)[0],
         )
         turn = asyncio.create_task(self._portal_turn(session, prompt))
         bt.task = turn
@@ -1373,6 +1478,19 @@ class GeminiVoiceService:
             task_id=bt.task_id, label=bt.label,
             others=f"Also running: {others}." if others else "No other task is running.",
         )
+
+    def _canvas_state(self, agent_name: str) -> tuple:
+        """`(updated_at, text)` of the agent's canvas, or `(None, "")` when it
+        cannot be read — the call never waits on the canvas."""
+        try:
+            from database import db
+            canvas = db.get_agent_canvas(agent_name, self._CANVAS_ID)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("voice: canvas read failed for %s: %s", agent_name, e)
+            return None, ""
+        if not canvas:
+            return None, ""
+        return canvas.get("updated_at"), canvas_context_text(canvas, limit=600)
 
     def _spawn(self, coro) -> Optional["asyncio.Task"]:
         """A strongly-referenced fire-and-forget task; None with no loop.
@@ -1458,9 +1576,14 @@ class GeminiVoiceService:
         else:
             state = "finished"
             can_draw = bool(_session_manifest(session) & _PANEL_TOOL_NAMES)
+            now_at, now_text = self._canvas_state(session.agent_name)
+            if now_at and now_at != bt.canvas_updated_at:
+                canvas = _TASK_DONE_CANVAS_CHANGED.format(summary=now_text)
+            else:
+                canvas = _TASK_DONE_CANVAS_HINT if can_draw else ""
             notice = _TASK_DONE_NOTICE.format(
                 task_id=bt.task_id, label=bt.label, result=_clip(reply, _TASK_RESULT_MAX),
-                canvas=_TASK_DONE_CANVAS_HINT if can_draw else "",
+                canvas=canvas,
             )
         self._spawn(self._emit_task_event(session, state, bt))
         if session._active:

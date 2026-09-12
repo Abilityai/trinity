@@ -42,6 +42,7 @@ import {
   voiceHeaderLine,
   threadChangeEndsCall,
   isMuteHotkey,
+  leaveCallCopy,
   applyTaskFrame,
   backgroundTasksLabel,
   voiceTaskCaption,
@@ -465,10 +466,13 @@ describe('the shell: the canvas takes the right column, and navigation waits', (
     expect(SHELL_CODE).toMatch(/voiceCall\.active \? 'flex-1 sm:flex-\[2_1_0%\]' : 'flex-1'/)
     expect(SHELL_CODE).toContain('@voice-call="onVoiceCall"')
   })
-  it('refuses New chat, ⌘J and opening another thread while the call is on', () => {
-    expect(SHELL_CODE).toMatch(/function newChatWithAgent\(name\) \{\s*if \(voiceCall\.value\.active\) return/)
-    expect(SHELL_CODE).toMatch(/function openThread\(t\) \{\s*if \(voiceCall\.value\.active\) return/)
-    expect(SHELL_CODE).toMatch(/function onGlobalKeydown\(e\) \{[\s\S]{0,200}if \(voiceCall\.value\.active\) return/)
+  it('holds New chat, ⌘J and opening another thread behind the leave-call guard while the call is on', () => {
+    // ent#551 QA: these used to `return` silently; they now ASK through the one
+    // guard (see "leaving the stage mid-call asks first"). Same protection, in
+    // words, and nothing else may run before the guard.
+    expect(SHELL_CODE).toMatch(/function newChatWithAgent\(name\) \{\s*if \(guardLeaveCall\(\(\) => newChatWithAgent\(name\)\)\) return/)
+    expect(SHELL_CODE).toMatch(/function openThread\(t\) \{\s*if \(guardLeaveCall\(\(\) => openThread\(t\)\)\) return/)
+    expect(SHELL_CODE).toMatch(/function onGlobalKeydown\(e\) \{[\s\S]{0,260}if \(voiceCall\.value\.active\) \{[\s\S]{0,120}guardLeaveCall\(\(\) => onGlobalKeydown\(e\)\)/)
   })
   it('clears the call state when the conversation remounts', () => {
     expect(SHELL_CODE).toMatch(/watch\(\[convKey, activeRoomIdFromRoute\], \(\) => \{\s*onVoiceCall\(null\)/)
@@ -783,5 +787,36 @@ describe('the status line never sits on the buttons, and M mutes', () => {
     const stack = orb.slice(orb.indexOf('voice-bottom-stack'))
     expect(stack.indexOf('statusLabel')).toBeLessThan(stack.indexOf('voice.toggleMute()'))
     expect(orb).toContain("'Unmute (M)' : 'Mute (M)'")
+  })
+})
+
+// ---- ent#551 QA — leaving the stage mid-call asks first; End call never does ----
+describe('leaving the stage mid-call asks first', () => {
+  it('the copy names the agent, what happens, and what is kept', () => {
+    const c = leaveCallCopy('acme-scout')
+    expect(c.title).toBe('End the call?')
+    expect(c.message).toBe("You're on a voice call with acme-scout. Leaving here ends it. What was said stays in the chat.")
+    expect(c.confirmText).toBe('End call and leave')
+    expect(c.cancelText).toBe('Stay on the call')
+    expect(c.variant).toBe('warning')
+    expect(leaveCallCopy().message).toBe("You're on a voice call. Leaving here ends it. What was said stays in the chat.")
+  })
+
+  it('every exit from the stage routes through the one guard, and the guard ends the call through the conversation', () => {
+    for (const fn of ['function newChatWithAgent(name)', 'function openThread(t)', 'function newChat()', 'function openRoom(roomId)', 'function openAgentPage(name)']) {
+      const at = SHELL.indexOf(fn)
+      expect(at, fn).toBeGreaterThan(-1)
+      expect(SHELL.slice(at, at + 420), fn).toContain('guardLeaveCall(')
+    }
+    // ⌘J too — a keyboard exit is still an exit.
+    const kd = SHELL.slice(SHELL.indexOf('function onGlobalKeydown(e)'))
+    expect(kd.slice(0, 600)).toContain('guardLeaveCall(() => onGlobalKeydown(e))')
+    // The guard holds the action and asks; confirm ends the call via the
+    // conversation's own exposed action, then runs it.
+    expect(SHELL).toContain("await conversationRef.value?.endVoiceCall?.()")
+    expect(SHELL).toMatch(/<ConfirmDialog[\s\S]{0,400}v-model:visible="leaveCall\.open"[\s\S]{0,400}@confirm="onLeaveCallConfirm"/)
+    expect(CODE).toContain('defineExpose({ focusComposer, startVoiceCall, endVoiceCall })')
+    // The End button itself is unchanged: immediate, no dialog.
+    expect(CODE).toMatch(/data-testid="portal-voice-end"[\s\S]{0,40}@click="endVoiceCall\(\)"/)
   })
 })

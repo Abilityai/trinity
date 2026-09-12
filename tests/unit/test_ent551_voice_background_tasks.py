@@ -931,3 +931,94 @@ def test_the_bridge_forwards_task_events_as_a_task_frame():
     src = inspect.getsource(voice_router.voice_websocket)
     assert '{"type": "task", **event}' in src
     assert "on_task_event=on_task_event" in src
+
+
+# ---------------------------------------------------------------------------
+# The model knows what is on the canvas
+# ---------------------------------------------------------------------------
+class TestTheCanvasIsInContext:
+    """Sixth live run: "I don't have a current table on the canvas" — with the
+    sales table on screen. The call starts with a text rendering of the canvas,
+    and a task that changed the canvas says so when it lands."""
+
+    CANVAS = {
+        "title": "Pipeline", "updated_at": "2026-09-12T11:53:00Z",
+        "blocks": [
+            {"id": "b1", "kind": "markdown", "slot": "header", "payload": {"markdown": "## Pipeline · week 36\nUpdated hourly."}},
+            {"id": "b2", "kind": "kpi", "payload": {"tiles": [{"label": "Open", "value": 42}, {"label": "Won", "value": 7, "unit": "this week"}]}},
+            {"id": "b3", "kind": "chart", "payload": {"type": "bar", "series": [{"label": "Won", "points": [{"ts": "W36", "value": 7}]}]}},
+            {"id": "b4", "kind": "table", "title": "Stalled", "payload": {"columns": ["Deal", "Value"], "rows": [["Acme", "$48k"], ["Globex", "$31k"]]}},
+            {"id": "voice", "kind": "markdown", "payload": {"markdown": "| Quarter | FY26 |\n|---|---|\n| Q1 | $2.4M |"}},
+            {"id": "b5", "kind": "html", "payload": {"html": "<div class=\"ck-card\"><b>Needs a decision</b> Two deals idle.</div>"}},
+        ],
+    }
+
+    def test_every_block_is_one_readable_line(self):
+        gv = _voice_module()
+        text = gv.canvas_context_text(self.CANVAS)
+        assert text.startswith("Title: Pipeline")
+        assert "- markdown [header]: ## Pipeline · week 36 Updated hourly." in text
+        assert "- kpi: Open: 42; Won: 7 this week" in text
+        assert "- chart: bar chart; series Won" in text
+        assert '- table “Stalled”: columns Deal, Value; 2 rows; first row ["Acme", "$48k"]' in text
+        assert "(your voice block): | Quarter | FY26 |" in text
+        assert "- html: Needs a decision Two deals idle." in text          # tags stripped
+
+    def test_an_empty_or_missing_canvas_says_so(self):
+        gv = _voice_module()
+        assert gv.canvas_context_text(None) == "The canvas is empty."
+        assert gv.canvas_context_text({"blocks": []}) == "The canvas is empty."
+
+    def test_the_text_is_bounded(self):
+        gv = _voice_module()
+        big = {"blocks": [{"kind": "markdown", "payload": {"markdown": "x" * 400}} for _ in range(30)]}
+        assert len(gv.canvas_context_text(big, limit=1500)) <= 1500
+
+    def test_the_workspace_call_starts_with_the_canvas_in_its_prompt(self):
+        import inspect
+        from client_portal import voice as pv
+        src = inspect.getsource(pv.start_workspace_voice)
+        assert "prompt += canvas_context_section(agent_name)" in src
+        gv = _voice_module()
+        with patch("database.db.get_agent_canvas", return_value=self.CANVAS):
+            section = gv.canvas_context_section("scout")
+        assert section.startswith("\n\n## On the canvas now")
+        assert "Title: Pipeline" in section
+        with patch("database.db.get_agent_canvas", side_effect=RuntimeError("db down")):
+            assert gv.canvas_context_section("scout") == ""             # best-effort, never blocks the call
+
+    def _land(self, gv, session, states):
+        """Drive one task to its notice with `_canvas_state` answering `states` in order."""
+        session._gemini_session = _Live()
+        svc = _svc(gv)
+        answers = iter(states)
+
+        async def _drive():
+            with patch("client_portal.service.portal_chat", AsyncMock(return_value={"response": "r"})), \
+                 patch.object(gv.GeminiVoiceService, "_canvas_state", lambda _self, _a: next(answers)), \
+                 patch.object(gv, "_NOTICE_QUIET_SECONDS", 0.0), patch.object(gv, "_ACK_WINDOW_SECONDS", 60):
+                await svc._dispatch_task_in_chat(session, "x")
+                await asyncio.gather(*[b.task for b in session._background_tasks.values()])
+                for _ in range(40):
+                    await asyncio.sleep(0.025)
+                    if session._gemini_session.send_realtime_input.await_count:
+                        break
+        asyncio.run(_drive())
+        [notice] = session._gemini_session.said
+        return notice
+
+    def test_a_task_that_changed_the_canvas_says_what_it_shows_now(self):
+        gv = _voice_module()
+        from services.voice_tools import PLATFORM_VOICE_TOOLS
+        notice = self._land(gv, _session(gv, tool_manifest=PLATFORM_VOICE_TOOLS),
+                            [("t0", "old"), ("t1", "- markdown: the new table")])
+        assert "The canvas changed while this task ran and now shows:" in notice
+        assert "- markdown: the new table" in notice
+        assert "show_markdown` BEFORE" not in notice
+
+    def test_an_unchanged_canvas_keeps_the_draw_it_yourself_hint(self):
+        gv = _voice_module()
+        from services.voice_tools import PLATFORM_VOICE_TOOLS
+        notice = self._land(gv, _session(gv, tool_manifest=PLATFORM_VOICE_TOOLS), [("t0", "same"), ("t0", "same")])
+        assert "NOT on the canvas" in notice and "show_markdown` BEFORE" in notice
+        assert "changed while this task ran" not in notice

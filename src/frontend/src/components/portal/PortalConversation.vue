@@ -2542,7 +2542,9 @@ async function endVoiceCall() {
 // armed `?voice=1`. Both tokens are live — `focusComposer` gained its own
 // consumer in #2579 (`nextTick(focusComposer)` on a new chat) — so dropping
 // either is a break, not dead-code cleanup.
-defineExpose({ focusComposer, startVoiceCall })
+// ent#551 QA: the shell ends the call through this when the person confirms
+// leaving the stage — the one path that ends a call from outside this component.
+defineExpose({ focusComposer, startVoiceCall, endVoiceCall })
 
 // ent#474 — the rail's Work signal for a 1:1, DERIVED from the in-flight flag
 // on every change and never latched: it clears in the same `finally` that ends

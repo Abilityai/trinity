@@ -255,6 +255,25 @@ export function isMuteHotkey(event, { callActive = false } = {}) {
   return true
 }
 
+// ---- Leaving mid-call by a click ----------------------------------------------
+
+// Every way out of the stage OTHER than the End button asks first. End call is
+// the person saying "end it"; a click on an agent in the rail, a thread, a
+// room, New chat or ⌘J is the person going somewhere, and a call ending as a
+// side effect of that — silently, transcript or not — is the bug the operator
+// hit twice (a rail click on the very agent they were talking to). The copy
+// says what will happen and what is kept.
+export function leaveCallCopy(agentName = '') {
+  const who = agentName ? `with ${agentName}` : ''
+  return Object.freeze({
+    title: 'End the call?',
+    message: `You're on a voice call ${who}`.trim() + '. Leaving here ends it. What was said stays in the chat.',
+    confirmText: 'End call and leave',
+    cancelText: 'Stay on the call',
+    variant: 'warning',
+  })
+}
+
 // ---- Leaving mid-call ---------------------------------------------------------
 
 // Does a change of agent / thread props end the call? A route-driven thread

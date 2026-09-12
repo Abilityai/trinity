@@ -247,3 +247,16 @@ class TestTheOtherSurfacesAgree:
         assert "that is about the agent, not you" in text
         assert "never before you have what replaces it" in text
         assert "you have them; draw the data yourself" in gv._TASK_DONE_CANVAS_HINT
+
+
+def test_doing_means_calling_is_the_first_rule_for_a_task_capable_session():
+    """Sixth live run: three requests, three spoken promises ("searching for
+    recent news about OpenAI now"), zero tool calls."""
+    gv = _gv()
+    block = gv.spoken_etiquette_instruction(frozenset({gv.RUN_TASK}), background=True)
+    rules = [l for l in block.splitlines() if l.startswith("- **")]
+    assert rules[0].startswith("- **Doing means calling.**")
+    assert "Saying you will do it is not doing it" in rules[0]
+    assert "Doing means calling" not in gv.spoken_etiquette_instruction(frozenset({"show_markdown"}))
+    [decl] = gv._RUN_TASK_TOOL.function_declarations
+    assert "You cannot do any of this yourself" in decl.description
