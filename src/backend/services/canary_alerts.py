@@ -93,13 +93,15 @@ class CanaryAlerts:
     #
     # SOURCE OF TRUTH is the invariant module's own docstring title line
     # (`canary/invariants/<id>_*.py`, "X-NN — <title> (CANARY-001 …)"), NOT
-    # docs/testing/orchestration-invariant-catalog.md. The catalog IDs are
-    # not the registry IDs: catalog E-06 is the unimplemented #129 check
-    # while registry E-06 is "no overdue next_run_at" (#1472) — the catalog
-    # flags this itself, and its own cross-references are stale. G-03/G-04's
-    # catalog titles also over-claim scope relative to what shipped. Sourcing
-    # a name from the catalog can therefore put a confidently WRONG label on
-    # a real alert, which is worse than the bare-ID fallback.
+    # docs/testing/orchestration-invariant-catalog.md. The catalog's TITLES
+    # can over-claim scope relative to what shipped (G-03/G-04 carry an
+    # "implemented predicate deviates" note), so sourcing a name from the
+    # catalog can put a confidently WRONG label on a real alert, which is
+    # worse than the bare-ID fallback. (The IDS agree since #2337: the
+    # catalog's E-06 once named the unimplemented #129 check while this
+    # registry's E-06 is "no overdue next_run_at" (#1472); the #129 entry was
+    # re-homed to E-09, and tests/unit/test_2337_invariant_namespace.py fails
+    # on any registry/catalog id mismatch.)
     #
     # Register differs from the docstring on purpose: a docstring names the
     # property that HOLDS ("Terminal-state closure"), an alert header names
