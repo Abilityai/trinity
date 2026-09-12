@@ -611,7 +611,7 @@ describe('#2733 — a cross-origin portal base URL must not reach the preview fe
     expect(decl).toBeGreaterThan(-1)
     const docblock = src.slice(src.lastIndexOf('/**', decl), decl)
     expect(docblock).toMatch(/#2733/)
-    expect(docblock).toMatch(/supported/)
+    expect(docblock).toMatch(/supported/i)   // the AC-7 word, whatever its emphasis
     expect(docblock).toMatch(/sharePreviewPath/)
   })
 })
