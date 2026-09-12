@@ -354,9 +354,9 @@ serve neither an external client nor agent-shared bytes (which live at
   `main.py`'s CORS `allow_headers` no longer reaches it: a ranged preview is
   therefore possible, and is deliberately not taken here — the whole-blob read
   stays because the 256 KB cap is applied by client-side slicing. Shared-file
-  preview reads carry `preview=1`; the
-  server audits them with `details.preview=true` without incrementing the
-  download counter. The cap is stated in the UI, not only in code.
+  preview reads carry `preview=1`; the server audits them with
+  `details.preview=true` without incrementing the download counter. The cap is
+  stated in the UI, not only in code.
 * Non-previewable types, and a **failed byte fetch**, both land on the same
   name/size/type + Download card. "Never a blank modal" has to cover a failure,
   not only an unknown type.
