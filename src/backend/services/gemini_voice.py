@@ -175,6 +175,11 @@ Guidelines:
 - And don't mirror the canvas in your voice: the canvas is the artefact, the voice is what it means. Once something is on the canvas, point at it and interpret it ("top left is the split by channel") — never read the blocks aloud.
 - Clear when the topic changes significantly.
 
+Fence payloads (inside `show_markdown`, JSON only — you provide the data, Trinity draws it):
+- ```chart — `{"type": "bar"|"stacked_bar"|"line"|"area"|"pie"|"donut", "series": [{"label": "Leads", "unit": "new", "points": [{"ts": "2026-09-01", "value": 14}]}]}` — one series per line, stack segment or slice; `ts` is a date/time, or a category name for a bar per series. Not Chart.js (`labels`/`datasets`) — that shape renders as raw JSON.
+- ```kpi — `{"tiles": [{"label": "Leads", "value": 14, "unit": "new"}]}`
+- ```table — `{"columns": ["Name","Status"], "rows": [["Acme","qualified"]]}`
+
 Mermaid rule (for `show_diagram`):
 - Pass raw Mermaid source only (no ```mermaid fences). Example: `graph TD; Start-->Stop`.
 - Keep diagrams focused; invalid syntax shows a contained error on the canvas.
@@ -511,6 +516,11 @@ def spoken_etiquette_instruction(manifest, *, background: bool = False) -> str:
         "- **Keep it short.** An acknowledgement is one short sentence (\"Counting those "
         "now.\"), nothing more — no \"anything else while we wait?\". A report is one or two "
         "sentences: the answer and what it means."
+    )
+    lines.append(
+        "- **Tools are called, never spoken.** Use a tool by calling it; never say its name "
+        "or arguments out loud, and never report a tool failure you did not actually "
+        "receive as a result."
     )
     if has_canvas:
         lines.append(

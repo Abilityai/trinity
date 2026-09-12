@@ -29,8 +29,11 @@ pytestmark = pytest.mark.unit
 
 # The block rides EVERY voice session, so its size is a decision, not an
 # accident. The fullest variant (run_task in the background + the canvas)
-# landed at ~1.9 KB.
-MAX_BLOCK_CHARS = 2200
+# landed at ~1.9 KB; the ent#551 QA runs added three rules the live model
+# demonstrably needed — keep it short, tools are called never spoken, never
+# claim a canvas you did not draw — and it measures 2,259 chars. Raised
+# 2200 -> 2600 for them, deliberately; a further increase should be one too.
+MAX_BLOCK_CHARS = 2600
 
 
 def _gv():
@@ -179,6 +182,15 @@ class TestTheRules:
         assert "anything else while we wait" in block
         assert "A report is one or two sentences" in block
 
+    def test_tools_are_called_never_spoken(self):
+        # Fourth live run: "show_markdown('Canvas update test') updated now" said
+        # aloud, and "the task failed because of a syntax error" for a call the
+        # backend never received.
+        gv = _gv()
+        block = gv.spoken_etiquette_instruction(frozenset({gv.RUN_TASK}))
+        assert "Tools are called, never spoken" in block
+        assert "never report a tool failure you did not actually receive" in block
+
     def test_the_canvas_is_never_claimed_unless_drawn(self):
         gv = _gv()
         from services.voice_tools import PLATFORM_VOICE_TOOLS
@@ -199,6 +211,22 @@ class TestTheOtherSurfacesAgree:
         assert "do not repeat that line" in desc
         # The old duplicate filler rule is gone — one contract, not two copies.
         assert "ALWAYS say a brief out-loud filler" not in desc
+
+    def test_the_panel_instructions_teach_the_fence_shapes_the_renderer_draws(self):
+        """Fourth live run: the model put a Chart.js-shaped JSON (`data.labels` /
+        `datasets`) in a ```chart fence and the canvas showed raw JSON — the
+        panel prompt said fences exist but never gave their shape. Pinned to
+        the renderer's own keys and chart types, the ent#536 way."""
+        import re
+        gv = _gv()
+        text = gv.WORKSPACE_PANEL_INSTRUCTIONS
+        utils = (Path(__file__).resolve().parents[2] / "src/frontend/src/components/canvas/canvasUtils.js").read_text()
+        chart_types = re.findall(r"'(\w+)'", re.search(r"export const CHART_TYPES = \[(.*?)\]", utils).group(1))
+        for t in chart_types:
+            assert f'"{t}"' in text, f"chart type {t!r} is not taught to the voice model"
+        for key in ('"series"', '"points"', '"ts"', '"value"', '"tiles"', '"columns"', '"rows"'):
+            assert key in text, key
+        assert "Not Chart.js" in text
 
     def test_the_panel_instructions_state_the_division_of_labour(self):
         gv = _gv()
