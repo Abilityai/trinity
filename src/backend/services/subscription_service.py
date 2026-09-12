@@ -348,6 +348,9 @@ async def adopt_for_credentialless_agents(
         from services.agent_service.helpers import is_claude_runtime
         from services.docker_utils import agent_container_runtime_labels_async
 
+        skipped = {"no_container": 0, "non_claude": 0, "ephemeral": 0,
+                   "already_assigned": 0, "docker_unreadable": 0}
+
         labels = await agent_container_runtime_labels_async()
         if labels is None:
             # Tri-state: Docker could not be ASKED. Fail CLOSED — deliberately
@@ -361,10 +364,20 @@ async def adopt_for_credentialless_agents(
                 "cannot be runtime-verified — adopted nobody",
                 trigger, len(names),
             )
+            # The summary row exists FOR this case: "adopted 0 of 40 because
+            # Docker was unreadable" must be distinguishable in the record from
+            # "nothing to do", and `agent_count` staying 0 is the operator's
+            # only other signal. An ERROR log alone leaves the audit trail
+            # saying nothing happened, which is the wrong answer.
+            skipped["docker_unreadable"] = len(names)
+            await _log_adoption_sweep(
+                trigger=trigger, adopted={}, assigned_ids={},
+                candidates=len(names), skipped=skipped,
+                actor_user=actor_user, actor_ip=actor_ip,
+                endpoint=endpoint, request_id=request_id,
+            )
             return {}
 
-        skipped = {"no_container": 0, "non_claude": 0, "ephemeral": 0,
-                   "already_assigned": 0}
         claude_names: List[str] = []
         for name in names:
             if name not in labels:

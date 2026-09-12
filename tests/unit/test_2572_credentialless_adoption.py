@@ -316,11 +316,23 @@ class TestTheRuntimeGate:
         env.docker_answer["value"] = None
         _make_subscription(env, "eugene-max")
 
-        adopted = await env.svc.adopt_for_credentialless_agents()
+        adopted = await env.svc.adopt_for_credentialless_agents(actor_user=env.admin)
 
         assert adopted == {}
         assert env.db.get_agent_subscription_id("scout") is None
         assert env.db.get_agent_subscription_id("coder") is None
+
+        # ...and the ABORT is on the record. This is the case the summary row
+        # exists for: without it, "adopted 0 of 40 because Docker was
+        # unreadable" is indistinguishable in `audit_log` from "nothing to do",
+        # and the operator's only other signal is `agent_count` staying 0.
+        rows = _audit_rows("subscription_auto_adopt_sweep")
+        assert len(rows) == 1
+        details = json.loads(rows[0]["details"])
+        assert details["adopted"] == 0
+        assert details["candidates"] == 2
+        assert details["skipped"]["docker_unreadable"] == 2
+        assert _audit_rows("subscription_auto_adopt") == []
 
     async def test_a_container_with_no_runtime_label_is_skipped(self, env):
         """T6c — the one that catches the `trinity-system` adoption. The batch
