@@ -239,6 +239,23 @@ export function voiceCallLabelFromTurns(turns = []) {
   return `Voice call · ${n} spoken ${n === 1 ? 'turn' : 'turns'}`
 }
 
+// ---- Leaving mid-call ---------------------------------------------------------
+
+// Does a change of agent / thread props end the call? A route-driven thread
+// change (browser back, a deep link) does — the call ends first, its transcript
+// kept. But a call started from a BRAND-NEW chat creates its thread first, and
+// adopting that thread replaces the route, so the `sessionId` prop changes from
+// null to the very thread the call is bound to a moment after the call starts.
+// That is not a thread change. Found live (ent#551 QA): every first call from a
+// new chat died at exactly 5 s — the premature stop waited out the `saved`
+// frame timeout, then closed the socket.
+export function threadChangeEndsCall({ callActive = false, agentChanged = false, newSessionId = null, boundSessionId = null } = {}) {
+  if (!callActive) return false
+  if (agentChanged) return true
+  if (!newSessionId) return true                   // the thread went away under the call
+  return newSessionId !== boundSessionId
+}
+
 // ---- Layout --------------------------------------------------------------------
 
 // The retired `/agents/:name/workspace` page's proportions: orb left 40%, the

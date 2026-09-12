@@ -40,6 +40,7 @@ import {
   voiceCallLabelFromTurns,
   voiceEntryState,
   voiceHeaderLine,
+  threadChangeEndsCall,
   applyTaskFrame,
   backgroundTasksLabel,
   voiceTaskCaption,
@@ -412,7 +413,10 @@ describe('leaving mid-call ends it gracefully — the transcript is kept', () =>
   it('unmount, agent switch and a route-driven thread change all stop the call', () => {
     expect(CODE).toMatch(/function cleanupVoice\(\) \{[\s\S]{0,200}if \(voice\.isActive\.value\) void voice\.stop\(\)/)
     expect(CODE).toMatch(/watch\(\(\) => props\.agent\?\.name, \(\) => \{[\s\S]{0,400}if \(voiceCallActive\.value\) void voice\.stop\(\)/)
-    expect(CODE).toMatch(/watch\(\(\) => \[props\.agent\.name, props\.sessionId\][\s\S]{0,300}if \(voiceCallActive\.value\) await voice\.stop\(\)/)
+    // ent#551: the thread-change watcher asks the RULE, so a call's own new
+    // thread being adopted (route replace → sessionId null → id) does not end it.
+    expect(CODE).toMatch(/watch\(\(\) => \[props\.agent\.name, props\.sessionId\][\s\S]{0,700}if \(threadChangeEndsCall\(\{[\s\S]{0,400}\}\)\) await voice\.stop\(\)/)
+    expect(CODE).toContain('boundSessionId: voice.portalSessionId.value || currentSessionId.value,')
   })
   it('reloads the thread on the falling edge of the call, so the persisted block is the truth', () => {
     expect(CODE).toMatch(/watch\(voiceCallActive, async \(on, was\) => \{\s*if \(!was \|\| on\) return[\s\S]{0,500}await loadThread\(currentSessionId\.value\)/)
@@ -710,5 +714,36 @@ describe('ent#551 — background tasks', () => {
     expect(marker.slice(0, 700)).not.toContain("emit('sessions-changed'")
     expect(conv).toContain('data-testid="portal-voice-task-caption"')
     expect(conv).toContain('voiceTaskCaption(item.message)')
+  })
+})
+
+// ---- ent#551 QA — a call started from a new chat must survive its own thread being adopted ----
+describe('a call started from a new chat is not ended by its own thread arriving', () => {
+  it('the rule: only a real thread change, or an agent change, ends the call', () => {
+    // No call: nothing to end.
+    expect(threadChangeEndsCall({ callActive: false, newSessionId: 'b', boundSessionId: 'a' })).toBe(false)
+    // The call's own thread being adopted (null → id, same id the call is bound to).
+    expect(threadChangeEndsCall({ callActive: true, newSessionId: 't1', boundSessionId: 't1' })).toBe(false)
+    // A route-driven switch to another thread.
+    expect(threadChangeEndsCall({ callActive: true, newSessionId: 't2', boundSessionId: 't1' })).toBe(true)
+    // The thread going away under the call.
+    expect(threadChangeEndsCall({ callActive: true, newSessionId: null, boundSessionId: 't1' })).toBe(true)
+    // An agent switch always ends it, whatever the thread.
+    expect(threadChangeEndsCall({ callActive: true, agentChanged: true, newSessionId: 't1', boundSessionId: 't1' })).toBe(true)
+  })
+
+  it('the mic worklet is a same-origin file, not a blob: script the CSP blocks', () => {
+    const audio = read('../../src/utils/audio.js')
+    expect(audio).toContain("export const MIC_WORKLET_URL = '/mic-capture.worklet.js'")
+    expect(audio).toContain('audioContext.audioWorklet.addModule(MIC_WORKLET_URL)')
+    expect(audio).not.toContain('createObjectURL')
+    const worklet = read('../../public/mic-capture.worklet.js')
+    expect(worklet).toContain("registerProcessor('trinity-mic-capture', MicCapture)")
+    // Both CSPs allow it as 'self'; neither needs (or gets) blob: in script-src.
+    const devCsp = read('../../vite.config.js')
+    const prodCsp = read('../../security-headers.conf')
+    // The policy LITERALS, not the comment above them that also says "script-src".
+    expect(devCsp.match(/"script-src ([^;"]*);/)[1]).toBe("'self' 'unsafe-inline' 'unsafe-eval'")
+    expect(prodCsp.match(/script-src ([^;]*);/)[1]).not.toContain('blob:')
   })
 })

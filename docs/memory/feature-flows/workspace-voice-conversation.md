@@ -507,6 +507,22 @@ one narration per sequence; report a failure once, with its reason. The
 mechanics live in [voice-chat.md § VOICE-007](voice-chat.md); the requirement is
 `runtimes.md` §29.7 / §29.11.
 
+### Two first-run defects (ent#551 QA)
+
+- **A call started from a new chat died at 5 s.** `startVoiceCall` creates the
+  thread and adopts it before the call starts; the shell's route replace then
+  changes the `sessionId` prop from null to that id a moment later, and the
+  thread-change watcher — right for browser back and deep links — ended the call
+  it had just started; the 5 s was the `saved`-frame timeout inside that stop.
+  `portalVoiceMode.js::threadChangeEndsCall` is the rule now: an agent change or
+  a switch to a *different* thread ends the call; the call's own thread arriving
+  does not.
+- **The mic worklet was a `blob:` script the CSP blocks.** Every call logged
+  "Loading the script 'blob:…' violates the following Content Security Policy
+  directive" and fell back to the deprecated ScriptProcessor. The processor is a
+  static file now (`public/mic-capture.worklet.js`, `utils/audio.js::MIC_WORKLET_URL`),
+  loaded from `self`; neither CSP needs `blob:` in `script-src`.
+
 ## Known limits
 
 - The completion notice is a text turn on the realtime channel (the ent#534

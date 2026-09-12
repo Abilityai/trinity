@@ -806,6 +806,7 @@ import {
   endedNotice,
   groupVoiceBlocks,
   startFailureReason,
+  threadChangeEndsCall,
   voiceEntryState,
   voiceHeaderLine,
   voicePreflight,
@@ -1284,7 +1285,15 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
 watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   // ent#534: a route-driven thread change (browser back, a deep link) cannot
   // be refused the way a click can — the call ends first, its transcript kept.
-  if (voiceCallActive.value) await voice.stop()
+  // ent#551: unless the "change" is the call's own new thread being adopted —
+  // `startVoiceCall` creates the thread and adopts it BEFORE the call starts,
+  // and the shell's route replace lands here a moment later with that same id.
+  if (threadChangeEndsCall({
+    callActive: voiceCallActive.value,
+    agentChanged: props.agent.name !== oldName,
+    newSessionId: sid,
+    boundSessionId: voice.portalSessionId.value || currentSessionId.value,
+  })) await voice.stop()
   currentSessionId.value = sid
   resetTypeahead()
   // #2624: the outgoing thread's element is about to be replaced, so re-arm
