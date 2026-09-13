@@ -4,7 +4,8 @@ Add, edit, and hot-reload credentials on agents without restarting them.
 
 ## Concepts
 
-- **Credential Injection (CRED-002)** -- Direct file injection system. Credentials are written as `.env` (KEY=VALUE) and `.mcp.json` (generated from template) directly to the agent container.
+- **Credential Injection** -- Direct file injection system. Credentials are written as `.env` (KEY=VALUE) and `.mcp.json` (generated from template) directly to the agent container.
+- **Credential Vault** -- A platform-level store of named, encrypted credentials that an admin grants to agents, so an agent can fetch a shared secret by name at runtime instead of carrying its own injected copy. Additive to file injection. The vault itself is an enterprise capability; the MCP tools and the transcript scrub described below ship in every build.
 - **Credential Declaration** -- A template says which credentials its agent needs in `template.yaml`: `credentials:` lists the variable **names**, and the optional sibling `credential_setup:` describes each one.
 - **Setup Checklist** -- The per-variable view on the Credentials tab: what this agent needs, which are already set, and where to get the missing ones.
 - **Encrypted Storage** -- Credentials can be exported to `.credentials.enc` files (AES-256-GCM encryption) for backup and import.
@@ -114,6 +115,29 @@ The platform encryption key (`CREDENTIAL_ENCRYPTION_KEY`) can be rotated online,
 
 The sweep re-encrypts every database-persisted token (subscriptions, channel bot tokens, GitHub PATs, payment credentials). Per-agent `.credentials.enc` files re-encrypt onto the new key on their next credential operation; they keep opening via the secondary key until then. Full runbook: `docs/migrations/CREDENTIAL_KEY_ROTATION.md`.
 
+### Credential Vault
+
+The vault holds named credentials once, encrypted (AES-256-GCM), and grants them per agent. An agent asks for a granted value by name at runtime; nothing is written into its `.env`.
+
+**As an admin**, open **Settings → Vault** (the tab appears only on an instance where the vault is enabled). Click **Add a credential**, then open its **Grants** and **Grant** it to the agents that may read it; **Revoke** takes a grant back and **Delete** removes the entry. Values are never shown again after you save them. After rotating the platform encryption key, the **Key-rotation maintenance** disclosure re-encrypts every entry; entries encrypted under a key the instance no longer has are counted so you can restore the previous key as `CREDENTIAL_ENCRYPTION_KEY_SECONDARY` and re-encrypt. Managing entries and grants requires an administrator signed in interactively — an API key of any scope is refused.
+
+**From inside an agent**, two MCP tools exist in every build:
+
+- `list_available_credentials()` — the names, descriptions, and kinds this agent has been granted. Never a value. An empty list means nothing has been granted.
+- `fetch_credential(name, execution_id?)` — the plaintext value of one granted credential. Deny-by-default: an ungranted or unknown name returns `not_granted: true`, and there is no way to discover names you were not granted.
+
+Where the vault is not available — an instance without the entitlement, or a call made without an agent-scoped key — the tools do not error. `list_available_credentials` returns `enabled: false` with a reason, and `fetch_credential` returns `success: false` with a flag that distinguishes *not granted*, *needs an agent key*, and *not available on this platform*.
+
+**What happens to the value.** The credential reaches the agent live, as a plain tool result, because that is what the agent needs to do its work. Trinity then scrubs that value out of everything it persists from the turn — the transcript, the execution log, the response and error columns, notifications, channel completion reports, and the cached response replayed to duplicate requests — replacing every occurrence (raw, JSON-escaped, and base64) with `***REDACTED***`. The scrub runs alongside the existing pattern-based sanitizer, not instead of it. Two honest limits: it covers what the platform stores, not the agent's own in-container session files, and it applies to values fetched within the last 24 hours.
+
+### Platform-level credentials
+
+The credentials the platform itself holds — the Anthropic API key and platform GitHub PAT (**Settings → Integrations → API Keys**), the Slack app token, client secret, and signing secret (**Settings → Integrations → Slack Integration**), and the Google API key — are stored AES-256-GCM encrypted at rest, never in cleartext. An install upgraded from an older release re-encrypts a leftover cleartext row the first time it is read and deletes the cleartext copy, so a restored old backup or a direct database write cannot leave a plaintext value behind for long.
+
+The generic settings route refuses to store a secret in the clear: `PUT /api/settings/{key}` for any of those keys, or for any credential-shaped key (`*_api_key`, `*_token`, `*_secret`, `*_pat`, `*_password`, `*_credentials`), answers `422` and names the dedicated route to use. The Slack **client ID** is a reviewed exemption — it is a public OAuth identifier that appears verbatim in the authorize URL.
+
+Encryption protects the database going forward only. Backups taken before the upgrade still hold the plaintext values, so an upgrading install should rotate those tokens — runbook: [`SECRET_SETTINGS_ENCRYPTION_2026-08.md`](../../migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md).
+
 ### Security
 
 Credential values are never logged. All operations use structured logging with values masked.
@@ -129,6 +153,9 @@ Credential values are never logged. All operations use structured logging with v
 | `/api/agents/{name}/credentials/inject` | POST | Inject files directly |
 | `/api/agents/{name}/credentials/export` | POST | Export to `.credentials.enc` |
 | `/api/agents/{name}/credentials/import` | POST | Import from encrypted file |
+| `/api/agents/{name}/credentials/env-drift` | GET | Per-variable drift between the agent's `.env` and the environment its running process actually has (variable names only). Owner-only and human-only; a stopped agent returns `agent_not_running` rather than an error. |
+
+The inject, export, import, checklist, and drift routes are owner-only **and human-only** — an agent-scoped API key is rejected, so a prompt-injected agent cannot read or rewrite its own credential set.
 
 ### MCP Tools
 
@@ -137,6 +164,7 @@ Credential values are never logged. All operations use structured logging with v
 - `export_credentials(name)` -- Export credentials to encrypted file.
 - `import_credentials(name)` -- Import credentials from encrypted file.
 - `get_credential_encryption_key()` -- Retrieve the encryption key.
+- `list_available_credentials()` / `fetch_credential(name)` -- Read a granted vault credential at runtime (see [Credential Vault](#credential-vault)).
 
 ## See Also
 

@@ -129,7 +129,7 @@ When `/trinity:onboard` detects it is running *inside* a deployed Trinity agent 
 4. Reconciles declared schedules live
 5. Finishes with `get_agent_compatibility_report` — every HARD finding is yours to fix; SOFT and AI findings are advisory
 
-**Bootstrap for agents that predate declared plugins.** The in-place path needs the `trinity` plugin present in the container. Agents created since Trinity re-installs declared plugins at boot get it from their `template.yaml`; an older agent has nothing declared yet, so run this once from its terminal, then start a fresh session:
+**The `trinity` plugin is provided by the platform.** The in-place path needs the plugin present in the container, and a bare repo declares nothing — so Trinity's agent image ships with it pre-installed, and every container boot re-installs it if missing, whether or not `template.yaml` declares it. A new agent therefore runs `/trinity:onboard in-place` straight away. Only an agent still running on an image built before the pre-install needs the one-time bootstrap from its terminal, followed by a fresh session:
 
 ```bash
 claude plugin marketplace add abilityai/abilities && claude plugin install trinity@abilityai --yes
@@ -186,7 +186,9 @@ The loop mechanics — modes, template variables, stop signals, capacity, costs 
 /trinity:create-dashboard
 ```
 
-Analyzes the agent's purpose and data sources, proposes a set of metrics, and — after your approval — scaffolds an agent-specific `/update-dashboard` skill that keeps `dashboard.yaml` current. Schedule that skill on Trinity to keep the agent's dashboard live. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md).
+Analyzes the agent's purpose and data sources, proposes a set of metrics, and — after your approval — scaffolds an agent-specific `/update-dashboard` skill that keeps `dashboard.yaml` current. Declare that skill's cron in `template.yaml` `schedules:` to keep the agent's dashboard live.
+
+The generated skill writes only widget types Trinity renders — `metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer`; anything else is stripped by the agent. There is no `chart` type: trend lines and sparklines come from the platform, which records each `metric` and `progress` widget's value on every fetch, keyed by the widget's stable `id:` — so the skill gives those widgets an `id` (reordering unkeyed widgets orphans their history) and never emits YAML anchors, which Trinity's hardened loader rejects. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md).
 
 ## Instance Provisioning: `/trinity:deploy-new-instance`
 
@@ -228,7 +230,7 @@ Optional but recommended:
 - `dashboard.yaml` — Custom metrics dashboard
 - `.mcp.json.template` — MCP server configuration
 - `template.yaml` `schedules:` — declared recurring work, materialized at creation
-- `template.yaml` `plugins:` — declared Claude Code plugins, re-installed on every boot (declare `trinity@abilityai` at minimum)
+- `template.yaml` `plugins:` — declared Claude Code plugins, re-installed on every boot. Declare `trinity@abilityai` at minimum so the intent is in the repo; the platform provides that one plugin on every boot even when it is undeclared
 
 The authoritative verdict is the platform's compatibility report (Agent Detail → Overview), which `/trinity:onboard` runs at the end of every path. See [Creating Agents](../agents/creating-agents.md).
 

@@ -16,7 +16,7 @@ Yes. A `github:owner/repo` template that points at a **public** repository clone
 
 ## Do I need to write my own template to create an agent?
 
-No. The **Library** page (formerly Templates -- the old `/templates` path redirects to `/library`) ships a curated **Starter Templates** section (recommended starters: `scout`, `sage`, `scribe`) auto-discovered from the platform's `config/agent-templates/` directory, plus any GitHub templates an admin has configured as cards. If you want a blank slate, choose **From Scratch** — it creates a minimal agent with a default `CLAUDE.md` you can build on. See [Creating Agents](../agents/creating-agents.md).
+No. The **Library** page (formerly Templates -- the old `/templates` path redirects to `/library`) ships a curated **Starter Templates** section (recommended starters: `scout`, `sage`, `scribe`) auto-discovered from the platform's `config/agent-templates/` directory, plus any GitHub templates an admin has configured as cards. If you want a blank slate, choose **From Scratch** — it creates a minimal agent with a default `CLAUDE.md` you can build on. A `github:owner/repo` template doesn't even need a `template.yaml`: Trinity creates the agent from the repository as it is, and because the `trinity` plugin is pre-installed in every agent, that agent can make itself Trinity-compatible afterwards by running `/trinity:onboard` in its own chat. See [Creating Agents](../agents/creating-agents.md) and the [Advanced Features FAQ](advanced-features.md#i-created-an-agent-straight-from-a-bare-github-repo-how-do-i-make-it-trinity-compatible).
 
 ## What goes in template.yaml?
 
@@ -24,7 +24,7 @@ No. The **Library** page (formerly Templates -- the old `/templates` path redire
 
 ## How do I make sure my agent's Claude Code plugins survive a rebuild or a move?
 
-Declare them in a `plugins:` block in `template.yaml` — a `marketplaces:` list (name plus `owner/repo` or an https source) and an `installed:` list of `plugin@marketplace` entries. Trinity materializes the block at creation as a committed, secret-free `~/.trinity/plugins.yaml`, and on every container boot the agent re-installs anything declared but missing, headlessly. Plugins installed by hand inside the agent are *not* captured back — they live in gitignored Claude Code state and vanish when the workspace is reconstituted from git onto a fresh volume or another host — so add them to the template too. Adding the block to an existing agent takes effect on its next restart; the abilities `/trinity:sync plugins` skill installs the difference right away. See [Creating Agents](../agents/creating-agents.md#declared-plugins).
+Declare them in a `plugins:` block in `template.yaml` — a `marketplaces:` list (name plus `owner/repo` or an https source) and an `installed:` list of `plugin@marketplace` entries. Trinity materializes the block at creation as a committed, secret-free `~/.trinity/plugins.yaml`, and on every container boot the agent re-installs anything declared but missing, headlessly. Plugins installed by hand inside the agent are *not* captured back — they live in gitignored Claude Code state and vanish when the workspace is reconstituted from git onto a fresh volume or another host — so add them to the template too. One plugin you never have to declare is `trinity@abilityai`: the platform pre-installs it in the agent image and re-ensures it on every boot whether or not the template lists it (an omitted entry is never uninstalled). Adding the block to an existing agent takes effect on its next restart; the abilities `/trinity:sync plugins` skill installs the difference right away. See [Creating Agents](../agents/creating-agents.md#declared-plugins).
 
 ## Why did creating my agent fail with an error about the base image?
 
@@ -32,11 +32,15 @@ Every template's `base_image` is validated against an allowlist, and blocked ima
 
 ## What's the difference between the Claude Code, Codex, and Gemini runtimes?
 
-The runtime is the CLI harness that executes the agent inside its container, chosen via `runtime.type` in `template.yaml`: `claude-code` (default), `codex` (OpenAI Codex), or `gemini-cli`. They differ in auth (Codex uses `OPENAI_API_KEY` and skips Claude-subscription auto-assignment; Gemini uses a Gemini API key), instruction file (Codex reads `AGENTS.md` — Trinity mirrors the template's `CLAUDE.md` into it at startup), session resume (a Codex agent cannot resume, so its Workspace turns replay the visible history as text rather than carrying working memory forward), and cost reporting (estimated for Codex, actual for the others). The runtime is fixed at creation: to change it, recreate the agent from a template that declares a different runtime. See [Agent Runtimes](../agents/agent-runtimes.md).
+The runtime is the CLI harness that executes the agent inside its container, chosen via `runtime.type` in `template.yaml`: `claude-code` (default), `codex` (OpenAI Codex), or `gemini-cli`. They differ in auth (Codex uses an `OPENAI_API_KEY` credential — Trinity logs the CLI in with it before the first turn, so an API-key Codex agent works out of the box and a rotated key is picked up on the next turn — or a ChatGPT-plan login you run yourself with `codex login`; Codex skips Claude-subscription auto-assignment, and Gemini uses a Gemini API key), instruction file (Codex reads `AGENTS.md` — Trinity mirrors the template's `CLAUDE.md` into it at startup), session resume (a Codex agent cannot resume, so its Workspace turns replay the visible history as text rather than carrying working memory forward), and cost reporting (estimated for Codex, actual for the others). The runtime is fixed at creation: to change it, recreate the agent from a template that declares a different runtime. See [Agent Runtimes](../agents/agent-runtimes.md).
 
 ## How do I start and stop an agent?
 
 Toggle the Running/Stopped switch on the Dashboard (Grid tiles and List rows both carry it) or the Agent Detail page — a spinner shows while the state changes. Via the API, use `POST /api/agents/{name}/start` and `POST /api/agents/{name}/stop`; via MCP, `start_agent(name)` and `stop_agent(name)`. See [Managing Agents](../agents/managing-agents.md).
+
+## Do my agents come back on their own after the server reboots?
+
+Yes. Agent containers are created with Docker's `unless-stopped` restart policy, so after a host reboot or a Docker daemon restart every agent that was running comes back by itself and its schedules resume — nobody has to start agents by hand. An agent you deliberately stopped stays stopped, because the policy honours Docker's manual-stop flag, so a quarantined agent is never resurrected by a reboot. Agents may briefly show as stopped while Docker brings them back. The policy is set when the container is created, so agents created before it shipped adopt it on their next recreate (a resource, runtime, or base-image change), not on a plain restart; an upgrading install can sweep its existing fleet once. See [Managing Agents](../agents/managing-agents.md#start-and-stop) and the [restart-policy migration guide](../../migrations/AGENT_RESTART_POLICY_2026-09.md).
 
 ## What survives an agent restart, and what survives a recreate?
 
@@ -49,6 +53,8 @@ No. Deleting stops and removes the container immediately, but it is a soft delet
 ## Can I create a short-lived, disposable agent that cleans itself up?
 
 Yes, with an enterprise-tier feature: a disposable ("ghost") agent is created with a hard budget — a maximum number of runs and/or a time limit. When the budget is spent it is discarded immediately and completely: the container and its data are removed with no soft-delete window and no reserved name. This is aimed at one-off jobs, often spawned on demand by another agent, rather than long-lived agents you manage by hand. In a community build agents are always long-lived (no budget). See [Managing Agents](../agents/managing-agents.md).
+
+## Why can't I create a new agent with the same name as one I deleted?
 
 Because deletion is a soft delete, the old agent's record still exists and reserves the name until the retention sweep purges it (default: 180 days). Pick a different name, or ask an admin to recover the soft-deleted agent if you actually want it back. See [Managing Agents](../agents/managing-agents.md).
 
@@ -64,6 +70,14 @@ Set a **display label**. The label is the human-facing name shown across the UI 
 
 Renaming moves the immutable slug — the agent's canonical name that URLs, MCP tool names, schedules, and webhooks all resolve to — so it's the heavier operation and rewrites records across the platform. A display label is a presentation-only friendly name layered on top of the unchanged slug. Prefer the label for day-to-day relabeling and reserve a rename for when you genuinely need the canonical name to change. See [Managing Agents](../agents/managing-agents.md).
 
+## How is the Agent Detail page organized?
+
+It lands on **Overview** (trends, health, recent activity) and puts everything else in tabs — Tasks, Chat, Reports, Canvas, Schedules, Loops, Playbooks, Credentials, Payments, Files, Info, plus owner-only tabs such as Access, Sharing, Permissions, Folders, Skills, and Settings; Dashboard, Brain, Git, and A2A appear only when the agent supports them, and tabs that don't fit the window collapse into a **More ▾** menu. Every tab is deep-linkable with `?tab=`. The header above the tabs holds live "now" state — status, CPU/memory gauges, cost, and quick controls such as the Running and Autonomy switches — and two doors into other surfaces: **Workspace** opens the agent in the Workspace, and **Talk** starts a voice call there. The **Chat** tab is stateless (each message starts fresh) and carries a **Continue in Workspace →** link that opens the Workspace in its own browser tab when you want a conversation that keeps its memory. There is no browser Terminal tab any more (see the SSH question below), and `?tab=session` redirects to the Workspace. See [Managing Agents](../agents/managing-agents.md#the-agent-detail-page).
+
+## What's in an agent's Settings tab?
+
+It's the owner-only home for per-agent configuration, in sections: **Guardrails** (max turns for chat and for tasks; the other overrides are API-only), **Parallel Capacity** (how many tasks may run at once, up to the admin's fleet ceiling, with live slot usage), **Expose via MCP** (publish the agent as its own MCP tool), **Trinity access key** (the agent-scoped key it uses to call Trinity's MCP tools, with health status and a **Regenerate** action — the running container is replaced to pick up the new key), **Reliability** (the dispatch circuit breaker, plus **Wake this agent when an operator answers**, which starts a turn as soon as an approval or question is answered instead of waiting for the agent's next scheduled run), and **Voice** (spoken voice notes on messaging channels). A **Cross-model validation** section appears only on entitled installations. Resources, read-only mode, and the Running/Autonomy switches stay in the agent header and on the Dashboard. See [Agent Configuration](../agents/agent-configuration.md#the-settings-tab).
+
 ## How do I limit how much CPU and memory an agent can use?
 
 Click the gear button ("Configure resources") in the agent header to open the resource modal. Memory options are 1g through 64g and CPU options are 1, 2, 4, 8, or 16 cores; either limit can be left as "Inherit default". Limits are enforced at the container level via Linux cgroups and take effect on the next restart. Admins set the fleet-wide defaults for new agents under Settings. See [Agent Configuration](../agents/agent-configuration.md).
@@ -78,7 +92,11 @@ Read-only mode prevents the agent from modifying source files (`*.py`, `*.js`, a
 
 ## What does the autonomy toggle actually control?
 
-Autonomy is the master switch for an agent's scheduled operations: turning it off pauses all of that agent's schedules at once, and turning it back on resumes them. You can flip it from the Dashboard (Grid or List), or the Agent Detail view, or via `PUT /api/agents/{name}/autonomy`. It only affects schedules — it is not a general on/off switch for the agent itself. See [Agent Configuration](../agents/agent-configuration.md) and [Scheduling](../automation/scheduling.md).
+Autonomy is the master gate for an agent's scheduled operations: turning it off means none of that agent's schedules fire, and turning it back on lets them resume. It doesn't touch each schedule's own on/off switch — a schedule you disabled individually stays disabled when autonomy comes back on, and one you left enabled resumes automatically. You can flip it from the Dashboard (Grid or List), the Agent Detail header, or via `PUT /api/agents/{name}/autonomy`. It only affects schedules — it is not a general on/off switch for the agent itself. See [Agent Configuration](../agents/agent-configuration.md) and [Scheduling](../automation/scheduling.md).
+
+## Why can't my agent schedule its own wake-up or run a cron job from inside a task?
+
+Because a task, schedule, loop, or MCP call runs the agent as a one-shot turn, and nothing it starts survives the end of that turn. Claude Code's built-in tools that promise a *later* event — scheduled wake-ups, cron entries, workflow and task-output notifications, messages to other local sessions, push notifications, remote triggers — would let the agent plan around an event that never arrives, so Trinity withholds that whole tool family from headless runs and points the agent at the platform's own mechanisms instead: `run_agent_loop` for repetition, `set_reminder` for a deferred self-trigger, and `chat_with_agent` to reach another agent. Subagents are unaffected (the turn waits for them). A background shell command still running when the turn ends is killed, and the execution records that it was, instead of reporting a clean success. The tool denial reaches an agent on its next recreate after the base image is rebuilt; the prompt guidance applies as soon as the platform is updated. See [Agent Runtimes](../agents/agent-runtimes.md#headless-runs-on-claude-code).
 
 ## How do I move an agent to another Trinity instance?
 
@@ -86,11 +104,15 @@ Export the agent's runtime data with `POST /api/agents/{name}/data/export` (or t
 
 ## Can I get shell access to my agent's container?
 
-Yes, via SSH — but it is admin-only and disabled by default. An admin first enables `ssh_access_enabled` under Settings → Ops Settings, then generates ephemeral credentials with `POST /api/agents/{name}/ssh-access` or the MCP tool `get_agent_ssh_access`. Access is **key-based only** — you supply your own public key and the server never handles a private key (the old password option was removed; the agent's SSH daemon rejects password auth). Credentials expire automatically after their TTL, which is now enforced on the container itself, not just in metadata. Agents listen on incrementing SSH ports starting at 2222. See [Agent Terminal](../agents/agent-terminal.md).
+Yes, over SSH with a key you supply — the browser terminal tab that used to live on the agent page has been retired. Access is admin-only and off by default: an admin switches on **Enable SSH Access** under **Settings → Access**, then requests credentials for a *running* agent with `POST /api/agents/{name}/ssh-access` (or the MCP tool `get_agent_ssh_access`), passing a public key (`ssh-keygen -t ed25519`) and a `ttl_hours` (default 4, maximum 24). Trinity injects the key into the container's `authorized_keys` and returns a ready-to-run `ssh` command with the host and the agent's own port from the 2222–2262 range; the key is removed when the TTL expires. Password authentication is not supported, and the server never generates or sees a private key. See [Agent Terminal](../agents/agent-terminal.md).
 
 ## How do I browse and edit the files inside my agent's workspace?
 
 Open the **Files** tab on the Agent Detail page: the left panel is a searchable file tree of the workspace (`/home/developer/`), and the right panel previews the selected file — images, video, audio, PDF, and text are supported. Text files can be edited and saved inline, **New folder** creates a directory in place (workspace-confined), and files can be deleted with warnings on protected paths. Toggle **Show hidden files** to reveal dotfiles like `.env` and `.claude/`. Downloads are supported up to 100 MB per file. See [Agent Files](../agents/agent-files.md).
+
+## How do I get a file into my agent's container, and can I send a ZIP?
+
+Attach it to a message. On the Agent Detail **Chat** tab, images reach the agent as vision content and everything else — plain text, CSV, JSON, and ZIP — is written to `/home/developer/uploads/` inside the container, readable by name; a ZIP is stored as-is, not extracted, and because the paperclip picker filters to images and text-like files you drop a ZIP onto the input instead (3 files per message, 5 MB each). In the Workspace, files you attach or drop on the conversation land in the agent's inbox and appear under **Files you sent** in the rail (up to 20 per drop, 25 MB each). For bulk runtime data, use the data import endpoint, which restores a tar archive into `data/`. See [Agent Chat](../agents/agent-chat.md#file-attachments) and [Agent Data & Portability](../agents/agent-data.md).
 
 ## Where can I see my agent's logs?
 
@@ -98,7 +120,7 @@ The **Logs** tab on the Agent Detail page shows the container's stdout/stderr wi
 
 ## What is the compatibility report on the Overview tab, and can Trinity fix what it finds?
 
-Once an agent is running, Trinity checks its workspace against 88 best-practice conventions — a valid `template.yaml`, a non-gitignored `.claude/` directory, accidentally committed secrets, and more — and shows the findings in the Agent Detail **Overview** tab, ranked HARD / SOFT / INFO. It is purely advisory and never blocks creation or deployment; Claude-specific checks are skipped for Codex and Gemini agents. The nine gitignore-related findings offer a one-click **Fix** button that rewrites the agent's `.gitignore` in place — the change stays uncommitted until the agent's next git sync. Use **Re-run analysis** to re-check at any time. See [Creating Agents](../agents/creating-agents.md).
+Once an agent is running, Trinity checks its workspace against a catalogue of best-practice conventions — a valid `template.yaml`, a non-gitignored `.claude/` directory, defined playbooks, accidentally committed secrets, and more — and shows the findings in the Agent Detail **Overview** tab, ranked HARD / SOFT / INFO. It also reports whether the platform-provided Trinity plugin is present and, if not, why it was withheld. It is purely advisory and never blocks creation or deployment; Claude-specific checks are skipped for Codex and Gemini agents. The nine gitignore-related findings offer a one-click **Fix** button that rewrites the agent's `.gitignore` in place — the change stays uncommitted until the agent's next git sync. Use **Re-run analysis** to re-check at any time. See [Creating Agents](../agents/creating-agents.md#compatibility-validation).
 
 ## I already have a GitHub repo — how do I turn it into an agent?
 
@@ -107,6 +129,14 @@ Create an agent from it and pick an **import intent**. **Clone** (the default) k
 ## My agent was created from a public template and can't push anywhere. Can I fix that without recreating it?
 
 Yes — use **Bind to your own repo** on the agent's **Git** tab. Trinity creates the destination repository under your account (private by default), pushes the agent's *current* workspace history into it, repoints `origin`, saves your token as the agent's own, and rebuilds the container so the change survives a restart. The agent keeps its name, identity, name reservation, data volumes, and history — nothing is re-provisioned. The agent must be running, and the action is owner-only and human-only (there is deliberately no MCP tool, since it needs your personal token). See [GitHub Sync](../integrations/github-sync.md).
+
+## Why did a Push untrack some of my agent's files, and where do I see what changed?
+
+Before every push Trinity rebuilds the agent's `.gitignore` around its own rules — managed defaults (caches, virtualenvs, local databases, generated content) above your rules, and a non-overridable protected floor (credential files, the agent's `.trinity/` state) below them — and then untracks anything the rules now cover. Because git is last-match-wins, a `!negation` you wrote keeps winning over the defaults, so a file you chose to keep is never silently dropped; the one exception is a negation *beneath* a directory-form pattern such as `node_modules/`, which git never descends into — those are reported as shadowed rather than fixed. The push then tells you what it did: the sync response and the `git_sync` MCP result carry `removed_paths`, `unignored_paths`, and `shadowed_negations`, the Git tab's toast and the commit message state the counts and paths, and when the tracked set actually changed Trinity also files an operator-queue notice, so an unattended scheduled sync can't untrack files for weeks unnoticed. A newly un-ignored path that was a secret is already in the remote's history — rotate it and remove the rule. See [GitHub Sync](../integrations/github-sync.md#what-a-push-does-to-gitignore).
+
+## Can my agent disable or edit its own guardrails?
+
+No. The hook scripts live in root-owned `/opt/trinity/`, and the registration that makes Claude Code run them lives in its admin-controlled managed settings (`/etc/claude-code/managed-settings.json`) — root-owned, read-only, taking precedence over user and project settings, and outside the git-synced working tree — so neither an edit inside the container nor a push to the agent's repository can remove it. The credential-file protection hook refuses writes to those paths as well. On every boot the container checks that the registration is present and unwritable and logs `GUARDRAILS: ERROR` if not. Owners can *tighten* guardrails per agent (turn limits in the Settings tab; deny lists and disallowed tools via the API) but never loosen the baseline. See [Agent Guardrails](../agents/agent-guardrails.md).
 
 ## Where do I see which credentials an agent still needs?
 

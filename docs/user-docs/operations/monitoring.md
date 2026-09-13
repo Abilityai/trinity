@@ -70,15 +70,18 @@ Heartbeat fields (`heartbeat_state`, `heartbeat_alive`, `last_heartbeat_age_s`, 
 
 A background service that automatically recovers stuck resources:
 
+- **Orphaned executions** -- The watchdog asks each running agent which executions it knows about (running, just finished, or accepted but not yet started). A `running` row the agent does not know is orphaned **only if no live backend dispatcher owns it either** — an execution admitted and parked in the backend's agent-call queue, or accepted by the agent but not yet spawned, is left alone. Rows withheld this way are reported as `dispatch_inflight_skipped` in the cleanup report; they are not recoveries. A genuine orphan is marked `failed` with an error stating what was observed, and its slot is released.
 - **Stale executions** -- Any execution with `status='running'` past its per-slot timeout is marked `failed`.
 - **Stale activities** -- Any activity with `activity_state='started'` past the configured threshold is marked `failed`.
 - **Stale Redis slots** -- Orphaned slot reservations are released.
 - **Run frequency** -- Every 5 minutes, plus a one-shot sweep on backend restart.
-- **Startup recovery** -- Orphaned executions (container down, not in process registry) are marked `failed` immediately and their slots are released.
+- **Startup recovery** -- Orphaned executions (container down, not in process registry, and not owned by a dispatcher in another worker) are marked `failed` immediately and their slots are released.
+
+A close the cleanup service fabricates records **no duration** — `duration_ms` is `NULL`, not a number computed from `started_at`. Earlier versions wrote a made-up duration, and on PostgreSQL a row older than about 25 days overflowed the column and rolled back the whole sweep, so nothing stale was ever closed again while the cycle still logged "complete". If you upgrade an instance in that state, the restart's startup recovery closes those rows; no manual SQL is needed.
 
 ### Retention Sweeps
 
-The same cleanup service runs retention sweeps to keep the database lean. Setting any window to `0` disables that sweep.
+The same cleanup service runs retention sweeps to keep the database lean. Setting any window to `0` disables that sweep — except `backup_retention_days`, where `0` is rejected (disable backups with `DB_BACKUP_ENABLED=false` instead).
 
 | Sweep | Default | Setting |
 |-------|---------|---------|
@@ -89,6 +92,10 @@ The same cleanup service runs retention sweeps to keep the database lean. Settin
 | Schedule soft-delete purged past | 30 days | `schedule_soft_delete_retention_days` |
 | Agent reports deleted past | 90 days | `agent_reports_retention_days` |
 | Terminal operator-queue rows deleted past | 90 days | `operator_queue_retention_days` |
+| Terminal agent reminders (fired/cancelled/failed) deleted past | 90 days | `agent_reminders_retention_days` |
+| Subscription headroom probe history deleted past | 30 days | `subscription_headroom_retention_days` |
+| Subscription rate-limit / auth failure events deleted past | 30 days | `subscription_failure_event_retention_days` |
+| Database backup files deleted past | 14 days | `backup_retention_days` (1–3650; the newest 3 are always kept) |
 | `audit_log` rows deleted past | 365 days | `AUDIT_LOG_RETENTION_DAYS` (floor 365, exempt) |
 
 The **agent soft-delete** purge is special: it destroys the agent's data volumes, so it is a recovery window, not a log window — it is **exempt** from the community floor below.
@@ -99,9 +106,13 @@ The 5,000-row figure some tooling reports bounds each **transaction**, not each 
 
 Fresh community installs are **seeded** with a 5-day minimum retention on the log windows. This applies to **new installs only** — it is never a retroactive change to an existing install, and the agent soft-delete window is exempt in every edition. Any admin can widen a window at any time.
 
+#### Every install owns its windows
+
+On every boot, Trinity writes an explicit row for any retention window that has none, at the value already in force — upgraded installs included, not just fresh ones. Nothing prunes differently the day this happens. The consequence is that retention is per-install configuration: a later change to the built-in defaults, in either direction, never silently changes how much data an existing install keeps. `GET /api/settings/retention` therefore reports every window with source `db-row`.
+
 #### Blast-radius guard & admin approval
 
-A sweep that would delete more than a fixed safety threshold (**1,000 rows**) of a single table **refuses** to run, logs an error, and raises an operator-queue alarm instead of deleting. An admin must then approve it in **Settings → the retention panel**, which shows a pending-acknowledgements banner.
+A sweep that would delete more than a fixed safety threshold (**1,000 rows**) of a single table **refuses** to run, logs an error, and raises an operator-queue alarm instead of deleting. An admin must then approve it in **Settings → Retention**, which shows a **Deletion awaiting your approval** banner with an **Approve deletion** button per pending prune.
 
 The approval is:
 

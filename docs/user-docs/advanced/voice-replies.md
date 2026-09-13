@@ -23,9 +23,9 @@ Set the ElevenLabs key under **Settings** (stored setting, with an env-var fallb
 
 ### 2. Owner — enable and configure the agent
 
-1. Open the agent's **Sharing** tab and its voice-replies configuration.
+1. Open the agent's **Settings** tab → **Voice** section.
 2. Turn **voice replies on** and pick a **voice** — or rely on the platform default voice. Enabling with neither an agent voice nor a platform default is rejected.
-3. Set the **per-channel allow flags** for Telegram, Slack, and WhatsApp. Each channel is independent; leave a channel off to keep it text-only.
+3. Set the **per-channel allow flags** in each channel's own panel on the **Sharing** tab (Telegram, Slack, WhatsApp). Each channel is independent; leave a channel off to keep it text-only.
 
 ### 3. Agent — opt a reply into voice
 

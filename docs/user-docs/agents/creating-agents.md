@@ -114,7 +114,7 @@ Trinity materializes the block at creation as a committed, secret-free `~/.trini
 
 Rules worth knowing:
 
-- Declare what the agent's skills actually use — each entry is a fetch at boot. Every marketplace named in `installed:` must appear under `marketplaces:`. Always include `trinity@abilityai` if you deploy with the abilities toolkit; it is what lets the deployed agent run `/trinity:sync` and onboard itself in place.
+- Declare what the agent's skills actually use — each entry is a fetch at boot. Every marketplace named in `installed:` must appear under `marketplaces:`. Declaring `trinity@abilityai` is still recommended, but it is not what delivers it: the platform pre-installs that plugin in the agent image and re-ensures it on every boot whether or not it is declared, an omitted `trinity@abilityai` is never uninstalled, and a manifest that re-points the `abilityai` marketplace at another source is ignored — see [Plugins inside a deployed agent](../automation/abilities-marketplace.md#plugins-inside-a-deployed-agent).
 - `plugin@marketplace` pins the plugin's *identity*, not a commit — a re-install fetches the marketplace's current content.
 - Plugins installed later by hand (`/plugin install` inside the agent) are **not** captured back into the manifest; add them to `template.yaml` too or they will not survive a reconstitution.
 - A private marketplace is fetched with the agent's GitHub token at boot; a public one needs only network access. On an air-gapped instance the boot log names what was withheld and startup continues — a plugin problem never fails the boot.
@@ -122,6 +122,10 @@ Rules worth knowing:
 - The `enabledPlugins:` mapping shape from Claude Code's own `settings.json` (`trinity@abilityai: true`) is accepted as an alternative to `installed:`.
 
 The manifest is agent-writable, so it is parsed defensively: names and marketplace sources are validated (no embedded credentials, no path traversal), a malformed block is reported rather than acted on, and every install runs with a timeout and never prompts.
+
+### Deploy a bare repository, then onboard it in place
+
+A `github:owner/repo` template does not need a `template.yaml` — Trinity creates the agent from the repository as it is. Because the `trinity@abilityai` plugin is pre-installed in the agent image and re-ensured on every boot, that agent can then make itself Trinity-compatible from inside its own container: run `/trinity:onboard` in its chat and choose **Onboard in place**. It writes `template.yaml`, `.env.example`, `.gitignore`, and `.mcp.json.template` and pushes them back to the repository (an agent with no push token prints the patch and says the result is container-local — in source mode, files written inside the container do not survive a reset unless pushed). The walkthrough lives in [Abilities Marketplace](../automation/abilities-marketplace.md) under the `trinity` plugin. Whether the pre-installed plugin was present, withheld (with the reason), or switched off is reported by the compatibility check on the Overview tab.
 
 ### Importing an Existing GitHub Repository
 

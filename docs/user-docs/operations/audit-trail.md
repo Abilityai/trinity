@@ -8,6 +8,7 @@ Append-only log of administrative actions across the platform. Records who did w
 |------|-------------|
 | **Event type** | Category of action (agent_lifecycle, authentication, etc.) |
 | **Actor** | Who performed the action (user, agent, mcp_client, system) |
+| **Credential** | Which key acted, when the call was authenticated with an MCP API key — its id, name and scope, recorded beside the owner |
 | **Target** | What was affected (agent, user, schedule, etc.) |
 | **Source** | Where the action originated (api, mcp, scheduler) |
 | **Hash chain** | Optional SHA-256 chain over consecutive entries — proves the log wasn't tampered with between two checkpoints |
@@ -26,6 +27,8 @@ Append-only log of administrative actions across the platform. Records who did w
 | `system` | startup, shutdown, migration |
 
 All entry-emitting code paths now write to the audit log; the earlier "Phase 1 coverage" caveat no longer applies.
+
+An action taken with an MCP API key is recorded against its owner (`actor_type` stays `user`, since the owner is the accountable party) **and** against the key: `mcp_key_id`, `mcp_key_name` and `mcp_scope` say which credential acted. That is what makes "what did that leaked key touch?" answerable — filter the list on `mcp_key_id`. A browser session records no key fields.
 
 ## How It Works
 
@@ -74,6 +77,8 @@ All endpoints are admin-only.
 - `start_time`, `end_time` (ISO 8601)
 - `limit` (default 100, max 1000), `offset`
 
+The list endpoint also takes `request_id` (joins the MCP and backend rows of one call), `mcp_key_id`, and `mcp_scope` (`user`, `agent`, `system`, `connector`, `portal_delegate`, `ops`).
+
 ### Entry Format
 
 ```json
@@ -84,6 +89,9 @@ All endpoints are admin-only.
   "actor_type": "user",
   "actor_id": "42",
   "actor_email": "admin@example.com",
+  "mcp_key_id": null,
+  "mcp_key_name": null,
+  "mcp_scope": null,
   "target_type": "agent",
   "target_id": "my-agent",
   "timestamp": "2026-05-14T10:30:00Z",
