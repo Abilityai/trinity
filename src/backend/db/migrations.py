@@ -4036,6 +4036,25 @@ def _migrate_agent_canvases_pinned(cursor, conn):
     conn.commit()
 
 
+def _migrate_execution_open_canvas(cursor, conn):
+    """ent#555 — which canvas the user had open when they sent a turn.
+
+    A per-turn CONTEXT field of exactly the shape `source_channel*` already
+    has on this table: stamped at dispatch, read by the surfaces that need to
+    know what the turn was about. It never widens what the agent may reach —
+    the boundary that stamps it validates the canvas belongs to that agent.
+
+    Mirrored by the Alembic revision 0061_execution_open_canvas.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "open_canvas_id",
+        "ALTER TABLE schedule_executions ADD COLUMN open_canvas_id TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_agent_canvas_shares_table(cursor, conn):
     """ent#554 — share links for a canvas.
 
@@ -4346,6 +4365,7 @@ MIGRATIONS = [
     ("agent_canvases_template", _migrate_agent_canvases_template),
     ("agent_canvases_pinned", _migrate_agent_canvases_pinned),
     ("agent_canvas_shares_table", _migrate_agent_canvas_shares_table),
+    ("execution_open_canvas", _migrate_execution_open_canvas),
     ("portal_session_main_chat", _migrate_portal_session_main_chat),
     ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
     ("portal_messages_voice_source", _migrate_portal_messages_voice_source),

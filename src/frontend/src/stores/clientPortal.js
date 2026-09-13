@@ -223,6 +223,8 @@ const briefingsDirty = new Set()
 
 export const useClientPortalStore = defineStore('clientPortal', {
   state: () => ({
+    // ent#555 — agent name → the canvas id the rail currently shows.
+    openCanvasByAgent: {},
     clientEmail: null,
     agents: [],
     loading: false,
@@ -559,13 +561,36 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // not "I don't know which". The backend cannot tell those apart from the
     // absence alone — which is why New chat used to land in the existing
     // conversation — and it ignores the flag when a session IS named.
+    /**
+     * ent#555 — which canvas the rail has open, per agent.
+     *
+     * Kept in the store rather than passed down because the two ends are in
+     * different subtrees: the selection happens in the rail's CanvasPanel and
+     * is needed by the composer in the conversation. Per-agent, so switching
+     * chats cannot carry one agent's selection into another's turn.
+     */
+    setOpenCanvas(agentName, canvasId) {
+      if (!agentName) return
+      this.openCanvasByAgent = { ...this.openCanvasByAgent, [agentName]: canvasId || null }
+    },
+
     // ent#403: `model` is the user's explicit pick, or null/'' to inherit. Sent
     // on BOTH turn actions — a field honoured by only one brings the bug back
     // exactly when streaming fails and this fallback runs.
-    async sendPortalChat(agentName, message, sessionId = null, { newThread = false, model = null } = {}) {
+    async sendPortalChat(agentName, message, sessionId = null,
+                    { newThread = false, openCanvasId = null, model = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat`,
-        { message, session_id: sessionId, new_thread: newThread, model: model || null },
+        {
+          message,
+          session_id: sessionId,
+          new_thread: newThread,
+          model: model || null,
+          // ent#555 — the canvas on screen, so "add a column to this" resolves.
+          // Server-validated: an id the caller cannot see is discarded there,
+          // so sending it is never a way to reach a canvas they could not open.
+          open_canvas_id: openCanvasId,
+        },
         { headers: this.authHeader }
       )
       return data
@@ -576,10 +601,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // `sendPortalChat` above is untouched — it stays the documented API surface
     // for headless clients (ent#83), and is still the fallback when streaming
     // is unavailable.
-    async startPortalChat(agentName, message, sessionId = null, { newThread = false, model = null } = {}) {
+    async startPortalChat(agentName, message, sessionId = null,
+                    { newThread = false, openCanvasId = null, model = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
-        { message, session_id: sessionId, new_thread: newThread, model: model || null },
+        {
+          message,
+          session_id: sessionId,
+          new_thread: newThread,
+          model: model || null,
+          // ent#555 — the canvas on screen, so "add a column to this" resolves.
+          // Server-validated: an id the caller cannot see is discarded there,
+          // so sending it is never a way to reach a canvas they could not open.
+          open_canvas_id: openCanvasId,
+        },
         { headers: this.authHeader }
       )
       return data   // {execution_id, session_id}

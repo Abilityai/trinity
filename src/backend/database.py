@@ -1788,6 +1788,7 @@ class DatabaseManager:
         source_channel_thread: str = None,
         source_channel_agent: str = None,
         source_channel_client: str = None,
+        open_canvas_id: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -1808,6 +1809,7 @@ class DatabaseManager:
             # /task inheritance point; None for direct rows).
             source_channel_agent=source_channel_agent,
             source_channel_client=source_channel_client,
+            open_canvas_id=open_canvas_id,
         )
 
     def create_schedule_execution(

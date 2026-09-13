@@ -57,6 +57,7 @@
             :pin-canvas="(id, pinned) => portal.pinAgentCanvas(agent, id, pinned)"
             :agent-name="agent"
             viewer="client"
+            @canvas-selected="(id) => portal.setOpenCanvas(agent, id)"
             @changed="feeds.refresh()"
           />
           <p v-else-if="participants.length > 1" class="text-xs text-gray-400">Nothing published yet.</p>

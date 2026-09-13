@@ -1586,6 +1586,49 @@ def agent_on_roster(agent_name: str, email: str | None,
     return agent_name in roster_agent_names(email, include_owned)
 
 
+def validated_open_canvas(agent_name: str, canvas_id, *, is_platform: bool):
+    """The open-canvas id to stamp on a turn, or None (ent#555).
+
+    The client tells us which canvas it has on screen. That is a CLIENT-SUPPLIED
+    id landing in a column an agent later reads, so it is validated here rather
+    than trusted, and every failure degrades to None — an unrecognised
+    selection means "no canvas open", never an error and never a wider reach.
+
+    Three checks, and the middle one is the one that matters:
+
+    * it is a string of the shape a canvas id can have;
+    * it names a canvas OF THIS AGENT — so the field cannot be used to point an
+      agent at another agent's surface;
+    * the caller can actually SEE it under the audience rules (`operator` is
+      invisible to an external client), so a client cannot learn that an
+      operator-only canvas exists by having it echoed back at them.
+
+    What this deliberately does NOT do is grant anything. Being named as open
+    is not permission: the agent's own read and write paths re-check ownership
+    and audience exactly as before (AC #6).
+    """
+    from database import db as core_db
+    from services import canvas_service
+
+    from . import agent_page
+
+    if not canvas_id or not isinstance(canvas_id, str):
+        return None
+    try:
+        canvas_service.validate_canvas_id(canvas_id)
+    except Exception:  # noqa: BLE001 — a malformed selection is just "none open"
+        return None
+
+    audience = agent_page.canvas_audience_for(is_platform)
+    try:
+        canvas = core_db.get_agent_canvas(agent_name, canvas_id, audience)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("open-canvas validation failed for %s/%s: %s",
+                       agent_name, canvas_id, e)
+        return None
+    return canvas_id if canvas else None
+
+
 def may_manage_canvases(agent_name: str, email: str | None, *,
                         is_platform: bool) -> bool:
     """May this Workspace caller delete or pin ``agent_name``'s canvases (ent#553)?
@@ -2409,6 +2452,7 @@ async def _run_sync_turn_and_clear_marker(owns_marker: bool, marker_session_id: 
 def _precreate_sync_execution(
     agent_name: str, message: str, email: str, session_id: str,
     resolved_model: str | None,
+    open_canvas_id: str | None = None,
 ) -> str | None:
     """Create the execution row for a synchronous portal turn (ent#365 review).
 
@@ -2472,6 +2516,8 @@ def _precreate_sync_execution(
             # row is MADE. See the docstring: there is no UPDATE path for this
             # column anywhere in the repo.
             model_used=resolved_model,
+            # ent#555 — what the user was looking at when they sent this.
+            open_canvas_id=open_canvas_id,
         )
         return execution.id if execution else None
     except Exception:  # noqa: BLE001
@@ -2493,7 +2539,10 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       model: str | None = None,
                       # ent#403 — the fully-resolved model, passed by a caller
                       # that has ALREADY stamped it on a pre-created row.
-                      resolved_model: str | None = None) -> dict:
+                      resolved_model: str | None = None,
+                      # ent#555 — the canvas on screen, validated at the router.
+                      # Stamped on the execution so the agent's tools default to it.
+                      open_canvas_id: str | None = None) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -2751,8 +2800,33 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # already holds the same rows — so a cold retry cannot double-send them.
     delta_prefix = (voice_delta + "\n\n") if voice_delta else ""
 
-    cold_message = history_prefix + manifest_prefix + message
-    message = (delta_prefix + manifest_prefix + message) if resuming else cold_message
+    # ent#555 — the canvas on screen, named in the turn itself.
+    #
+    # This is what makes "add a column to this" resolvable. The tool default
+    # (ent#555 AC #3) covers a call that omits an id, but an agent has to READ
+    # the canvas before it can edit it, and it cannot read what it does not
+    # know the name of — so the id has to be in the prompt, not only in the
+    # tool's fallback.
+    #
+    # It rides the SAME prefix as the file manifest, which means it is present
+    # on a resumed turn too: the open canvas changes between turns while the
+    # session's memory of it does not, so replaying it only on a cold turn
+    # would leave a resumed conversation editing whatever was open first.
+    canvas_prefix = ""
+    if open_canvas_id:
+        canvas_prefix = (
+            f"[Client Portal] The user has the canvas '{open_canvas_id}' open on screen. "
+            "When they say \"this\", \"that chart\" or similar, they mean that canvas — "
+            "read it before editing so you change what they can see, and patch by "
+            "block id rather than rewriting the whole surface.\n\n"
+        )
+
+    # #2694 × ent#555 on a resumed turn: the voice delta comes first (it is
+    # conversation the session never heard, so it reads as history), then the
+    # canvas on screen, then the file manifest, then what the client said.
+    # The cold message carries the replay in place of the delta.
+    cold_message = history_prefix + canvas_prefix + manifest_prefix + message
+    message = (delta_prefix + canvas_prefix + manifest_prefix + message) if resuming else cold_message
 
     # ent#212: inject the client's durable per-user memory (MEM-001) + the #1205
     # public-channel custom instructions into the turn, so a delegated end user
@@ -2798,8 +2872,9 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # than this one growing its own turn machinery.
         owns_marker = False
         if not execution_id:
-            execution_id = _precreate_sync_execution(agent_name, message, email,
-                                                     session_id, resolved_model)
+            execution_id = _precreate_sync_execution(
+                agent_name, message, email, session_id, resolved_model,
+                open_canvas_id=open_canvas_id)
             if execution_id:
                 mark_turn_inflight(session_id, execution_id, turn_timeout + 60)
                 owns_marker = True
@@ -3466,7 +3541,10 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             # by only one route brings the bug back exactly when
                             # streaming fails. Already normalised and
                             # allow-listed at the router; None = inherit.
-                            model: str | None = None) -> dict:
+                            model: str | None = None,
+                            # ent#555 — the canvas on screen, validated at the router.
+                            # Stamped on the execution so the agent's tools default to it.
+                            open_canvas_id: str | None = None) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -3533,6 +3611,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         # anywhere in the repo — so a model passed as a turn kwarg alone would
         # never reach the row a client can see.
         model_used=resolved_model,
+        # ent#555 — both creation sites carry it, for the reason stated above
+        # about the stamp otherwise being a coin flip.
+        open_canvas_id=open_canvas_id,
     )
     execution_id = execution.id if execution else None
     if not execution_id:
@@ -3565,7 +3646,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               # ladder can name it) AND the trusted resolution
                               # already stamped on the row above, so `portal_chat`
                               # never re-resolves and the two cannot disagree.
-                              model=model, resolved_model=resolved_model)
+                              model=model, resolved_model=resolved_model,
+                              open_canvas_id=open_canvas_id)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
             # — so the ONLY way this reaches the client is the record written
