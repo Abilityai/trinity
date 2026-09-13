@@ -169,19 +169,55 @@ def test_every_lane_is_one_the_catalog_defined(catalog):
         assert not unknown, f"{j['id']} names undefined lane(s) {sorted(unknown)}"
 
 
+def _lib():
+    """The shared invariant parser (#2337, Rail R3). Imported the way `_gen()`
+    below imports the generator — an explicit path, inside the function — so
+    an import failure degrades these tests only."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import _invariant_catalog as lib
+    return lib
+
+
+_ID_SHAPE = re.compile(r"^[A-Z]+-[0-9]{2,}$")
+
+
+def test_invariants_field_is_a_list_of_ids(catalog):
+    """`invariants: E-01` (a scalar) iterates its CHARACTERS and `null` raises
+    inside the resolver — both read as harness breakage rather than as the
+    author's mistake. Name the mistake first, in the author's terms."""
+    for j in catalog["journeys"]:
+        inv = j["invariants"]
+        assert isinstance(inv, list), (
+            f"{j['id']}.invariants must be a list (got {type(inv).__name__}: {inv!r})"
+        )
+        bad = [i for i in inv if not (isinstance(i, str) and _ID_SHAPE.match(i))]
+        assert not bad, (
+            f"{j['id']}.invariants carries {bad!r} — every entry is an id of the "
+            f"form X-NN (`P-02`, `SCH-03`), never a free string"
+        )
+
+
 def test_every_invariant_id_resolves(catalog):
     """AC #7, and the one-namespace rule. An id that resolves nowhere is worse
-    than an empty list: it reads as coverage that does not exist."""
-    text = INVARIANTS.read_text()
-    declared = set(re.findall(r"^\|\s*([A-Z]+-[0-9]+)\s*\|", text, re.MULTILINE))
+    than an empty list: it reads as coverage that does not exist.
+
+    Resolution reads the catalog's `**X-NN** … *(Tier` entries — the
+    DEFINITIONS — through the parser `test_2337_invariant_namespace.py` also
+    uses, so the two tests cannot disagree about what an id is. This used to
+    read markdown TABLE rows, and the only table was the 12-row "Recommended
+    starting subset": 60 of the 71 defined invariants were uncitable, and
+    citing `P-02` (a real §7 entry, J10's own permission promise) failed here
+    as "coverage theatre" (#2337).
+    """
+    lib = _lib()
+    declared = set(lib.catalog_ids(lib.read(INVARIANTS)))
     assert declared, "no invariant ids parsed — the catalog format changed"
     for j in catalog["journeys"]:
         unresolved = [i for i in j["invariants"] if i not in declared]
         assert not unresolved, (
             f"{j['id']} references {unresolved}, which resolve nowhere in "
-            f"{INVARIANTS.name}. Reference an existing id or leave the list "
-            f"EMPTY — #2337 (Rail R3) is what adds journey-level invariants. "
-            f"An invented id is coverage theatre."
+            f"{INVARIANTS.name}. Reference an existing `**X-NN**` entry or leave "
+            f"the list EMPTY — an invented id is coverage theatre."
         )
 
 

@@ -11,16 +11,16 @@ coverage debt is queryable rather than rediscovered.
 
 | id | promise | actor | lanes | tier | built | harness | invariants | issue |
 |---|---|---|---|---|---|---|---|---|
-| **J01** | I can install Trinity on a clean machine and log in. | operator | local, digitalocean | live-stack | **no** | — | — | #2340 |
+| **J01** | I can install Trinity on a clean machine and log in. | operator | local, digitalocean | live-stack | **no** | — | P-05 | #2340 |
 | **J02** | I can upgrade my instance and keep my agents, data and schedules. | operator | local, digitalocean | live-stack | **no** | — | G-01 | #2341 |
 | **J03** | I can create an agent with no configuration and get a useful answer. | user | local, digitalocean | journey-smoke | **no** | — | E-05 | #2342 |
 | **J04** | My agents keep working when several things run at once, and nothing silently stalls. | operator | local | soak | **no** | — | S-01, S-02, S-03, E-01, E-02, B-01, B-02, R-01 | #2343 |
 | **J05** | I can schedule work, walk away, and find out what happened. | user | local | live-stack | **no** | — | E-01, E-05 | #2344 |
-| **J06** | I can give an agent a credential and it can use the tools that credential unlocks. | user | local | live-stack | **no** | — | — | #2345 |
-| **J07** | A skill I add shows up in the agent's head and it uses it. | user | local | live-stack | **no** | — | — | #2346 |
-| **J08** | I can install a marketplace plugin and the agent can use it. | user | local | live-stack | **no** | — | — | #2347 |
-| **J09** | I can point Trinity at my repo and get a working agent from it. | user | local | live-stack | **no** | — | — | #2348 |
-| **J10** | My agents can call each other, and I can see what they said. | user | local | live-stack | **no** | — | L-03 | #2349 |
+| **J06** | I can give an agent a credential and it can use the tools that credential unlocks. | user | local | live-stack | **no** | — | L-06, G-04 | #2345 |
+| **J07** | A skill I add shows up in the agent's head and it uses it. | user | local | live-stack | **no** | — | SK-01, SK-02, SK-03 | #2346 |
+| **J08** | I can install a marketplace plugin and the agent can use it. | user | local | live-stack | **no** | — | PLG-01 | #2347 |
+| **J09** | I can point Trinity at my repo and get a working agent from it. | user | local | live-stack | **no** | — | RD-01, RD-02, RD-03 | #2348 |
+| **J10** | My agents can call each other, and I can see what they said. | user | local | live-stack | **no** | — | P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03 | #2349 |
 | **J11** | A companion's brief reaches me where I already work, without me asking. | user | local | live-stack | **no** | — | E-01, E-05, L-03 | #2565 |
 
 **0 of 11 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
