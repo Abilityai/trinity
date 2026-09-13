@@ -1501,3 +1501,48 @@ class TestSyncErrorSurface:
         assert result["success"] is False
         assert self._MARKER not in result["error"]
         assert "invalid source URL" in result["error"]
+
+
+class TestCloneTargetCompositionEnt615:
+    """The rule neither half can carry: never send two credentials.
+
+    A source row may hold userinfo of its own — `_adopt_legacy_clone` writes
+    rows with no validation, and `reject_embedded_credentials` only guards NEW
+    writes — and after ent#615 git would otherwise send BOTH libcurl's basic
+    auth from the URL and our `http.extraHeader`. That is the double-credential
+    shape ent#347 documented as *rejected*, spelled differently.
+    """
+
+    @staticmethod
+    def _target(url, pat):
+        import services.skill_service as ss
+
+        return ss.SkillService._clone_target(ss.SkillService.__new__(ss.SkillService), url, pat)
+
+    def test_a_stored_credential_is_dropped_when_we_send_our_own(self):
+        clone_url, sent = self._target(
+            "https://ghp_STORED@github.com/o/r", "ghp_PLATFORM"
+        )
+        assert sent == "ghp_PLATFORM"
+        assert "@" not in clone_url
+        assert clone_url == "https://github.com/o/r"
+
+    def test_a_stored_credential_SURVIVES_when_we_send_nothing(self):
+        """This issue's own cardinal sin, applied to the skills library:
+        never remove a credential without a replacement. For a row whose own
+        token is the only credential it has, stripping it is an outage."""
+        clone_url, sent = self._target("https://ghp_STORED@github.com/o/r", None)
+        assert sent == ""
+        assert clone_url == "https://ghp_STORED@github.com/o/r"
+
+    def test_a_foreign_host_keeps_its_own_credential_and_gets_none_of_ours(self):
+        clone_url, sent = self._target(
+            "https://tok@gitlab.example.com/o/r", "ghp_PLATFORM"
+        )
+        assert sent == ""
+        assert clone_url == "https://tok@gitlab.example.com/o/r"
+
+    def test_the_ordinary_case_is_unchanged(self):
+        clone_url, sent = self._target("owner/repo", "ghp_PLATFORM")
+        assert clone_url == "https://github.com/owner/repo"
+        assert sent == "ghp_PLATFORM"

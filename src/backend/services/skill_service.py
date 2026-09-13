@@ -603,8 +603,7 @@ class SkillService:
                 db.record_skill_source_sync(src.id, success=False, error=msg)
                 continue
 
-            clone_url = self._normalized_url(url)
-            source_pat = self._auth_pat_for(clone_url, github_pat)
+            clone_url, source_pat = self._clone_target(url, github_pat)
             logger.info(
                 "syncing skill source %s (%s) %s=%s",
                 src.name, src.id, src.ref_type, src.ref,
@@ -716,6 +715,31 @@ class SkillService:
                 absolute = f"https://github.com/{url}"
 
         return absolute
+
+    def _clone_target(self, url: str, github_pat: Optional[str]) -> tuple:
+        """``(clone_url, pat)`` for one source — the two halves, composed.
+
+        The composition carries one rule the halves cannot: **when we are going
+        to send a credential, the URL must not carry one.** A source row may
+        hold userinfo of its own (`_adopt_legacy_clone` writes rows with no
+        validation, and `reject_embedded_credentials` only guards NEW writes),
+        and git would then send BOTH — libcurl's basic auth from the URL and
+        our `http.extraHeader` — which is the double-credential shape ent#347
+        documented as *rejected*, just spelled differently.
+
+        When we are NOT sending one, the stored userinfo is left exactly as it
+        is: for a row whose own token is the only credential it has, stripping
+        it would be this issue's own cardinal sin — removing a credential
+        without a replacement — applied to the skills library.
+        """
+        # Resolved through `self`, not the class: `_normalized_url` is the seam
+        # a test overrides per instance to let a local fixture repo path
+        # through, and a `cls.`-qualified call would silently bypass it.
+        clone_url = self._normalized_url(url)
+        pat = self._auth_pat_for(clone_url, github_pat)
+        if pat:
+            clone_url = strip_url_credentials(clone_url)
+        return clone_url, pat
 
     @staticmethod
     def _auth_pat_for(url: str, github_pat: Optional[str]) -> str:
