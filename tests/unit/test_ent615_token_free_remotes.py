@@ -944,24 +944,24 @@ class _RecordingExec:
 
 @pytest.fixture
 def gs_with_exec():
+    """Install a recording `execute_command_in_container`; returns the recorder."""
     gs = _git_service()
+    patches = []
 
-    def _install(helper_ok: int = 1):
+    def _install(helper_ok: int = 1) -> _RecordingExec:
         recorder = _RecordingExec(helper_ok=helper_ok)
-        detect = AsyncMock(return_value="/home/developer")
         ctx = patch.multiple(
             gs,
             execute_command_in_container=recorder,
-            _detect_git_dir=detect,
+            _detect_git_dir=AsyncMock(return_value="/home/developer"),
         )
         ctx.start()
-        return recorder, ctx
+        patches.append(ctx)
+        return recorder
 
-    installed = []
-    yield lambda helper_ok=1: (lambda pair: (installed.append(pair[1]), pair[0])[1])(
-        _install(helper_ok)
-    )
-    for ctx in installed:
+    yield _install
+
+    for ctx in patches:
         ctx.stop()
 
 
