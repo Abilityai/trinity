@@ -2343,8 +2343,10 @@ intersected with freshly re-resolved membership.
 
 Remove is gated on **four** conditions, each blocking something the others do not: the
 preview is current for the typed name, membership was verified, the consequence is
-acknowledged (ent#126's `data-testid="ack-checkbox"` + `:acknowledged` /
-`update:acknowledged` contract, reused rather than re-invented), and at least one agent is
+acknowledged (ent#126's `:acknowledged` / `update:acknowledged` contract, reused
+rather than re-invented, under its own `data-testid="teardown-ack-checkbox"` —
+both panels render on one page, so sharing the ADDRESS would make every
+`getByTestId('ack-checkbox')` strict-mode ambiguous), and at least one agent is
 checked. A disabled button states which one is missing.
 
 Tone switches on `status`, never the HTTP code (the ent#126 rule: `partial` is 200,
@@ -2362,6 +2364,32 @@ systems.
 `ManifestPreview.vue`'s *"There is no un-deploy"* warning now tracks the **capability**:
 still exactly true where the module is absent. Retiring it everywhere because one edition
 gained the verb would have been the dishonest fix.
+
+### What a REMOVAL needs from the roster that a read does not (review, 2026-09-13)
+
+Every OSS sibling on this surface resolves its roster with `get_accessible_agents`,
+which iterates `list_all_agents_fast()` — **containers**. An agent's identity, though,
+is its `agent_ownership` row (#1747), and the gap between the two is routine rather than
+exotic: the #834 Phase 1c recovery flow leaves a live row with no container *by design*,
+as does a `docker prune`, a daemon reset, or a crash between the row write and container
+creation. `DELETE /api/agents/{name}` was fixed to delete such an agent; a fleet verb
+reading the same roster could not even see it.
+
+For `get_system` / `restart_system` / `export_manifest` that is cosmetic. For a verb that
+reports **completion** it is the §3 under-capture failure one layer below where teardown
+already guards it: remove the ten members you can see, answer `torn_down`, and the
+eleventh keeps its live row and its reserved name — so the re-deploy produces exactly the
+`_N`-suffixed duplicate the feature exists to undo. So teardown supplements its roster
+from the ownership rows, filtered by the same access rule `get_accessible_agents` applies,
+and shows such a member as `status: "no container"`.
+
+That supplement is only safe because of the #2196 **tri-state** reader:
+`agent_container_states()` answers `None` for *Docker could not be asked* and `{}` for
+*asked, no containers*. Treating those alike would make a denied socket report the whole
+fleet as container-less and soft-delete every row while its container kept running — a
+worse bug than the one being fixed. An unreadable Docker therefore supplements nothing and
+**refuses on both paths** (503), rather than the 404 an empty roster used to produce:
+"System not found" is a false statement about a fleet nobody could ask.
 
 ### Tests
 
