@@ -165,10 +165,18 @@ export function fileActions(row, { owned = false } = {}) {
  * no portal base URL is configured (`get_portal_base_url()` falls back to
  * `public_chat_url`, which can be `''`), and `new URL(relative)` throws.
  *
- * The invariant this rests on: the portal page and `/api` are same-origin by
- * construction. A deployment that configures a portal base URL pointing
- * somewhere else has a cross-origin fetch, and that is the deployment's problem
- * — we return the URL unchanged rather than pretending otherwise.
+ * This helper keeps its honest general contract: reduce a url that is ALREADY
+ * same-origin, leave anything else alone. **Not for `/api/files/` share urls —
+ * use `sharePreviewPath`**, which knows which route it is holding.
+ *
+ * Regression note (#2733). A portal base URL pointing at a different origin is a
+ * SUPPORTED production topology, not a misconfiguration: ent#79 exists so an
+ * operator can put portal links on a dedicated public agent hostname beside the
+ * app hostname. Returning the absolute url there is what broke preview — the
+ * browser refused the fetch, because `connect-src` lists `'self'` plus two
+ * build-time hosts while the portal base URL is a per-deployment SETTING no
+ * static header can carry (and CORS would refuse it a second time). The answer
+ * is not to widen the header but to stop asking cross-origin.
  */
 export function sameOriginPath(url, base = '') {
   const raw = String(url || '')
@@ -224,9 +232,56 @@ export async function errorDetail(err, fallback = 'Something went wrong.') {
   return fallback
 }
 
-/** Mark a preview read without mutating the original download URL. */
+/**
+ * The route whose bytes the portal page's OWN origin is guaranteed to serve.
+ * `portal_documents` builds every share url as `{portal_base}/api/files/{id}?…`,
+ * and `/api/` is proxied to the same backend on every hostname that fronts it
+ * (prod `nginx.conf`, the Vite dev proxy, and `api.js`'s empty `baseURL` — the
+ * Workspace could not load at all otherwise).
+ *
+ * @csp-coupled: `connect-src` cannot carry `portal_base_url`'s origin, so the
+ * preview fetch must not need it. Pinned by tests/unit/test_1400_csp_blob_preview.py.
+ */
+const SHARED_FILE_ROUTE = '/api/files/'
+
+/**
+ * Mark a preview read without mutating the original download URL — and ask the
+ * portal page's own origin for the bytes (#2733).
+ *
+ * The origin carries no authority here: `/api/files/{id}` is public and the
+ * 192-bit `?sig=` token is the sole credential, compared with `compare_digest`
+ * against the stored row rather than signed over the URL. Dropping the origin
+ * therefore costs nothing and buys a fetch that CSP `connect-src 'self'` and
+ * CORS both allow. `download_url` is untouched: it stays the shareable link the
+ * anchor-click Download uses, with #2582's one-way `&download=1` intact.
+ *
+ * The slice is taken FROM the route, not from the path root, because that is the
+ * exact inverse of the server's `f"{base}/api/files/{fid}"` — so a portal base
+ * URL carrying a path prefix (`https://host/trinity`) resolves to the same
+ * `/api/files/{id}` on this origin instead of a path this origin never serves.
+ * `lastIndexOf` rather than `indexOf` for the same reason: the route is appended
+ * last. The output is therefore ALWAYS either unchanged or a path under
+ * `/api/files/` — the rewrite cannot be steered at another route.
+ *
+ * A url with no `/api/files/` in its path is left to `sameOriginPath`'s unchanged
+ * behaviour: we do not know what it is, so we do not invent a local path for it.
+ *
+ * The caller fetches this with a bare `fetch`, NOT through `api.js` — that the
+ * url is now same-origin makes an `api.js` call look tempting, and it would
+ * attach the platform JWT to a route whose whole design is that the `sig` token
+ * is the only credential.
+ *
+ * The route check SELECTS a route; it does not SANITISE one. `%2f` survives
+ * `new URL()` un-decoded, so do not reuse this helper for a user-supplied URL.
+ * It is safe here because `download_url` is server-built from an admin-set
+ * `portal_base_url` plus a DB id, and the fetch carries no ambient credential
+ * (Trinity sets no cookies; the portal authenticates with a Bearer header).
+ */
 export function sharePreviewPath(url, base) {
   const parsed = new URL(url, base)
   parsed.searchParams.set('preview', '1')
+  const at = parsed.pathname.lastIndexOf(SHARED_FILE_ROUTE)
+  // Path + query only — never the origin, whatever `portal_base_url` resolved to.
+  if (at >= 0) return `${parsed.pathname.slice(at)}${parsed.search}`
   return sameOriginPath(parsed.href, base)
 }

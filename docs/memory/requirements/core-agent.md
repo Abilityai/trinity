@@ -2690,9 +2690,11 @@ to localStorage in the clear.
   interpolation, **capped at 256 KB with the cap stated in the UI** ("Showing the
   first 256 KB of 1.1 MB · Download the full file"); an image over 10 MB shows
   the card instead of fetching. Bytes are fetched **whole and sliced
-  client-side, with no `Range` header** — `main.py`'s CORS `allow_headers` does
-  not list `Range`, so a ranged preview dies silently on any deployment whose
-  portal base URL differs from the API's origin, and slicing also keeps preview
+  client-side, with no `Range` header** — a share preview is fetched same-origin
+  (#2733: `sharePreviewPath` slices the path from `/api/files/` and drops
+  whatever origin `portal_base_url` resolved to), so `main.py`'s missing `Range`
+  in CORS `allow_headers` no longer reaches it; the whole-blob read stays
+  because the cap is applied by client-side slicing, which also keeps preview
   off the download-counter path entirely.
 - **AC-5 — delete (ent#548)**, backend-enforced with the UI mirroring it off the
   roster payload (#2128):
