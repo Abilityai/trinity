@@ -98,14 +98,84 @@ export const VOICE_STATE_LABELS = Object.freeze({
 
 // What the one status line says. `toolName` is shown beside "Working" so the
 // person sees WHAT the agent is doing (the amber badge on the orb says the
-// same); a muted mic overrides "Listening", since it is not.
-export function voiceHeaderLine({ status = 'idle', toolName = null, muted = false, error = '' } = {}) {
+// same); a muted mic overrides "Listening", since it is not. Background tasks
+// (ent#551) are appended: they outlive the tool call that started them, so the
+// line keeps saying so while the conversation moves on.
+export function voiceHeaderLine({ status = 'idle', toolName = null, muted = false, error = '', backgroundTasks = 0 } = {}) {
   if (error) return error
+  let line
   if (status === 'tool_calling') {
-    return toolName ? `Working: ${String(toolName).replace(/_/g, ' ')}` : 'Working…'
+    line = toolName ? `Working: ${String(toolName).replace(/_/g, ' ')}` : 'Working…'
+  } else if (status === 'listening' && muted) {
+    line = 'Muted'
+  } else {
+    line = VOICE_STATE_LABELS[status] ?? ''
   }
-  if (status === 'listening' && muted) return 'Muted'
-  return VOICE_STATE_LABELS[status] ?? ''
+  const tasks = backgroundTasksLabel(backgroundTasks)
+  if (!tasks) return line
+  return line ? `${line} · ${tasks}` : tasks
+}
+
+// ---- Background tasks (ent#551) ---------------------------------------------
+
+// The bridge's `task` frame: `{state: started|finished|failed, task_id, label}`.
+// A list keyed on the task id, never a count — two tasks can be in flight and
+// the first to finish must not clear the badge (the same reason the backend
+// keeps a dict). A frame for an unknown id is a no-op; a repeated `started` is
+// idempotent.
+export function applyTaskFrame(tasks = [], frame = {}) {
+  const id = frame?.task_id
+  if (!id) return tasks
+  if (frame.state === 'started') {
+    if (tasks.some((t) => t.taskId === id)) return tasks
+    return [...tasks, { taskId: id, label: frame.label || '', status: frame.status || 'running' }]
+  }
+  // ent#551 QA: tasks run one at a time per call (the thread admits one turn);
+  // `running` is the moment a queued task takes its turn.
+  if (frame.state === 'running') {
+    return tasks.map((t) => (t.taskId === id ? { ...t, status: 'running' } : t))
+  }
+  return tasks.filter((t) => t.taskId !== id)
+}
+
+// One line per task for the orb's list: the label, and "queued" while another
+// task holds the thread. Separate items, never bunched — the operator's note.
+export function taskItemLabel(task = {}) {
+  const label = clip(task.label, TASK_LABEL_MAX) || 'task'
+  return task.status === 'queued' ? `${label} · queued` : label
+}
+
+// The badge / header words for work in flight: WHAT is running, in one line,
+// not how many things are (the operator's first-run note — "a task" tells the
+// person nothing). Given the list, one task is its own label; several are the
+// count followed by their labels. Given only a count, the count.
+export const TASK_LABEL_MAX = 48
+export const TASKS_LINE_MAX = 96
+
+function clip(text, max) {
+  const t = String(text || '').trim()
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t
+}
+
+export function backgroundTasksLabel(tasks = []) {
+  if (!Array.isArray(tasks)) {
+    const n = Math.max(0, Number(tasks) || 0)
+    return n === 0 ? '' : n === 1 ? '1 task running' : `${n} tasks running`
+  }
+  if (tasks.length === 0) return ''
+  if (tasks.length === 1) return clip(tasks[0].label, TASK_LABEL_MAX) || '1 task running'
+  const labels = tasks.map((t) => clip(t.label, TASK_LABEL_MAX)).filter(Boolean).join(' · ')
+  return clip(`${tasks.length} tasks · ${labels}`, TASKS_LINE_MAX)
+}
+
+// A typed row written by a task the agent ran during a voice call carries the
+// call's id but NOT `source: 'voice'` (it was not spoken) — so it renders as an
+// ordinary turn, outside the collapsed block, with this caption on the ask.
+export const VOICE_TASK_CAPTION = 'asked during a voice call'
+
+export function voiceTaskCaption(message = {}) {
+  if (!message?.voiceCallId || message.source === VOICE_SOURCE) return ''
+  return message.role === 'user' ? VOICE_TASK_CAPTION : ''
 }
 
 // The sentence for a call that ended other than by the person pressing End.
@@ -179,6 +249,60 @@ export function voiceCallLabelFromTurns(turns = []) {
   const n = turns.length
   if (!n) return 'Voice call'
   return `Voice call · ${n} spoken ${n === 1 ? 'turn' : 'turns'}`
+}
+
+// ---- Escape right after a call --------------------------------------------------
+
+// ---- The mute hotkey ----------------------------------------------------------
+
+// M toggles the mic while a call is on. Plain M only — a modifier means some
+// other shortcut (⌘M minimises a window); a key already claimed by an overlay
+// (`defaultPrevented`, the #2582 protocol) is not ours; and a key typed into a
+// field is text, not a command (the composer is inert during a call, but the
+// rename field and the picker's search are not).
+export function isMuteHotkey(event, { callActive = false } = {}) {
+  if (!callActive || !event || event.defaultPrevented) return false
+  if (event.key !== 'm' && event.key !== 'M') return false
+  if (event.metaKey || event.ctrlKey || event.altKey) return false
+  const tag = String(event.target?.tagName || '').toUpperCase()
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || event.target?.isContentEditable) return false
+  return true
+}
+
+// ---- Leaving mid-call by a click ----------------------------------------------
+
+// Every way out of the stage OTHER than the End button asks first. End call is
+// the person saying "end it"; a click on an agent in the rail, a thread, a
+// room, New chat or ⌘J is the person going somewhere, and a call ending as a
+// side effect of that — silently, transcript or not — is the bug the operator
+// hit twice (a rail click on the very agent they were talking to). The copy
+// says what will happen and what is kept.
+export function leaveCallCopy(agentName = '') {
+  const who = agentName ? `with ${agentName}` : ''
+  return Object.freeze({
+    title: 'End the call?',
+    message: `You're on a voice call ${who}`.trim() + '. Leaving here ends it. What was said stays in the chat.',
+    confirmText: 'End call and leave',
+    cancelText: 'Stay on the call',
+    variant: 'warning',
+  })
+}
+
+// ---- Leaving mid-call ---------------------------------------------------------
+
+// Does a change of agent / thread props end the call? A route-driven thread
+// change (browser back, a deep link) does — the call ends first, its transcript
+// kept. But a call started from a BRAND-NEW chat creates its thread first, and
+// adopting that thread replaces the route, so the `sessionId` prop changes from
+// null to the very thread the call is bound to a moment after the call starts.
+// That is not a thread change. Found live (ent#551 QA): every first call from a
+// new chat died at exactly 5 s — the premature stop waited out the `saved`
+// frame timeout, then closed the socket.
+export function threadChangeEndsCall({ callActive = false, agentChanged = false, newSessionId = null, boundSessionId = null } = {}) {
+  if (!callActive) return false
+  if (agentChanged) return true
+  if (!newSessionId) return true                   // the thread went away under the call
+  return newSessionId !== boundSessionId
 }
 
 // ---- Layout --------------------------------------------------------------------

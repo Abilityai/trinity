@@ -33,27 +33,65 @@
         </div>
       </Transition>
 
-      <!-- Status text -->
-      <div class="absolute bottom-16 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2">
+      <!-- ent#551: tasks running in the background. Persists across turns,
+           unlike the amber badge above, which is one tool call's moment; a
+           different hue so "the agent is thinking" and "the agent has work in
+           flight" never read as the same thing. -->
+      <Transition
+        enter-active-class="transition ease-out duration-200"
+        enter-from-class="opacity-0 translate-y-2"
+        enter-to-class="opacity-100 translate-y-0"
+        leave-active-class="transition ease-in duration-150"
+        leave-from-class="opacity-100 translate-y-0"
+        leave-to-class="opacity-0 translate-y-2"
+      >
         <div
-          class="w-1.5 h-1.5 rounded-full transition-colors duration-300"
-          :style="{ background: statusDotColor }"
-        />
-        <span class="text-xs tracking-widest uppercase" :style="{ color: statusTextColor }">
-          {{ statusLabel }}
-        </span>
-      </div>
+          v-if="voice.hasBackgroundTasks?.value"
+          class="absolute top-14 left-1/2 -translate-x-1/2 z-10 max-w-[85%] flex flex-col items-center gap-1.5"
+          data-testid="voice-background-tasks"
+        >
+          <!-- One pill per task, never bunched: each names what it is doing and
+               whether it is queued behind another (one turn per thread). -->
+          <div
+            v-for="t in voice.backgroundTasks.value"
+            :key="t.taskId"
+            class="max-w-full truncate px-3 py-1 rounded-full text-xs font-medium bg-status-info-500/15 border border-status-info-400/40"
+            :class="t.status === 'queued' ? 'text-status-info-300/70' : 'text-status-info-200'"
+            :title="t.label"
+            data-testid="voice-background-task"
+          >
+            {{ taskItemLabel(t) }}
+          </div>
+        </div>
+      </Transition>
+
+      <!-- Status text + controls: ONE bottom-anchored column, so the two can
+           never overlap however short the stage is. They used to be two
+           absolutely positioned rows (status 4 rem up, controls 1.25 rem up
+           with 48px buttons), and on a short stage the word LISTENING sat on
+           top of the buttons. -->
+      <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-10 flex flex-col items-center gap-3" data-testid="voice-bottom-stack">
+        <div class="flex items-center gap-2">
+          <div
+            class="w-1.5 h-1.5 rounded-full transition-colors duration-300"
+            :style="{ background: statusDotColor }"
+          />
+          <span class="text-xs tracking-widest uppercase" :style="{ color: statusTextColor }">
+            {{ statusLabel }}
+          </span>
+        </div>
 
       <!-- Controls -->
-      <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-10 flex items-center gap-5">
-        <!-- Mute -->
+      <div class="flex items-center gap-5">
+        <!-- Mute (also the M key while the call is on) -->
         <button
           @click="voice.toggleMute()"
           class="w-10 h-10 rounded-full flex items-center justify-center transition-colors"
           :style="voice.muted.value
             ? 'background: rgba(217,119,6,0.35); border: 1px solid rgba(217,119,6,0.5);'
             : 'background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);'"
-          :title="voice.muted.value ? 'Unmute' : 'Mute'"
+          :title="voice.muted.value ? 'Unmute (M)' : 'Mute (M)'"
+          :aria-pressed="voice.muted.value ? 'true' : 'false'"
         >
           <svg v-if="!voice.muted.value" class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z" />
@@ -76,6 +114,7 @@
           </svg>
         </button>
       </div>
+      </div>
 
       <!-- Error -->
       <div
@@ -91,6 +130,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { taskItemLabel } from '../portal/portalVoiceMode'
 
 const props = defineProps({
   voice: { type: Object, required: true }

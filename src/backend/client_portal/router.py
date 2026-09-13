@@ -1648,6 +1648,9 @@ async def portal_terminate_execution(
     rate_limiter.enforce(f"portal_cancel:{email}:{agent_name}", 30, 60,
                          detail="Too many cancellations.")
 
+    # ent#551 QA: the one line that says a PERSON in the Workspace asked for
+    # this cancel (see `terminate_execution`'s entry log for the actor kind).
+    logger.info("portal cancel: %s stops execution %s on %s", email, execution_id, agent_name)
     try:
         return await service.terminate_portal_turn(agent_name, execution_id)
     except ClientPortalError as e:

@@ -2219,6 +2219,16 @@ async def terminate_execution(
     cancel that lands after the row is already terminal loses and leaves the
     real terminal alone.
     """
+    # ent#551 QA: two voice-dispatched turns were cancelled ~3 s after their
+    # call ended and nothing in the log said by whom — uvicorn access logging
+    # is off, and this path logged only its outcome. Name the requester here,
+    # once, for every arm.
+    logger.info(
+        "[Terminate] requested for %s on '%s' by %s%s",
+        task_execution_id or execution_id, name, actor_kind,
+        f" (user {getattr(current_user, 'username', None) or getattr(current_user, 'id', '?')})" if current_user else "",
+    )
+
     # Agent scope for the DB half, checked ONCE for every arm. The route proves
     # `name`; `task_execution_id` is caller-supplied (a query param on the
     # operator route) and is the id the CANCELLED CAS and the activity close
