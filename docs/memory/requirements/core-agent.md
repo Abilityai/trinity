@@ -1399,6 +1399,30 @@ well, and the agent never touches CSS.
 - **AC-8 — the empty state teaches**: "Nothing running right now" + **See what
   you can ask** — scrolls to the briefing hints when they are on screen, else
   opens the agent page's "what it can do".
+- **AC-9 — the body's scrollbar is thin and hidden at rest
+  (trinity-enterprise#608)**: the rail's one scroll axis wears the
+  overlay-scrollbar convention of editor panels — a ~6px rounded thumb on a
+  transparent track, invisible until the pointer is over the scroll region,
+  focus is inside it, or the body is scrolling (`:hover` / `:focus-within` /
+  an `is-scrolling` class held ~800ms past the last `scroll` event), fading
+  rather than popping. The scroll arm is not optional on macOS: in the default
+  "show scroll bars: automatically" mode the platform never reveals an overlay
+  bar on hover, only during scrolling — and with the rest colour transparent
+  it would otherwise show nothing, ever.
+  Reveal changes the thumb's colour ONLY — never `display`, `width`,
+  `scrollbar-width` or `overflow` — so content wraps byte-identically hovered
+  or not; the thin bar keeps its gutter in classic-scrollbar mode by design.
+  The affordance is hidden, the capability is not (wheel, trackpad, touch and
+  focus-into-view all work at rest — the #1789 bar). Both engines, one look:
+  the standard `scrollbar-width: thin` + `scrollbar-color` pair (Firefox,
+  Chromium ≥121, where it also disables the `::-webkit-scrollbar` rules) and the
+  WebKit pseudo-elements for Safari. The thumb is the tertiary ink of each
+  theme (gray-500 light / gray-400 dark) at reduced alpha, stronger under the
+  pointer; `sm:`-and-up only, so the mobile sheet keeps its native overlay
+  bars. Scoped to `PortalRail.vue` — the global `.dark ::-webkit-scrollbar`
+  rule in `style.css` is untouched; the sidebar list and the conversation
+  transcript are a follow-up once the feel is confirmed. Gated on a human feel
+  check on the running instance before the PR.
 - **Not in this slice (recorded on the issue)**: the Work tab's content
   (#457), re-homing Loops / Canvas / Files (#472's second child), the sidebar /
   thread tab strip / top band / Agent-details panel / drop target of the

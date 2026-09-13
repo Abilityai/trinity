@@ -468,6 +468,50 @@ reviewer clicks.
   and asserts the share-route literal in `portalFiles.js` still matches the
   f-string `client_portal/service.py` builds `download_url` from.
 
+## The body's scrollbar — thin, hidden at rest (trinity-enterprise#608)
+
+The rail's single scroll axis (`data-testid="portal-rail-body"`, principle 8)
+used to show a stock scrollbar: the global `.dark ::-webkit-scrollbar` 8px bar
+in dark mode, the browser default in light — and because *any*
+`::-webkit-scrollbar` rule opts an element out of macOS overlay scrollbars, a
+dark-mode Mac saw an always-on bar where the light rail hid its bar when idle.
+The two themes disagreed about scrollbar weight.
+
+`rail-scroll`, a scoped style on that one container, makes both behave like the
+good case and thinner: `scrollbar-width: thin` with `scrollbar-color:
+transparent transparent` at rest, the tertiary ink (`theme('colors.gray.500 /
+0.55')` light, `gray.400 / 0.5` dark — resolved at build, hence an explicit
+`.dark` override, the ScanlineReveal precedent) on `:hover` / `:focus-within`,
+with a 150ms `scrollbar-color` transition — and on `.is-scrolling`, a class the
+body's passive `scroll` listener holds for ~800ms past the last event. That
+third arm was found in the capture, not designed in: Chromium on a Mac in the
+default "show scroll bars: automatically" mode renders the standard-property
+bar as a native overlay, which shows during scrolling only and never on hover,
+so with the rest colour transparent the first cut showed no bar at all, in
+either theme, in any state. A parallel `::-webkit-scrollbar*`
+block gives Safari the same 6px rounded thumb on a transparent track with the
+same two states; in Chromium the standard pair wins and the WebKit rules are
+ignored, which is why the two blocks must stay visually identical rather than
+being two designs.
+
+**What reveal may change: colour, nothing else.** Toggling `display: none`,
+`width`, `scrollbar-width` or `overflow` on hover reflows the whole tab body
+(every line re-wraps as the gutter comes and goes) — the anti-pattern the issue
+excludes. The proof is mechanical: the feel-check capture reads every
+descendant's `getBoundingClientRect` at rest and hovered and asserts the two
+serialisations are equal, in both themes. The thin bar therefore keeps its
+gutter in classic-scrollbar mode (Windows/Linux defaults, macOS "Show scroll
+bars: Always"); it is the rest-state *visibility* that changes, not the
+geometry. Under `prefers-reduced-motion` the transition is off.
+
+The rule is wrapped in `@media (min-width: 640px)` (Tailwind `sm`): the
+below-`sm` sheet is the same component, but touch platforms already overlay
+their scrollbars natively and are left native. The global dark rule in
+`style.css` is untouched — the sidebar list (`PortalSidebar.vue`) and the
+transcript (`PortalConversation.vue` `scrollEl`) are a follow-up if the feel
+lands, not this change. Guard: `portalRail.spec.js` pins the body's class
+string with `rail-scroll` on it.
+
 ## Residuals (stated)
 
 - The Work signal is store-derived since ent#525 (`workspace-work.md`): the owner merges
