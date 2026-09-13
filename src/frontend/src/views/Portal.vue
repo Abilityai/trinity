@@ -652,6 +652,18 @@
       </template>
     </PortalRail>
 
+    <!-- ent#551 QA: leaving the stage mid-call asks; End call itself never does -->
+    <ConfirmDialog
+      v-model:visible="leaveCall.open"
+      :title="leaveCallText.title"
+      :message="leaveCallText.message"
+      :confirm-text="leaveCallText.confirmText"
+      :cancel-text="leaveCallText.cancelText"
+      :variant="leaveCallText.variant"
+      @confirm="onLeaveCallConfirm"
+      @cancel="onLeaveCallCancel"
+    />
+
     <!-- ent#361: picking who is in a chat is an explicit act now -->
     <PortalAgentPicker
       v-if="pickerOpen"
@@ -689,6 +701,7 @@ import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
 import PortalRail from '@/components/portal/PortalRail.vue'
 import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
 import PortalVoiceCanvas from '@/components/portal/PortalVoiceCanvas.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { usePortalRailFeeds } from '@/composables/usePortalRailFeeds'
 import {
   RAIL_TABS,
@@ -716,7 +729,11 @@ import {
 // the count. See `utils/tabTitle.js` for why neither writes `document.title`.
 import { setUnreadCount, clearUnreadCount } from '@/utils/tabTitle'
 import {
-  VOICE_QUERY_KEY, voiceAutoStart, voiceAutoStartArmed, disarmVoiceAutoStart,
+  VOICE_QUERY_KEY,
+  voiceAutoStart,
+  voiceAutoStartArmed,
+  disarmVoiceAutoStart,
+  leaveCallCopy,
 } from '@/components/portal/portalVoiceMode'
 
 const store = useClientPortalStore()
@@ -860,6 +877,30 @@ const railSheetOpen = ref(false)
 // changes end the call gracefully inside the conversation instead.
 const voiceCall = ref({ active: false, agentName: null, voiceSessionId: null })
 const voicePanelVersion = ref(0)
+// ent#551 QA: every exit from the stage other than End call ASKS first. A rail
+// click on the very agent being talked to pushed a route, the conversation
+// remounted, and its unmount ended the call — silently. `guardLeaveCall(run)`
+// answers true when it took the action over: the dialog holds it, End-and-leave
+// ends the call through the conversation's own `endVoiceCall` and then runs it,
+// Stay drops it. Every navigation entry routes through this one guard so a new
+// exit cannot forget to.
+const leaveCall = ref({ open: false, run: null })
+const leaveCallText = computed(() => leaveCallCopy(voiceCall.value.agentName || ''))
+function guardLeaveCall(run) {
+  if (!voiceCall.value.active) return false
+  leaveCall.value = { open: true, run }
+  return true
+}
+async function onLeaveCallConfirm() {
+  const run = leaveCall.value.run
+  leaveCall.value = { open: false, run: null }
+  await conversationRef.value?.endVoiceCall?.()
+  // The conversation's watcher clears this on the next flush; clear it now so
+  // the action below sees the call as over rather than re-arming the dialog.
+  voiceCall.value = { active: false, agentName: null, voiceSessionId: null }
+  if (typeof run === 'function') run()
+}
+function onLeaveCallCancel() { leaveCall.value = { open: false, run: null } }
 
 // #2559 — the Talk door. `?voice=1` asks for the call to start on landing, and
 // the ask is honoured only when it was armed IN THE APP (see `portalVoiceMode`).
@@ -1103,6 +1144,7 @@ const pickerBusy = ref(false)
 const startingNewChat = ref(false)
 
 function newChat() {
+  if (guardLeaveCall(() => newChat())) return   // ent#551: ask, then leave
   pickerOpen.value = true
 }
 
@@ -1244,6 +1286,7 @@ const STAGE_ACTION = 'mt-3 text-sm text-action-primary-600 hover:underline'
 
 function openRoom(roomId) {
   if (!roomId) return
+  if (guardLeaveCall(() => openRoom(roomId))) return   // ent#551: ask, then leave
   unreachableAgent.value = null
   markRead('room', roomId)
   activeRoomId.value = roomId
@@ -1271,6 +1314,9 @@ function openRoom(roomId) {
 // at every instant instead of pointing at a chat we have not resolved.
 function openAgentPage(name) {
   if (!name) return
+  // ent#551 QA: the rail's agent row. It pushed a route with no guard, so the
+  // conversation remounted and the call ended without a word.
+  if (guardLeaveCall(() => openAgentPage(name))) return
   unreachableAgent.value = null
   pendingSession.value = null
   startingNewChat.value = false
@@ -1391,7 +1437,7 @@ async function onMainReset(result) {
 }
 
 function newChatWithAgent(name) {
-  if (voiceCall.value.active) return   // ent#534: end the call to switch chats
+  if (guardLeaveCall(() => newChatWithAgent(name))) return   // ent#534/ent#551: ask, then leave
   unreachableAgent.value = null
   activeAgentName.value = name
   // ent#451: this function has always MEANT a fresh chat — it clears
@@ -1413,7 +1459,7 @@ function newChatWithAgent(name) {
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
-  if (voiceCall.value.active) return   // ent#534: end the call to switch chats
+  if (guardLeaveCall(() => openThread(t))) return   // ent#534/ent#551: ask, then leave
   unreachableAgent.value = null
   // Opening an existing thread is the opposite intent; clear it so a later
   // send does not still ask for a fresh one.
@@ -1671,7 +1717,11 @@ function renameRoom(roomId, title) {
 function onGlobalKeydown(e) {
   if (!isNewChatHotkey(e)) return
   if (!store.isClientSignedIn) return
-  if (voiceCall.value.active) return   // ent#534: the call owns the stage
+  if (voiceCall.value.active) {        // ent#534/ent#551: the call owns the stage — ask first
+    e.preventDefault()
+    guardLeaveCall(() => onGlobalKeydown(e))
+    return
+  }
   e.preventDefault()
   const name = activeAgentPageName.value
     || (!activeRoomIdFromRoute.value && !unreachableAgent.value ? activeAgent.value?.name : null)

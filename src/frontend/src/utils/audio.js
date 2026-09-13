@@ -9,16 +9,11 @@
 const INPUT_SAMPLE_RATE = 16000
 const OUTPUT_SAMPLE_RATE = 24000
 
-// AudioWorklet processor source (inlined to avoid separate file + HTTPS requirement)
-const _WORKLET_SRC = `
-class MicCapture extends AudioWorkletProcessor {
-  process(inputs) {
-    const ch = inputs[0]?.[0];
-    if (ch) this.port.postMessage(ch.slice());
-    return true;
-  }
-}
-registerProcessor('trinity-mic-capture', MicCapture);`
+// The AudioWorklet processor is a static file under `public/`, loaded from the
+// page's own origin. It was inlined into a `blob:` URL, which the CSP's
+// `script-src 'self'` (dev and production alike) blocks — every call logged a
+// CSP violation and silently fell back to the deprecated ScriptProcessor.
+export const MIC_WORKLET_URL = '/mic-capture.worklet.js'
 
 /**
  * Start capturing audio from the microphone.
@@ -46,10 +41,7 @@ export async function startMicCapture(onData) {
   // Try AudioWorklet first (avoids deprecated ScriptProcessor warning)
   let useWorklet = false
   try {
-    const blob = new Blob([_WORKLET_SRC], { type: 'application/javascript' })
-    const blobUrl = URL.createObjectURL(blob)
-    await audioContext.audioWorklet.addModule(blobUrl)
-    URL.revokeObjectURL(blobUrl)
+    await audioContext.audioWorklet.addModule(MIC_WORKLET_URL)
     const workletNode = new AudioWorkletNode(audioContext, 'trinity-mic-capture')
     workletNode.port.onmessage = (e) => {
       const base64 = arrayBufferToBase64(float32ToPcm16(e.data).buffer)

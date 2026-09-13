@@ -263,6 +263,7 @@ async def voice_websocket(
     Server sends: {"type": "audio", "data": "<base64 PCM 24kHz mono>"}
                   {"type": "transcript", "role": "user|assistant", "text": "..."}
                   {"type": "status", "state": "connecting|listening|speaking|ended"}
+                  {"type": "task", "state": "started|finished|failed", "task_id": "t1", "label": "...", "running": 1}
     """
     # Authenticate via query param token (WebSocket can't use Authorization header)
     if not token:
@@ -380,6 +381,15 @@ async def voice_websocket(
         except Exception:
             pass
 
+    # ent#551: a background task's lifecycle — started / finished / failed —
+    # so the orb can show work in flight across turns, distinct from the
+    # per-call amber badge, and the canvas column can refetch when it lands.
+    async def on_task_event(event: dict):
+        try:
+            await websocket.send_json({"type": "task", **event})
+        except Exception:
+            pass
+
     # Start the Gemini connection in a background task
     gemini_task = asyncio.create_task(
         voice_service.connect_and_stream(
@@ -390,6 +400,7 @@ async def voice_websocket(
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_turn=on_turn,
+            on_task_event=on_task_event,
         )
     )
 
