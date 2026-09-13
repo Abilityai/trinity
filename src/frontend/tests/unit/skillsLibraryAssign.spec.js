@@ -110,7 +110,7 @@ describe('ent#386 — assigning', () => {
 
     await store.assignSkill('research', 'scout')
 
-    expect(api.post).toHaveBeenCalledWith('/api/agents/scout/skills/research')
+    expect(api.post).toHaveBeenCalledWith('/api/agents/scout/skills/research', {}, { timeout: 45000 })
   })
 
   it('patches the holder map in place rather than refetching', async () => {
@@ -173,7 +173,7 @@ describe('ent#386 — assigning', () => {
 
     await store.assignSkill('a/b', 'scout')
 
-    expect(api.post).toHaveBeenCalledWith('/api/agents/scout/skills/a%2Fb')
+    expect(api.post.mock.calls[0][0]).toBe('/api/agents/scout/skills/a%2Fb')
   })
 })
 

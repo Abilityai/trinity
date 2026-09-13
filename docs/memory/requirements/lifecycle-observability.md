@@ -290,7 +290,12 @@ anonymous usage telemetry tracked separately (#758 / trinity-enterprise#12).
   read-shaped path** (a GET, a status readback) uses the non-minting twin
   `get_installation_id()` and reports `None` honestly when nothing has minted
   it yet (ent#545), because a `get_or_create_*` on a read path is a durable
-  write with a race (learnings 2026-08-05). The last such caller, the
+  write with a race (learnings 2026-08-05). That writer set is pinned in CI:
+  `tests/unit/test_2669_minting_accessor_callers.py` fails the build on any use
+  of a minting accessor (`get_or_create_installation_id`,
+  `get_or_mint_sharing_id`, `get_instance_label`) outside its reasoned
+  allowlist, and on any write of the identity keys outside their home modules
+  (#2669; the private tree's twin is trinity-enterprise#575). The last such caller, the
   enterprise activation-funnel read, adopts the twin in trinity-enterprise#570;
   a public tree ahead of that submodule pointer still mints on the tab's first
   open. The mint itself is a **write-once
@@ -677,6 +682,14 @@ no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry
   404 from the default URL is worded as a 404 at the default address (the
   receiver has been live since 2026-09-04, ent#190, so that is an anomaly to look
   at); from an overridden `TELEMETRY_SHARING_URL` as that receiver answering 404.
+  Since #2571 each entry records the origin it was posted to (scheme + host +
+  port; never path, query or userinfo), the last-shared stamp records the origin
+  that acknowledged it (`telemetry_sharing_last_shared_host`), and the receiver
+  sentence is decided from that record rather than from the URL configured at
+  read time: it names the host that answered and says plainly when the newest
+  entry's origin differs from the configured one (an entry without a recorded
+  origin reads as unknown and never as a mismatch); `share_url` is scrubbed
+  before it reaches the panel.
 - **FR-6 — Delivery that survives a missing receiver**: the consent-time backfill
   is retried at every due wake until the first 2xx
   (`telemetry_sharing_backfill_delivered_at`), then windows are cumulative from
@@ -689,13 +702,15 @@ no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry
   `telemetry_sharing_` prefix the generic `PUT /api/settings/{key}` already
   refuses; the generic `DELETE` stays open for it by design — deleting a key
   only moves toward off / ask again / re-mint, or, for `last_shared_at`, one
-  re-share at the next wake (#2618; consent still gates). The builder runs off the event
+  re-share at the next wake (#2618; consent still gates), or, for `last_shared_host`,
+  a delivery line that reads "to an unknown receiver" (#2571). The builder runs off the event
   loop (`asyncio.to_thread`) and every reader is fenced so a stubbed or failing
   source degrades a field, never the payload.
 
 **Deferred**: feature-usage / click-through coverage (PR2, child issue); an
 edition-differentiated ask (ent#496, unblocked by ent#190); the taxonomy field
-(ent#418); the send log recording its destination host (#2571); `main.py`
+(ent#418); a destination change starting a new delivery episode and the
+benchmark read using the recorded origin (both deferred from #2571); `main.py`
 adopting `utils/app_version.py` (debt inbox
 `2026-09-03-main-version-resolver-adopt-util`).
 

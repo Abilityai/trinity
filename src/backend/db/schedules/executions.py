@@ -694,6 +694,58 @@ class ScheduleExecutionsMixin:
                 rows.append(d)
             return rows
 
+    def get_fan_out_executions(
+        self, agent_name: str, fan_out_id: str, limit: int = 200
+    ) -> List[dict]:
+        """Every execution row of one fan-out batch, oldest first (#2670).
+
+        The batch's rows are the ONLY durable record of a fan-out: the
+        aggregated `FanOutResponse` is built in memory and returned once, so a
+        caller whose HTTP call died has nothing to read. `fan_out_id` is written
+        on every subtask row at dispatch (FANOUT-001), which makes this the
+        read surface a gateway-timeout receipt can be resolved against — and,
+        unlike the idempotency snapshot, it answers WHILE THE BATCH IS STILL
+        RUNNING, which is the state a timed-out caller is in by construction.
+
+        Scoped by `agent_name` as well as `fan_out_id`: the id is server-minted
+        and unguessable, but the route that exposes this is agent-gated, so the
+        query must not be able to return another agent's rows even if an id were
+        somehow reused.
+
+        Ordered by `started_at` ASC — dispatch order, which is the order the
+        caller listed its tasks in. `limit` is a belt (MAX_TASKS bounds a batch
+        at creation); a re-queued subtask can add a row, so it is not exact.
+        """
+        stmt = (
+            select(
+                schedule_executions.c.id,
+                schedule_executions.c.status,
+                schedule_executions.c.started_at,
+                schedule_executions.c.completed_at,
+                schedule_executions.c.duration_ms,
+                schedule_executions.c.message,
+                schedule_executions.c.response,
+                schedule_executions.c.error,
+                schedule_executions.c.cost,
+                schedule_executions.c.context_used,
+                schedule_executions.c.model_used,
+            )
+            .where(schedule_executions.c.agent_name == agent_name)
+            .where(schedule_executions.c.fan_out_id == fan_out_id)
+            .order_by(schedule_executions.c.started_at.asc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            rows = []
+            for row in conn.execute(stmt).mappings():
+                d = dict(row)
+                # #1474: the scheduler is not the writer here, but normalise
+                # anyway so this surface can never serialize a naive timestamp.
+                d["started_at"] = _norm_ts(d.get("started_at"))
+                d["completed_at"] = _norm_ts(d.get("completed_at"))
+                rows.append(d)
+            return rows
+
     def get_execution(self, execution_id: str) -> Optional[ScheduleExecution]:
         """Get a specific execution by ID."""
         stmt = select(schedule_executions).where(

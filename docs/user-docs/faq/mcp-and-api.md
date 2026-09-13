@@ -79,6 +79,8 @@ It makes retries safe on endpoints that trigger an execution (`/chat`, `/task`, 
 
 Synchronous `chat_with_agent` calls cap at `MCP_CHAT_TIMEOUT_MS` (default 25 seconds). If the agent hasn't finished by then, the tool returns `{status: "queued_timeout", execution_id, message}` instead of an answer — the task keeps running on the agent. Poll `get_execution_result` with that `execution_id` to fetch the result when it completes; the call is not duplicated. See [MCP Server](../integrations/mcp-server.md).
 
+`fan_out` works the same way and hits the cap more often, because a batch runs longer than any single task in it. Its receipt is `{status: "fan_out_timeout", fan_out_id, task_count, message}` — a batch is many executions sharing one id, so it names the *batch*, not one task. Poll `get_fan_out_result(agent_name, fan_out_id)`. One thing to watch: re-sending the identical call is deduplicated and answers with the same batch, but **rewording it dispatches all N tasks a second time**.
+
 ## How do I run a long task via the API and check its result later?
 
 Submit it with `POST /api/agents/{name}/task`, then poll `GET /api/agents/{name}/executions` and `GET /api/agents/{name}/executions/{id}` for status, response, cost, and duration. The agent's configured execution timeout is authoritative — omit the deprecated per-task `timeout_seconds` field and raise the agent's timeout cap if you need longer runs. For hands-off recurring triggers, use schedules or webhooks instead. See [Chat API](../api-reference/chat-api.md) and, for webhooks, [Webhook Triggers](../api-reference/webhook-triggers.md).

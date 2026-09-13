@@ -195,7 +195,11 @@ def test_the_prompt_context_survives_a_resumed_turn():
     import inspect
     from client_portal import service
     src = inspect.getsource(service.portal_chat)
-    assert "(canvas_prefix + manifest_prefix + message) if resuming" in src
+    # #2694 put the voice delta at the head of a resumed turn; the canvas rides
+    # behind it and AHEAD of the manifest on both arms, so a resumed turn and a
+    # cold one name the same canvas in the same place.
+    assert "(delta_prefix + canvas_prefix + manifest_prefix + message) if resuming" in src
+    assert "cold_message = history_prefix + canvas_prefix + manifest_prefix + message" in src
 
 
 # --- wiring -----------------------------------------------------------------

@@ -280,9 +280,33 @@ and id once the list passes six, a height-bounded scrolling strip so a long
 list does not cost the rail its other tabs, and a Manage mode giving each row
 its age, its stale mark, a pin toggle and a delete. Decidable rules live in
 `components/canvas/canvasUtils.js` (`sortCanvases`, `filterCanvases`,
-`selectionState`, `bulkDeletePrompt`, `bulkDeleteOutcome`, `canvasHeadroom`),
-because vitest runs `environment: 'node'` with no mount harness — a rule inside
-the SFC is one no test can reach.
+`selectionState`, `bulkDeletePrompt`, `bulkDeleteOutcome`, `canvasHeadroom`,
+`canvasSelectorVisible`, `canvasAutoSelect`, `canvasSearchVisible`), because
+vitest runs `environment: 'node'` with no mount harness — a rule inside the SFC
+is one no test can reach; `canvasPanelSelectorGate.spec.js` goes one step
+further and slices the SFC's own gate expressions out of the source to **run**
+them against the numbers each review ejection was proven with.
+
+**A search is state the list can change under** — two review-found defects of
+one class, both fixed by a pure rule rather than a template tweak. (1) The chip
+strip was gated on the *filtered* list (`visible.length > 1`), so a query
+narrowing to exactly one match hid the strip, the no-match line stayed hidden
+too, and the auto-select watcher — keyed off the *unfiltered* `props.canvases`
+— never selected the match: the user searched, hit one result, and the chips
+vanished with the previous canvas still on screen. `canvasSelectorVisible`
+shows any hit while a query is active and keeps the "no choice" collapse for
+the un-searched case; `canvasAutoSelect` makes the selection follow the
+matches. (2) `query` has exactly one writer, the search input's `v-model`, and
+that input was `v-if`'d on `count > threshold` alone — so seven canvases, type
+"Topic 3", delete the one match: six canvases, the box unmounts, `visible`
+keeps filtering on text nobody can see, the strip collapses, and the panel
+says *No canvas matches "Topic 3"* with no control left to clear it (also
+reachable with no operator action, via the agent's own `clear_canvas` plus a
+rail refresh). `canvasSearchVisible` keeps the box while a query is active
+regardless of the count — the typed intent survives the shrink and the
+no-match line keeps its one control; resetting `query` on the flip was
+rejected because it would erase a search the user was mid-way through because
+a sibling canvas went away.
 
 - Dual-track migration: `db/migrations.py::agent_canvases_table` +
   Alembic `0050_agent_canvases`. ent#536 changes **no DDL**: block ids and the

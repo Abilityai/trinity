@@ -48,6 +48,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -62,6 +63,7 @@ from redis_breaker_util import SingleFlightLock, get_breaker_redis
 from services import settings_service
 from utils.app_version import resolve_release_version
 from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
+from utils.url_validation import strip_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +72,12 @@ PAYLOAD_SCHEMA_VERSION = 2
 _PAYLOAD_SCHEMA_VERSION = PAYLOAD_SCHEMA_VERSION  # ent#12 name, kept for readers
 RECENT_SENDS_LIMIT = 5
 
-# The documented default. Compared against the configured URL so a 404 can be
-# worded honestly: from the default it means "the hosted service is not live
-# yet"; from an override it means only "your receiver answered 404".
+# The documented default. Its ORIGIN is compared against the origin recorded on
+# a send-log entry (#2571) so a 404 can be worded honestly: from the default it
+# means "the hosted service answered 404"; from anywhere else it means only
+# "that receiver answered 404". Never compared against the URL configured at
+# read time — that is a boot-time constant, and after an operator tests against
+# a local sink and restores the default the two disagree.
 DEFAULT_SHARE_URL = "https://intake.abilityai.dev/v1/telemetry-share"
 
 # Readers whose time cutoff is unconditional (``db.get_failure_event_counts_by_
@@ -114,11 +119,12 @@ PREVIEW_SHARING_ID = "00000000-0000-4000-8000-000000000000"
 # ``telemetry_sharing_`` prefix the generic PUT /api/settings/{key} refuses, so
 # the dedicated human-only routes are the only writers. The generic DELETE stays
 # open for the prefix BY DESIGN: it is the reset path, and every deletion moves
-# in the safe direction (off / ask again / re-mint).
+# in the safe direction (off / ask again / re-mint / an unknown receiver).
 KEY_ENABLED = "telemetry_sharing_enabled"          # "true"/"false" — the consent
 KEY_CONSENT_AT = "telemetry_sharing_consent_at"
 KEY_BACKFILL_DAYS = "telemetry_sharing_backfill_days"
 KEY_LAST_SHARED_AT = "telemetry_sharing_last_shared_at"
+KEY_LAST_SHARED_HOST = "telemetry_sharing_last_shared_host"        # #2571 — the origin that acknowledged the stamp
 KEY_SHARING_ID = "telemetry_sharing_id"                          # ent#437
 KEY_DISMISSED_AT = "telemetry_sharing_dismissed_at"              # ent#437 "don't ask again"
 KEY_FIRST_VALUE_AT = "telemetry_sharing_first_value_at"          # ent#437 warm-ask memo
@@ -366,6 +372,55 @@ def first_value_at() -> Optional[str]:
     return None
 
 
+def _send_host(url: Any) -> Optional[str]:
+    """Where an attempt is (or was) posted, reduced to its origin —
+    ``scheme://host[:port]``, lower-cased — or ``None`` when the configured
+    value has no usable authority (empty, scheme-less, protocol-relative,
+    unparseable, or not http/https, the only schemes the transport can post to).
+
+    #2571. Path, query and fragment never survive (a query can carry a token —
+    the ent#190 class); userinfo is removed by the parse-based
+    ``strip_url_credentials`` and, as a belt, everything before the last ``@``
+    of the authority is dropped again here, so the stored value cannot carry a
+    credential even if that strip is ever bypassed. TOTAL by contract: it runs
+    inside the best-effort send-log writer, where a raise would drop the whole
+    entry (the #2654 class — an attempt nothing records), and ``urlsplit`` does
+    raise (``Invalid IPv6 URL`` on an unbalanced bracket). It never reads
+    ``.port`` (raises on ``:abc``) and does not fold default ports: an explicit
+    ``:443`` reads as a different origin from the default, which is visible
+    because both origins are displayed wherever they are compared.
+    """
+    try:
+        text = strip_url_credentials(url if isinstance(url, str) else "").strip()
+        parts = urlsplit(text)
+        scheme = (parts.scheme or "").lower()
+        authority = (parts.netloc or "").rsplit("@", 1)[-1].strip().lower()
+        if scheme not in ("http", "https") or not authority:
+            return None
+        return f"{scheme}://{authority}"
+    except Exception:  # noqa: BLE001 — total by contract, see above
+        return None
+
+
+def _display_url(url: Any) -> str:
+    """The configured URL as the panel may show it (#2571): userinfo stripped,
+    query and fragment dropped. Never raises — an unparseable value degrades to
+    the stripped text cut at its first ``?`` or ``#``."""
+    text = strip_url_credentials(url if isinstance(url, str) else "").strip()
+    try:
+        return urlsplit(text)._replace(query="", fragment="").geturl()
+    except Exception:  # noqa: BLE001
+        return text.split("?", 1)[0].split("#", 1)[0]
+
+
+def _entry_host(entry: Any) -> Optional[str]:
+    """The origin a stored attempt was posted to, or ``None`` for an entry
+    written before #2571 or carrying a corrupt value — "unknown", never
+    "known", so it can never claim a mismatch."""
+    host = entry.get("host") if isinstance(entry, dict) else None
+    return host.strip() if isinstance(host, str) and host.strip() else None
+
+
 def _recent_sends() -> List[Dict]:
     """The last ``RECENT_SENDS_LIMIT`` send attempts, newest first. A corrupt or
     absent row reads as an empty list — it must never 500 the status route or
@@ -384,8 +439,14 @@ def _recent_sends() -> List[Dict]:
 
 def _record_send(entry: Dict) -> None:
     """Prepend one send attempt (success or failure) to the bounded local log.
-    Best-effort: a failed write never changes the egress result."""
+    Best-effort: a failed write never changes the egress result.
+
+    Stamps the destination origin here (#2571), at the one choke point every
+    writer passes through, so no attempt is ever logged without one: a refused
+    payload or a pre-POST failure carries the origin it was AIMED at, which the
+    panel words as "to <host>", never as "answered by"."""
     try:
+        entry.setdefault("host", _send_host(TELEMETRY_SHARING_URL))
         sends = [entry] + _recent_sends()
         db.set_setting(KEY_RECENT_SENDS, json.dumps(sends[:RECENT_SENDS_LIMIT]))
     except Exception:  # noqa: BLE001
@@ -394,17 +455,28 @@ def _record_send(entry: Dict) -> None:
 
 def receiver_hint(recent: List[Dict]) -> Optional[str]:
     """What the newest attempt says about the receiver — a hint for the panel,
-    never a verdict: ``receiver_not_live`` (404 from the DEFAULT url — the ent#190
-    receiver has been live since 2026-09-04, so this is an anomaly, not the
-    expected state; the hint keeps its name), ``receiver_404`` (404 from an
-    overridden url), ``ok``, ``failed``, or None when nothing has been attempted."""
+    never a verdict: ``ok``, ``receiver_not_live`` (a 404 recorded against the
+    DEFAULT origin — the ent#190 receiver has been live since 2026-09-04, so this
+    is an anomaly, not the expected state; the hint keeps its name),
+    ``receiver_404`` (a 404 from any other, or an unrecorded, origin), ``failed``,
+    or None when nothing has been attempted.
+
+    Decided from the origin RECORDED on the attempt, never from the URL
+    configured now (#2571): the configured value is a boot-time constant, so an
+    operator who tested against a local sink and restored the default used to
+    read the sink's answer as the hosted receiver's. A pre-#2571 entry has no
+    origin and can only read as the unnamed ``receiver_404``, never as the
+    default's. Whether the newest attempt's origin still matches the configured
+    one is a separate, orthogonal fact (``get_status`` → ``receiver_mismatch``),
+    observable only across a backend restart because the URL cannot change
+    in-process — do not "fix" that by re-reading the environment per request."""
     if not recent:
         return None
     newest = recent[0]
     if newest.get("ok") is True:
         return "ok"
     if newest.get("http_status") == 404:
-        return "receiver_not_live" if TELEMETRY_SHARING_URL == DEFAULT_SHARE_URL else "receiver_404"
+        return "receiver_not_live" if _entry_host(newest) == _send_host(DEFAULT_SHARE_URL) else "receiver_404"
     return "failed"
 
 
@@ -442,13 +514,21 @@ def get_status() -> Dict:
         backfill = TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS
     recent = _recent_sends()
     sharing_id = _read(KEY_SHARING_ID, None)
+    # #2571 — where the newest attempt went, where sends go now, and whether
+    # those differ (both known AND unequal: an unrecorded origin never claims a
+    # mismatch). The "last delivered" stamp carries its own origin, so a delivery
+    # date a test receiver produced is never credited to the hosted one.
+    receiver_host = _entry_host(recent[0]) if recent else None
+    configured_host = _send_host(TELEMETRY_SHARING_URL)
+    last_shared_host = _read(KEY_LAST_SHARED_HOST, None)
     return {
         "enabled": is_consent_enabled(),
         "hard_disabled": is_hard_disabled(),
         "consent_at": _read(KEY_CONSENT_AT, None),
         "backfill_days": backfill,
         "last_shared_at": _read(KEY_LAST_SHARED_AT, None),
-        "share_url": TELEMETRY_SHARING_URL,
+        "last_shared_host": last_shared_host.strip() if isinstance(last_shared_host, str) and last_shared_host.strip() else None,
+        "share_url": _display_url(TELEMETRY_SHARING_URL),
         "interval_hours": TELEMETRY_SHARING_INTERVAL_HOURS,
         "schema_version": PAYLOAD_SCHEMA_VERSION,
         # ent#437
@@ -458,6 +538,9 @@ def get_status() -> Dict:
         "backfill_delivered_at": _read(KEY_BACKFILL_DELIVERED_AT, None),
         "recent_sends": recent,
         "receiver_hint": receiver_hint(recent),
+        "receiver_host": receiver_host,
+        "configured_host": configured_host,
+        "receiver_mismatch": bool(receiver_host and configured_host and receiver_host != configured_host),
     }
 
 
@@ -771,6 +854,7 @@ async def share_now(*, backfill: bool = False, window_days: Optional[int] = None
     # every wake, unthrottled and invisible (#2654 review).
     entry: Dict[str, Any] = {
         "sent_at": _now_iso(),
+        "host": _send_host(TELEMETRY_SHARING_URL),   # #2571 — where this attempt goes (total: never raises)
         "backfill": bool(backfill),
         "window_days": int(window_days or 0),
         "ok": False,
@@ -821,6 +905,13 @@ async def share_now(*, backfill: bool = False, window_days: Optional[int] = None
             # its marker on False would then re-send an accepted snapshot every
             # wake (#2618). Status/exception CLASS only — never the URL.
             try:
+                # #2571: the stamp names the origin that acknowledged it, so
+                # "last delivered <date>" can say to whom — a test receiver's
+                # 2xx is not the hosted receiver's. Written FIRST: if the pair
+                # is cut in half, an old date beside the right receiver is the
+                # lesser lie; a fresh date beside a stale receiver is this
+                # issue's own class.
+                db.set_setting(KEY_LAST_SHARED_HOST, entry["host"] or "")
                 db.set_setting(KEY_LAST_SHARED_AT, _now_iso())
             except Exception as e:  # noqa: BLE001
                 logger.warning(
