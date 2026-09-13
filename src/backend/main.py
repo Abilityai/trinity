@@ -654,15 +654,10 @@ async def _schedule_staggered_services() -> None:
     # ent#615: ONE-SHOT fleet remediation of remotes still carrying an embedded
     # credential — deliberately not a loop, and the only reacher that covers a
     # `restart: unless-stopped` container the daemon brought back after a host
-    # reboot. Rationale in `git_service.sweep_fleet_git_remote_tokens`.
-    async def _run_git_token_scrub_delayed():
-        await asyncio.sleep(20)
-        try:
-            from services import git_service
-            await git_service.sweep_fleet_git_remote_tokens()
-        except Exception as e:
-            logger.error(f"Error running the ent#615 git remote-token sweep: {e}")
-    asyncio.create_task(_run_git_token_scrub_delayed())
+    # reboot. Scheduling lives in the service (strong task ref, stagger, the
+    # never-raises fence); rationale in `sweep_fleet_git_remote_tokens`.
+    from services import git_service as _git_service_boot
+    _git_service_boot.schedule_fleet_git_remote_token_sweep()
 
     # #447: subscription recovery probe — re-asks the provider whether a
     # subscription believed rate-limited is back. Nothing else can clear the

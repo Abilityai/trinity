@@ -1126,3 +1126,63 @@ class TestInitializeSeedsRatherThanOrphaning:
             "a1", "acme/agent", "", create_working_branch=False,
         ))
         assert result.success is True
+
+
+class TestTheSweepIsBoundedAndSurvives:
+    """Two failure modes that are silent by construction."""
+
+    def test_every_caller_shares_one_concurrency_bound(self):
+        """The caller that needed it is not the obvious one.
+
+        `propagate_github_pat` gathers over the WHOLE FLEET with no bound of
+        its own, and this change takes each agent from one exec to three. On a
+        50-agent rotation that is 150 execs against the fixed 6-thread
+        `_docker_executor` the whole backend shares (`to_thread` draws from it
+        too), each holding its thread for up to the in-container timeout. So
+        the bound lives at the sweep, where every caller inherits it — not at
+        the boot pass, which is the only caller that looks like it needs one.
+        """
+        gs = _git_service()
+        assert gs._SCRUB_CONCURRENCY >= 1
+        source = (_ROOT / "src/backend/services/git_service.py").read_text()
+        body = source[source.index("async def scrub_git_remote_tokens"):
+                      source.index("def schedule_fleet_git_remote_token_sweep")]
+        assert "async with _scrub_semaphore:" in body, (
+            "the shared bound is not held around the sweep's exec"
+        )
+
+    def test_the_boot_task_is_strongly_referenced(self):
+        """A bare `create_task` is GC-collectable mid-flight (#1083). This one
+        sleeps 20s before doing real work and runs once per boot, so a
+        collected task is a remediation that silently never happened."""
+        gs = _git_service()
+        source = (_ROOT / "src/backend/services/git_service.py").read_text()
+        fn = source[source.index("def schedule_fleet_git_remote_token_sweep"):
+                    source.index("def spawn_git_remote_token_scrub")]
+        assert "global _fleet_scrub_task" in fn
+        assert "_fleet_scrub_task = asyncio.create_task" in fn
+        assert hasattr(gs, "_fleet_scrub_task")
+
+    def test_the_per_agent_spawn_keeps_its_task_alive_too(self):
+        gs = _git_service()
+        source = (_ROOT / "src/backend/services/git_service.py").read_text()
+        fn = source[source.index("def spawn_git_remote_token_scrub"):
+                    source.index("_inflight_token_scrub_tasks: set")]
+        assert "_inflight_token_scrub_tasks.add(task)" in fn
+        assert "add_done_callback" in fn
+        assert hasattr(gs, "_inflight_token_scrub_tasks")
+
+    def test_the_start_hook_is_not_behind_the_2069_auto_sync_gate(self):
+        """Whether an agent auto-syncs has nothing to do with whether its
+        `.git/config` holds a token. Copying #2069's gate would silently skip
+        every agent that does not auto-sync — which, on a fleet of read-only
+        template agents, is most of them."""
+        source = (_ROOT / "src/backend/services/agent_service/lifecycle.py").read_text()
+        call = "spawn_git_remote_token_scrub(agent_name)"
+        assert call in source
+        # The nearest preceding `if` must not be the auto-sync gate.
+        preceding = source[:source.index(call)]
+        tail = preceding[preceding.rindex("try:"):]
+        assert "get_git_auto_sync_enabled" not in tail, (
+            "the ent#615 scrub inherited #2069's auto_sync_enabled gate"
+        )

@@ -360,18 +360,19 @@ async def scrub_git_remote_tokens(
         if git_dir is None:
             git_dir = await _detect_git_dir(container_name)
         inner = git_credential_helper.scrub_command(git_dir)
-        result = await asyncio.wait_for(
-            execute_command_in_container(
-                container_name=container_name,
-                command=f"timeout {SCRUB_TIMEOUT_S} bash -c {shlex.quote(inner)}",
-                user="root",
-                environment=(
-                    {git_credential_helper.SEED_ENV_VAR: seed_pat}
-                    if seed_pat else None
+        async with _scrub_semaphore:
+            result = await asyncio.wait_for(
+                execute_command_in_container(
+                    container_name=container_name,
+                    command=f"timeout {SCRUB_TIMEOUT_S} bash -c {shlex.quote(inner)}",
+                    user="root",
+                    environment=(
+                        {git_credential_helper.SEED_ENV_VAR: seed_pat}
+                        if seed_pat else None
+                    ),
                 ),
-            ),
-            timeout=SCRUB_TIMEOUT_S + 15,
-        )
+                timeout=SCRUB_TIMEOUT_S + 15,
+            )
     except asyncio.TimeoutError:
         logger.warning("ent#615: remote-token sweep timed out for %s", agent_name)
         return report
@@ -407,11 +408,15 @@ async def scrub_git_remote_tokens(
     return report
 
 
-# Bounds the boot sweep against the fixed `_docker_executor` pool that the whole
-# backend shares (`to_thread` draws from it too). A fleet-wide pass that fanned
-# out unbounded would starve every other Docker call at exactly the moment the
-# backend is coming up.
-_FLEET_SCRUB_CONCURRENCY = 3
+# Bounds EVERY caller of the sweep against the fixed `_docker_executor` pool the
+# whole backend shares (`to_thread` draws from it too, #2433). One bound, at the
+# sweep itself, rather than one per caller — because the caller that actually
+# needed it is not the obvious one: `propagate_github_pat` gathers over the
+# WHOLE FLEET with no bound of its own, and this change takes each agent from
+# one exec to three. On a 50-agent rotation that is 150 execs against 6 threads,
+# each holding its thread for up to the in-container `timeout`.
+_SCRUB_CONCURRENCY = 3
+_scrub_semaphore = asyncio.Semaphore(_SCRUB_CONCURRENCY)
 
 # The one-shot's lease. TTL is generous: the whole point is that a second worker
 # skips rather than duplicates, and an expiry mid-sweep just means a duplicate
@@ -455,11 +460,10 @@ async def sweep_fleet_git_remote_tokens() -> Dict[str, int]:
         logger.warning("ent#615: fleet sweep could not enumerate agents: %s", e)
         return totals
 
-    semaphore = asyncio.Semaphore(_FLEET_SCRUB_CONCURRENCY)
-
     async def _one(name: str) -> None:
-        async with semaphore:
-            report = await scrub_git_remote_tokens(name)
+        # No bound here: `scrub_git_remote_tokens` carries the shared one, so
+        # this pass cannot out-run a concurrent rotation or start hook.
+        report = await scrub_git_remote_tokens(name)
         totals["agents"] += 1
         for key in ("remotes_scrubbed", "harvested", "refused"):
             totals[key] += report.get(key, 0)
@@ -467,6 +471,35 @@ async def sweep_fleet_git_remote_tokens() -> Dict[str, int]:
     await asyncio.gather(*(_one(name) for name in agents), return_exceptions=True)
     logger.info("ent#615: fleet remote-token sweep complete: %s", totals)
     return totals
+
+
+# Staggered +20s, behind every other boot loop.
+_FLEET_SCRUB_BOOT_DELAY_S = 20
+
+# Strong ref. Unlike the staggered loops it sits beside, this task does REAL
+# work after its sleep and runs exactly once per boot, so a GC-collected task is
+# a remediation that silently never happened (the #1083 asyncio footgun, same
+# remedy as `main._first_run_seed_task`).
+_fleet_scrub_task: Optional["asyncio.Task"] = None
+
+
+def schedule_fleet_git_remote_token_sweep() -> None:
+    """Fire the boot one-shot after a stagger. Never raises."""
+
+    async def _run() -> None:
+        await asyncio.sleep(_FLEET_SCRUB_BOOT_DELAY_S)
+        try:
+            await sweep_fleet_git_remote_tokens()
+        except Exception as e:  # noqa: BLE001 — a boot task must not kill boot
+            logger.error("ent#615: fleet remote-token sweep failed: %s", e)
+
+    global _fleet_scrub_task
+    coro = _run()
+    try:
+        _fleet_scrub_task = asyncio.create_task(coro)
+    except RuntimeError as e:
+        coro.close()
+        logger.debug("ent#615: fleet sweep not scheduled (no loop): %s", e)
 
 
 def spawn_git_remote_token_scrub(agent_name: str) -> None:
