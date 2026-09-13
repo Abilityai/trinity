@@ -388,3 +388,245 @@ class TestSyncStateReadIsBounded:
         path = repo / ".trinity" / "sync-state.json"
         path.write_text('{"last_sync_status": "success", "consecutive_failures": 0}')
         assert git_mod._read_sync_state_file(repo)["last_sync_status"] == "success"
+
+
+# ---------------------------------------------------------------------------
+# AC2 — concurrent callers share ONE computation and ONE `git fetch`
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clean_inflight_slot():
+    """The slot is module-global; every AC2 test must leave it empty."""
+    git_mod._STATUS_INFLIGHT.clear()
+    yield git_mod._STATUS_INFLIGHT
+    assert not git_mod._STATUS_INFLIGHT, (
+        "the in-flight slot leaked — a later test would be served this repo's "
+        "payload for a different repo"
+    )
+
+
+class _BlockingFetch:
+    """Stand-in for `run_registered` that blocks the FIRST `git fetch` on an
+    event and counts every fetch it is asked to run."""
+
+    def __init__(self, real, gate):
+        self.real = real
+        self.gate = gate
+        self.fetches = 0
+
+    def __call__(self, argv, **kwargs):
+        argv = list(argv)
+        if argv[:3] == ["git", "fetch", "origin"]:
+            self.fetches += 1
+            self.gate.wait(timeout=10)
+        return self.real(argv, **kwargs)
+
+
+class TestStatusIsSingleFlighted:
+
+    @pytest.mark.asyncio
+    async def test_concurrent_status_calls_share_one_fetch(
+        self, status_home, clean_inflight_slot, monkeypatch
+    ):
+        """AC2 proper. Five concurrent callers, one `git fetch origin`.
+
+        The fetch is held open on an Event so all five callers are genuinely
+        in flight at once — without the gate the first could complete before the
+        fifth arrives and the test would pass for the wrong reason.
+        """
+        import asyncio
+        import threading
+
+        gate = threading.Event()
+        spy = _BlockingFetch(git_mod.run_registered, gate)
+        monkeypatch.setattr(git_mod, "run_registered", spy)
+
+        callers = [git_mod.get_git_status() for _ in range(5)]
+        task = asyncio.gather(*callers)
+        await asyncio.sleep(0.2)   # let all five reach the slot
+        gate.set()
+        results = await task
+
+        assert spy.fetches == 1, f"expected 1 fetch, got {spy.fetches}"
+        assert all(r is results[0] for r in results), (
+            "every caller must receive the SAME payload object — a second "
+            "computation would produce a second dict"
+        )
+
+    @pytest.mark.asyncio
+    async def test_only_one_thread_is_used_per_inflight_computation(
+        self, status_home, clean_inflight_slot, monkeypatch
+    ):
+        """The #2433 regression guard, and the assertion that stops the rejected
+        shape from being reintroduced.
+
+        `asyncio.to_thread` uses the loop's DEFAULT executor — 6 threads on a
+        2-vCPU agent — which also carries `ctx.terminate`, auto-sync and
+        pipe-close. Routing every caller through a thread (rather than
+        coalescing on the loop) parks that pool and stalls execution
+        termination. Five callers must cost exactly ONE `to_thread`.
+        """
+        import asyncio
+
+        calls = {"n": 0}
+        real_to_thread = asyncio.to_thread
+
+        async def _counting(fn, *a, **k):
+            calls["n"] += 1
+            return await real_to_thread(fn, *a, **k)
+
+        monkeypatch.setattr(git_mod.asyncio, "to_thread", _counting)
+
+        await asyncio.gather(*[git_mod.get_git_status() for _ in range(5)])
+
+        assert calls["n"] == 1, f"expected exactly 1 to_thread call, got {calls['n']}"
+
+    @pytest.mark.asyncio
+    async def test_follower_cancellation_does_not_kill_the_leader(
+        self, status_home, clean_inflight_slot, monkeypatch
+    ):
+        """The `shield` test. A disconnecting or timing-out follower must not
+        cancel the computation everybody else is waiting on."""
+        import asyncio
+        import threading
+
+        gate = threading.Event()
+        spy = _BlockingFetch(git_mod.run_registered, gate)
+        monkeypatch.setattr(git_mod, "run_registered", spy)
+
+        tasks = [asyncio.ensure_future(git_mod.get_git_status()) for _ in range(5)]
+        await asyncio.sleep(0.2)
+
+        for t in tasks[:3]:          # three clients disconnect mid-flight
+            t.cancel()
+        gate.set()
+
+        survivors = await asyncio.gather(*tasks[3:])
+        assert len(survivors) == 2
+        assert all(s["git_enabled"] for s in survivors)
+        assert spy.fetches == 1
+
+    @pytest.mark.asyncio
+    async def test_leader_exception_propagates_to_every_follower_and_clears_slot(
+        self, status_home, clean_inflight_slot, monkeypatch
+    ):
+        """A 504 must fan out to every waiter AND the slot must clear, so the
+        next poll is a fresh computation rather than a permanently wedged read."""
+        import asyncio
+        import threading
+        from fastapi import HTTPException
+
+        gate = threading.Event()
+        real = git_mod.run_registered
+
+        def _boom(argv, **kwargs):
+            argv = list(argv)
+            if argv[:3] == ["git", "fetch", "origin"]:
+                gate.wait(timeout=10)
+                raise subprocess.TimeoutExpired(argv, 30)
+            return real(argv, **kwargs)
+
+        monkeypatch.setattr(git_mod, "run_registered", _boom)
+
+        tasks = [asyncio.ensure_future(git_mod.get_git_status()) for _ in range(3)]
+        await asyncio.sleep(0.2)
+        gate.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert len(results) == 3
+        for r in results:
+            assert isinstance(r, HTTPException) and r.status_code == 504
+
+        assert not git_mod._STATUS_INFLIGHT, "slot must clear after a failure"
+
+        # And the next call recomputes cleanly on the real runner.
+        monkeypatch.setattr(git_mod, "run_registered", real)
+        again = await git_mod.get_git_status()
+        assert again["git_enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_follower_wait_bound_maps_to_504(
+        self, status_home, clean_inflight_slot, monkeypatch
+    ):
+        """A follower that waits past its bound gets a 504 — and the leader is
+        untouched and still completes (that is what `shield` buys)."""
+        import asyncio
+        import threading
+        from fastapi import HTTPException
+
+        gate = threading.Event()
+        spy = _BlockingFetch(git_mod.run_registered, gate)
+        monkeypatch.setattr(git_mod, "run_registered", spy)
+        monkeypatch.setattr(git_mod, "_STATUS_FOLLOWER_WAIT_SECONDS", 0.1)
+
+        leader = asyncio.ensure_future(git_mod.get_git_status())
+        await asyncio.sleep(0.05)
+
+        with pytest.raises(HTTPException) as exc:
+            await git_mod.get_git_status()
+        assert exc.value.status_code == 504
+
+        gate.set()
+        # The leader's own await also hit the 0.1s follower bound, so it too
+        # sees a 504 — but the COMPUTATION survived and released the slot.
+        with pytest.raises(HTTPException):
+            await leader
+        for _ in range(50):
+            if not git_mod._STATUS_INFLIGHT:
+                break
+            await asyncio.sleep(0.05)
+        assert spy.fetches == 1
+
+    @pytest.mark.asyncio
+    async def test_a_missing_git_dir_short_circuits_before_the_slot(
+        self, tmp_path, clean_inflight_slot, monkeypatch
+    ):
+        """The early return must not claim the slot — a non-git agent polled
+        every 60 s would otherwise churn futures for nothing."""
+        monkeypatch.setattr(git_mod, "_STATUS_HOME_DIR", tmp_path)
+        payload = await git_mod.get_git_status()
+        assert payload["git_enabled"] is False
+        assert not git_mod._STATUS_INFLIGHT
+
+    @pytest.mark.asyncio
+    async def test_the_payload_is_stamped_with_its_own_age(
+        self, status_home, clean_inflight_slot
+    ):
+        """`computed_at` is how the bounded staleness of coalescing is made
+        legible rather than denied."""
+        from datetime import datetime, timezone
+        payload = await git_mod.get_git_status()
+        stamped = datetime.fromisoformat(payload["computed_at"])
+        assert stamped.tzinfo is not None, "computed_at must be timezone-aware"
+        assert abs((datetime.now(timezone.utc) - stamped).total_seconds()) < 60
+
+    @pytest.mark.asyncio
+    async def test_the_slot_never_cross_serves_two_repos(
+        self, tmp_path, clean_inflight_slot, monkeypatch
+    ):
+        """The R8 case, made a test rather than left implicit: the slot is a
+        module global while the computation takes a parameter. Keyed on the
+        resolved home path, two repos can never be served each other's payload."""
+        import asyncio
+
+        repos = []
+        for name in ("one", "two"):
+            local, remote = tmp_path / name, tmp_path / f"{name}-remote"
+            local.mkdir()
+            remote.mkdir()
+            _init_repo(local, remote)
+            (local / ".trinity").mkdir()
+            (local / f"{name}-marker.txt").write_text("m")
+            repos.append(local)
+
+        payloads = []
+        for local in repos:
+            monkeypatch.setattr(git_mod, "_STATUS_HOME_DIR", local)
+            payloads.append(await git_mod.get_git_status())
+            # slot released between flights
+            await asyncio.sleep(0)
+
+        paths = [{c["path"] for c in p["changes"]} for p in payloads]
+        assert paths[0] == {"one-marker.txt"}
+        assert paths[1] == {"two-marker.txt"}

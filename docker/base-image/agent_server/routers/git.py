@@ -1,6 +1,7 @@
 """
 Git sync endpoints for GitHub bidirectional sync.
 """
+import asyncio
 import functools
 import json
 import os
@@ -795,6 +796,33 @@ def _dual_ahead_behind_payload(current_branch: str, home_dir: Path) -> dict:
 # computation agree on their subject by construction.
 _STATUS_HOME_DIR = Path("/home/developer")
 
+# #2742 — CALLER bound. Set at or just past the point every real client has
+# already given up: the backend poller times out at 10 s, `git_service` at 30 s,
+# so a follower waiting longer than 35 s can only produce work nobody awaits.
+# Exceeding it is a 504, not a second computation.
+_STATUS_FOLLOWER_WAIT_SECONDS = 35
+
+# #2742 — COMPUTATION bound, deliberately a different number and a different
+# kind of thing. The child timeouts sum to ~130 s nominal (see
+# `_compute_git_status`'s docstring for the arithmetic) before `run_registered`'s
+# post-killpg drain, and on this design a slow leader costs no follower threads
+# but DOES hold the in-flight slot — so every caller in that window 504s. Cap it
+# so a wedged leader releases the slot instead of monopolising it.
+_STATUS_LEADER_DEADLINE_SECONDS = 90
+
+# #2742 — the single-flight slot, keyed by resolved home path.
+#
+# Production has exactly one repo, so a bare `Optional[Future]` would be correct
+# there — but any test that repoints `_STATUS_HOME_DIR` would then inherit a live
+# slot from the previous test and be served the PREVIOUS repo's payload. Keying
+# it costs three lines and removes the class.
+#
+# The check-and-set below is atomic WITHOUT a lock because there is no `await`
+# between the test and the assignment and the agent server is single-process
+# (`agent_server/main.py` calls `uvicorn.run(app, ...)` with no `workers=`). The
+# BACKEND is not single-process, which is what the #2742 Redis lease is for.
+_STATUS_INFLIGHT: Dict[str, "asyncio.Future"] = {}
+
 
 def _compute_git_status(home_dir: Path) -> Dict:
     """The whole `/api/git/status` computation, as ONE blocking callable (#2742).
@@ -975,6 +1003,13 @@ def _compute_git_status(home_dir: Path) -> Dict:
         response.update(ahead_behind)
         # #389: merge auto-sync heartbeat state (may be defaults if never run).
         response["sync_state"] = _read_sync_state_file(home_dir)
+        # #2742: coalescing IS bounded staleness, and saying so is cheaper than
+        # denying it. A follower arriving at t=29 s of a 30 s leader run is
+        # served a 29-second-old snapshot — visibly, an operator pressing Sync
+        # and seeing "1 ahead" right after a successful push. Stamp the age so
+        # every consumer can see it. (TTL caching was rejected: serving late
+        # followers a FRESH run reintroduces the overlapping fetch AC2 forbids.)
+        response["computed_at"] = datetime.now(timezone.utc).isoformat()
         return response
 
     except subprocess.TimeoutExpired:
@@ -984,11 +1019,48 @@ def _compute_git_status(home_dir: Path) -> Dict:
         raise HTTPException(status_code=500, detail=f"Git status error: {str(e)}")
 
 
+async def _run_status_computation(home_dir: Path) -> Dict:
+    """Run ONE `_compute_git_status` in ONE worker thread, under its own deadline.
+
+    `asyncio.to_thread` uses the loop's DEFAULT executor. On a 2-vCPU agent that
+    is `min(32, cpu+4)` = 6 threads, and `services/headless_executor.py` records
+    that `ctx.terminate`, auto-sync and pipe-close deliberately stay on that same
+    pool — so parking followers in it is the #2433 starvation class, where a
+    burst of status callers stalls EXECUTION TERMINATION. Exactly one thread per
+    in-flight computation, ever; the callers coalesce on the loop instead.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_compute_git_status, home_dir),
+            timeout=_STATUS_LEADER_DEADLINE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        # The worker thread's git children are killed by their own
+        # `run_registered` timeouts; what this bound protects is the SLOT.
+        raise HTTPException(
+            status_code=504,
+            detail="Git status timed out (overall computation deadline)",
+        )
+
+
 @router.get("/api/git/status")
 async def get_git_status():
     """
     Get git repository status including current branch, changes, and sync state.
     Only available for agents with git sync enabled.
+
+    #2742 — single-flight, on the event loop. Three callers converge on this
+    route (the backend's 60 s sync-health poll, the UI git panel's own 60 s poll
+    while open, and the MCP `get_git_status` tool), and each computation runs a
+    30 s `git fetch origin`, so concurrent callers used to stack overlapping
+    fetches against one repo. Now the first caller starts the computation and
+    every other caller awaits the SAME future.
+
+    No 409 by design: this is a read, and `_with_repo_lock` on it would turn
+    every poll into a contended write and flap the agent `unreachable`.
+
+    Coalescing is bounded staleness, not free — see `computed_at` in the
+    payload, which is the honest way to say so.
     """
     home_dir = _STATUS_HOME_DIR
     git_dir = home_dir / ".git"
@@ -999,7 +1071,41 @@ async def get_git_status():
             "message": "Git sync not enabled for this agent"
         }
 
-    return _compute_git_status(home_dir)
+    key = str(home_dir)
+    fut = _STATUS_INFLIGHT.get(key)
+    if fut is None or fut.done():
+        # Atomic by construction: no `await` between the test and the assignment.
+        fut = asyncio.ensure_future(_run_status_computation(home_dir))
+        _STATUS_INFLIGHT[key] = fut
+
+        def _release_slot(done: "asyncio.Future", _key: str = key) -> None:
+            # Only clear the slot if it still holds THIS future — a later flight
+            # may already have claimed it.
+            if _STATUS_INFLIGHT.get(_key) is done:
+                _STATUS_INFLIGHT.pop(_key, None)
+            # Mark a failure retrieved even if every waiter was cancelled, so a
+            # disconnect storm cannot print "Future exception was never
+            # retrieved" once per poll.
+            if not done.cancelled():
+                done.exception()
+
+        fut.add_done_callback(_release_slot)
+
+    try:
+        # `shield` is load-bearing: a follower that times out or whose client
+        # disconnects must not cancel the leader's computation for everybody
+        # else. And the future is ALWAYS resolved — `asyncio.to_thread` ->
+        # `run_in_executor` -> `_WorkItem.run` catches BaseException and calls
+        # `set_exception` — so no hand-rolled set_result/set_exception pair and
+        # no "leader vanished" fallback is needed here. Do not add one.
+        return await asyncio.wait_for(
+            asyncio.shield(fut), timeout=_STATUS_FOLLOWER_WAIT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="Git status busy: coalesced status did not complete in time",
+        )
 
 
 @router.post("/api/git/sync")
