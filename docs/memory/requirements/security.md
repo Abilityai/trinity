@@ -334,6 +334,39 @@
   security-surface pointer; the resolution mechanics and the recreate-vs-create
   ladder distinction live there.
 
+### 20.9b Credential-Free Git Remotes (trinity-enterprise#615)
+- **Status**: ✅ Implemented.
+- **Standing requirement**: a git remote Trinity persists **carries no
+  userinfo**, and platform git authentication is **credential-helper-borne**.
+  A remote URL is read by `ps`, by git's own stderr (which reaches API
+  responses, `agent_sync_state` rows, operator-queue entries and chat
+  transcripts), and is at rest on the workspace volume for the life of the
+  container — so a credential in one is a credential in all of them.
+- **The chain this closes** (the actual win, stated because it is not obvious
+  from the acceptance criteria): git expanded the stored URL into
+  `git-remote-https`'s argv on every fetch — including the 60s sync-health
+  poll — from where `ps` → the agent server's reaped-cmdline logging
+  (ent#292, rated **P0**) → Vector → the host log files → `get_agent_logs` /
+  MCP → **another agent's LLM context**. ent#292 sanitized the last hop; this
+  removes the cause.
+- **What it does NOT close, recorded so it is not assumed**: a prompt-injected
+  agent reading its own credential. `GITHUB_PAT` remains in the container env
+  and in `/home/developer/.env`, and the helper can be invoked directly. Root
+  ownership of `/usr/local/bin/git-credential-trinity` and `/etc/gitconfig` is
+  **integrity** (the agent cannot rewrite what platform git executes), **not
+  confidentiality**. **Blast radius is unchanged** — the credential is still
+  the fleet-wide PAT, and through a host-registered helper it is ambient
+  authority for `https://github.com/*` rather than something an agent had to
+  construct a URL to use (net-neutral in practice, since `GITHUB_PAT` stays
+  env-readable, but stated rather than discovered). The structural answer is
+  **ent#558 (AAuth)**; the cheapest existing lever is per-agent, repo-scoped
+  PATs via `agent_git_config.github_pat_encrypted`.
+- **Never strip a credential you have not already replaced** — a platform
+  rule, not an implementation detail. It binds `startup.sh`'s per-restart
+  rewrite, `git_service.update_remote_pat` and the remediation sweep alike; a
+  refusal is queued to the operator rather than logged and forgotten.
+- **Full requirement**: `docs/memory/requirements/github.md` §11.16.
+
 ### 20.10 Machine Identities for Admin/Ops APIs (#2323)
 - **Status**: ✅ Implemented.
 - **Premise correction (recorded, because the issue as filed says the opposite)**:
