@@ -267,6 +267,39 @@ describe('teardown — failures stay actionable', () => {
     expect(store.teardownResult).toBeNull()
   })
 
+  it('says what was in flight — a teardown timeout never talks about deploying', async () => {
+    // The normalizer is shared with deploy, and its default copy is
+    // "Deployment may still be running... re-deploying creates duplicate
+    // agents" — the opposite advice, at the worst moment of a removal.
+    const err = new Error('timeout of 300000ms exceeded')
+    err.code = 'ECONNABORTED'
+    axios.delete.mockRejectedValue(err)
+
+    await store.teardown(['acme-web'])
+
+    expect(store.teardownOutcomeUnknown).toMatch(/removal|removed/i)
+    expect(store.teardownOutcomeUnknown).not.toMatch(/deploy/i)
+  })
+
+  it('a 5xx with no body says members may be gone, not that agents may exist', async () => {
+    axios.delete.mockRejectedValue(httpError(502, null))
+
+    await store.teardown(['acme-web'])
+
+    expect(store.teardownOutcomeUnknown).toMatch(/removed/i)
+    expect(store.teardownOutcomeUnknown).not.toMatch(/created/i)
+  })
+
+  it('a PREVIEW failure never implies work in flight — a dry run writes nothing', async () => {
+    const err = new Error('timeout of 30000ms exceeded')
+    err.code = 'ECONNABORTED'
+    axios.delete.mockRejectedValue(err)
+
+    await store.previewTeardown()
+
+    expect(store.teardownError).toMatch(/Nothing was removed/i)
+  })
+
   it('treats a timeout on PREVIEW as a plain error — a dry run removes nothing', async () => {
     const err = new Error('timeout of 30000ms exceeded')
     err.code = 'ECONNABORTED'

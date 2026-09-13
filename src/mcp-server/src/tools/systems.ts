@@ -56,17 +56,20 @@ function teardownFailure(error: unknown): string {
   } else if (status === 403) {
     flags.not_permitted = true;
     message =
-      "Refused. System teardown is licensed separately AND is human-only: an "
-      + "agent-scoped key cannot remove a fleet, because that is the bulk form "
-      + "of an operation that is spawn-scoped one agent at a time. Ask a human "
-      + "operator with the creator role.";
+      "Refused. System teardown is licensed separately AND is human-only: a "
+      + "machine credential (agent, connector, system, ops) cannot remove a "
+      + "fleet, because that is the bulk form of an operation that is "
+      + "spawn-scoped one agent at a time. Ask a human operator with the "
+      + "creator role.";
   } else if (status === 503) {
     flags.membership_unverified = true;
     flags.retryable = true;
     message =
-      "Refused: system membership could not be verified, so teardown will not "
-      + "derive a removal set from name prefixes alone. Nothing was removed. "
-      + "Retry once the platform database is reachable.";
+      "Refused: the removal set could not be established — either the "
+      + "membership tags or the agent roster could not be read — and teardown "
+      + "will not derive a removal set from name prefixes alone. Nothing was "
+      + "removed. The detail says which read failed; retry once that dependency "
+      + "is reachable.";
   } else if (status === 400) {
     // The confirmed set named no current member — re-preview and re-confirm.
     flags.bad_request = true;
@@ -321,9 +324,11 @@ export function createSystemTools(
         "Best-effort and honest: switch on `status` ('preview' | 'torn_down' | " +
         "'partial' | 'failed'), never the HTTP code, and read every member's " +
         "`outcome` — 'skipped' is not 'failed'. " +
-        "Requires the 'creator' role AND a HUMAN caller: an agent-scoped key is " +
-        "refused, because this removes N agents in one call without the " +
-        "per-agent spawn-scope check that delete_agent applies one at a time. " +
+        "Requires the 'creator' role AND a HUMAN caller: only an interactive " +
+        "session or an operator's own user-scoped key is accepted — agent, " +
+        "connector, system and every other credential kind is refused, because " +
+        "this removes N agents in one call without the per-agent spawn-scope " +
+        "check that delete_agent applies one at a time. " +
         "Licensed separately — on a build without it, the tool says so rather " +
         "than failing opaquely.",
       parameters: z.object({
@@ -342,8 +347,10 @@ export function createSystemTools(
           .describe(
             "Defaults to TRUE. Returns the complete removal set — members with "
             + "their current status, evidence and ephemeral flag, the system "
-            + "view, the tag — and writes NOTHING. Pass false only to execute a "
-            + "removal a human has confirmed."
+            + "view, the tag — and writes NOTHING. A member whose status is 'no "
+            + "container' exists as a record only (recovered or pruned); it is "
+            + "removed the same way, which is what frees its name. Pass false "
+            + "only to execute a removal a human has confirmed."
           ),
         agents: z
           .array(z.string())

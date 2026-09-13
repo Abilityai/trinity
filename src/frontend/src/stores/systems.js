@@ -58,19 +58,47 @@ function teardownUrl (name, dryRun) {
  * The 500-with-a-report is the important one: a naive `catch` throws away exactly
  * the `failed[]` list AC #3 has to render. It is a RESULT, not an error, so it is
  * returned as `kind: 'result'` and rendered normally.
+ *
+ * `verb` selects the two sentences that are about WHAT was in flight (ent#454).
+ * Everything else here is verb-independent, which is why this is one function —
+ * but "deployment may still be running, and re-deploying creates duplicates" is
+ * actively misleading at the worst moment of a teardown, where the in-flight
+ * work is removal and the advice is the opposite.
  */
-export function normalizeError (err) {
+const UNKNOWN_OUTCOME_COPY = {
+  deploy: {
+    timeout: 'The request timed out. Deployment may still be running on the server — '
+      + 'refresh before trying again, because re-deploying creates duplicate agents.',
+    server: status => `The server returned HTTP ${status}. Some agents may already `
+      + 'have been created — refresh before trying again.'
+  },
+  teardown: {
+    timeout: 'The request timed out. Removal is serial and may still be running on the '
+      + 'server — check your agent list before doing anything else, because the '
+      + 'members removed so far are already gone.',
+    server: status => `The server returned HTTP ${status}. Some members may already `
+      + 'have been removed — check your agent list before trying again.'
+  },
+  // A dry run writes nothing, so neither sentence may imply work in flight.
+  'teardown-preview': {
+    timeout: 'The preview timed out. Nothing was removed — try previewing again.',
+    server: status => `The server returned HTTP ${status} while previewing. Nothing `
+      + 'was removed.'
+  }
+}
+
+export function normalizeError (err, verb = 'deploy') {
   const res = err?.response
+  const copy = UNKNOWN_OUTCOME_COPY[verb] || UNKNOWN_OUTCOME_COPY.deploy
 
   if (!res) {
     // Timeout, abort, or network failure. Cancelling the request does NOT cancel
-    // the server, which may still be creating agents — see `outcomeUnknown`.
+    // the server, which may still be working — see `outcomeUnknown`.
     const timedOut = err?.code === 'ECONNABORTED' || /timeout/i.test(err?.message || '')
     return {
       kind: 'unknown-outcome',
       message: timedOut
-        ? 'The request timed out. Deployment may still be running on the server — '
-          + 'refresh before trying again, because re-deploying creates duplicate agents.'
+        ? copy.timeout
         : (err?.message || 'Network error — the outcome is unknown.')
     }
   }
@@ -95,13 +123,9 @@ export function normalizeError (err) {
     return { kind: 'invalid', message: detail }
   }
 
-  // A 500 with no usable body can still have happened AFTER agents were created.
+  // A 500 with no usable body can still have happened AFTER the work began.
   if (res.status >= 500) {
-    return {
-      kind: 'unknown-outcome',
-      message: `The server returned HTTP ${res.status}. Some agents may already `
-        + 'have been created — refresh before trying again.'
-    }
+    return { kind: 'unknown-outcome', message: copy.server(res.status) }
   }
   return { kind: 'invalid', message: `HTTP ${res.status}` }
 }
@@ -356,7 +380,7 @@ export const useSystemsStore = defineStore('systems', () => {
       teardownPreviewedName.value = name
       return response.data
     } catch (err) {
-      const normalized = normalizeError(err)
+      const normalized = normalizeError(err, 'teardown-preview')
       // A dry run creates nothing, so `unknown-outcome` carries no in-flight
       // work to warn about here — it is just a failure, as on `dryRun()`.
       teardownError.value = normalized.message
@@ -393,7 +417,7 @@ export const useSystemsStore = defineStore('systems', () => {
       teardownResult.value = response.data
       return response.data
     } catch (err) {
-      const normalized = normalizeError(err)
+      const normalized = normalizeError(err, 'teardown')
       if (normalized.kind === 'result') {
         // status === 'failed' at HTTP 500, body IS the report. Discarding it
         // would discard every per-member reason — the only actionable output.
