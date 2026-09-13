@@ -87,7 +87,7 @@
 
 *Public Access & Monetization:*
 - `public_links.py` - Public agent link management
-- `public.py` - Public chat endpoints
+- `public.py` - Public chat endpoints; also Caddy's unauthenticated on-demand-TLS `ask` gate, `GET /api/public/tls-allowed` (#2380)
 - `paid.py` - x402 payment-gated chat (NVM-001)
 - `nevermined.py` - Nevermined payment config (NVM-001)
 - `slack.py` - Slack integration: OAuth, events, multi-agent channel routing, per-agent binding (SLACK-001/002)

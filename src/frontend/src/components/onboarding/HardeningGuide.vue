@@ -8,10 +8,13 @@
 
   Four properties are load-bearing:
 
-  1. **The gate is `marketplace_install`, resolved server-side.** Every other
-     install — the whole managed fleet included — is false, so this never
-     appears over an instance somebody already put behind Tailscale. The
-     browser holds no copy of which sources count as a marketplace.
+  1. **The gate is `hardening_guide_eligible`, resolved server-side.** It is
+     PROVENANCE, not TLS state: the marketplace images plus a droplet installed
+     by following the DigitalOcean deploy doc. Every other install — the whole
+     managed fleet included — is false, so this never appears over an instance
+     somebody already put behind Tailscale, which has no domain and no HTTPS
+     flag either and would be caught by any posture-based gate. The browser
+     holds no copy of which provenances qualify.
 
   2. **Admins only.** Not cosmetics: Settings → General is `adminOnly`, so for
      anyone else the card's one action falls through to the default tab, and
@@ -53,11 +56,15 @@
           </p>
 
           <!--
-            ONE action on the card face. Adding a domain is the only step that is
-            collectable in-app, and it is also the completion condition that
-            retires this card — so it is the primary, and everything explanatory
-            moves behind the disclosure below. A first login should be able to
-            act on this in one glance without reading two columns of prose.
+            ONE action on the card face, and since #2380's on-demand-TLS change
+            it is finally an action that finishes the job. Saving the Public URL
+            used to reconfigure nothing — the operator ended up advertising a
+            name no web server answered to, while the card advanced to step two
+            and hid the only instruction that would have fixed it. Caddy now asks
+            the backend whether a hostname is allowed (`/api/public/tls-allowed`)
+            and obtains the certificate on first request, so the settings field IS
+            the whole step. Do not reintroduce a host command here: a non-engineer
+            following a deploy guide has no root shell in the loop.
           -->
           <div v-if="stage === 'address'" class="mt-3">
             <BaseButton
@@ -98,20 +105,36 @@
                   Give it a real name
                 </h4>
                 <!--
-                  Trinity does not issue, renew, or install certificates: `public_chat_url`
-                  is a display/webhook-base setting and nothing in the tree reconfigures a
-                  proxy or a listener from it. So this promises only what setting it does —
-                  change the name Trinity hands out — and attributes the certificate change
-                  to whatever actually terminates TLS.
+                  Trinity issues no certificates: `public_chat_url` is a display and
+                  webhook-base setting, and nothing in this tree reconfigures a proxy from
+                  it. For a while that made this copy a lie by omission — the operator set
+                  the URL, `install_tls_posture` flipped to `https-domain` by string-parsing
+                  their own input, this card advanced to step two, and the domain served a
+                  certificate error because the web server still answered only to the IP.
+                  The card retired on a state it had helped break.
+
+                  What changed is the WEB SERVER, not this copy's honesty budget: the
+                  provisioned Caddyfile now carries on-demand TLS with an `ask` gate at
+                  `/api/public/tls-allowed`, so Caddy obtains a certificate for the saved
+                  name on first request and refuses every other name. Saving the field is
+                  genuinely the whole step, which is what this card always claimed.
+
+                  Still no verdict on the live connection: "is configured to obtain one" is
+                  a statement about how the server in front was set up, which this code can
+                  read from its own provisioning, not about a handshake nobody here has
+                  observed.
                 -->
                 <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
                   Point a domain’s A record at this server, then set it as the
                   <span class="text-gray-600 dark:text-gray-300">Public URL</span>
-                  in Settings → General so Trinity hands out the name instead of the IP. Trinity
-                  does not issue certificates itself — whatever terminates TLS in front of it
-                  picks up the name and can then use an ordinary long-lived certificate instead
-                  of a short-lived IP one.
-                </p>
+                  in Settings → General. Trinity does not issue certificates itself, but
+                  whatever terminates TLS in front of it is configured to obtain one for the
+                  name you save, the first time someone visits it — so the domain gets an
+                  ordinary long-lived certificate instead of a short-lived IP one, and Trinity
+                  hands out the name instead of the IP. Only the name you save is allowed, so
+                  nobody else can point a domain here and have certificates issued. Give DNS
+                  time to settle first: until the record points here, the name has nothing to
+                  answer it.                </p>
               </div>
 
               <div class="min-w-0">
@@ -221,7 +244,7 @@ const visible = computed(
       // `role`, not `userRole` — the latter never existed on the auth store, so
       // this card had been permanently hidden (found by the ent#437 eyeball).
       isAdmin: authStore.profileVerified && authStore.role === 'admin',
-      marketplaceInstall: store.marketplaceInstall,
+      hardeningGuideEligible: store.hardeningGuideEligible,
       installTlsPosture: store.installTlsPosture,
       dismissed: dismissed.value[stage.value],
     }) &&
@@ -230,6 +253,8 @@ const visible = computed(
     !!postureCopy(store.installTlsPosture)
 )
 
+const openSettings = () => router.push('/settings?tab=general')
+
 const dismiss = () => {
   // Hidden for this session regardless of whether storage accepted the write —
   // the helper warns, and a refused write is not a failed verb to the user.
@@ -237,8 +262,6 @@ const dismiss = () => {
   dismissed.value = { ...dismissed.value, [stage.value]: true }
   persistHardeningGuideDismissed(stage.value)
 }
-
-const openSettings = () => router.push('/settings?tab=general')
 
 onMounted(() => {
   // Shared, cached, and already awaited by the rest of the page: `once()` means

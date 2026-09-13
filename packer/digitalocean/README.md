@@ -14,8 +14,13 @@ fails the one-click bar — which is why #2280 gates this work.
 
 | Stage | What happens |
 |---|---|
-| Build | Docker + Caddy + ufw installed; Trinity checkout at `/opt/trinity`; all five images pulled at a pinned tag; agent base retagged `trinity-agent-base:latest` |
-| First boot | admin password resolved; `.env` written (including the provenance marker); Docker/ufw gap closed; Caddy issued a certificate for the droplet's own IP; `start.sh --hosted --unattended` |
+| Build | Trinity checkout at `/opt/trinity`, then `start.sh --provision --cloud digitalocean --machine-only` (Docker, pinned Caddy, ufw, the firewall unit); all five images pulled at a pinned tag; agent base retagged `trinity-agent-base:latest` |
+| First boot | admin password resolved, then `start.sh --provision --cloud digitalocean --site-only --provenance do-marketplace --hosted --unattended` (`.env` including the provenance marker, Docker/ufw gap closed, a certificate for the droplet's own IP, and the install itself) |
+
+Both phases are the **same installer** a doc-driven install runs (#2380) — the
+Packer scripts contribute only what is specific to baking a snapshot. There is no
+second copy of the provisioning logic to keep in step, which is how the port list
+above came to be wrong in the first place.
 
 ## Prerequisites
 
@@ -177,18 +182,36 @@ interface. A domain is a post-login upgrade, not a prerequisite.
 **Docker publishes past ufw.** `docker-compose.hosted.yml` publishes 8000, 8080,
 8686, the OTel collector ports **and the frontend's `FRONTEND_PORT` (8081 here)**
 on `0.0.0.0`. Docker's iptables rules are consulted before ufw's chain, so
-`ufw deny 8000` on such a droplet is silently inert. First boot inserts a
-`DOCKER-USER` DROP rule for those ports on `eth0` — the one chain Docker leaves
-to the operator and evaluates first. They remain reachable from the host (Caddy
-proxies `127.0.0.1:8081`) and between containers, which is what the platform
-uses.
+`ufw deny 8000` on such a droplet is silently inert. `scripts/deploy/docker-firewall.sh`
+closes it in `DOCKER-USER`, the one chain Docker leaves to the operator and
+evaluates first. Container ports stay reachable from the host (Caddy proxies
+`127.0.0.1:8081`) and between containers, which is what the platform uses.
 
-8081 is the one that decides whether the TLS story holds at all: it is the SPA,
-moved off `:80` so Caddy can own 80/443, and compose's short port syntax binds it
-to every interface. Left out of the DROP list, the login page answers plain HTTP
-on `http://<ip>:8081` — past the certificate and past the `http→https` redirect.
-`tests/unit/test_2281_firstboot_port_exposure.py` keeps the list and the compose
-file from drifting apart.
+The rule is **inverted rather than enumerated** (#2380). It used to carry a
+hand-typed port list kept in step with compose by a unit test, and that list had
+already shipped wrong: 8081 was missing, and 8081 is the one that decides whether
+the TLS story holds at all — it is the SPA, moved off `:80` so Caddy can own
+80/443, so the login page answered plain HTTP on `http://<ip>:8081`, past the
+certificate and past the `http→https` redirect. Now everything entering a
+container from off-box is dropped, whatever the port, with two RETURNs ahead of
+it: replies to connections a container opened (without which agents lose outbound
+internet), and traffic from Docker's own bridges. Link-local (169.254.0.0/16) is
+dropped outbound between the two, ahead of the bridge RETURNs — that range serves
+the droplet's own user-data verbatim for the life of the machine, and an agent
+container has no business reading it. Naming what is *inside* rather
+than which interface is outside also covers DigitalOcean's private `eth1` for
+free. `tests/unit/test_2380_provision_single_source.py` pins the ordering.
+
+**Adding a domain is a Settings field.** The provisioned Caddyfile carries
+on-demand TLS with an `ask` gate at `/api/public/tls-allowed`, so Caddy obtains a
+certificate for whatever hostname an admin saves as the Public URL, on first
+request, and refuses every other name. Trinity is containerised and cannot
+rewrite this file or reload Caddy — inverting the direction (Caddy asks, Trinity
+answers) is what removes the root shell from a non-engineer's install path
+without moving any privilege into the container. The gate is not optional:
+`on_demand` without it makes the droplet request certificates for any name
+anyone points at its address, until the ACME account is rate-limited and the
+operator's own renewals fail.
 
 **The agent base image is not a compose service.** The backend creates agent
 containers from the literal local tag `trinity-agent-base:latest`, hardcoded in

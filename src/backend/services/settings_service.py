@@ -523,6 +523,24 @@ class SettingsService:
 
         return self.get_install_source() in MARKETPLACE_INSTALL_SOURCES
 
+    def is_hardening_guide_eligible(self) -> bool:
+        """Whether the first-run hardening guide should be offered here (#2380).
+
+        A SEPARATE question from `is_marketplace_install`, not a rename of it.
+        The guide's subject is "you are on a public cloud VM reachable at a bare
+        IP with no domain" — true of a marketplace image AND of a droplet
+        installed by following the DigitalOcean deploy doc, which records
+        `do-script`. `marketplace_install` keeps answering only what it says.
+
+        Still resolved server-side, so the browser holds no second copy of which
+        provenances qualify (the ent#386 rule), and still gated on PROVENANCE
+        rather than TLS state: the managed fleet has no domain and no HTTPS
+        flag, so a posture-based gate would fire on every paying client forever.
+        """
+        from config import HARDENING_GUIDE_INSTALL_SOURCES
+
+        return self.get_install_source() in HARDENING_GUIDE_INSTALL_SOURCES
+
     def get_install_tls_posture(self) -> str:
         """What this instance ADVERTISES itself as reachable at (#2380).
 

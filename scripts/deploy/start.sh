@@ -61,6 +61,11 @@ compose_project_name() {
         | tr -cd 'a-z0-9_-' \
         | sed 's/^[_-]*//'
 }
+
+# `set_env_key` lives in env-file.sh so every `.env` writer shares one copy,
+# because a `.env` writer that disagrees with itself corrupts credentials
+# silently.
+. ./scripts/deploy/env-file.sh
 # -----------------------------------------------------------------------------
 
 echo "====================================="
@@ -100,6 +105,314 @@ fi
 # resolve_image_tag() below. Resolving it here would be too early to read the
 # file, which is the only place an --unattended or marketplace install can
 # persist it.
+
+# --- Provision a bare cloud VM (--provision, #2380) ---------------------------
+# Bring a BARE Ubuntu VM to the state the install below already assumes: Docker,
+# a pinned Caddy terminating TLS on the machine's own public IP, a host
+# firewall, and the handful of `.env` keys only the machine itself knows.
+#
+# It is a switch on this script for the same reason --hosted is one. This logic
+# existed in THREE places — the Packer bakery (build time), the Packer first
+# boot (per droplet), and a hand-written script pasted into the DigitalOcean
+# deploy doc — and the copies had already drifted: the doc's port list and the
+# image's disagreed, leaving the login page answering plain HTTP past the
+# certificate (#2281 review C1). All three now enter here.
+#
+# Two phases, because a snapshot-based image splits them:
+#   --machine-only  IP-independent, safe to bake into a disk image (packages,
+#                   firewall unit). The Packer bakery calls this, and it exits
+#                   without installing Trinity.
+#   --site-only     what only a real instance knows: its own address — hence the
+#                   Caddyfile, the certificate and the .env keys. Packer's first
+#                   boot calls this, once per droplet, and continues into the
+#                   normal install.
+#   (neither)       both, in order: a doc-driven install on a fresh droplet.
+#
+# OFF by default, and it must stay inert on a developer laptop — it installs
+# system packages, resets ufw and claims :80/:443. The guard is root + Linux + a
+# reachable cloud metadata service, which no laptop satisfies.
+PROVISION=0
+PROVISION_PHASE=both
+PROVISION_CLOUD=""
+PROVISION_PROVENANCE=""
+_pargs=("$@")
+_pi=0
+while [ "$_pi" -lt "${#_pargs[@]}" ]; do
+    case "${_pargs[$_pi]}" in
+        --provision)    PROVISION=1 ;;
+        --machine-only) PROVISION_PHASE=machine ;;
+        --site-only)    PROVISION_PHASE=site ;;
+        --cloud)        _pi=$((_pi + 1)); PROVISION_CLOUD="${_pargs[$_pi]:-}" ;;
+        --cloud=*)      PROVISION_CLOUD="${_pargs[$_pi]#*=}" ;;
+        --provenance)   _pi=$((_pi + 1)); PROVISION_PROVENANCE="${_pargs[$_pi]:-}" ;;
+        --provenance=*) PROVISION_PROVENANCE="${_pargs[$_pi]#*=}" ;;
+    esac
+    _pi=$((_pi + 1))
+done
+
+# Caddy is PINNED and the floor is load-bearing rather than hygiene: the whole
+# no-domain HTTPS story rests on a Let's Encrypt certificate for a BARE IP, and
+# Caddy could not issue one until v2.11.3 (caddyserver/caddy#7399 — v2.10.0
+# fails outright with "subject '<ip>' cannot have public IP certificate").
+# Deliberately NOT `apt-mark hold`: forward versions carry the fix, and a hold
+# would block security updates for the life of the machine.
+PROVISION_CADDY_VERSION="2.11.4"
+PROVISION_CADDY_MIN_VERSION="2.11.3"
+
+provision_die() { echo "❌ --provision: $1" >&2; exit 1; }
+
+# The only thing that actually differs between clouds is where the instance's
+# own public address is published — one line per cloud, not a provider
+# abstraction for a single string.
+provision_metadata_ip() {
+    case "$PROVISION_CLOUD" in
+        digitalocean)
+            curl -fsS --max-time 10 \
+                http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address 2>/dev/null
+            ;;
+    esac
+}
+
+# Default provenance per cloud (#2380). The card that teaches an operator to put
+# a domain in front of a bare-IP instance is gated on WHERE the install came
+# from, never on TLS state — the managed fleet runs plain HTTP behind a tunnel
+# and must never see it. A doc-driven DigitalOcean install honestly IS a
+# DigitalOcean install, so it records its own value rather than a generic one.
+provision_default_provenance() {
+    case "$PROVISION_CLOUD" in
+        digitalocean) echo "do-script" ;;
+        *)            echo "script" ;;
+    esac
+}
+
+provision_machine() {
+    echo "→ Installing Docker, Caddy ${PROVISION_CADDY_VERSION} and the host firewall..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q
+    # NOT iptables-persistent: ufw declares `Breaks: iptables-persistent`, so apt
+    # resolves that install by silently REMOVING ufw. The DOCKER-USER rules are
+    # persisted by trinity-docker-firewall.service instead, which is the better
+    # mechanism anyway — DOCKER-USER does not exist until Docker creates it, so
+    # restoring saved rules at boot is racy.
+    apt-get install -y -q ca-certificates curl gnupg git jq ufw
+
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list
+
+    # Cloudsmith's own list line already carries a signed-by=, so do not add a
+    # second one.
+    curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+        | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+        > /etc/apt/sources.list.d/caddy-stable.list
+
+    apt-get update -q
+    apt-get install -y -q docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin "caddy=${PROVISION_CADDY_VERSION}"
+    systemctl enable --now docker
+
+    # Assert the floor rather than trusting the pin: the pin can be edited, the
+    # repo can drop a version, and `caddy upgrade` can move it on a live box.
+    local _caddy
+    _caddy="$(caddy version | head -1 | sed 's/^v//' | cut -d' ' -f1)"
+    if [ "$(printf '%s\n%s\n' "$PROVISION_CADDY_MIN_VERSION" "$_caddy" | sort -V | head -1)" \
+         != "$PROVISION_CADDY_MIN_VERSION" ]; then
+        provision_die "caddy ${_caddy} is below ${PROVISION_CADDY_MIN_VERSION}, which cannot issue Let's Encrypt IP certificates (caddyserver/caddy#7399)."
+    fi
+    echo "   Caddy ${_caddy} (floor ${PROVISION_CADDY_MIN_VERSION}) — IP certificates supported."
+    # Caddy owns :80/:443 but is configured by the SITE phase, which needs the
+    # instance's own IP. A Caddy started now with the packaged default would race
+    # that and take a certificate for the wrong name.
+    systemctl stop caddy || true
+
+    # ufw governs HOST ports only. It does NOT govern Docker-published ports —
+    # Docker inserts its rules ahead of ufw's chain, so `ufw deny 8000` on a box
+    # publishing 8000:8000 is silently inert. That gap is closed separately, by
+    # docker-firewall.sh.
+    ufw --force reset >/dev/null
+    ufw default deny incoming >/dev/null
+    ufw default allow outgoing >/dev/null
+    ufw allow 22/tcp >/dev/null
+    ufw allow 80/tcp >/dev/null
+    ufw allow 443/tcp >/dev/null
+    ufw --force enable
+
+    # The unit runs the script from wherever this checkout lives, so a doc
+    # install and a Packer image share one copy of the rules rather than the
+    # image carrying its own.
+    local _fw="${PWD}/scripts/deploy/docker-firewall.sh"
+    [ -x "$_fw" ] || provision_die "missing ${_fw} — is this a Trinity checkout?"
+    cat > /etc/systemd/system/trinity-docker-firewall.service <<UNIT
+[Unit]
+Description=Trinity: drop internet access to Docker-published container ports
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${_fw}
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    # Never fatal: a machine that boots without the rule and SAYS so beats one
+    # that refuses to finish installing.
+    systemctl enable --now trinity-docker-firewall.service \
+        || echo "⚠️  DOCKER-USER rules not applied — container ports may be public. Re-run: ${_fw}" >&2
+}
+
+provision_site() {
+    local ip provenance _tls
+    ip="$(provision_metadata_ip || true)"
+    [ -n "$ip" ] || provision_die "could not read this instance's public IP from the ${PROVISION_CLOUD} metadata service."
+    mkdir -p /etc/trinity
+    chmod 0700 /etc/trinity
+    echo "$ip" > /etc/trinity/public-ip
+
+    [ -f .env ] || cp .env.example .env
+    provenance="${PROVISION_PROVENANCE:-$(provision_default_provenance)}"
+    # FRONTEND_PORT moves the SPA off :80 so Caddy can own 80/443 in front of it.
+    set_env_key FRONTEND_PORT 8081
+    set_env_key FRONTEND_URL "https://${ip}"
+    set_env_key TRINITY_INSTALL_SOURCE "$provenance"
+    if [ -n "${TRINITY_IMAGE_TAG:-}" ]; then
+        set_env_key TRINITY_IMAGE_TAG "$TRINITY_IMAGE_TAG"
+    fi
+    chmod 0600 .env
+    echo "→ .env: FRONTEND_URL=https://${ip}, TRINITY_INSTALL_SOURCE=${provenance}"
+
+    # Rule 10 of DigitalOcean's 1-Click build standard specifies this header on
+    # the reverse-proxy block, and their own catalog apps ship it (openclaw's
+    # Caddyfile sets it to "openclaw"). It is how a marketplace-originated
+    # install identifies itself to DigitalOcean — so it is keyed on the
+    # marketplace provenance, not on the cloud: the doc-driven install on the
+    # same cloud did not originate from the catalog.
+    local _do_header=""
+    if [ "$provenance" = "do-marketplace" ]; then
+        _do_header='header X-DO-MARKETPLACE "trinity"'
+    fi
+
+    # Let's Encrypt issues certificates for bare IPs via the `shortlived` ACME
+    # profile (~6-day validity, renewed automatically while the machine runs), so
+    # the instance lands on browser-trusted HTTPS with no domain and no input. A
+    # domain becomes a post-login upgrade rather than a prerequisite.
+    # Two sites, and the catch-all is the point.
+    #
+    # The bare IP is what the instance answers to on day one, on the
+    # `shortlived` profile that is the only way to get a browser-trusted
+    # certificate without a domain.
+    #
+    # The catch-all takes ANY other hostname and gets a certificate for it on
+    # first request, gated by `ask`: Caddy asks the backend whether the name is
+    # allowed, and the backend answers yes only for the domain an admin actually
+    # saved. That gate is load-bearing in both directions — without it, anyone
+    # who points DNS at this address makes the instance request certificates on
+    # their behalf until Let's Encrypt rate-limits the account.
+    #
+    # This exists so that adding a domain is a Settings field and nothing else.
+    # The alternative was a shell command on the host, because Trinity runs in a
+    # container with no way to rewrite this file or reload Caddy — and a
+    # non-engineer following a deploy guide does not have a root shell in the
+    # loop. Caddy asking Trinity a question inverts that: no privilege moves,
+    # and the operator never leaves the browser.
+    cat > /etc/caddy/Caddyfile <<CADDY
+{
+    acme_ca https://acme-v02.api.letsencrypt.org/directory
+    on_demand_tls {
+        ask http://127.0.0.1:8000/api/public/tls-allowed
+    }
+}
+
+https://${ip} {
+    tls {
+        issuer acme {
+            profile shortlived
+        }
+    }
+    encode gzip
+
+    # Streaming endpoints must not be buffered: the Workspace reads execution
+    # logs over SSE (GET /api/executions/{id}/stream).
+    reverse_proxy 127.0.0.1:8081 {
+        flush_interval -1
+    }
+    ${_do_header}
+}
+
+https:// {
+    tls {
+        on_demand
+    }
+    encode gzip
+    reverse_proxy 127.0.0.1:8081 {
+        flush_interval -1
+    }
+}
+
+http:// {
+    redir https://{host}{uri} permanent
+}
+CADDY
+    systemctl enable caddy
+    systemctl restart caddy
+
+    # Verify the certificate was actually ISSUED. Without this the failure is
+    # silent and worse than silent: Caddy serves a TLS error, this script exits
+    # 0, and the summary prints a confident https:// URL. Trinity is not up yet,
+    # so Caddy answers 502 — which is the point: curl without -f treats an HTTP
+    # error as success, so a zero exit means the handshake completed and the
+    # chain validated against the system trust store. Nothing weaker separates a
+    # real Let's Encrypt certificate from Caddy's internal-CA fallback.
+    _tls=failed
+    for _try in $(seq 1 30); do
+        if curl -sS -o /dev/null --max-time 10 "https://${ip}/" 2>/dev/null; then
+            _tls=ok
+            break
+        fi
+        sleep 5
+    done
+    printf '%s\n' "$_tls" > /etc/trinity/tls-status
+    if [ "$_tls" = "ok" ]; then
+        echo "→ TLS: certificate issued for ${ip}."
+    else
+        # Never fatal: an instance serving over HTTP with an honest banner beats
+        # one that refuses to finish booting.
+        echo "⚠️  TLS: no valid certificate for ${ip} after ~150s. Trinity will still start." >&2
+        echo "    Check: journalctl -u caddy -n 100" >&2
+    fi
+}
+
+if [ "$PROVISION" = "1" ]; then
+    [ "$(uname -s)" = "Linux" ] || provision_die "only runs on Linux — it installs system packages, resets the firewall and claims :80/:443."
+    [ "$(id -u)" = "0" ] || provision_die "must run as root."
+    case "$PROVISION_CLOUD" in
+        digitalocean) ;;
+        "") provision_die "--cloud is required (supported: digitalocean)." ;;
+        *)  provision_die "unsupported --cloud '${PROVISION_CLOUD}' (supported: digitalocean)." ;;
+    esac
+    # The metadata service is the "this is a fresh cloud VM, not somebody's
+    # laptop" guard, and it costs one request: nothing on a laptop answers on
+    # 169.254.169.254.
+    [ -n "$(provision_metadata_ip || true)" ] \
+        || provision_die "no ${PROVISION_CLOUD} metadata service reachable — refusing to provision a machine that is not a ${PROVISION_CLOUD} instance."
+
+    echo "Provisioning host (cloud: ${PROVISION_CLOUD}, phase: ${PROVISION_PHASE})..."
+    [ "$PROVISION_PHASE" = "site" ]    || provision_machine
+    [ "$PROVISION_PHASE" = "machine" ] || provision_site
+    echo ""
+    if [ "$PROVISION_PHASE" = "machine" ]; then
+        echo "Host provisioned (machine phase) — Trinity itself is NOT installed by this phase."
+        exit 0
+    fi
+fi
+# -----------------------------------------------------------------------------
 
 # Fail fast with ONE consolidated, actionable message rather than crashing
 # mid-run. Docker daemon + Compose v2 are hard requirements. `docker info` also
@@ -178,6 +491,17 @@ ensure_hex32_secret INTERNAL_API_SECRET
 # the three above — once set it must not change, or every agent's token would
 # shift and the running fleet would 401 until recreated.
 ensure_hex32_secret AGENT_AUTH_SECRET
+
+# An operator-supplied ADMIN_PASSWORD in the ENVIRONMENT is written through to
+# `.env` (#2380). The deploy docs ask the reader to put their own password at
+# the top of a one-screen install script; without this, every such script has to
+# hand-roll its own `.env` writer — which is exactly the duplication --provision
+# exists to remove. `.env` wins if it already has one: this never overwrites a
+# password an install has already committed to.
+if [ -n "${ADMIN_PASSWORD:-}" ] && ! grep -qE '^ADMIN_PASSWORD=.+' .env 2>/dev/null; then
+    set_env_key ADMIN_PASSWORD "$ADMIN_PASSWORD"
+    echo "Wrote ADMIN_PASSWORD from the environment to .env."
+fi
 
 # ADMIN_PASSWORD has no sensible default. Interactively we fail fast rather than
 # boot into a state the operator can't log into (#443). Unattended (#39), we

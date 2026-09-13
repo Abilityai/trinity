@@ -270,6 +270,15 @@ async def get_public_feature_flags(
         # including the entire managed fleet, whose plain-HTTP-over-Tailscale shape
         # is indistinguishable from an unhardened droplet by any other signal.
         "marketplace_install": settings_service.is_marketplace_install(),
+        # Whether the first-run hardening guide is offered here. A SEPARATE gate
+        # from `marketplace_install` (#2380): the guide's subject is "public
+        # cloud VM at a bare IP with no domain", which is equally true of a
+        # droplet installed by following the DigitalOcean deploy doc
+        # (`do-script`). Widened to that provenance, NOT to all installs —
+        # provenance is why the gate exists, and the managed fleet's
+        # plain-HTTP-behind-a-tunnel shape would otherwise carry the card
+        # permanently.
+        "hardening_guide_eligible": settings_service.is_hardening_guide_eligible(),
         # What URL this instance ADVERTISES itself at: unconfigured | http |
         # https-ip | https-domain. Derived from `public_chat_url` (else the baked
         # FRONTEND_URL) — nothing probes a socket or reads a certificate, because
