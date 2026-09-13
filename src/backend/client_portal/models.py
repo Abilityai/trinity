@@ -700,6 +700,11 @@ class PortalHistory(BaseModel):
     # the budget above is: an undeclared key is stripped by `response_model` and
     # never reaches the client.
     last_turn_outcome: Optional[PortalTurnOutcome] = None
+    # #2694: the window is counted in typed turns and bounded by a row ceiling;
+    # True when the ceiling cut rows off the OLD end, so the client can say
+    # "earlier messages aren't shown" instead of rendering a thread that
+    # silently starts mid-call. Declared for the same reason as the two above.
+    truncated: bool = False
 
 
 # --- Operator controls over a signed-in client (ent#281) ----------------------

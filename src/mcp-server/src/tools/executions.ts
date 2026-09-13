@@ -195,6 +195,58 @@ export function createExecutionTools(
     },
 
     // ========================================================================
+    // get_fan_out_result - Poll a fan-out batch (#2670)
+    // ========================================================================
+    getFanOutResult: {
+      name: "get_fan_out_result",
+      description:
+        "Get the aggregate status and per-task results of a fan-out batch. " +
+        "Use this to poll after fan_out returns {status: 'fan_out_timeout', fan_out_id} — " +
+        "the batch is still running and this is the only way to reach it. " +
+        "\n\n**Batch status:** `running` while any subtask can still change, then " +
+        "`completed` (all succeeded), `partial` (some did — fan-out is best-effort, so " +
+        "this is a normal outcome, not an error) or `failed` (none did). " +
+        "\n\n**Per-task status** is the execution status (`queued`, `running`, `success`, " +
+        "`failed`, …), so a subtask waiting for a slot is distinguishable from one that ran. " +
+        "\n\nAccess control: agents can only read batches on self or permitted agents. " +
+        "An unknown fan_out_id, one belonging to another agent, and a malformed one are " +
+        "the same 'not found'.",
+      parameters: z.object({
+        agent_name: z.string().describe("Name of the agent that ran the fan-out"),
+        fan_out_id: z
+          .string()
+          .describe("Batch ID (returned by fan_out, or carried on a fan_out_timeout receipt)"),
+      }),
+      execute: async (
+        { agent_name, fan_out_id }: { agent_name: string; fan_out_id: string },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        // Same gate as `get_execution_result` beside it: an agent-scoped key
+        // reaches `{self} ∪ permitted` and nothing else. The backend's own
+        // `get_authorized_agent` is the boundary; this is the MCP-layer
+        // narrowing an agent key needs on top of it (Invariant #13 / #1104).
+        const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
+        if (!accessCheck.allowed) {
+          console.log(`[get_fan_out_result] Access denied: ${accessCheck.reason}`);
+          return JSON.stringify({
+            error: "Access denied",
+            reason: accessCheck.reason,
+          }, null, 2);
+        }
+
+        const batch = await apiClient.getFanOutResult(agent_name, fan_out_id);
+        console.log(
+          `[get_fan_out_result] ${agent_name}/${fan_out_id}: ${batch.status} ` +
+          `(${batch.completed}/${batch.total} done, ${batch.running} running)`
+        );
+        return JSON.stringify(batch, null, 2);
+      },
+    },
+
+    // ========================================================================
     // get_agent_activity_summary - High-level activity summary for monitoring
     // ========================================================================
     getAgentActivitySummary: {

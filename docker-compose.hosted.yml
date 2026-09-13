@@ -779,6 +779,15 @@ services:
       # #848 ceiling for the four backend relay fetches on the inline-auth path.
       # Functional via its 15000ms default; wired so the lever is not inert.
       - MCP_INLINE_AUTH_TIMEOUT_MS=${MCP_INLINE_AUTH_TIMEOUT_MS:-15000}
+      # #914/#2661 ceiling for the synchronous backend fetch in chat_with_agent
+      # sync mode (both routes). On abort the MCP server looks up the execution
+      # and answers with a `queued_timeout` receipt instead of `fetch failed`.
+      # Default 25000ms sits below the typical 30-60s MCP gateway ceiling.
+      - MCP_CHAT_TIMEOUT_MS=${MCP_CHAT_TIMEOUT_MS:-25000}
+      # #2661 ceiling for the executions lookup that recovery runs AFTER the
+      # abort — whatever is left of the gateway ceiling is all it has, so it
+      # must fail fast rather than hang into the same `fetch failed`.
+      - MCP_RECOVERY_TIMEOUT_MS=${MCP_RECOVERY_TIMEOUT_MS:-5000}
       # #736 ceiling for the mcp-server's own outbound-A2A fetches. Must stay
       # below the MCP client's gateway abort — see docker-compose.yml.
       # Functional via its 40000ms default; wired so the lever is not inert.

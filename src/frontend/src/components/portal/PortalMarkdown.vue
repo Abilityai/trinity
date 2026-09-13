@@ -104,7 +104,114 @@ onBeforeUnmount(() => { clearTimeout(announceTimer) })
 .prose-portal :deep(p:first-child) { margin-top: 0; }
 .prose-portal :deep(p:last-child) { margin-bottom: 0; }
 .prose-portal :deep(ul) { list-style: disc; padding-left: 1.25rem; }
+.prose-portal :deep(ol) { list-style: decimal; padding-left: 1.5rem; }
+.prose-portal :deep(ul),
+.prose-portal :deep(ol) { margin: 0.5rem 0; }
+.prose-portal :deep(li) { margin: 0.25rem 0; }
+/* A nested list is a step in, on the same rhythm — not a second block. */
+.prose-portal :deep(li > ul),
+.prose-portal :deep(li > ol) { margin: 0.25rem 0; }
 .prose-portal :deep(a) { text-decoration: underline; }
+
+/* ---- Headings (#2616) -----------------------------------------------------
+   Preflight resets h1-h6 to inherited size AND weight, so every heading an
+   agent writes arrived at body weight — a 900-word reply with no structure.
+   The ladder is deliberately BOUNDED: `# Title` names a section of the reply,
+   not the page, so it tops out at the design system's section size (18/650)
+   rather than page-title size, and h3+ lands on the meta overline. Three
+   visibly distinct steps, all inside the six-size scale; a chat bubble has no
+   room for six. */
+.prose-portal :deep(h1),
+.prose-portal :deep(h2),
+.prose-portal :deep(h3),
+.prose-portal :deep(h4),
+.prose-portal :deep(h5),
+.prose-portal :deep(h6) {
+  /* 12px above / 4px below: a heading belongs to what follows it. */
+  @apply mt-3 mb-1 leading-snug text-gray-900 dark:text-gray-100;
+}
+.prose-portal :deep(h1) {
+  @apply text-[18px];
+  font-weight: 650;
+}
+.prose-portal :deep(h2) {
+  @apply text-sm;
+  font-weight: 550;
+}
+.prose-portal :deep(h3),
+.prose-portal :deep(h4),
+.prose-portal :deep(h5),
+.prose-portal :deep(h6) {
+  @apply text-[11px] font-medium uppercase tracking-wide text-gray-600 dark:text-gray-400;
+}
+/* A reply that opens on a heading must not double the bubble's own padding. */
+.prose-portal :deep(h1:first-child),
+.prose-portal :deep(h2:first-child),
+.prose-portal :deep(h3:first-child),
+.prose-portal :deep(h4:first-child),
+.prose-portal :deep(h5:first-child),
+.prose-portal :deep(h6:first-child) { margin-top: 0; }
+
+/* ---- Tables (#2616) -------------------------------------------------------
+   The table is its own OBJECT one step off the bubble tint, exactly as a code
+   block is, and its anatomy is `ReportTable` / `ck-table`'s rather than a third
+   look: mono-caps header on chrome, 6/12 cell padding, a rule per row.
+
+   `display: block` makes the table element its own horizontal scroll viewport
+   (the rule CanvasKit already proved for the 24rem rail, #2583) so a ten-column
+   table scrolls instead of widening the bubble; `overflow-wrap: normal` in the
+   cells is its other half — a "break anywhere" inherited from a wrapper squeezes
+   an auto-layout table to one character per line. */
+.prose-portal :deep(table) {
+  display: block;
+  /* `fit-content`, not the block box's automatic full width: a two-column table
+     that stretched to the bubble's edge would draw its border around an acre of
+     nothing. It still scrolls, because `max-width` caps it at the column. */
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  @apply my-2 rounded-md border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-900 text-[12.5px];
+}
+.prose-portal :deep(table:first-child) { margin-top: 0; }
+.prose-portal :deep(table:last-child) { margin-bottom: 0; }
+.prose-portal :deep(thead th) {
+  @apply bg-gray-100 dark:bg-gray-750 text-gray-600 dark:text-gray-400 font-mono text-[11px] font-medium uppercase tracking-wide;
+  padding: 6px 12px;
+  text-align: start;
+  white-space: nowrap;
+}
+.prose-portal :deep(th),
+.prose-portal :deep(td) {
+  @apply border-b border-gray-200 dark:border-gray-750;
+  overflow-wrap: normal;
+}
+.prose-portal :deep(td) {
+  padding: 6px 12px;
+  vertical-align: top;
+}
+.prose-portal :deep(tbody tr:last-child td) { border-bottom: 0; }
+/* GFM alignment survives sanitising as the `align` attribute, but a
+   presentational hint loses to the author `text-align` above — so the two
+   aligned cases are restated here, and a numeric column gets figures that
+   line up. */
+.prose-portal :deep(th[align="right"]),
+.prose-portal :deep(td[align="right"]) { text-align: right; }
+.prose-portal :deep(th[align="center"]),
+.prose-portal :deep(td[align="center"]) { text-align: center; }
+
+/* ---- Callout and divider (#2616) ------------------------------------------
+   The 3px left rule is `ck-callout`'s, so a quoted line reads the same whether
+   the agent wrote it into a message or onto a canvas. */
+.prose-portal :deep(blockquote) {
+  @apply my-2 rounded-md border-l-[3px] border-gray-300 dark:border-gray-700 bg-gray-200/50 dark:bg-gray-900/40 px-3 py-2 text-gray-700 dark:text-gray-300;
+}
+.prose-portal :deep(blockquote > :first-child) { margin-top: 0; }
+.prose-portal :deep(blockquote > :last-child) { margin-bottom: 0; }
+.prose-portal :deep(hr) {
+  @apply my-3 border-0 border-t border-gray-200 dark:border-gray-750;
+}
 
 /* ---- Code blocks (#2515) --------------------------------------------------
    A block is its own OBJECT, one step off the bubble's tint in both themes,

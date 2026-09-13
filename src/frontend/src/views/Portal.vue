@@ -503,8 +503,6 @@
         leave-active-class="transition-[flex-grow,opacity] duration-300 ease-out motion-reduce:transition-none motion-reduce:duration-0"
         enter-from-class="!grow-0 opacity-0"
         leave-to-class="!grow-0 opacity-0"
-        @before-leave="voiceCanvasLeaving = true"
-        @after-leave="voiceCanvasLeaving = false"
       >
         <PortalVoiceCanvas
           v-if="voiceCanvasHasColumn"
@@ -524,15 +522,48 @@
            because a `v-else-if` silently becoming a `v-if` is how both columns
            end up on screen at once.
 
-           `!voiceCanvasLeaving` is the second half of that. A leaving element
-           stays in the DOM for the length of its transition, so without it the
-           rail would mount at its full fixed width while the canvas is still
-           shrinking — three columns competing for the row, main squeezed by
-           flex for 300ms, which is a worse jump than the one being fixed. The
-           rail arrives once the canvas is gone, so the motion reads as one
-           column handing the space back. -->
+           #2676: the rail column is a WIDTH, so it moves with the canvas
+           instead of stepping. It used to be a bare `v-if` on a `shrink-0` flex
+           sibling carrying no width transition, so it appeared at its full size
+           in one frame — 48px collapsed, 384px open, or whatever `--ws-rail`
+           was dragged to, which on a wide rail is a bigger jump than the 211px
+           snap #2640 removed.
+
+           The width lives on a WRAPPER this view owns, not on `PortalRail`'s
+           own `<aside>` — the same shape the sidebar column three columns to
+           the left already has (`shrink-0 overflow-hidden` + an explicit
+           `--ws-` width). `--ws-rail` is the RENDERED width (48px collapsed,
+           the dragged width open), so one binding covers both states and the
+           inner aside's own width agrees with it at rest.
+
+           Why Vue enter/leave classes rather than a `transition-[width]` that
+           is always on: the same variable is written on every `pointermove` of
+           a drag, and a permanently-transitioned width would make dragging the
+           rail rubber-band by 300ms. Vue adds the active class only for the
+           enter/leave window and removes it after, so a drag is instant exactly
+           as it is today. `!w-0` is `!`-marked for the reason the canvas's
+           `!grow-0` is: both are single-class selectors setting the same
+           property, so without it Tailwind's output order would decide.
+
+           This also RETIRES `voiceCanvasLeaving`. That flag existed because a
+           rail mounting at full width beside a still-shrinking canvas put three
+           columns in a row sized for two. A rail that enters from zero width is
+           complementary to a canvas leaving towards zero grow — the row's total
+           is conserved at every frame — so the hazard is gone by construction
+           rather than held off by a flag, and the two motions now overlap
+           instead of running back to back. -->
+      <Transition
+        enter-active-class="transition-[width] duration-300 ease-out overflow-hidden motion-reduce:transition-none motion-reduce:duration-0"
+        leave-active-class="transition-[width] duration-300 ease-out overflow-hidden motion-reduce:transition-none motion-reduce:duration-0"
+        enter-from-class="!w-0"
+        leave-to-class="!w-0"
+      >
+      <div
+        v-if="railHasColumn"
+        class="hidden sm:flex shrink-0 min-h-0 w-[var(--ws-rail,24rem)]"
+        data-testid="ws-rail-column"
+      >
       <PortalRail
-        v-if="railVisible && !voiceCanvasHasColumn && !voiceCanvasLeaving"
         :tabs="railTabs"
         :active-tab="railState.tab"
         :open="railState.open"
@@ -572,6 +603,8 @@
           />
         </template>
       </PortalRail>
+      </div>
+      </Transition>
     </div>
 
     <!-- ent#474: the rail's mobile form (the former Files drawer's sheet). Same
@@ -633,7 +666,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
@@ -675,7 +708,13 @@ import {
   landingThread,
   agentHasMain, titleSettling, shouldFetchTitleHealth, titleGenerationNotice,
   TITLE_SETTLE_DELAYS_MS,
+  // ent#557: the SAME sum the sidebar renders, so the tab and the rows cannot
+  // disagree about the number.
+  totalUnread,
 } from '@/components/portal/portalUtils'
+// ent#557: the tab title's unread half. The router owns the label; this pushes
+// the count. See `utils/tabTitle.js` for why neither writes `document.title`.
+import { setUnreadCount, clearUnreadCount } from '@/utils/tabTitle'
 import {
   VOICE_QUERY_KEY, voiceAutoStart, voiceAutoStartArmed, disarmVoiceAutoStart,
 } from '@/components/portal/portalVoiceMode'
@@ -881,20 +920,22 @@ const voiceCanvasHasColumn = computed(() => Boolean(
   voiceCall.value.active && voiceCall.value.voiceSessionId && activeAgent.value
 ))
 
-// #2640: true only while the canvas column is playing its leave transition.
-// Vue keeps a leaving element in the DOM for the transition's duration, and the
-// rail must not mount into the same row while it is still there — see the
-// template comment on the rail's `v-if`.
+
+// #2676: `voiceCanvasLeaving` lived here. It held the rail out of the row for
+// the length of the canvas's leave transition, because a rail mounting at its
+// FULL width beside a still-shrinking canvas put three columns in a row sized
+// for two. The rail column now enters from zero width, which is complementary
+// to a canvas leaving towards zero grow — the row's total is conserved at every
+// frame — so the hazard is gone by construction and the two motions overlap
+// instead of running back to back. A flag whose only job was to sequence them
+// is not needed to sequence motions that no longer need sequencing.
 //
-// Under `prefers-reduced-motion` this is never observably true — but only
-// because the leave-active class carries `motion-reduce:duration-0` as well as
-// `motion-reduce:transition-none`. `transition-none` sets `transition-property`
-// and nothing else, so `getTransitionInfo` would still read a 300ms
-// `transitionDuration` and resolve `@after-leave` on the fallback timer with
-// nothing animating: a reduced-motion user would see the canvas disappear, then
-// an empty column, then the rail. The zero duration is what makes the claim in
-// this comment true; it is not decoration.
-const voiceCanvasLeaving = ref(false)
+// The reduced-motion reasoning it carried is NOT lost: it belongs to the
+// transition classes themselves (`motion-reduce:transition-none` alone leaves
+// `transitionDuration` at .3s, which is what Vue's `getTransitionInfo` reads to
+// size its fallback timer), and it is stated on the `<main>` transition and
+// pinned by `portalVoiceLayoutMotion.spec.js`, which now requires both classes
+// on every transitioning element — including the two added here.
 const roomParticipants = ref([])
 const workSignal = ref(emptySignal())
 
@@ -923,6 +964,15 @@ const railVisible = computed(() => railVisibleFor({
   activeAgent: activeAgent.value?.name,
   unreachable: !!unreachableAgent.value,
 }))
+
+// #2676: the rail column's presence, as ONE condition the wrapper and the
+// motion share. `railTabs.length` is part of it because `PortalRail`'s own root
+// carries `v-if="tabs.length"` — with the width now on a wrapper this view
+// owns, a tabless rail would otherwise leave a full-width empty column behind.
+// Reading the same list the component does keeps the two from disagreeing.
+const railHasColumn = computed(() => Boolean(
+  railVisible.value && railTabs.value.length && !voiceCanvasHasColumn.value
+))
 // ent#475: the ONE owner of what the Loops / Canvas / Files tabs read. It
 // feeds `portalLoops` and `portalRailFeeds` off the same door gate and
 // participant list the rail renders from — nothing is fetched for a tab this
@@ -1775,6 +1825,21 @@ function resolveAgentQuery() {
   return true
 }
 
+// ent#557 — the tab says how many replies are waiting.
+//
+// Computed from the SAME `threads` the sidebar renders, through the same pure
+// helper, so the tab and the rows cannot disagree about the number. "Honest
+// counts" (AC 6) is a property of that sharing, not of a second sum: every unit
+// in this total is a thread in the list the user can click.
+const unreadTotal = computed(() => totalUnread(threads.value))
+watch(unreadTotal, (n) => setUnreadCount(n), { immediate: true })
+
+// Leaving the Workspace clears it: the count would otherwise outlive the only
+// surface that can explain it, leaving a tab reading `(3)` on a page with
+// nothing to click. `onUnmounted` rather than a route guard — the marker
+// belongs to this component's lifetime, not to a URL.
+onUnmounted(() => clearUnreadCount())
+
 // ent#364 — one poll feeds all three ask renderings.
 //
 // The Workspace has no WebSocket (`operator_queue_new` is broadcast on the platform
@@ -1792,7 +1857,22 @@ function startAsksPoll() {
     // Visibility-aware: a backgrounded tab polls nothing. The next foreground
     // tick catches up, and an ask that arrived meanwhile is not lost — it is a
     // row, not an event.
-    if (document.visibilityState === 'visible') store.fetchAsks()
+    if (document.visibilityState !== 'visible') return
+    store.fetchAsks()
+    // ent#557: the SAME tick refreshes threads and their read state, which is
+    // what makes an unread reply appear while the user is elsewhere in the
+    // Workspace. `refreshThreads` was event-driven only — a send, a navigation,
+    // a turn finishing — so a message an AGENT started (the ent#523 Main case
+    // this feature is about) reached the sidebar on the user's next action and
+    // not before.
+    //
+    // Folded into the existing timer rather than given its own: the Workspace
+    // has no WebSocket (`operator_queue_new` is broadcast on the platform `/ws`,
+    // which a portal client is not on), and a second timer would be a second
+    // cadence to reason about for one badge. Since #2198 the thread half is ONE
+    // request for every agent, not one per agent, which is what makes it cheap
+    // enough to ride here.
+    refreshThreads()
   }, ASKS_POLL_MS)
 }
 

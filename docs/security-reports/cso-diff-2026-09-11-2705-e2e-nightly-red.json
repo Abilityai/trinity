@@ -1,0 +1,78 @@
+{
+  "version": "1.1",
+  "date": "2026-09-11",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/2705-e2e-nightly-red",
+  "issue": "abilityai/trinity#2705",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 14],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": 0,
+    "new_db_reads": 0,
+    "new_redis_keys": 0,
+    "new_prompt_surfaces": 0,
+    "widened_prompt_surfaces": 0,
+    "dev_server_config_changes": 1,
+    "new_dev_scripts": 1,
+    "new_test_files": 2,
+    "doc_files": 4
+  },
+  "findings": [],
+  "appendix": [
+    {
+      "confidence": 3,
+      "category": "dev-tooling",
+      "note": "scripts/scan-dynamic-imports.mjs walks src/ with readdirSync/statSync, which follow symlinks; a symlinked directory inside src/ would be read too. Input is the repository's own tree in a developer or CI shell, never a request path — hard exclusion 5 (hardening without a concrete vulnerability)."
+    },
+    {
+      "confidence": 2,
+      "category": "redos",
+      "note": "The scanner's lazy-quantifier regexes ([\\s\\S]*? over <script> blocks, [^)]*? over import arguments) run on repository source only — hard exclusion 16 (no untrusted input in a request path)."
+    },
+    {
+      "confidence": 2,
+      "category": "supply-chain",
+      "note": "optimizeDeps.include pre-bundles mermaid and qrcode at dev-server start; both were already runtime dependencies and are invoked by the same unchanged call sites (CanvasDiagram.vue keeps securityLevel 'strict' and the DOMPurify sanitizeSvg pass; QrCode.vue renders a TOTP URI). No production build effect."
+    },
+    {
+      "confidence": 2,
+      "category": "ci",
+      "note": "The guard spec executes vite.config.js through resolveConfig inside npm run test:unit; the same frontend-build job already executes it via npm run build one step later. No new code execution surface."
+    },
+    {
+      "confidence": 2,
+      "category": "test-only",
+      "note": "workspace-model-choice.spec.js passes element handles into one page.evaluate and emulates reduced motion; test code against mocked routes (hard exclusion 8)."
+    },
+    {
+      "confidence": 1,
+      "category": "disclosure",
+      "note": "Added doc text names #2676/#2705/#2710–#2712 and OSS components only; the enterprise-docs-guard pattern matches no added line."
+    }
+  ],
+  "supply_chain_summary": {
+    "deps_changed": 0,
+    "lockfiles_changed": 0,
+    "workflows_changed": 0
+  },
+  "filter_stats": {
+    "candidates": 6,
+    "reported": 0,
+    "refuted_or_appendix": 6
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior": "docs/security-reports/cso-diff-2026-09-10-2694-voice-call-thread-order.md",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0,
+    "direction": "flat"
+  }
+}

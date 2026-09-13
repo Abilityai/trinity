@@ -1,23 +1,97 @@
 /**
- * #914 live verification: invoke TrinityClient.chat() against the running
- * backend with a low MCP_CHAT_TIMEOUT_MS to force the abort path, and
- * confirm we get a `queued_timeout` receipt with a real execution_id.
+ * #914 / #2661 live verification: invoke TrinityClient against the running
+ * backend with a low MCP_CHAT_TIMEOUT_MS to force the abort path, and confirm
+ * we get a `queued_timeout` receipt with a real execution_id.
+ *
+ * Two routes, because the receipt now exists on both:
+ *   chat  — sequential /chat   (#914, queue-serialised)
+ *   task  — sync parallel /task (#2661, concurrent)
  *
  * Run with:
  *   MCP_CHAT_TIMEOUT_MS=3000 \
  *   TRINITY_API_URL=http://localhost:8000 \
  *   TRINITY_TOKEN="trinity_mcp_..." \
- *   npx tsx src/mcp-server/scripts/verify_914.ts <agent_name>
+ *   TRINITY_MCP_KEY_ID="<key id from Settings → API Keys>" \
+ *   npx tsx src/mcp-server/scripts/verify_914.ts <agent_name> [chat|task|fanout|all]
  *
  * Not a test — debug harness for the live stack. Deleted before PR
  * lands? No: kept so future operators can reproduce the recovery path.
  */
 import { TrinityClient } from "../src/client.js";
 
+// Unique per run: two runs with an IDENTICAL message create two rows the
+// message discriminator cannot tell apart, and #2661 deliberately returns no
+// receipt on ambiguity — a harness that collided with its own prior run would
+// look like a broken feature.
+const NONCE = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+// Unique per ROUTE as well (#2675 review): in `both` mode the chat row is still
+// running when the task route aborts, and `pickRecentMcpExecution` filters on
+// the exact message — so one shared prompt made the task lookup see TWO
+// survivors (its own row and chat's), refuse on ambiguity, and exit 1. The
+// default mode was broken by the very rule it exists to verify.
+const prompt = (route: string) =>
+  `[verify ${NONCE} ${route}] Please sleep for 60 seconds in your head, then reply DONE. Take your time.`;
+
+type Outcome = { route: string; ok: boolean; note: string; executionId?: string };
+
+/**
+ * #2661: use the CALLING key's real id, or nothing — never a fabricated one.
+ *
+ * The original harness hard-coded `keyId: "verify-914-key"`, a literal that can
+ * never equal any row's `source_mcp_key_id`. The matcher lets a row through when
+ * the ROW's key id is absent, so the run went green while proving nothing about
+ * the key-scoped filter — it could not distinguish "the filter works" from "the
+ * filter never engaged".
+ *
+ * There is no self-describing endpoint for the presented key, so the operator
+ * supplies it (`TRINITY_MCP_KEY_ID`, visible in Settings → API Keys). Passing
+ * `undefined` when it is absent is the honest fallback: the lookup is then
+ * genuinely unscoped and the banner says so, rather than a fake value implying
+ * a scoping check that never ran.
+ */
+function resolveKeyId(): string | undefined {
+  const keyId = process.env.TRINITY_MCP_KEY_ID;
+  if (!keyId) {
+    console.log(
+      "[verify] TRINITY_MCP_KEY_ID unset — the executions lookup runs UNSCOPED. " +
+        "Set it (Settings → API Keys) to also exercise the source_mcp_key_id filter."
+    );
+  }
+  return keyId || undefined;
+}
+
+function classify(route: string, response: unknown, elapsedMs: number): Outcome {
+  console.log(`[verify-${route}] elapsed=${elapsedMs}ms`);
+  console.log(JSON.stringify(response, null, 2));
+  const status =
+    typeof response === "object" && response !== null && "status" in response
+      ? (response as { status?: string }).status
+      : undefined;
+  if (status === "queued_timeout") {
+    const executionId = (response as { execution_id?: string }).execution_id;
+    return { route, ok: true, note: "queued_timeout receipt", executionId };
+  }
+  // #2670: the batch receipt names a fan_out_id, not an execution_id — N rows
+  // share one id, so a single execution id could only name an arbitrary member.
+  if (status === "fan_out_timeout") {
+    const r = response as { fan_out_id?: string; execution_ids?: string[]; task_count?: number };
+    return {
+      route,
+      ok: true,
+      note:
+        `fan_out_timeout receipt (fan_out_id=${r.fan_out_id}, ` +
+        `${r.execution_ids?.length ?? 0}/${r.task_count ?? "?"} rows found at abort)`,
+      executionId: r.fan_out_id,
+    };
+  }
+  return { route, ok: false, note: "fast response — no timeout fired; did the agent reply quickly?" };
+}
+
 async function main(): Promise<void> {
   const baseUrl = process.env.TRINITY_API_URL ?? "http://localhost:8000";
   const token = process.env.TRINITY_TOKEN;
   const agent = process.argv[2] ?? "trinity-system";
+  const mode = (process.argv[3] ?? "both").toLowerCase();
 
   if (!token) {
     console.error("set TRINITY_TOKEN to an MCP API key (trinity_mcp_...)");
@@ -25,31 +99,59 @@ async function main(): Promise<void> {
   }
 
   const client = new TrinityClient(baseUrl, token);
-  console.log(`[verify-914] target=${agent}, MCP_CHAT_TIMEOUT_MS=${process.env.MCP_CHAT_TIMEOUT_MS ?? "(default 25000)"}`);
+  const keyId = resolveKeyId();
+  console.log(
+    `[verify] target=${agent}, mode=${mode}, MCP_CHAT_TIMEOUT_MS=${process.env.MCP_CHAT_TIMEOUT_MS ?? "(default 25000)"}, keyId=${keyId ?? "(unresolved)"}`
+  );
 
-  const t0 = Date.now();
+  const keyInfo = keyId ? { keyId, keyName: "verify" } : undefined;
+  const outcomes: Outcome[] = [];
+
   try {
-    const response = await client.chat(
-      agent,
-      "Please sleep for 60 seconds in your head, then reply DONE. Take your time.",
-      undefined,
-      { keyId: "verify-914-key", keyName: "914-verify" },
-    );
-    console.log(`[verify-914] elapsed=${Date.now() - t0}ms`);
-    console.log("[verify-914] response:");
-    console.log(JSON.stringify(response, null, 2));
+    if (mode === "chat" || mode === "both" || mode === "all") {
+      const t0 = Date.now();
+      const response = await client.chat(agent, prompt("chat"), undefined, keyInfo);
+      outcomes.push(classify("914-chat", response, Date.now() - t0));
+    }
 
-    if (typeof response === "object" && response !== null && "status" in response && response.status === "queued_timeout") {
-      console.log("\n✓ #914 PATH FIRED — got queued_timeout receipt with execution_id");
-      process.exit(0);
-    } else {
-      console.log("\n⚠ Fast response (no timeout fired). Did the agent reply quickly?");
-      process.exit(0);
+    if (mode === "task" || mode === "both" || mode === "all") {
+      // #2661: sync parallel — async_mode omitted on purpose. This is the route
+      // that used to hold the fetch for timeout_seconds + 60 and surface a bare
+      // `fetch failed`.
+      const t0 = Date.now();
+      const response = await client.task(agent, prompt("task"), {}, undefined, keyInfo);
+      outcomes.push(classify("2661-task", response, Date.now() - t0));
+    }
+    if (mode === "fanout" || mode === "all") {
+      // #2670: three tasks so the receipt has to identify a BATCH rather than a
+      // row — with one task the distinction the fix turns on is invisible. The
+      // nonce is per-message for the same reason it is per-run above: the
+      // matcher's message discriminator must have something unique to match.
+      const t0 = Date.now();
+      const tasks = [1, 2, 3].map((n) => ({
+        id: `verify-${n}`,
+        message: `${PROMPT} (batch member ${n})`,
+      }));
+      const response = await client.fanOut(agent, tasks, {}, undefined, keyInfo);
+      outcomes.push(classify("2670-fanout", response, Date.now() - t0));
     }
   } catch (err) {
-    console.error(`[verify-914] elapsed=${Date.now() - t0}ms — error:`, (err as Error).message);
+    console.error(`[verify] error:`, (err as Error).message);
     process.exit(1);
   }
+
+  console.log("\n--- summary ---");
+  for (const o of outcomes) {
+    console.log(`${o.ok ? "✓" : "⚠"} ${o.route}: ${o.note}${o.executionId ? ` execution_id=${o.executionId}` : ""}`);
+  }
+  console.log(
+    "\nNext (proves the receipt's TRUTH claim, not just its shape): poll each execution_id " +
+      "until terminal and confirm it reaches success — i.e. the target really did keep running " +
+      "after we hung up, and the capacity slot was released."
+  );
+  // Non-zero when any route answered fast instead of with a receipt — that is
+  // "the timeout never fired", which the run exists to prove, not a pass.
+  process.exit(outcomes.every((o) => o.ok) ? 0 : 1);
 }
 
 main();
