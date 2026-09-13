@@ -206,9 +206,10 @@
  * plus the opt-out is the mechanism, and the confirmed list is sent back on
  * execute and intersected with freshly-resolved membership.
  *
- * The acknowledgement reuses ent#126's `data-testid="ack-checkbox"` +
- * `:acknowledged` / `update:acknowledged` contract deliberately: one pattern
- * for "restate the consequence and make the user affirm it", not two.
+ * The acknowledgement reuses ent#126's `:acknowledged` / `update:acknowledged`
+ * contract deliberately: one pattern for "restate the consequence and make the
+ * user affirm it", not two. Its `data-testid` is deliberately NOT shared — see
+ * the note at the control itself.
  *
  * All server-derived text renders as plain text, never v-html (H-005).
  */

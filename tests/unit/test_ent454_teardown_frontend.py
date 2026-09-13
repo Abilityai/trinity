@@ -178,6 +178,37 @@ def test_the_ack_reuses_the_ent126_contract_but_not_its_address():
     )
 
 
+def test_no_test_id_is_shared_with_the_install_panel_it_sits_beside():
+    """The general rule, not the one instance.
+
+    Fixing the acknowledgement id by hand found a SECOND collision the same way
+    (`goto-fleet`, owned by DeployResult.vue), which is the signal that the
+    per-id fix was the wrong shape. Install and remove are two panels on one
+    page, and on an entitled build both can show a preview and a result at the
+    same time — so any id they share is strict-mode ambiguous for a Playwright
+    `getByTestId(...)`, which is how `e2e/system-install.spec.js` addresses both
+    `ack-checkbox` and `goto-fleet`.
+
+    None of this fails CI today (the teardown panel is unentitled there and
+    renders nothing), which is the whole reason it needs a test.
+    """
+    ids = re.compile(r'data-testid="([a-z0-9-]+)"')
+    install = set()
+    for path in (_MANIFEST_PREVIEW, _DEPLOY_RESULT, _SYSTEMS / "SystemInstallPanel.vue"):
+        install |= set(ids.findall(_code_only(_src(path))))
+    teardown = set()
+    for path in _NEW_FILES:
+        teardown |= set(ids.findall(_code_only(_src(path))))
+
+    assert install, "premise check: the install panel has test ids"
+    assert teardown, "premise check: the teardown panel has test ids"
+    shared = install & teardown
+    assert not shared, (
+        f"shared test id(s) {sorted(shared)} — both panels can render on the "
+        "Library page at once, so each id must address exactly one element"
+    )
+
+
 def test_the_member_list_is_bounded():
     """A fleet is unbounded data: internal scroll + a stated total, never a page
     that grows without limit (principle 28)."""

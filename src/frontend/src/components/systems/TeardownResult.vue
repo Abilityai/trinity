@@ -133,7 +133,11 @@
 
     <!-- The natural next step (principle 27) ------------------------------ -->
     <div class="flex flex-wrap gap-2">
-      <BaseButton data-testid="goto-fleet" @click="$emit('view-fleet')">
+      <!-- `teardown-goto-fleet`, not `goto-fleet`: DeployResult.vue already owns
+           that id, and on an entitled build a deploy result and a teardown
+           result can be on the Library page at the same time. Same reasoning as
+           the acknowledgement id. -->
+      <BaseButton data-testid="teardown-goto-fleet" @click="$emit('view-fleet')">
         View the fleet
       </BaseButton>
       <BaseButton variant="secondary" @click="$emit('remove-another')">
