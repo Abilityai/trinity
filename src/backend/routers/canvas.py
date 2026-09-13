@@ -1,4 +1,4 @@
-# mcp: canvas.ts (set_canvas / patch_canvas / get_canvas / list_canvases / clear_canvas → /api/agents/{name}/canvas)
+# mcp: canvas.ts (set_canvas / patch_canvas / get_canvas / list_canvases / clear_canvas → /api/agents/{name}/canvas); deliberately NOT exposed (ent#553): PUT .../canvas/{id}/pin — pin is the reader's decision, never the agent's — and POST .../canvas/bulk-delete — an agent's bulk delete is clear_canvas per id under the #918 self-gate, so the human-only verb has no agent caller
 """Agent canvas API (ent#438, widened by ent#536).
 
 A **canvas** is a durable surface an agent renders onto and keeps current —

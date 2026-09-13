@@ -1883,6 +1883,10 @@ class DatabaseManager:
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
 
+    def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
+        """Every execution row of one fan-out batch (#2670)."""
+        return self._schedule_ops.get_fan_out_executions(agent_name, fan_out_id, limit)
+
     def get_all_agents_execution_stats(self, hours: int = 24):
         """Get execution statistics for all agents."""
         return self._schedule_ops.get_all_agents_execution_stats(hours)
@@ -3019,6 +3023,19 @@ class DatabaseManager:
         """#2409: the auto-switch candidate list — filter only, load-balance
         order; ranking lives in `services.subscription_auto_switch`."""
         return self._subscription_ops.list_viable_alternative_subscriptions(current_subscription_id)
+
+    def list_recently_failed_alternatives(self, current_subscription_id: str):
+        """#2638: the COMPLEMENT of the candidate list — the alternatives the 2h
+        skip-list is excluding, which the switcher may readmit only on positive
+        fresh evidence."""
+        return self._subscription_ops.list_recently_failed_alternatives(current_subscription_id)
+
+    def last_failure_at_by_subscription(self, subscription_ids, hours: int = 2):
+        """#2638: newest failure instant per subscription inside the window, one
+        query — the instant a provider reset time is compared against."""
+        return self._subscription_ops.last_failure_at_by_subscription(
+            subscription_ids, hours=hours
+        )
 
     def get_subscription_usage(self, subscription_id: str):
         """Return rolling usage totals for a subscription (SUB-004)."""

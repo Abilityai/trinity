@@ -60,6 +60,17 @@ class TaskExecutionResult:
     # stays `running`; this flag is in-memory only so the caller (scheduler
     # async-poll) keeps polling instead of treating the ACK as a terminal.
     dispatched_async: bool = False
+    # #2638: the SUB-003 switch that happened during this turn, if any — the
+    # `handle_subscription_failure` / `ensure_serviceable_subscription` /
+    # `fallback_to_api_key` result dict (`switched`, `new_subscription`,
+    # `pre_dispatch`, `fallback`). In-memory only, like `dispatched_async`.
+    #
+    # It exists because "this failed" and "this failed on a subscription the
+    # agent is no longer using" are different answers to the caller. Before it,
+    # a turn that failed AFTER a successful switch was reported to the Workspace
+    # as `retryable=False` — while the agent sat on a fresh subscription and a
+    # re-send would very likely have worked (#2638 gap 4).
+    subscription_switch: Optional[dict] = None
 
 
 @dataclass

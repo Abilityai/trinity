@@ -41,7 +41,9 @@ from utils.url_validation import (
     reject_embedded_credentials,
     validate_skills_library_url,
 )
-from services.skill_service import skill_service, SkillInjectionBusy
+from services.skill_service import (
+    skill_service, SkillInjectionBusy, broadcast_skills_changed,
+)
 from services.skill_packaging import validate_skill_name
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,32 @@ async def _remove_unassigned_skills(
         "skills_failed": result.get("skills_failed", 0),
         "results": result.get("results", {}),
     }
+
+
+async def _deliver_assigned_skills(
+    agent_name: str, added_names: List[str]
+) -> Optional[Dict[str, Any]]:
+    """Deliver just-assigned skill packages to the agent (#2703) — the write-side
+    twin of `_remove_unassigned_skills`, with the same contract: the row has
+    committed and is authoritative, delivery is best-effort, and a stopped
+    agent / busy lock / transport failure is a NAMED outcome in the body, never
+    a failed request. See `skill_service.deliver_assigned` for the vocabulary.
+
+    Returns the delivery report for the response body, or None when nothing was
+    assigned.
+    """
+    names = [n for n in added_names if validate_skill_name(n)]
+    if not names:
+        return None
+    try:
+        return await skill_service.deliver_assigned(agent_name, names)
+    except Exception as e:  # noqa: BLE001 — never fail a committed assign
+        logger.warning(f"skill delivery failed for {agent_name}: {e}")
+        return {
+            "status": "not_delivered",
+            "reason": "injection_error",
+            "skills": {n: {"status": "not_delivered"} for n in sorted(names)},
+        }
 
 
 # ============================================================================
@@ -413,15 +441,26 @@ async def update_agent_skills(
         assigned_by=current_user.username
     )
 
+    # #2703: symmetric — added names are delivered, dropped names removed. Both
+    # are best-effort reports on a committed write; either may defer to the
+    # start path. Delivery first: it takes the same per-agent lock as removal,
+    # and a removal that lands while delivery holds the lock reads as
+    # `deferred` (the start-path reconcile finishes it), which is the honest
+    # order for a replace that mostly ADDS.
+    added = sorted(set(update.skills) - previous)
+    delivery = await _deliver_assigned_skills(agent_name, added)
     removal = await _remove_unassigned_skills(
         agent_name, sorted(previous - set(update.skills)), current_user, request
     )
+    if added or (previous - set(update.skills)):
+        await broadcast_skills_changed(agent_name)
 
     return {
         "success": True,
         "agent_name": agent_name,
         "skills_assigned": count,
         "skills": update.skills,
+        "delivery": delivery,
         "removal": removal,
     }
 
@@ -441,9 +480,12 @@ async def inject_skills(
     Per-skill warnings (missing deps, skipped files) ride the results map.
     """
     try:
-        return await skill_service.inject_skills(agent_name, force=True)
+        result = await skill_service.inject_skills(agent_name, force=True)
     except SkillInjectionBusy as e:
         raise HTTPException(status_code=409, detail=str(e))
+    # #2703: a Sync changes the listing too — open surfaces refetch.
+    await broadcast_skills_changed(agent_name)
+    return result
 
 
 @router.post("/agents/{agent_name}/skills/{skill_name}")
@@ -464,17 +506,26 @@ async def assign_skill(
         )
 
     result = db.assign_skill(agent_name, skill_name, current_user.username)
+    # #2703: deliver on BOTH branches. "Already assigned" used to return early,
+    # which made a re-click after a `not_delivered` a no-op — and the Library
+    # page's assign control has no Sync button beside it, so that re-click is
+    # the only retry it has. Delivery is the start-path injection (unchanged
+    # skills cost one metas read), so an idempotent re-assign is cheap.
+    delivery = await _deliver_assigned_skills(agent_name, [skill_name])
+    await broadcast_skills_changed(agent_name)
     if result is None:
         return {
             "success": True,
             "message": "Skill already assigned",
-            "skill_name": skill_name
+            "skill_name": skill_name,
+            "delivery": delivery,
         }
 
     return {
         "success": True,
         "message": "Skill assigned",
-        "skill": result
+        "skill": result,
+        "delivery": delivery,
     }
 
 
@@ -500,6 +551,10 @@ async def unassign_skill(
         removal = await _remove_unassigned_skills(
             agent_name, [skill_name], current_user, request
         )
+        # #2703: fired on the ROW change, even when the package removal
+        # deferred — the listing surfaces re-read the container either way and
+        # the assignment lists read the row.
+        await broadcast_skills_changed(agent_name)
 
     return {
         "success": True,

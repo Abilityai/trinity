@@ -278,6 +278,7 @@ import {
   bulkDeleteOutcome,
   bulkDeletePrompt,
   canvasAutoSelect,
+  canvasSearchVisible,
   canvasHeadroom,
   canvasSelectorVisible,
   emptyState,
@@ -335,7 +336,10 @@ const actionNote = ref('')
 // canvas sitting where it was.
 const ordered = computed(() => sortCanvases(props.canvases))
 const visible = computed(() => filterCanvases(ordered.value, query.value))
-const showSearch = computed(() => ordered.value.length > SEARCH_THRESHOLD)
+// The box survives a shrink below the threshold while a query is typed —
+// otherwise the only writer of `query` unmounts and the stale text wedges
+// the panel (`canvasSearchVisible`).
+const showSearch = computed(() => canvasSearchVisible(ordered.value.length, SEARCH_THRESHOLD, query.value))
 const headroom = computed(() => canvasHeadroom(props.canvases.length, props.canvasLimit))
 const selection = computed(() => selectionState(selectedIds.value, visible.value))
 const selectorVisible = computed(() => canvasSelectorVisible({

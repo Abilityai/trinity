@@ -2996,6 +2996,53 @@ class FanOutResponse(BaseModel):
     results: List[FanOutTaskResponse]
 
 
+# --- #2670: the batch's read surface ----------------------------------------
+#
+# `FanOutResponse` is built in memory and returned exactly once. A caller whose
+# HTTP call was killed by its own gateway timeout therefore has nothing to read,
+# while N executions keep running. These two models are what the batch looks
+# like when it is read back out of `schedule_executions` instead.
+#
+# Deliberately NOT a reuse of `FanOutResponse`: the aggregate has states the
+# dispatch response cannot have (`running` — some rows are still going) and
+# loses one it does have (`deadline_exceeded` is the DISPATCHER's verdict on its
+# own outer deadline, not a property of any row). Two different questions, two
+# shapes; making one serve both would mean a status vocabulary where half the
+# values are unreachable depending on which way you arrived.
+
+class FanOutBatchTask(BaseModel):
+    """One subtask of a batch, as recorded on its execution row."""
+    execution_id: str
+    status: str
+    # The dispatched message. It is the only thing tying a row back to the task
+    # the caller named — `FanOutTask.id` is a request-local label and is not
+    # persisted anywhere on the row.
+    message: Optional[str] = None
+    response: Optional[str] = None
+    error: Optional[str] = None
+    cost: Optional[float] = None
+    context_used: Optional[int] = None
+    duration_ms: Optional[int] = None
+    model_used: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class FanOutBatchStatus(BaseModel):
+    """A fan-out batch read back from its execution rows (#2670)."""
+    agent_name: str
+    fan_out_id: str
+    # `running` while any row is non-terminal; else `completed` when every row
+    # succeeded, `partial` when some did, `failed` when none did. An empty batch
+    # is unreachable here — the route 404s rather than reporting a batch of zero.
+    status: str
+    total: int
+    completed: int
+    failed: int
+    running: int
+    results: List[FanOutBatchTask]
+
+
 # =============================================================================
 # Git Models (routers/git.py)
 # =============================================================================

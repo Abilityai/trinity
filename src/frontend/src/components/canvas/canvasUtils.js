@@ -213,6 +213,29 @@ export function canvasSelectorVisible({ visible, manage, query }) {
 }
 
 /**
+ * Should the search box render? (ent#553 review — the stale-query wedge.)
+ *
+ * The box appears once the pile is real (`count > threshold`) — but `query`
+ * has exactly one writer, that box's `v-model`, so a box gated on the count
+ * ALONE unmounts the moment a delete (or the agent's own `clear_canvas` plus
+ * a rail refresh) drops the pile to the threshold while a query is typed:
+ * `visible` keeps filtering on text nobody can see or clear, the strip
+ * collapses, and the panel says "No canvas matches" with no control left.
+ * So an active query keeps its box regardless of the count: the typed
+ * intent survives the shrink, and the no-match line keeps the one control
+ * that clears it. Resetting `query` instead was rejected — it would erase a
+ * search the user was mid-way through because a sibling canvas went away.
+ *
+ * @param {number} count   canvases in the (unfiltered) list
+ * @param {number} threshold
+ * @param {string} query
+ */
+export function canvasSearchVisible(count, threshold, query) {
+  if (String(query || '').trim()) return true
+  return count > threshold
+}
+
+/**
  * Which canvas the strip should select after the visible set changed.
  *
  * `null` = leave the selection alone. While a query is active the selection

@@ -912,7 +912,9 @@ that rather than blocking on it:
   no-op without an email. Owns the stable `installation_id` (random UUID in
   `system_settings`, the #758 telemetry seed — minted write-once by the writers'
   accessor on this POST, the product-event emit and the canary label; read
-  without minting by `get_installation_id`, ent#545). Never raises; never logs
+  without minting by `get_installation_id`, ent#545; that writer set is pinned
+  in CI by `tests/unit/test_2669_minting_accessor_callers.py`, #2669). Never
+  raises; never logs
   the email.
   **Delivery-failure observability (#1593):** success is gated on a *true* 2xx —
   a non-2xx **response** (3xx redirect or 4xx/5xx) logs at **WARNING** (status +
