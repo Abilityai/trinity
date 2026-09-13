@@ -65,7 +65,7 @@ keyword**:
 | `workspace` | offered in the Workspace composer |
 | `workspace_tier` | the plain-language primary text the option renders |
 
-⚠️ `ModelEntry` is a **positional frozen dataclass** — all ten entries pass their three
+⚠️ `ModelEntry` is a **positional frozen dataclass** — every entry passes its three
 booleans positionally. A field inserted anywhere but last silently reassigns
 `public_channel` / `admin_default_selectable` / `recommended` on every entry, with no error.
 
