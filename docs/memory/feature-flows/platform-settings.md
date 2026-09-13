@@ -191,6 +191,9 @@ Backend endpoint details are documented in [agent-avatars.md](agent-avatars.md) 
 | `POST /api/settings/ops/reset` | 653-678 | `reset_ops_settings()` | Delete all ops settings (revert to defaults) |
 | `GET /api/settings` | 75-92 | `get_all_settings()` | List all system settings |
 | `PUT /api/settings/{key}` | 537-556 | `update_setting()` | Update single setting by key |
+| `PUT /api/settings/api-keys/anthropic` | — | `update_anthropic_key()` | Store the instance Anthropic API key (400s anything not starting `sk-ant-`; AES-256-GCM at rest, ent#435) |
+| `DELETE /api/settings/api-keys/anthropic` | — | `delete_anthropic_key()` | Remove the instance Anthropic key (both the encrypted and any legacy cleartext row). **#2572:** when it actually removed something, also runs the credential-less subscription adoption sweep |
+| `DELETE /api/settings/{key}` | — | `delete_setting()` | Delete single setting by key. **#2572:** for either Anthropic key alias this is a SECOND clear path — `db.delete_setting` has no delete-side twin of ent#435's write sink guard — so it fires the same sweep |
 
 ### Authorization
 
@@ -516,6 +519,7 @@ the `fork_to_own` fail-closed fix.
 - **Related**: [internal-system-agent.md](internal-system-agent.md) - Ops settings affect fleet health checks
 - **Related**: [ssh-access.md](ssh-access.md) - `ssh_access_enabled` setting controls MCP tool availability
 - **Related**: [agent-avatars.md](agent-avatars.md) - Default avatar generation endpoint and image generation pipeline (AVATAR-003)
+- **Downstream**: [subscription-management.md](subscription-management.md) - Deleting the instance Anthropic API key runs the #2572 credential-less adoption sweep: every agent the platform can no longer authenticate adopts an available Claude subscription. Best-effort and gated on the deletion having removed something — it never fails the deletion, and it is inert while any key still resolves (including the `ANTHROPIC_API_KEY` environment fallback this route reports as `fallback_configured`). **Both** clear paths are hooked, the dedicated route and the generic `DELETE /{key}`
 
 ---
 

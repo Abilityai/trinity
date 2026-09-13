@@ -940,6 +940,66 @@ async def update_anthropic_key(
         raise HTTPException(status_code=500, detail=f"Failed to update API key: {str(e)}")
 
 
+# #2572 Trigger A2 — the instance Anthropic key can be cleared through TWO
+# reachable routes, and both must fire the credential-less adoption sweep.
+#
+# The canonical migration off a metered key is *register a subscription, then
+# delete the key*. In that order the registration sweep (Trigger A1) finds
+# nothing — the key still resolves, so it short-circuits — and the deletion then
+# strands the whole fleet in exactly #2572's state with no trigger left.
+#
+# Route 1 is the dedicated `DELETE /api-keys/anthropic` below, which the
+# Settings UI uses and which clears BOTH the encrypted and the legacy row via
+# `clear_secret_setting`.
+# Route 2 is the generic `DELETE /{key}` catch-all, which reaches the same rows
+# through `db.delete_setting` — a sink that, unlike `db.set_setting`, carries no
+# ent#435 secret-settings guard, so it is reachable rather than theoretical.
+#
+# The hook deliberately sits on the ROUTES, not on `clear_secret_setting`: that
+# leaf also serves `github_pat` and the Slack keys, and hooking it would run a
+# Claude-subscription sweep on unrelated credential deletions. (A third clear
+# path exists at `set_secret_setting`'s blank-write branch but is unreachable
+# for this key — `update_anthropic_key` 400s anything not starting `sk-ant-`,
+# and the generic PUT is refused by ent#435's sink guard. If that prefix
+# validation is ever relaxed, re-check this.)
+_ANTHROPIC_KEY_ALIASES = {"anthropic_api_key", "anthropic_api_key_encrypted"}
+
+
+async def _adopt_after_instance_key_removed(current_user: User, request: Request) -> None:
+    """#2572 Trigger A2: the instance API key just went away, so every
+    ``api_key``-mode agent is now credential-less — sweep them onto an available
+    subscription.
+
+    Best-effort in the strongest sense: it must NEVER fail the deletion the
+    operator asked for, so everything is swallowed. Only Phase A (decide +
+    persist) is awaited; the service backgrounds the container apply, so this
+    never times out the DELETE on a real fleet.
+
+    It is also inert unless the key is genuinely gone: the sweep's own first
+    condition re-resolves through ``get_anthropic_api_key()``, which still finds
+    an ``ANTHROPIC_API_KEY`` in the backend environment (the ``.env``/compose
+    fallback this route reports as ``fallback_configured``) and correctly adopts
+    nobody in that case.
+    """
+    try:
+        from services.subscription_service import (
+            TRIGGER_INSTANCE_KEY_DELETED,
+            adopt_for_credentialless_agents,
+        )
+        await adopt_for_credentialless_agents(
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            trigger=TRIGGER_INSTANCE_KEY_DELETED,
+        )
+    except Exception as e:
+        logger.error(
+            f"[#2572] credential-less adoption sweep failed after instance "
+            f"API key deletion: {e}"
+        )
+
+
 @router.delete("/api-keys/anthropic")
 async def delete_anthropic_key(
     request: Request,
@@ -967,6 +1027,10 @@ async def delete_anthropic_key(
                 request_id=getattr(request.state, "request_id", None),
                 details={"setting": "anthropic_api_key", "action": "delete"},
             )
+
+            # #2572 Trigger A2 — gated on `deleted` for the same reason the
+            # audit row above is: nothing changed ⇒ nothing to sweep.
+            await _adopt_after_instance_key_removed(current_user, request)
 
         # Check if env var fallback exists
         env_key = os.getenv('ANTHROPIC_API_KEY', '')
@@ -3387,6 +3451,14 @@ async def delete_setting(
                 request_id=getattr(request.state, "request_id", None),
                 details={"setting": key, "action": "delete"},
             )
+
+            # #2572 Trigger A2, second clear path. `db.delete_setting` has no
+            # delete-side twin of ent#435's sink guard, so this route reaches
+            # the instance Anthropic key without ever touching
+            # `clear_secret_setting` — leaving it unhooked would reopen exactly
+            # the hole the dedicated route's hook closes.
+            if key in _ANTHROPIC_KEY_ALIASES:
+                await _adopt_after_instance_key_removed(current_user, request)
 
         return {"success": True, "deleted": deleted}
     except Exception as e:
