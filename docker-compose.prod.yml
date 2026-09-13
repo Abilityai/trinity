@@ -158,6 +158,9 @@ services:
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Prod compose launches standalone (no base merge / env_file), so wire it here too.
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.
+      # This compose launches standalone (no base merge / env_file), so wire it here too.
+      - CANVAS_MAX_PER_AGENT=${CANVAS_MAX_PER_AGENT:-100}        # canvases per agent
       # Skills library lifecycle automation (ent#236).
       # Prod compose launches standalone (no base merge / env_file), so wire it here too.
       - SKILLS_RECONCILE_MAX_REMOVALS=${SKILLS_RECONCILE_MAX_REMOVALS:-10}   # per-agent blast-radius cap

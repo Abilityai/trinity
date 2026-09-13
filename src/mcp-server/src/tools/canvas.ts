@@ -336,7 +336,11 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
       description:
         "Remove one of your canvases entirely. Use when a surface is finished or was superseded — " +
         "leaving a stale canvas up is worse than removing it, because a reader cannot tell the " +
-        "difference between 'done' and 'abandoned'. Succeeds whether or not the canvas existed.",
+        "difference between 'done' and 'abandoned'. Succeeds whether or not the canvas existed. " +
+        "RETIRE AS YOU GO: you have a fixed budget of canvases, and set_canvas refuses a NEW one " +
+        "once you are at it (updating the ones you already have keeps working). A canvas per run " +
+        "is what exhausts it — prefer rewriting one durable surface per topic to creating " +
+        "'report-2026-09-08'-style ids, and clear the ones whose job is done.",
       parameters: z.object({
         canvas_id: z.string().describe("The canvas to remove."),
       }),

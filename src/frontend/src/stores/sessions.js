@@ -57,6 +57,10 @@ export const useSessionsStore = defineStore('sessions', {
     brainOrbVoiceAvailable: false, // trinity-enterprise#60 — Brain Orb voice tile (Phase 3)
     brainOrbWriteAvailable: false, // trinity-enterprise#61 — Brain Orb KB-write surface (Phase 4a)
     claudeAuthConfigured: false,   // trinity-enterprise#52 — onboarding hard gate
+    // ent#553 — the per-agent canvas ceiling. 0 = "not told", which is the
+    // honest reading `canvasHeadroom` already gives a missing limit: the panel
+    // says nothing rather than inventing a bound.
+    canvasMaxPerAgent: 0,
 
     // #2380 — install provenance + the URL posture this instance ADVERTISES.
     // `marketplaceInstall` is THE gate for the first-run hardening guide and is
@@ -133,6 +137,11 @@ export const useSessionsStore = defineStore('sessions', {
         this.brainOrbVoiceAvailable = !!r.data?.brain_orb_voice_available
         this.brainOrbWriteAvailable = !!r.data?.brain_orb_write_available
         this.claudeAuthConfigured = !!r.data?.claude_auth_configured
+        // ent#553: an integer, not a flag. `Number(...) || 0` collapses null,
+        // undefined, a string and a NaN to the same "not told" value the
+        // component treats as "say nothing", so an older backend that has never
+        // heard of this key renders exactly as it did before.
+        this.canvasMaxPerAgent = Number(r.data?.canvas_max_per_agent) || 0
         // #2380: string flags, `platform_default_model`'s precedent on this
         // surface. Coerced through the same safe default the catch below uses,
         // so a null/absent field lands on the closed value rather than
@@ -160,6 +169,7 @@ export const useSessionsStore = defineStore('sessions', {
         this.brainOrbWriteAvailable = false
         this.claudeAuthConfigured = false
         this.a2aAvailable = false
+        this.canvasMaxPerAgent = 0
         // #2380 fails CLOSED like every flag above it: `unknown` provenance is
         // not a marketplace, so the hardening guide stays hidden. Showing a
         // security prompt on a correctly-configured managed instance is the

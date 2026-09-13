@@ -233,18 +233,28 @@ def test_summary_row_is_read_by_position_with_template_last():
     column list rather than hard-coding it."""
     from db.canvas import CanvasOperations, _SUMMARY_COLUMNS
 
-    assert _SUMMARY_COLUMNS[-1].name == "template"
-    row = ("agent", "main", "T", "roster", 1, "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", "exec", "brief")
+    # ent#553 appended `pinned` after it, obeying the same rule this test
+    # exists to enforce: `_row_to_summary` reads BY POSITION, so a new column
+    # goes last or every index after it shifts. The invariant is "append", not
+    # "template specifically" — so the check follows the newest column.
+    assert _SUMMARY_COLUMNS[-1].name == "pinned"
+    assert _SUMMARY_COLUMNS[-2].name == "template"
+    row = ("agent", "main", "T", "roster", 1, "2026-01-01T00:00:00Z",
+           "2026-01-02T00:00:00Z", "exec", "brief", 1)
     out = CanvasOperations._row_to_summary(row)
     assert out == {
         "agent_name": "agent", "canvas_id": "main", "title": "T", "audience": "roster",
         "schema_version": 1, "created_at": "2026-01-01T00:00:00Z",
         "updated_at": "2026-01-02T00:00:00Z", "updated_by_execution_id": "exec",
-        "template": "brief",
+        "template": "brief", "pinned": True,
     }
     full = CanvasOperations._row_to_full(row + ('[{"id":"b1","kind":"json"}]',))
     assert full["template"] == "brief" and full["blocks"][0]["id"] == "b1"
-    assert CanvasOperations._row_to_summary(row[:-1] + (None,))["template"] is None
+    # ent#553 — the stored 0/1 becomes a real bool, and `template` stays
+    # readable at its own index now that a column follows it.
+    assert CanvasOperations._row_to_summary(row[:-2] + (None, 0)) == {
+        **out, "template": None, "pinned": False,
+    }
     assert "template" in inspect.signature(CanvasOperations.upsert_canvas).parameters
 
 

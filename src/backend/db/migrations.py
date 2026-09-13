@@ -4012,6 +4012,30 @@ def _migrate_agent_canvases_template(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_canvases_pinned(cursor, conn):
+    """ent#553 — a human may pin a canvas so it stays at the top of the pile.
+
+    `agent_canvases.pinned` is 0/1, default 0, and is written ONLY by the
+    human-facing pin route — never by the agent write path. The distinction is
+    the point: `audience` is the agent's decision about who may read a canvas,
+    `pinned` is the reader's decision about what they want to see first, and an
+    agent that could pin itself to the top would defeat the ordering the pin
+    exists to give the person.
+
+    NOT NULL DEFAULT 0 so every pre-#553 row reads as unpinned without a
+    backfill pass.
+
+    Mirrored by the Alembic revision 0059_agent_canvases_pinned.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_canvases",
+        "pinned",
+        "ALTER TABLE agent_canvases ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+    )
+    conn.commit()
+
+
 def _migrate_portal_session_title_source(cursor, conn):
     """ent#473 — which hand wrote a Workspace thread's title.
 
@@ -4282,6 +4306,7 @@ MIGRATIONS = [
     ("portal_session_title_source", _migrate_portal_session_title_source),
     ("user_ui_preferences_table", _migrate_user_ui_preferences_table),
     ("agent_canvases_template", _migrate_agent_canvases_template),
+    ("agent_canvases_pinned", _migrate_agent_canvases_pinned),
     ("portal_session_main_chat", _migrate_portal_session_main_chat),
     ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
     ("portal_messages_voice_source", _migrate_portal_messages_voice_source),

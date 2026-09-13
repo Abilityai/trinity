@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+from types import SimpleNamespace
 from typing import Optional
 
 import httpx
@@ -34,11 +35,17 @@ from dependencies import (
     reject_agent_principal,
     require_admin,
 )
-from models import REPORT_ROWS_PAGE_MAX, User
+from models import (
+    REPORT_ROWS_PAGE_MAX,
+    CanvasBulkDelete,
+    CanvasPinRequest,
+    User,
+)
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
+from database import db
 from . import agent_page, service
 from .models import (
     PortalSessionRename,
@@ -770,6 +777,30 @@ def portal_agent_canvases(
         agent_name, audience=agent_page.canvas_audience_for(principal.is_platform))}
 
 
+@router.post("/agents/{agent_name}/canvas/bulk-delete")
+async def portal_bulk_delete_canvases(
+    agent_name: str,
+    body: CanvasBulkDelete,
+    request: Request,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Remove several of this agent's canvases from the Workspace (ent#553).
+
+    Declared above the parameterized canvas routes (Invariant #4). Audited like
+    its operator twin — see `_audit_canvas_change`.
+    """
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    _require_canvas_manager(agent_name, principal)
+    deleted = db.delete_agent_canvases(agent_name, body.canvas_ids)
+    await _audit_canvas_change(
+        request, principal, action="canvas_bulk_delete", agent_name=agent_name,
+        details={"requested": len(body.canvas_ids), "deleted": deleted,
+                 "surface": "workspace"},
+    )
+    return {"agent_name": agent_name, "requested": len(body.canvas_ids),
+            "deleted": deleted}
+
+
 @router.get("/agents/{agent_name}/canvas/{canvas_id}")
 def portal_agent_canvas_detail(
     agent_name: str,
@@ -795,6 +826,134 @@ def portal_agent_canvas_detail(
     if canvas is None:
         raise HTTPException(status_code=404, detail="Canvas not found")
     return canvas
+
+
+async def _audit_canvas_change(request: Request, principal: PortalPrincipal, *,
+                               action: str, agent_name: str, details: dict) -> None:
+    """One audit row per Workspace canvas delete/pin (ent#553 review).
+
+    The operator twins in `routers/canvas.py` have logged since they shipped and
+    `docs/user-docs/agents/agent-canvas.md` tells users deletion is audited —
+    these routes recorded nothing, so the claim was false for exactly the surface
+    an external-facing product is most often asked about.
+
+    **The actor is resolved to the real `users` row, not left as an email.**
+    Passing `actor_email` alone looks sufficient and is not: `_resolve_actor`
+    keys `actor_type` off `actor_user` / `actor_agent_name` / `mcp_scope` /
+    `mcp_key_id`, so an email-only call falls through to its last branch and the
+    row lands as `actor_type="system"`, `actor_id="trinity-system"` — a named
+    operator's deletion recorded as a PLATFORM action, invisible to any
+    `actor_type=user` query and to the per-actor filter the audit UI offers.
+    That is worse than the missing row this function was added to fix: a wrong
+    attribution is believed. (The #848 inline-auth precedent for `actor_email`
+    holds where the caller genuinely has no `users` row; here
+    `_require_canvas_manager` is platform-only and resolves through
+    `db.can_user_share_agent`, so a row exists by construction.)
+
+    The lookup is best-effort: if it somehow misses, the row is still written
+    with the email attached rather than dropped — an under-attributed audit
+    entry beats none — and the miss is logged, because it would mean the gate
+    admitted someone the user table does not know.
+
+    Ids and counts only — a canvas's blocks are agent-authored free-form content
+    and the audit log is broadly readable (the canary G-04 rule the operator
+    routes state).
+    """
+    actor_user = None
+    try:
+        row = db.get_user_by_email(principal.email)
+        if row:
+            actor_user = SimpleNamespace(
+                id=row.get("id"), email=row.get("email") or principal.email,
+                username=row.get("username"),
+            )
+    except Exception as e:  # noqa: BLE001 — attribution must not fail the action
+        logger.warning("canvas audit: could not resolve actor for %s: %s",
+                       principal.email, e)
+    if actor_user is None:
+        logger.warning(
+            "canvas audit: no users row for %s on a platform-only route; "
+            "recording the action with the email but no user attribution",
+            principal.email,
+        )
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action=action,
+        source="api",
+        actor_user=actor_user,
+        actor_email=principal.email,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details=details,
+    )
+
+
+def _require_canvas_manager(agent_name: str, principal: PortalPrincipal) -> None:
+    """Owner-or-admin, platform-only — the ent#553 gate for changing a canvas.
+
+    A uniform 404, not a 403: this prefix's contract is that a caller learns
+    nothing about what they cannot reach, and an external client who could tell
+    "exists but you may not" from "does not exist" has been told which canvases
+    the agent keeps for its operator.
+    """
+    if not service.may_manage_canvases(agent_name, principal.email,
+                                       is_platform=principal.is_platform):
+        raise HTTPException(status_code=404, detail="Canvas not found")
+
+
+@router.delete("/agents/{agent_name}/canvas/{canvas_id}")
+async def portal_delete_canvas(
+    agent_name: str,
+    canvas_id: str,
+    request: Request,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Remove one canvas from the Workspace (ent#553).
+
+    Idempotent, matching the operator route: a list one poll out of date must
+    not turn a second click into an error. Only a delete that REMOVED something
+    is audited — the same rule as the operator twin, for the same reason: a
+    repeat click is a no-op and logging those fills the trail with events where
+    nothing happened.
+    """
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    _require_canvas_manager(agent_name, principal)
+    deleted = db.delete_agent_canvas(agent_name, canvas_id)
+    if deleted:
+        await _audit_canvas_change(
+            request, principal, action="canvas_delete", agent_name=agent_name,
+            details={"canvas_id": canvas_id, "surface": "workspace"},
+        )
+    return {"canvas_id": canvas_id, "deleted": bool(deleted)}
+
+
+@router.put("/agents/{agent_name}/canvas/{canvas_id}/pin")
+async def portal_pin_canvas(
+    agent_name: str,
+    canvas_id: str,
+    body: CanvasPinRequest,
+    request: Request,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Pin or unpin one canvas so it stays at the top of the rail (ent#553).
+
+    Audited: a pin is what decides which canvas a whole roster sees first, so it
+    is an administrative act on a shared surface, not a per-viewer preference.
+    """
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    _require_canvas_manager(agent_name, principal)
+    if not db.set_agent_canvas_pinned(agent_name, canvas_id, body.pinned):
+        raise HTTPException(status_code=404, detail="Canvas not found")
+    await _audit_canvas_change(
+        request, principal, action="canvas_pin", agent_name=agent_name,
+        details={"canvas_id": canvas_id, "pinned": bool(body.pinned),
+                 "surface": "workspace"},
+    )
+    return {"canvas_id": canvas_id, "pinned": body.pinned}
 
 
 @router.get("/agents/{agent_name}/reports", response_model=PortalAgentReports)

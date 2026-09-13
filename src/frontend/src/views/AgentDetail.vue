@@ -238,7 +238,7 @@
 
             <!-- Canvas Tab Content (ent#438) -->
             <div v-if="activeTab === 'canvas'">
-              <AgentCanvasTab :agent-name="agent.name" />
+              <AgentCanvasTab :agent-name="agent.name" :can-manage="agent.can_share" />
             </div>
 
             <!-- Loops Tab Content (#1106 / #740 Phase 2) -->

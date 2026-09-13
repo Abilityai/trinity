@@ -15,20 +15,53 @@
     <CanvasPanel
       :canvases="canvases"
       :fetch-detail="fetchDetail"
+      :can-manage="canManage"
+      :delete-canvas="removeCanvas"
+      :bulk-delete-canvases="removeCanvases"
+      :pin-canvas="pinCanvas"
+      :canvas-limit="canvasLimit"
       viewer="operator"
+      @changed="load"
     />
   </div>
 </template>
 
 <script setup>
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import api from '../../api'
+import { useSessionsStore } from '../../stores/sessions'
 import CanvasPanel from './CanvasPanel.vue'
 
-const props = defineProps({ agentName: { type: String, required: true } })
+const props = defineProps({
+  agentName: { type: String, required: true },
+  // ent#553 (review) — the agent's own `can_share`, which is `db.
+  // can_user_share_agent`: exactly the predicate `_gate_human_removal` enforces
+  // server-side, and the same one `ReportsPanel` five lines up in `AgentDetail`
+  // already reads for its delete control.
+  //
+  // It was hardcoded `true`, on the argument that "the server decides". The
+  // server does decide — but a merely-SHARED user was then shown Manage →
+  // Delete / Pin and got a 403 on click, which is the failing-control problem
+  // `can_manage_canvases` exists to prevent on the Workspace. One model for
+  // both surfaces: the control renders where the call would succeed.
+  //
+  // Defaults FALSE, deliberately: an ancestor that forgets the prop hides an
+  // affordance rather than offering one that 403s.
+  canManage: { type: Boolean, default: false },
+})
 
 const canvases = ref([])
 const error = ref('')
+const sessions = useSessionsStore()
+// Surfaced so the header can warn BEFORE the agent meets the refusal. It is a
+// platform constant, not per-agent state, and the client already holds the
+// count — so it rides `GET /api/settings/feature-flags`, the established home
+// for a value the browser needs to render a surface, rather than a new route
+// (Invariant #13) or an envelope around the canvas list (which the MCP tool and
+// the Workspace both read as a bare array). 0 = "not told", and
+// `canvasHeadroom(n, 0)` renders nothing — the honest reading, and what an
+// older backend gets.
+const canvasLimit = computed(() => sessions.canvasMaxPerAgent)
 
 async function load() {
   error.value = ''
@@ -49,6 +82,34 @@ async function fetchDetail(canvasId) {
   return data
 }
 
-onMounted(load)
+async function removeCanvas(canvasId) {
+  await api.delete(
+    `/api/agents/${encodeURIComponent(props.agentName)}/canvas/${encodeURIComponent(canvasId)}`,
+  )
+  return true
+}
+
+async function removeCanvases(canvasIds) {
+  const { data } = await api.post(
+    `/api/agents/${encodeURIComponent(props.agentName)}/canvas/bulk-delete`,
+    { canvas_ids: canvasIds },
+  )
+  return data
+}
+
+async function pinCanvas(canvasId, pinned) {
+  await api.put(
+    `/api/agents/${encodeURIComponent(props.agentName)}/canvas/${encodeURIComponent(canvasId)}/pin`,
+    { pinned },
+  )
+  return true
+}
+
+onMounted(() => {
+  load()
+  // Cached for the page load and shared with every other flag consumer, so this
+  // is a no-op whenever anything else already asked.
+  sessions.loadFeatureFlags?.()
+})
 watch(() => props.agentName, load)
 </script>

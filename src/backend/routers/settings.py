@@ -187,6 +187,7 @@ async def get_public_feature_flags(
     )
     from services.entitlement_service import entitlement_service
     from services import a2a_outbound_service
+    from models import CANVAS_MAX_PER_AGENT
     # Function-local (#2217): a top-level import would pull the whole canary
     # package into the settings-router load; the handler pattern here is
     # function-local imports.
@@ -257,6 +258,20 @@ async def get_public_feature_flags(
         # routes enforce it themselves.
         "a2a_outbound_available": a2a_outbound_service.is_outbound_enabled(),
         "platform_default_model": settings_service.get_platform_default_model(),
+        # ent#553: the per-agent canvas ceiling, so the UI can WARN before the
+        # agent meets the refusal instead of only reporting it afterwards. An
+        # INTEGER, not a flag — `platform_default_model` above is the precedent
+        # for a non-boolean here, and this is the same shape of thing: a value
+        # the browser needs to render a surface honestly.
+        #
+        # Surfaced here rather than on a new route because it is a CONSTANT, not
+        # per-agent state: the client already knows the count (it holds the
+        # list), so the ceiling is the only missing half, and a dedicated
+        # endpoint would owe Invariant #13 a third surface for one integer.
+        # Not folded into the canvas LIST response either — that would turn
+        # `List[CanvasSummary]` into an envelope and break the MCP tool and the
+        # Workspace, both of which read the bare array.
+        "canvas_max_per_agent": CANVAS_MAX_PER_AGENT,
         # Install provenance (#2380). A STRING, not a boolean — `platform_default_model`
         # above is the precedent for a non-boolean on this surface. One of
         # do-marketplace / vultr-marketplace / script / unknown, recorded once at
