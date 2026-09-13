@@ -7,7 +7,7 @@ Organize agents with tags, saved system views, and tag clouds for visual groupin
 1. Tag agents from the agent detail page, or programmatically via API/MCP.
 2. Tags appear as colored badges on agent tiles throughout the UI.
 3. The Dashboard shows tag clouds -- agents grouped visually by tag.
-4. On the Agents page, filter by tags. Filters persist across navigation.
+4. On the Dashboard (any view mode), filter by tags. Filters persist across navigation.
 5. Create **System Views** to save filter combinations (tags plus other criteria) for quick access.
 
 ### Tag Management

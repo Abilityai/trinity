@@ -52,7 +52,7 @@ curl -X PUT http://localhost:8000/api/agents/my-agent/voip \
 
 ### The Agent's Voice
 
-Calls speak with the agent's persisted Gemini voice, shared with the in-app voice overlay. Pick it in the VoIP dialog's **Agent voice** selector or via `PUT /api/agents/{name}/voice/name`. Available voices: **Kore** (firm, the default), **Zephyr** (bright), **Puck** (upbeat), **Aoede** (breezy), **Charon** (informational), **Fenrir** (excitable), and **Gacrux** (mature). Clearing the setting reverts to Kore.
+Calls speak with the agent's persisted Gemini voice, shared with the Workspace voice call. Pick it in the VoIP dialog's **Agent voice** selector or via `PUT /api/agents/{name}/voice/name`. Available voices: **Kore** (firm, the default), **Zephyr** (bright), **Puck** (upbeat), **Aoede** (breezy), **Charon** (informational), **Fenrir** (excitable), and **Gacrux** (mature). Clearing the setting reverts to Kore.
 
 ### 2. Place a Call
 
@@ -97,7 +97,7 @@ The optional `context` (up to 2,000 characters) becomes the call's purpose in th
 | `/api/agents/{name}/voip` | PUT | Configure Twilio voice binding — validates credentials with Twilio, encrypts the Auth Token (owner-only) |
 | `/api/agents/{name}/voip` | DELETE | Remove the binding (owner-only) |
 | `/api/agents/{name}/voip/enabled` | PUT | Enable/disable calling without re-entering credentials (owner-only; 404 if no binding) |
-| `/api/agents/{name}/voice/name` | GET / PUT | The agent's persisted Gemini voice (PUT owner-only; applies to VoIP calls and the in-app voice overlay) |
+| `/api/agents/{name}/voice/name` | GET / PUT | The agent's persisted Gemini voice (PUT owner-only; applies to VoIP calls and the Workspace voice call) |
 | `/api/agents/{name}/voip/call` | POST | Place an outbound call; returns `{call_id, status: "ringing", to_number, twilio_call_sid, chat_session_id}` |
 | `/api/voip/voice/{call_id}` | WebSocket | Twilio Media Streams audio bridge (ticket-authed, used by Twilio — not called directly) |
 

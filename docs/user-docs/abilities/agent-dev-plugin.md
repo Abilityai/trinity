@@ -1,6 +1,8 @@
 # agent-dev Plugin
 
-Development tools for extending existing agents — skills, memory systems, git-backed state, a GitHub Issues development cycle, long-running pipelines, multi-agent orchestration, a shared canonical-data layer, and fleet analysis and migration.
+Development tools for extending existing agents — skills, memory systems, git-backed state, a GitHub Issues development cycle, cross-actor project management, long-running pipelines, multi-agent orchestration, a shared canonical-data layer, and fleet analysis and migration. Thirty skills in v1.16.0.
+
+Two kinds of skill live here. **Installers** (`add-*`) put a capability into an agent. **Runtime skills** are what the agent then runs — the nine backlog-workflow skills and the five `project-*` skills. Each runtime skill is authored once in this plugin; the installers copy it in at install time (they embed nothing of their own), and the same files are mirrored into the community skills catalog Trinity ships with (`trinity-skills`), so a deployed agent can also receive them by [assignment](../automation/skills-and-playbooks.md) without running the installer.
 
 > 📺 **Watch:** [Why Every AI Agent Needs a GitHub Repo](https://youtu.be/R4nNHf6ywEs) *(Apr 2026)* · [3 AI Agents Run My Software Development Pipeline](https://youtu.be/zCDFDhewFkk) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -18,11 +20,11 @@ Development tools for extending existing agents — skills, memory systems, git-
 | `/agent-dev:adjust-playbook` | Modify an existing skill/playbook |
 | `/agent-dev:add-memory` | Add a memory system (file-index, brain, json-state, workspace) |
 | `/agent-dev:add-git-sync` | Add git-as-state hooks — auto-commit on stop, rebase on session start |
-| `/agent-dev:add-backlog` | Install the full GitHub Issues development cycle into the agent |
-| `/agent-dev:backlog` | View the agent's current GitHub Issues backlog |
+| `/agent-dev:add-backlog` | Install the full GitHub Issues development cycle into the agent — copies the nine standalone workflow skills below |
+| `/agent-dev:backlog` | View the agent's current GitHub Issues backlog (`all`, `in-progress`, or `blocked`) |
 | `/agent-dev:claim` | Claim the next issue — picks the highest-priority todo, marks it in-progress |
 | `/agent-dev:autoplan` | Analyze a claimed issue before implementing — affected files, changes, risks |
-| `/agent-dev:commit` | Commit changed skill files and close the in-progress issue with traceability |
+| `/agent-dev:commit` | Commit changed skill files and close the in-progress issue with traceability; with nothing claimed, a **checkpoint** commit of the agent-state files |
 | `/agent-dev:close` | Close the current issue without a commit (use `/commit` when files changed) |
 | `/agent-dev:groom` | Groom the backlog — label untagged issues, verify priorities, surface stale work |
 | `/agent-dev:roadmap` | Strategic view — open issues grouped by skill area |
@@ -36,17 +38,24 @@ Development tools for extending existing agents — skills, memory systems, git-
 | `/agent-dev:add-orchestrator` | Make the agent a system-aware orchestrator — discover the fleet, compose systems, route and fan out work; `--check` reports installed-vs-bundled drift before you overwrite |
 | `/agent-dev:add-canon` | Give the agent a shared canonical-data layer — a fleet-wide git repo with publish, consume, reconcile, and doctor skills |
 | `/agent-dev:add-canon-lint` | Install deterministic (no-LLM) consistency linting into that canon repo, with a CI workflow |
-| `/agent-dev:add-project-management` | Install cross-actor project management — GitHub Issues as the source of truth, an approval-ready completion lattice, and a project steward |
+| `/agent-dev:add-project-management` | Install cross-actor project management — GitHub Issues as the source of truth, an approval-ready completion lattice, and a project steward. Writes `PROJECT_STANDARD.md` and copies the five `project-*` skills below |
+| `/agent-dev:project-init` | Create or adopt a long-term managed project — a GitHub epic with idempotent labels and a `project_files/<slug>/` workspace stub. Materializes a missing `PROJECT_STANDARD.md` from its own template, so it works when assigned from the library without the installer |
+| `/agent-dev:project-task` | Create a task issue in the uniform format (Objective / Definition of Done / Context / Validation) and add it to the epic's checklist — the only sanctioned task-creation path; `--headless` for crons and other skills |
+| `/agent-dev:project-steward` | Autonomous sweep of every managed project: verify pending-verification claims, dispatch labeled work, escalate stalls, age open loops and draft follow-ups, write the digest. Never asks a human mid-run; ships a default weekday schedule |
+| `/agent-dev:project-reconcile` | Sync a projection adapter (Google Tasks v1 shipped) back into the GitHub Issues registry — idempotent, refuses unkeyed items with a sync-gap alert |
+| `/agent-dev:project-intake` | Headless intake primitive — route actionable items from meetings, email, Slack, or trackers into the registry, deduped by meaning; returns the issue number. Called by other skills and crons, never interactive |
 | `/agent-dev:agent-fleet-analysis` | Audit a directory of agents in any paradigm, score maturity and migration readiness, and emit a PDF report plus an agent-executable work order |
 | `/agent-dev:agent-fleet-migrate` | Execute that work order non-destructively into a verified Claude Code fleet, with a before/after maturity report |
 
 ### Fleet-scale skills
 
-The last five are about a *set* of agents rather than one.
+Five of these are about a *set* of agents rather than one.
 
 **Canon** (`add-canon`, `add-canon-lint`) gives a fleet a shared, citable source of truth on plain git — no new platform primitive. Each agent owns a folder it publishes to and reads other agents' folders at a pinned ref; the lint pass keeps the claims structurally consistent and runs in CI. The layer also carries **relations** — per-counterpart collaboration memory: each agent keeps one doc per agent it actually works with (working agreements, a capped log of recent events, open threads), reads it before acting on that counterpart's request and appends the outcome before closing the interaction. Each side keeps its own view; a divergence between the pair is a dropped-thread signal, and open threads older than 30 days surface as needs-review rows in the reconcile pass.
 
 **Project management** (`add-project-management`) installs a cross-actor task model on GitHub Issues, with an `open → pending-verification → done` lattice so work isn't marked complete until it's been verified, and a **loop-closure** discipline: no loop closes by silence in either direction. Every run ends by stating what is now true, what is waiting on the operator, and what happens next; work parked on someone the system cannot dispatch to (a client, a vendor, a colleague) is labeled `waiting-on:<actor>`, aged on a 3/7/14-day ladder, listed under **Your open loops** in the digest, and handed back with a drafted follow-up — the agent drafts, the human sends.
+
+The installer asks for the registry repo, the operator, the agent's name, the pending-verification age limit, and a steward cadence; then it renders `PROJECT_STANDARD.md` — the deployer's configuration surface, which all five runtime skills read — and copies `/project-init`, `/project-task`, `/project-steward`, `/project-reconcile`, and `/project-intake` into `.claude/skills/`. Re-running it offers to overwrite, install only what is missing, or upgrade an older standard in place. It governs *cross-actor* work; for a single agent's own dev backlog use `add-backlog` instead. On Trinity the same five skills can be [assigned from the skills library](../automation/skills-and-playbooks.md) — `/project-init` then materializes the standard itself on first run.
 
 **Fleet analysis and migration** (`agent-fleet-analysis`, `agent-fleet-migrate`) are a pair. The first scans agents written in *any* paradigm — Claude Code, n8n workflow exports, LangChain/CrewAI/AutoGen applications, hand-rolled loops — and produces both a human-readable report and a work order an agent can execute. The second carries out that work order into a fresh `fleet-migrated/` tree; your original sources are never mutated, and each migrated agent passes a review gate before the run reports success.
 
@@ -124,16 +133,18 @@ Add task management via GitHub Issues:
 /agent-dev:add-backlog
 ```
 
-This installs the full development cycle directly into the agent. After install, the agent has:
+This installs the full development cycle directly into the agent by copying the nine standalone workflow skills from the plugin (the installer carries no copies of its own, so an installed agent always matches the maintained skills). After install, the agent has:
 
 - `/backlog` — view current issues
 - `/claim` — claim the next issue to work on
 - `/autoplan` — analyze the claimed issue before implementing
-- `/commit` — commit changes and close the issue with a traceable message
+- `/commit` — commit changes and close the issue with a traceable message; with no issue in progress it becomes a **checkpoint** commit of the agent-state set (`memory/`, `.claude/memory/`, `outputs/`, `.claude/skills/`, `CLAUDE.md`, `template.yaml` — never `.env`, `.mcp.json`, or anything credential-shaped), so the one `/commit` also serves as a plain save
 - `/close` — close without a commit
 - `/groom` and `/roadmap` — keep the backlog labeled, prioritized, and surveyable
 - `/sprint` — the human-supervised end-to-end cycle
 - `/work-loop` — the autonomous variant (below)
+
+On Trinity the same nine skills ship in the bundled community skills catalog, so they can also be [assigned](../automation/skills-and-playbooks.md) to a deployed agent directly.
 
 ### Autonomous Work Loop
 

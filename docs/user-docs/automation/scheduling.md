@@ -30,12 +30,21 @@ A template can ship the recurring work its agent is designed to do in a `schedul
 
 1. Open the agent detail page and go to the scheduling section.
 2. Click **Create Schedule**.
-3. Configure: name, cron expression (e.g., `0 9 * * 1-5` for weekdays at 9 AM), message/task, timezone, and description.
+3. Configure: name, cron expression (e.g., `0 9 * * 1-5` for weekdays at 9 AM), message/task, timezone, and description. The presets **Daily 9 AM**, **Weekly Mon**, **Every 6h** and **Every 30m** fill the cron field for the common cadences.
 4. Optionally select a model override (Fable 5, Sonnet 5, Opus, Haiku, or custom). Fable 5 is the most capable model, for the longest and hardest tasks; Sonnet 5 is fast with a 1M-token context window.
 5. Enable or disable individual schedules with the toggle.
 6. View execution history with status, duration, and cost.
 7. Click **Run Now** to trigger a schedule immediately.
 8. Use the autonomy toggle to pause or resume all of the agent's scheduled work at once. Individual schedules keep their own enabled/disabled state across the toggle -- while autonomy is off, an enabled schedule shows a "Will not fire -- autonomy off" warning instead of being switched off.
+
+### Cron expressions are checked as you type
+
+The form validates the cron expression with the same grammar the scheduler uses, so a mistake is caught before you save rather than as a server error:
+
+- While creating, an inline error appears under the field once you leave it with an invalid expression; while editing, an invalid stored expression is flagged immediately. **Create** (or **Update**) is disabled only while the field is non-empty **and** invalid.
+- A schedule already stored with an expression the scheduler cannot register shows a warning triangle inside its cron chip in the list, with the tooltip **Invalid cron expression**. Such a schedule never fires until you fix it.
+
+The server remains the authority: an expression the form accepts but the scheduler rejects still fails on save with the reason.
 
 ### Execution Flow
 
@@ -97,7 +106,8 @@ curl -X POST http://localhost:8000/api/agents/my-agent/schedules \
 ```
 
 The same field is available on `create_agent_schedule` and `update_agent_schedule`;
-passing `null` on an update stops delivering. Leave it unset and nothing changes.
+passing `null` on an update stops delivering. Leave it unset and nothing changes. The
+schedule form in the UI has no field for it.
 
 **Where it lands.** In that person's **Main** chat with the agent — the one constant
 conversation per person per agent, which is where the agent reaches you when no
@@ -105,20 +115,28 @@ particular chat is the right home for a message. It reads like any other message
 from the agent, and it can be rated like one.
 
 **Who you can name.** Someone the agent is already shared with, or its owner. If the
-address cannot reach the agent — never shared, share revoked, or simply unknown —
+address cannot reach the agent — never shared, share revoked, blocked, or simply unknown —
 **the run fails and says so** on the execution row rather than running and quietly
 delivering nowhere. A malformed address is rejected when you save the schedule, not
 hours later on the first fire.
+
+**Who can set it.** You can always name yourself. Naming anyone else takes the agent's
+owner or an admin — on create and on update alike — so that someone the agent is merely
+shared with cannot put a recurring message of their choosing into a colleague's chat.
+Clearing the address is never restricted.
 
 **When it shows up.** The message is saved as soon as the run finishes, but the
 Workspace does not poll a conversation you already have open. So it appears the
 next time that person loads the Workspace or switches to the chat — fine at daily
 cadence, and worth knowing if you were expecting it to pop up mid-conversation. It
-will also never cut into a turn already in progress in that chat: it waits for the
-reply to finish first.
+also avoids cutting into a turn already in progress in that chat: it waits up to two
+minutes for that reply to finish, then writes regardless.
 
 **Delivered once.** Each fire delivers at most one message, even if the platform
 has to retry internally.
+
+**Rateable.** The delivered message is an ordinary reply from the agent, so the
+person can rate it like any other — see [Workspace](../sharing-and-access/workspace.md#reading-replies).
 
 ## Per-Schedule Analytics
 
@@ -258,3 +276,4 @@ Raise the agent cap first, then raise the schedule timeout.
 - [Agent Loops](agent-loops.md) — bounded sequential task repetition
 - [Agent Self-Reminders](agent-reminders.md) — one-shot, durable, agent-initiated deferred follow-ups
 - [Approvals](approvals.md) — human-in-the-loop gates for scheduled work
+- [Workspace](../sharing-and-access/workspace.md) — where a delivered run lands

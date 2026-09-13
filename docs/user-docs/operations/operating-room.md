@@ -8,6 +8,7 @@ The Operations page at `/operations` is the single fleet-operations surface. It 
 | **Notifications** | Agent notifications with filters, stats, and bulk actions |
 | **Health** | Fleet health monitoring (admin-only) — see [Monitoring](monitoring.md) |
 | **Executions** | All task runs across the fleet — see [Executions](executions.md) |
+| **Reports** | Structured reports published by every agent you can access — see [Agent Reports](agent-reports.md) |
 | **Resolved** | Terminal operator-queue items (responded, acknowledged, cancelled, expired) |
 
 Tabs are addressable via `?tab=` (e.g. `/operations?tab=notifications`). Legacy routes redirect here: `/operating-room` (deep links keep their query), `/monitoring` → the Health tab, `/executions` → the Executions tab, and `/events` → the Notifications tab. Non-admin deep links to `?tab=health` fall back to the default tab.
@@ -23,8 +24,24 @@ Shows items from agents' operator queues that are waiting on a human: questions,
 - Agents write to `~/.trinity/operator-queue.json` inside their container.
 - A background sync service polls running agents every 5 seconds and persists items to the backend database.
 - Operators respond to items directly; responses are written back to the originating agent.
-- The first open item auto-expands when items arrive.
+- The first open item auto-expands once when items arrive. A card you collapse stays collapsed through refreshes and new arrivals; the auto-expand re-arms only after the queue empties.
 - WebSocket events: `operator_queue_new`, `operator_queue_responded`, `operator_queue_acknowledged`, `operator_queue_cleared`.
+
+Each card carries a type pill — **Needs approval**, **Question**, or **Heads up** — and the control matches the type:
+
+| Type | What you do |
+|------|-------------|
+| Needs approval | Pick one of the options the agent offered, optionally add a note, and send. The decision is always one of the agent's own options — a free-text decision is refused. |
+| Question | Type an answer and send. |
+| Heads up | Click **Got it** to acknowledge. |
+
+If the item stopped being pending while you were answering — another operator's response or Clear All landed first, or it expired — your response is **not recorded** and the page says so.
+
+Besides agent-authored items, the platform files its own alerts into this tab:
+
+- Git sync failures — see [Sync Health Alerts](#sync-health-alerts) below.
+- Weekly-limit subscription alerts, titled **Subscription '<name>' passed N% of its weekly limit** (or **… is at N% of its weekly limit** at the critical tier) and, when two or more are all saturated, **All N subscriptions are near their weekly limit**. The thresholds are described in [Subscription Credentials](../credentials/subscription-credentials.md).
+- A notice after a push whose `.gitignore` sweep changed which files are tracked — see [GitHub Sync](../integrations/github-sync.md).
 
 ### Notifications Tab
 
@@ -76,7 +93,7 @@ Per-agent sync state (last sync at, last error, ahead/behind counts on `main` an
 | `/api/operator-queue/bulk-cancel` | POST | Cancel listed pending items (`{"ids": [...]}`); returns `{cancelled, skipped}` |
 | `/api/operator-queue/clear-resolved` | POST | Hide terminal items (acknowledged/cancelled/expired); returns `{cleared}` |
 | `/api/operator-queue/{id}` | GET | Get single item |
-| `/api/operator-queue/{id}/respond` | POST | Submit response |
+| `/api/operator-queue/{id}/respond` | POST | Submit response — body `{"response": "<decision>", "response_text": "<optional note>"}`. For an approval, `response` must be one of the item's own `options` (exact match) or the call fails with 422 `response_not_an_offered_option` carrying `offered_options`; 409 if the item is no longer pending |
 | `/api/operator-queue/{id}/cancel` | POST | Cancel item |
 | `/api/operator-queue/agents/{name}` | GET | Items for a specific agent |
 | `/api/notifications/dismiss-all` | POST | Dismiss all pending + acknowledged notifications (optional `agent_name`) |

@@ -24,7 +24,46 @@ Agent-defined dashboards via `dashboard.yaml` with 11 widget types, historical t
 4. Auto-refresh updates values as the agent modifies the YAML file.
 5. Historical values are tracked automatically — sparklines appear for metrics with enough data points.
 6. Trend indicators (↑/↓) show percentage change from previous values.
-7. A Platform Metrics section appears at the bottom of every dashboard. This section is auto-injected and not controlled by the YAML file.
+7. A Platform Metrics section appears at the bottom of every dashboard. This section is auto-injected and not controlled by the YAML file (set `platform_metrics: false` at the top level to opt out).
+
+### dashboard.yaml shape
+
+```yaml
+title: "My Agent Dashboard"     # required
+refresh: 30                     # optional auto-refresh in seconds (min 5, default 30)
+sections:                       # required, at least one
+  - title: "Status"
+    layout: grid                # grid (default) or list
+    columns: 3                  # 1-4
+    widgets:
+      - type: metric
+        id: tasks_done          # a stable id keeps the value's history — this is what draws the sparkline
+        label: "Tasks completed"
+        value: 42
+        unit: "tasks"
+      - type: markdown
+        content: "**Next up:** the weekly digest"
+```
+
+### Widget reference
+
+| Type | Required fields | Renders as |
+|------|-----------------|------------|
+| `metric` | `label`, `value` | A number, with optional `unit`, `trend` (`up`/`down`), `trend_value`, `description` — and a sparkline when it has an `id` |
+| `status` | `label`, `value`, `color` | A colored badge (`green`, `red`, `yellow`, `gray`, `blue`, `orange`, `purple`) |
+| `progress` | `label`, `value` | A 0–100 bar, optional `color`; history and sparkline when it has an `id` |
+| `text` | `content` | Plain text, optional `size`, `color`, `align` |
+| `markdown` | `content` | Rendered Markdown |
+| `table` | `columns`, `rows` | A table |
+| `list` | `items` | A bullet or numbered list |
+| `link` | `label`, `url` | A link or button |
+| `image` | `src`, `alt` | An image |
+| `divider` | — | A horizontal rule |
+| `spacer` | — | Vertical space |
+
+The eleven types above are the closed set. A widget of any other type — or one missing a required field — is stripped by the agent server before the dashboard reaches the UI and listed in the Dashboard tab's *widgets skipped due to validation errors* banner; the rest of the dashboard still renders. The agent's compatibility report names the offending type. Only a missing `title` or an empty `sections` list makes the whole dashboard invalid.
+
+**Sparkline history is keyed by `id`.** Trinity records each `metric`, `progress`, and `status` widget's value on every fetch; `metric` and `progress` widgets draw a sparkline once they have more than one point. A widget with an explicit `id` keeps its history when you reorder or insert widgets; one without an `id` is keyed by position (`s0_w1`), so moving it starts a new series. Trend arrows compare the first and second halves of the window (more than ±5% is up or down).
 
 ## Related: the Brain Orb
 
@@ -42,15 +81,16 @@ Agents control their dashboard entirely by writing to `dashboard.yaml` in their 
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents/{name}/dashboard` | GET | Get dashboard data |
+| `/api/agent-dashboard/{name}` | GET | Get dashboard data, enriched with history and platform metrics |
+| `/api/agent-dashboard/{name}/exists` | GET | Whether the agent has (or ever had) a dashboard — served from cache, no container call |
 
 **Query parameters:**
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `include_history` | bool | Include historical value data |
-| `history_hours` | int | Number of hours of history to return |
-| `include_platform_metrics` | bool | Include the auto-injected platform metrics section |
+| `include_history` | bool | Include historical value data (default `true`) |
+| `history_hours` | int | Hours of history to return, 1–168 (default 24) |
+| `include_platform_metrics` | bool | Include the auto-injected platform metrics section (default `true`) |
 
 ## See Also
 

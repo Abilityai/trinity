@@ -14,8 +14,8 @@ Connect agents to Slack workspaces. Supports DMs, @mentions in channels, multi-a
 
 ### Platform Setup (Admin -- Settings Page)
 
-1. Go to **Settings > Slack** section.
-2. Enter your Slack App Token (`xapp-...`) for Socket Mode.
+1. Go to **Settings → Integrations** and find the **Slack Integration** section.
+2. Enter your Slack App Token (`xapp-...`) for Socket Mode. The app token, client secret, and signing secret are stored encrypted at rest (see [Credential Management](../credentials/credential-management.md#platform-level-credentials)).
 3. Click **Connect** to start the Socket Mode transport.
 4. Click **Install to Workspace** to perform platform-level OAuth and obtain a bot token.
 5. The connection status badge shows connected or disconnected.

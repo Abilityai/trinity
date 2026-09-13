@@ -22,9 +22,9 @@ A GitHub PAT is required for:
 | Clone from public templates | No |
 | Pull from public repos (read-only) | No |
 
-> **The token needs the right scopes for each row above.** As of #1574 Trinity wires the managed token for **both** `git` **and** the `gh` CLI / REST API — but wiring only makes the token *available*; it can't grant scopes the token lacks. A git-contents-only PAT still 403s on Issues/PRs.
+> **The token needs the right scopes for each row above.** Trinity wires the managed token for **both** `git` **and** the `gh` CLI / REST API — but wiring only makes the token *available*; it can't grant scopes the token lacks. A git-contents-only PAT still 403s on Issues/PRs.
 
-## What the PAT Authenticates: Git **and** the `gh` CLI (#1574)
+## What the PAT Authenticates: Git **and** the `gh` CLI
 
 When an agent has a GitHub repo and a resolved PAT (per-agent override or the platform PAT), Trinity:
 
@@ -73,7 +73,7 @@ You do not have to rely on the shared platform PAT. **Any authenticated user —
 So a non-admin is no longer confined to the admin PAT's repo scope: an agent you create picks up *your* token first, reaching the repos *your* GitHub user can reach.
 
 - **Never echoed back.** A read returns status only (`configured`, `has_global`) — never the token string.
-- **Validated and encrypted.** The token is checked against GitHub before it is saved, then encrypted at rest.
+- **Validated and encrypted.** The token is checked against GitHub before it is saved, then encrypted at rest — as is the platform-wide PAT (see [Credential Management → Platform-level credentials](../credentials/credential-management.md#platform-level-credentials)).
 
 **How the resolved token is persisted:**
 

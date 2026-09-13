@@ -68,6 +68,8 @@ when either applies:
   deployment may still be running. **Check your agent list before retrying**, because
   deploying twice creates duplicate agents.
 
+Unrecognised keys are reported as warnings rather than silently ignored — at the top level and inside an agent entry alike (`credentials:`, `skills:`, and `display_label:` are the ones people try first; the manifest does not carry them). Preview and deploy resolve the same default resources, so a preview that passes on the fleet default will not fail at deploy because the two disagreed.
+
 Two known limits of the preview, both deliberate:
 
 - Templates referenced as `github:` are only checked when you actually deploy, so a
@@ -135,6 +137,15 @@ Two deploy options control this:
 
 **Redeploy caveat:** re-running a manifest after a `partial` failure does **not** yet converge idempotently -- it `_N`-suffixes the already-created agents (e.g. `my-system-worker_2`) instead of reusing them. Clean up the survivors first, or expect suffixed duplicates.
 
+## After Deploy: Reading, Restarting, and Exporting a System
+
+Deploy is a one-shot recipe, but the deployed agents remain addressable as a system:
+
+- **Membership is by tag, not by name.** Deploy tags every member with the system name, and the post-deploy routes resolve membership from that tag. Only agents deployed before tagging existed fall back to the `<system>-*` name prefix, and even then an agent whose own tag claims a longer prefix is excluded — so restarting `acme` never touches the agents of a system named `acme-extra`.
+- **Get** (`GET /api/systems/{name}`) returns the members you can access with their permissions, shared folders, and real schedules.
+- **Restart** (`POST /api/systems/{name}/restart`, `restart_system`) stops and starts every member. It requires the **creator** role or above and is **human-only**: an agent-scoped API key is refused, because the per-agent start/stop routes only let an agent touch agents it spawned and a bulk restart would bypass that.
+- **Export** (`GET /api/systems/{name}/manifest`, `get_system_manifest`) writes a manifest you can deploy again. Permission edges pointing outside the system are dropped rather than exported as broken names, and the instance-wide platform prompt is never embedded as the manifest's `prompt:` — deploying the export elsewhere would otherwise overwrite that instance's prompt for every agent.
+
 ## Default System on First Run
 
 On a **fresh install** (no non-system agents yet), Trinity auto-seeds a bundled default system from a shipped manifest, so a new instance comes up with a running starter fleet -- zero manual steps.
@@ -151,17 +162,19 @@ On a **fresh install** (no non-system agents yet), Trinity auto-seeds a bundled 
 |------|-------------|
 | `deploy_system(manifest, dry_run?, strict?)` | Deploy a system from a manifest. `dry_run` validates and previews without creating; `strict` restores abort-on-first-failure. Check the response `status` / `failed[]`. |
 | `list_systems()` | List all deployed systems |
-| `restart_system(name)` | Restart all agents in a system |
-| `get_system_manifest(name)` | Retrieve the manifest for a deployed system |
+| `restart_system(name)` | Restart all agents in a system (creator role, human callers only — refused for an agent key) |
+| `get_system_manifest(name)` | Export the system as a redeployable YAML manifest |
 
 ### API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/systems/deploy` | POST | Deploy a system from a YAML manifest (`dry_run`, `strict` in the body) |
+| `/api/systems/deploy` | POST | Deploy a system from a YAML manifest (`dry_run`, `strict` in the body); creator role |
+| `/api/systems/manifests` | GET | The bundled manifest catalogue shown under **Pick a system** (creator role) |
+| `/api/systems/manifests/{manifest_id}` | GET | One bundled manifest's YAML and preview (creator role) |
 | `/api/systems` | GET | List all deployed systems |
 | `/api/systems/{system_name}` | GET | Get one system's agents, permissions, folders, and schedules |
-| `/api/systems/{system_name}/restart` | POST | Restart all agents in the system |
+| `/api/systems/{system_name}/restart` | POST | Restart all agents in the system (creator role, human-only) |
 | `/api/systems/{system_name}/manifest` | GET | Export the system as a YAML manifest |
 
 See the [Backend API Docs](http://localhost:8000/docs) for full request/response schemas.
