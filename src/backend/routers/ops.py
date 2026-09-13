@@ -1188,6 +1188,14 @@ def _format_model_name(model_id: str) -> str:
 
     # Map common model IDs
     mappings = {
+        # #2726: the substitution above strips only an 8-DIGIT suffix, so a
+        # point-release id keeps its `-1` and falls through to the title-case
+        # fallback, rendering "Claude Fable 5 1". Every earlier catalog addition
+        # degraded cleanly ("claude-opus-5" -> "Claude Opus 5"), so this is the
+        # first id that needs an exact entry. `claude-fable-5` is deliberately
+        # NOT mapped: its fallback is already correct, and a prefix entry for it
+        # would swallow this one (startswith, first match wins).
+        "claude-fable-5-1": "Claude Fable 5.1",
         "claude-sonnet-4": "Claude Sonnet 4",
         "claude-opus-4": "Claude Opus 4",
         "claude-haiku-4": "Claude Haiku 4",

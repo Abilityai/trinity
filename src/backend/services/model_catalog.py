@@ -81,8 +81,8 @@ class ModelEntry:
 
     ⚠️ **This is a positional frozen dataclass** — every entry below passes its
     booleans positionally. A field inserted anywhere but LAST silently reassigns
-    ``public_channel`` / ``admin_default_selectable`` / ``recommended`` on all ten
-    entries, with no error. Append; set the new ones by keyword.
+    ``public_channel`` / ``admin_default_selectable`` / ``recommended`` on every
+    entry, with no error. Append; set the new ones by keyword.
     """
 
     id: str
@@ -100,6 +100,10 @@ class ModelEntry:
 # memory): ``claude-opus-5`` is the current Opus tier; the ``-5`` family and
 # ``claude-sonnet-4-6`` are current; ``opus-4-8/4-7/4-6`` are the prior Opus
 # generation (legacy). The date-suffixed ids are kept verbatim.
+#
+# Canonical lineup (keep this comment as the bump-anchor):
+#     https://platform.claude.com/docs/en/about-claude/models/overview
+# Last synced: 2026-09-12 (#2726 — Claude Fable 5.1)
 MODEL_CATALOG: tuple[ModelEntry, ...] = (
     # Current generation.
     ModelEntry(
@@ -113,9 +117,17 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         workspace_tier="Most capable",
     ),
     ModelEntry(
+        "claude-fable-5-1",
+        "Claude Fable 5.1",
+        "Most capable \u2014 longest tasks (latest)",
+        True,
+        True,
+        False,
+    ),
+    ModelEntry(
         "claude-fable-5",
         "Claude Fable 5",
-        "Most capable \u2014 longest tasks (latest)",
+        "Most capable \u2014 longest tasks",
         True,
         True,
         False,

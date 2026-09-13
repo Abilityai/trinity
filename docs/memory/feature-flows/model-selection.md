@@ -73,7 +73,8 @@ The catalog, in picker order:
 | id | label | note |
 |---|---|---|
 | `claude-opus-5` | Claude Opus 5 | Most capable Opus (latest) |
-| `claude-fable-5` | Claude Fable 5 | Most capable — longest tasks (latest) |
+| `claude-fable-5-1` | Claude Fable 5.1 | Most capable — longest tasks (latest) |
+| `claude-fable-5` | Claude Fable 5 | Most capable — longest tasks |
 | `claude-sonnet-5` | Claude Sonnet 5 | Fast + smart, 1M context (latest) |
 | `claude-opus-4-8` | Claude Opus 4.8 | Legacy (prior Opus) |
 | `claude-opus-4-7` | Claude Opus 4.7 | Legacy |
@@ -494,7 +495,8 @@ ALTER TABLE schedule_executions ADD COLUMN model_used TEXT;
 | Model ID | Label | Notes |
 |-----------|-------|-------|
 | `claude-opus-5` | Claude Opus 5 | Current Opus tier (latest), 1M context — **added #2086** |
-| `claude-fable-5` | Claude Fable 5 | Claude 5 family — most capable, longest tasks (latest), 1M context |
+| `claude-fable-5-1` | Claude Fable 5.1 | Current Fable tier (latest), 1M context — **added #2726** |
+| `claude-fable-5` | Claude Fable 5 | Claude 5 family — most capable, longest tasks, 1M context |
 | `claude-sonnet-5` | Claude Sonnet 5 | Claude 5 family — fast + smart (latest), 1M context |
 | `claude-opus-4-8` | Claude Opus 4.8 | Legacy (prior Opus), 1M context |
 | `claude-opus-4-7` | Claude Opus 4.7 | Legacy, 1M context |
@@ -504,9 +506,9 @@ ALTER TABLE schedule_executions ADD COLUMN model_used TEXT;
 | `claude-opus-4-5-20251101` | Claude Opus 4.5 | Legacy (picker-only) |
 | `claude-sonnet-4-5-20250929` | Claude Sonnet 4.5 | Legacy (picker-only) |
 
-Current-generation `-5` models and `claude-sonnet-4-6` use undated aliases that resolve to the latest snapshot; the prior Opus generation (`4-8`/`4-7`/`4-6`) is relabelled Legacy since `claude-opus-5` landed (#2086). Legacy dated ids (e.g., `claude-opus-4-5-20251101`) pin a deterministic snapshot. The two models that retired from the presets on 2026-06-15 (`claude-opus-4-20250514`, `claude-sonnet-4-20250514`) are no longer offered — see the graceful-degradation note under Preset Models above.
+Current-generation `-5` models and `claude-sonnet-4-6` use undated aliases that resolve to the latest snapshot; the prior Opus generation (`4-8`/`4-7`/`4-6`) is relabelled Legacy since `claude-opus-5` landed (#2086). `claude-fable-5` likewise lost its `(latest)` marker when `claude-fable-5-1` landed (#2726) — it is still current-generation and still served, simply no longer the latest in its tier, so it keeps its id and both policy flags. Legacy dated ids (e.g., `claude-opus-4-5-20251101`) pin a deterministic snapshot. The two models that retired from the presets on 2026-06-15 (`claude-opus-4-20250514`, `claude-sonnet-4-20250514`) are no longer offered — see the graceful-degradation note under Preset Models above.
 
-Also accepts model aliases (`sonnet`, `opus`, `haiku`) and 1M context variants (`sonnet[1m]`, etc.).
+Also accepts model aliases (`sonnet`, `opus`, `haiku`, `fable`) — each resolves to the current generation of its family, per the Claude Code CLI, not Trinity's catalog — and 1M context variants (`sonnet[1m]`, `fable[1m]`, etc.). `fable` was advertised by `GET /api/model` but rejected by the sibling `PUT` until #2726.
 
 ### Gemini Runtime
 
@@ -524,7 +526,7 @@ Also accepts model aliases (`sonnet`, `opus`, `haiku`) and 1M context variants (
 |------------|-------------|---------|
 | Agent not found | 404 | "Agent not found" |
 | Agent not running | 400 | "Agent is not running" |
-| Invalid Claude model | 400 | "Invalid Claude model: {model}. Use aliases (sonnet, opus, haiku) or full model names." |
+| Invalid Claude model | 400 | "Invalid Claude model: {model}. Use aliases (sonnet, opus, haiku, fable) or full model names." |
 | Invalid Gemini model | 400 | "Invalid Gemini model: {model}. Use: gemini-2.5-pro, gemini-2.5-flash, etc." |
 | Agent server unreachable | 503 | "Failed to get/set model" |
 
@@ -608,6 +610,7 @@ Also accepts model aliases (`sonnet`, `opus`, `haiku`) and 1M context variants (
 
 | Date | Change |
 |------|--------|
+| 2026-09-12 | **#2726 — Claude Fable 5.1 selectable; alias help text current**: added `claude-fable-5-1` (public-channel + admin-default, `recommended` untouched) to `MODEL_CATALOG` at index 1 and regenerated the mirror — it is now offered in the operator picker and the admin fleet-default dropdown, and `PUT /api/agents/{name}/public-channel-model` answers **200 instead of 422**. `claude-fable-5` keeps its id, slot and both flags; only the `(latest)` marker moved (no `Legacy` relabel, no reposition — AC 2 asks that it stop being labelled the latest, and that is exactly what dropping the marker says). The **Workspace composer is deliberately unchanged**: ent#403 excluded the whole Fable tier from that client-facing surface on a written rationale, so both `workspace` kwargs are omitted and reversing that decision stays a `type-feature`, not a P1 bug fix. Agent-server `GET /api/model` now states the durable rule before the perishable list (`opus` was still documented as Opus 4.8), and `PUT /api/model` accepts the `fable` / `fable[1m]` aliases the same router already advertised. The parity guard is derived, so the AC is pinned by explicit assertions instead: a per-id end-to-end test, a family-generic `at most one (latest) per tier` rule, and a coverage assertion closing the hole where `test_per_model_flags` named only 9 of 10 entries. `model_catalog.py` gains a `Last synced:` bump anchor so staleness is provable by inspection. |
 | 2026-08-16 | **#2086 — centralize the selectable model catalog**: one source of truth (`src/backend/services/model_catalog.py`, stdlib-only leaf) now defines id/label/note + the `public_channel`/`admin_default_selectable`/`recommended` policy flags. `scripts/gen_model_catalog.py` emits the checked-in `src/frontend/src/constants/modelCatalog.js`; `ModelSelector.vue`, the `Settings.vue` admin dropdown, and `settings_service.PUBLIC_CHANNEL_MODELS` all derive from it (no consumer keeps a literal list). Added `claude-opus-5` (public + admin) so it is selectable end-to-end (422→200 on the public-channel PUT); relabelled the prior Opus gen (4.8/4.7/4.6) as Legacy. `tests/unit/test_2086_model_catalog_parity.py` byte-matches + structurally validates the mirror on every PR; retired the brittle `test_1660` Vue-regex guard and repointed `test_ent243`/`test_model_selection`/`test_platform_default_model` at the catalog. |
 | 2026-06-06 | **#1080 — model list refresh**: Added **Claude Opus 4.8** (`claude-opus-4-8`) as the flagship/latest across `ModelSelector.vue` and the admin platform-default dropdown (`Settings.vue`). Removed the two models retiring 2026-06-15 (`claude-opus-4-20250514`, `claude-sonnet-4-20250514`) from the presets; re-tiered current vs. legacy. Bumped the `TasksPanel.vue` localStorage fallback off legacy `claude-opus-4-5-20251101` → current `claude-sonnet-4-6`. Refreshed MCP `model` param examples (`chat.ts`, `schedules.ts`, `loops.ts`) off the EOL example ID. Backend/agent-server defaults were already current (`claude-sonnet-4-6`, `claude-haiku-4-5-20251001`) — unchanged, no base-image rebuild. Documented graceful degradation: removed presets remain valid free-text until Anthropic's retirement date, then fail with a clear execution error rather than silently. |
 | 2026-03-02 | **MODEL-001 bug fixes**: (1) ModelSelector `PRESET_MODELS` updated to correct Anthropic API IDs with snapshot dates (`claude-opus-4-5-20251101`, `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001`) plus legacy models. (2) Added `isTyping` flag so dropdown filtering only applies during free-text input, not when opening via chevron. (3) Fixed `DatabaseManager.create_task_execution()` proxy missing `model_used` parameter -- was crashing all task submissions with model selection. (4) Default model changed from `claude-opus-4-5` to `claude-opus-4-6` in TasksPanel.vue and SchedulesPanel.vue. |
