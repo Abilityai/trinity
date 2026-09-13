@@ -13,16 +13,41 @@ Lifecycle mirrors `OperatorQueueSyncService`:
   - Internally swallows exceptions so the heartbeat never dies silently
 
 The poll interval defaults to 60 s — sync failures are slow-moving, and a
-tighter loop would multiply SQLite writes for no benefit (PERF-269).
+tighter loop would multiply SQLite writes for no benefit (PERF-269). #2742
+makes it overridable via `SYNC_HEALTH_POLL_INTERVAL_SECONDS` (read at call
+time so monkeypatching works), with the default deliberately unchanged: the
+cadence is already 15x oversampled against its own producer — the agent's
+auto-sync heartbeat writes `sync-state.json` every 900 s and every consumer
+threshold in `utils/syncHealth.js` is 24 h / 7 d — so the knob is there for an
+operator who wants the fetch load down, not because 60 s was wrong.
+
+Leader-leased across uvicorn workers (#2742, the #1464/#1632 shape).
+Production runs `--workers 2` and `main.py` starts this service in EVERY
+worker, so the fleet was polled twice a minute per agent and each poll runs a
+30 s credentialed `git fetch` inside the agent container.
+
+The lease fails **OPEN** — Redis unreachable ⇒ every worker polls, i.e. exactly
+the pre-#2742 behaviour. Failing closed would darken the `sync_failing` signal
+precisely when infrastructure is degraded, and this is an observability feed.
+
+**Named side effect, because it is not idempotent.** `db.upsert_sync_state`
+*increments* `consecutive_failures` on every `failed` upsert, and
+`ALERT_THRESHOLD` is an edge trigger off that counter. Two unleased workers
+therefore drove a failing agent to `sync_failing` in ~90 s; one leader takes
+~180 s. That is arguably the counter finally meaning what its name says (3
+consecutive failed *polls* = 3 minutes), but it is a change to an alerting
+path, so it is documented here, covered by a test, and called out in the PR.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import uuid
 from typing import Dict, Optional
 
 from database import db
+from redis_breaker_util import get_breaker_redis
 from services.agent_client import AgentClient
 from utils.helpers import utc_now_iso
 
@@ -30,6 +55,37 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL = 60  # seconds
 ALERT_THRESHOLD = 3  # emit sync_failing entry after N consecutive failures
+
+# #2742: single Redis key holding the current sync-health leader's worker id.
+# One poller across all uvicorn workers. Collides with none of the five existing
+# leases (monitoring / opqueue / skills:sync / canary / subscription:recovery).
+_LEADER_KEY = "synchealth:leader"
+
+# #2742: compare-and-delete release. A plain GET-then-DEL is not atomic — a
+# worker whose lease expired between the two can delete a sibling's FRESH grant,
+# which is a second poller for one whole cycle. EVAL is outside the `-@dangerous`
+# categories denied to the `backend`/`scheduler` ACL users.
+_RELEASE_IF_MINE = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then "
+    "return redis.call('del', KEYS[1]) else return 0 end"
+)
+
+
+def _poll_interval_seconds() -> int:
+    """Poll cadence, read at CALL time (#2742).
+
+    Shape borrowed from `agent_server.routers.git._maintenance_timeout_seconds`:
+    an import-time copy makes env monkeypatching silently inert. Parse-guarded
+    and positive-clamped — a garbage or non-positive value degrades to the
+    default rather than becoming a hot loop.
+    """
+    raw = os.getenv("SYNC_HEALTH_POLL_INTERVAL_SECONDS", str(DEFAULT_POLL_INTERVAL))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_POLL_INTERVAL
+    return value if value > 0 else DEFAULT_POLL_INTERVAL
+
 
 # #1595: edge-triggered git-bloat alerting — the killed-auto-gc failure class
 # was "completely silent until the disk fills"; a column behind an API nobody
@@ -66,10 +122,30 @@ def set_websocket_manager(manager):
 class SyncHealthService:
     """Background service that keeps agent_sync_state fresh and raises alerts."""
 
-    def __init__(self, poll_interval: int = DEFAULT_POLL_INTERVAL):
-        self.poll_interval = poll_interval
+    def __init__(self, poll_interval: Optional[int] = None):
+        # `is not None`, never truthiness: the tests construct this with
+        # poll_interval=0 to mean "one cycle then exit".
+        self._poll_interval_override = poll_interval
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        # #2742: unique per worker PROCESS, and stable across cycles — the
+        # lease has to recognise its own grant in order to refresh it, which is
+        # exactly why `SingleFlightLock` (a fresh token per acquire) cannot be
+        # adopted here. Mirrors monitoring #1464 / opqueue #1632.
+        self._worker_id = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        self._is_leader = False  # last observed leadership, for transition logs
+
+    @property
+    def poll_interval(self) -> int:
+        """Effective cadence: an explicit constructor value, else the env read.
+
+        A property rather than an attribute so `SYNC_HEALTH_POLL_INTERVAL_SECONDS`
+        is honoured at call time — the module-level singleton is built at import,
+        and an import-time copy is how an env knob becomes silently inert.
+        """
+        if self._poll_interval_override is not None:
+            return self._poll_interval_override
+        return _poll_interval_seconds()
 
     # -------------------------- lifecycle --------------------------
 
@@ -87,7 +163,60 @@ class SyncHealthService:
         if self._task:
             self._task.cancel()
             self._task = None
+        # #2742: hand leadership off on a graceful shutdown instead of making
+        # the survivor wait out the TTL with nobody polling.
+        self._release_leadership()
         logger.info("Sync health service stopped")
+
+    # -------------------------- leader lease (#2742) --------------------------
+
+    def _leader_ttl(self) -> int:
+        """Lease TTL. Refreshed once at the TOP of each `_poll_cycle`, so it has
+        to outlast one worst-case cycle plus the inter-cycle sleep or leadership
+        flaps and both workers poll anyway. A cycle is `asyncio.gather` over every
+        git-enabled agent with a 10 s per-agent client timeout, then a
+        `poll_interval` sleep — so `3x` at the 60 s default is 180 s, with the 30 s
+        floor covering the poll_interval=0 test construction."""
+        return max(self.poll_interval * 3, 30)
+
+    def _try_acquire_leadership(self) -> bool:
+        """True iff this worker holds the lease for this cycle (#2742).
+
+        Fail-OPEN: Redis unreachable or erroring ⇒ act as leader, which is the
+        pre-#2742 behaviour (every worker polls). Failing closed would stop the
+        only feed that ever raises `sync_failing`, at exactly the moment the
+        infrastructure is already degraded.
+        """
+        r = get_breaker_redis()
+        if r is None:
+            return True  # fail-open: no Redis → behave as the sole worker
+        ttl = self._leader_ttl()
+        try:
+            if r.set(_LEADER_KEY, self._worker_id, nx=True, ex=ttl):
+                return True
+            # Already held — refresh the TTL only if the lease is OURS.
+            if r.get(_LEADER_KEY) == self._worker_id:
+                r.expire(_LEADER_KEY, ttl)
+                return True
+            return False
+        except Exception as e:
+            logger.warning("sync-health leader lock check failed-open (%s)", e)
+            return True
+
+    def _release_leadership(self) -> None:
+        """Delete the lease iff we still hold it (best-effort, never raises).
+
+        Compare-and-delete in ONE round trip: a GET-then-DEL lets a worker whose
+        lease expired between the two calls delete a sibling's fresh grant, which
+        is a second poller for a whole cycle.
+        """
+        try:
+            r = get_breaker_redis()
+            if r is not None:
+                r.eval(_RELEASE_IF_MINE, 1, _LEADER_KEY, self._worker_id)
+        except Exception:
+            pass
+        self._is_leader = False
 
     # -------------------------- loop --------------------------
 
@@ -110,7 +239,26 @@ class SyncHealthService:
                 break
 
     async def _poll_cycle(self):
-        """One pass over every git-enabled agent."""
+        """One pass over every git-enabled agent.
+
+        #2742: only the lease-holding worker polls. `main.py` starts this service
+        in every uvicorn worker and prod runs `--workers 2`, so the fleet was
+        being asked for `/api/git/status` twice a minute per agent — each ask
+        running a 30 s credentialed `git fetch` inside the container.
+        """
+        leader = self._try_acquire_leadership()
+        if leader and not self._is_leader:
+            logger.info(
+                "Sync health loop acquired leadership (worker %s)", self._worker_id
+            )
+        elif not leader and self._is_leader:
+            logger.info(
+                "Sync health loop yielded leadership (worker %s)", self._worker_id
+            )
+        self._is_leader = leader
+        if not leader:
+            return
+
         try:
             configs = db.list_git_enabled_agents()
         except Exception:

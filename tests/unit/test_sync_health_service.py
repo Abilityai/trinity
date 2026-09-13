@@ -107,10 +107,19 @@ def _status_payload(status="success", ahead_working=0, behind_working=0, error=N
 
 
 @pytest.fixture
-def service(tmp_db):
-    """SyncHealthService instance with a stub AgentClient."""
-    from services.sync_health_service import SyncHealthService  # noqa: WPS433
-    svc = SyncHealthService(poll_interval=0)
+def service(tmp_db, monkeypatch):
+    """SyncHealthService instance with a stub AgentClient.
+
+    #2742: `get_breaker_redis` is stubbed to None so the leader lease fails OPEN
+    and every test keeps polling. Without this, a developer with a local Redis
+    would (a) pay a ~1 s connect attempt per cycle at poll_interval=0 and (b)
+    leave a real 30 s `synchealth:leader` lease behind, so the NEXT test's fresh
+    service loses the election and silently polls nothing — a green suite that
+    asserts nothing.
+    """
+    import services.sync_health_service as shs  # noqa: WPS433
+    monkeypatch.setattr(shs, "get_breaker_redis", lambda: None)
+    svc = shs.SyncHealthService(poll_interval=0)
     return svc
 
 
@@ -272,3 +281,77 @@ class TestSoftDeletedExcluded:
         # No sync_state row and no operator-queue entry for the dead agent.
         assert db.get_sync_state("dead") is None
         assert db.list_operator_queue_items(agent_name="dead") == []
+
+
+class TestLeaderLeaseAlertTiming:
+    """#2742 — what the leader lease costs the alerting path, named and pinned.
+
+    The lease's original justification was "a duplicated poll costs only
+    duplicate reads and idempotent upserts". That is false: `upsert_sync_state`
+    *increments* `consecutive_failures` on every `failed` upsert and
+    `ALERT_THRESHOLD` is an edge trigger off that counter. So two unleased
+    workers drove a failing agent to `sync_failing` in ~90 s (three failed polls
+    arriving in three half-cycles); one leader takes three full cycles, ~180 s.
+
+    Arguably the counter now means what its name says — 3 consecutive failed
+    *polls* = 3 minutes — but it is a change to an alerting path, so it is
+    asserted here rather than discovered later. The lease mechanics themselves
+    live in `test_2742_sync_health_leader_lock.py`.
+    """
+
+    @pytest.mark.asyncio
+    async def test_upsert_is_not_idempotent_which_is_why_timing_moved(
+        self, service, seed_agent
+    ):
+        """The load-bearing fact, asserted directly: the SAME failing payload
+        polled twice increments twice. A test that only counted cycles would
+        pass against an idempotent upsert and prove nothing."""
+        seed_agent("alpha")
+        payload = _status_payload(status="failed", error="push failed")
+        with patch.object(service, "_fetch_git_status",
+                           AsyncMock(return_value=payload)):
+            await service._poll_cycle()
+            await service._poll_cycle()
+
+        from database import db
+        assert db.get_sync_state("alpha")["consecutive_failures"] == 2
+
+    @pytest.mark.asyncio
+    async def test_one_leader_crosses_the_threshold_on_the_third_cycle(
+        self, service, seed_agent
+    ):
+        """With one poller, `sync_failing` fires on cycle 3 — i.e. ~180 s at the
+        60 s cadence, where two unleased workers reached it in ~90 s."""
+        seed_agent("alpha")
+        payload = _status_payload(status="failed", error="boom")
+        from database import db
+
+        with patch.object(service, "_fetch_git_status",
+                           AsyncMock(return_value=payload)):
+            await service._poll_cycle()
+            assert db.list_operator_queue_items(agent_name="alpha") == []
+            await service._poll_cycle()
+            assert db.list_operator_queue_items(agent_name="alpha") == []
+            await service._poll_cycle()
+
+        items = db.list_operator_queue_items(agent_name="alpha")
+        assert len(items) == 1
+        assert items[0]["type"] == "sync_failing"
+        assert db.get_sync_state("alpha")["consecutive_failures"] == 3
+
+    @pytest.mark.asyncio
+    async def test_a_non_leader_writes_nothing_at_all(
+        self, service, seed_agent, monkeypatch
+    ):
+        """The non-leader must not advance the counter either — a lease that
+        only skipped the HTTP call but still upserted would keep the old timing
+        and quietly defeat its own purpose."""
+        seed_agent("alpha")
+        monkeypatch.setattr(service, "_try_acquire_leadership", lambda: False)
+        payload = _status_payload(status="failed", error="boom")
+        with patch.object(service, "_fetch_git_status",
+                           AsyncMock(return_value=payload)):
+            await service._poll_cycle()
+
+        from database import db
+        assert db.get_sync_state("alpha") is None
