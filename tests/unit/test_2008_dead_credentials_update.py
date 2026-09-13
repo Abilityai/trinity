@@ -122,7 +122,6 @@ class TestNoLiveDocSendsYouThere:
         assert "`/api/credentials/update` - Hot-reload credentials" not in arch
 
     @pytest.mark.parametrize("doc", [
-        "docs/testing/API_TEST_REQUIREMENTS.md",
         "docs/diagrams/03-agent-container.md",
     ])
     def test_no_live_doc_advertises_the_endpoint(self, doc):

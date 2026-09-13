@@ -6,7 +6,7 @@
 >
 > **PR**: [#700](https://github.com/abilityai/trinity/pull/700) — `feature/302-settings-tabbed-layout`
 >
-> **Companion doc**: [`docs/planning/302-settings-test-list.md`](../planning/302-settings-test-list.md) (Canon TDD behavior list — what the automated tests cover)
+> **Companion doc**: [`docs/planning/302-settings-test-list.md`](../../planning/302-settings-test-list.md) (Canon TDD behavior list — what the automated tests cover)
 
 ---
 
@@ -293,7 +293,7 @@ If you want to confirm what was tested matches what you're testing:
 
 ```bash
 cd src/frontend
-ADMIN_PASSWORD=$(grep -E '^ADMIN_PASSWORD' /Users/pash/projects/trinity/.env | cut -d'=' -f2-) \
+ADMIN_PASSWORD=$(grep -E '^ADMIN_PASSWORD' /path/to/trinity/.env | cut -d'=' -f2-) \
   npx playwright test e2e/settings-tabs.spec.js --reporter=line
 ```
 

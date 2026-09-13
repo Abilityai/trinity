@@ -547,4 +547,4 @@ As a [user type], I want to [action] so that [benefit].
 3. Add Testing section with step-by-step verification
 4. Update this index after creating
 
-See `docs/TESTING_GUIDE.md` for testing template and examples.
+The Testing-section template is the add-testing skill (`/add-testing`, dev-methodology plugin); the method behind it is `docs/testing/STRATEGY.md`.

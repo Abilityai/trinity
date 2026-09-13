@@ -1,5 +1,9 @@
 # Trinity Tests
 
+> **Strategy first.** The testing method, the CI lanes and the acceptance bar for
+> a harness are in [docs/testing/STRATEGY.md](../docs/testing/STRATEGY.md). This
+> file is the mechanics: environment, scripts, tiers, friction recovery.
+
 > ⚠️ **This suite mutates the target instance.** The API fixtures **create and
 > delete real agents** on whatever `TRINITY_API_URL` points at. **Point it at a
 > local dev instance — never staging/production.** Every agent the suite creates

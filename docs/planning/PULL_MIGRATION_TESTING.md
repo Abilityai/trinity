@@ -1,6 +1,6 @@
 # Pull / Work-Stealing Migration (#1081) — Testing, Findings & Pilot Record
 
-> **Start at [`PULL_MIGRATION_STATUS.md`](../planning/PULL_MIGRATION_STATUS.md) — it is the migration's entry point and the one
+> **Start at [`PULL_MIGRATION_STATUS.md`](PULL_MIGRATION_STATUS.md) — it is the migration's entry point and the one
 > place that states current phase, remaining gates and open decisions. This file is reference
 > material.**
 

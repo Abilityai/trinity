@@ -64,7 +64,7 @@
   - `SYSTEM`: startup, shutdown, emergency_stop
 - **Architecture**: `docs/requirements/AUDIT_TRAIL_ARCHITECTURE.md`
 - **Flow**: `docs/memory/feature-flows/audit-trail.md`
-- **Test plan**: `docs/testing/audit-trail-manual-test-plan.md` (19 acceptance checks; 18/19 passed live, hash-chain verify bug fixed in-flight and re-verified)
+- **Test plan**: `docs/archive/testing/audit-trail-manual-test-plan.md` (19 acceptance checks; 18/19 passed live, hash-chain verify bug fixed in-flight and re-verified)
 - **Follow-up (optional)**: admin UI (no requirement in spec — API export satisfies compliance criterion); forward `schedule_id` / `schedule_name` from scheduler to `/api/internal/execute-task` so `schedule_triggered` audit carries that context.
 
 ### 20.2 Execution Origin Tracking (AUDIT-001)
