@@ -709,10 +709,18 @@
   fallback with no name, evidence, or next step (#1880). Enforced by
   `tests/unit/test_1880_canary_alert_parity.py`, bidirectionally (a stale or
   typo'd id fails too). Source the name from the invariant module's own
-  docstring title, **not** the catalog: catalog ids are not registry ids
-  (catalog `E-06` is the unimplemented #129 check, while registry `E-06` is
-  "no overdue `next_run_at`"), so a catalog-sourced name can confidently
-  mislabel a live alert.
+  docstring title, **not** the catalog: a catalog title can over-claim what
+  shipped (G-03/G-04 carry an "implemented predicate deviates" note), so a
+  catalog-sourced name can confidently mislabel a live alert. The ids
+  themselves agree since #2337: the catalog's `E-06` had named the
+  unimplemented #129 orphan check while the registry's `E-06` was "no overdue
+  `next_run_at`" — the #129 entry was re-homed to `E-09` (operator ruling,
+  2026-09-12), the catalog's *Canary mapping* table joins every registry
+  module to its catalog entry, and `tests/unit/test_2337_invariant_namespace.py`
+  fails on any row where the two ids differ. Journey records
+  (`tests/journeys/catalog.yaml`) resolve their `invariants:` against the
+  catalog's `**X-NN**` definitions through the same parser
+  (`tests/unit/_invariant_catalog.py`), never against a summary table.
 
 ### 31.2 Canary Run-State Observability (#2217)
 - **Status**: ✅ Implemented (2026-08-16)
