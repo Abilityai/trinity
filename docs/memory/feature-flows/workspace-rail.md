@@ -348,11 +348,15 @@ serve neither an external client nor agent-shared bytes (which live at
 * Markdown goes through `PortalMarkdown` (the one sanitiser policy); other text
   renders in a `<pre>`, escaped by interpolation.
 * Text is capped at **256 KB** and fetched **whole, with no `Range` header**,
-  then sliced client-side. `main.py`'s CORS `allow_headers` does not list
-  `Range`, so a ranged preview dies silently wherever the portal base URL is
-  genuinely cross-origin. Shared-file preview reads carry `preview=1`; the
-  server audits them with `details.preview=true` without incrementing the
-  download counter. The cap is stated in the UI, not only in code.
+  then sliced client-side. A share preview is fetched same-origin (#2733 —
+  `portalFiles.js::sharePreviewPath` slices the path from `/api/files/` and drops
+  the origin `portal_base_url` put on `download_url`), so the `Range` gap in
+  `main.py`'s CORS `allow_headers` no longer reaches it: a ranged preview is
+  therefore possible, and is deliberately not taken here — the whole-blob read
+  stays because the 256 KB cap is applied by client-side slicing. Shared-file
+  preview reads carry `preview=1`; the server audits them with
+  `details.preview=true` without incrementing the download counter. The cap is
+  stated in the UI, not only in code.
 * Non-previewable types, and a **failed byte fetch**, both land on the same
   name/size/type + Download card. "Never a blank modal" has to cover a failure,
   not only an unknown type.
@@ -454,7 +458,15 @@ reviewer clicks.
 * `src/frontend/tests/unit/portalFiles.spec.js` — `previewKind`, `neighbour`,
   `flattenFiles` order equalling render order, the `fileActions` matrix, and the
   component's own source guards (an `<img>`, no `v-html`, capture + preventDefault,
-  `revokeObjectURL`, no `Range`, zero raw palette classes).
+  `revokeObjectURL`, no `Range`, zero raw palette classes). It also pins the
+  same-origin preview rewrite (#2733): a cross-origin `download_url` yields a path
+  under `/api/files/`, a path-prefixed portal base URL resolves to the same path,
+  and a URL at any other route falls through untouched.
+* `tests/unit/test_1400_csp_blob_preview.py` — the CSP↔loader contract. Beyond
+  #1400's `blob:` guard it freezes the `connect-src` source SET in both CSP
+  sources (adding an origin there to make preview work is the move #2733 rejects)
+  and asserts the share-route literal in `portalFiles.js` still matches the
+  f-string `client_portal/service.py` builds `download_url` from.
 
 ## Residuals (stated)
 

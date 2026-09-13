@@ -33,6 +33,7 @@ import {
   previewCapNotice,
   previewKind,
   sameOriginPath,
+  sharePreviewPath,
 } from '@/components/portal/portalFiles'
 
 const SRC = fileURLToPath(new URL('../../src', import.meta.url))
@@ -252,7 +253,12 @@ describe('#2582 — url and size helpers', () => {
     expect(sameOriginPath('/api/files/f1?sig=t')).toBe('/api/files/f1?sig=t')
   })
 
-  it('leaves a genuinely cross-origin url alone rather than pretending', () => {
+  // DELIBERATELY RETAINED through #2733. `sameOriginPath` is the GENERAL helper
+  // and its honest contract is "reduce when already same-origin, otherwise leave
+  // it alone". The share rule that does rewrite a cross-origin url lives in
+  // `sharePreviewPath`, below, because only that caller knows which route it is
+  // holding. Two scopes, not a contradiction.
+  it('sameOriginPath, the general helper, leaves a genuinely cross-origin url alone', () => {
     expect(sameOriginPath('https://elsewhere.example/api/files/f1', 'https://portal.example.com'))
       .toBe('https://elsewhere.example/api/files/f1')
   })
@@ -499,7 +505,118 @@ describe('share preview URL', () => {
     expect(preview.searchParams.get('preview')).toBe('1')
     expect(preview.searchParams.get('download')).toBe('1')
     expect(download).not.toContain('preview')
+    // FLIPPED by #2733. This asserted the bug: it pinned the cross-origin url
+    // the browser then refused under `connect-src`. See the #2733 describe below.
     expect(sharePreviewPath('https://cdn.example.com/api/files/f1?sig=t', 'https://portal.example.com'))
-      .toBe('https://cdn.example.com/api/files/f1?sig=t&preview=1')
+      .toBe('/api/files/f1?sig=t&preview=1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #2733 — the preview fetch must not depend on the portal base URL's origin
+// ---------------------------------------------------------------------------
+
+describe('#2733 — a cross-origin portal base URL must not reach the preview fetch', () => {
+  const BASE = 'https://portal.example.com'
+
+  it('rewrites a cross-origin share url onto the page own origin', () => {
+    const result = sharePreviewPath(
+      'https://files.example.com/api/files/f1?sig=t&download=1', BASE)
+    expect(result).toBe('/api/files/f1?sig=t&download=1&preview=1')
+    // The property, stated independently of the string: same origin, at the
+    // share route. `not.toMatch(/^https?:/)` would pass for a protocol-relative
+    // `//host/…`, which `fetch` still resolves cross-origin.
+    expect(result).toMatch(/^\/api\/files\//)
+    expect(new URL(result, BASE).origin).toBe(BASE)
+  })
+
+  it('leaves the default install byte-identical (no portal base URL configured)', () => {
+    expect(sharePreviewPath('/api/files/f1?sig=t&download=1', BASE))
+      .toBe('/api/files/f1?sig=t&download=1&preview=1')
+  })
+
+  it('reduces a same-origin absolute url to the same path', () => {
+    expect(sharePreviewPath(`${BASE}/api/files/f1?sig=t&download=1`, BASE))
+      .toBe('/api/files/f1?sig=t&download=1&preview=1')
+  })
+
+  it('drops a path prefix on the portal base URL, not just the origin', () => {
+    // The slice from the route is the exact inverse of the server's
+    // `f"{base}/api/files/{fid}"`. A `startsWith` check plus the whole pathname
+    // would keep `/trinity/` and 404 on an origin that serves `/api/` at root.
+    expect(sharePreviewPath('https://files.example.com/trinity/api/files/f1?sig=t', BASE))
+      .toBe('/api/files/f1?sig=t&preview=1')
+  })
+
+  it('does not mutate the download_url it was handed', () => {
+    const download = 'https://files.example.com/api/files/f1?sig=t&download=1'
+    sharePreviewPath(download, BASE)
+    expect(download).toBe('https://files.example.com/api/files/f1?sig=t&download=1')
+    expect(download).not.toContain('preview')
+  })
+
+  it('carries the sig token across the rewrite, percent-encoding intact', () => {
+    const result = sharePreviewPath(
+      'https://files.example.com/api/files/f1?sig=a%2Bb&download=1', BASE)
+    const parsed = new URL(result, BASE)
+    expect(parsed.searchParams.get('sig')).toBe('a+b')
+    expect(parsed.searchParams.get('download')).toBe('1')
+    expect(parsed.searchParams.get('preview')).toBe('1')
+  })
+
+  it('leaves a cross-origin url at ANOTHER route absolute', () => {
+    // The deliberate fall-through: we do not know what this is, so we do not
+    // invent a local path for it. A "simplification" to a bare
+    // `${pathname}${search}` widens the reachable path set and fails here.
+    expect(sharePreviewPath('https://files.example.com/api/agents/x?sig=t', BASE))
+      .toBe('https://files.example.com/api/agents/x?sig=t&preview=1')
+  })
+
+  it('cannot be steered off the share route by traversal', () => {
+    // `new URL()` normalises `..` BEFORE pathname is read, so the slice never
+    // sees the route and the url falls through unrewritten.
+    expect(sharePreviewPath('https://evil.example/api/files/../../admin?sig=t', BASE))
+      .toBe('https://evil.example/admin?sig=t&preview=1')
+  })
+
+  it('rewrites a base that differs only by port', () => {
+    // A differing port IS a differing origin, so this was blocked too.
+    expect(sharePreviewPath('https://portal.example.com:8443/api/files/f1?sig=t', BASE))
+      .toBe('/api/files/f1?sig=t&preview=1')
+  })
+
+  it('rewrites a protocol-relative portal base URL', () => {
+    expect(sharePreviewPath('//files.example.com/api/files/f1?sig=t', BASE))
+      .toBe('/api/files/f1?sig=t&preview=1')
+  })
+
+  it('drops a fragment, exactly as it did before', () => {
+    // Unchanged behaviour — `sameOriginPath` also returns pathname + search, and
+    // `portal_documents` builds no fragment. Asserted so the drop is decided.
+    expect(sharePreviewPath('https://files.example.com/api/files/f1?sig=t#frag', BASE))
+      .toBe('/api/files/f1?sig=t&preview=1')
+  })
+
+  it('is still the only thing the rail hands its share fetch', () => {
+    expect(RAIL_FILES).toMatch(/fetch\(sharePreviewPath\(/)
+    // ...and no OTHER fetch takes the raw url. The positive match above still
+    // passes when a SECOND, unrewritten `fetch(row.item.download_url)` is added
+    // beside it — a retry path, an "open in a tab" — which is exactly how #2733
+    // returns: one rewritten caller and one that never was.
+    expect(RAIL_FILES).not.toMatch(/fetch\(\s*row\.item\.download_url/)
+    // AC 4 — a client upload has no DB row and no url; it never reaches here.
+    expect(RAIL_FILES).toMatch(/portal\.fetchUploadBlob\(/)
+  })
+
+  it('records the regression note on sameOriginPath own docblock (AC 7)', () => {
+    // Scoped to THAT docblock: a whole-file grep would pass on
+    // `sharePreviewPath`'s docblock, which also names #2733 — half a guard.
+    const src = read('components/portal/portalFiles.js')
+    const decl = src.indexOf('export function sameOriginPath')
+    expect(decl).toBeGreaterThan(-1)
+    const docblock = src.slice(src.lastIndexOf('/**', decl), decl)
+    expect(docblock).toMatch(/#2733/)
+    expect(docblock).toMatch(/supported/i)   // the AC-7 word, whatever its emphasis
+    expect(docblock).toMatch(/sharePreviewPath/)
   })
 })

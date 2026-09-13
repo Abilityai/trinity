@@ -4029,7 +4029,15 @@ def portal_documents(agent_name: str, email: str, include_owned: bool = False) -
     emits private links; when no base is configured they're relative (same-origin
     as the portal page). The `?sig=` token is the download credential — the OSS
     `/api/files/{id}` route is public and token-gated, so no portal auth rides on
-    the link."""
+    the link.
+
+    `download_url` may therefore be CROSS-ORIGIN to the page that reads it, and
+    that is a supported topology (ent#79), so do not `fetch()` it from the portal
+    page: `connect-src` cannot carry a per-deployment origin and CORS would
+    refuse it a second time (#2733). The rail's preview loader slices the path
+    from `/api/files/` and asks its own origin instead
+    (`components/portal/portalFiles.js::sharePreviewPath`); the absolute url here
+    stays the user-shareable link the anchor-click Download uses."""
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
 
