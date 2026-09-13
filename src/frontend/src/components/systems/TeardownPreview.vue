@@ -166,13 +166,19 @@
       <p v-if="preview.recovery" class="mt-2 text-xs text-status-warning-800 dark:text-status-warning-200">
         {{ preview.recovery }}
       </p>
-      <!-- Same contract as ManifestPreview.vue's ack, not a second pattern. -->
+      <!-- Same CONTRACT as ManifestPreview.vue's ack — the `:acknowledged` prop
+           and the `update:acknowledged` emit — but a distinct test id. Install
+           and remove can both be previewed on this one page, so a shared
+           `data-testid` would be two elements at one address: strict-mode
+           ambiguous for any Playwright `getByTestId('ack-checkbox')`, which is
+           how the existing system-install spec addresses it. The pattern is
+           worth sharing; the address is not. -->
       <label class="mt-3 flex items-start gap-2 cursor-pointer">
         <input
           type="checkbox"
           :checked="acknowledged"
           class="mt-0.5 rounded border-gray-300 dark:border-gray-600"
-          data-testid="ack-checkbox"
+          data-testid="teardown-ack-checkbox"
           @change="$emit('update:acknowledged', $event.target.checked)"
         />
         <span class="text-sm font-medium text-status-warning-900 dark:text-status-warning-100">

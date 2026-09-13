@@ -148,13 +148,34 @@ def test_protected_agents_are_listed_rather_than_silently_dropped():
     assert "preview.excluded" in src
 
 
-def test_the_ack_reuses_the_ent126_contract():
-    """One pattern for "restate the consequence and affirm it", not two."""
-    preview = _src(_PREVIEW)
-    manifest = _src(_MANIFEST_PREVIEW)
+def test_the_ack_reuses_the_ent126_contract_but_not_its_address():
+    """One PATTERN for "restate the consequence and affirm it" — and two
+    distinct addresses.
+
+    The prop/emit shape is shared on purpose: a second convention for the same
+    job is how the two drift. The `data-testid` is deliberately NOT, and that
+    distinction is the point of this test. Install and remove can both be
+    previewed on the same page, so a shared id puts two elements at one
+    address — strict-mode ambiguous for any Playwright `getByTestId(...)`, and
+    `e2e/system-install.spec.js` addresses the install ack exactly that way. It
+    would not have failed CI (the teardown panel is unentitled there and renders
+    nothing), which is precisely why it needs a test rather than a CI run.
+    """
+    preview = _code_only(_src(_PREVIEW))
+    manifest = _code_only(_src(_MANIFEST_PREVIEW))
+
+    # The shared contract.
     for src in (preview, manifest):
-        assert 'data-testid="ack-checkbox"' in src
         assert "update:acknowledged" in src
+        assert ":checked=\"acknowledged\"" in src
+
+    # The separate addresses.
+    assert 'data-testid="ack-checkbox"' in manifest
+    assert 'data-testid="teardown-ack-checkbox"' in preview
+    assert 'data-testid="ack-checkbox"' not in preview, (
+        "two acknowledgement checkboxes can be on the page at once; they must "
+        "not share one test id"
+    )
 
 
 def test_the_member_list_is_bounded():
