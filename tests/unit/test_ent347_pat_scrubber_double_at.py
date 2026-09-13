@@ -173,21 +173,40 @@ def test_both_scrubbers_agree(text):
 # ---------------------------------------------------------------------------
 
 
-def test_scrubber_covers_what_authenticated_url_actually_builds():
-    """Input built by the REAL splice, not typed by hand.
+def test_the_platform_no_longer_produces_the_double_at_shape():
+    """ent#615 removed the producer — and that is NOT a reason to drop the test.
 
-    This is the assertion that ties the fix to the reported path: if
-    `_authenticated_url` ever changes how it composes the authority, this fails
-    instead of the scrubbers quietly ceasing to cover it.
+    This assertion used to build its input from the real splice, so that a
+    change in how the URL was composed failed here instead of silently
+    un-covering the scrubbers. ent#615 deleted the splice: the PAT now travels
+    in the git child's environment and never enters the URL, so the platform
+    cannot emit a double-`@` authority any more.
+
+    The scrubbers still must handle it, which is why the coverage below stays.
+    A STORED source row can carry userinfo of its own — `_adopt_legacy_clone`
+    writes rows with no validation and `validate_skills_library_url` ignores
+    userinfo by design — and every `.git/config` written before ent#615 is
+    still on disk carrying one. This half pins that the producer is gone; the
+    half below pins that the scrubber still covers what is already out there.
     """
     from services.skill_service import SkillService
 
     stored = "https://ghp_LEGACY@github.com/org/private-skills"
-    spliced = SkillService._authenticated_url(stored, "ghp_PLATFORM")
+    out = SkillService._normalized_url(stored)
+    assert out == stored, "normalisation must not rewrite a stored URL"
+    assert not hasattr(SkillService, "_authenticated_url"), (
+        "_authenticated_url is back — it spliced the platform PAT into the "
+        "clone URL, which git then wrote to `origin` in "
+        "/data/skills-library/*/.git/config on the host bind mount"
+    )
+    # And the platform PAT is offered separately, never inside the URL.
+    assert SkillService._auth_pat_for(out, "ghp_PLATFORM") == "ghp_PLATFORM"
+    assert "ghp_PLATFORM" not in out
 
-    # Precondition: the splice really does produce a double-`@` authority.
-    assert spliced.count("@") >= 2, f"splice no longer double-@: {spliced!r}"
-    assert "ghp_PLATFORM" in spliced and "ghp_LEGACY" in spliced
+
+def test_scrubber_still_covers_the_legacy_double_at_shape():
+    """Hand-built now, by necessity — see the test above for why."""
+    spliced = "https://ghp_PLATFORM@ghp_LEGACY@github.com/org/private-skills"
 
     # The durable-state path: an error string carrying that URL.
     persisted = redact(f"fatal: could not read Username for '{spliced}'")

@@ -262,6 +262,7 @@ want_host="${want_host%%/*}"
 
 scrubbed=0
 harvested=0
+seeded=0
 refused=0
 gitmodules_hits=0
 helper_ok=0
@@ -340,10 +341,35 @@ done < "${CFGS}"
 # Does anything already resolve? Checked BEFORE any strip, never after.
 if probe; then helper_ok=1; fi
 
+# The helper's LAST rung. Deliberately not `.env`: `startup.sh` exports `.env`'s
+# GITHUB_PAT as GH_TOKEN/GITHUB_TOKEN and `configure_push_remote` gates the
+# ent#123 push blackhole on the same name, so writing that name would be a
+# privilege GRANT, not a relocation (the ent#162 class). `.trinity/*` is already
+# ignored contents-only (#2070), so this file is never committed. Owned by the
+# agent because the helper runs as whatever user git runs as.
+write_harvest() {
+    ( umask 077; mkdir -p "${HARVEST_DIR}"; printf '%s' "$1" > "${HARVEST}" ) 2>/dev/null || return 1
+    chmod 600 "${HARVEST}" 2>/dev/null || true
+    chown developer:developer "${HARVEST_DIR}" "${HARVEST}" 2>/dev/null || true
+    return 0
+}
+
+# Seed — a credential the CALLER already holds, handed over in the exec
+# ENVIRONMENT (never argv, never base64-on-argv, which would relocate the leak
+# rather than remove it). This is what makes `POST /{agent}/git/initialize`
+# stop creating orphans: it has the PAT in hand and, before ent#615, persisted
+# it nowhere.
+if [ "${helper_ok}" -eq 0 ] && [ -n "${TRINITY_SEED_PAT:-}" ]; then
+    if write_harvest "${TRINITY_SEED_PAT}"; then
+        if probe; then helper_ok=1; seeded=1; fi
+    fi
+fi
+
 # Harvest — only for an agent that has no other source. This is the orphan
-# class `POST /{agent}/git/initialize` creates: a git config row, a push with
-# the resolved platform PAT, no baked git env, no per-agent row, no `.env` —
-# "its only credential lives in the container's `.git/config` origin URL".
+# class `POST /{agent}/git/initialize` created before that seed existed: a git
+# config row, a push with the resolved platform PAT, no baked git env, no
+# per-agent row, no `.env` — "its only credential lives in the container's
+# `.git/config` origin URL".
 if [ "${helper_ok}" -eq 0 ]; then
     secret=""
     while IFS="${TAB}" read -r cfg key; do
@@ -360,16 +386,8 @@ if [ "${helper_ok}" -eq 0 ]; then
         done < "${VALS}"
         [ -z "${secret}" ] || break
     done < "${KEYS}"
-    if [ -n "${secret}" ]; then
-        # stderr on the SUBSHELL: a redirection failure is reported by the
-        # shell before the command runs, so the command's own 2>/dev/null
-        # cannot suppress it — and this output crosses the exec boundary.
-        if (umask 077; mkdir -p "${HARVEST_DIR}"; printf '%s' "${secret}" > "${HARVEST}") 2>/dev/null; then
-            harvested=1
-            chmod 600 "${HARVEST}" 2>/dev/null || true
-            chown developer:developer "${HARVEST_DIR}" "${HARVEST}" 2>/dev/null || true
-            if probe; then helper_ok=1; else harvested=0; fi
-        fi
+    if [ -n "${secret}" ] && write_harvest "${secret}"; then
+        if probe; then helper_ok=1; harvested=1; fi
     fi
 fi
 
@@ -437,13 +455,44 @@ fi
 competing=$(g -C "${ROOT}" config --get-all credential.helper 2>/dev/null | grep -v '^trinity$' | grep -c . || true)
 [ -n "${competing}" ] || competing=0
 
-printf 'TRINITY_SCRUB_REPORT remotes_scrubbed=%s harvested=%s refused=%s gitmodules_hits=%s helper_ok=%s competing_helpers=%s\n' \
-    "${scrubbed}" "${harvested}" "${refused}" "${gitmodules_hits}" "${helper_ok}" "${competing}"
+printf 'TRINITY_SCRUB_REPORT remotes_scrubbed=%s harvested=%s seeded=%s refused=%s gitmodules_hits=%s helper_ok=%s competing_helpers=%s\n' \
+    "${scrubbed}" "${harvested}" "${seeded}" "${refused}" "${gitmodules_hits}" "${helper_ok}" "${competing}"
 """
 
 
 def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def git_auth_env(pat: str) -> Dict[str, str]:
+    """Git auth as config-via-env: the header never appears on the argv.
+
+    THE authority for the env form (ent#615). It predates this issue —
+    ``fork_to_own`` shipped it for the backend-host clone/push, which is why the
+    fleet-PAT report could say the fix "already exists in-repo, generalize it" —
+    and it now has three consumers: that path, the ent#109 in-container rebind
+    push, and the skills-library clone. A second hand-written copy is how the
+    next pair drifts apart (the ent#347 lesson), so there is one.
+
+    Use this for a credential that must reach ONE git invocation. Use the
+    credential HELPER for a credential that must serve every later git
+    invocation in a container — ``Config.Env`` is immutable without a recreate,
+    which is exactly why the helper exists and this does not replace it.
+
+    ⚠️ Env is not confidential to a SAME-UID reader: ``/proc/<pid>/environ`` is
+    readable by the process owner for the life of the process. On the backend
+    host that is nobody (``_run_git`` is a backend child); inside an agent
+    container it is the agent, so an exec carrying a credential the agent must
+    not hold runs as ``root``.
+    """
+    if not pat:
+        return {}
+    b64 = base64.b64encode(f"x-access-token:{pat}".encode()).decode()
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: basic {b64}",
+    }
 
 
 def install_command() -> str:
@@ -470,6 +519,27 @@ def install_command() -> str:
     )
 
 
+# Answers "would git get a credential for our origin in this container?" — by
+# EXIT CODE. `git credential fill` prints the credential on stdout, so it is
+# piped into `grep -q` and discarded; nothing but the status leaves the
+# container. The origin is derived in-container exactly as the helper derives
+# it, so the answer cannot disagree with the helper over a self-hosted base the
+# backend and the container spell differently.
+_PROBE_SCRIPT = r"""
+base="${TRINITY_GIT_BASE_URL:-https://github.com}"
+base="${base%/}"
+p="${base%%://*}"
+h="${base#*://}"
+h="${h%%/*}"
+printf 'protocol=%s\nhost=%s\n\n' "${p}" "${h}" | git credential fill 2>/dev/null | grep -q '^password=.'
+"""
+
+
+def probe_command() -> str:
+    """Shell command whose EXIT CODE says whether a credential resolves."""
+    return f"printf %s {_b64(_PROBE_SCRIPT)} | base64 -d | sh"
+
+
 def scrub_command(git_dir: str) -> str:
     """Shell command that installs the helper **then** scrubs token URLs.
 
@@ -490,11 +560,18 @@ _REPORT_RE = re.compile(
 _REPORT_FIELDS = (
     "remotes_scrubbed",
     "harvested",
+    "seeded",
     "refused",
     "gitmodules_hits",
     "helper_ok",
     "competing_helpers",
 )
+
+# The env name the sweep reads a caller-supplied credential from. It travels in
+# the Exec Create body, NEVER on argv — an exec's argv is visible in the
+# container's process table, which is the leak this whole issue is about, and
+# base64-ing a token onto argv relocates it rather than removing it.
+SEED_ENV_VAR = "TRINITY_SEED_PAT"
 
 
 def parse_scrub_report(output: str) -> Dict[str, int]:

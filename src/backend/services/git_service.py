@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from database import db, AgentGitConfig, GitSyncResult
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, execute_command_in_container
+from services import git_credential_helper
 from utils.credential_sanitizer import scrub_secret_and_urls
 from utils.safe_yaml import (  # ent#314
     AliasPolicy as _AliasPolicy,
@@ -61,6 +62,18 @@ _AUTH_PATTERNS = (
     re.compile(r"could not read password", re.IGNORECASE),
     re.compile(r"invalid username or password", re.IGNORECASE),
     re.compile(r"permission denied \(publickey\)", re.IGNORECASE),
+    # ent#615 AC4. The credential helper emits this on stderr when it resolves
+    # nothing, and it is the DISCRIMINATOR between "no credential" and
+    # "credential rejected" — the fallthrough itself is already matched above
+    # ("could not read Username for '<url>': terminal prompts disabled", which
+    # is what GIT_TERMINAL_PROMPT=0 turns a silent helper into; proven by
+    # execution, so AC4 needed no new pattern for the generic case).
+    #
+    # NOT a bare `403`: `classify_conflict` evaluates auth patterns FIRST, so a
+    # secondary-rate-limit 403, a SAML-SSO-enforcement 403 and an archived-repo
+    # push 403 would all be relabelled AUTH_FAILURE and shown to the operator
+    # as "no write credentials".
+    re.compile(r"TRINITY_GIT_NO_CREDENTIAL"),
 )
 
 _UNCOMMITTED_PATTERNS = (
@@ -159,24 +172,28 @@ def generate_instance_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-def _git_remote_url(github_pat: str, github_repo: str) -> str:
-    """Build an authenticated git remote URL.
-
-    Defaults to GitHub. Dev/self-host deployments can override the base via
-    TRINITY_GIT_BASE_URL (e.g., "http://trinity-gitea-dev:3000" for a local
-    gitea in the test harness). The base URL must include the scheme.
-    """
-    base = os.getenv("TRINITY_GIT_BASE_URL", "https://github.com").rstrip("/")
-    scheme, _, host_path = base.partition("://")
-    return f"{scheme}://oauth2:{github_pat}@{host_path}/{github_repo}.git"
+# ent#615: `_git_remote_url(pat, repo)` — which built
+# `<scheme>://oauth2:<pat>@<host>/<repo>.git` — is GONE. It was the chokepoint
+# every persisted remote came through, and a persisted remote is read by `ps`,
+# by the orphan sweep's reaped-cmdline logging and by git's own stderr. The one
+# remaining URL builder is `_credentialless_remote_url` below; the credential
+# arrives per-operation through the `trinity` credential helper
+# (`services/git_credential_helper.py`), which git speaks to over stdin.
 
 
 def _remote_seturl_subcommand(url: str) -> str:
-    """Idempotent `origin` set-url/add shell subcommand, with the (token-bearing)
-    URL shell-quoted (#1264 review). Shared by ``initialize_github_sync`` and
-    ``update_remote_pat`` so the templating logic lives in one place; the
-    ``shlex.quote`` is defense-in-depth (canonical PATs are ``[A-Za-z0-9_]``,
-    but ``set_agent_github_pat`` accepts arbitrary input)."""
+    """Idempotent `origin` set-url/add shell subcommand (#1264 review).
+
+    Shared by ``initialize_github_sync`` and ``update_remote_pat`` so the
+    templating logic lives in one place.
+
+    Post-ent#615 the URL is credential-less, so the ``shlex.quote`` is no longer
+    protecting a secret — keep it anyway, because it is protecting the SHELL,
+    and note what it is NOT: docker-py ``split_command``s a string command
+    (``docker/api/exec_api.py:47``), consuming one level of quoting, so this
+    quote does not survive into the container as a second layer. It is the only
+    layer, and it is load-bearing for a repo name, not for a token.
+    """
     q = shlex.quote(url)
     return (
         f"git remote get-url origin >/dev/null 2>&1 && "
@@ -189,27 +206,257 @@ def generate_working_branch(agent_name: str, instance_id: str) -> str:
     return f"trinity/{agent_name}/{instance_id}"
 
 
-async def update_remote_pat(agent_name: str, github_pat: str, github_repo: str) -> bool:
-    """Re-template a running agent's ``origin`` remote to embed ``github_pat`` (#1264).
+# How long the in-container remediation sweep may run. Enforced TWICE, because
+# the two bounds free different resources: an in-container `timeout N` prefix
+# frees the `_docker_executor` pool thread (the fixed 6-thread pool the whole
+# backend shares — `to_thread` draws from it too), and `asyncio.wait_for` frees
+# the caller. `execute_command_in_container` accepts a `timeout` and forwards it
+# nowhere, so without both a wedged exec pins a pool thread forever, fleet-wide,
+# from a background pass.
+SCRUB_TIMEOUT_S = 60
 
-    A per-agent PAT configured *after* the container/git was set up never reaches
-    the live remote — it stays frozen with an empty password (e.g.
-    ``https://x-access-token:@github.com/...``) in the persisted workspace
-    volume, so every fetch/push fails. This rewrites ``remote.origin.url`` to the
-    authenticated ``oauth2:<pat>@`` URL (``_git_remote_url``, same scheme
-    startup.sh uses), idempotently (set-url if origin exists, else add). The
-    startup.sh self-heal does the same on restart; this is the no-restart path
-    used by ``set_agent_github_pat``.
+# One operator alarm per agent per day when the sweep REFUSED to strip: a
+# stable id so a restart loop cannot flood the queue while an operator is
+# already looking at it (the `archive_storage` precedent).
+_SCRUB_ALARM_ID_PREFIX = "ent615-git-token-scrub-"
+
+# Upserts `GITHUB_PAT` in the workspace `.env` — the FIRST rung of the
+# credential helper's ladder, and therefore the one a rotation must reach.
+#
+# The value arrives in the exec's ENVIRONMENT, never on its argv: an exec's argv
+# is visible in the container's process table, which is the exact leak this
+# whole issue is about, and base64-ing a token onto argv would relocate it, not
+# remove it. The exec runs as ROOT so `/proc/<pid>/environ` is unreadable by the
+# agent (same uid could read it for the life of the exec); the file it writes
+# keeps `.env`'s existing ownership and mode.
+#
+# This is the belt to `github_pat_propagation_service._apply_pat_to_env`, which
+# writes the same line over `http://agent-<name>:8000/api/credentials/inject`
+# and RAISES when the agent server is wedged, restarting or OOM. `docker exec`
+# works in all three. The HTTP write stays primary because only it runs
+# `sync_process_env()`.
+_ENV_PAT_UPSERT_SCRIPT = r"""
+set -u
+ENV_FILE="${TRINITY_AGENT_HOME:-/home/developer}/.env"
+[ -n "${TRINITY_NEW_GITHUB_PAT:-}" ] || exit 2
+TMP="${ENV_FILE}.trinity-ent615.$$"
+if [ -f "${ENV_FILE}" ]; then
+    # `[[:space:]]`, not `[ \t]`: a POSIX bracket expression takes backslash
+    # literally, so `[ \t]` is "space, backslash or t" and a TAB-indented line
+    # would survive as a duplicate.
+    grep -v '^[[:space:]]*GITHUB_PAT=' "${ENV_FILE}" > "${TMP}" 2>/dev/null || : > "${TMP}"
+else
+    : > "${TMP}" || exit 3
+fi
+printf 'GITHUB_PAT=%s\n' "${TRINITY_NEW_GITHUB_PAT}" >> "${TMP}" || exit 4
+chmod --reference="${ENV_FILE}" "${TMP}" 2>/dev/null || chmod 600 "${TMP}" 2>/dev/null || true
+chown --reference="${ENV_FILE}" "${TMP}" 2>/dev/null || chown developer:developer "${TMP}" 2>/dev/null || true
+mv -f "${TMP}" "${ENV_FILE}" || exit 5
+"""
+
+
+async def write_container_github_pat(agent_name: str, github_pat: str) -> bool:
+    """Write ``GITHUB_PAT`` into the container's ``.env`` over ``docker exec``.
+
+    Returns True on success. Never raises — the caller decides what a failure
+    means, and for every caller here it means "do not strip anything".
+    """
+    if not github_pat:
+        return False
+    try:
+        result = await execute_command_in_container(
+            container_name=f"agent-{agent_name}",
+            command=f"bash -c {shlex.quote(_ENV_PAT_UPSERT_SCRIPT)}",
+            user="root",
+            environment={"TRINITY_NEW_GITHUB_PAT": github_pat},
+        )
+    except Exception as e:  # noqa: BLE001 — container may be down
+        logger.warning("ent#615: .env PAT write raised for %s: %s", agent_name, e)
+        return False
+    ok = result.get("exit_code", 1) == 0
+    if not ok:
+        # NEVER the output: this exec's stdout/stderr could echo the file it was
+        # editing. Only the exit code, which the script makes specific.
+        logger.warning(
+            "ent#615: .env PAT write failed for %s (exit %s)",
+            agent_name, result.get("exit_code"),
+        )
+    return ok
+
+
+def _alarm_git_token_scrub_refused(agent_name: str, report: Dict[str, Any]) -> None:
+    """One operator alarm when the sweep left a token URL in place.
+
+    Refusing is the CORRECT outcome — the sweep never strips a credential it
+    could not replace, because the agent whose only credential lives in its
+    `origin` URL (the `POST /{agent}/git/initialize` orphan class) is stranded
+    permanently by a strip-first sweep. But a refusal is also invisible, so it
+    is queued rather than logged and forgotten. Fail-soft.
+    """
+    try:
+        from database import db
+        from utils.helpers import utc_now_iso
+
+        db.create_operator_queue_item(agent_name, {
+            "id": f"{_SCRUB_ALARM_ID_PREFIX}{agent_name}-{utc_now_iso()[:10]}",
+            "type": "alert",
+            "priority": "medium",
+            "title": "A git remote still carries an embedded credential",
+            "question": (
+                f"{agent_name} has {report.get('refused', 0)} git remote URL(s) "
+                "with an embedded credential that Trinity deliberately did NOT "
+                "remove: no replacement credential could be resolved, and "
+                "removing it would have left the agent unable to fetch or push "
+                "at all. Set a GitHub token for this agent (Git tab → add a "
+                "GitHub token) and the next start will finish the job."
+            ),
+            "context": {k: v for k, v in report.items()},
+            "created_at": utc_now_iso(),
+        })
+    except Exception:  # noqa: BLE001 — alarm plumbing must never break a sweep
+        logger.exception("ent#615: could not file the scrub-refused alarm for %s", agent_name)
+
+
+async def scrub_git_remote_tokens(
+    agent_name: str,
+    git_dir: Optional[str] = None,
+    seed_pat: str = "",
+) -> Dict[str, Any]:
+    """Install the credential helper, then remove embedded credentials (ent#615).
+
+    Idempotent. One root ``docker exec`` of a base64-injected script (the
+    ``compatibility/collector.py`` precedent — it avoids the nested-quoting
+    hazard entirely), which:
+
+    1. installs and REGISTERS the helper, so a container on an older base image
+       is covered without a recreate;
+    2. proves the helper actually resolves a credential — **by exit code**,
+       because ``git credential fill`` prints the credential on stdout and this
+       exec's output reaches ``logger`` and ``GitInitResult.error``;
+    3. harvests, only for an agent with no other source, into the helper's last
+       rung (``/home/developer/.trinity/git-credential``, 0600) — deliberately
+       NOT `.env`, whose ``GITHUB_PAT`` is exported as ``GH_TOKEN``/
+       ``GITHUB_TOKEN`` and gates the ent#123 push blackhole, so writing that
+       name would be a privilege GRANT (the ent#162 class), not a relocation;
+    4. strips userinfo from every remote in every config under ``.git`` —
+       including NESTED submodules, which a ``.git/modules/*/config`` glob
+       misses — and from ``url.<base>.insteadOf`` subsections, scoped to the
+       configured protocol+host so a foreign remote's credential is neither
+       promoted nor stripped;
+    5. REFUSES, and reports, rather than stripping what it could not replace.
+
+    ``seed_pat`` is a credential the CALLER already holds — the path that stops
+    new orphans being created. It is tried before the URL harvest and only when
+    nothing else resolves, and it travels in the exec ENVIRONMENT, never argv.
+    The exec runs as root so ``/proc/<pid>/environ`` is unreadable by the agent.
+
+    Returns the parsed report (counts only — never a URL, host or value) plus
+    ``success``. Never raises.
+    """
+    container_name = f"agent-{agent_name}"
+    report: Dict[str, Any] = git_credential_helper.parse_scrub_report("")
+    report["success"] = False
+    try:
+        if git_dir is None:
+            git_dir = await _detect_git_dir(container_name)
+        inner = git_credential_helper.scrub_command(git_dir)
+        result = await asyncio.wait_for(
+            execute_command_in_container(
+                container_name=container_name,
+                command=f"timeout {SCRUB_TIMEOUT_S} bash -c {shlex.quote(inner)}",
+                user="root",
+                environment=(
+                    {git_credential_helper.SEED_ENV_VAR: seed_pat}
+                    if seed_pat else None
+                ),
+            ),
+            timeout=SCRUB_TIMEOUT_S + 15,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("ent#615: remote-token sweep timed out for %s", agent_name)
+        return report
+    except Exception as e:  # noqa: BLE001 — best-effort, container may be down
+        logger.warning("ent#615: remote-token sweep error for %s: %s", agent_name, e)
+        return report
+
+    output = result.get("output", "") or ""
+    report.update(git_credential_helper.parse_scrub_report(output))
+    report["success"] = result.get("exit_code", 1) == 0
+
+    if report["refused"]:
+        _alarm_git_token_scrub_refused(agent_name, report)
+    if report["gitmodules_hits"]:
+        # A token in the TRACKED `.gitmodules` is already committed and pushed.
+        # The sweep cannot fix that; finding one turns "rotate the platform PAT
+        # after adoption" from advice into a requirement.
+        logger.error(
+            "ent#615: %s has %s credential-bearing url(s) in its TRACKED "
+            ".gitmodules — already committed and pushed; the platform token "
+            "must be rotated",
+            agent_name, report["gitmodules_hits"],
+        )
+    if report["competing_helpers"]:
+        # Helper lists COMPOSE. A helper registered ahead of ours answers first
+        # and masks it, which would also make the probe above report a
+        # credential this helper never produced.
+        logger.warning(
+            "ent#615: %s has %s git credential helper(s) besides trinity",
+            agent_name, report["competing_helpers"],
+        )
+    logger.info("ent#615: remote-token sweep for %s: %s", agent_name, report)
+    return report
+
+
+async def update_remote_pat(agent_name: str, github_pat: str, github_repo: str) -> bool:
+    """Make a running agent authenticate with ``github_pat``, no restart (#1264).
+
+    **Semantics flipped by ent#615, signature unchanged.** This used to rewrite
+    ``remote.origin.url`` to embed the token — the "now fix" a rotation needs,
+    because the live git process authenticated from that URL and not from
+    `.env`. It now does the opposite: it puts the credential where the
+    credential helper reads it and makes the URL credential-LESS.
+
+    Three steps, in this order, because **no path may strip a credential it has
+    not already replaced**:
+
+    1. write the token into the container's `.env` over ``docker exec`` — the
+       helper's first rung, and the rung a rotation must reach (``Config.Env``
+       is immutable without a recreate, so a baked-env-first ladder would keep
+       authenticating with the revoked token);
+    2. run the sweep, which installs the helper, PROVES it resolves, and only
+       then strips legacy userinfo — including the frozen empty-password
+       ``https://x-access-token:@github.com/...`` shape #1264 exists for;
+    3. ensure ``origin`` exists and is credential-less (the sweep only rewrites
+       remotes that are already there; #1264's case includes one that is not).
 
     Returns True on success. Best-effort: returns False (never raises) if the
-    container isn't running, has no git dir, or the command fails.
+    container isn't running, has no git dir, or a step fails.
     """
     if not github_pat or not github_repo:
         return False
     container_name = f"agent-{agent_name}"
     try:
         git_dir = await _detect_git_dir(container_name)
-        cmd = _remote_seturl_subcommand(_git_remote_url(github_pat, github_repo))
+
+        env_written = await write_container_github_pat(agent_name, github_pat)
+
+        # The seed is the belt to the `.env` write: if that write failed AND the
+        # container has no other source, the sweep still has a credential to
+        # place before it strips anything.
+        report = await scrub_git_remote_tokens(
+            agent_name, git_dir=git_dir, seed_pat=github_pat
+        )
+        if not report.get("helper_ok"):
+            # Nothing resolves, so step 3 would install a credential-less origin
+            # over a URL that may be the agent's only credential. Leave it.
+            logger.warning(
+                "ent#615/#1264: no credential resolves in %s after the .env "
+                "write (written=%s) — origin left as it was",
+                agent_name, env_written,
+            )
+            return False
+
+        cmd = _remote_seturl_subcommand(_credentialless_remote_url(github_repo))
         result = await execute_command_in_container(
             container_name=container_name,
             command=f'bash -c "cd {git_dir} && {cmd}"',
@@ -240,12 +487,17 @@ REBIND_PUSH_TIMEOUT_S = 120
 def _credentialless_remote_url(github_repo: str) -> str:
     """A remote URL with no userinfo, honouring ``TRINITY_GIT_BASE_URL``.
 
-    Mirrors ``startup.sh``'s ``UPSTREAM_URL`` construction
-    (``${GIT_SCHEME}://${GIT_HOST_PATH}/${repo}.git``) so the ``upstream``
-    remote this module writes and the one startup.sh self-heals are the same
-    string. Distinct from ``_git_remote_url``, which always embeds
-    ``oauth2:<pat>@`` — passing an empty PAT there yields ``oauth2:@host``,
-    which is NOT credential-less and defeats anonymous fetch.
+    Since ent#615 this is the ONLY remote-URL builder — every persisted remote
+    Trinity writes comes through here, and the credential arrives separately,
+    per operation, through the ``trinity`` git credential helper. It was
+    already the shape ``startup.sh``'s ``UPSTREAM_URL`` used
+    (``${GIT_SCHEME}://${GIT_HOST_PATH}/${repo}.git``), which is why the two
+    agree with no further work.
+
+    It replaced ``_git_remote_url(pat, repo)``, which always embedded
+    ``oauth2:<pat>@``. Note why that one could not simply be called with an
+    empty PAT: it yielded ``oauth2:@host``, which is not credential-less and
+    defeats anonymous fetch.
     """
     base = os.getenv("TRINITY_GIT_BASE_URL", "https://github.com").rstrip("/")
     return f"{base}/{github_repo}.git"
@@ -319,29 +571,62 @@ async def rebind_origin_and_push(
     Never raises; the caller maps ``stage`` to a structured 502.
     """
     container_name = f"agent-{agent_name}"
-    dest_url = _git_remote_url(user_pat, destination_repo)
+    # ent#615: credential-LESS. The push below carries the user's PAT
+    # per-operation through the exec environment instead.
+    dest_url = _credentialless_remote_url(destination_repo)
 
     try:
         git_dir = await _detect_git_dir(container_name)
     except Exception as e:  # noqa: BLE001 — container may be down mid-op
         return RebindResult(False, "detect", error=f"Could not reach the agent container: {e}")
 
-    async def _run(cmd: str, timeout: int = 120) -> tuple:
+    async def _run(
+        cmd: str,
+        timeout: int = 120,
+        *,
+        environment: Optional[Dict[str, str]] = None,
+        user: str = "developer",
+    ) -> tuple:
         result = await execute_command_in_container(
             container_name=container_name,
             command=f"bash -c {shlex.quote(f'cd {shlex.quote(git_dir)} && {cmd}')}",
             timeout=timeout,
+            environment=environment,
+            user=user,
         )
         return (
             result.get("exit_code", 1),
             _scrub_git_output(result.get("output", ""), user_pat),
         )
 
-    # 1. Push committed history to the destination by explicit URL.
+    # 1. Push committed history to the destination by explicit — and now
+    #    credential-less — URL.
+    #
+    #    ent#615/CRIT-7: the credential travels in the exec ENVIRONMENT
+    #    (`http.extraHeader` via GIT_CONFIG_*), so it is in neither the argv nor
+    #    `.git/config`. But env is readable through `/proc/<pid>/environ` by a
+    #    SAME-UID process, and this is the USER's PAT — a credential the
+    #    container is not supposed to hold at all — exposed for the whole
+    #    `REBIND_PUSH_TIMEOUT_S` window to an agent that runs as `developer`
+    #    and has `Bash`. So the push runs as ROOT, whose `environ` `developer`
+    #    cannot read.
+    #
+    #    It cannot move to the backend host (the recommended shape, and the one
+    #    fork_to_own uses): the history being pushed lives ONLY on the
+    #    container's workspace volume, and the backend has no copy of it.
+    #
+    #    `safe.directory`: git refuses to operate as root on a repo owned by
+    #    another user. Non-secret, and `-c` is protected configuration, so this
+    #    is the one thing that legitimately belongs on the argv here. `push` is
+    #    local-read-only — it writes no objects and no refs into the repo — so
+    #    running it as root leaves nothing root-owned behind.
     rc, out = await _run(
-        f"git push {shlex.quote(dest_url)} "
+        f"git -c {shlex.quote(f'safe.directory={git_dir}')} "
+        f"push {shlex.quote(dest_url)} "
         f"{shlex.quote(f'refs/heads/{branch}:refs/heads/{branch}')}",
         timeout=REBIND_PUSH_TIMEOUT_S,
+        environment=git_credential_helper.git_auth_env(user_pat),
+        user="root",
     )
     if rc != 0:
         last = out.strip().splitlines()[-1][:300] if out.strip() else "push failed"
@@ -1109,14 +1394,21 @@ NO_WRITE_CREDENTIALS_MESSAGE = (
 
 
 def _agent_has_write_credentials(agent_name: str, container) -> bool:
-    """True if the agent can plausibly push (ent#123 tokenless guard).
+    """The CHEAP tier of "can this agent plausibly push" (ent#123 guard).
 
-    Predicate = the container's baked ``GITHUB_PAT`` env **or** a per-agent
-    PAT row. The OR matters: ``set_agent_github_pat`` live-injects the token
-    into the workspace ``.env`` and rewrites origin (``update_remote_pat``,
-    #1264) BEFORE any recreate, so baked env alone would block the user who
-    just fixed the problem. The global tier is deliberately excluded — a
-    global PAT never reaches a tokenless container's remote.
+    Baked ``GITHUB_PAT`` env **or** a per-agent PAT row. The OR matters:
+    ``set_agent_github_pat`` live-injects the token into the workspace ``.env``
+    and re-points origin (``update_remote_pat``, #1264) BEFORE any recreate, so
+    baked env alone would block the user who just fixed the problem.
+
+    ⚠️ This is NOT the whole predicate any more. It used to be, on the strength
+    of "the global tier is deliberately excluded — a global PAT never reaches a
+    tokenless container's remote", and ent#615 made that sentence false: a
+    credential the helper resolves DOES reach the remote, from `.env` or from
+    the ent#615 harvest file, neither of which is visible from here. Answering
+    on this tier alone would return ``no_write_credentials`` to agents that can
+    push. Use ``_agent_can_push``, which consults this first and the helper's
+    own ladder second.
 
     Fail-open: any error reading either source returns True so this guard
     can only ever produce a clearer message, never block a working push.
@@ -1133,6 +1425,35 @@ def _agent_has_write_credentials(agent_name: str, container) -> bool:
             "failing open", agent_name, exc,
         )
         return True
+
+
+async def _agent_can_push(agent_name: str, container) -> bool:
+    """Full "can this agent push" predicate (ent#615).
+
+    The cheap tiers first (`Config.Env`, the per-agent row — no I/O beyond a DB
+    read), then the credential helper's own ladder, asked in the container by
+    EXIT CODE. The extra exec only ever runs for an agent that already looks
+    tokenless, which is the small population where the cheap answer is now
+    wrong, so the Push hot path is unchanged for everyone else.
+
+    Fail-open, like the tier it wraps: this guard exists to produce a clearer
+    message, never to block a push that would have worked.
+    """
+    if _agent_has_write_credentials(agent_name, container):
+        return True
+    try:
+        result = await execute_command_in_container(
+            container_name=f"agent-{agent_name}",
+            command=f"bash -c {shlex.quote(git_credential_helper.probe_command())}",
+            timeout=15,
+        )
+    except Exception as exc:  # noqa: BLE001 — guard must never break push
+        logger.warning(
+            "_agent_can_push: helper probe failed for %s: %s — failing open",
+            agent_name, exc,
+        )
+        return True
+    return result.get("exit_code", 1) == 0
 
 
 async def sync_to_github(
@@ -1171,7 +1492,7 @@ async def sync_to_github(
     # ent#123: a tokenless (anonymous public-template) agent has no push
     # credentials — fail with an honest, actionable message instead of
     # letting the in-container push die on a cryptic auth prompt.
-    if not _agent_has_write_credentials(agent_name, container):
+    if not await _agent_can_push(agent_name, container):
         return GitSyncResult(
             success=False,
             message=NO_WRITE_CREDENTIALS_MESSAGE,
@@ -2743,6 +3064,34 @@ async def initialize_git_in_container(
         timeout=5,
     )
 
+    # Step 2b (ent#615): install the credential helper and make `github_pat`
+    # resolvable through it, BEFORE anything writes a remote or fetches.
+    #
+    # This is also what stops this endpoint creating the orphan class it was
+    # named for. It used to push with the resolved — often GLOBAL — platform
+    # PAT while baking no git env, persisting no per-agent row and writing no
+    # `.env`, so the agent's only credential ended up inside its own
+    # `origin` URL. The seed puts it where the helper reads it instead, and the
+    # URL below is credential-less.
+    #
+    # A tokenless agent (ent#123 anonymous public template) legitimately
+    # resolves nothing — that is a read-only clone, not a failure. A PAT that
+    # was supplied and could NOT be placed IS a failure, and saying so here
+    # beats a cryptic auth error three commands later.
+    seed_report = await scrub_git_remote_tokens(
+        agent_name, git_dir=git_dir, seed_pat=github_pat
+    )
+    if github_pat and not seed_report.get("helper_ok"):
+        return GitInitResult(
+            success=False,
+            git_dir=git_dir,
+            error=(
+                "Could not install the git credential for this agent: the "
+                "credential helper resolved nothing after the token was "
+                "placed. Nothing was changed."
+            ),
+        )
+
     # Step 3: Initialize git and try to preserve remote history
     # Commands marked required=True will abort on failure;
     # optional commands (like fetch) may fail for empty repos.
@@ -2759,7 +3108,12 @@ async def initialize_git_in_container(
         ('git config --global maintenance.auto false', True),
         ('git config --global maintenance.autoDetach false', True),
         ('git init', True),
-        (_remote_seturl_subcommand(_git_remote_url(github_pat, github_repo)), True),
+        # ent#615: credential-LESS origin. The credential reaches `git fetch`
+        # below — and every later fetch/push — through the `trinity` credential
+        # helper, which the caller installs and PROVES before this runs. Order
+        # matters: a token-free origin registered before a working helper is a
+        # repo nothing can fetch.
+        (_remote_seturl_subcommand(_credentialless_remote_url(github_repo)), True),
         ('git fetch origin', False),  # Optional — remote may be empty
     ]
 
@@ -2958,7 +3312,7 @@ async def reset_to_main_preserve_state(agent_name: str) -> Dict[str, Any]:
     # ent#123: the recovery ends in a force-with-lease PUSH — refuse up front
     # for a tokenless agent with the same honest message as sync.
     container = get_agent_container(agent_name)
-    if container and not _agent_has_write_credentials(agent_name, container):
+    if container and not await _agent_can_push(agent_name, container):
         return {
             "error": "no_write_credentials",
             "message": NO_WRITE_CREDENTIALS_MESSAGE,

@@ -523,7 +523,11 @@ def service(sources_db, tmp_path, monkeypatch):
     svc = ss.SkillService()
     svc.library_root = tmp_path / "clones"
     svc.library_path = tmp_path / "clones"
-    monkeypatch.setattr(svc, "_authenticated_url", lambda url, pat: url, raising=False)
+    # ent#615: normalisation and the PAT decision are separate now. The local
+    # fixture repo path must survive normalisation; the PAT half needs no stub
+    # because `_auth_pat_for` already refuses every non-github host, which a
+    # tmp_path is.
+    monkeypatch.setattr(svc, "_normalized_url", lambda url: url, raising=False)
     return svc
 
 
@@ -1358,12 +1362,36 @@ class TestPatSplicingHostCheck:
     `"github.com" in url` is satisfied by a URL merely *containing* the string,
     and the splice that followed used `str.replace("https://", ...)`. Together
     that sends the platform PAT to an attacker host. Guarded by parsing.
+
+    ent#615 removed the splice itself — the PAT no longer enters the URL at all,
+    it travels in the git child's environment — but the HOST DECISION it guarded
+    is unchanged and, if anything, more load-bearing: an `http.extraHeader` is
+    sent to whatever host git connects to, so "is this host ours" still decides
+    whether the platform credential travels. These tests now exercise the two
+    halves the one function was split into.
     """
 
     @staticmethod
-    def _splice(url, pat="ghp_placeholder"):
+    def _url(url):
         import services.skill_service as ss
-        return ss.SkillService._authenticated_url(url, pat)
+        return ss.SkillService._normalized_url(url)
+
+    @staticmethod
+    def _pat(url, pat="ghp_placeholder"):
+        import services.skill_service as ss
+        return ss.SkillService._auth_pat_for(ss.SkillService._normalized_url(url), pat)
+
+    def test_the_url_never_carries_the_pat_at_all(self):
+        """ent#615 AC1, one layer out from the agent containers.
+
+        The spliced URL was written to `origin` at clone time, so the platform
+        PAT sat at rest in `/data/skills-library/*/.git/config` — on the
+        `~/trinity-data` HOST BIND MOUNT, and therefore in every backup and
+        snapshot of it — as well as on the backend's git argv.
+        """
+        for url in ("https://github.com/owner/repo", "github.com/owner/repo", "owner/repo"):
+            assert "ghp_placeholder" not in self._url(url)
+            assert "@" not in self._url(url)
 
     @pytest.mark.parametrize("hostile", [
         "https://evil.example/?x=github.com",
@@ -1371,22 +1399,21 @@ class TestPatSplicingHostCheck:
         "https://github.com.evil.example/owner/repo",
         "http://github.com/owner/repo",          # wrong scheme
     ])
-    def test_pat_is_never_spliced_into_a_non_github_host(self, hostile):
-        out = self._splice(hostile)
-        assert "ghp_placeholder" not in out, f"PAT leaked into {out!r}"
+    def test_pat_never_travels_to_a_non_github_host(self, hostile):
+        assert self._pat(hostile) == "", f"PAT offered to {hostile!r}"
 
     @pytest.mark.parametrize("url", [
         "https://github.com/owner/repo",
         "github.com/owner/repo",
         "owner/repo",
     ])
-    def test_pat_is_spliced_for_real_github_urls(self, url):
+    def test_pat_travels_for_real_github_urls(self, url):
         """The guard must not be so tight it breaks private-repo access."""
-        out = self._splice(url)
-        assert out.startswith("https://ghp_placeholder@github.com/")
+        assert self._pat(url) == "ghp_placeholder"
 
-    def test_no_pat_configured_still_normalises(self):
-        assert self._splice("owner/repo", pat=None) == "https://github.com/owner/repo"
+    def test_no_pat_configured(self):
+        assert self._pat("owner/repo", pat=None) == ""
+        assert self._url("owner/repo") == "https://github.com/owner/repo"
 
     @pytest.mark.parametrize("shorthand, expected", [
         ("github.com/owner/repo", "https://github.com/owner/repo"),
@@ -1404,11 +1431,12 @@ class TestPatSplicingHostCheck:
         same bypassable class of check as the substring test above, and a second
         way of answering "which host is this" is a second thing to keep correct.
         """
-        assert self._splice(shorthand, pat=None) == expected
+        assert self._url(shorthand) == expected
 
     def test_lookalike_shorthand_never_reaches_the_lookalike_host(self):
-        out = self._splice("github.com.evil.example/owner/repo")
+        out = self._url("github.com.evil.example/owner/repo")
         assert urlparse(out).hostname == "github.com"
+        assert self._pat("github.com.evil.example/owner/repo") == "ghp_placeholder"
 
 
 class TestSyncErrorSurface:

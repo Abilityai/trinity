@@ -72,6 +72,11 @@ _ALLOWED_CALLERS = {
         "platform-only: edge-triggered on the durable prior-status transition "
         "(ok->failed), plus a staleness re-alarm throttled to weekly; volume is "
         "bound by the daily job cadence and no agent input reaches it (#2216)",
+    ("services/git_service.py", "_alarm_git_token_scrub_refused"):
+        "platform-only: the ent#615 sweep refused to strip a credential URL it "
+        "could not replace. Raised from a start hook / boot one-shot, so the "
+        "cadence is the platform's, and the id is bucketed per agent per UTC "
+        "day so a restart loop is <=1 row/agent/day; no agent input reaches it",
     ("services/lease_reaper_service.py", "_create_park_item"):
         "platform-only + LOAD-BEARING: #1402 poison-park parks ONLY on a successful "
         "create — must never be throttled (the reason a db-sink bound was rejected)",
