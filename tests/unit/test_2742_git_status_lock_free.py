@@ -1018,3 +1018,226 @@ class TestTheObserverCannotDarkenTheFeed:
         finally:
             git_mod._REPO_LOCK.release()
             lock.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# AC4 — an agent commit survives a concurrent poll
+#
+# Three phases, strongest first. Phase B is the GATE: it is deterministic AND
+# genuinely concurrent, so AC4 does not rest on probability anywhere. Phase A
+# (the lock-sighting sampler, above) is the property. Phase C is a behavioural
+# witness that must demonstrate it can fail before it is allowed to pass.
+# ---------------------------------------------------------------------------
+
+
+def _bulk_repo(repo: Path, files: int) -> Path:
+    """Widen the index so `git status`'s lock window is comfortably catchable."""
+    bulk = repo / "bulk"
+    bulk.mkdir(exist_ok=True)
+    for i in range(files):
+        (bulk / f"f{i}.txt").write_text(str(i))
+    _run(["git", "add", "-A"], repo)
+    _run(["git", "commit", "-m", "bulk"], repo)
+    return repo
+
+
+class TestACommitSurvivesAConcurrentPoll:
+
+    @staticmethod
+    def _freeze_status_holding_the_lock(repo: Path, argv, attempts: int = 8):
+        """Start a real `git status` child and SIGSTOP it the instant it takes
+        `.git/index.lock`. Returns the frozen Popen, or None if the lock never
+        appeared (which is the expected outcome for the flagged argv).
+
+        SIGSTOP is the only way to hold the window open: git runs hooks and
+        filters OUTSIDE the index lock, so an fsmonitor hook sleeping 1 s
+        stretches `status` wall time to 1279 ms while the lock window stays
+        0.8 ms, and a pre-commit hook holds it for 0 ms. A stopped process,
+        however, holds it for as long as we like.
+        """
+        import signal
+        import time as _time
+
+        lock = repo / ".git" / "index.lock"
+        for _ in range(attempts):
+            proc = subprocess.Popen(
+                argv, cwd=str(repo),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            deadline = _time.monotonic() + 5.0
+            while _time.monotonic() < deadline:
+                if lock.exists():
+                    try:
+                        os.kill(proc.pid, signal.SIGSTOP)
+                    except ProcessLookupError:
+                        break
+                    if lock.exists() and proc.poll() is None:
+                        return proc
+                    try:
+                        os.kill(proc.pid, signal.SIGCONT)
+                    except ProcessLookupError:
+                        pass
+                    break
+                if proc.poll() is not None:
+                    break
+            proc.wait(timeout=10)
+        return None
+
+    @staticmethod
+    def _thaw(proc):
+        """SIGCONT in a `finally`, always. `--timeout-method=signal` raises
+        INSIDE the test, and a leaked SIGSTOPped child would hold the index lock
+        for the rest of the pytest session."""
+        import signal
+        if proc is None:
+            return
+        try:
+            os.kill(proc.pid, signal.SIGCONT)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    def test_a_commit_fails_while_a_legacy_status_holds_the_index_lock(self, repo):
+        """**The AC4 gate.** Deterministic and genuinely concurrent: a real
+        `git status --porcelain` child is frozen holding the real lock, and the
+        agent's own `git add` — a second real process — fails against it.
+
+        This is the defect #2742 describes, reproduced without a race: the
+        platform's poll and the agent's turn contend for one index lock.
+        """
+        _bulk_repo(repo, 2000)
+        (repo / "agent-work.txt").write_text("the agent's own turn")
+
+        frozen = self._freeze_status_holding_the_lock(
+            repo, ["git", "status", "--porcelain"]
+        )
+        try:
+            if frozen is None:
+                pytest.skip(
+                    "could not freeze a status child holding index.lock in this "
+                    "environment — never pass without having reproduced it"
+                )
+            add = _run(["git", "add", "-A"], repo)
+            assert add.returncode != 0, (
+                "the agent's git add should have failed against the held lock"
+            )
+            assert "index.lock" in add.stderr, (
+                f"expected an index.lock failure, got: {add.stderr!r}"
+            )
+        finally:
+            self._thaw(frozen)
+
+    def test_the_shipped_status_argv_cannot_be_caught_holding_the_lock(self, repo):
+        """The other direction of the same deterministic experiment: with
+        `--no-optional-locks` the lock never appears, so there is nothing to
+        freeze — and the agent's concurrent `git add` succeeds."""
+        _bulk_repo(repo, 2000)
+        (repo / "agent-work.txt").write_text("the agent's own turn")
+
+        frozen = self._freeze_status_holding_the_lock(
+            repo, ["git", "--no-optional-locks", "status", "--porcelain"], attempts=4
+        )
+        try:
+            assert frozen is None, (
+                "the flagged argv was caught holding index.lock — the flag is "
+                "not doing what AC1 claims"
+            )
+            add = _run(["git", "add", "-A"], repo)
+            assert add.returncode == 0, add.stderr
+            commit = _run(["git", "commit", "-m", "agent turn"], repo)
+            assert commit.returncode == 0, commit.stderr
+        finally:
+            self._thaw(frozen)
+
+    def test_the_witness_run_that_must_prove_it_can_fail_first(self, repo, monkeypatch):
+        """**Phase C — the behavioural witness, self-validating and non-gating.**
+
+        Thread A drives the real `get_git_status()` route; thread B is the agent,
+        doing write / `git add` / `git commit` rounds. The CONTROL arm (the
+        legacy argv, injected through the same route) must reproduce at least one
+        `index.lock` failure IN THIS RUN — otherwise the test skips. It must
+        never pass without having demonstrated that it can fail: measured through
+        this route the duty cycle is only ~0.7 % (about 95 % of each iteration is
+        `git fetch`), so the margin is roughly one failure per run and a
+        scheduling change could take it away silently.
+
+        Writer rounds write `time.time_ns()` and failures are classified by
+        `"index.lock" in stderr`, never by return code: `git commit` exits 1 with
+        EMPTY stderr ("nothing to commit" on stdout) whenever a round writes
+        content identical to the previous one, which under `check=True` is
+        indistinguishable from a lock failure.
+        """
+        import asyncio
+        import threading
+        import time as _time
+
+        _bulk_repo(repo, 2000)
+        monkeypatch.setattr(git_mod, "_STATUS_HOME_DIR", repo)
+        real_run_registered = git_mod.run_registered
+
+        def _witness(strip_flag: bool, rounds: int = 20) -> int:
+            if strip_flag:
+                def _legacy(argv, **kwargs):
+                    argv = [a for a in argv if a != "--no-optional-locks"]
+                    return real_run_registered(argv, **kwargs)
+                git_mod.run_registered = _legacy
+            else:
+                git_mod.run_registered = real_run_registered
+
+            git_mod._STATUS_INFLIGHT.clear()
+            stop = threading.Event()
+            failures = {"n": 0}
+
+            def _reader():
+                async def _loop():
+                    while not stop.is_set():
+                        try:
+                            await git_mod.get_git_status()
+                        except Exception:
+                            pass
+                asyncio.run(_loop())
+
+            def _writer():
+                try:
+                    for _ in range(rounds):
+                        (repo / "agent.txt").write_text(str(_time.time_ns()))
+                        add = _run(["git", "add", "-A"], repo)
+                        if "index.lock" in (add.stderr or ""):
+                            failures["n"] += 1
+                            continue
+                        commit = _run(["git", "commit", "-m", "agent turn"], repo)
+                        if "index.lock" in (commit.stderr or ""):
+                            failures["n"] += 1
+                finally:
+                    stop.set()
+
+            reader = threading.Thread(target=_reader, daemon=True)
+            writer = threading.Thread(target=_writer, daemon=True)
+            reader.start()
+            writer.start()
+            writer.join(timeout=180)
+            stop.set()
+            reader.join(timeout=60)
+            return failures["n"]
+
+        try:
+            control = _witness(strip_flag=True)
+            if control == 0:
+                pytest.skip(
+                    "the control arm did not reproduce an index.lock failure in "
+                    "this run — the witness has no teeth here, so it must skip "
+                    "rather than pass (the deterministic AC4 gate above is "
+                    "unaffected)"
+                )
+            treatment = _witness(strip_flag=False)
+            assert treatment == 0, (
+                f"the shipped status path still collided with the agent's own "
+                f"git {treatment}x (control reproduced {control})"
+            )
+        finally:
+            git_mod.run_registered = real_run_registered
+            git_mod._STATUS_INFLIGHT.clear()

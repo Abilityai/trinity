@@ -43,13 +43,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 from database import db
 from redis_breaker_util import get_breaker_redis
 from services.agent_client import AgentClient
-from utils.helpers import utc_now_iso
+from utils.helpers import parse_iso_timestamp, utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,93 @@ def _coerce_nonneg_int(value) -> Optional[int]:
         return value
     return None
 
+
+# #2742: an explicit UTC offset, which `startup.sh` always writes (`...Z`).
+_ISO_OFFSET_RE = re.compile(r"[+-]\d{2}:?\d{2}$")
+
+# #2742: how old a `lock_recovery.at` may be and still be worth announcing.
+# Floor at one hour rather than the poll interval: `startup.sh` stamps it at
+# container boot and the agent server folds it in on its FIRST status read, and
+# a cold boot (image pull, clone, credential injection) can put several minutes
+# between those two. The clamp's job is to reject nonsense — a far-future `at`
+# would otherwise be "newer" on every tick forever — and the DEDUP below, not
+# the clamp, is what stops a real record repeating.
+_LOCK_RECOVERY_MAX_AGE_SECONDS = 3600
+_LOCK_RECOVERY_FUTURE_GRACE_SECONDS = 60
+
+
+def _coerce_lock_recovery(value, poll_interval: int = DEFAULT_POLL_INTERVAL):
+    """Rebuild the boot-reap record from coerced values, or drop it (#2742).
+
+    `sync-state.json` is agent-authored and the agent server merges it wholesale
+    (`merged.update(data)`), so `last_lock_recovery` is fully agent-controlled
+    even on an agent where nothing ever reaped anything — and
+    `git_service.get_git_status` proxies `response.json()` UNMODIFIED to the UI
+    and the MCP tool. The backend therefore never passes the agent's dict
+    through; it builds a new one from values it has checked.
+
+    Three guards, each for a specific failure:
+
+    - `isinstance(value, str)` before parsing: `parse_iso_timestamp` raises
+      `AttributeError` (not `ValueError`) on a non-str.
+    - `except (ValueError, TypeError)` around the parse AND the comparison: a
+      valid-but-naive ISO string parses cleanly and then raises `TypeError` on
+      `aware > naive`. That raise would land in `_sync_agent` AFTER the upsert
+      and be swallowed by `_poll_cycle`'s `gather(return_exceptions=True)`, so
+      the symptom is a LOST ALERT with no traceback. The same guard, with the
+      same comment, already exists in the file this record comes from
+      (`agent_server/routers/git.py::_maybe_run_git_maintenance`).
+    - An explicit UTC offset is REQUIRED. Our own writer always stamps `Z`, so a
+      naive value did not come from us; this is a boundary over agent-authored
+      JSON and the house posture is to reject rather than guess (the
+      `_coerce_nonneg_int` docstring states the same threat model).
+
+    Returns a fresh dict or None. Never raises.
+    """
+    if not isinstance(value, dict):
+        return None
+    raw_at = value.get("at")
+    if not isinstance(raw_at, str) or not (0 < len(raw_at) <= 64):
+        return None
+    if not (raw_at.endswith("Z") or _ISO_OFFSET_RE.search(raw_at)):
+        return None
+    try:
+        parsed = parse_iso_timestamp(raw_at)
+        now = datetime.now(timezone.utc)
+        if parsed > now + timedelta(seconds=_LOCK_RECOVERY_FUTURE_GRACE_SECONDS):
+            return None
+        if parsed < now - timedelta(seconds=_LOCK_RECOVERY_MAX_AGE_SECONDS):
+            return None
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+    locks = value.get("locks")
+    return {
+        "at": parsed.isoformat(),
+        # Agent-reachable free text: bounded, and it never reaches a format
+        # string as anything but a `%s` argument.
+        "locks": locks[:200] if isinstance(locks, str) else "",
+    }
+
+
+def _coerce_lock_stuck(value):
+    """Rebuild the stuck-lock report from coerced INTS only (#2742).
+
+    The agent-supplied `path` is deliberately dropped: it is composed from a
+    `.git` the agent can point anywhere, it adds nothing to a fleet-level
+    WARNING, and a free-text field that reaches a log is how the next log
+    injection gets written. Returns None unless at least one usable int survives.
+    """
+    if not isinstance(value, dict):
+        return None
+    coerced = {
+        key: _coerce_nonneg_int(value.get(key))
+        for key in ("age_seconds", "stable_for_seconds", "sightings", "size_bytes")
+    }
+    if all(v is None for v in coerced.values()):
+        return None
+    return {k: v for k, v in coerced.items() if v is not None}
+
 # WebSocket manager injected from main.py (optional, mirrors operator-queue pattern).
 _websocket_manager = None
 
@@ -134,6 +223,13 @@ class SyncHealthService:
         # adopted here. Mirrors monitoring #1464 / opqueue #1632.
         self._worker_id = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._is_leader = False  # last observed leadership, for transition logs
+        # #2742: dedup comparands for the two new log lines. Against the last
+        # OBSERVED value, never against `last_check_at` — that column is
+        # re-stamped to `now` on EVERY upsert, so "at is newer than
+        # last_check_at" would be true forever, per agent, and a single
+        # far-future `at` would flood the log for the life of the process.
+        self._last_lock_recovery: Dict[str, Dict] = {}
+        self._lock_stuck_agents: set = set()
 
     @property
     def poll_interval(self) -> int:
@@ -330,6 +426,40 @@ class SyncHealthService:
         new_failures = updated["consecutive_failures"]
         if prior_failures < ALERT_THRESHOLD <= new_failures:
             self._emit_sync_failing_alert(agent_name, updated)
+
+        # #2742: a self-healed wedge, announced once. No operator-queue item
+        # and no DB column — the boot reap already fixed it, so this is a log
+        # line an operator can find, not a decision anyone has to make.
+        recovery = _coerce_lock_recovery(
+            sync_state.get("last_lock_recovery"), self.poll_interval
+        )
+        if recovery is not None and self._last_lock_recovery.get(agent_name) != recovery:
+            self._last_lock_recovery[agent_name] = recovery
+            logger.warning(
+                "%s recovered a stale git lock at container start (at=%s, locks=%s)",
+                agent_name, recovery["at"], recovery["locks"],
+            )
+
+        # #2742: a lock that is stuck RIGHT NOW, edge-triggered. Reported, never
+        # removed — see `_index_lock_stuck` in the agent server for why. This is
+        # the "tell the truth about state" half: a stale lock does not fail
+        # `git status`, so without this line a wedged workspace is invisible
+        # until a human notices the commits stopped.
+        stuck = _coerce_lock_stuck(payload.get("index_lock_stuck"))
+        if stuck is not None:
+            if agent_name not in self._lock_stuck_agents:
+                self._lock_stuck_agents.add(agent_name)
+                logger.warning(
+                    "%s has a git index.lock that has been unchanged across %s "
+                    "status reads (%ss) — a running git may still hold it; the "
+                    "race-free repair is a container restart, whose boot reap "
+                    "clears it with the PID namespace empty",
+                    agent_name,
+                    stuck.get("sightings"),
+                    stuck.get("stable_for_seconds"),
+                )
+        else:
+            self._lock_stuck_agents.discard(agent_name)
 
         # #1595: edge-triggered git-bloat / maintenance-health alerts.
         new_git_dir_bytes = updated.get("git_dir_bytes") or 0

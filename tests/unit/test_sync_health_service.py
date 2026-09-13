@@ -82,7 +82,8 @@ def seed_agent(tmp_db):
     return _seed
 
 
-def _status_payload(status="success", ahead_working=0, behind_working=0, error=None):
+def _status_payload(status="success", ahead_working=0, behind_working=0, error=None,
+                    lock_recovery=None, index_lock_stuck=None, computed_at=None):
     return {
         "git_enabled": True,
         "branch": "trinity/alpha/abc123",
@@ -101,8 +102,13 @@ def _status_payload(status="success", ahead_working=0, behind_working=0, error=N
             "last_sync_at": "2026-04-18T10:00:00+00:00",
             "last_error_summary": error,
             "consecutive_failures": 0,  # agent-side counter, backend recomputes
+            "last_lock_recovery": lock_recovery,  # #2742
         },
         "sync_status": "up_to_date",
+        # #2742 fields (None on an agent running an older base image).
+        "lock_recovery": lock_recovery,
+        "index_lock_stuck": index_lock_stuck,
+        "computed_at": computed_at,
     }
 
 
@@ -355,3 +361,219 @@ class TestLeaderLeaseAlertTiming:
 
         from database import db
         assert db.get_sync_state("alpha") is None
+
+
+def _iso_now(offset_seconds: int = 0):
+    from datetime import datetime, timedelta, timezone
+    return (
+        datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
+    ).isoformat().replace("+00:00", "Z")
+
+
+class TestLockRecoveryObservability:
+    """#2742 — the self-healed wedge reaches the platform, exactly once.
+
+    `sync-state.json` is agent-authored and merged wholesale by the agent
+    server, and `git_service.get_git_status` proxies `response.json()`
+    UNMODIFIED to the UI and the MCP tool — so the backend never passes the
+    agent's dict through, it rebuilds one from values it has checked.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_recovery_logs_once(self, service, seed_agent, caplog):
+        seed_agent("alpha")
+        payload = _status_payload(
+            lock_recovery={"at": _iso_now(-30), "locks": "index.lock"}
+        )
+        with caplog.at_level("WARNING"):
+            with patch.object(service, "_fetch_git_status",
+                               AsyncMock(return_value=payload)):
+                await service._poll_cycle()
+        hits = [r for r in caplog.records if "recovered a stale git lock" in r.message]
+        assert len(hits) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_same_recovery_is_not_logged_again(
+        self, service, seed_agent, caplog
+    ):
+        """Dedup is against the last OBSERVED value. The rejected alternative —
+        `at` newer than the prior row's `last_check_at` — is not a dedup at all:
+        that column is re-stamped to `now` on every upsert."""
+        seed_agent("alpha")
+        payload = _status_payload(
+            lock_recovery={"at": _iso_now(-30), "locks": "index.lock"}
+        )
+        with caplog.at_level("WARNING"):
+            with patch.object(service, "_fetch_git_status",
+                               AsyncMock(return_value=payload)):
+                await service._poll_cycle()
+                await service._poll_cycle()
+                await service._poll_cycle()
+        hits = [r for r in caplog.records if "recovered a stale git lock" in r.message]
+        assert len(hits) == 1, f"expected one log line, got {len(hits)}"
+
+    @pytest.mark.asyncio
+    async def test_a_far_future_at_is_rejected_and_never_floods(
+        self, service, seed_agent, caplog
+    ):
+        """The flooding case the clamp exists for: with the rejected
+        `last_check_at` dedup, `9999-01-01` would be 'newer' on every tick,
+        per agent, forever — asserting a platform action that never happened."""
+        seed_agent("alpha")
+        payload = _status_payload(
+            lock_recovery={"at": "9999-01-01T00:00:00Z", "locks": "index.lock"}
+        )
+        with caplog.at_level("WARNING"):
+            with patch.object(service, "_fetch_git_status",
+                               AsyncMock(return_value=payload)):
+                await service._poll_cycle()
+                await service._poll_cycle()
+        assert not [r for r in caplog.records
+                    if "recovered a stale git lock" in r.message]
+        from database import db
+        assert db.get_sync_state("alpha") is not None, "the upsert must still land"
+
+    @pytest.mark.asyncio
+    async def test_an_ancient_at_is_rejected(self, service, seed_agent, caplog):
+        seed_agent("alpha")
+        payload = _status_payload(
+            lock_recovery={"at": _iso_now(-86400), "locks": "index.lock"}
+        )
+        with caplog.at_level("WARNING"):
+            with patch.object(service, "_fetch_git_status",
+                               AsyncMock(return_value=payload)):
+                await service._poll_cycle()
+        assert not [r for r in caplog.records
+                    if "recovered a stale git lock" in r.message]
+
+    @pytest.mark.parametrize("bad", [
+        None, "junk", 5, [], {}, {"at": 5}, {"at": None},
+        {"at": "not-a-date"}, {"at": True},
+        {"at": "2026-09-13T10:00:00"},          # valid ISO, NAIVE — see below
+        {"at": "x" * 500},
+    ])
+    def test_malformed_recoveries_are_dropped_without_raising(self, bad):
+        """Includes the naive-ISO case explicitly (R1). It parses cleanly and
+        would then raise TypeError on the aware/naive comparison — a raise that
+        lands after the upsert and is swallowed by
+        `gather(return_exceptions=True)`, i.e. a lost alert with no traceback.
+        It is rejected here because our own writer always stamps `Z`, so a naive
+        value did not come from us."""
+        from services.sync_health_service import _coerce_lock_recovery
+        assert _coerce_lock_recovery(bad) is None
+
+    def test_a_well_formed_recovery_is_accepted(self):
+        """The other half, so the test above cannot pass by rejecting
+        everything."""
+        from services.sync_health_service import _coerce_lock_recovery
+        out = _coerce_lock_recovery({"at": _iso_now(-30), "locks": "index.lock"})
+        assert out is not None
+        assert out["locks"] == "index.lock"
+
+    def test_an_offset_form_is_accepted_too(self):
+        from datetime import datetime, timedelta, timezone
+        from services.sync_health_service import _coerce_lock_recovery
+        at = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+        assert at.endswith("+00:00")
+        assert _coerce_lock_recovery({"at": at}) is not None
+
+    def test_agent_supplied_free_text_is_bounded(self):
+        from services.sync_health_service import _coerce_lock_recovery
+        out = _coerce_lock_recovery({"at": _iso_now(-5), "locks": "y" * 5000})
+        assert len(out["locks"]) == 200
+
+    def test_a_non_string_locks_field_becomes_empty(self):
+        from services.sync_health_service import _coerce_lock_recovery
+        out = _coerce_lock_recovery({"at": _iso_now(-5), "locks": {"evil": 1}})
+        assert out["locks"] == ""
+
+
+class TestStuckLockObservability:
+    """#2742 — a currently-wedged workspace is visible, and no operator-queue
+    item is created for it (the report is a diagnosis, not a decision)."""
+
+    @pytest.mark.asyncio
+    async def test_a_stuck_lock_logs_once_per_episode(
+        self, service, seed_agent, caplog
+    ):
+        seed_agent("alpha")
+        payload = _status_payload(index_lock_stuck={
+            "path": "index.lock", "age_seconds": 2000,
+            "stable_for_seconds": 1800, "sightings": 4, "size_bytes": 0,
+        })
+        with caplog.at_level("WARNING"):
+            with patch.object(service, "_fetch_git_status",
+                               AsyncMock(return_value=payload)):
+                await service._poll_cycle()
+                await service._poll_cycle()
+        hits = [r for r in caplog.records if "unchanged across" in r.message]
+        assert len(hits) == 1, "edge-triggered, not once per minute"
+
+    @pytest.mark.asyncio
+    async def test_it_re_arms_after_the_lock_clears(
+        self, service, seed_agent, caplog
+    ):
+        seed_agent("alpha")
+        stuck = _status_payload(index_lock_stuck={
+            "age_seconds": 2000, "stable_for_seconds": 1800, "sightings": 4,
+        })
+        clear = _status_payload()
+        with caplog.at_level("WARNING"):
+            for payload in (stuck, clear, stuck):
+                with patch.object(service, "_fetch_git_status",
+                                   AsyncMock(return_value=payload)):
+                    await service._poll_cycle()
+        hits = [r for r in caplog.records if "unchanged across" in r.message]
+        assert len(hits) == 2, "a new episode must be announced"
+
+    @pytest.mark.asyncio
+    async def test_no_operator_queue_item_is_created(self, service, seed_agent):
+        seed_agent("alpha")
+        payload = _status_payload(index_lock_stuck={
+            "age_seconds": 2000, "stable_for_seconds": 1800, "sightings": 4,
+        })
+        with patch.object(service, "_fetch_git_status",
+                           AsyncMock(return_value=payload)):
+            await service._poll_cycle()
+        from database import db
+        assert db.list_operator_queue_items(agent_name="alpha") == []
+
+    @pytest.mark.parametrize("bad", [
+        None, "junk", 5, [], {}, {"age_seconds": "600"},
+        {"sightings": True}, {"age_seconds": -1}, {"age_seconds": None},
+    ])
+    def test_malformed_stuck_reports_are_dropped(self, bad):
+        from services.sync_health_service import _coerce_lock_stuck
+        assert _coerce_lock_stuck(bad) is None
+
+    def test_a_well_formed_stuck_report_is_accepted_and_path_is_dropped(self):
+        """The agent-supplied `path` is composed from a `.git` the agent can
+        point anywhere. It adds nothing to a fleet-level WARNING, so it never
+        crosses the boundary."""
+        from services.sync_health_service import _coerce_lock_stuck
+        out = _coerce_lock_stuck({
+            "path": "../../etc/passwd", "age_seconds": 2000,
+            "stable_for_seconds": 1800, "sightings": 4, "size_bytes": 0,
+        })
+        assert out == {
+            "age_seconds": 2000, "stable_for_seconds": 1800,
+            "sightings": 4, "size_bytes": 0,
+        }
+        assert "path" not in out
+
+    @pytest.mark.asyncio
+    async def test_an_older_base_image_without_the_fields_still_upserts(
+        self, service, seed_agent
+    ):
+        """The fleet converges by recreate, so most agents will not carry these
+        keys at all for a while."""
+        seed_agent("alpha")
+        legacy = _status_payload()
+        legacy.pop("lock_recovery")
+        legacy.pop("index_lock_stuck")
+        legacy["sync_state"].pop("last_lock_recovery")
+        with patch.object(service, "_fetch_git_status",
+                           AsyncMock(return_value=legacy)):
+            await service._poll_cycle()
+        from database import db
+        assert db.get_sync_state("alpha")["last_sync_status"] == "success"
