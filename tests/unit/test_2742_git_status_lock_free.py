@@ -630,3 +630,391 @@ class TestStatusIsSingleFlighted:
         paths = [{c["path"] for c in p["changes"]} for p in payloads]
         assert paths[0] == {"one-marker.txt"}
         assert paths[1] == {"two-marker.txt"}
+
+
+# ---------------------------------------------------------------------------
+# AC3 — a stuck lock recovers, and the recovery is observable
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_lock_sightings():
+    """The sighting ledger is a module global; every test starts from empty."""
+    git_mod._LOCK_SIGHTINGS.clear()
+    yield
+    git_mod._LOCK_SIGHTINGS.clear()
+
+
+def _tick(home_dir, times=1):
+    """Run the observer N times, as N successive status polls would."""
+    out = None
+    for _ in range(times):
+        out = git_mod._index_lock_stuck(home_dir)
+    return out
+
+
+def _age_first_seen(path: Path, seconds: float) -> None:
+    """Backdate a candidate's monotonic first-sighting so a test does not have
+    to wait 15 real minutes. Reaches into the ledger deliberately: the detector's
+    clock is `time.monotonic()` precisely so it CANNOT be moved from outside by
+    changing the wall clock."""
+    entry = git_mod._LOCK_SIGHTINGS[str(path)]
+    entry["first_seen"] -= seconds
+
+
+class TestStartupReapIsAnnounced:
+    """The /verify-local agent stage boots `local:test-echo`, so `startup.sh`
+    never runs there. The block is therefore proved by extracting it and running
+    it — the standing gotcha for this file."""
+
+    @staticmethod
+    def _extract_reap_block() -> str:
+        src = (_BASE_IMAGE / "startup.sh").read_text(encoding="utf-8")
+        start = src.index("if [ -d /home/developer/.git ]; then")
+        # The block ends at the first line that is exactly "fi" at column 0
+        # after the opening `if`.
+        end = src.index("\nfi\n", start) + len("\nfi\n")
+        block = src[start:end]
+        assert "TRINITY_REAPED_LOCKS" in block, "extracted the wrong block"
+        return block
+
+    def _run_block(self, tmp_path, home):
+        """Run the SHIPPED block with /home/developer rewritten to a fixture."""
+        block = self._extract_reap_block().replace("/home/developer", str(home))
+        script = tmp_path / "reap.sh"
+        script.write_text("#!/bin/bash\nset -u\n" + block + "\n")
+        return subprocess.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=60
+        )
+
+    def test_it_removes_and_announces_an_index_lock(self, tmp_path):
+        home = tmp_path / "home"
+        (home / ".git").mkdir(parents=True)
+        lock = home / ".git" / "index.lock"
+        lock.write_text("")
+
+        res = self._run_block(tmp_path, home)
+
+        assert res.returncode == 0, res.stderr
+        assert not lock.exists(), "the lock must still be removed"
+        assert "reaped stale git lock at container start" in res.stdout
+        assert "index.lock" in res.stdout
+
+    def test_it_says_nothing_when_there_was_nothing_to_reap(self, tmp_path):
+        home = tmp_path / "home"
+        (home / ".git").mkdir(parents=True)
+
+        res = self._run_block(tmp_path, home)
+
+        assert res.returncode == 0, res.stderr
+        assert "reaped" not in res.stdout, (
+            f"a clean boot must be quiet, got: {res.stdout!r}"
+        )
+        assert not (home / ".trinity" / "lock-recovery.json").exists()
+
+    def test_it_drops_a_marker_the_agent_server_can_read(self, tmp_path):
+        home = tmp_path / "home"
+        (home / ".git").mkdir(parents=True)
+        (home / ".git" / "index.lock").write_text("")
+
+        res = self._run_block(tmp_path, home)
+
+        marker = home / ".trinity" / "lock-recovery.json"
+        assert marker.exists(), res.stdout + res.stderr
+        import json as _json
+        data = _json.loads(marker.read_text())
+        assert "index.lock" in data["locks"]
+        assert data["at"].endswith("Z")
+
+    def test_it_reaps_submodule_and_worktree_index_locks(self, tmp_path):
+        """Before #2742 these were covered by NOTHING — not the boot reap (its
+        find is scoped to refs/ and logs/), not the per-cycle reaper — so a
+        submodule wedge was permanent and survived every restart."""
+        home = tmp_path / "home"
+        sub = home / ".git" / "modules" / "vendor"
+        wt = home / ".git" / "worktrees" / "feature"
+        sub.mkdir(parents=True)
+        wt.mkdir(parents=True)
+        (sub / "index.lock").write_text("")
+        (wt / "index.lock").write_text("")
+
+        res = self._run_block(tmp_path, home)
+
+        assert res.returncode == 0, res.stderr
+        assert not (sub / "index.lock").exists()
+        assert not (wt / "index.lock").exists()
+        assert "modules" in res.stdout and "worktrees" in res.stdout
+
+
+class TestLockRecoveryReachesThePlatform:
+
+    def test_the_marker_becomes_sync_state_without_faking_a_sync(self, repo):
+        """`_write_sync_state_file` stamps `last_sync_at = now`, which would mark
+        a never-synced agent as freshly synced and turn its dashboard dot green.
+        The dedicated writer must not do that."""
+        marker = repo / ".trinity" / "lock-recovery.json"
+        marker.write_text('{"at": "2026-09-13T10:00:00Z", "locks": "index.lock"}')
+
+        record = git_mod._record_lock_recovery(repo)
+
+        assert record["locks"] == "index.lock"
+        state = git_mod._read_sync_state_file(repo)
+        assert state["last_lock_recovery"]["locks"] == "index.lock"
+        assert state["last_sync_status"] == "never", "must not fake a sync"
+        assert state["last_sync_at"] is None, "must not stamp last_sync_at"
+
+    def test_the_record_is_metrics_only_over_an_existing_failure_state(self, repo):
+        git_mod._write_sync_state_file(
+            repo, "failed", last_error_summary="push rejected"
+        )
+        before = git_mod._read_sync_state_file(repo)
+
+        (repo / ".trinity" / "lock-recovery.json").write_text(
+            '{"at": "2026-09-13T10:00:00Z", "locks": "index.lock"}'
+        )
+        git_mod._record_lock_recovery(repo)
+        after = git_mod._read_sync_state_file(repo)
+
+        for field in ("consecutive_failures", "last_sync_status",
+                      "last_sync_at", "last_error_summary"):
+            assert after[field] == before[field], f"{field} must be untouched"
+        assert after["last_lock_recovery"] is not None
+        assert not list((repo / ".trinity").glob("*.json.tmp")), "no temp left behind"
+
+    def test_the_marker_is_consumed_once(self, repo):
+        """Reported once per episode, not every minute forever."""
+        (repo / ".trinity" / "lock-recovery.json").write_text(
+            '{"at": "2026-09-13T10:00:00Z", "locks": "index.lock"}'
+        )
+        assert git_mod._record_lock_recovery(repo) is not None
+        assert git_mod._record_lock_recovery(repo) is None
+        assert not (repo / ".trinity" / "lock-recovery.json").exists()
+
+    @pytest.mark.parametrize("payload", [
+        "not json at all",
+        "[]",
+        '{"at": {"nested": 1}, "locks": ["a", "b"]}',
+        '{"at": "' + "x" * 500 + '"}',
+    ])
+    def test_a_malformed_marker_never_raises_and_is_cleared(self, repo, payload):
+        (repo / ".trinity" / "lock-recovery.json").write_text(payload)
+        git_mod._record_lock_recovery(repo)   # must not raise
+        assert not (repo / ".trinity" / "lock-recovery.json").exists()
+
+    def test_the_status_response_carries_the_recovery(self, status_home):
+        (status_home / ".trinity" / "lock-recovery.json").write_text(
+            '{"at": "2026-09-13T10:00:00Z", "locks": "index.lock"}'
+        )
+        payload = git_mod._compute_git_status(status_home)
+        assert payload["lock_recovery"]["locks"] == "index.lock"
+        assert payload["sync_state"]["last_lock_recovery"] is not None
+
+
+class TestStuckLockIsReportedNotDeleted:
+
+    def test_a_stable_lock_is_reported_and_still_there_afterwards(self, repo):
+        """The 'still there' assertion is the point of this whole design."""
+        lock = repo / ".git" / "index.lock"
+        lock.write_text("")
+
+        assert _tick(repo) is None, "one sighting is never enough"
+        assert _tick(repo) is None, "two sightings are never enough"
+        _age_first_seen(lock, git_mod._STUCK_LOCK_MIN_AGE_SECONDS + 1)
+        report = _tick(repo)
+
+        assert report is not None
+        assert report["path"] == "index.lock"
+        assert report["sightings"] >= git_mod._STUCK_LOCK_MIN_SIGHTINGS
+        assert lock.exists(), "the observer must NEVER remove the lock"
+
+    def test_a_long_stable_span_alone_is_not_enough(self, repo):
+        """Both gates, not either: the sighting COUNT and the span."""
+        lock = repo / ".git" / "index.lock"
+        lock.write_text("")
+        _tick(repo)
+        _age_first_seen(lock, git_mod._STUCK_LOCK_MIN_AGE_SECONDS * 10)
+        assert _tick(repo) is None, (
+            "two sightings must not report however old the span looks"
+        )
+
+    def test_a_busy_lock_is_never_reported(self, repo):
+        """Encodes the measurement that cut the delete: a finishing git replaces
+        the lock, so the inode CHANGES. A 155-second healthy `git add` under a
+        clean filter must never be called a wedge, however old any single
+        sighting looks."""
+        lock = repo / ".git" / "index.lock"
+        for round_ in range(6):
+            lock.unlink(missing_ok=True)
+            lock.write_text("")          # a new inode each round
+            out = git_mod._index_lock_stuck(repo)
+            if str(lock) in git_mod._LOCK_SIGHTINGS:
+                _age_first_seen(lock, git_mod._STUCK_LOCK_MIN_AGE_SECONDS * 2)
+            assert out is None, f"reported a changing candidate on round {round_}"
+
+    def test_a_zero_byte_lock_is_not_by_itself_evidence(self, repo):
+        """0 bytes is the signature of a LIVE writer for ~100% of its life (29 s
+        at 60 000 files, 155 s under a clean filter). The detector must not treat
+        emptiness as a signal at all."""
+        lock = repo / ".git" / "index.lock"
+        lock.write_text("")
+        assert lock.stat().st_size == 0
+        assert _tick(repo, times=git_mod._STUCK_LOCK_MIN_SIGHTINGS + 2) is None, (
+            "size must not shortcut the stability requirement"
+        )
+
+    def test_a_forward_clock_step_cannot_manufacture_a_wedge(self, repo, monkeypatch):
+        """A forward NTP step or a live migration ages every existing lock at
+        once — the one clock direction that makes a false positive MORE likely.
+        The detector's clock is `time.monotonic()`, which a wall-clock jump
+        cannot move."""
+        lock = repo / ".git" / "index.lock"
+        lock.write_text("")
+        _tick(repo)
+
+        real_time = git_mod.time.time
+        monkeypatch.setattr(git_mod.time, "time", lambda: real_time() + 86400)
+
+        assert _tick(repo) is None
+        assert _tick(repo) is None, (
+            "a wall-clock jump must not satisfy the stability window"
+        )
+
+    def test_a_fresh_workspace_reports_nothing(self, repo):
+        assert git_mod._index_lock_stuck(repo) is None
+        assert git_mod._LOCK_SIGHTINGS == {}
+
+    def test_the_ledger_forgets_a_lock_that_goes_away(self, repo):
+        lock = repo / ".git" / "index.lock"
+        lock.write_text("")
+        _tick(repo)
+        assert git_mod._LOCK_SIGHTINGS
+        lock.unlink()
+        _tick(repo)
+        assert git_mod._LOCK_SIGHTINGS == {}, "the ledger must not grow"
+
+
+class TestObserverResolvesTheRealGitDir:
+
+    def test_it_follows_a_gitdir_file(self, tmp_path):
+        """`.git` is a FILE for a linked worktree and for a submodule, both of
+        which an agent can create with one command. Assuming a directory makes
+        the observer look where the lock provably is not."""
+        home = tmp_path / "wt"
+        home.mkdir()
+        real = tmp_path / "store" / "worktrees" / "feature"
+        real.mkdir(parents=True)
+        (home / ".git").write_text(f"gitdir: {real}\n")
+        (real / "index.lock").write_text("")
+
+        _tick(home)
+        _tick(home)
+        _age_first_seen(real / "index.lock",
+                        git_mod._STUCK_LOCK_MIN_AGE_SECONDS + 1)
+        report = _tick(home)
+
+        assert report is not None
+        assert report["path"] == "index.lock"
+
+    def test_it_finds_a_submodule_lock(self, tmp_path):
+        home = tmp_path / "home"
+        sub = home / ".git" / "modules" / "vendor"
+        sub.mkdir(parents=True)
+        (sub / "index.lock").write_text("")
+
+        _tick(home)
+        _tick(home)
+        _age_first_seen(sub / "index.lock",
+                        git_mod._STUCK_LOCK_MIN_AGE_SECONDS + 1)
+        report = _tick(home)
+
+        assert report is not None
+        assert report["path"] == "modules/vendor/index.lock"
+
+    def test_it_finds_a_linked_worktree_lock_under_a_normal_git_dir(self, tmp_path):
+        home = tmp_path / "home"
+        wt = home / ".git" / "worktrees" / "feature"
+        wt.mkdir(parents=True)
+        (wt / "index.lock").write_text("")
+
+        _tick(home)
+        _tick(home)
+        _age_first_seen(wt / "index.lock",
+                        git_mod._STUCK_LOCK_MIN_AGE_SECONDS + 1)
+        assert _tick(home)["path"] == "worktrees/feature/index.lock"
+
+    def test_a_symlinked_git_is_skipped(self, tmp_path):
+        """A follow-stat reasons about one file while any action would touch
+        another. This code only reads, and still refuses to be in that position."""
+        home = tmp_path / "home"
+        home.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "index.lock").write_text("")
+        (home / ".git").symlink_to(elsewhere, target_is_directory=True)
+
+        assert _tick(home, times=5) is None
+        assert (elsewhere / "index.lock").exists()
+
+    def test_a_missing_git_dir_is_not_an_error(self, tmp_path):
+        assert git_mod._index_lock_stuck(tmp_path / "nope") is None
+
+
+class TestTheObserverCannotDarkenTheFeed:
+
+    def test_a_raising_lstat_still_yields_a_status_payload(
+        self, status_home, monkeypatch
+    ):
+        """The observer sits inside `_compute_git_status`'s `try`, whose tail is
+        `HTTPException(500)` — and `_fetch_git_status` treats ANY non-200 as
+        None and writes nothing. So one EACCES would silently stop the agent's
+        sync-health row advancing, and `sync_failing` would never fire either."""
+        real_lstat = git_mod.os.lstat
+
+        def _boom(path, *a, **k):
+            if ".git" in str(path):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_lstat(path, *a, **k)
+
+        monkeypatch.setattr(git_mod.os, "lstat", _boom)
+
+        payload = git_mod._compute_git_status(status_home)
+
+        assert payload["git_enabled"] is True
+        assert payload["index_lock_stuck"] is None
+
+    def test_an_unwritable_sync_state_still_yields_a_status_payload(
+        self, status_home, monkeypatch
+    ):
+        """The recovery fold is the other observability write on this path, and
+        it too must be unable to fail the read — the marker lives in an
+        agent-writable directory and the write can fail for any filesystem
+        reason at all."""
+        (status_home / ".trinity" / "lock-recovery.json").write_text(
+            '{"at": "2026-09-13T10:00:00Z", "locks": "index.lock"}'
+        )
+
+        def _boom(_home, _updates):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(git_mod, "_patch_sync_state", _boom)
+
+        payload = git_mod._compute_git_status(status_home)
+
+        assert payload["git_enabled"] is True
+        assert payload["lock_recovery"] is None
+
+    def test_the_observer_takes_no_repo_lock(self, status_home):
+        """Holding `_REPO_LOCK` across the observation would make a status poll
+        a brand-new source of 409 `agent_busy` on an operator's POST /git/sync.
+        An `lstat` needs no mutual exclusion, so it takes none."""
+        lock = status_home / ".git" / "index.lock"
+        lock.write_text("")
+        acquired = git_mod._REPO_LOCK.acquire(blocking=False)
+        assert acquired
+        try:
+            git_mod._index_lock_stuck(status_home)          # must not block
+            payload = git_mod._compute_git_status(status_home)
+            assert payload["git_enabled"] is True
+        finally:
+            git_mod._REPO_LOCK.release()
+            lock.unlink(missing_ok=True)

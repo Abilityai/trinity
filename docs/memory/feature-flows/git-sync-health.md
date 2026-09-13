@@ -271,7 +271,9 @@ _run_auto_sync_once (worker thread, repo lock held)
   field on `GET /api/git/status` → a one-shot backend WARNING. Container
   start is also the ONLY context where "no process holds this lock" is
   provable for free (the PID namespace is empty), which is why recovery
-  lives here and not in the running container.
+  lives here and not in the running container. It also reaps `index.lock`
+  under `<gitdir>/modules/*` and `<gitdir>/worktrees/*` — covered by nothing
+  before, so a submodule or linked-worktree wedge survived every restart.
 - **Runtime stuck-lock report (#2742) — observe, never delete.** The status
   read reports a currently-present `index.lock` as `index_lock_stuck`
   (`{age_seconds, sightings, path}`) and a backend WARNING; it does **not**

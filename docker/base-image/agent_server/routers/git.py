@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import logging
 import threading
@@ -114,6 +115,7 @@ _SYNC_STATE_DEFAULT: Dict = {
     "maintenance_status": None,  # #1595: last maintenance outcome string
     "maintenance_failures": 0,  # #1595: consecutive failed maintenance attempts
     "maintenance_next_attempt_at": None,  # #1595: backoff gate (ISO timestamp)
+    "last_lock_recovery": None,  # #2742: the boot reap's own record of a wedge
 }
 
 
@@ -240,6 +242,267 @@ def _write_sync_state_file(
     tmp_path.write_text(json.dumps(prior, indent=2))
     os.replace(tmp_path, path)
     return prior
+
+
+def _patch_sync_state(home_dir: Path, updates: Dict) -> Dict:
+    """Atomically set ONLY the given keys in `sync-state.json` (#2742).
+
+    A dedicated writer is mandatory, not tidiness: `_write_sync_state_file`
+    unconditionally stamps `last_sync_at = now`, so reusing it to record an
+    observability field would mark a never-synced agent as freshly synced and
+    turn its dashboard dot green. This one never touches `last_sync_status`,
+    `last_sync_at` or `consecutive_failures`.
+
+    Same atomic tmp + `os.replace` posture as the sync writer, and the same
+    read-modify-write race against it — which is why the caller set is kept tiny
+    (one write per container boot), and why the stuck-lock detector's per-tick
+    ledger deliberately does NOT live in this file.
+    """
+    state = _read_sync_state_file(home_dir)
+    state.update(updates)
+    path = _sync_state_path(home_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(state, indent=2))
+    os.replace(tmp_path, path)
+    return state
+
+
+# #2742: written by `startup.sh` when the boot reap actually removed something.
+_LOCK_RECOVERY_MARKER = ".trinity/lock-recovery.json"
+_LOCK_RECOVERY_MARKER_MAX_BYTES = 4096
+
+
+def _record_lock_recovery(home_dir: Path) -> Optional[Dict]:
+    """Fold `startup.sh`'s boot-reap marker into sync-state, once (#2742).
+
+    The reap itself is the safe half of AC3 and already existed — it runs where
+    "no git process is running" is definitional. The missing half was that it
+    was silent. This turns the one-shot marker into a durable
+    `sync_state.last_lock_recovery` the backend poller can see, then deletes the
+    marker so the event is reported once rather than every minute forever.
+
+    Server-composed on read: the marker is written by our own startup script,
+    but it lives in an agent-writable directory, so only the parsed timestamp
+    and a bounded label survive. Best-effort throughout — a failure here must
+    never fail a status read.
+    """
+    marker = home_dir / _LOCK_RECOVERY_MARKER
+    try:
+        if not marker.is_file():
+            return None
+        if marker.stat().st_size > _LOCK_RECOVERY_MARKER_MAX_BYTES:
+            marker.unlink(missing_ok=True)
+            return None
+        data = json.loads(marker.read_text())
+        if not isinstance(data, dict):
+            marker.unlink(missing_ok=True)
+            return None
+        record = {
+            "at": str(data.get("at") or "")[:64],
+            "locks": str(data.get("locks") or "")[:200],
+            "source": "startup_reap",
+        }
+        _patch_sync_state(home_dir, {"last_lock_recovery": record})
+        marker.unlink(missing_ok=True)
+        logger.warning(
+            "git lock recovery recorded from the boot reap (locks=%s)",
+            record["locks"],
+        )
+        return record
+    except (OSError, ValueError, json.JSONDecodeError):
+        logger.debug("could not fold the lock-recovery marker", exc_info=True)
+        try:
+            marker.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Stuck-lock OBSERVER (#2742) — reports, never unlinks. Read the reasoning
+# before shortening any of it; every clause below was a measurement.
+# ---------------------------------------------------------------------------
+
+# Number of consecutive unchanged sightings of the SAME inode before a lock is
+# called a wedge, and the minimum wall span those sightings must cover. The
+# tunable is the SIGHTING COUNT, not a wall-clock age, and that is the whole
+# point: `st_mtime` on an index.lock is stamped at create and never advances
+# (git does not write into the fd until the final flush), so age measures the
+# IN-FLIGHT OPERATION, not abandonment. Measured: a healthy `git add -A` holds a
+# 0-byte lock for 100% of its life — 3.9 s on 450 MB, 29 s at 60 000 files,
+# 155 s with a `clean` filter configured. A one-tick age gate cannot tell that
+# apart from a wedge; two observations of an unchanged inode can. It is also
+# immune to a forward NTP step or a live migration, which instantly age every
+# existing lock at once — the one clock direction that makes a false positive
+# MORE likely.
+_STUCK_LOCK_MIN_SIGHTINGS = 3
+_STUCK_LOCK_MIN_AGE_SECONDS = 900  # 15 min
+
+# The sighting ledger, in memory and deliberately NOT in sync-state.
+#
+# Per-tick writes into the agent-authored sync-state document would race the
+# auto-sync writer's own read-modify-write and could drop `consecutive_failures`
+# or `last_sync_status` — an observability path corrupting the very feed it
+# exists to brighten. And it does not need to be durable: the only thing that
+# clears a genuinely wedged lock is a container restart, which clears this too.
+# Keyed by absolute candidate path; monotonic clock so a clock step cannot forge
+# stability either.
+_LOCK_SIGHTINGS: Dict[str, Dict] = {}
+
+_GITFILE_MAX_BYTES = 4096
+
+
+def _resolve_git_dir(home_dir: Path) -> Optional[Path]:
+    """The REAL gitdir for `home_dir`, or None when there isn't one to reason about.
+
+    `home_dir/".git"` is a plain directory for an ordinary clone, but a FILE
+    holding `gitdir: <path>` for a linked worktree (`git worktree add`) and for a
+    submodule — both of which an agent can create in its own workspace. Assuming
+    a directory makes the observer look in a place where the lock provably is
+    not, while the real one sits at `<gitdir>/worktrees/<wt>/index.lock`.
+
+    A symlinked `.git` returns None: a follow-stat reasons about one file while
+    any action would touch another, and this code refuses to be in that position
+    even though it only ever reads.
+    """
+    git_path = home_dir / ".git"
+    st = os.lstat(git_path)  # OSError if absent — caller owns it
+    if stat.S_ISLNK(st.st_mode):
+        return None
+    if stat.S_ISDIR(st.st_mode):
+        return git_path
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    if st.st_size > _GITFILE_MAX_BYTES:
+        return None
+    text = git_path.read_text(errors="replace")
+    for line in text.splitlines():
+        if line.startswith("gitdir:"):
+            target = line.split("gitdir:", 1)[1].strip()
+            if not target:
+                return None
+            resolved = Path(target)
+            if not resolved.is_absolute():
+                resolved = (home_dir / resolved).resolve()
+            return resolved if resolved.is_dir() else None
+    return None
+
+
+def _index_lock_candidates(git_dir: Path):
+    """`<gitdir>/index.lock` plus the submodule and linked-worktree indexes.
+
+    A lock under `modules/` or `worktrees/` is covered by neither the per-cycle
+    reaper nor (before #2742) the boot reap, so those wedges used to be
+    permanent and survive every restart.
+    """
+    yield git_dir / "index.lock"
+    for sub in ("modules", "worktrees"):
+        base = git_dir / sub
+        try:
+            if not base.is_dir():
+                continue
+            yield from base.glob("*/index.lock")
+        except OSError:
+            continue
+
+
+def _index_lock_stuck(home_dir: Path) -> Optional[Dict]:
+    """Report a lock that looks abandoned. **Never unlinks anything.**
+
+    Why there is no delete here, in one place so nobody re-derives it:
+
+    1. `st_size == 0` is the signature of a LIVE writer, not an abandoned one.
+       git creates the lock with O_EXCL *before* walking the worktree and writes
+       the new index into it only at the very end.
+    2. `st_mtime` never advances, so age measures the in-flight operation.
+    3. A wrong unlink is permanent and strictly worse than the wedge it repairs:
+       git renames by PATH, so after an unlink a second git owns the path and the
+       first git's closing `rename(index.lock, index)` promotes the second's
+       in-flight file onto `.git/index`. The corrupting process exits rc=0 with
+       empty stderr, and the resulting 0-byte index is cleared by nothing —
+       not the boot reap, not `_reap_stale_git_litter`, not `git reset`.
+    4. "No process holds this lock" is provable for free only when no processes
+       exist, i.e. at container boot — which is exactly where the repair lives.
+    5. `_REPO_LOCK` would not help: it excludes this server's own auto-sync
+       cycle and nothing else — not the agent's own `git add`, which is the
+       entire premise of #2742.
+
+    It also takes NO lock: an `lstat` needs no mutual exclusion, and holding
+    `_REPO_LOCK` across the observation would make a status poll a brand-new
+    source of 409 `agent_busy` on an operator's `POST /api/git/sync`.
+
+    Wrapped end to end in its own `except OSError` — it runs inside
+    `_compute_git_status`'s `try`, whose tail is `HTTPException(500)`, and a 500
+    makes the backend poller write NOTHING, so an EACCES or a gitlink `.git`
+    would silently darken the very feed this exists to brighten.
+    """
+    try:
+        git_dir = _resolve_git_dir(home_dir)
+        if git_dir is None:
+            return None
+
+        now = time.monotonic()
+        seen_paths = set()
+        report: Optional[Dict] = None
+
+        for candidate in _index_lock_candidates(git_dir):
+            key = str(candidate)
+            seen_paths.add(key)
+            try:
+                st = os.lstat(candidate)
+            except OSError:
+                _LOCK_SIGHTINGS.pop(key, None)
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                _LOCK_SIGHTINGS.pop(key, None)
+                continue
+
+            fingerprint = (st.st_ino, st.st_mtime_ns, st.st_size)
+            prior = _LOCK_SIGHTINGS.get(key)
+            if prior is None or prior["fingerprint"] != fingerprint:
+                # A changed (or brand-new) inode is a DIFFERENT operation — a
+                # finishing git replacing the lock looks exactly like this, and
+                # calling that a wedge is how a healthy 155-second `git add`
+                # gets reaped. Start counting again from one.
+                _LOCK_SIGHTINGS[key] = {
+                    "fingerprint": fingerprint,
+                    "first_seen": now,
+                    "count": 1,
+                }
+                continue
+
+            prior["count"] += 1
+            stable_for = now - prior["first_seen"]
+            if (
+                prior["count"] >= _STUCK_LOCK_MIN_SIGHTINGS
+                and stable_for >= _STUCK_LOCK_MIN_AGE_SECONDS
+                and report is None
+            ):
+                report = {
+                    "path": candidate.relative_to(git_dir).as_posix(),
+                    "age_seconds": max(0, int(time.time() - st.st_mtime)),
+                    "stable_for_seconds": int(stable_for),
+                    "sightings": prior["count"],
+                    "size_bytes": st.st_size,
+                }
+
+        # Forget candidates that no longer exist so the ledger cannot grow.
+        for gone in [k for k in _LOCK_SIGHTINGS if k not in seen_paths]:
+            _LOCK_SIGHTINGS.pop(gone, None)
+
+        if report is not None:
+            logger.warning(
+                "git index lock has been unchanged for %ss across %s status "
+                "reads (%s) — REPORTING ONLY, not removing it: a running git "
+                "may still hold it, and container restart is the only race-free "
+                "repair",
+                report["stable_for_seconds"], report["sightings"], report["path"],
+            )
+        return report
+    except OSError:
+        logger.debug("stuck-lock observation failed (non-fatal)", exc_info=True)
+        return None
 
 
 # #1596: auto-sync commits the workspace on every heartbeat and never ran git
@@ -1001,8 +1264,22 @@ def _compute_git_status(home_dir: Path) -> Dict:
         }
         # #389: dual ahead/behind tuples plus legacy ahead/behind aliases.
         response.update(ahead_behind)
+        # #2742: fold the boot reap's one-shot marker into sync-state BEFORE
+        # reading it, so a recovery surfaces on the very first poll after the
+        # restart that performed it rather than a minute later.
+        _record_lock_recovery(home_dir)
+
         # #389: merge auto-sync heartbeat state (may be defaults if never run).
         response["sync_state"] = _read_sync_state_file(home_dir)
+        # #2742: lift the recovery record to the top level too — the backend
+        # rebuilds it from coerced values and never trusts the nested copy,
+        # which `_read_sync_state_file` merges wholesale from agent-written JSON.
+        response["lock_recovery"] = response["sync_state"].get("last_lock_recovery")
+        # #2742: a currently-stuck lock is REPORTED, never removed. This is the
+        # "tell the truth about state" half — a stale lock does not fail
+        # `git status` (rc=0, empty stderr), so before this the read could not
+        # see the wedge it was reporting on. That is the "silent" in #2742.
+        response["index_lock_stuck"] = _index_lock_stuck(home_dir)
         # #2742: coalescing IS bounded staleness, and saying so is cheaper than
         # denying it. A follower arriving at t=29 s of a 30 s leader run is
         # served a 29-second-old snapshot — visibly, an operator pressing Sync
