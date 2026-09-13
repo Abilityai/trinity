@@ -454,23 +454,32 @@ async def sweep_fleet_git_remote_tokens() -> Dict[str, int]:
     if not lock.acquire():
         return totals
 
+    # RELEASED when the pass ends, not left to expire. The lease exists to stop
+    # N workers of the SAME boot sweeping N times — `acquire` never waits, so a
+    # loser has already returned and releasing frees nobody prematurely. Letting
+    # it run out the TTL instead would silently skip the sweep on a deliberate
+    # restart inside the window, which is the one moment an operator is most
+    # likely to want it.
     try:
-        agents = [a.name for a in list_all_agents_fast() if a.status == "running"]
-    except Exception as e:  # noqa: BLE001 — Docker may be unreadable at boot
-        logger.warning("ent#615: fleet sweep could not enumerate agents: %s", e)
+        try:
+            agents = [a.name for a in list_all_agents_fast() if a.status == "running"]
+        except Exception as e:  # noqa: BLE001 — Docker may be unreadable at boot
+            logger.warning("ent#615: fleet sweep could not enumerate agents: %s", e)
+            return totals
+
+        async def _one(name: str) -> None:
+            # No bound here: `scrub_git_remote_tokens` carries the shared one, so
+            # this pass cannot out-run a concurrent rotation or start hook.
+            report = await scrub_git_remote_tokens(name)
+            totals["agents"] += 1
+            for key in ("remotes_scrubbed", "harvested", "refused"):
+                totals[key] += report.get(key, 0)
+
+        await asyncio.gather(*(_one(name) for name in agents), return_exceptions=True)
+        logger.info("ent#615: fleet remote-token sweep complete: %s", totals)
         return totals
-
-    async def _one(name: str) -> None:
-        # No bound here: `scrub_git_remote_tokens` carries the shared one, so
-        # this pass cannot out-run a concurrent rotation or start hook.
-        report = await scrub_git_remote_tokens(name)
-        totals["agents"] += 1
-        for key in ("remotes_scrubbed", "harvested", "refused"):
-            totals[key] += report.get(key, 0)
-
-    await asyncio.gather(*(_one(name) for name in agents), return_exceptions=True)
-    logger.info("ent#615: fleet remote-token sweep complete: %s", totals)
-    return totals
+    finally:
+        lock.release_if_owned()
 
 
 # Staggered +20s, behind every other boot loop.

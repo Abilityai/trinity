@@ -63,15 +63,35 @@ _SECRETISH = re.compile(r"(?i)(pat|token|secret|password|credential|auth)")
 _SCANNED_TREES = ("src/backend", "docker/base-image")
 
 
-def _placeholder_text(node: ast.JoinedStr) -> str:
-    """An f-string flattened with each placeholder rendered as ``\\x00name\\x00``."""
-    out = []
-    for value in node.values:
-        if isinstance(value, ast.Constant) and isinstance(value.value, str):
-            out.append(value.value)
-        elif isinstance(value, ast.FormattedValue):
-            out.append("\x00" + _expr_name(value.value) + "\x00")
-    return "".join(out)
+def _flatten(node: ast.AST) -> str:
+    """Flatten a string-building expression, placeholders as ``\\x00name\\x00``.
+
+    Five shapes, because the f-string is only the CURRENT way to write this
+    one. A guard that knew only f-strings would wave through the same defect
+    written as concatenation, `%`-format or `.format()` — and then the next
+    producer ships green, which is this issue's own failure mode one level up.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else ""
+    if isinstance(node, ast.JoinedStr):
+        return "".join(_flatten(v) for v in node.values)
+    if isinstance(node, ast.FormattedValue):
+        return "\x00" + _expr_name(node.value) + "\x00"
+    if isinstance(node, ast.Name):
+        return "\x00" + node.id + "\x00"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        # "https://oauth2:" + pat + "@github.com/..."
+        return _flatten(node.left) + _flatten(node.right)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        # "https://oauth2:%s@github.com/..." % pat — the LITERAL carries the
+        # userinfo marker, so the placeholder only has to look secretish.
+        return _flatten(node.left).replace("%s", "\x00interpolated_pat\x00")
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+            and node.func.attr == "format":
+        return _flatten(node.func.value).replace(
+            "{}", "\x00interpolated_pat\x00"
+        )
+    return ""
 
 
 def _expr_name(node: ast.AST) -> str:
@@ -108,12 +128,12 @@ def _python_offenders() -> list[str]:
             except (OSError, SyntaxError):  # pragma: no cover
                 continue
             for node in ast.walk(parsed):
-                if isinstance(node, ast.JoinedStr) and _builds_credentialed_url(
-                    _placeholder_text(node)
-                ):
+                if not isinstance(node, (ast.JoinedStr, ast.BinOp, ast.Call)):
+                    continue
+                if _builds_credentialed_url(_flatten(node)):
                     rel = path.relative_to(_ROOT).as_posix()
                     hits.append(f"{rel}:{node.lineno}")
-    return sorted(hits)
+    return sorted(set(hits))
 
 
 # `${VAR}` / `$VAR` inside a URL authority, before the `@`.
@@ -162,16 +182,44 @@ def test_no_code_path_builds_a_credential_bearing_remote_url():
     )
 
 
-def test_the_guard_would_catch_the_shape_it_claims_to():
-    """A guard nobody has seen fail is not evidence. Prove it fires."""
-    assert _builds_credentialed_url(
-        "\x00scheme\x00://oauth2:\x00github_pat\x00@\x00host\x00/\x00repo\x00.git"
-    )
-    assert _builds_credentialed_url("https://\x00pat\x00@github.com/o/r")
-    # …and that it does NOT fire on the scrubbers this change keeps.
-    assert not _builds_credentialed_url("https://***@github.com/o/r")
-    assert not _builds_credentialed_url("s|oauth2:[^@]*@|oauth2:***@|g")
-    assert not _builds_credentialed_url("\x00scheme\x00://\x00host\x00/\x00repo\x00.git")
+@pytest.mark.parametrize("src", [
+    # the exact shape `_git_remote_url` used
+    'f"{scheme}://oauth2:{github_pat}@{host_path}/{github_repo}.git"',
+    # the exact shape `template_service.clone_github_repo` used
+    'f"https://oauth2:{github_pat}@github.com/{github_repo}.git"',
+    # the exact shape `skill_service._authenticated_url` produced
+    'f"https://{github_pat}@github.com/{repo}"',
+    # …and the three ways to write the same thing that an f-string-only guard
+    # would wave straight through
+    '"https://oauth2:" + github_pat + "@github.com/" + repo + ".git"',
+    '"https://oauth2:%s@github.com/%s.git" % (github_pat, repo)',
+    '"https://oauth2:{}@github.com/{}.git".format(github_pat, repo)',
+])
+def test_the_guard_fires_on_every_way_to_write_the_defect(src):
+    """A guard nobody has seen fail is not evidence.
+
+    Six shapes, because the f-string is only the CURRENT way to write this. A
+    guard that knew only f-strings lets the next producer ship green — which is
+    this issue's own failure mode, one level up.
+    """
+    node = ast.parse(src, mode="eval").body
+    assert _builds_credentialed_url(_flatten(node)), f"guard missed: {src}"
+
+
+@pytest.mark.parametrize("src", [
+    # the credential-less builders that replaced them
+    'f"{base}/{github_repo}.git"',
+    'f"{scheme}://{host_path}/{github_repo}.git"',
+    # the scrubbers this change deliberately KEEPS — a naive scan for the
+    # literal `oauth2:` flags every one of them, and deleting a scrubber
+    # because its cause was removed strands every pre-existing volume
+    '"https://***@github.com/o/r"',
+    '"s|oauth2:[^@]*@|oauth2:***@|g"',
+    '"https://[^/]+@"',
+])
+def test_the_guard_does_not_fire_on_what_this_change_keeps(src):
+    node = ast.parse(src, mode="eval").body
+    assert not _builds_credentialed_url(_flatten(node)), f"false positive: {src}"
 
 
 def test_the_scrubbers_are_still_there():
