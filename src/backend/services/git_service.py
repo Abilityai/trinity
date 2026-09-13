@@ -407,6 +407,94 @@ async def scrub_git_remote_tokens(
     return report
 
 
+# Bounds the boot sweep against the fixed `_docker_executor` pool that the whole
+# backend shares (`to_thread` draws from it too). A fleet-wide pass that fanned
+# out unbounded would starve every other Docker call at exactly the moment the
+# backend is coming up.
+_FLEET_SCRUB_CONCURRENCY = 3
+
+# The one-shot's lease. TTL is generous: the whole point is that a second worker
+# skips rather than duplicates, and an expiry mid-sweep just means a duplicate
+# idempotent pass.
+_FLEET_SCRUB_LOCK_KEY = "git:ent615-token-scrub:boot"
+_FLEET_SCRUB_LOCK_TTL_S = 900
+
+
+async def sweep_fleet_git_remote_tokens() -> Dict[str, int]:
+    """One-shot, whole-fleet ent#615 remediation. Runs at boot, not on a loop.
+
+    **Why a one-shot and not a recurring service.** After this change no code
+    path produces a token-bearing remote URL, so there is no recurring producer
+    for a recurring service to chase. A permanent loop plus a lease would be
+    permanent surface bought for a transient problem. The three reachers are:
+    this, the `start_agent_internal` hook (per agent, on every start), and
+    `startup.sh`'s conditional per-restart rewrite. The one-shot is the one that
+    covers a `restart: unless-stopped` container the Docker daemon brings back
+    after a HOST REBOOT, which never passes through `start_agent_internal`.
+
+    **Why a fail-open lease is right here**, unlike on most credential-mutating
+    work: losing the lease costs a duplicate pass of an operation that is
+    idempotent by construction and REFUSES rather than destroying when it
+    cannot place a replacement. The failure mode of fail-open is "the sweep ran
+    twice"; the failure mode of fail-closed would be "an install with no Redis
+    never gets remediated at all".
+    """
+    from redis_breaker_util import SingleFlightLock, get_breaker_redis
+    from services.docker_service import list_all_agents_fast
+
+    lock = SingleFlightLock(
+        _FLEET_SCRUB_LOCK_KEY, _FLEET_SCRUB_LOCK_TTL_S, client=get_breaker_redis()
+    )
+    totals = {"agents": 0, "remotes_scrubbed": 0, "harvested": 0, "refused": 0}
+    if not lock.acquire():
+        return totals
+
+    try:
+        agents = [a.name for a in list_all_agents_fast() if a.status == "running"]
+    except Exception as e:  # noqa: BLE001 — Docker may be unreadable at boot
+        logger.warning("ent#615: fleet sweep could not enumerate agents: %s", e)
+        return totals
+
+    semaphore = asyncio.Semaphore(_FLEET_SCRUB_CONCURRENCY)
+
+    async def _one(name: str) -> None:
+        async with semaphore:
+            report = await scrub_git_remote_tokens(name)
+        totals["agents"] += 1
+        for key in ("remotes_scrubbed", "harvested", "refused"):
+            totals[key] += report.get(key, 0)
+
+    await asyncio.gather(*(_one(name) for name in agents), return_exceptions=True)
+    logger.info("ent#615: fleet remote-token sweep complete: %s", totals)
+    return totals
+
+
+def spawn_git_remote_token_scrub(agent_name: str) -> None:
+    """Fire the per-agent sweep fire-and-forget from a start path (ent#615).
+
+    Mirrors `spawn_gitignore_merge_after_clone` (#2069) — with ONE deliberate
+    difference: that one is gated on `db.get_git_auto_sync_enabled`, and
+    copying that gate here would silently skip every agent that does not
+    auto-sync, which has nothing to do with whether its `.git/config` holds a
+    credential.
+
+    A strong ref defeats the asyncio `create_task` GC footgun. With no running
+    loop the coro is closed and the spawn is skipped (logged), never raised —
+    the boot one-shot and `startup.sh` are the backstops.
+    """
+    coro = scrub_git_remote_tokens(agent_name)
+    try:
+        task = asyncio.create_task(coro)
+        _inflight_token_scrub_tasks.add(task)
+        task.add_done_callback(_inflight_token_scrub_tasks.discard)
+    except RuntimeError as e:
+        coro.close()
+        logger.debug("ent#615: spawn_git_remote_token_scrub skipped (no loop): %s", e)
+
+
+_inflight_token_scrub_tasks: set = set()
+
+
 async def update_remote_pat(agent_name: str, github_pat: str, github_repo: str) -> bool:
     """Make a running agent authenticate with ``github_pat``, no restart (#1264).
 

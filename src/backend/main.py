@@ -651,6 +651,19 @@ async def _schedule_staggered_services() -> None:
             logger.error(f"Error starting skills library sync service: {e}")
     asyncio.create_task(_start_skills_sync_delayed())
 
+    # ent#615: ONE-SHOT fleet remediation of remotes still carrying an embedded
+    # credential — deliberately not a loop, and the only reacher that covers a
+    # `restart: unless-stopped` container the daemon brought back after a host
+    # reboot. Rationale in `git_service.sweep_fleet_git_remote_tokens`.
+    async def _run_git_token_scrub_delayed():
+        await asyncio.sleep(20)
+        try:
+            from services import git_service
+            await git_service.sweep_fleet_git_remote_tokens()
+        except Exception as e:
+            logger.error(f"Error running the ent#615 git remote-token sweep: {e}")
+    asyncio.create_task(_run_git_token_scrub_delayed())
+
     # #447: subscription recovery probe — re-asks the provider whether a
     # subscription believed rate-limited is back. Nothing else can clear the
     # badge (no success path clears a failure row), and the ambient refresh is
