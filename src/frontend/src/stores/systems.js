@@ -19,6 +19,27 @@ import api from '../api'
 // gets its own budget (precedents: stores/agents.js 120s, views/Settings.vue 300s).
 const DEPLOY_TIMEOUT_MS = 300000
 
+// Teardown is synchronous and serial too, and each member stops + removes a
+// container, so it gets the same budget for the same reason. A timeout here is
+// worse than on deploy: the server keeps deleting, and the user cannot tell how
+// far it got — which is why `teardownOutcomeUnknown` exists and offers no retry.
+const TEARDOWN_TIMEOUT_MS = 300000
+
+/**
+ * The entitlement id the teardown surface is gated on (ent#454).
+ *
+ * The verb is an entitlement-gated module: absent (404) on an OSS build,
+ * 403 when mounted-but-unlicensed. The panel renders only when this id is in
+ * `enterprise_features`, so a user never meets a control whose backend is not
+ * there.
+ */
+export const TEARDOWN_FEATURE_ID = 'system_teardown'
+
+function teardownUrl (name, dryRun) {
+  return `/api/enterprise/system-teardown/${encodeURIComponent(name)}`
+    + `?dry_run=${dryRun ? 'true' : 'false'}`
+}
+
 /**
  * Collapse any axios failure into ONE renderable shape.
  *
@@ -106,6 +127,25 @@ export const useSystemsStore = defineStore('systems', () => {
   const isDeploying = ref(false)
   const error = ref(null)
 
+  // --- teardown (ent#454) ---------------------------------------------------
+  // Deliberately a second set of refs rather than a shared `preview`/`result`
+  // pair: install and remove are two flows a user can have half-finished at
+  // once on the same page, and one shared slot would let a deploy result
+  // silently replace a teardown preview the user is still reading.
+  const teardownName = ref('')
+  // The exact system name `teardownPreview` was produced for. A preview of
+  // `acme` says nothing about `acme-2`, and the removal set is the whole point
+  // — so the name is bound the same way `previewedText` binds the manifest.
+  const teardownPreviewedName = ref(null)
+  const teardownPreview = ref(null)
+  const teardownResult = ref(null)
+  const teardownError = ref(null)
+  // Set when the outcome genuinely is not known (timeout / bare 5xx). Agents
+  // may already be gone, so this is NOT an invitation to retry.
+  const teardownOutcomeUnknown = ref(null)
+  const isPreviewingTeardown = ref(false)
+  const isTearingDown = ref(false)
+
   // --- computed ------------------------------------------------------------
   const previewIsCurrent = computed(
     () => preview.value !== null && previewedText.value === manifestText.value
@@ -136,6 +176,27 @@ export const useSystemsStore = defineStore('systems', () => {
   const canDeploy = computed(
     () => previewIsCurrent.value && !previewHasBlockers.value && !isDeploying.value
   )
+
+  // --- teardown computed ----------------------------------------------------
+  const teardownPreviewIsCurrent = computed(
+    () => teardownPreview.value !== null
+      && teardownPreviewedName.value === teardownName.value.trim()
+  )
+
+  /**
+   * Membership the server could not verify blocks the verb in the UI too.
+   *
+   * The backend refuses this with a 503 regardless, so this is not the
+   * enforcement — it is the UI not offering a button whose only outcome is a
+   * refusal (principle 15: never optimistic).
+   */
+  const teardownMembershipUnverified = computed(
+    () => teardownPreview.value !== null
+      && teardownPreview.value.membership_verified === false
+  )
+
+  /** The members a preview offers for removal, all pre-checked. */
+  const teardownCandidates = computed(() => teardownPreview.value?.members || [])
 
   // --- internal ------------------------------------------------------------
   // Clears the preview PAYLOAD only. `previewedText` deliberately survives: it is
@@ -251,6 +312,105 @@ export const useSystemsStore = defineStore('systems', () => {
     }
   }
 
+  function setTeardownName (name) {
+    teardownName.value = name || ''
+    // Any change to the target invalidates the preview PAYLOAD; the
+    // previewed-name marker survives so the UI can tell "not previewed yet"
+    // from "previewed a different system" (the `previewedText` rule).
+    teardownPreview.value = null
+    teardownError.value = null
+    teardownResult.value = null
+    teardownOutcomeUnknown.value = null
+  }
+
+  function resetTeardown () {
+    teardownName.value = ''
+    teardownPreview.value = null
+    teardownPreviewedName.value = null
+    teardownResult.value = null
+    teardownError.value = null
+    teardownOutcomeUnknown.value = null
+  }
+
+  /**
+   * Dry run: the complete removal set, zero writes server-side.
+   *
+   * Sends NO body — `agents` is only meaningful on execute, and a preview that
+   * pre-filtered by a confirmed set would be previewing something other than
+   * the system.
+   */
+  async function previewTeardown () {
+    const name = teardownName.value.trim()
+    if (!name) {
+      teardownError.value = 'Enter the name of the system to remove.'
+      return null
+    }
+    isPreviewingTeardown.value = true
+    teardownError.value = null
+    teardownPreview.value = null
+    teardownResult.value = null
+    teardownOutcomeUnknown.value = null
+    try {
+      const response = await api.delete(teardownUrl(name, true))
+      teardownPreview.value = response.data
+      teardownPreviewedName.value = name
+      return response.data
+    } catch (err) {
+      const normalized = normalizeError(err)
+      // A dry run creates nothing, so `unknown-outcome` carries no in-flight
+      // work to warn about here — it is just a failure, as on `dryRun()`.
+      teardownError.value = normalized.message
+      return null
+    } finally {
+      isPreviewingTeardown.value = false
+    }
+  }
+
+  /**
+   * Execute, against an explicit confirmed list.
+   *
+   * `agents` is always sent, even when the user checked everything: the server
+   * intersects it with freshly re-resolved membership, so sending it is what
+   * makes the confirmation mean something — a member that appeared since the
+   * preview is reported `not_confirmed` instead of being swept in.
+   */
+  async function teardown (agents) {
+    const name = teardownName.value.trim()
+    if (!name) {
+      teardownError.value = 'Enter the name of the system to remove.'
+      return null
+    }
+    isTearingDown.value = true
+    teardownError.value = null
+    teardownResult.value = null
+    teardownOutcomeUnknown.value = null
+    try {
+      const response = await api.delete(teardownUrl(name, false), {
+        // Axios carries a DELETE body under `data`.
+        data: { agents: agents ?? null, strict: false },
+        timeout: TEARDOWN_TIMEOUT_MS
+      })
+      teardownResult.value = response.data
+      return response.data
+    } catch (err) {
+      const normalized = normalizeError(err)
+      if (normalized.kind === 'result') {
+        // status === 'failed' at HTTP 500, body IS the report. Discarding it
+        // would discard every per-member reason — the only actionable output.
+        teardownResult.value = normalized.data
+        return normalized.data
+      }
+      if (normalized.kind === 'unknown-outcome') {
+        teardownOutcomeUnknown.value = normalized.message
+      } else {
+        teardownError.value = normalized.message
+      }
+      return null
+    } finally {
+      isTearingDown.value = false
+    }
+  }
+
   async function deploy () {
     const text = manifestText.value
     if (!text.trim()) {
@@ -300,17 +460,33 @@ export const useSystemsStore = defineStore('systems', () => {
     isLoading,
     isDeploying,
     error,
+    // teardown state (ent#454)
+    teardownName,
+    teardownPreviewedName,
+    teardownPreview,
+    teardownResult,
+    teardownError,
+    teardownOutcomeUnknown,
+    isPreviewingTeardown,
+    isTearingDown,
     // computed
     previewIsCurrent,
     previewHasBlockers,
     needsAcknowledgement,
     canDeploy,
+    teardownPreviewIsCurrent,
+    teardownMembershipUnverified,
+    teardownCandidates,
     // actions
     setManifestText,
     reset,
     fetchBundled,
     loadBundled,
     dryRun,
-    deploy
+    deploy,
+    setTeardownName,
+    resetTeardown,
+    previewTeardown,
+    teardown
   }
 })
