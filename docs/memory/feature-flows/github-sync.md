@@ -79,7 +79,7 @@ create_agent(name="my-agent", template="github:owner/repo@develop", source_branc
 | 3. URL Parsing | `src/backend/services/agent_service/crud.py` | 102-113 | Parse `@branch` from template URL, validate alphanumeric + `-_/` |
 | 4. Template Lookup | `src/backend/services/agent_service/crud.py` | 115-117 | Reconstruct URL without branch for template lookup |
 | 5. Env Var Set | `src/backend/services/agent_service/crud.py` | 328 | `GIT_SOURCE_BRANCH` set from `config.source_branch` |
-| 6. Template Clone | `src/backend/services/template_service.py` | 22-41 | `clone_github_repo()` accepts optional `branch` param, adds `-b branch` flag |
+| 6. Template Clone | — | — | `clone_github_repo()` was **deleted** by ent#615: it built `https://oauth2:<pat>@github.com/…` and passed it as **argv** to `subprocess.run` on the backend host, and it had no production callers. Branch selection reaches the container as `GIT_SOURCE_BRANCH` (step 7). |
 | 7. Container Clone | `docker/base-image/startup.sh` | 38-45 | Uses `GIT_SOURCE_BRANCH` in `git clone -b` command |
 | 8. Branch Checkout | `docker/base-image/startup.sh` | 57-67 | Source mode checks out and tracks the specified branch |
 
