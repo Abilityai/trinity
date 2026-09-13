@@ -20,6 +20,10 @@
       :bulk-delete-canvases="removeCanvases"
       :pin-canvas="pinCanvas"
       :canvas-limit="canvasLimit"
+      :agent-name="agentName"
+      :share-canvas="shareCanvas"
+      :list-shares="listShares"
+      :revoke-canvas-share="revokeShare"
       viewer="operator"
       @changed="load"
     />
@@ -95,6 +99,29 @@ async function removeCanvases(canvasIds) {
     { canvas_ids: canvasIds },
   )
   return data
+}
+
+async function shareCanvas(canvasId, scope) {
+  const { data } = await api.post(
+    `/api/agents/${encodeURIComponent(props.agentName)}/canvas/${encodeURIComponent(canvasId)}/share`,
+    { scope },
+  )
+  return data
+}
+
+async function listShares(canvasId) {
+  const { data } = await api.get(
+    `/api/agents/${encodeURIComponent(props.agentName)}/canvas/shares`,
+    { params: { canvas_id: canvasId } },
+  )
+  return data
+}
+
+async function revokeShare(shareId) {
+  await api.delete(
+    `/api/agents/${encodeURIComponent(props.agentName)}/canvas/shares/${encodeURIComponent(shareId)}`,
+  )
+  return true
 }
 
 async function pinCanvas(canvasId, pinned) {

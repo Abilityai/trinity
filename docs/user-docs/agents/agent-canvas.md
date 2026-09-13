@@ -34,6 +34,29 @@ Every agent has a **Canvas** tab on its detail page. A canvas the agent marks as
 - **The `canvas` skill.** Agents with the `canvas` skill from the skills library have the full reference and worked examples; any agent gets the essentials from its platform prompt — including when to *retire* a canvas rather than add another.
 - **Markdown and raw HTML.** In a `markdown` block, kit markup must not contain blank lines (Markdown treats a blank line as the end of the HTML). For a fully custom layout the agent uses an `html` block.
 
+## Sharing a canvas, and saving it as a PDF
+
+**Share** produces a link to the canvas. You choose who it reaches, and the
+narrower option is preselected:
+
+- **People who already have access** (the default) — opening the link requires
+  signing in, and only people who can already see the agent will see the canvas.
+- **Anyone with the link** — no sign-in at all. The dialog says so plainly,
+  because it is the option that reaches further than the canvas did before.
+
+A shared canvas **stays current**: whoever opens the link sees it as the agent
+updates it, not a copy from when you shared it. The page says this, and shows
+the last-updated time and the "may be out of date" mark. **Revoke** turns a link
+off; anyone holding it is told it was turned off rather than getting a broken
+page. Creating and revoking links is recorded in the audit log.
+
+**PDF** is available from every canvas surface. It uses your browser's own
+print-to-PDF, so what you get matches what you see: the same typography, charts
+and diagrams, one clean column, and no block split across a page break. The PDF
+carries the canvas title, the agent and the date, and is always the light
+rendering even if you work in dark mode. If your browser cannot do it, the
+button says so and tells you to use Print → Save as PDF.
+
 ## Removing canvases
 
 An agent that uses its canvas well accumulates them — one per report, per topic,

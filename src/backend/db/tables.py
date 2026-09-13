@@ -591,6 +591,24 @@ enterprise_room_messages = Table(
 )
 
 
+agent_canvas_shares = Table(
+    # ent#554 — one share link for one canvas. Separate from
+    # `agent_public_links` on purpose; see the DDL comment in db/schema.py.
+    "agent_canvas_shares",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("canvas_id", Text),
+    Column("token", Text),
+    Column("scope", Text),
+    Column("created_by", Text),
+    Column("created_at", Text),
+    Column("expires_at", Text),
+    Column("revoked_at", Text),
+    Column("last_viewed_at", Text),
+    Column("view_count", Integer),
+)
+
 agent_canvases = Table(
     # ent#438 — a durable, addressable surface an agent renders onto and
     # UPDATES. Composite PK (agent_name, canvas_id): the write is an upsert,

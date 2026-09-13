@@ -24,9 +24,10 @@ from database import (
     PublicChatResponse,
     PublicChatMessage
 )
-from dependencies import get_current_user, assert_owns
+from dependencies import get_current_user, get_optional_user, assert_owns
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
+from services import canvas_share_service
 from services.agent_auth import agent_httpx_client
 from services.chat_execution_service import terminate_execution as _terminate_execution
 from services.chat_signals import ChatDispatchError
@@ -1237,3 +1238,78 @@ async def get_public_link_session_detail(
         "message_count": len(messages),
         "messages": [m.model_dump() for m in messages],
     }
+
+# ---------------------------------------------------------------------------
+# Canvas share view (ent#554)
+# ---------------------------------------------------------------------------
+
+@router.get("/canvas/{token}")
+async def get_shared_canvas(
+    token: str,
+    request: Request,
+    user=Depends(get_optional_user),
+):
+    """Render one shared canvas (ent#554).
+
+    Optional auth, because the two scopes need different things: a `public`
+    link must render for a stranger with no credential, while an `authorized`
+    link is a DEEP link — it points at a canvas the viewer could already see,
+    and the server re-checks that rather than trusting the URL.
+
+    The status vocabulary is deliberate. `revoked` and `expired` are only ever
+    returned for a token that MATCHED a row: whoever holds such a link was
+    already told the canvas exists, so naming the state discloses nothing new
+    and is what AC #2 asks for. Everything else — an unknown token, a canvas
+    deleted out from under the link — collapses into the same `not_found`, so
+    a stranger guessing tokens cannot tell a real one from a fabricated one.
+
+    Rate-limited on the shared public-token counter: this route resolves an
+    attacker-suppliable token, so it belongs to the same budget the other
+    token endpoints share rather than getting its own generous one.
+    """
+    check_public_link_rate_limit(_get_client_ip(request))
+
+    resolution = canvas_share_service.resolve(token, user)
+    status_value = resolution["status"]
+
+    if status_value == canvas_share_service.ShareResolution.OK:
+        return canvas_share_service.public_view_payload(resolution)
+
+    if status_value == canvas_share_service.ShareResolution.SIGN_IN_REQUIRED:
+        # 401 with a NAMED reason, not the uniform 404: the page has to be able
+        # to offer a sign-in rather than a dead end, and this state is only
+        # reachable for a token that already matched a live row.
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "status": status_value,
+                "message": "Sign in to view this canvas — it was shared with the people who already have access.",
+            },
+        )
+
+    if status_value == canvas_share_service.ShareResolution.NOT_AUTHORIZED:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "status": status_value,
+                "message": "This canvas was shared with the people who already have access to its agent, and this account does not.",
+            },
+        )
+
+    if status_value in (
+        canvas_share_service.ShareResolution.REVOKED,
+        canvas_share_service.ShareResolution.EXPIRED,
+    ):
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "status": status_value,
+                "message": (
+                    "This share link was turned off by its owner."
+                    if status_value == canvas_share_service.ShareResolution.REVOKED
+                    else "This share link has expired."
+                ),
+            },
+        )
+
+    raise HTTPException(status_code=404, detail=INVALID_LINK_MESSAGE)
