@@ -49,9 +49,13 @@ def _compute_ahead_behind(home_dir: Path, branch: str) -> tuple:
     here has non-empty stderr, so a failure to resolve counts is harmless.
     """
     try:
-        result = subprocess.run(
+        # #2742: sweep-registered. Reached from the status path AND from
+        # `_conflict_response`, i.e. the 409 path of every locked endpoint —
+        # `run_registered` takes neither `capture_output` nor `text` (it hardcodes
+        # PIPE + text in Popen), so both kwargs are deleted, not renamed.
+        result = run_registered(
             ["git", "rev-list", "--left-right", "--count", f"origin/{branch}...HEAD"],
-            capture_output=True, text=True, cwd=str(home_dir), timeout=10
+            cwd=str(home_dir), timeout=10,
         )
         if result.returncode == 0:
             parts = result.stdout.strip().split()
@@ -112,6 +116,11 @@ _SYNC_STATE_DEFAULT: Dict = {
 }
 
 
+# #2742: hard ceiling on the agent-authored sync-state document (see
+# `_read_sync_state_file`). Not a tunable — it is a boundary guard.
+_SYNC_STATE_MAX_BYTES = 64 * 1024
+
+
 def _sync_state_path(home_dir: Path) -> Path:
     return home_dir / ".trinity" / "sync-state.json"
 
@@ -122,6 +131,19 @@ def _read_sync_state_file(home_dir: Path) -> Dict:
     if not path.exists():
         return dict(_SYNC_STATE_DEFAULT)
     try:
+        # #2742: bound the read before taking it. This file is FULLY
+        # agent-authored (`merged.update(data)` below merges it wholesale) and
+        # the backend's poller reads every agent concurrently via
+        # asyncio.gather — so an unbounded read_text() on a runaway or hostile
+        # sync-state.json OOMs this container's uvicorn AND the backend, once a
+        # minute. 64 KiB is ~30x the largest legitimate document.
+        size = path.stat().st_size
+        if size > _SYNC_STATE_MAX_BYTES:
+            logger.warning(
+                "sync-state.json too large (%s bytes > %s), using defaults",
+                size, _SYNC_STATE_MAX_BYTES,
+            )
+            return dict(_SYNC_STATE_DEFAULT)
         data = json.loads(path.read_text())
         if not isinstance(data, dict):
             raise ValueError("sync-state.json root is not an object")
@@ -244,6 +266,16 @@ _GIT_MAINTENANCE_LOOSE_THRESHOLD = int(
 # roulette), or run during a repack. Non-blocking everywhere: the cycle skips
 # when an operator op is in flight; operator endpoints 409 (`agent_busy`)
 # while a cycle/maintenance runs.
+#
+# #2742 — what it does NOT exclude, because misreading this produced a plan to
+# treat a successful non-blocking acquire as evidence of quiescence. It is an
+# in-process `threading.Lock`: it excludes the agent server's own auto-sync
+# cycle and its own operator endpoints, and NOTHING ELSE. It does not exclude
+# the agent's own git (Claude Code running `git add` in its turn) — the dominant
+# index writer in a Trinity agent and the entire premise of #2742 — nor the
+# backend's ~22 `docker exec` git sites (the repo says so itself at
+# `services/git_service.py`: "the backend's docker exec runs outside the agent
+# server's _REPO_LOCK"). Never treat holding it as "no git is running here".
 _REPO_LOCK = threading.Lock()
 
 
@@ -588,9 +620,11 @@ def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
     """
     if not current_branch.startswith("trinity/"):
         return current_branch
-    result = subprocess.run(
+    # #2742: sweep-registered (also reached from `sync_to_github` and
+    # `pull_from_github` under `_with_repo_lock` — intended, see the module note).
+    result = run_registered(
         ["git", "rev-parse", "--verify", "origin/main"],
-        capture_output=True, text=True, cwd=str(home_dir), timeout=10
+        cwd=str(home_dir), timeout=10,
     )
     return "main" if result.returncode == 0 else current_branch
 
@@ -619,10 +653,9 @@ def _persist_last_remote_sha(branch: str, home_dir: Path) -> None:
     has no lease and behaves like plain `--force` (one-time regression, not
     silent corruption).
     """
-    rev = subprocess.run(
+    # #2742: sweep-registered (also reached from `sync_to_github` under the lock).
+    rev = run_registered(
         ["git", "rev-parse", f"origin/{branch}"],
-        capture_output=True,
-        text=True,
         cwd=str(home_dir),
         timeout=10,
     )
@@ -757,39 +790,64 @@ def _dual_ahead_behind_payload(current_branch: str, home_dir: Path) -> dict:
     }
 
 
-@router.get("/api/git/status")
-async def get_git_status():
-    """
-    Get git repository status including current branch, changes, and sync state.
-    Only available for agents with git sync enabled.
-    """
-    home_dir = Path("/home/developer")
-    git_dir = home_dir / ".git"
+# #2742: the one repo this handler ever reads. A module constant rather than an
+# inline literal so the single-flight slot (which is also module-global) and the
+# computation agree on their subject by construction.
+_STATUS_HOME_DIR = Path("/home/developer")
 
-    if not git_dir.exists():
-        return {
-            "git_enabled": False,
-            "message": "Git sync not enabled for this agent"
-        }
 
+def _compute_git_status(home_dir: Path) -> Dict:
+    """The whole `/api/git/status` computation, as ONE blocking callable (#2742).
+
+    Extracted verbatim from the route handler so the handler can become a thin
+    wrapper. Nothing here is `async`: every step is a blocking `git` child, and
+    running ~8 of them directly on the agent's event loop is what this extraction
+    exists to stop.
+
+    Raises the same `HTTPException` 504/500 the route always raised, so the
+    contract at the boundary is unchanged.
+
+    **Child-timeout budget, written down because the arithmetic decides the
+    caller-side bounds.** Sequential worst case:
+    `rev-parse` 10 + `status` 10 + `log` 10 + `fetch` **30** + `merge-base` 10 +
+    `log`(ancestor) 10 + `remote get-url` 10 = 90, plus `_persist_last_remote_sha`
+    10, `_get_pull_branch` 10 and `_dual_ahead_behind_payload` 10 (20 on a
+    `trinity/*` branch) = **~130 s nominal**, before `run_registered`'s
+    post-`killpg` drain of up to 10 s per timing-out child. The flow doc's old
+    "~30 s worst case" was wrong and is corrected there.
+    """
     try:
         # Get current branch
-        branch_result = subprocess.run(
+        branch_result = run_registered(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
             cwd=str(home_dir),
-            timeout=10
+            timeout=10,
         )
         current_branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "unknown"
 
         # Get status (modified, untracked files)
-        status_result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
+        #
+        # #2742 — THE call site this issue exists for. `git status --porcelain`
+        # takes `.git/index.lock` on EVERY invocation in order to refresh the
+        # index, whether or not it ends up rewriting it, for a window that scales
+        # with index size (0.6 ms at one file, 12.8-15.4 ms at 20 000, 334-473 ms
+        # measured in a real container). Driven by the backend's 60 s poll that
+        # meant the platform took this agent's index lock ~2x/min, outside
+        # `_REPO_LOCK`, racing the agent's own `git add` — and a sweep-killed
+        # child orphaned a 0-byte lock that silently failed every later git write.
+        # `--no-optional-locks` is precisely what the flag exists for.
+        #
+        # SCOPED to this one site on purpose. The auto-sync cycle's own status
+        # (right after `git add -A`, under the repo lock) and the `sync`/`pull`
+        # bodies keep the plain form: they are lock-serialized, they proceed to
+        # stage/commit, and they WANT the refreshed stat cache. Flag form, not
+        # `GIT_OPTIONAL_LOCKS=0`: `run_registered` has no `env=` kwarg, the env
+        # form would silently change the mutating sites too, and only the argv is
+        # assertable in a test. Needs git >= 2.15; bookworm ships 2.39.
+        status_result = run_registered(
+            ["git", "--no-optional-locks", "status", "--porcelain"],
             cwd=str(home_dir),
-            timeout=10
+            timeout=10,
         )
         changes = []
         if status_result.returncode == 0 and status_result.stdout.strip():
@@ -803,12 +861,10 @@ async def get_git_status():
                     })
 
         # Get last commit
-        log_result = subprocess.run(
+        log_result = run_registered(
             ["git", "log", "-1", "--format=%H|%h|%s|%an|%ai"],
-            capture_output=True,
-            text=True,
             cwd=str(home_dir),
-            timeout=10
+            timeout=10,
         )
         last_commit = None
         if log_result.returncode == 0 and log_result.stdout.strip():
@@ -823,12 +879,16 @@ async def get_git_status():
                 }
 
         # Fetch to update remote refs (required for accurate ahead/behind)
-        fetch_result = subprocess.run(
+        # #2742: `--no-optional-locks` closes only the index-lock half. A sweep
+        # tick straddling this 30 s child still SIGKILLs it, and a killed fetch
+        # can orphan `FETCH_HEAD.lock` / `refs/remotes/origin/*.lock` /
+        # `packed-refs.lock` — which NO reaper covers, not even `startup.sh`'s
+        # (its find is scoped to refs/ and logs/, and the other two sit directly
+        # in .git/). Registering the child is what stops the poll producing them.
+        fetch_result = run_registered(
             ["git", "fetch", "origin"],
-            capture_output=True,
-            text=True,
             cwd=str(home_dir),
-            timeout=30
+            timeout=30,
         )
         # S7 Layer 3 (#382): snapshot the remote SHA we just observed so
         # the next push can use it as the --force-with-lease expected-sha.
@@ -850,22 +910,18 @@ async def get_git_status():
         pull_branch = _get_pull_branch(current_branch, home_dir)
         common_ancestor_sha = ""
         common_ancestor_age_days = None
-        merge_base_result = subprocess.run(
+        merge_base_result = run_registered(
             ["git", "merge-base", "HEAD", f"origin/{pull_branch}"],
-            capture_output=True,
-            text=True,
             cwd=str(home_dir),
-            timeout=10
+            timeout=10,
         )
         if merge_base_result.returncode == 0:
             common_ancestor_sha = merge_base_result.stdout.strip()
             if common_ancestor_sha:
-                ancestor_date_result = subprocess.run(
+                ancestor_date_result = run_registered(
                     ["git", "log", "-1", "--format=%cI", common_ancestor_sha],
-                    capture_output=True,
-                    text=True,
                     cwd=str(home_dir),
-                    timeout=10
+                    timeout=10,
                 )
                 if ancestor_date_result.returncode == 0:
                     date_str = ancestor_date_result.stdout.strip()
@@ -882,21 +938,24 @@ async def get_git_status():
                             )
 
         # Get remote URL (without credentials)
-        remote_result = subprocess.run(
+        remote_result = run_registered(
             ["git", "remote", "get-url", "origin"],
-            capture_output=True,
-            text=True,
             cwd=str(home_dir),
-            timeout=10
+            timeout=10,
         )
         remote_url = ""
         if remote_result.returncode == 0:
             url = remote_result.stdout.strip()
-            # Remove credentials from URL for display
-            if '@github.com' in url:
-                remote_url = "https://github.com/" + url.split('@github.com/')[1]
-            else:
-                remote_url = url
+            # #2742: redact unconditionally. The old shape special-cased
+            # `@github.com` and returned the URL VERBATIM otherwise — so for any
+            # non-github.com remote (GitHub Enterprise, GitLab, a host-rewritten
+            # origin) this response body carried the fully tokenized
+            # `https://oauth2:<PAT>@host/...`, straight through
+            # `git_service.get_git_status` (which returns `response.json()`
+            # unmodified) to the UI and the MCP tool. ent#615 owns the broader
+            # credential-in-argv class; this is the one line in it that this
+            # diff was already moving.
+            remote_url = redact_url_userinfo(url)
 
         response = {
             "git_enabled": True,
@@ -923,6 +982,24 @@ async def get_git_status():
     except Exception as e:
         logger.error(f"Git status error: {e}")
         raise HTTPException(status_code=500, detail=f"Git status error: {str(e)}")
+
+
+@router.get("/api/git/status")
+async def get_git_status():
+    """
+    Get git repository status including current branch, changes, and sync state.
+    Only available for agents with git sync enabled.
+    """
+    home_dir = _STATUS_HOME_DIR
+    git_dir = home_dir / ".git"
+
+    if not git_dir.exists():
+        return {
+            "git_enabled": False,
+            "message": "Git sync not enabled for this agent"
+        }
+
+    return _compute_git_status(home_dir)
 
 
 @router.post("/api/git/sync")

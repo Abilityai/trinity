@@ -3008,6 +3008,18 @@
         "reliability"
       ],
       "description": "Cross-worker leader election on the sync-health poll loop (#2742): distinct worker ids; only one of two workers leads; the holder refreshes and keeps leadership; Redis-down and Redis-error fail OPEN to leader (the feed that raises sync_failing must not go dark when infra is degraded); graceful release hands off immediately; release only deletes its OWN lease and does so as a single compare-and-delete EVAL, never a bare DEL (a GET-then-DEL lets an expired worker delete a sibling's fresh grant = two pollers for a cycle); release never raises; TTL expiry lets a sibling take over; stop() releases; _leader_ttl() floor 30 / 180 at the 60 s default; _poll_cycle lists agents and issues agent HTTP iff leader. Plus the TD5 cadence knob: SYNC_HEALTH_POLL_INTERVAL_SECONDS read at CALL time, default UNCHANGED at 60 s, garbage/non-positive degrading to the default, and an explicit poll_interval=0 constructor value winning over the env. FakeRedis (models eval), agent_client + database stubbed; no real Redis, no DB. The alert-timing consequence (~90 s to ~180 s time-to-sync_failing) needs the real upsert increment and lives in test_sync_health_service.py::TestLeaderLeaseAlertTiming."
+    },
+    {
+      "file": "unit/test_2742_git_status_lock_free.py",
+      "feature": "#2742",
+      "added": "2026-09-13",
+      "categories": [
+        "agent-server",
+        "git-sync",
+        "reliability",
+        "regression"
+      ],
+      "description": "The sync-health poll must not take, or orphan, .git/index.lock (#2742, agent-server). AC1: the status read issues `git --no-optional-locks status --porcelain` and never the plain argv; the flag is scoped to exactly ONE call site (the auto-sync cycle's status keeps the index-refreshing form); a busy-poll sampler sees the plain argv holding index.lock and the flagged argv never (asserted as a SIGHTING, never as an index rewrite — git's racily-clean rule makes a rewrite assertion fail once fixture setup crosses ~1s, ordinary under CI's -n auto); the read leaves .git/index byte-identical; every status child is sweep-registered with paired add/remove and a raising subprocess.run proves no bare child survives; the LOCKED sync/pull/409 paths register their helper children too (an intended consequence of converting the three shared helpers, pinned rather than stumbled on); a tokenized non-github.com origin comes back with no userinfo in remote_url; an oversized agent-authored sync-state.json degrades to defaults without being parsed. Real throwaway git repos (local + bare remote so `git fetch origin` works offline), no Docker."
     }
   ]
 }
