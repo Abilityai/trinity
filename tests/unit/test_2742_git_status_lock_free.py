@@ -1241,3 +1241,78 @@ class TestACommitSurvivesAConcurrentPoll:
         finally:
             git_mod.run_registered = real_run_registered
             git_mod._STATUS_INFLIGHT.clear()
+
+
+class TestTheLeaderIsBounded:
+    """A slow leader costs no follower THREADS on this design, but it does hold
+    the in-flight slot — so every caller in that window 504s. The deadline is
+    what stops one wedged computation from monopolising the read forever."""
+
+    @pytest.mark.asyncio
+    async def test_leader_deadline_releases_the_slot(
+        self, status_home, clean_inflight_slot, monkeypatch
+    ):
+        import asyncio
+        import threading
+        from fastapi import HTTPException
+
+        gate = threading.Event()
+        spy = _BlockingFetch(git_mod.run_registered, gate)
+        monkeypatch.setattr(git_mod, "run_registered", spy)
+        monkeypatch.setattr(git_mod, "_STATUS_LEADER_DEADLINE_SECONDS", 0.2)
+
+        with pytest.raises(HTTPException) as exc:
+            await git_mod.get_git_status()
+        assert exc.value.status_code == 504
+        assert "deadline" in exc.value.detail
+
+        gate.set()
+        for _ in range(50):
+            if not git_mod._STATUS_INFLIGHT:
+                break
+            await asyncio.sleep(0.05)
+        assert not git_mod._STATUS_INFLIGHT, "a wedged leader must release the slot"
+
+    def test_the_declared_leader_deadline_matches_the_real_child_budget(self):
+        """AST guard so the documented arithmetic cannot silently drift.
+
+        `_compute_git_status`'s own `run_registered` timeouts sum to 90s
+        (10 rev-parse + 10 status + 10 log + 30 fetch + 10 merge-base + 10 log
+        + 10 remote get-url), which is what the leader deadline is set to. Adding
+        a child — or widening one — without revisiting the deadline fails here
+        rather than showing up as an unexplained 504 in production. The helpers
+        it calls add a further ~40s on top, which is precisely why the deadline
+        exists instead of relying on the child timeouts to bound the run.
+        """
+        import ast
+
+        src = (
+            _BASE_IMAGE / "agent_server" / "routers" / "git.py"
+        ).read_text(encoding="utf-8")
+        fn = next(
+            node for node in ast.walk(ast.parse(src))
+            if isinstance(node, ast.FunctionDef) and node.name == "_compute_git_status"
+        )
+        budget = sum(
+            kw.value.value
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "run_registered"
+            for kw in node.keywords
+            if kw.arg == "timeout" and isinstance(kw.value, ast.Constant)
+        )
+        assert budget == git_mod._STATUS_LEADER_DEADLINE_SECONDS, (
+            f"the status body's child timeouts now sum to {budget}s but the "
+            f"leader deadline is still {git_mod._STATUS_LEADER_DEADLINE_SECONDS}s "
+            "— revisit both together, and the flow doc's arithmetic with them"
+        )
+
+    def test_the_follower_bound_sits_above_every_real_callers_own_timeout(self):
+        """Poller 10s, backend git_service 30s. A follower waiting longer than
+        every caller can only produce work nobody is waiting for."""
+        assert git_mod._STATUS_FOLLOWER_WAIT_SECONDS >= 30
+        assert (
+            git_mod._STATUS_FOLLOWER_WAIT_SECONDS
+            < git_mod._STATUS_LEADER_DEADLINE_SECONDS
+        ), "the caller bound must fail fast relative to the computation bound"

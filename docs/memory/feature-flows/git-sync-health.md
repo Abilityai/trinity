@@ -276,7 +276,9 @@ _run_auto_sync_once (worker thread, repo lock held)
   before, so a submodule or linked-worktree wedge survived every restart.
 - **Runtime stuck-lock report (#2742) — observe, never delete.** The status
   read reports a currently-present `index.lock` as `index_lock_stuck`
-  (`{age_seconds, sightings, path}`) and a backend WARNING; it does **not**
+  (`{path, age_seconds, stable_for_seconds, sightings, size_bytes}` — the
+  backend keeps only the ints and drops the agent-composed path) and a backend
+  WARNING; it does **not**
   unlink it. Three measurements decide this:
   - `st_size == 0` is the signature of a **live** writer, not an abandoned
     one — git creates the lock with `O_EXCL` *before* walking the worktree
