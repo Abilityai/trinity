@@ -348,23 +348,23 @@ class TestRemoteUrlRedaction:
         the UI and the MCP tool."""
         _run(
             ["git", "remote", "set-url", "origin",
-             "https://oauth2:ghp_SECRETVALUE123@gitlab.example.com/org/repo.git"],
+             "https://oauth2:notarealtoken_PLACEHOLDER@gitlab.example.com/org/repo.git"],
             status_home,
         )
         payload = git_mod._compute_git_status(status_home)
 
-        assert "ghp_SECRETVALUE123" not in payload["remote_url"]
+        assert "notarealtoken_PLACEHOLDER" not in payload["remote_url"]
         assert "oauth2" not in payload["remote_url"]
         assert "gitlab.example.com/org/repo.git" in payload["remote_url"]
 
     def test_a_tokenized_github_origin_is_still_redacted(self, status_home):
         _run(
             ["git", "remote", "set-url", "origin",
-             "https://oauth2:ghp_SECRETVALUE123@github.com/org/repo.git"],
+             "https://oauth2:notarealtoken_PLACEHOLDER@github.com/org/repo.git"],
             status_home,
         )
         payload = git_mod._compute_git_status(status_home)
-        assert "ghp_SECRETVALUE123" not in payload["remote_url"]
+        assert "notarealtoken_PLACEHOLDER" not in payload["remote_url"]
         assert "github.com/org/repo.git" in payload["remote_url"]
 
 
