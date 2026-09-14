@@ -85,7 +85,7 @@
                 class="px-2 py-0.5 text-xs rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300"
               >Cancel</button>
               <span v-if="nameError" class="text-xs text-status-danger-500">{{ nameError }}</span>
-              <span v-else class="text-xs text-status-warning-600 dark:text-status-warning-400">
+              <span v-else class="text-xs text-status-warning-700 dark:text-status-warning-400">
                 Changes the agent's id: restarts it, re-keys its URLs and MCP keys, and its
                 existing data volumes stay under the old id. To just change the displayed
                 name, cancel and use the pencil.
@@ -104,7 +104,7 @@
                 @blur="saveName"
               />
               <span v-if="nameError" class="text-xs text-status-danger-500">{{ nameError }}</span>
-              <span v-else class="text-xs text-gray-400 dark:text-gray-500">
+              <span v-else class="text-xs text-gray-500 dark:text-gray-400">
                 Display label — empty resets to <code class="font-mono">{{ agent.name }}</code>
                 <button
                   @mousedown.prevent="startEditSlug"
@@ -118,7 +118,7 @@
               <button
                 v-if="agent.can_share && !agent.is_system"
                 @click="startEditName"
-                class="text-gray-400 dark:text-gray-500 hover:text-action-primary-600 dark:hover:text-action-primary-400 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                class="text-gray-500 dark:text-gray-400 hover:text-action-primary-600 dark:hover:text-action-primary-400 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
                 title="Rename label"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -130,7 +130,7 @@
           <!-- ent#181 FR-4: the slug is what URLs, MCP keys, containers and
                volumes key on — keep it visible when a label hides it. -->
           <div v-if="showsSlug" class="mt-0.5">
-            <code class="text-xs font-mono text-gray-400 dark:text-gray-500">{{ agent.name }}</code>
+            <code class="text-xs font-mono text-gray-500 dark:text-gray-400">{{ agent.name }}</code>
           </div>
           <div class="flex items-center space-x-2 mt-1.5">
             <!-- Status badge -->
@@ -292,7 +292,7 @@
           <button
             v-if="agent.can_delete"
             @click="$emit('delete')"
-            class="text-gray-400 dark:text-gray-500 hover:text-status-danger-600 dark:hover:text-status-danger-400 p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+            class="text-gray-500 dark:text-gray-400 hover:text-status-danger-600 dark:hover:text-status-danger-400 p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
             title="Delete agent"
           >
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -333,7 +333,7 @@
         <div v-if="!agent.is_system && agent.can_share" class="h-4 w-px bg-gray-300 dark:bg-gray-600 mx-4"></div>
         <!-- Tags -->
         <div class="flex items-center">
-          <span class="text-xs text-gray-400 dark:text-gray-500 mr-2 flex-shrink-0">Tags:</span>
+          <span class="text-xs text-gray-500 dark:text-gray-400 mr-2 flex-shrink-0">Tags:</span>
           <TagsEditor
             :model-value="tags"
             :editable="agent.can_share"
@@ -355,7 +355,7 @@
         <template v-if="agent.status === 'running' && agentStats">
           <!-- CPU -->
           <div class="flex items-center space-x-1.5">
-            <span class="text-gray-400 dark:text-gray-500">CPU</span>
+            <span class="text-gray-500 dark:text-gray-400">CPU</span>
             <SparklineChart
               :data="cpuHistory"
               color="#3b82f6"
@@ -368,11 +368,11 @@
               :class="agentStats.cpu_percent > 80 ? 'text-status-danger-500' : agentStats.cpu_percent > 50 ? 'text-status-warning-500' : 'text-status-success-500'"
             >{{ agentStats.cpu_percent }}%</span>
             <!-- #1126: configured core ceiling, so live % reads against capacity -->
-            <span class="text-gray-400 dark:text-gray-500 font-mono">/ {{ resourceLimits.current_cpu || '2' }} cores</span>
+            <span class="text-gray-500 dark:text-gray-400 font-mono">/ {{ resourceLimits.current_cpu || '2' }} cores</span>
           </div>
           <!-- Memory -->
           <div class="flex items-center space-x-1.5">
-            <span class="text-gray-400 dark:text-gray-500">MEM</span>
+            <span class="text-gray-500 dark:text-gray-400">MEM</span>
             <SparklineChart
               :data="memoryHistory"
               color="#a855f7"
@@ -385,7 +385,7 @@
               :class="agentStats.memory_percent > 80 ? 'text-status-danger-500' : agentStats.memory_percent > 50 ? 'text-status-warning-500' : 'text-status-success-500'"
             >{{ formatBytes(agentStats.memory_used_bytes) }}</span>
             <!-- #1126: configured max memory, so live usage reads against the ceiling -->
-            <span class="text-gray-400 dark:text-gray-500 font-mono">/ {{ (resourceLimits.current_memory || '4g').toUpperCase() }}</span>
+            <span class="text-gray-500 dark:text-gray-400 font-mono">/ {{ (resourceLimits.current_memory || '4g').toUpperCase() }}</span>
           </div>
           <!-- Uptime -->
           <div class="text-gray-500 dark:text-gray-400 font-mono w-16 text-right">
@@ -394,23 +394,23 @@
         </template>
         <!-- When running but stats loading -->
         <template v-else-if="agent.status === 'running' && statsLoading">
-          <div class="flex items-center space-x-2 text-gray-400 dark:text-gray-500">
+          <div class="flex items-center space-x-2 text-gray-500 dark:text-gray-400">
             <div class="animate-spin h-3 w-3 border border-gray-300 dark:border-gray-600 border-t-gray-600 dark:border-t-gray-300 rounded-full"></div>
             <span>Loading...</span>
           </div>
         </template>
         <!-- When stopped: Show resource allocation -->
         <template v-else>
-          <span class="text-gray-400 dark:text-gray-500">{{ formatRelativeTime(agent.created) }}</span>
+          <span class="text-gray-500 dark:text-gray-400">{{ formatRelativeTime(agent.created) }}</span>
           <span class="text-gray-300 dark:text-gray-600">|</span>
-          <span class="text-gray-400 dark:text-gray-500 font-mono">{{ resourceLimits.current_cpu || '2' }} CPU</span>
-          <span class="text-gray-400 dark:text-gray-500 font-mono">{{ (resourceLimits.current_memory || '4g').toUpperCase() }}</span>
+          <span class="text-gray-500 dark:text-gray-400 font-mono">{{ resourceLimits.current_cpu || '2' }} CPU</span>
+          <span class="text-gray-500 dark:text-gray-400 font-mono">{{ (resourceLimits.current_memory || '4g').toUpperCase() }}</span>
         </template>
         <!-- Resource Config Button -->
         <button
           v-if="agent.can_share"
           @click="$emit('open-resource-modal')"
-          class="p-1.5 text-gray-400 dark:text-gray-500 hover:text-action-primary-600 dark:hover:text-action-primary-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors flex-shrink-0"
+          class="p-1.5 text-gray-500 dark:text-gray-400 hover:text-action-primary-600 dark:hover:text-action-primary-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors flex-shrink-0"
           title="Configure resources (Memory/CPU)"
         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -437,7 +437,7 @@
       </span>
       <!-- 7-day cost sparkline -->
       <div class="flex items-center space-x-1.5">
-        <span class="text-gray-400 dark:text-gray-500">7d</span>
+        <span class="text-gray-500 dark:text-gray-400">7d</span>
         <SparklineChart
           :data="tokenCostSparkline"
           color="#f59e0b"
@@ -448,7 +448,7 @@
       </div>
       <!-- Today's cost -->
       <div class="flex items-center space-x-1">
-        <span class="text-gray-400 dark:text-gray-500">Today</span>
+        <span class="text-gray-500 dark:text-gray-400">Today</span>
         <span class="font-mono text-gray-700 dark:text-gray-300" :title="costUnreported ? 'Cost is not reported under this auth — token-based tracking only' : null">{{ costUnreported ? '—' : costPrefix + formatCost(tokenStats.cost_24h) }}</span>
       </div>
       <!-- Trend vs 7d average -->
@@ -474,7 +474,7 @@
       <!-- Lifetime cost -->
       <!-- #2197 — the cost row is the third that had to wrap: at 375px the
            lifetime-spend cluster is the last thing still pushing the page. -->
-      <div class="ml-auto flex flex-wrap items-center gap-1 text-gray-400 dark:text-gray-500">
+      <div class="ml-auto flex flex-wrap items-center gap-1 text-gray-500 dark:text-gray-400">
         <span>Lifetime</span>
         <span class="font-mono text-gray-600 dark:text-gray-400" :title="costUnreported ? 'Cost is not reported under this auth — token-based tracking only' : null">{{ costUnreported ? '—' : costPrefix + formatCost(tokenStats.lifetime_cost) }}</span>
         <span class="text-gray-300 dark:text-gray-600">·</span>
@@ -492,7 +492,7 @@
           :href="gitStatus.remote_url"
           target="_blank"
           rel="noopener noreferrer"
-          class="flex-shrink-0 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+          class="flex-shrink-0 text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
           title="Open GitHub repository"
         >
           <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
@@ -506,7 +506,7 @@
         <!-- Commit hash -->
         <span
           v-if="gitStatus?.last_commit?.short_sha"
-          class="ml-2 text-xs font-mono text-gray-400 dark:text-gray-500 flex-shrink-0"
+          class="ml-2 text-xs font-mono text-gray-500 dark:text-gray-400 flex-shrink-0"
           :title="`Commit: ${gitStatus.last_commit.message}\nAuthor: ${gitStatus.last_commit.author}\nDate: ${gitStatus.last_commit.date}`"
         >{{ gitStatus.last_commit.short_sha }}</span>
         <div class="flex-1"></div>
@@ -552,7 +552,7 @@
         <button
           @click="$emit('git-refresh')"
           :disabled="gitLoading"
-          class="flex-shrink-0 ml-2 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+          class="flex-shrink-0 ml-2 text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
           title="Refresh git status"
         >
           <svg :class="['w-4 h-4', gitLoading ? 'animate-spin' : '']" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -562,10 +562,10 @@
       </template>
       <!-- When stopped: Show minimal indicator -->
       <template v-else>
-        <svg class="w-4 h-4 text-gray-400 dark:text-gray-500" fill="currentColor" viewBox="0 0 24 24">
+        <svg class="w-4 h-4 text-gray-500 dark:text-gray-400" fill="currentColor" viewBox="0 0 24 24">
           <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
         </svg>
-        <span class="ml-2 text-xs text-gray-400 dark:text-gray-500">Git enabled - start agent to sync</span>
+        <span class="ml-2 text-xs text-gray-500 dark:text-gray-400">Git enabled - start agent to sync</span>
       </template>
     </div>
   </div>
@@ -867,9 +867,9 @@ function formatTrendPct(pct) {
 
 const trendClass = computed(() => {
   const pct = props.tokenStats?.trend_cost_pct ?? 0
-  if (pct > 5) return 'text-status-warning-600 dark:text-status-warning-400'
-  if (pct < -5) return 'text-status-success-600 dark:text-status-success-400'
-  return 'text-gray-400 dark:text-gray-500'
+  if (pct > 5) return 'text-status-warning-700 dark:text-status-warning-400'
+  if (pct < -5) return 'text-status-success-700 dark:text-status-success-400'
+  return 'text-gray-500 dark:text-gray-400'
 })
 </script>
 

@@ -115,7 +115,7 @@
         >
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
           <span class="hidden md:inline">New chat</span>
-          <kbd class="hidden lg:inline text-[11px] font-mono text-gray-400 dark:text-gray-500">{{ newChatHotkey }}</kbd>
+          <kbd class="hidden lg:inline text-[11px] font-mono text-gray-500 dark:text-gray-400">{{ newChatHotkey }}</kbd>
         </button>
         <!-- ent#359 AC #4: star from the header too. Hidden until the thread
              exists — a chat with no id yet cannot be pinned, and rendering a
@@ -225,7 +225,7 @@
       <span class="min-w-0 truncate text-gray-700 dark:text-gray-200">
         {{ voiceCallActive ? voiceHeaderText : voiceEndNotice }}
       </span>
-      <span v-if="voiceCallActive" class="hidden sm:inline text-gray-400 dark:text-gray-500">· End the call to switch chats · Esc ends</span>
+      <span v-if="voiceCallActive" class="hidden sm:inline text-gray-500 dark:text-gray-400">· End the call to switch chats · Esc ends</span>
       <button
         v-if="voiceCallActive"
         type="button"
@@ -450,7 +450,7 @@
     <!-- Composer -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-6 py-3">
       <div class="max-w-[var(--ws-message-max,64rem)] mx-auto">
-        <p v-if="offline" class="mb-2 text-xs text-status-warning-600 dark:text-status-warning-400 flex items-center gap-1.5">
+        <p v-if="offline" class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-400 flex items-center gap-1.5">
           <span class="w-1.5 h-1.5 rounded-full bg-status-warning-500"></span>
           You appear to be offline — messages will send once you're reconnected.
         </p>
