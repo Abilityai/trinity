@@ -564,11 +564,19 @@
            is conserved at every frame — so the hazard is gone by construction
            rather than held off by a flag, and the two motions now overlap
            instead of running back to back. -->
+      <!-- #2711 (review): the LEAVE is animated only when the column actually
+           held a rail. A reservation that turns out to be wrong — an empty or
+           failed roster, where the rail never arrives — must be given back in
+           one frame, not slid away over 300ms, or the fix hands back the very
+           shift it removes. Measured before this: `reserved(48) → 22 → 3 → none`
+           on a rosterless load. The ENTER keeps its transition: it only ever
+           runs for the voice-canvas swap (#2676), since a reserved column is
+           present from the first frame and never enters. -->
       <Transition
-        enter-active-class="transition-[width] duration-300 ease-out overflow-hidden motion-reduce:transition-none motion-reduce:duration-0"
-        leave-active-class="transition-[width] duration-300 ease-out overflow-hidden motion-reduce:transition-none motion-reduce:duration-0"
+        :enter-active-class="RAIL_MOTION"
+        :leave-active-class="railEverHeldRail ? RAIL_MOTION : ''"
         enter-from-class="!w-0"
-        leave-to-class="!w-0"
+        :leave-to-class="railEverHeldRail ? '!w-0' : ''"
       >
       <div
         v-if="railHasColumn || railColumnReserved"
@@ -1049,6 +1057,11 @@ const railVisible = computed(() => railVisibleFor({
 // and deliberately narrower than `railVisible`: see its docblock for why a room
 // route is excluded. `voiceCanvasHasColumn` still wins — the canvas and the rail
 // are never both in the row.
+// One definition of the rail column's motion, so the enter and the (conditional)
+// leave cannot drift apart.
+const RAIL_MOTION = 'transition-[width] duration-300 ease-out overflow-hidden '
+  + 'motion-reduce:transition-none motion-reduce:duration-0'
+
 const railColumnReserved = computed(() => Boolean(
   railColumnReservedFor({
     agentPage: activeAgentPageName.value,
@@ -1060,6 +1073,15 @@ const railColumnReserved = computed(() => Boolean(
 const railHasColumn = computed(() => Boolean(
   railVisible.value && railTabs.value.length && !voiceCanvasHasColumn.value
 ))
+
+// #2711 (review): has this column ever actually held the rail? A reservation
+// that is handed back without ever becoming a rail was a guess that did not pay
+// off, and giving it back instantly is strictly better than animating it away.
+// Reset per route, because the answer is about THIS stage: navigating from a
+// conversation to an empty roster must not inherit the conversation's verdict.
+const railEverHeldRail = ref(false)
+watch(railHasColumn, (has) => { if (has) railEverHeldRail.value = true })
+watch(() => route.value.fullPath, () => { railEverHeldRail.value = railHasColumn.value })
 // ent#475: the ONE owner of what the Loops / Canvas / Files tabs read. It
 // feeds `portalLoops` and `portalRailFeeds` off the same door gate and
 // participant list the rail renders from — nothing is fetched for a tab this
