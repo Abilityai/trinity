@@ -1,6 +1,6 @@
 # Sequential Agent Loops
 
-Run the same task against one agent repeatedly, in order, with a bounded run count — for example "process the next backlog item" × 20. Start a loop once, get back a `loop_id`, and disconnect: the loop runs server-side, dispatching each iteration through the standard execution pipeline.
+Run the same task against one agent repeatedly, in order, with a bounded run count — for example "process the next backlog item" × 20. Start a loop once, get back a `loop_id`, and disconnect: the loop runs server-side, dispatching each iteration through the standard execution pipeline and advancing when that iteration finishes. A loop is a durable record, so it survives a backend restart.
 
 Loops are the sequential counterpart to [Fan-Out](fan-out.md) (parallel batch) and a single chat turn (one-shot).
 
@@ -15,6 +15,8 @@ Loops are the sequential counterpart to [Fan-Out](fan-out.md) (parallel batch) a
 - **Fixed mode** — No stop signal set: the loop runs exactly `max_runs` iterations.
 - **Until mode** — A `stop_signal` is set: after each iteration, Trinity checks whether the agent's response contains the stop signal as a plain substring. On match, the loop ends early with reason `stop signal matched`. A recommended sentinel is `[[DONE]]` — tell the agent to emit it when the work is finished.
 - **Cooperative stop** — Stopping a loop never kills the in-flight iteration. The current run finishes, then the loop exits with reason `stopped by user`.
+- **Deadline** — An optional `max_duration_seconds` wall-clock limit on the whole loop, checked between runs. The in-flight run always finishes, so the overshoot is at most one run; on expiry the loop stops with reason `deadline_exceeded`.
+- **No-progress stop** — After `no_progress_threshold` consecutive identical responses (default 3; `0` disables), the loop stops with reason `no_progress` rather than burning budget on a doom loop. A tolerated failure between two identical successes does not reset the count.
 - **Cost budget** — An optional `max_cost_usd` ceiling on total loop spend. It is checked **between runs**, not mid-run: before each iteration Trinity sums the cost of completed runs and, once that meets or exceeds the budget, stops the loop with reason `budget exhausted` **before starting the next run**. The current run always finishes, so one run — including the very first — can overshoot the budget by any amount; this is a guardrail against runaway loops, not a hard mid-call cap. A run that reports no cost counts as `$0` toward the budget (the loop is still bounded by `max_runs`).
 
 ## How It Works
@@ -25,15 +27,43 @@ Loops are the sequential counterpart to [Fan-Out](fan-out.md) (parallel batch) a
    - **Message template** (required) — e.g. `Process item {{run}}. Previous result: {{previous_response}}`
    - **Max runs** (required, 1–100)
    - **Stop signal** (optional) — substring that ends the loop early
-   - **Delay between runs (seconds)** (0–3600)
-   - **Timeout per run (seconds)** (10–7200; defaults to the agent's execution timeout)
+   - **Delay between runs (seconds)** (0–3600) — a pacing knob: a parked loop is picked up by a sweep that runs every few seconds, not a precision timer
+   - **Timeout per run (seconds)** (10–7200; defaults to the agent's execution timeout, and cannot exceed it)
+   - **Max duration (seconds)** — optional wall-clock deadline for the whole loop
+   - **Max cost (USD)** — optional spend budget
+   - **No-progress threshold** — stop after this many identical responses in a row (default 3; 0 disables)
+   - **On iteration failure** / **Max consecutive failures** — the failure policy, see [Handling Failures](#handling-failures)
    - **Model** — per-loop model override (defaults to the agent default)
    - **Allowed tools** — restrict the agent's tools for every iteration, or leave **All Tools (Unrestricted)**
 4. Click **Start Loop**. The loop appears in the list below with a live status badge and a **Run N / M** progress counter.
-5. Click a loop row to expand it: a per-run table shows each iteration's status, cost, duration, and a response preview, and the **Last response** is rendered as markdown below the table.
+5. Click a loop row to expand it: a per-run table shows each iteration's status, cost, duration, and a response preview; a deadline or budget you set shows as elapsed/limit and spend/budget rows; and the **Last response** is rendered as markdown below the table.
 6. Click **Stop** on an active loop to request a graceful stop. The badge shows the current iteration finishing, then the loop ends with reason `stopped by user`.
 
 The panel updates in real time via WebSocket events as each run completes, with a periodic backstop refresh while a loop is active.
+
+### From the Workspace
+
+Platform users can run and watch loops from the chat they belong to, in the [Workspace](../sharing-and-access/workspace.md) rail's **Loops** tab. An external client never sees this tab, and the agent's activity shown to a client omits loop runs altogether — a loop is an operator capability.
+
+- **Start a loop** (or **Start another loop**) opens a small form: **Agent** (in a room, which participant), **Do this each run**, **Runs**, and **Cost budget (USD)**. The guardrails are stated before you start: *It also stops by itself after 3 identical replies in a row, and after 3 consecutive failures. No time limit unless you set one.*
+- Each loop row shows its status, **Run N of M** (with *· K failed* when a `continue`-mode loop tolerated failures), how much of each guardrail is left, and **Stop** while it is active. A guardrail you never set shows no bar — "no budget" and "budget untouched" are different facts.
+- The collapsed rail signals *N running*; in a room, loops are grouped by participating agent.
+- Rows update over the same live events as the operator panel, with a 12-second backstop poll only while a loop is active.
+- Each loop run also appears as a **Loop run** in the rail's **Work** tab — see [Executions](../operations/executions.md#work-in-the-workspace).
+
+The status words there say why a loop ended rather than only that it did:
+
+| What you see | Meaning |
+|--------------|---------|
+| **Done** | Reached its run limit or matched its stop signal, with no failed runs |
+| **Done, with errors** | Reached its run limit with tolerated failures along the way |
+| **Stopped by you** | You pressed Stop |
+| **Stopped — cost budget reached** / **time limit reached** / **it stopped making progress** | A guardrail ended it |
+| **Failed** / **Failed — too many errors in a row** | The failure policy ended it |
+
+### Asking the agent to loop
+
+Telling an agent in chat to "run a loop" or "do this every few minutes" starts a Trinity loop (or a [reminder](agent-reminders.md)): the platform routes repetition to these primitives and blocks the harness's own loop and wake-up tools, which would report success and then never fire once the turn ended.
 
 ### Loop Lifecycle
 
@@ -42,9 +72,9 @@ The panel updates in real time via WebSocket events as each run completes, with 
 | `queued` / `running` | Loop active; iterations dispatching |
 | `completed` | Reached max runs, or the stop signal matched — with no failed iterations |
 | `completed_with_errors` | A `continue`-mode loop reached its run limit (or matched its stop signal) with at least one tolerated failure along the way |
-| `stopped` | Stopped by a user, or the cost budget (`max_cost_usd`) was met/exceeded at a run boundary; the in-flight iteration finished first |
+| `stopped` | Stopped by a user, or a guardrail ended it at a run boundary — the cost budget (`budget_exhausted`), the deadline (`deadline_exceeded`), or repeated identical responses (`no_progress`); the in-flight iteration finished first |
 | `failed` | The loop aborted on a failed iteration — in `abort` mode at the first failure, or in `continue` mode after `max_consecutive_failures` consecutive failures |
-| `interrupted` | The backend restarted mid-loop; loops do **not** auto-resume |
+| `interrupted` | Only on loops from older builds. A backend restart no longer interrupts a loop — on boot, a loop between runs is picked up again, and a loop whose run was in flight continues from that run's outcome |
 
 ### Observability
 
@@ -192,7 +222,9 @@ curl -X POST http://localhost:8000/api/agents/my-agent/loops \
 | `max_runs` | — (required) | 1–100 | Hard ceiling on iterations |
 | `stop_signal` | none (fixed mode) | ≤200 chars | Substring that ends the loop early; whitespace-stripped, blank = fixed mode |
 | `delay_seconds` | 0 | 0–3600 | Pause between iterations |
-| `timeout_per_run` | agent's execution timeout | 10–7200 | Per-iteration timeout in seconds |
+| `timeout_per_run` | agent's execution timeout | 10–7200 | Per-iteration timeout in seconds. Refused with `400` (naming `agent_cap_seconds`) when above the agent's execution timeout |
+| `max_duration_seconds` | none (no deadline) | 1–604800 | Wall-clock deadline for the whole loop; checked **between runs**. Stops with reason `deadline_exceeded`. Must be at least the effective per-run timeout (`400` otherwise) |
+| `no_progress_threshold` | 3 | 0 or ≥ 2 | Stop after this many consecutive identical responses (reason `no_progress`); `0` disables, `1` is rejected |
 | `max_cost_usd` | none (no budget) | > 0 | Total USD spend budget; checked **between runs** (the current run always finishes). Stops with reason `budget exhausted` once spend meets/exceeds it. Runs reporting no cost count as `$0`. |
 | `on_failure` | `abort` | `abort` \| `continue` | Failure policy. `abort` stops at the first failed iteration; `continue` tolerates a failed iteration and proceeds |
 | `max_consecutive_failures` | 3 | 1–100 | `continue` mode only: abort the loop (`failed`) after this many failed iterations in a row. The streak resets on any success |
@@ -204,9 +236,9 @@ curl -X POST http://localhost:8000/api/agents/my-agent/loops \
 - **One agent, sequential** — A loop targets a single agent and never runs iterations in parallel. For parallel batches, use [Fan-Out](fan-out.md).
 - **Shared capacity** — Each iteration goes through the agent's normal capacity admission and counts against its `max_parallel_tasks` budget alongside chat, schedules, and other traffic.
 - **Failure policy** — `abort` (default) stops the loop with status `failed` at the first failed iteration. `continue` tolerates failed iterations and proceeds, but still aborts (`failed`) after `max_consecutive_failures` consecutive failures — the streak resets on any success. See [Handling Failures](#handling-failures).
-- **No resume after restart** — A backend restart marks in-flight loops `interrupted`. They do not auto-resume; start a new loop.
 - **Stop is not instant** — The in-flight iteration always finishes; only subsequent iterations are skipped.
-- **Bounded inputs** — `max_runs` is capped at 100, delay at 1 hour, and per-run timeout at 2 hours.
+- **Delay is pacing, not timing** — A loop waiting out `delay_seconds` is re-dispatched by a sweep every few seconds, so the pause is approximate.
+- **Bounded inputs** — `max_runs` is capped at 100, delay at 1 hour, per-run timeout at 2 hours (and at the agent's own execution timeout), and the deadline at 7 days.
 
 ## See Also
 
@@ -215,4 +247,5 @@ curl -X POST http://localhost:8000/api/agents/my-agent/loops \
 - [Agent Self-Reminders](agent-reminders.md) — The time-deferred sibling: a one-shot, durable, agent-scheduled follow-up
 - [Scheduling](scheduling.md) — Cron-based recurring tasks; the right tool for cadences slower than 1 hour
 - [Executions](../operations/executions.md) — Where each loop iteration appears
+- [Workspace](../sharing-and-access/workspace.md) — The rail's Loops tab
 - [Agent Configuration](../agents/agent-configuration.md) — Execution timeout and parallel task limits
