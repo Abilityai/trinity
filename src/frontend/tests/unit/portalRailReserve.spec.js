@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { railColumnReservedFor, railVisibleFor } from '../../src/components/portal/portalRail.js'
 
 /**
@@ -74,5 +76,27 @@ describe('reserve and visible are complementary, never both', () => {
       const args = { agentPage: 'scout', stageState }
       expect(railColumnReservedFor(args) || railVisibleFor(args), stageState).toBe(false)
     }
+  })
+})
+
+describe('the shell reads the route the way the rest of the file does', () => {
+  // Not style. `useRoute()` returns a reactive OBJECT, not a ref, so a
+  // `route.value.x` getter throws — and Vue routes a watch-getter error to its
+  // error handler instead of aborting setup, so the page still renders, every
+  // e2e still passes, and the watcher is simply dead. That shipped here: the
+  // reset watcher added with the reservation threw on every Workspace load and
+  // nothing failed. One spelling in one file, so pin it.
+  const SHELL = readFileSync(join(process.cwd(), 'src/views/Portal.vue'), 'utf8')
+
+  it('never reaches through `.value` on the route object', () => {
+    const offenders = SHELL.split('\n')
+      .map((line, i) => [i + 1, line])
+      .filter(([, line]) => /\broute\.value\b/.test(line) && !line.trim().startsWith('//'))
+      .map(([n, line]) => `${n}: ${line.trim().slice(0, 80)}`)
+    expect(offenders, 'useRoute() is a reactive object — read `route.x`, not `route.value.x`').toEqual([])
+  })
+
+  it('still reads the route somewhere, so the guard is not vacuous', () => {
+    expect(SHELL).toMatch(/\broute\.(fullPath|params|query|path)\b/)
   })
 })
