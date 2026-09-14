@@ -184,6 +184,11 @@
           No payment activity yet
         </div>
 
+        <!-- #1925 triage — NOT a tab strip: a bounded wide table. Horizontal scroll
+             INSIDE the container is the correct treatment for unbounded column width
+             (design-system principle 7); collapsing columns into a "More" menu would
+             hide data, not navigation. Left as-is deliberately so a later audit does
+             not re-flag it. -->
         <div v-else class="overflow-x-auto">
           <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
             <thead class="bg-gray-50 dark:bg-gray-900/50">
