@@ -169,10 +169,11 @@ def seeded(db_backend):
     return db_backend
 
 
-def _user(username: str, role: str = "user", *, uid: int = 0, agent_name=None, connector_agent=None):
+def _user(username: str, role: str = "user", *, uid: int = 0, agent_name=None, connector_agent=None, mcp_scope=None):
     from models import User
 
-    return User(id=uid, username=username, role=role, agent_name=agent_name, connector_agent=connector_agent)
+    return User(id=uid, username=username, role=role, agent_name=agent_name,
+                connector_agent=connector_agent, mcp_scope=mcp_scope)
 
 
 def _stranger():

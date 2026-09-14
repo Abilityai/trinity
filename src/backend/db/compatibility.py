@@ -51,7 +51,10 @@ class CompatibilityOperations:
         """Insert or replace the single latest-snapshot row for an agent."""
         payload = dict(
             overall_status=overall_status,
-            checks_json=json.dumps(checks),
+            # default=str: `detail` is built from agent-authored YAML and the hardened
+            # loader yields dates; one check's non-JSON-native value must not fail the
+            # persistence of the whole report (#2110). Producers still bound at origin.
+            checks_json=json.dumps(checks, default=str),
             hard_count=int(hard_count),
             soft_count=int(soft_count),
             info_count=int(info_count),

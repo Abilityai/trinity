@@ -80,6 +80,14 @@ _ALLOWED_CALLERS = {
     ("services/operator_queue_service.py",
      "OperatorQueueSyncService._maybe_emit_flood_alert"):
         "the #1632 flood alert: cooldown-gated, one per episode",
+    ("services/subscription_headroom_alerts.py", "_emit"):
+        "platform-only: edge-triggered per weekly window via a deterministic "
+        "id (sub-headroom-{sid}-{reset-day}-{tier}) whose ON CONFLICT DO NOTHING "
+        "makes a re-emit a no-op; volume is bound by the sweep cadence and a "
+        "per-cycle cap. Agent-CHOSEN names do reach the body (an agent may "
+        "spawn children and name them) but arrive sanitized and capped at five "
+        "per alert — it is the VOLUME an agent cannot drive, which is what this "
+        "exemption rests on (ent#434)",
     ("services/operator_queue_service.py", "create_bounded_alert"):
         "the #1677 budget helper's own admit-path create (the seam itself)",
     ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
@@ -89,7 +97,12 @@ _ALLOWED_CALLERS = {
     ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
         "platform-only: assignment-driven, quasi-idempotent id (ent#236)",
     ("services/skill_service.py", "SkillService._record_adoption_failure"):
-        "platform-only: admin-driven sync cadence (ent#346)",
+        "platform-only: the only input is `skills_library_url`, blocked on the "
+        "generic settings PUT by routers/settings.py LEGACY_SKILLS_LIBRARY_KEYS "
+        "(ent#346), so no agent can drive volume; the steady-state branch is "
+        "additionally idempotent by a URL-derived id ⇒ ≤1 row per refused URL. "
+        "NOT admin-driven — ent#236's auto-sync calls the same sync_library() "
+        "unattended on a 300s-86400s timer (#2744)",
     ("services/skills_sync_service.py",
      "SkillsLibrarySyncService._announce_fleet_failures"):
         "platform-only: leader-locked, one per sync run (ent#236)",

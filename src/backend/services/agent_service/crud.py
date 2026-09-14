@@ -4,6 +4,7 @@ Agent Service CRUD - Agent creation and deletion operations.
 Contains the core logic for creating and deleting agents.
 """
 import asyncio
+import io
 import os
 import re
 import json
@@ -59,6 +60,7 @@ from .capabilities import (
     AGENT_TMPFS_MOUNT,
     AGENT_DEFAULT_TMPDIR,
     AGENT_LOG_CONFIG,
+    AGENT_RESTART_POLICY,
     normalize_cpu,
     normalize_memory,
 )
@@ -1587,10 +1589,11 @@ def _build_base_env(config: AgentConfig) -> dict:
 
 
 def _apply_subscription_env(config: AgentConfig, env_vars: dict) -> Optional[str]:
-    """#74: auto-assign a round-robin Claude subscription (Claude runtimes only).
+    """#74: auto-assign a Claude subscription (Claude runtimes only) — since
+    #2409 the one with the most headroom, load-balance order among unranked.
     Sets `CLAUDE_CODE_OAUTH_TOKEN` and pops `ANTHROPIC_API_KEY` on success.
     Returns the assigned subscription id (None when skipped)."""
-    # Auto-assign subscription (round-robin) — #74.
+    # Auto-assign subscription — #74 (headroom-ranked since #2409).
     # Subscriptions are Claude-OAuth tokens (CLAUDE_CODE_OAUTH_TOKEN) and apply
     # ONLY to the Claude Code runtime. Non-Claude runtimes (Gemini, Codex) bring
     # their own credentials via .env (CRED-002), so skip the assign entirely —
@@ -1600,7 +1603,11 @@ def _apply_subscription_env(config: AgentConfig, env_vars: dict) -> Optional[str
     auto_assigned_subscription_id = None
     if is_claude_runtime(config.runtime):
         try:
-            least_used = db.get_least_used_subscription()
+            # #2409: filter (db) → rank by cached headroom → first decryptable
+            # token, in the subscription service. Lazy import — this module's
+            # creation harnesses stub `services.*` selectively at load.
+            from services.subscription_service import select_subscription_for_new_agent
+            least_used = select_subscription_for_new_agent()
             if least_used:
                 token = db.get_subscription_token(least_used.id)
                 if token:
@@ -1626,11 +1633,15 @@ def _apply_gemini_and_otel_env(config: AgentConfig, env_vars: dict) -> None:
     # Add Google API key if using Gemini runtime
     # Gemini CLI expects GEMINI_API_KEY environment variable
     if config.runtime == 'gemini-cli' or config.runtime == 'gemini':
-        google_api_key = os.getenv('GOOGLE_API_KEY', '')
+        # ent#582: the saved Settings key first, then GEMINI_API_KEY/GOOGLE_API_KEY
+        # env — the resolver every other Gemini reader uses. Lazy: the creation
+        # harnesses stub `services.*` selectively at load.
+        from services.settings_service import get_gemini_api_key
+        google_api_key = get_gemini_api_key()
         if google_api_key:
             env_vars['GEMINI_API_KEY'] = google_api_key  # Gemini CLI expects this name
         else:
-            logger.warning("Gemini runtime selected but GOOGLE_API_KEY not configured")
+            logger.warning("Gemini runtime selected but no Gemini key configured (Settings or GEMINI_API_KEY/GOOGLE_API_KEY)")
 
     # OpenTelemetry Configuration (enabled by default)
     # Claude Code has built-in OTel support - these vars enable metrics export
@@ -2022,6 +2033,10 @@ async def _create_agent_container(
         # unbounded, so without this the log grows until the Docker data root
         # fills and dockerd wedges. Creation-time — see AGENT_LOG_CONFIG.
         log_config=AGENT_LOG_CONFIG,
+        # #2541: born `unless-stopped` so the agent survives a host reboot or a
+        # daemon restart. Docker's default is `no` — 8 of 19 agents stayed dead
+        # ~42h after the 2026-09-04 power-off. Creation-time, like log_config.
+        restart_policy=AGENT_RESTART_POLICY,
         network='trinity-agent-network',
         # #1197: cpu/memory normalized + validated above (raises 400 on
         # a bad template value), so these are guaranteed Docker-valid.
@@ -2048,6 +2063,55 @@ async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> Non
                 "container_id": agent_status.container_id
             }
         }))
+
+
+_BUNDLED_AVATAR_NAMES = ("avatar.webp", "avatar.png")
+_BUNDLED_AVATAR_MAX_BYTES = 2 * 1024 * 1024
+_AVATAR_DIR = Path("/data/avatars")  # routers/avatar.py AVATAR_DIR
+
+
+def _install_bundled_avatar(config: AgentConfig) -> None:
+    """#2693: copy a `local:` template's bundled `avatar.webp`/`avatar.png` into
+    the avatar store, so an agent has a face with no Gemini key and no network.
+
+    Stored as a DEFAULT avatar (the caller writes `is_default_avatar=1`), so
+    Settings → Generate Default Avatars still overwrites it once a key exists.
+    Always re-encoded through `optimize_avatar`: the deploy-local root holds
+    user-uploaded templates, and a decode/re-encode is what keeps an arbitrary
+    file from being served verbatim on the unauthenticated avatar route."""
+    if not config.template or not config.template.startswith("local:"):
+        return
+    # Both paths come from request fields. `_resolve_local_template_dir` and
+    # agent-name validation already contain them, but CodeQL's
+    # `py/path-injection` can't follow those callees — so each final path is
+    # normalized and prefix-checked right here (the `routers/avatar.py
+    # _avatar_path` barrier), as plain strings with no Path rebuild after it.
+    template_roots = tuple(os.path.join(str(r.resolve()), "") for r in _LOCAL_TEMPLATE_ROOTS)
+    avatar_root = os.path.join(str(_AVATAR_DIR), "")
+    dest = os.path.normpath(os.path.join(avatar_root, f"{config.name}.webp"))
+    if not dest.startswith(avatar_root):
+        return
+    template_dir = str(_resolve_local_template_dir(config.template[6:]))
+    for filename in _BUNDLED_AVATAR_NAMES:
+        source = os.path.normpath(os.path.join(template_dir, filename))
+        if not source.startswith(template_roots):
+            return
+        if not os.path.isfile(source) or os.path.getsize(source) > _BUNDLED_AVATAR_MAX_BYTES:
+            continue
+        from PIL import Image
+        from utils.image_optimize import optimize_avatar
+
+        with open(source, "rb") as f:
+            data = f.read()
+        # A 2 MB PNG can still declare a gigapixel canvas; read the header only.
+        with Image.open(io.BytesIO(data)) as img:
+            if img.width * img.height > 4096 * 4096:
+                raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
+        os.makedirs(avatar_root, exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(optimize_avatar(data))
+        logger.info(f"[AVATAR-003] Installed bundled avatar from {config.template} for {config.name}")
+        return
 
 
 def _register_agent(
@@ -2132,6 +2196,13 @@ def _register_agent(
     # durable-identity nicety a disposable agent never benefits from)
     _avatar_prompt = (template_data.get("avatar_prompt") if template_data else None) if not config.ephemeral else None
     if _avatar_prompt:
+        try:
+            # #2693: install the template's bundled image BEFORE the DB row, so
+            # `avatar_url` never points at a file that isn't there yet. A bad
+            # image must not cost the prompt seed — that is the regeneration path.
+            _install_bundled_avatar(config)
+        except Exception as e:
+            logger.warning(f"[AVATAR-003] Failed to install bundled avatar for {config.name}: {e}")
         try:
             db.set_default_avatar(config.name, _avatar_prompt, datetime.now(timezone.utc).isoformat())
             logger.info(f"[AVATAR-003] Seeded avatar prompt from template for {config.name}")

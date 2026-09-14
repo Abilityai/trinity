@@ -209,9 +209,12 @@
     <!-- Execution list -->
     <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
       <!-- Loading state -->
-      <div v-if="store.loading && store.rows.length === 0" class="text-center py-12">
-        <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
-        <p class="text-sm text-gray-500 dark:text-gray-400 mt-2">Loading…</p>
+      <!-- #1921: a LIST first-load, so row-shaped placeholders in the list's own
+           footprint rather than a centred spinner in a 12-unit box. The
+           refresh-icon spin at the top of this file and the "Load more" button
+           label are sanctioned in-flight indicators and are left alone. -->
+      <div v-if="store.loading && store.rows.length === 0" class="p-4">
+        <SkeletonLoader variant="rows" :count="6" height="2.75rem" gap="0.5rem" />
       </div>
 
       <!-- Error state -->
@@ -316,6 +319,7 @@
 </template>
 
 <script setup>
+import SkeletonLoader from './SkeletonLoader.vue'
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { formatCost, formatCostCompact } from '../composables/useFormatters'

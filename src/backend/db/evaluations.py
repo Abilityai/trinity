@@ -18,7 +18,8 @@ import json
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import select, insert, and_
+from sqlalchemy import select, insert, update, and_, func
+from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
 from db.tables import agent_evaluations
@@ -75,6 +76,202 @@ class EvaluationOperations:
         with get_engine().begin() as conn:
             conn.execute(stmt)
         return self.get_evaluation(eval_id)
+
+    # ------------------------------------------------------------------
+    # ent#366 — one-click Workspace ratings
+    # ------------------------------------------------------------------
+
+    RATING_UP = 1.0
+    RATING_DOWN = 0.0
+
+    def upsert_workspace_rating(
+        self,
+        agent_name: str,
+        *,
+        evaluator: str,
+        target_kind: str,
+        target_id: str,
+        quality: float,
+        comment: Optional[str] = None,
+        execution_id: Optional[str] = None,
+    ) -> dict:
+        """Record (or change) one person's rating of one thing.
+
+        Idempotent per (evaluator, target) by construction — the unique index
+        carries the rule, and this method's UPDATE-then-INSERT reflects it. A
+        second thumb on the same message is a correction, not a second vote,
+        which is what makes a raw tally mean "how many people", not "how many
+        clicks".
+
+        `comment` is stored as sent (it is the point of the box) and is
+        withheld from the rated agent at the READ boundary — never here: a db
+        layer that redacted by caller would be a policy in the wrong place, and
+        the operator surfaces legitimately need the text.
+
+        Clearing the comment is explicit: passing None on a re-rate leaves the
+        previous text, because a person changing thumbs-down to thumbs-up has
+        not necessarily retracted what they wrote.
+        """
+        now = utc_now_iso()
+        values = {
+            "quality": quality,
+            "updated_at": now,
+        }
+        if comment is not None:
+            values["comment"] = comment
+        if execution_id is not None:
+            values["execution_id"] = execution_id
+
+        def _apply(conn) -> Optional[dict]:
+            """UPDATE if the rating exists; return None if it does not."""
+            where = and_(
+                agent_evaluations.c.evaluator == evaluator,
+                agent_evaluations.c.target_kind == target_kind,
+                agent_evaluations.c.target_id == target_id,
+            )
+            if not conn.execute(update(agent_evaluations).where(where).values(**values)).rowcount:
+                return None
+            return self._row_to_dict(
+                conn.execute(select(agent_evaluations).where(where)).mappings().first()
+            )
+
+        with get_engine().begin() as conn:
+            existing = _apply(conn)
+            if existing is not None:
+                return existing
+            # Two first-ratings of the same target by the same person race here:
+            # both UPDATE zero rows, both INSERT, and the unique index refuses
+            # the loser. That is a double-click, and it must read as "your
+            # rating is recorded", not as a 500 — so the loser re-runs the
+            # UPDATE it should have run, which is what the winner just made
+            # possible. The index stays the authority; this is how a caller
+            # experiences it.
+            eval_id = f"eval_{uuid.uuid4().hex[:16]}"
+            insert_values = dict(
+                id=eval_id,
+                agent_name=agent_name,
+                execution_id=execution_id,
+                archetype=None,
+                completion=None,
+                quality=quality,
+                checks_json=None,
+                judge_json=None,
+                evaluator=evaluator,
+                created_at=now,
+                target_kind=target_kind,
+                target_id=target_id,
+                comment=comment,
+                updated_at=now,
+            )
+            try:
+                # SAVEPOINT, so the failed INSERT can be undone without ending
+                # the transaction. Required for dialect portability: SQLite
+                # tolerates reusing the connection after a constraint violation
+                # (verified on SQLAlchemy 2.0.51), but PostgreSQL aborts the
+                # whole transaction — "current transaction is aborted, commands
+                # ignored until end of transaction block" — so a bare retry
+                # would fix the default backend and break the other one.
+                with conn.begin_nested():
+                    conn.execute(insert(agent_evaluations).values(**insert_values))
+            except IntegrityError:
+                # The loser of that race. Its rating is not lost: the row now
+                # exists, so the UPDATE it originally skipped is the correct
+                # action — retried on the SAME connection.
+                #
+                # Review finding: it used to open a SECOND connection here, and
+                # on SQLite (the default backend) that deadlocks against itself.
+                # pysqlite holds a RESERVED write lock on `conn` for the life of
+                # the transaction, and a constraint violation rolls back only
+                # the failed STATEMENT, not the transaction — so the retry's
+                # UPDATE waits on a lock its own caller is holding, burns the
+                # 30s `connect_args["timeout"]`, and raises
+                # `OperationalError: database is locked`, which `submit_rating`
+                # turns into the 503 this design exists to avoid. Deterministic,
+                # not a flake, and reachable from two tabs (the client-side
+                # `sending` guard covers one component instance). PostgreSQL
+                # tolerated it, so the DEFAULT backend was the broken one.
+                #
+                # The SAVEPOINT above is what makes reusing `conn` safe on
+                # both dialects; the same connection is then the only form that
+                # cannot block on itself.
+                applied = _apply(conn)
+                if applied is not None:
+                    return applied
+                raise
+            row = conn.execute(
+                select(agent_evaluations).where(agent_evaluations.c.id == eval_id)
+            ).mappings().first()
+        return self._row_to_dict(row)
+
+    def get_workspace_rating(self, evaluator: str, target_kind: str,
+                             target_id: str) -> Optional[dict]:
+        """This person's current rating of this thing, if any."""
+        stmt = select(agent_evaluations).where(and_(
+            agent_evaluations.c.evaluator == evaluator,
+            agent_evaluations.c.target_kind == target_kind,
+            agent_evaluations.c.target_id == target_id,
+        ))
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return self._row_to_dict(row) if row else None
+
+    def list_workspace_ratings_for_targets(self, evaluator: str, target_kind: str,
+                                           target_ids: list) -> dict:
+        """`{target_id: quality}` for ONE evaluator over many targets (ent#366).
+
+        One query per thread rather than one per message. Scoped to a single
+        evaluator by construction — this is how a client sees their own thumb
+        and never anyone else's.
+        """
+        if not evaluator or not target_ids:
+            return {}
+        stmt = select(
+            agent_evaluations.c.target_id, agent_evaluations.c.quality
+        ).where(and_(
+            agent_evaluations.c.evaluator == evaluator,
+            agent_evaluations.c.target_kind == target_kind,
+            agent_evaluations.c.target_id.in_(list(target_ids)),
+        ))
+        with get_engine().connect() as conn:
+            return {tid: q for tid, q in conn.execute(stmt).all()}
+
+    def workspace_rating_tally(self, agent_name: str) -> dict:
+        """Raw up/down counts for an agent — never a percentage (ent#366 AC #4).
+
+        At the volumes this surface sees, a percentage is the dishonest form: one
+        thumbs-down out of one rating is "100% negative", which is a number that
+        looks like evidence and is not. The denominator is the honest part, so
+        both numbers are returned and the caller renders both.
+        """
+        stmt = (
+            select(agent_evaluations.c.quality, func.count().label("n"))
+            .where(and_(
+                agent_evaluations.c.agent_name == agent_name,
+                agent_evaluations.c.target_id.isnot(None),
+                # ent#366 review — CLIENT ratings only. `include_owned` lets an
+                # operator reach the Workspace and rate their own agent, which
+                # is right; counting it here is not. This number is shown to
+                # every client of the agent and answers "how did this land with
+                # people" — an owner test-clicking is not that audience, and
+                # once counted the click was unrecoverable (the agent-principal
+                # redaction anonymises both kinds to the bare word `workspace`).
+                # Prefix-matched rather than NOT-LIKE'd on the operator form, so
+                # a future evaluator kind is excluded by default instead of
+                # silently joining the client tally.
+                agent_evaluations.c.evaluator.like("workspace:%"),
+            ))
+            .group_by(agent_evaluations.c.quality)
+        )
+        up = down = 0
+        with get_engine().connect() as conn:
+            for quality, n in conn.execute(stmt).all():
+                if quality is None:
+                    continue
+                if quality >= 0.5:
+                    up += int(n)
+                else:
+                    down += int(n)
+        return {"up": up, "down": down, "total": up + down}
 
     def get_evaluation(self, eval_id: str) -> Optional[dict]:
         stmt = select(agent_evaluations).where(agent_evaluations.c.id == eval_id)

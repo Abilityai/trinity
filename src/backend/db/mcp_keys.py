@@ -106,7 +106,27 @@ class McpKeyOperations:
     # `system` are deliberately absent — they are bound to an agent and are
     # minted by their own code paths; accepting them here would let a caller
     # forge an agent principal with no agent behind it.
-    _USER_CREATABLE_SCOPES = ("user", "portal_delegate")
+    # #2323: `ops` is a bounded read-only machine credential. Admin-gated AND
+    # human-only at the router; refused here too so a bad value can never reach
+    # the column by another path.
+    _USER_CREATABLE_SCOPES = ("user", "portal_delegate", "ops")
+
+    # #2323 INVARIANT — every scope this creator can mint (`_USER_CREATABLE_SCOPES`
+    # above) must leave `agent_name` NULL. Three separate sweeps filter on
+    # `scope IN ('agent','connector')` to find their work — the canary L-03
+    # orphan scan, the key orphan sweep, and the agent rename/purge cascade — so
+    # a non-agent scope carrying an agent name would be invisible to all three
+    # and outlive its agent forever.
+    #
+    # It holds HERE BY CONSTRUCTION, with no guard to bypass: this creator writes
+    # the literal `agent_name=None` below, and `McpApiKeyCreate` declares no
+    # `agent_name` for a caller to supply. An earlier revision guarded on
+    # `getattr(key_data, "agent_name", None)` — which Pydantic makes permanently
+    # falsy, so it could never fire while reading as protection. #2389 removed
+    # the guard, then removed the `_AGENTLESS_SCOPES` tuple it had been the only
+    # reader of: a constant nothing consults reads as enforcement to the next
+    # person, which is the same defect one step smaller.
+    # `test_2323_machine_identities.py` asserts the WRITTEN ROW.
 
     def create_mcp_api_key(self, username: str, key_data: McpApiKeyCreate) -> Optional[McpApiKeyWithSecret]:
         """Create a new MCP API key for a user.

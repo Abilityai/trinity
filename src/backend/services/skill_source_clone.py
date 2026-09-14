@@ -409,6 +409,15 @@ class SkillSourceClone:
         up as a fetch failure rather than a silent adoption. The explicit SHA
         comparison below is the belt to that suspenders — it catches the same
         condition on a fresh clone where no local tag ref exists yet to conflict.
+
+        The comparison resolves the tag PEELED (`^{commit}`), never bare. The
+        recorded SHA is `current_commit()` — HEAD, i.e. the commit — while a
+        bare `rev-parse refs/tags/<ref>` on an ANNOTATED tag yields the tag
+        object, so an unmoved tag compared unequal and was refused as moved on
+        every sync after the first (#2550). Every `trinity-skills` release tag
+        is annotated, so the bundled source hit this on its second sync. Peeling
+        is the identity for a lightweight tag, and a tag that really moved still
+        resolves to a different commit — the refusal itself is unchanged.
         """
         fetch = self._git(
             [*_GIT_HTTP_UA_ARGS, "fetch", "origin", "tag", self.ref],
@@ -429,7 +438,7 @@ class SkillSourceClone:
                 }
             return {"success": False, "error": f"fetch failed: {stderr}"}
 
-        resolved = self._resolve(f"refs/tags/{self.ref}")
+        resolved = self._resolve(f"refs/tags/{self.ref}^{{commit}}")
         if resolved is None:
             return {"success": False, "error": f"tag {self.ref!r} not found upstream"}
         if expected_sha and not resolved.startswith(expected_sha):

@@ -45,7 +45,9 @@ share_file({ filename: "report.csv" })
 # Returns: { url, expires_at, size_bytes, mime_type }
 ```
 
-The agent drops a file into `/home/developer/public/`, then calls `share_file` with the filename. Trinity extracts it, stores it securely, and returns a signed URL valid for 7 days.
+The agent drops a file into `/home/developer/public/`, then calls `share_file` with the filename (optionally `display_name` and `expires_in`). Trinity extracts it, stores it securely, and returns a signed URL valid for 7 days.
+
+**Opening a link.** The link works wherever it is pasted, including in-app browsers on a phone (Telegram, iOS Safari): audio, video, images, and PDFs open inline and stream with range requests, so a voice note plays without a forced download. Anything that could carry script — HTML and SVG — is always delivered as a download. Append `?download=1` to force a download for any file. A media player's chunked reads count as one download.
 
 **From the UI:**
 - Active shared files appear in the File Sharing panel with filename, size, expiry, and download count.
@@ -61,23 +63,27 @@ The agent drops a file into `/home/developer/public/`, then calls `share_file` w
 | Default expiry | 7 days |
 | Blocked types | Executables (PE/ELF/Mach-O), scripts with shebangs |
 
-If the agent has `require_email` enabled, download links enforce session verification automatically.
+The signed URL is the only credential a download needs: it is not tied to a chat session or a verified email, so a recipient outside Trinity can open it. Revoke the link if it reaches the wrong hands.
 
 ## For Agents
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/files` | GET | List workspace files (tree structure) |
+| `/api/agents/{name}/files` | PUT | Save a text file (what the inline editor calls) |
+| `/api/agents/{name}/files` | DELETE | Delete a file (protected paths are refused) |
 | `/api/agents/{name}/files/download` | GET | Download file content (100 MB limit) |
+| `/api/agents/{name}/files/preview` | GET | File content with its real MIME type, for previews |
 | `/api/agents/{name}/files/mkdir` | POST | Create a directory in the workspace |
 | `/api/agents/{name}/file-sharing` | GET | File sharing status and quota |
 | `/api/agents/{name}/file-sharing` | PUT | Enable or disable file sharing (owner/admin) |
 | `/api/agents/{name}/shared-files` | POST | Mint a download URL for a file in `/home/developer/public/` |
 | `/api/agents/{name}/shared-files` | GET | List active shared files |
 | `/api/agents/{name}/shared-files/{id}` | DELETE | Revoke a shared file |
-| `/api/files/{file_id}` | GET | Public download — query param `?sig={token}` |
+| `/api/files/{file_id}` | GET/HEAD | Public download — query param `?sig={token}`; supports `Range` requests; `?download=1` forces a download |
 
 ## See Also
 
 - [Creating Agents](creating-agents.md)
 - [Managing Agents](managing-agents.md)
+- [Workspace](../sharing-and-access/workspace.md) — the Workspace has its own Files tab for files you and the agent exchange in a conversation

@@ -58,13 +58,13 @@
   - `AUTHENTICATION`: login_success, login_failed (logout / token_refresh — no endpoints in Trinity)
   - `AUTHORIZATION`: share, unshare, permission_grant, permission_revoke, permissions_set
   - `CONFIGURATION`: settings_change, resource_limits, autonomy_toggle
-  - `CREDENTIALS`: inject, export, import, oauth_complete (CRED-002 replaced spec's create/delete/reload)
+  - `CREDENTIALS`: inject, export, import, oauth_complete (CRED-002 replaced spec's create/delete/reload), subscription_assign, subscription_clear, subscription_auto_adopt, subscription_auto_adopt_sweep (#2572 — the manual and automatic halves of subscription assignment; #2421 still owns register / delete / auto-switch-settings)
   - `MCP_OPERATION`: tool_call, key_create, key_revoke, key_delete
   - `GIT_OPERATION`: sync, pull, init (commit — folded into sync)
   - `SYSTEM`: startup, shutdown, emergency_stop
 - **Architecture**: `docs/requirements/AUDIT_TRAIL_ARCHITECTURE.md`
 - **Flow**: `docs/memory/feature-flows/audit-trail.md`
-- **Test plan**: `docs/testing/audit-trail-manual-test-plan.md` (19 acceptance checks; 18/19 passed live, hash-chain verify bug fixed in-flight and re-verified)
+- **Test plan**: `docs/archive/testing/audit-trail-manual-test-plan.md` (19 acceptance checks; 18/19 passed live, hash-chain verify bug fixed in-flight and re-verified)
 - **Follow-up (optional)**: admin UI (no requirement in spec — API export satisfies compliance criterion); forward `schedule_id` / `schedule_name` from scheduler to `/api/internal/execute-task` so `schedule_triggered` audit carries that context.
 
 ### 20.2 Execution Origin Tracking (AUDIT-001)
@@ -107,8 +107,8 @@
   - Fleet auth report at `/api/ops/auth-report`
 - **Workflow**:
   1. User runs `claude setup-token` locally to generate long-lived token
-  2. Registers subscription via MCP: `register_subscription("name", "sk-ant-oat01-...")`
-  3. Assigns to agents: `assign_subscription("agent-name", "subscription-name")`
+  2. Registers subscription via MCP: `register_subscription("name", "sk-ant-oat01-...")` or `POST /api/subscriptions` (the Settings form and the MCP tool are the same endpoint, so step 3 fires for both)
+  3. **Automatic (#2572)**: on registration, every agent whose active auth mode resolves to *no usable credential* adopts an available subscription — see 20.3a. Manual assignment remains for every other case: `assign_subscription("agent-name", "subscription-name")`
   4. Agent container is (re)created with `CLAUDE_CODE_OAUTH_TOKEN` env var; `ANTHROPIC_API_KEY` removed
 - **Database**: `subscription_credentials` table, `subscription_id` FK on `agent_ownership`
 - **Files**:
@@ -117,16 +117,35 @@
   - `src/backend/services/subscription_service.py` - Auth mode detection
   - `src/mcp-server/src/tools/subscriptions.ts` - MCP tools
 
-### 20.3a Subscription Auto-Assign on Agent Creation (#74)
-- **Status**: ✅ Implemented (2026-03-25)
-- **GitHub Issue**: #74
+### 20.3a Subscription Auto-Assign — at Creation (#74) and to a Credential-less Fleet (#2572)
+- **Status**: ✅ Implemented (creation 2026-03-25, #74; credential-less adoption 2026-09-12, #2572)
+- **GitHub Issue**: #74, #2572
 - **Extends**: SUB-002
-- **Description**: When a new agent is created, automatically assign the subscription with fewest assigned agents (round-robin). Tie-break: alphabetical by name. Falls back to platform API key if no subscriptions exist or token decryption fails. System agents (`trinity-system`) are unaffected (separate creation path).
+- **Description**: A Claude-runtime agent is put on a subscription automatically — at creation, and (#2572) whenever the platform stops being able to authenticate it any other way. The target is chosen by one ranker for all three triggers: since #2409 the subscription with the most cached provider headroom (furthest from the nearest wall); candidates with no usable reading fall back to fewest assigned agents (round-robin), tie-break alphabetical by name.
+- **The three triggers, and deliberately no periodic sweep** (operator decision, 2026-09-12):
+  1. **Agent creation** (#74) — gates only on `is_claude_runtime`, with no instance-key check, so it already covers a keyless instance. Unchanged by #2572; pinned by test.
+  2. **Subscription registration** (#2572) — `POST /api/subscriptions`, which the Settings form and the MCP `register_subscription` tool both reach. An upsert re-registration re-runs it; the sweep is idempotent.
+  3. **Instance Anthropic key deletion** (#2572) — the canonical migration off a metered key is *register, then delete the key*, and in that order trigger 2 correctly adopts nobody. **Two** entry points are hooked, because `db.delete_setting` carries no delete-side twin of ent#435's write sink guard: `DELETE /api/settings/api-keys/anthropic` and the generic `DELETE /api/settings/{key}` for either Anthropic key alias. Both fire only when the deletion actually removed a row.
+- **The predicate — "no usable credential"** (all five must hold):
+  1. the platform resolves **no** Anthropic key via `settings_service.get_anthropic_api_key()` — encrypted row → legacy row → `ANTHROPIC_API_KEY` **env fallback**. This short-circuits the whole sweep on any normal install and is the structural guarantee that no agent with a working key is ever moved. It must never become `has_secret_setting()` (DB-only, presence-only), which would adopt a fleet off a working env key;
+  2. `agent_ownership.subscription_id IS NULL` — an agent already on a subscription is never moved;
+  3. `use_platform_api_key IS TRUE` — `False` means the operator asserted through `PUT /api/agents/{name}/api-key-setting` that this agent brings its own `.env` credential, which the backend structurally cannot see and which the agent-side `arm_subscription_auth_guard()` (#2114) would force-unset on adoption;
+  4. the container's `trinity.agent-runtime` label is **present and Claude** (#1187 decision 7). Label-strict: `is_claude_runtime(None)` is `True` by design and the batch runtime map defaults a missing label to `claude-code`, so absence is read as *no evidence*, not as Claude;
+  5. the agent is **not ephemeral**.
+- **Two never-move guards, stated as such**: an agent with a working API key (condition 1, fleet-wide) and an agent already on another subscription (condition 2). Moving either is a billing decision the operator has not made.
+- **Phase split**: the decide-and-persist phase is awaited inside the triggering request (every blocking call off the event loop), so `GET /api/subscriptions` and the agent auth badge are correct the moment it returns; the container apply is backgrounded, per-agent, under the #799 switch lock, and re-verifies the assignment before restarting (SUB-003 may legitimately have moved the agent in between). Credential-less → subscription is an auth-**mode** change, so the apply recreates rather than hot-reloading.
+- **Two Phase-B exclusions, both verified destructive if included**: `trinity-system` is adopted in the DB but never restarted by the sweep (`_restart_agent` stops first, so #1816's "never recreate a running trinity-system" guard is bypassed by construction); ephemeral ghosts are excluded from the sweep entirely (volume-less by invariant, and the auth recreate predicate has no ghost exemption, so a restart destroys the workspace mid-budget).
+- **Known bound, accepted**: a Claude agent with a live ownership row and **no container** is skipped — its runtime is unverifiable — and with no periodic sweep nothing returns for it until it has a container at the next trigger. It is not running, so it is not the reported failure; recovery is one click in the agent-header subscription switcher.
+- **Fail-closed on an unreadable Docker**: if the daemon cannot be asked at all, the sweep adopts nobody. Deliberately the opposite resolution to `agent_container_runtimes`' documented fail-open, because that call site decides a UI affordance while this one writes a persisted credential assignment. The aborted sweep still writes its summary audit row (`skipped.docker_unreadable`), so "adopted 0 of 40 because Docker was unreadable" is distinguishable in the record from "nothing to do".
+- **Owner-blind**, following #74 and `list_assignable_subscriptions`' own lack of an owner filter: on a multi-user install an admin's subscription can acquire another user's credential-less agents.
+- **Audit**: one `subscription_auto_adopt` row per adopted agent plus one `subscription_auto_adopt_sweep` summary row, and (#2572) the previously-unaudited manual `subscription_assign` / `subscription_clear`. Subscription id and name only — never a token.
 - **Key Features**:
-  - `get_least_used_subscription()` DB method (SQL: COUNT + ORDER BY)
+  - `db.list_assignable_subscriptions()` (SQL: COUNT + ORDER BY, 2h failure filter — filter only) → `services.subscription_service.select_subscription_for_new_agent()` (rank by cached headroom, then the first candidate whose token decrypts) — #2409 replaced the first-match `get_least_used_subscription()`
   - Auto-assign logic in `create_agent_internal()` — token injected before container creation, DB assignment after `register_agent_owner()`
-  - Graceful fallback: no subs → API key, decrypt fail → API key, exception → API key
-- **Files**: `db/subscriptions.py`, `database.py`, `services/agent_service/crud.py`
+  - `services.subscription_service.adopt_for_credentialless_agents()` — the #2572 sweep; one fleet-wide DB read, ONE batch Docker read (`docker_service.agent_container_runtime_labels`), per-agent select/assign under the #799 lock
+  - Graceful fallback: no subs → API key, decrypt fail → API key, exception → API key; the sweep never fails the request that triggered it
+  - SUB-003's preconditions are **unchanged** — this is a second, event-driven trigger, not a relaxation of failure-driven switching
+- **Files**: `db/subscriptions.py`, `database.py`, `services/agent_service/crud.py`, `services/subscription_service.py`, `routers/subscriptions.py`, `routers/settings.py`, `services/docker_service.py`
 
 ### 20.4 Subscription Auto-Switch on Rate Limit (SUB-003)
 - **Status**: ✅ Implemented (2026-03-21)
@@ -139,7 +158,7 @@
 - **Key Features**:
   - System setting `auto_switch_subscriptions` (default OFF) with Settings UI toggle
   - Rate-limit event tracking per (agent, subscription) with 2h window
-  - Best-alternative selection: prefer fewer assigned agents, skip recently rate-limited
+  - Best-alternative selection: skip any subscription that failed in the last 2h (any kind, #2352), then rank the survivors by cached provider headroom — furthest from the nearest wall first — with fewest assigned agents as the tiebreak (#2409)
   - Activity event logged on auto-switch, notification sent to agent owner
   - Hooks into chat proxy 429 handler and background task failure path
 - **Database**: `subscription_rate_limit_events` table
@@ -161,6 +180,15 @@
   - **Out of scope / follow-ups**: the #1083 fire-and-forget async path (`DISPATCH_ASYNC`, default OFF) routes 429s through the result-callback, bypassing this sync path; and a concurrent switch-lock *loser* (gets `None` from `handle_subscription_failure`) does not retry. Both deferred.
   - **Files**: `src/backend/services/task_execution_service.py` (`classify_switch_failure`, `_extract_agent_error`, `_salvage_attempt_cost`, pre-raise block, except-handler gate); tests `tests/unit/test_792_subscription_retry.py`.
 
+- **Headroom-ranked alternative selection (#2409, 2026-08-27)**: `select_best_alternative_subscription` used to return the FIRST survivor of the 2h failure filter in `agent_count ASC` order and read no headroom — so auto-switch could relocate an agent onto a subscription at 99% of its weekly window, and an *unused dead-token* subscription (no agents ⇒ no failure rows) sorted first. Selection now lives in `services/subscription_auto_switch.py`; the db layer only lists filtered survivors (`list_viable_alternative_subscriptions`, `agent_count ASC, name ASC` — filter, never ranking). Survivors are ranked by the cached provider snapshot (`subscription:headroom:{id}`, ONE `MGET`, **never a probe**) through `subscription_headroom_service.rank_subscriptions`: primary key = the **fuller of the two windows** (the nearest wall — the #792 retry re-issues the turn on the destination immediately, so a 7d 20% / 5h 98% subscription fails within the minute), banded to 10 points so `agent_count` still spreads a storm within a band; then the other window; then name. Readings pass the same usability gate the ent#434 classifier uses (`headroom_reading` — extracted from `classify_headroom`, so the two cannot drift): the weekly figure is trusted ≤2h (`MAX_READING_AGE_SECONDS`, moved into the headroom service), the 5h figure and any refusal ≤30 min (`FRESHNESS_SECONDS`, the LIMIT-badge bound). A **fresh provider refusal** (probe 429, blocking window status, rejected token) is filtered out — the one case that now yields no target where it previously did is "every survivor is currently refused by the provider"; a stale refusal is merely unknown. Missing / stale / unreadable readings never block a switch: such candidates sort after measured ones in today's order, and any ranking failure (Redis down, import failure) falls back to today's order with a WARNING — the ranking only ever improves a choice, never prevents one. The recent-failure filter is unchanged and still runs first; failed candidates are never even read. `get_least_used_subscription` (new-agent auto-assign, #74) became `select_subscription_for_new_agent` in `services/subscription_service.py` over the same ranker (rank first, then the first candidate with a decryptable token — ≤1 decrypt when the top pick is valid). The switch notification/activity now carries `destination_headroom` (tier, both windows' utilization + reset, reading age, candidate count) and one clause saying why the destination was chosen — or that no fresh reading existed (and that ambient headroom refresh is off, when it is). Tests: `tests/unit/test_2409_headroom_ranked_switch.py`.
+
+- **The turn completes on another subscription (#2638, 2026-09-09)**: SUB-003 switched and #792 re-issued, yet a Workspace message on a rate-limited subscription still failed outright and was reported to the client as not retryable. Four gaps, closed together:
+  - **Readmission on evidence (gaps 1+2)**: `list_viable_alternative_subscriptions` drops every subscription with ANY failure event in a flat 2h window, so on a two-subscription install one stale event means "no viable alternative" while an alternative the provider would serve sits there — #2320's own evidence. The exclusion is now overridden **per candidate**, on POSITIVE evidence only: `subscription_headroom_service.recovery_verdict` readmits when a FRESH reading says the provider is not refusing (`serving_now` — the #447 rule that a probe beats an inference from past failures), or when a blocked window's own reset instant has ELAPSED **and predates the failure** (`window_reset`). The ordering is load-bearing: without it a subscription that 429'd a minute *after* its rollover would be readmitted on a reset it had already consumed. Instants are read from an AGED snapshot (`RECOVERY_INSTANT_MAX_AGE_SECONDS`, bounded by the snapshot's own 7-day TTL) on the #447/#2396 asymmetry — a utilisation *number* decays, an *instant* does not. Absence of evidence readmits nothing, so #444's ping-pong (caused by FORGETTING a failure) stays closed, and the fail-open ranking path readmits nobody by construction — it is precisely the branch where the evidence could not be read. A `window_reset` candidate's reading is passed to the ranker as UNKNOWN, because its `blocked` flag describes the window that just rolled over and `rank_subscriptions` would otherwise drop it as refused — the readmission would be inert in exactly the case it exists for. The db layer gains the complement (`list_recently_failed_alternatives`) and the failure instant (`last_failure_at_by_subscription`, kind-blind like the predicate it sits beside); both share `_list_all_alternatives` with the filter so the two lists cannot disagree about which subscriptions exist.
+  - **Pre-dispatch switch (gap 3)**: `ensure_serviceable_subscription` moves the agent BEFORE the first attempt when the assigned subscription is already known-refused — a fresh provider refusal, or a 429 in the platform's own 2h window (the DISPLAY predicate `is_subscription_rate_limited`, 429-only: an auth failure is a credential problem a different subscription may share). Called from `_call_agent_with_retries`, best-effort and never raising, so a turn that would have run still runs and #792 stays the backstop. It records **no** failure event — nothing failed, and a synthetic one would poison the skip-list that decides where the agent may move next. With no alternative it dispatches anyway: the provider's answer is better evidence than ours. It performs the SAME `_perform_auto_switch` (AC#6), so one activity, one notification and one hot-reload happen whichever path fired; `pre_dispatch=True` changes only the WORDING (`_failure_phrase`), because "switched after a rate-limit error" for a turn that never ran sends an operator looking for an execution that does not exist.
+  - **API-key fallback (gap 1, last resort)**: when the switcher declines and a platform API key is configured, `fallback_to_api_key` clears the subscription assignment, turns `use_platform_api_key` on and RESTARTS (the reload endpoint pushes an OAuth token; the change needed here is the opposite one, which `lifecycle`'s auth block already derives from DB state). It CLEARS rather than remembering-and-restoring — a hidden "go back at reset" would be a second invisible scheduler competing with the operator's assignment. Setting `subscription_api_key_fallback` (default ON, `GET`/`PUT /api/subscriptions/settings/api-key-fallback`, Settings → Subscriptions); the GET also reports `key_configured`, because a toggle reading only "on" with no key stored describes a remedy that cannot run. Fail-OPEN on a settings read error — the failure it guards is a user's turn dying with a usable key sitting in settings.
+  - **The client is told what changed (gap 4)**: `TaskExecutionResult.subscription_switch` carries the switch dict (in-memory, like `dispatched_async`), stamped at `execute_task`'s return sites by `_with_switch`. The portal's AUTH/BILLING branch consults it first: a turn that failed AFTER a switch answers **503 `auth_switched` retryable=True** naming the new subscription, instead of #2320's `retryable=False` — which was true only while nothing changed underneath, and a switch is exactly something changing underneath. With no switch it still refuses, but names the earliest reset instant the sampler already caches (`earliest_known_reset` → `_usage_limit_detail`), degrading to the original sentence whenever the instant is unknown — a fabricated time is worse than a vague one.
+  - **Pull terminals (#2643)**: `pull_coordination_service.apply_task_result` carries the SUB-003 hook on its CAS-won branch, so a pull-dispatched 429/401 triggers the same switch as a push one — inert until an agent is piloted onto the pull path. Files: `services/subscription_auto_switch.py`, `services/subscription_headroom_service.py`, `db/subscriptions.py`, `services/task_execution_service.py`, `services/execution_envelope.py`, `client_portal/service.py`, `routers/subscriptions.py`, `components/settings/SubscriptionsPanel.vue`, `stores/subscriptions.js`; tests `tests/unit/test_2638_subscription_switch_on_turn.py`.
+
 ### 20.5 Per-Subscription Usage Tracking (SUB-004)
 - **Status**: ✅ Implemented (2026-04-01)
 - **Requirement ID**: SUB-004
@@ -179,6 +207,64 @@
   - `src/backend/routers/chat.py` - Subscription ID capture at execution time
   - `src/backend/db/chat.py` - Session creation with subscription_id
   - `src/frontend/src/views/Settings.vue` - Usage display (if applicable)
+
+### 20.5a Subscription Usage Observability + Live Headroom (#471, SUB-004 extension)
+- **Status**: ✅ Implemented (2026-08-19; merged as PR #2316)
+- **GitHub Issue**: abilityai/trinity#471 (P1, epic #1048); siblings trinity-enterprise#351 (agent-facing half), trinity-enterprise#259 (grid tile), #855 (spike — partially answered here)
+- **Extends**: SUB-002/003/004
+- **Description**: Surface the dark subscription-usage data (SUB-004 windows, SUB-003 failure events) in Settings → Subscriptions and as Dashboard pressure badges, and add **live headroom** — actual 5h/7d utilization % + reset times per subscription — sourced from the `anthropic-ratelimit-unified-*` response headers of a minimal probe call. **OSS-core by explicit decision (2026-08-19)**: visibility is ungated; the paid layer is governance (trinity-enterprise#166 spend caps). Never inferred backwards from the merge (ent#326 discipline).
+- **Provider-signal facts (verified 2026-08-19, real stored setup token)**:
+  - `GET /api/oauth/usage` → **403 `permission_error` (missing `user:profile` scope)** for `sk-ant-oat01-` setup tokens — that endpoint requires an interactive-login token and is dead for the tokens Trinity stores (the mechanism behind the closed PR #2170).
+  - `POST /v1/messages` under the same token → 200 + full unified rate-limit headers (`{5h,7d}-utilization/-reset/-status`, `representative-claim`, overage status). This header channel is what the probe reads.
+- **Headroom probe contract**: click-to-refresh (Settings, ≥60s apart per subscription) always available; **ambient refresh default-ON** behind the `subscription_headroom_auto_refresh` system-setting toggle (15-min floor, demand-driven — an unwatched instance probes nothing; **fail-CLOSED to observed-only when Redis is unavailable**, so a probe storm is structurally impossible). Probe = `max_tokens=1` Haiku message (~a dozen tokens of subscription quota per refresh, disclosed on the toggle; operators will see tiny platform-initiated entries in the Anthropic console — release-noted). Probe 429s update the snapshot only, never `subscription_rate_limit_events` (platform-caused, not agent work). Every reading carries `source: "anthropic"|"observed"` + snapshot age; the DB-derived observed block is ALWAYS populated (the load-bearing arm — the #2170 inversion).
+- **Data-layer fixes shipped with it**: failure events recorded BEFORE the auto-switch enabled gate (previously an opted-out operator got permanently-zero observability); `failure_kind` column on `subscription_rate_limit_events` (the table conflates auth-class failures with 429s — writer had the param, never persisted); ONE `rate_limited_now` derivation (2h `is_subscription_rate_limited` OR fresh provider status) consumed by every surface.
+- **Key surfaces**: extended `GET /api/subscriptions/{id}/usage` (+`failure_events_24h`, per-kind counts, `rate_limited_now`, `headroom` block); `GET /api/subscriptions/{id}/usage/breakdown` (per-agent, both windows, **ranked by `cost_usd` desc** — cost is model-weighted by construction, resolving the 2026-07-28 model-mix research item); `POST /api/subscriptions/{id}/usage/refresh` (click probe); `GET/PUT /api/subscriptions/settings/headroom-auto-refresh`; batch `GET /api/agents/subscription-pressure` (pure-DB accessible set — owned ∪ shared via the shared ent#384 helper; `auth_mode` reuses the `AgentAuthStatus` vocabulary). Tier 0 relabel: subscription-funded agents present cost as `≈ $X API-equivalent` (AgentHeader + fleet surfaces; per-execution cells stay metered `$`).
+- **Cut**: Tier 4 bulk auto-assign (out of the operator's 2026-08-17 scope; SUB-003 covers the reactive per-agent case; bulk proactive migration filed separately). **Partially revived by #2572 (2026-09-12)**: the *credential-less* subset — agents the platform can no longer authenticate at all — is now assigned in bulk at subscription-registration and instance-key-deletion time (20.3a). Bulk migration of agents that already have a **working** credential remains cut, and is the one thing that sweep's condition 1 structurally forbids. MCP tools + `~/.trinity/usage.json` stay in trinity-enterprise#351.
+
+### 20.5b Subscription Headroom History + Failure-Event Retention (ent#433)
+- **Status**: 🔨 In progress (2026-08-20)
+- **GitHub Issue**: abilityai/trinity-enterprise#433 (P2, `theme-monetization`, epic ent#94); consumer sibling ent#259 (grid tile, merged point-in-time only as PR #2327)
+- **Extends**: 20.5a (#471)
+- **OSS-core by explicit decision**: the #471 gate ruling carries over — visibility is ungated, the paid layer is governance (ent#166). Recorded here so it is never inferred backwards from the mere fact that it merged (the ent#326 discipline).
+- **Description**: #471 keeps exactly ONE last-known-good headroom snapshot per subscription (Redis, overwritten every probe), so "how close did we run to the 5h wall this week" is unanswerable. This adds the durable half: every probe result is persisted as a row, exposed as a bounded time series, and swept under a real retention window.
+- **What a probe row records**: `subscription_id`, `fetched_at`, probe `status` (`ok|rate_limited|invalid_token|error|no_windows`), per-window `utilization_pct`/`resets_at`/`status` for 5h and 7d, `representative_claim`, `overage_status`, `unified_status`. **Every** probe that actually ran is persisted, including failures as status-only rows — otherwise a three-day dead token is byte-identical to nobody-watching, which contradicts the honest-gaps rule below. `no_windows` is a history-local classification of the one genuinely ambiguous case (`status='ok'` with neither window reported — reachable when only the bare top-level status header arrives), which would otherwise persist as an all-NULL row indistinguishable from a botched write.
+- **A probe that never ran records nothing**, deliberately. A subscription with no usable token returns before any HTTP call, and persisting that would emit one row every 15 minutes forever for a purely configuration state — the highest-volume, lowest-information row in the design. **A gap therefore has three causes** — nobody watched, no usable token, or auto-refresh disabled — and no consumer may present a gap as any one of them.
+- **The series is `last`-per-bucket, never `max`** — three independent reasons, all load-bearing:
+  1. **Observer effect.** Probes are demand-driven (they fire only on an HTTP request), so samples-per-bucket is proportional to operator attention. `E[max of n]` rises with `n`, so an hour watched during an incident out-reads an identical unwatched hour — and the unattended overnight burn, the thing most worth seeing, gets the fewest samples and the lowest reading.
+  2. **Two-peak ambiguity.** 5h and 7d are independent metrics that peak at different instants inside one bucket, so "the peak sample's timestamp" is undefined for a two-column response. `last` yields ONE correlated snapshot of both windows.
+  3. **Invisible 429s.** A 429 can legitimately carry `status: rate_limited` with `utilization_pct: None`; under a `MAX(utilization)` read the single most important sample in the series vanishes and the chart flatlines through an outage.
+  "How close did we run this week" is answered by max-**across** buckets at the consumer, which is a far less biased estimator than max-**within** bucket.
+- **Honest gaps (the load-bearing contract)**: the series is legitimately sparse — an unwatched instance probes nothing. Consumers render gaps as gaps: never interpolate, never present a sparse series as continuous coverage. The payload therefore carries **both** the logical `bucket_start` **and** the real `fetched_at`. Emitting only non-empty buckets with real timestamps alone is *insufficient and was the original design error*: sample jitter and a true gap are indistinguishable from timestamp deltas (a 10:05 sample followed by 11:55 is 1h50m apart with NO gap; 10:55 followed by 12:05 is 1h10m apart WITH one). `bucket_start` is what makes gap detection decidable client-side, with zero synthetic fill.
+- **Enrichment, never a dependency**: a history write can never affect the probe path's availability, latency, or correctness. The INSERT runs **after** the Redis snapshot write and **off the event loop** (`asyncio.to_thread`) — a plain `try/except` handles *errors* but not *blocking*, and the platform DB is DELETE-journal with a 30s busy timeout, so a sync write landing during the 03:30 backup or 04:30 VACUUM would stall the whole event loop (health checks, the WS dispatcher, every in-flight request). Ordering is pinned by test.
+- **Probe cadence is unchanged and must stay unchanged.** History records what already happens. The write hook sits inside `_probe_and_store`, so it inherits #471's entire rate-bounding envelope for free (60s per-subscription floor, cross-worker single-flight, fail-CLOSED ambient gate) and adds no probe. A sparse chart must **not** become an argument for lowering `SUBSCRIPTION_HEADROOM_REFRESH_SECONDS` — that knob is unguarded and would multiply provider spend on the operator's own quota invisibly.
+- **Retention (two windows, both new)**:
+  - `subscription_headroom_retention_days` (default 30, `0`=off) — the new history table.
+  - `subscription_failure_event_retention_days` (default 30, `0`=off) — **converts** `subscription_rate_limit_events`' previously **hardcoded 24h** sweep into a real window. That table held the platform's only record of *real agent work* hitting a rate limit, timestamped and attributed to the causing agent, and destroyed it at 24h with no operator control, no blast-radius guard, and no `GET /api/settings/retention` entry while every sibling table had all three. Widening to 30d is the #1638-safe direction (no install loses data) and cannot change any existing answer, because every consumer already time-filters (`hours=24` at the call site, a 2h predicate for `rate_limited_now`).
+  - Both registered in `RETENTION_OPS_KEYS`, validated in `OPS_SETTINGS_VALIDATION`, each with exactly one `_guard_allows` blast-radius gate (#1644) whose candidate count shares the prune's own predicate by construction, surfaced automatically on `GET /api/settings/retention`, and logged at boot. Neither is in `COMMUNITY_FRESH_INSTALL_SEED` — the 5-day floor would silently truncate a 7-day default read window while the UI labelled it 7 days.
+- **Read surface**: `GET /api/subscriptions/{id}/headroom/history?window=24h|7d|30d` — `assert_admin` (which also rejects agent principals, #1890), resolves by id OR name then 404 for parity with `/usage`, and returns bounded buckets (hour for 24h/7d, day for 30d). Selection is a SQL window function (`ROW_NUMBER() OVER (PARTITION BY bucket ORDER BY fetched_at DESC)`), never a bare non-aggregated column beside `MAX()` — that is a SQLite-only extension that raises `GroupingError` on PostgreSQL.
+- **Consumer**: this ships the backend only. The realistic ent#259 consumer is a compact in-tile **sparkline**, not a labelled trend chart — FleetGrid v1 renders every tile in exactly one cell (`cells` is declared and deliberately ignored), the tile body is `overflow: hidden` with no scroll, and its row list silently drops anything past a hardcoded cap. `SubscriptionsPanel.vue` is the roomier second consumer.
+- **Storage shape**: a dedicated table, not the generic `product_events`. That table has no `subscription_id`, is bound to the activation-funnel's own retention window, and **egresses** — `telemetry_sharing_service.build_aggregate_payload` counts it by type and POSTs it on Tier-2 opt-in, so per-subscription quota telemetry does not belong there.
+
+### 20.5c Weekly Subscription-Limit Alert (ent#434)
+- **Status**: 🔨 In progress (2026-08-26)
+- **GitHub Issue**: abilityai/trinity-enterprise#434 (P2, `theme-monetization`, `complexity-medium`)
+- **Extends**: 20.5a (#471, the reading) and 20.5b (ent#433, the history that settled the window semantics)
+- **OSS-core by explicit decision** (team ruling 2026-08-26, recorded on the issue): the #471 gate ruling carries over — visibility is ungated, the paid layer is governance (ent#166). Rationale given: cost/price display already ships in OSS. Recorded here so it is never inferred backwards from the mere fact that it merged (the ent#326 discipline).
+- **Description**: 20.5a made the weekly reading real and 20.5b made it durable; neither tells the operator anything *before* the limit is reached. This adds the alert: a per-subscription warning when the 7-day window crosses a configurable threshold, and a fleet escalation when every registered subscription is saturated at once.
+- **The window is FIXED-with-reset, not rolling — measured, not assumed.** Querying 20.5b's own history table settled it: `seven_day_resets_at` held CONSTANT at one midnight-UTC instant across five days of probes while utilization climbed 36→90, then STEPPED exactly +7 days. Under a rolling window with continuous usage it would have advanced continuously. (`docs/memory/feature-flows/dashboard-grid-view.md` described these as rolling; that claim is corrected.) Two consequences, both of which REMOVE specified work:
+  1. Utilization is monotonic non-decreasing inside a window, so the specified **hysteresis floor is dead code** — the only real re-arm is the reset.
+  2. `resets_at` IS the window's identity, so the deterministic alert id `sub-headroom-{sid}-{reset-day}-{tier}` becomes the **entire state machine**: `create_item` maps `item["id"]` onto `request_id` under `UNIQUE(agent_name, request_id)` with ON CONFLICT DO NOTHING, so the same window re-emits into the same row (edge-trigger), a reset mints a new id (re-arm), and cross-worker/cross-restart dedup is free. **No durable memo** — nothing to leak, race, or clean up on `delete_subscription`. The id is quantised to the DAY as a belt: were some plan to behave as rolling, it degrades to one alert/day rather than one/probe.
+- **The threshold fires; the projection ranks.** There is deliberately no configurable "alert if the reset is less than N hours away" — no such constant is right for every operator. Window length is known and `resets_at` says how much is left, so `projected_end = utilization_pct / fraction_of_window_elapsed` derives the operator's own pace: 75% at day 3 projects to 175%, 75% with hours left to ~77%. Per the operator ruling the alert is **never withheld** at the threshold; the projection sets `priority` (`low` under 100% projected, `high` at or over). An unknowable projection is treated as not-on-pace — a missing `resets_at` is not evidence of an emergency.
+- **Assessability is a THIRD state, not the existing binary predicate.** `classify_headroom` → `saturated | has_headroom | unassessable`. `_headroom_indicates_healthy` returns `False` for a stale snapshot, a rejected token, a transport error **and** a genuinely saturated subscription, so it cannot distinguish "no evidence" from "no headroom" — used as the gate, the fleet escalation would be blocked by exactly the condition it exists to report. (#2396's docstring named this feature as that predicate's consumer; that was wrong and is corrected. Its BODY is untouched — `resolve_rate_limited_now` consumes it, so a behavioural edit moves every `LIMIT` badge.) The classifier keys on **utilization, not window status**: `allowed_warning` is deliberately non-blocking per #2396, so a status-driven classifier would file a live 90% reading as `has_headroom`. Status remains the *stronger* signal — a blocking 7d status or a probe 429 is `saturated` with or without a number, counting toward the fleet claim but raising no percentage-crossing alert, because there is no percentage to name. Every could-not-tell path returns `unassessable`, including a 5h-only snapshot (`parse_unified_headers` admits that shape).
+- **Fleet escalation, and the claim it does NOT make**: requires ≥2 subscriptions (with one, "this is full" and "every one is full" are the same fact) and every member assessable — one `unassessable` blocks the claim and is named instead (the ent#100 positive-evidence rule). When it fires the per-subscription alerts are suppressed for that cycle. It states what was **measured** and deliberately does **not** say "auto-switch has no viable target": since abilityai/trinity#2409 the selector ranks its candidates over the SAME cached readings this sweep samples (and drops a fresh provider refusal), but its candidate set is also narrowed by the 2h failure filter the sweep never sees — so the claim stays about the measurement and never promises what the selector will do.
+- **Cadence rides the existing sweep, not a new loop.** A second background loop would mean a second leader lease over the same probe budget, and the only thing between two leases and a double probe is a 60s per-worker floor, which is not a coordination primitive. Per subscription: `recover_probe` (#447) **first**, then `ensure_reading` + `classify_headroom`, in **sibling** try/excepts. Both orderings are load-bearing — `_probe_floor_ok` bounds probes at 60s/subscription, so whichever consumer probes first floors the other out; ordered this way recovery's zero-age snapshot is reused, reversed `recover_probe` answers `"floored"` and #447 silently stops clearing stale `LIMIT` badges. The sibling split keeps an alert-path bug from taking down that same mechanism.
+- **Probe cost, disclosed**: ~24 probes/day/subscription (`max_tokens=1` Haiku) — **4x less than a watched instance already spends** via the 900s ambient refresh. `SAMPLE_INTERVAL_SECONDS` (3600, floored at `REFRESH_SECONDS`) is a **code constant that reads no env var**: neither compose uses `env_file`, so an unforwarded read would be permanently inert while still reading as configurable, which invites a later "packaging fix" creating the knob #1644 argues against. The one genuine lever is `SUBSCRIPTION_SWEEP_CONCURRENCY` (probes per sweep chunk, fleet-size dependent), forwarded in both composes and documented in `.env.example`.
+- **Configuration + honest status**: threshold on `PUT /api/subscriptions/settings/headroom-alert-threshold` (`assert_admin`; `0` disables per the `operator_queue_retention_days` idiom, else 50–99 with a **named 422**; blocked on the generic settings catch-all). The escalation tier is **DERIVED** (`max(threshold, 90)`), never a second knob — two settable thresholds are an oscillator and `validate_ops_setting` is per-key, so it structurally cannot express the cross-field invariant. It rides the existing `subscription_headroom_auto_refresh` toggle rather than adding a switch (operator decision); that toggle's copy claimed probing happened "only while a dashboard is open", untrue since #447, and is corrected. `GET /api/subscriptions/settings/headroom-auto-refresh` carries `active` plus an `inactive_reason` of `no_subscriptions | threshold_disabled | auto_refresh_off | redis_unavailable`, so "no alerts" is distinguishable from "not checking" (#2217).
+- **Emitter hygiene**: platform-only, on sentinel `_sub-headroom` (uncreatable — `sanitize_agent_name` strips the leading `_`), registered in `_PLATFORM_ALARM_SENTINELS` (else every alert is a permanent L-03 orphan), `_RESERVED_ID_PREFIXES` (else an agent pre-creates the id and on-conflict-silences its own alarm), and the `test_1677` platform-only allowlist. `expires_at` is `None` — `mark_operator_queue_expired` flips any pending row past it fleet-wide every 5s. Context carries ids, names, percentages, timestamps and counts only (canary G-04); a per-cycle cap bounds a whole fleet crossing at once.
+- **Residual (stated, not hidden)**: `create_item` has no UPDATE path, so a warning row keeps the number it was raised with — a 75% alert still reads 75% when the subscription later sits at 92%. Same residual `retention_guard` documents for its own alarm. The escalation is a separate id with a self-contained body.
+- **Settings surface**: the threshold input and the honest status line render in `SubscriptionsPanel.vue` beside the auto-refresh toggle; decidable rules live in `utils/headroomAlertSettings.js` because vitest has no component-mount harness (ent#392). `count_unavailable` is a fifth `inactive_reason` — an unreadable subscription list must not fall through to `active: true`.
+- **The fleet denominator comes from the roster, not the results** — a member whose sampling raised is `UNASSESSABLE`, not absent. Filtering results on truthiness dropped exactly the members the ent#100 rule requires to block the claim, and the early return suppressed the per-subscription alerts, so the false claim was the only emission. Found in review of PR #2410; the durable class is in `learnings.md` (2026-08-26).
+- **No schema change, no migration** — the state machine is the alert id, and the threshold is a `system_settings` row.
 
 ### 20.6 Credential Rotation via Hot-Reload, not Container Recreate (#1089)
 - **Status**: ✅ Implemented (2026-06-13)
@@ -248,6 +334,122 @@
   security-surface pointer; the resolution mechanics and the recreate-vs-create
   ladder distinction live there.
 
+### 20.10 Machine Identities for Admin/Ops APIs (#2323)
+- **Status**: ✅ Implemented.
+- **Premise correction (recorded, because the issue as filed says the opposite)**:
+  Trinity already had a machine identity for admin/ops surfaces. A `user`-scoped
+  MCP key owned by an admin reaches every admin gate, is **already exempt from
+  interactive 2FA** (the MFA gate is invoked only at the two login routes; key
+  validation never passes through it), is already revocable, and already rotates
+  by minting a second key while the first stays valid. What it lacked was
+  **bounds, attribution, and expiry** — so the only 2FA-surviving option was a
+  permanent, unattributable, unlimited admin credential, a worse posture than the
+  control it worked around.
+- **Admin gate is an allowlist (`ADMIN_GATE_SCOPES`)**: `require_admin` /
+  `assert_admin` require `mcp_scope ∈ {None, "user", "system"}`. A scope that
+  sets neither `agent_name` nor `connector_agent` previously walked both named
+  rejections and inherited the owner's role. A principal lacking the attribute
+  fails **closed** via a sentinel — never a `None` default, which is the
+  privileged JWT value. See `architecture.md` Invariant #8.
+- **`ops` scope — read-only, route-fenced, self-authorizing**:
+  - Admin-minted and **human-only** to mint (`reject_non_interactive_principal` —
+    the allowlist form; the guards used for `portal_delegate` are both no-ops for
+    an ops principal, so an ops key could otherwise mint ops keys).
+  - Fenced at the **single auth entry point** (`get_current_user`), beside the
+    connector / ephemeral / portal_delegate fences. **Every entry is a `GET`**,
+    asserted by a test that imports the constant; the method belt stops a future
+    `POST /api/ops/*` inheriting read access under a prefix.
+  - Kept **out** of `ADMIN_GATE_SCOPES`; an admin-gated ops route opts in with
+    `assert_admin(..., allow_scopes={"ops"})`, or `Depends(require_admin_allowing("ops"))`
+    for the `Depends` spelling (#2389 — `require_admin` took no `allow_scopes`, so
+    an allowlisted route gated that way was permanently dead to ops keys with no
+    opt-in available; the factory delegates the whole ladder to `assert_admin`
+    rather than restating it). The opt-in is what makes the grant **per route** —
+    a new ops route is inaccessible until someone adds it, rather than silently
+    reachable.
+  - **The opt-in is an ADDITIONAL gate, never a substitute one (#2389).** An ops
+    key is a *narrowing* of its owner, not a *decoupling* from them: the scope is
+    admitted and `role == "admin"` is still enforced afterwards. An earlier
+    revision of this section claimed the tier "stops every ops integration dying
+    when that admin is offboarded" — **it does not, and could not**: demoting the
+    owner 403s the key at every ops read, and `get_current_user` rejects a
+    principal whose owner carries `suspended_at` (#995) one layer above this gate,
+    so suspension — the usual offboarding action — kills it before any of this
+    runs. Dropping the role check for an opted-in scope was considered and
+    refused: it would make this bounded tier *harder* to revoke than the unbounded
+    `user`-scoped key it exists to displace, and it still could not deliver the
+    claim. #2323 asked for a credential that survives enforced **2FA** — which it
+    does — not one that survives its owner.
+    **Operator consequence:** an ops key is bound to the account that minted it.
+    Mint it under a dedicated service admin account that is not offboarded with
+    people, and put revoke-and-re-mint in the offboarding runbook for any ops key
+    held by a departing admin. Pinned by `test_2323_machine_identities.py` so the
+    claim cannot drift back.
+  - Never carries an `agent_name` (`_AGENTLESS_SCOPES`): three sweeps — the
+    canary orphan scan, the key orphan sweep, and the rename/purge cascade —
+    find their work by filtering `scope IN ('agent','connector')`, so a
+    non-agent scope holding an agent name is invisible to all three.
+  - Excluded from the MCP tool surface **by construction**: `OPERATOR_SCOPES` is
+    an allowlist pinned by its own test. This is a backend bearer credential.
+  - Fence set is derived from the **measured** read set of the real consumer, not
+    from the issue's wording (which named only `/api/ops/*` and would have
+    shipped a credential unable to run the dashboard it exists for).
+- **Audit attribution comes from the presented credential**: `models.User` carries
+  `mcp_key_id`/`mcp_key_name`; `platform_audit_service.log()` derives the three
+  `mcp_*` columns from `actor_user` when not passed explicitly, fixing ~70 call
+  sites with no diff at any of them. `actor_type` stays `"user"` — the owner is
+  the accountable party and is the only branch yielding an email, and the
+  enterprise user-activity view matches on it. `GET /api/audit-log` gains
+  `mcp_key_id` / `mcp_scope` filters so "what did that leaked key touch?" is
+  answerable.
+- **The `X-MCP-Key-Id` / `X-MCP-Key-Name` headers are gone from the backend**: they
+  were `Header(None)` on six routes, validated nowhere, and persisted into the
+  backlog replay blob — so honouring them let any authenticated caller forge the
+  credential named in the two highest-volume audit events, surfacing minutes later
+  on queue drain. The parameters were **removed**, not ignored. Review (#2389)
+  found the removal had covered the *audit* path only: five routers still declared
+  the headers and wrote them into **durable provenance columns** — `schedule_
+  executions.source_mcp_key_id` (`/chat`, `/task`, schedule trigger), `agent_loops`,
+  `agent_reminders`, the fan-out rows — and `backlog_service` still persisted both
+  into `backlog_metadata`, the longest-lived copy of a request and the one surface
+  canary G-04 scans and #1449 scrubs. One request therefore produced two provenance
+  records that disagreed, and the forged one outlived the honest one. Every writer
+  now derives from `current_user.mcp_key_id`/`mcp_key_name`; **no route declares
+  either header** (guarded by a router-tree scan, so the class cannot return one
+  endpoint at a time), and the blob no longer carries them — `_spawn_drain` never
+  read either key back, so they were stored and never reconstructed. A pre-existing
+  queued row still holding them drains unchanged (the drain reads the blob
+  key-by-key with `.get()`). The MCP server still *sends* the headers; nothing on
+  the backend reads them, and the values it sends are the same key the bearer
+  already identifies.
+- **Security fix carried by the same change**: the A2A inbound idempotency scope
+  reads `mcp_key_id` off the principal and fell back to `username` because the
+  field did not exist, so two agent-scoped keys of one owner shared a
+  peer-controlled `messageId` namespace — caller B received caller A's full
+  response text and B's task never ran. Reachable on an entitled install with ≥2
+  `a2a_exposed` agents under one owner. **Deploy note**: the scope string moves
+  from `a2a:{agent}:{username}` to `a2a:{agent}:{key_id}`, so a `messageId`
+  replayed across the deploy re-executes instead of replaying (bounded by the 24h
+  TTL).
+- **Explicitly NOT delivered**: key expiry (`mcp_api_keys` still has no
+  `expires_at`); narrowing the existing `user` scope (would break the fleet); a
+  **write-capable** ops tier — the human-driven ops toolkit's 24 writes stay on
+  password auth or a `user`-scoped key. The read fence does not retire the admin
+  password.
+- **Two costs inherited, not introduced** (flagged in review; stated so they are
+  not discovered): key validation writes `last_used_at`/`usage_count` on **every**
+  request, so a 10s poll takes a write lock every 10s; and
+  `GET /api/ops/fleet/status` issues one HTTP round-trip **per agent**, through
+  the client that hosts the transport circuit breaker. Neither is a regression —
+  the Observatory already polls exactly these endpoints on an admin JWT at the
+  same cadence, and this credential replaces that one rather than adding load.
+  A `track_usage=False` path exists (the heartbeat uses it) and is the obvious
+  lever if the write rate becomes a problem, at the cost of the key appearing
+  dormant; caching for the fleet-status fan-out is a separate change.
+- **Honest bound**: the credential narrows the **API** surface only. Ops tooling
+  that mutates containers over SSH never touches the API; SSH remains the real
+  privilege boundary on those hosts.
+
 ---
 
 ## 26. Operator Queue & Operating Room (OPS-001)
@@ -299,7 +501,7 @@
   - **Depth cap (primary, DB-measured ⇒ Redis-independent)**: `db.count_operator_queue_pending_for_agent(agent)` is computed once per cycle; new items are admitted only while `pending + admitted < OPERATOR_QUEUE_MAX_PENDING_PER_AGENT` (default **25**). At the cap, ingestion **stops** (`break`, not drip — avoids the C1 per-cycle DoS of re-scanning a growing file) and the surplus is held behind **one aggregated summary alert**. Bounds per-agent pending rows to `MAX_PENDING (+ platform items)` regardless of Redis.
   - **Rate cap (burst smoothing, Redis, fail-open)**: per-agent `rate_limiter.check("operator_queue_create:{agent}", OPERATOR_QUEUE_CREATE_RATE_LIMIT=60, OPERATOR_QUEUE_CREATE_RATE_WINDOW=60)` + fleet-level `check("operator_queue_create:_fleet", OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT=300, 60)` at the real create point only. Denied → item held this cycle, `break` the new-item scan. The fleet cap bounds a colluding / shared-upstream-injected fleet in aggregate (#1402 threat model, #1085 governor precedent).
   - **Field hygiene (`_clamp_ingested_item`, total helper, run INSIDE the #1525 create try/except)**: `title` truncated to `OPERATOR_QUEUE_TITLE_MAX` (300), `question` to `OPERATOR_QUEUE_QUESTION_MAX` (4000) — **truncate-with-marker** (losing a real approval is worse than a clamped one); `context` serialized >`OPERATOR_QUEUE_CONTEXT_MAX_BYTES` (8192) → replaced by a `{"_truncated":true,"_original_bytes":N,"execution_id":<validated ≤128 or dropped>}` marker (so the context cap can't be defeated by a verbatim `execution_id`); non-dict `context` → `{}` (fixes the pre-existing `create_item` `.get` crash class); `options` serialized >`OPERATOR_QUEUE_OPTIONS_MAX_BYTES` (4096) → dropped-with-marker; agent-supplied `created_at` **normalized to ingest time** (defeats future-date sort-pinning; `expires_at` still honored); `priority` validate-only (unknown → `medium`; legit `critical` untouched — the depth cap already bounds critical *volume*).
-  - **Reserved-id guard + malformed-id reject**: an agent item whose `id` starts with a platform-reserved prefix (`queue-flood-`, `poison-`, `cb-dormant-`, `sync-failing-`, `git-bloat-`, `skill-not-found-`, `val_`, `system-seed-`, `base-image-stale-`, `alert-budget-` (#1677)) is **rejected** so an agent can't pre-create (and thereby self-suppress via `on_conflict_do_nothing`) its own flood alarm or the #1402 poison alert; an `id` longer than `OPERATOR_QUEUE_ID_MAX` (256) or not matching `^[A-Za-z0-9._:-]+$` is rejected (a PK can't be safely rewritten).
+  - **Reserved-id guard + malformed-id reject**: an agent item whose `id` starts with a platform-reserved prefix (`queue-flood-`, `poison-`, `cb-dormant-`, `sync-failing-`, `git-bloat-`, `skill-not-found-`, `val_`, `system-seed-`, `base-image-stale-`, `alert-budget-` (#1677), `skills-legacy-adoption-` (#2744)) is **rejected** so an agent can't pre-create (and thereby self-suppress via `on_conflict_do_nothing`) its own flood alarm or the #1402 poison alert; an `id` longer than `OPERATOR_QUEUE_ID_MAX` (256) or not matching `^[A-Za-z0-9._:-]+$` is rejected (a PK can't be safely rewritten).
   - **Leader lock** (`opqueue:leader`, mirror monitoring #1464): only the lease-holding uvicorn worker runs `_poll_cycle`, so `--workers 2` no longer double-charges the limiter, double-broadcasts the alert, or double-scans the file. Fail-open to leader on Redis down.
   - **Summary/flood alert**: when depth-held or rate-skipped items occur, **one** `type:"alert"` operator-queue item is emitted via a platform **direct-DB create** (exempt), with an un-guessable `queue-flood-{agent}-{utc_now_iso()}` id, priority `high`, softened wording, and an in-memory `FLOOD_ALERT_COOLDOWN_SECONDS` (300) cooldown so it fires once per episode; wrapped so an emit failure never kills the sync.
   - **Generous DB belt** (`create_item`): rejects (`ValueError`) `title`>4 KiB, `question`>16 KiB, serialized `context`>64 KiB, `id`>512 — an order of magnitude above the service caps so platform items never trip it, but the "platform bypasses the boundary" invariant stops being solely load-bearing (#1525 two-layer philosophy: validate at the boundary AND at the sink).
@@ -325,7 +527,7 @@
 - **Status**: ✅ Implemented (#140)
 - **Requirement ID**: GUARD-002
 - **Priority**: HIGH
-- **Description**: Pre-configure Claude Code hooks in the base image (`~/.claude/settings.json`) that all agents inherit. Hooks fire deterministically on every tool call — including in `--dangerously-skip-permissions` mode.
+- **Description**: Pre-configure Claude Code hooks in the base image (`/etc/claude-code/managed-settings.json` — root-owned; see 28.2.1) that all agents inherit. Hooks fire deterministically on every tool call — including in `--dangerously-skip-permissions` mode.
 - **Key Features**:
   - `PreToolUse` hooks on `Bash` tool: deny-list of destructive patterns (`rm -rf /`, `rm -rf ~`, `chmod 777`, `curl | sh`, `git push --force`, production domain access)
   - `PreToolUse` hooks on `Edit`/`Write` tools: block writes to credential files (`.env`, `.mcp.json`, `~/.ssh/`, `~/.aws/`)
@@ -334,7 +536,7 @@
   - Configurable per-agent overrides via `agent-config.yaml` (operator can relax rules for specific agents that need broader access)
   - All blocked actions logged to Vector pipeline with reason and tool input
 - **Architecture**:
-  - Base image writes `~/.claude/settings.json` with default hooks during build
+  - Base image writes `/etc/claude-code/managed-settings.json` with default hooks during build (ent#345 — was `~/.claude/settings.json`)
   - `startup.sh` merges agent-specific hook overrides from `/config/agent-config.yaml`
   - Hook scripts receive JSON on stdin, return `permissionDecision: deny` to block
   - Exit code 2 = block action, exit code 0 = allow
@@ -342,7 +544,57 @@
   - `/opt/trinity/hooks/bash-guardrail.sh` — Deny-list pattern matching on bash commands
   - `/opt/trinity/hooks/file-guardrail.sh` — Block credential file modifications
   - `/opt/trinity/hooks/output-scanner.sh` — Post-execution credential leak detection
-  - `~/.claude/settings.json` — Hook registration (baked into Dockerfile)
+  - `/etc/claude-code/managed-settings.json` — Hook registration (baked into Dockerfile, root:root 0444 in a root-owned 0755 dir)
+
+#### 28.2.1 Registration is out of the agent's write reach (ent#345)
+- **Status**: ✅ Implemented (2026-08-19)
+- **The defect**: the hooks were always root-owned in `/opt/trinity/hooks/`, but their
+  REGISTRATION shipped to `/home/developer/.claude/settings.json` — owned by
+  `developer`, mode 0644, **inside the git-synced working tree** (HOME is the repo
+  root) and read live by Claude Code. The guarded agent could therefore edit the file
+  that decides whether it is guarded: one `Edit` disables the bash deny-list, file
+  guard, read-only guard and credential output-scanner for every subsequent tool
+  call, with no privilege escalation. Observed in the wild — an agent edited this
+  file autonomously and committed it through git sync during the #2036
+  investigation. Being synced also made it settable from OUTSIDE, by a push to the
+  agent's repo. "Agents cannot opt out" (28.1's design principle) was therefore not
+  true of the mechanism that enforces it.
+- **Fix**: register in `/etc/claude-code/managed-settings.json` — Claude Code's
+  admin-controlled managed-settings path, which takes precedence over user and
+  project settings and sits outside the synced tree, closing the self-edit and
+  inbound-git vectors together. Root-owned `0444` inside a root-owned `0755`
+  directory: the file cannot be rewritten and the directory cannot be used to
+  replace it or shadow it with a `managed-settings.d` drop-in. No platform-owned
+  `settings.json` is shipped into `~/.claude` at all any more, so there is nothing
+  there to edit away.
+- **Fail-open is the risk this creates, and it is handled**: if the registration is
+  missing or writable, Claude Code simply runs no hooks — silently. `startup.sh`
+  asserts both properties on every boot and logs `GUARDRAILS: ERROR …` (Vector
+  captures it); it reports and continues rather than refusing to boot, so a
+  registration problem cannot become a fleet outage. An operator-visible signal on
+  `/health` (the `clone_status` pattern, #1439) is the tracked follow-up.
+- **Interaction checked**: read-only mode (#887) no longer registers a hook of its
+  own — it writes `~/.trinity/read-only-config.json`, which the baked
+  `read-only-guard.py` reads — so there is exactly one live registration and the
+  managed file cannot clobber a runtime-written one.
+  `read_only._remove_legacy_settings_hook` still cleans up pre-#887 leftovers.
+- **Both paths stay in the three write-deny lists**
+  (`_FILE_WRITE_DENY_PATTERNS` / `guardrails-baseline.json::path_deny` /
+  `EDIT_PROTECTED_PATHS`) as defence in depth, not as the primary control. Note
+  `bash-guardrail.py` does **not** consult `path_deny`, so before this change the
+  Bash route to the registration was open even though the Edit route was denied.
+- **Legacy in-tree copy**: `~/.claude/settings.json` sits on the **durable home
+  volume**, so rebuilding the image does not remove it from an existing agent —
+  leaving a second registration (precedence-dependent) and a live #2036 leak
+  candidate. `startup.sh` deletes it **only on an exact `cmp -s` match** against the
+  managed copy; an agent-authored or operator-edited settings file differs and is
+  left alone. The #2036 ignore rule therefore stays load-bearing, for the legacy and
+  agent-authored copies rather than for a platform-baked one — premise restated in
+  `test_2036_claude_settings_leak.py`, whose own docstring asked for exactly that
+  re-argument if the hooks ever moved out of the synced tree.
+- **Tests**: `tests/unit/test_ent345_guardrail_registration.py` (Dockerfile +
+  startup assertions; CI does not build the base image, so the shipped artifact is
+  what is pinned).
 
 ### 28.3 CLI Budget & Scope Controls (GUARD-003)
 - **Status**: 🚧 Partially Implemented — `--max-turns` + `--disallowedTools` shipped in #140; chat-mode wall-clock timeout tracked in #313

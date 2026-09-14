@@ -396,9 +396,13 @@
   - Anonymous sessions have the same memory capability as email-verified sessions.
 
 ### 15.2 First-Time Setup
-- **Status**: ✅ Implemented (2025-12-23; streamlined trinity-enterprise#49, 2026-06-23)
-- **Description**: Admin-account wizard on fresh install — a welcoming, animated single-screen first-run page (orbiting fleet constellation)
-- **Key Features**: Bcrypt hashing, API key configuration in Settings. **Streamlined (#49)**: the log-copied **setup token was removed** (no token field); **admin email is required** (becomes the sign-in identity) with field order email → password (+confirm) → company → updates opt-in. Security tradeoff of token removal is an explicit operator responsibility (deploy behind a tunnel/VPN until setup completes) — see `docs/DEPLOYMENT.md` → Security Recommendations
+- **Status**: ✅ Implemented (2025-12-23; streamlined trinity-enterprise#49, 2026-06-23; scoped to unprovisioned installs #2381, 2026-08-24; marketplace claim trinity-enterprise#580, 2026-09-11)
+- **Description**: Admin-account wizard for an install that has **no admin account yet** — a welcoming, animated single-screen first-run page (orbiting fleet constellation)
+- **Key Features**: Bcrypt hashing, API key configuration in Settings. **Streamlined (#49)**: the log-copied **setup token was removed** (no token field); **admin email is required** (becomes the sign-in identity) with field order email → password (+confirm) → company → updates opt-in.
+- **Audience (#2381)**: the wizard is scoped to installs that genuinely have no way in — blank `ADMIN_PASSWORD` dev, hand-rolled backends, a marketplace one-click image (below) — where login is blocked by the same `setup_completed` flag and the wizard is the only door. It does **not** render where `ADMIN_PASSWORD` provisioned an admin at boot (production compose requires the variable; `start.sh` refuses blank and auto-generates under `--unattended`; a marketplace image given a password in user-data), because there it can only overwrite a working account.
+- **Marketplace claim (trinity-enterprise#580)**: a one-click marketplace image (DigitalOcean today) pre-provisions **no** admin. First boot leaves `ADMIN_PASSWORD` explicitly blank and records `ADMIN_PASSWORD_SOURCE=browser` in `.env`, so the first person to open the instance in a browser gets this wizard and creates the admin (email + password + product-updates consent) — no terminal, ever. The MOTD prints the URL to open, never a password. The operator-supplied path (cloud-init `write_files` → `/etc/trinity/admin-password`) is unchanged: admin pre-provisioned, wizard closed, MOTD says "the password you supplied". Two properties hold the browser-set password in place: a blank `ADMIN_PASSWORD` never re-syncs over it on reboot, and a `start.sh` re-run (the documented update path) neither refuses nor generates while `ADMIN_PASSWORD_SOURCE=browser` — a generated password would be written to `.env` and re-synced over the operator's own on the next boot. Every other install is unchanged: `ADMIN_PASSWORD_SOURCE` is set only by first boot. Nothing else becomes claimable: only `docker-compose.hosted.yml` renders a blank `ADMIN_PASSWORD` (prod keeps `:?`), and it forwards `ADMIN_PASSWORD_SOURCE=${…:-unset}`, so a hand-run hosted stack with a blank password and no marker gets 403 from this endpoint (checked after the existing-admin refusal, before hashing) telling the operator to set `ADMIN_PASSWORD` or run `start.sh --hosted`; an absent variable (dev compose) is unaffected. No one-time claim token: it could reach the operator only through the MOTD, which is a terminal. The window between instance creation and the first visit is an **accepted risk** (2026-09-10) — see `docs/DEPLOYMENT.md` → Security Recommendations. Regression: `tests/unit/test_ent580_marketplace_admin_claim.py`, `tests/unit/test_2281_firstboot_password.py`, journey J01's two variants.
+- **Security (#2381)**: `POST /api/setup/admin-password` refuses whenever a usable admin account already exists — its own precondition, not the derived flag, which said `false` on every fresh install and made the endpoint an unauthenticated admin-takeover surface. Fail-closed on a DB read error; checked above the bcrypt hash on this unauthenticated, unrate-limited route. This closes ent#49's tokenless window **without reinstating the token**: ent#49 priced that tradeoff on "there is no admin yet", which now holds exactly where the wizard still renders. See `docs/DEPLOYMENT.md` → Security Recommendations for the residual (an unprovisioned install on a public IP).
+- **Related**: the product-updates opt-in has no home outside this wizard and needs a Settings surface — `abilityai/trinity-enterprise#463`. The admin sign-in email is captured post-login instead (the `email` step of the ent#581 first-run overlay, `components/onboarding/FirstRunOverlay.vue` over `firstRunSteps.js`; formerly `AdminEmailNudge.vue`).
 - **Flow**: `docs/memory/feature-flows/first-time-setup.md`
 
 ### 15.3 Per-Agent API Key Control
@@ -529,12 +533,12 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   - System agents hidden by default
 
 ### 27.3 Ops Tab
-- **Status**: ⏳ Not Started
+- **Status**: ✅ Implemented — queue + alerts (answer payload + explicit-submit parity: #2370, 2026-08-21); the "cost alerts summary" bullet below is not built
 - **Requirement ID**: MOB-001-OPS
 - **Description**: Mobile-optimized Operating Room showing items needing attention
 - **Key Features**:
   - Needs Response queue with expandable cards
-  - Respond/acknowledge actions inline
+  - Respond/acknowledge actions inline, by item type (desktop parity, #2370): approval = select an option → restated consequence → optional note → explicit `Send: <option>` (never a one-tap irreversible answer); question = text answer; alert = `Got it`. The payload is the desktop's — the decision in `response`, a note in `response_text` — built by the shared `utils/operatorQueue.js`, so a Deny can no longer be recorded as an approval
   - Notification list with priority badges
   - Badge count on tab icon
   - Cost alerts summary
@@ -651,7 +655,7 @@ degrade quietly). #2086 centralizes it.
   `MODEL_CATALOG` (ordered `ModelEntry` list: `id`, `label`, `note`, and the
   policy flags). It is a **stdlib-only leaf** (imports nothing from
   `settings_service`/`database`) so codegen and the parity test load it DB-free.
-- **FR-2 — Two policy dimensions + a display marker**:
+- **FR-2 — Policy dimensions + a display marker**:
   - `public_channel` — selectable as the #894 per-agent public-channel override
     (`settings_service.PUBLIC_CHANNEL_MODELS` **re-exports** the derived set).
   - `admin_default_selectable` — offered in the admin fleet-default dropdown.
@@ -661,6 +665,20 @@ degrade quietly). #2086 centralizes it.
   - `recommended` — drives the admin dropdown's "(recommended)" marker; exactly
     one entry, **pinned to `PLATFORM_DEFAULT_MODEL_VALUE`** (#831, out of scope to
     change) rather than the loaded value.
+  - `workspace` + `workspace_tier` (ent#403) — offered in the **Workspace
+    composer's** client-facing dropdown, with the plain-language primary text the
+    option renders (`"Most capable"`, `"Balanced — fast and smart"`, `"Fastest"`).
+    A separate dimension rather than a reuse of `note`, which is copy written for
+    the operator picker: joining `label — note` yields two options both leading
+    with "Most capable" and one em-dash nested inside another. The derived set
+    `WORKSPACE_MODELS` is the Workspace turn route's closed allowlist.
+    **Subset rule, asserted at import: `WORKSPACE_MODELS ⊆ PUBLIC_CHANNEL_MODELS`**
+    — the Workspace must never accept a model the #894 operator route would 422,
+    or the two sources genuinely disagree. A second assertion refuses a workspace
+    entry with no tier (the option would render blank). Both fields are appended
+    **last** to the frozen dataclass and set by keyword: every entry passes its
+    booleans positionally, so a field inserted anywhere else silently reassigns
+    `public_channel` / `admin_default_selectable` / `recommended` with no error.
 - **FR-3 — Generated frontend mirror**: `scripts/gen_model_catalog.py` emits the
   checked-in, do-not-edit `src/frontend/src/constants/modelCatalog.js` (Vite-bundled,
   CSP-clean `'self'` asset). `ModelSelector.vue` derives its picker and `Settings.vue`
@@ -797,3 +815,100 @@ where they already are.
   rows carry no `source_channel_chat_id`, so channel consumers already ignore it.
 - **FR-8 — Sticky client choice**: the speaker toggle persists per client+agent in
   `localStorage`, instead of resetting to off on every page load.
+
+### 48.3 Workspace Voice Mode — the orb takes the conversation (trinity-enterprise#534; supersedes ent#440)
+
+**Description**: An internal user starts a **real-time voice call** with an agent
+from the Workspace chat they are in. Modal, the way ChatGPT's voice mode is: the
+orb (the platform's Gemini Live session — `VoiceOverlay` + `useVoiceSession`,
+reused) takes the conversation column, the chat is visible but inert, the
+agent's canvas takes the right column, and End / Escape returns to the chat with
+the call's transcript kept there as one collapsed **"Voice call · N min"** block.
+Ruled 2026-09-07. OSS-core by the standing ruling, deliberately ungated.
+
+**Supersedes ent#440.** The hands-free STT → typed-turn → TTS loop (the former
+§48.3) is **retired** — one voice entry point. Two of its three reasons for not
+porting the orb are moot under the rulings since (a "parallel conversation" is
+the modal model wanted; the JWT-only WebSocket is only a problem for *external*
+portal-token clients, and the Workspace's audience is internal users), and the
+third (`run_task` cannot act as the agent) is #535. Hold-to-dictate (#2212) and
+spoken replies (#2157) stay as composer affordances.
+
+- **FR-1 — Entry**: a **Voice** control on the conversation header for platform
+  sessions only, driven by the roster's `realtime_voice {available, reason}`
+  (instance-level, fail-closed, named for the capability — ent#354 may add a
+  second provider). Disabled WITH the reason when the instance cannot ("voice is
+  turned off" / "no voice provider key"), never a dead button. Portal-token
+  clients never see it. Distinct from the per-agent `voice_available` (TTS).
+- **FR-1b — The Talk door (#2559)**: `/workspace?agent=<name>&voice=1` starts the
+  call on landing. The param alone is **not** authority: it is honoured only when
+  the intent was **armed in the app** (`armVoiceAutoStart()` in
+  `portalVoiceMode.js`, called by `AgentHeader`'s Talk button before the
+  `router.push`), the agent actually landed, and the principal is a platform
+  session. The armed flag is a module-scoped `let`, so it lives exactly as long
+  as the document — a pasted, bookmarked or mailed link arrives on a fresh
+  document and can never be armed, including the signed-out case where the
+  sign-in click re-runs `bootstrap()` on the same document. `bootstrap()` strips
+  the key once, in its `finally`, keyed on the key's **presence** (so `?voice=0`
+  does not linger either) and disarms; the intent is consumed once. A
+  portal-token principal is refused and shown nothing, mirroring FR-1.
+- **FR-2 — Bound to the thread**: `POST /api/enterprise/client-portal/agents/{name}/voice/start`
+  under the portal principal — roster membership and thread ownership evaluated
+  before branching → ONE uniform 404 (off-roster, foreign thread, portal token);
+  per-(user, agent) rate limit; 503 with the reason when voice is off. A
+  brand-new chat gets its thread created and adopted BEFORE the call starts.
+  Context = the thread's recent rows (system rows skipped, earlier spoken rows
+  labelled). `/stop`, `/ws/voice/{id}` and `/panel` are the shared OSS routes.
+- **FR-3 — Transcript, written as it goes**: each completed turn is inserted by
+  the worker holding the live socket as an `enterprise_portal_messages` row
+  with `source='voice'` and `voice_call_id`; the call closes with one `system`
+  label row (+ how it ended) and `touch_portal_session`; a call with no turns
+  writes nothing; `/stop` never writes for this surface. Save-at-end was
+  rejected (two-worker double write, restart loss). The chat folds a call's rows
+  into one block **keyed on the call id**, placed where the call started —
+  robust to the 100-row history window and to typed turns landing mid-call.
+  The Agent Detail chat is untouched.
+- **FR-3b — One timeline, and the agent knows what was said (#2694)**: the
+  thread is read as a window of **typed turns** (the newest 100, plus every
+  spoken row of the calls among them, under a row ceiling that reports itself
+  as `truncated`), so a long call never pushes the typed turns before it off
+  the screen and the call block sits where the call happened — live, after a
+  reload, after a chat switch. The first typed turn after a call carries the
+  call's content whether it resumes the agent's live session or starts cold:
+  the platform-written rows since the agent's last typed reply (spoken turns,
+  labelled as spoken; the call's label as a bracketed marker, never as the
+  agent's words) are prefixed to a resumed turn; the cold replay carries them
+  in the same form. One total character budget covers a whole 30-minute call;
+  anything trimmed is named by count. A call cannot start while a typed reply
+  is still being written, and a typed turn cannot start while a call is on
+  (both 409, unbilled, after the uniform 404), so no reply lands mid-call once
+  the audio bridge is up — and a call whose audio socket never opens never
+  holds the thread: the live-call marker is an owned lease armed by the bridge
+  at connect, not by the start (#2700).
+- **FR-4 — Modal**: while the call is on, New chat, the picker, star, Reset, the
+  tabs, attach, mic, textarea and Send are inert; the speaker toggle is hidden;
+  one status line names the orb state / the tool at work and the way out;
+  Escape ends the call; the shell refuses sidebar / ⌘J navigation; a
+  route-driven change or an unmount ends the call gracefully with the
+  transcript kept.
+- **FR-5 — Canvas column**: orb 40 / canvas 60 (the retired page's split) at
+  `sm+`; the column reads the voice panel route through `CanvasPanel`,
+  refetching on each panel `tool_result` frame + a 3 s safety poll. The call
+  writes at `operator`; a platform principal reads every canvas audience in the
+  Workspace so the rail shows the same board after the call. Below `sm` the orb
+  has the stage (mobile: trinity#710).
+- **FR-6 — Cap with words**: `WORKSPACE_VOICE_MAX_DURATION` (default 1800 s,
+  env, compose-wired). At T-30 s the model is asked out loud to wrap up; at the
+  cap the call ends with `end_reason="cap"`, carried on the `status` frame and
+  in the label row — never a silent drop. Requires the session to outlive the
+  provider connection: compression + resumption on every session, reconnect on
+  `go_away`.
+- **FR-7 — Barge-in, Mute, End, tool badge**: the shared orb component
+  (`components/chat/VoiceOverlay.vue`), whose **only** front door is this one
+  since #2559 — Agent Detail's chat-panel mount of it is retired.
+- **FR-8 — Degradation, with words**: mic denied, insecure origin, no key,
+  disabled, provider error, connection closed, cap reached → a named reason in
+  the status line (or the failed-start line) and the chat unblocked. A `saved`
+  frame after persistence tells the client when to reload; End always works.
+- **FR-9 — Out of scope**: rooms; acting as the agent (#535); the external
+  projection (#285/#446); provider choice (#354, seam kept provider-neutral).

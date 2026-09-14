@@ -394,12 +394,25 @@ def test_feature_flags_carries_canary_enabled(monkeypatch):
         get_elevenlabs_api_key=lambda: None,
         get_platform_default_model=lambda: "model",
         get_anthropic_api_key=lambda: None,
+        # #2380 — install provenance. Hand-rolled stub, so every field the
+        # handler reads has to be present or the whole endpoint AttributeErrors
+        # and this test goes red for a reason that has nothing to do with the
+        # canary. Values are irrelevant here; `test_2380_install_provenance.py`
+        # owns their contract.
+        get_install_source=lambda: "unknown",
+        is_marketplace_install=lambda: False,
+        is_hardening_guide_eligible=lambda: False,
+        get_install_tls_posture=lambda: "unconfigured",
     )
     monkeypatch.setattr(settings_module, "settings_service", stub_settings)
     monkeypatch.setattr(
         settings_module,
         "telemetry_sharing_service",
-        SimpleNamespace(is_consent_enabled=lambda: False),
+        SimpleNamespace(
+            is_consent_enabled=lambda: False,
+            # ent#437: the flags document now spreads the four consent bools.
+            public_flags=lambda: {"telemetry_sharing_enabled": False},
+        ),
     )
     monkeypatch.setattr(settings_module.db, "has_any_subscription", lambda: False)
 

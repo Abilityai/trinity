@@ -1,6 +1,8 @@
 <template>
   <div
     class="bg-white dark:bg-gray-800 rounded-xl border transition-all duration-200"
+    data-testid="queue-card"
+    :aria-expanded="isExpanded"
     :class="isExpanded
       ? 'border-blue-300 dark:border-blue-600 shadow-lg ring-1 ring-blue-100 dark:ring-blue-900/50'
       : 'border-gray-200 dark:border-gray-700 shadow-sm hover:shadow-md hover:border-gray-300 dark:hover:border-gray-600 cursor-pointer'"
@@ -32,7 +34,7 @@
           <!-- Type + priority pills (subtle) -->
           <div class="flex items-center gap-2 mt-1.5">
             <span class="text-xs px-2 py-0.5 rounded-full" :class="typePill(item.type)">
-              {{ typeLabel(item.type) }}
+              {{ queueTypeLabel(item.type) }}
             </span>
             <span
               v-if="item.priority === 'critical' || item.priority === 'high'"
@@ -49,6 +51,7 @@
           v-if="isExpanded"
           @click.stop="store.toggleExpand(item.id)"
           class="flex-shrink-0 p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 rounded"
+          aria-label="Collapse"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -94,7 +97,7 @@
       <!-- Response area -->
       <div class="px-4 pb-4">
         <!-- Approval: option buttons -->
-        <div v-if="item.type === 'approval' && item.options" class="space-y-3">
+        <div v-if="responseKind === 'approval'" class="space-y-3">
           <div class="flex flex-wrap gap-2">
             <button
               v-for="(option, idx) in item.options"
@@ -131,7 +134,7 @@
         </div>
 
         <!-- Question: freeform answer -->
-        <div v-else-if="item.type === 'question'" class="space-y-2">
+        <div v-else-if="responseKind === 'question'" class="space-y-2">
           <textarea
             v-model="responseText"
             rows="3"
@@ -154,7 +157,7 @@
         </div>
 
         <!-- Alert: acknowledge -->
-        <div v-else-if="item.type === 'alert'" class="flex justify-end">
+        <div v-else class="flex justify-end">
           <button
             @click.stop="store.acknowledgeItem(item.id)"
             class="px-5 py-2 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
@@ -173,6 +176,7 @@ import { renderMarkdown } from '../../utils/markdown'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
+import { queueTypeLabel, queueResponseKind } from '../../utils/operatorQueue'
 import AgentAvatar from '../AgentAvatar.vue'
 
 const props = defineProps({
@@ -181,6 +185,14 @@ const props = defineProps({
 
 const store = useOperatorQueueStore()
 const agentsStore = useAgentsStore()
+
+// ent#499: the controls come from the ONE shared rule, never a local v-if
+// chain. `type` is free TEXT and the platform emits non-protocol types
+// (skill_not_found #1410, workspace_problem_report ent#499); the hardcoded
+// chain rendered NO control for those, so they could not be closed from the
+// queue at all — and a budgeted alert type whose items cannot be closed jams
+// its own pending cap permanently.
+const responseKind = computed(() => queueResponseKind(props.item))
 
 const isExpanded = computed(() => store.expandedItemId === props.item.id)
 const agentAvatarUrl = computed(() => {
@@ -223,10 +235,6 @@ function typePill(type) {
     question: 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400',
     alert: 'bg-state-autonomous-50 text-state-autonomous-600 dark:bg-state-autonomous-900/20 dark:text-state-autonomous-400'
   }[type] || ''
-}
-
-function typeLabel(type) {
-  return { approval: 'Needs approval', question: 'Question', alert: 'Heads up' }[type] || type
 }
 
 function priorityPill(priority) {

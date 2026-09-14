@@ -47,16 +47,24 @@
 
     <InlineError v-if="store.syncError" :message="store.syncError" class="mb-3" />
 
-    <!-- ONE persistent ScanlineReveal instance with the branching INSIDE its
-         slot (ent#245): sibling v-if branches AROUND the component remount it,
-         which re-inits from loading=false so the reveal never plays. `reveal`
-         is false on the error/empty terminals — they snap in rather than
-         playing the celebratory pass for content that isn't there. -->
-    <ScanlineReveal :loading="store.loading" :reveal="hasSkills">
+    <!-- #1921: a skills LIST, not a chart — so a skeleton placeholder, not the
+         scanline beam (design-system principle 12 as amended by #2540). The
+         wrapper owns the footprint for both faces (principle 4), and the
+         placeholder is the FIRST arm of the chain so no terminal can render
+         under it. Keyed on `view.state`, a verdict from `viewState` — never
+         `store.loading`, which the #1927 ratchet counts as a bare gate even
+         though this store derives it correctly. -->
+    <div>
+      <SkeletonLoader
+        v-if="view.state === 'loading'"
+        variant="rows"
+        :count="3"
+        height="4.5rem"
+      />
       <!-- A fetch error is an ERROR, not an empty library (no-swallow rule):
            say so and offer a retry instead of a confident wrong empty state. -->
       <LoadFailed
-        v-if="store.error"
+        v-else-if="store.error"
         title="Couldn't load the skills library"
         message="The library list could not be fetched. This is not the same as an empty library."
         :detail="store.error"
@@ -126,15 +134,13 @@
               <!-- ent#384: who already holds this skill. -->
               <AssignedAgents :skill-name="s.name" class="mt-3" />
 
-              <!-- Kept on EVERY card, not only the zero-holder one: the chips
-                   above point at existing holders, which is the wrong
-                   direction for "give this to another agent". -->
-              <router-link
-                to="/agents"
-                class="mt-3 text-[11px] text-action-primary-600 dark:text-action-primary-400 hover:underline"
-              >
-                Assign via an agent's Skills tab →
-              </router-link>
+              <!-- ent#386 replaced the "assign via an agent's Skills tab →"
+                   link-out that stood here. The block above now carries the
+                   assign control itself, so the page that tells you a skill is
+                   unused is also the page that can fix it. The link-out is not
+                   kept as a fallback: two routes to the same write is the
+                   parallel-mechanism problem ent#182 closed, and the agent's
+                   Skills tab remains reachable from every holder chip. -->
             </BaseCard>
           </li>
         </ul>
@@ -176,12 +182,13 @@
           </li>
         </ul>
       </section>
-    </ScanlineReveal>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted } from 'vue'
+import { viewState } from '../utils/loadingState'
 import { useSkillsLibraryStore } from '../stores/skillsLibrary'
 import { useRole } from '../composables/useRole'
 import SkillContractChips from './skills/SkillContractChips.vue'
@@ -191,8 +198,8 @@ import BaseBadge from './base/BaseBadge.vue'
 import BaseButton from './base/BaseButton.vue'
 import BaseCard from './base/BaseCard.vue'
 import InlineError from './InlineError.vue'
+import SkeletonLoader from './SkeletonLoader.vue'
 import LoadFailed from './LoadFailed.vue'
-import ScanlineReveal from './ScanlineReveal.vue'
 
 const store = useSkillsLibraryStore()
 const { isAdmin } = useRole()
@@ -202,6 +209,14 @@ const shortSha = computed(() =>
 )
 
 const hasSkills = computed(() => store.library.length > 0)
+// One verdict for the whole section (#1927's helper): "no data yet" is the only
+// thing that shows a placeholder — a background refresh with skills on screen
+// never re-flashes it.
+const view = computed(() => viewState({
+  hasLoaded: store.hasLoaded,
+  error: store.error,
+  count: store.library.length,
+}))
 
 // An empty state requires a fetch that SUCCEEDED and returned zero (#1926) —
 // never `library.length === 0`, which is also true mid-flight and after a

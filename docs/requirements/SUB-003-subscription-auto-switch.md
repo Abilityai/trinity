@@ -109,7 +109,7 @@ Backend logs event, sends notification, retries execution
 - **All subscriptions exhausted**: Log warning, do not switch, surface error to user as today
 - **Agent has ANTHROPIC_API_KEY (not subscription)**: Auto-switch does not apply — only for subscription-based agents
 - **Concurrent switches**: Use DB-level locking to prevent two agents from switching to the same subscription simultaneously
-- **Rapid flip-flopping** (#441): the 2h skip-list on alternative selection (`is_subscription_rate_limited` + `select_best_alternative_subscription`) is the only thrash guard. When an agent switches A→B and B also fails, A stays flagged for 2h post-switch (by the still-recorded events from before the switch — see #444), so no ping-pong back to A.
+- **Rapid flip-flopping** (#441): the 2h skip-list on alternative selection (`has_recent_subscription_failures` — kind-blind; named `is_subscription_rate_limited` before #2352 split the display predicate off it — + `select_best_alternative_subscription`) is the only thrash guard. When an agent switches A→B and B also fails, A stays flagged for 2h post-switch (by the still-recorded events from before the switch — see #444), so no ping-pong back to A.
 
 ---
 

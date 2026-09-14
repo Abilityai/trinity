@@ -3,11 +3,19 @@ must never reach the agent's GitHub repo.
 
 ## The defect
 
-`docker/base-image/Dockerfile` bakes `hooks/claude-settings.json` into
+`docker/base-image/Dockerfile` baked `hooks/claude-settings.json` into
 `/home/developer/.claude/settings.json`, registering the platform guardrail
 hooks by ABSOLUTE container path (`/opt/trinity/hooks/*.py`). Agent HOME is
 also the git repo root and the in-container auto-sync commits with
 `git add -A`, so the file was swept into the repo on the next sync.
+
+**ent#345 removed the platform's copy** (the registration is root-owned at
+`/etc/claude-code/managed-settings.json`, outside the tree),
+which retires the ORIGINAL cause. The ignore rule stays load-bearing for the two
+copies that can still exist — a legacy one on a pre-ent#345 volume, and an
+agent-authored one — because either still registers paths that do not resolve
+outside the container. See `test_baked_settings_registers_absolute_container_paths`
+for the restated premise.
 
 The damage lands somewhere else entirely: a clone of that repo made outside
 the container has no `/opt/trinity`, so each registered PreToolUse hook exits
@@ -149,14 +157,31 @@ def _run_shell(command: str, repo: Path):
 # ---------------------------------------------------------------------------
 
 def test_baked_settings_registers_absolute_container_paths():
-    """The reason `.claude/settings.json` may never be committed.
+    """The reason a `.claude/settings.json` may never be committed.
 
-    If this fails because the hooks became relative or moved out of the synced
-    tree, the ignore rule below is no longer load-bearing and should be
-    re-argued — not silently kept.
+    This test asked to be re-argued if the hooks ever "moved out of the synced
+    tree", and ent#345 moved them: the registration now ships to root-owned
+    `/etc/claude-code/managed-settings.json`, because the in-tree copy was
+    agent-WRITABLE and let a guarded agent switch off its own guardrails.
+
+    **The ignore rule survives the move, for a different reason than it was
+    written for.** It no longer protects against the platform baking a file into
+    the tree — nothing does that any more. It protects against the two copies that
+    can still be there:
+
+    * a **legacy** one on an agent that predates ent#345. `~/.claude/settings.json`
+      lives on the durable home volume, so rebuilding the image does not remove it;
+      `startup.sh` deletes it only on an exact content match, and an agent that
+      never restarts still has it.
+    * an **agent-authored** one, which the platform must not delete and cannot
+      vouch for.
+
+    Either still registers absolute `/opt/trinity` paths that do not exist outside
+    the container, so committing either still bricks an outside clone — the #2036
+    damage, unchanged. Hence: rule kept, premise restated.
     """
-    baked = _project_root / "docker" / "base-image" / "hooks" / "claude-settings.json"
-    assert baked.is_file(), f"baked hook settings missing at {baked}"
+    baked = _project_root / "docker" / "base-image" / "hooks" / "managed-settings.json"
+    assert baked.is_file(), f"hook settings missing at {baked}"
 
     settings = json.loads(baked.read_text())
     commands = [
@@ -174,16 +199,28 @@ def test_baked_settings_registers_absolute_container_paths():
     )
 
 
-def test_dockerfile_still_bakes_settings_into_the_repo_root():
-    """HOME == repo root is what puts the baked file inside the working tree.
+def test_dockerfile_no_longer_installs_settings_into_the_repo_root():
+    """The move this file's sibling asked to have re-argued, now pinned in place.
 
-    Pinned so a move (e.g. registering hooks outside `/home/developer`) is a
-    conscious change that revisits this fix rather than leaving a dead rule.
+    Was: assert the Dockerfile DOES bake into `/home/developer/.claude/settings.json`
+    ("pinned so a move is a conscious change"). ent#345 is that conscious change —
+    the registration is root-owned at `/etc/claude-code/managed-settings.json` — so
+    the pin inverts: a revert would put an agent-writable guardrail registration back
+    inside the synced tree, which is both the #2036 leak and the ent#345 hole.
+
+    Instructions only, not comments: the ent#345 block deliberately NAMES the old
+    path in prose to record what moved, and a whole-file substring search would pass
+    on that documentation — which is exactly how the old assertion passed against
+    this change before the rename made it fail.
     """
     dockerfile = (
         _project_root / "docker" / "base-image" / "Dockerfile"
     ).read_text()
-    assert "/home/developer/.claude/settings.json" in dockerfile
+    instructions = "\n".join(
+        line for line in dockerfile.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "/home/developer/.claude/settings.json" not in instructions
+    assert "/etc/claude-code/managed-settings.json" in instructions
 
 
 # ---------------------------------------------------------------------------

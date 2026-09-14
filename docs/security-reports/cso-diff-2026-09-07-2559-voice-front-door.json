@@ -1,0 +1,82 @@
+{
+  "version": "1.1",
+  "date": "2026-09-07",
+  "mode": "diff",
+  "scope": "trinity#2559 \u2014 branch AndriiPasternak31/issue-2559 vs merge-base c04750e73 on dev; 37 files (+1069/-301); frontend Vue/JS + docs + tests, zero backend source",
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_skipped": {
+    "3": "no dependency/lockfile change in diff",
+    "4": "no .github/ change in diff",
+    "5": "no docker/compose change in diff",
+    "6": "no backend/integration change in diff",
+    "8": "no .claude/skills change in diff"
+  },
+  "attack_surface": {
+    "new_backend_endpoints": 0,
+    "new_frontend_query_params": 1,
+    "new_exposed_component_methods": 1,
+    "removed_backend_callers": 3,
+    "new_dangerous_sinks": 0,
+    "new_outbound_integrations": 0
+  },
+  "findings": [],
+  "observations": [
+    {
+      "id": "O1",
+      "severity": "info",
+      "confidence": 4,
+      "title": "armed flag is not cleared when the Talk navigation aborts",
+      "file": "src/frontend/src/components/portal/portalVoiceMode.js"
+    },
+    {
+      "id": "O2",
+      "severity": "info",
+      "confidence": 5,
+      "title": "voiceAutoStart's `landed` guard is always true at its only call site",
+      "file": "src/frontend/src/views/Portal.vue"
+    },
+    {
+      "id": "O3",
+      "severity": "info",
+      "confidence": 6,
+      "title": "admin off-roster Talk lands on false copy (pre-existing reach gap, follow-up #3)",
+      "file": "src/frontend/src/views/Portal.vue:330"
+    }
+  ],
+  "supply_chain_summary": {
+    "python_deps_changed": 0,
+    "node_deps_changed": 0,
+    "lockfiles_changed": 0
+  },
+  "filter_stats": {
+    "candidates_considered": 6,
+    "hard_excluded": 0,
+    "below_gate": 3,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "info": 3,
+    "open": 0
+  },
+  "trend": {
+    "prior_report": "cso-diff-2026-09-07-ent541-retention-parity-guard",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0
+  }
+}

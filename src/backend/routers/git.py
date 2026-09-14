@@ -186,6 +186,10 @@ async def sync_to_github(
                 "status_code": status_code,
                 "conflict_type": result.conflict_type,
                 "conflict_class": result.conflict_class,
+                # #2529: the `.gitignore` sweep runs BEFORE the agent call, so a
+                # failed Push can still have mutated the index. #905's rule is
+                # that a mutating op stays traceable — including this half.
+                "removed_paths": result.removed_paths,
             },
         )
         raise HTTPException(
@@ -205,6 +209,7 @@ async def sync_to_github(
             "files_changed": result.files_changed,
             "branch": result.branch,
             "strategy": body.strategy,
+            "removed_paths": result.removed_paths,  # #2529
         },
     )
 
@@ -214,7 +219,15 @@ async def sync_to_github(
         "files_changed": result.files_changed,
         "branch": result.branch,
         "message": result.message,
-        "sync_time": result.sync_time.isoformat() if result.sync_time else None
+        "sync_time": result.sync_time.isoformat() if result.sync_time else None,
+        # #2529 — this dict is hand-built and drops anything not listed, so a
+        # new GitSyncResult field is invisible until it is named here. The
+        # failure path can't carry them at all (HTTPException keeps only
+        # `detail`), which is why `sync_to_github` also folds a one-line summary
+        # into `message`.
+        "removed_paths": result.removed_paths,
+        "unignored_paths": result.unignored_paths,
+        "shadowed_negations": result.shadowed_negations,
     }
 
 

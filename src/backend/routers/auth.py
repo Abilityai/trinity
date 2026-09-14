@@ -6,6 +6,7 @@ import logging
 from datetime import timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 import redis
@@ -315,7 +316,8 @@ async def get_auth_mode():
     }
 
 
-@router.post("/token", response_model=Token)
+@router.post("/token", response_model=Token, response_model_exclude_none=True,
+             responses={403: {"description": "Second factor required — no session issued (#2322)"}})
 async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """Login with username/password and get JWT token.
 
@@ -384,7 +386,31 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             request_id=getattr(request.state, "request_id", None),
             details={"method": "admin"},
         )
-        return challenge
+        # #2322 — a password grant that issued no session is an ERROR for the
+        # grant (RFC 6749 §5.2), not a 200. Returned as a JSONResponse rather
+        # than raised as an HTTPException so the challenge fields sit at the
+        # top level beside `detail`, which is the shape the issue specifies and
+        # the shape clients can branch on without unwrapping.
+        #
+        # 403, not 401, for three reasons — the issue permits either:
+        #  1. Our own CLI's `_handle_response` treats 401 as "your session
+        #     expired, run `trinity login`" and hard-exits. During login that
+        #     message is nonsense.
+        #  2. The frontend registers a GLOBAL axios 401 interceptor that calls
+        #     `authStore.logout()` and redirects to /login. It happens to be
+        #     guarded by `currentPath !== '/login'` today, but wiring a
+        #     mid-flight login refusal into "your session died" machinery is a
+        #     trap for whoever next moves the login form.
+        #  3. Semantically the credentials were CORRECT. Authentication is
+        #     incomplete, not rejected — which is why OAuth providers answer
+        #     `mfa_required` with 403.
+        #
+        # `mfa_required` and the two flags are kept alongside `detail` so a
+        # client branches on a boolean, never on parsing a human string.
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": "mfa_required", **challenge},
+        )
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
@@ -409,7 +435,8 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@router.post("/api/token", response_model=Token)
+@router.post("/api/token", response_model=Token, response_model_exclude_none=True,
+             responses={403: {"description": "Second factor required — no session issued (#2322)"}})
 async def login_api(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """Alias for /token endpoint."""
     return await login(request, form_data)
@@ -568,7 +595,7 @@ async def request_email_login_code(request: Request):
     return generic_response
 
 
-@router.post("/api/auth/email/verify")
+@router.post("/api/auth/email/verify")  # deliberately no response_model — see #2322
 async def verify_email_login_code(request: Request):
     """
     Verify email login code and get JWT token.
@@ -607,8 +634,40 @@ async def verify_email_login_code(request: Request):
     # Check per-email OTP attempt rate limit (pentest 3.1.5)
     check_otp_rate_limit(email)
 
+    # Re-check the allow-list here, not only at /email/request (#2381).
+    #
+    # Login codes live in ONE shared table keyed on (email, code), and nothing
+    # binds a code to the channel that minted it. `/email/request` checks the
+    # allow-list before minting, but three other producers do not:
+    # `telegram_adapter` and `whatsapp_adapter` `/login <email>` mint for any
+    # syntactically-valid address after a shape check, and `mcp_auth_service`
+    # mints for any address the users table already knows. Their own redeemers
+    # only grant channel- or connector-scope, but a code they minted was also
+    # redeemable HERE — the one redeemer that issues a full platform JWT with
+    # whatever role the matched account carries. Since `get_or_create_email_user`
+    # resolves by email column alone, an attacker-controlled address bound to
+    # the admin row turned any of those mints into an admin session.
+    #
+    # This narrows nothing legitimate: codes obtained through the web flow above
+    # already passed this exact check at mint time, channel users redeem in
+    # their own channel, and every account that can legitimately email-login is
+    # allow-listed by construction (sharing, access-request approval, and the
+    # admin allow-list UI are the only ways such an account comes to exist).
+    #
+    # Fails into the SAME branch as a bad code — identical status, message,
+    # audit row and rate-limit accounting — so this is not an oracle for
+    # "is this address allow-listed".
+    allowed = False
+    try:
+        allowed = db.is_email_whitelisted(email)
+    except Exception as e:
+        logger.error(
+            "Allow-list check failed during email verify (%s) — refusing",
+            type(e).__name__,
+        )
+
     # Verify code
-    verification = db.verify_login_code(email, code)
+    verification = db.verify_login_code(email, code) if allowed else None
     if not verification:
         record_login_attempt(client_ip, success=False, account=email)
         record_otp_attempt(email, success=False)

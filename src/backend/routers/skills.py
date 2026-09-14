@@ -41,7 +41,9 @@ from utils.url_validation import (
     reject_embedded_credentials,
     validate_skills_library_url,
 )
-from services.skill_service import skill_service, SkillInjectionBusy
+from services.skill_service import (
+    skill_service, SkillInjectionBusy, broadcast_skills_changed,
+)
 from services.skill_packaging import validate_skill_name
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,32 @@ async def _remove_unassigned_skills(
         "skills_failed": result.get("skills_failed", 0),
         "results": result.get("results", {}),
     }
+
+
+async def _deliver_assigned_skills(
+    agent_name: str, added_names: List[str]
+) -> Optional[Dict[str, Any]]:
+    """Deliver just-assigned skill packages to the agent (#2703) — the write-side
+    twin of `_remove_unassigned_skills`, with the same contract: the row has
+    committed and is authoritative, delivery is best-effort, and a stopped
+    agent / busy lock / transport failure is a NAMED outcome in the body, never
+    a failed request. See `skill_service.deliver_assigned` for the vocabulary.
+
+    Returns the delivery report for the response body, or None when nothing was
+    assigned.
+    """
+    names = [n for n in added_names if validate_skill_name(n)]
+    if not names:
+        return None
+    try:
+        return await skill_service.deliver_assigned(agent_name, names)
+    except Exception as e:  # noqa: BLE001 — never fail a committed assign
+        logger.warning(f"skill delivery failed for {agent_name}: {e}")
+        return {
+            "status": "not_delivered",
+            "reason": "injection_error",
+            "skills": {n: {"status": "not_delivered"} for n in sorted(names)},
+        }
 
 
 # ============================================================================
@@ -265,44 +293,12 @@ async def sync_library(admin_user: User = Depends(require_admin)):
 # Agent Skills Assignment Endpoints
 # ============================================================================
 
-def _visible_agent_names(current_user: User) -> Optional[set]:
-    """The agents this caller may see named, resolved from the DB (ent#384).
-
-    Returns None for an admin (no filter), else the set of agent names the
-    caller owns or has been shared.
-
-    **Deliberately not `services.agent_service.helpers.accessible_agent_names`,
-    which is the helper the issue named.** That one resolves through
-    `get_accessible_agents` → `list_all_agents_fast()`, i.e. a Docker
-    `containers.list()` that returns `[]` when the daemon is unreachable or the
-    socket is denied — logged only as a throttled WARNING (#1131). Routed
-    through it, a Docker fault would answer this endpoint with an empty set for
-    every non-admin, which the UI can only render as "no agent holds any
-    skill", fleet-wide, with no error anywhere. That is a confident wrong zero
-    arriving through the *access* layer, where a store-level "a failed fetch is
-    not an empty result" rule structurally cannot catch it, and changing
-    `DOCKER_GID` is enough to trigger it.
-
-    `db.get_all_agent_metadata()` is one pure-DB batch query that already
-    carries `owner_username`, `is_shared_with_user` and `WHERE ao.deleted_at IS
-    NULL`. Access semantics are identical — admin ⇒ all, else owned ∪ shared —
-    so this narrows nothing and widens nothing except that the DB set also
-    contains the caller's OWN agents that currently have no container (#1747
-    documents that state as routine: soft-delete recovery, a pruned daemon, a
-    crash mid-create). It never contains somebody else's agent.
-
-    Email drives only the sharing join and comes from the same `users` row both
-    auth paths already read, so it is as reliable here as in the helper.
-    """
-    if current_user.role == "admin":
-        return None
-    metadata = db.get_all_agent_metadata(current_user.email or "")
-    return {
-        name
-        for name, meta in metadata.items()
-        if meta.get("owner_username") == current_user.username
-        or meta.get("is_shared_with_user")
-    }
+# #471: the pure-DB visible-set rule moved to ONE home —
+# `services.agent_service.helpers.visible_agent_names` (its docstring carries
+# the ent#384 Docker-fault rationale) — now that the subscription-pressure
+# batch endpoint is a second consumer. Aliased to keep this module's call
+# sites unchanged.
+from services.agent_service.helpers import visible_agent_names as _visible_agent_names
 
 
 @router.get("/skills/assignments", response_model=SkillAssignmentsResponse)
@@ -371,9 +367,25 @@ async def get_skill_assignments(current_user: User = Depends(get_current_user)):
             )
         )
 
+    # ent#386 — the assign targets ride along on the read the Library already
+    # does, so the write half costs no extra round-trip and no N+1 per block.
+    # `None` username = admin ⇒ unfiltered, the same admin convention as
+    # `visible` above; passing the username for an admin would silently narrow
+    # the list to the agents that admin personally owns.
+    assignable = [
+        SkillAssignmentAgent(
+            name=row["agent_name"],
+            display_label=row.get("display_label"),
+        )
+        for row in db.get_assignable_agents(
+            None if current_user.role == "admin" else current_user.username
+        )
+    ]
+
     return SkillAssignmentsResponse(
         assignments=assignments,
         scope="all" if visible is None else "accessible",
+        assignable_agents=assignable,
     )
 
 
@@ -429,15 +441,26 @@ async def update_agent_skills(
         assigned_by=current_user.username
     )
 
+    # #2703: symmetric — added names are delivered, dropped names removed. Both
+    # are best-effort reports on a committed write; either may defer to the
+    # start path. Delivery first: it takes the same per-agent lock as removal,
+    # and a removal that lands while delivery holds the lock reads as
+    # `deferred` (the start-path reconcile finishes it), which is the honest
+    # order for a replace that mostly ADDS.
+    added = sorted(set(update.skills) - previous)
+    delivery = await _deliver_assigned_skills(agent_name, added)
     removal = await _remove_unassigned_skills(
         agent_name, sorted(previous - set(update.skills)), current_user, request
     )
+    if added or (previous - set(update.skills)):
+        await broadcast_skills_changed(agent_name)
 
     return {
         "success": True,
         "agent_name": agent_name,
         "skills_assigned": count,
         "skills": update.skills,
+        "delivery": delivery,
         "removal": removal,
     }
 
@@ -457,9 +480,12 @@ async def inject_skills(
     Per-skill warnings (missing deps, skipped files) ride the results map.
     """
     try:
-        return await skill_service.inject_skills(agent_name, force=True)
+        result = await skill_service.inject_skills(agent_name, force=True)
     except SkillInjectionBusy as e:
         raise HTTPException(status_code=409, detail=str(e))
+    # #2703: a Sync changes the listing too — open surfaces refetch.
+    await broadcast_skills_changed(agent_name)
+    return result
 
 
 @router.post("/agents/{agent_name}/skills/{skill_name}")
@@ -480,17 +506,26 @@ async def assign_skill(
         )
 
     result = db.assign_skill(agent_name, skill_name, current_user.username)
+    # #2703: deliver on BOTH branches. "Already assigned" used to return early,
+    # which made a re-click after a `not_delivered` a no-op — and the Library
+    # page's assign control has no Sync button beside it, so that re-click is
+    # the only retry it has. Delivery is the start-path injection (unchanged
+    # skills cost one metas read), so an idempotent re-assign is cheap.
+    delivery = await _deliver_assigned_skills(agent_name, [skill_name])
+    await broadcast_skills_changed(agent_name)
     if result is None:
         return {
             "success": True,
             "message": "Skill already assigned",
-            "skill_name": skill_name
+            "skill_name": skill_name,
+            "delivery": delivery,
         }
 
     return {
         "success": True,
         "message": "Skill assigned",
-        "skill": result
+        "skill": result,
+        "delivery": delivery,
     }
 
 
@@ -516,6 +551,10 @@ async def unassign_skill(
         removal = await _remove_unassigned_skills(
             agent_name, [skill_name], current_user, request
         )
+        # #2703: fired on the ROW change, even when the package removal
+        # deferred — the listing surfaces re-read the container either way and
+        # the assignment lists read the row.
+        await broadcast_skills_changed(agent_name)
 
     return {
         "success": True,

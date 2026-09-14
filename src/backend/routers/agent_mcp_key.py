@@ -1,3 +1,4 @@
+# mcp: none — credential-lifecycle routes are human-only by construction (reject_non_interactive_principal, #1854)
 """Per-agent Trinity MCP key — read, verify, rotate (#1854).
 
 Thin HTTP shell over ``services/agent_mcp_key_service.py`` (Invariant #1): no

@@ -100,6 +100,9 @@ from db_models import (
 # Re-export connection utilities
 from db.connection import get_db_connection, DB_PATH
 from utils.helpers import utc_now_iso
+# #2381: the shared "is this install provisioned?" policy. Stdlib-only leaf, so
+# it is safe at import time here; `routers/setup.py` reads the same two rules.
+from utils.admin_identity import admin_username, is_usable_password_hash
 
 # Import schema and migration utilities
 from db.migrations import run_all_migrations
@@ -114,6 +117,9 @@ from db.chat import ChatOperations
 from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
+from db.canvas import CanvasOperations
+from db.canvas_shares import CanvasShareOperations
+from db.user_preferences import UserPreferenceOperations
 from db.product_events import ProductEventOperations
 from db.evaluations import EvaluationOperations
 from db.reminders import RemindersOperations
@@ -170,9 +176,24 @@ def init_database():
         upgrade_to_head()
         # #1638: seed BEFORE _ensure_admin_user_engine — see the sqlite path.
         _seed_fresh_install_retention_engine()
+        # #2085: give every OTHER retention window an explicit row too, at the
+        # value already in force. MUST follow the line above — both use
+        # insert-or-ignore, so the first writer wins and the reverse order
+        # would overwrite the #1039 community floor with the wide defaults.
+        _seed_retention_windows_engine()
         # ent#237: same fresh-install window, same ordering requirement.
         _seed_fresh_install_skill_source_engine()
         _ensure_admin_user_engine()
+        # #2381: make `setup_completed` honest about the admin that now exists.
+        # MUST follow the line above — asking before the admin is provisioned is
+        # the entire bug (the SQLite `setup_completed_backfill` migration asks
+        # during `run_all_migrations`, while `users` is still empty, then records
+        # itself as applied and never asks again). PostgreSQL had NO writer for
+        # this key at all: no Alembic revision touches it.
+        _mark_setup_completed_if_provisioned_engine()
+        # #2380: record install provenance. No ordering requirement —
+        # it needs only `system_settings`; placed last so none is implied.
+        _record_install_source_engine()
         return
 
     db_path = Path(DB_PATH)
@@ -215,6 +236,14 @@ def init_database():
             # would make this install look pre-existing).
             _seed_fresh_install_retention(cursor, conn)
 
+            # #2085: give every OTHER retention window an explicit row too, at
+            # the value already in force, so no install resolves a retention
+            # window from the image. MUST follow the line above — both use
+            # INSERT OR IGNORE, so the first writer wins and the reverse order
+            # would overwrite the #1039 community floor with the wide defaults.
+            # Unlike the seed above this is NOT fresh-install-only.
+            _seed_retention_windows(cursor, conn)
+
             # ent#237: seed the bundled community skills source. Same
             # fresh-install window and the same must-precede-_ensure_admin_user
             # ordering, since that is what makes `users` non-empty.
@@ -222,6 +251,37 @@ def init_database():
 
             # Create default admin user if not exists
             _ensure_admin_user(cursor, conn)
+
+            # #2381: make `setup_completed` honest about the admin that now
+            # exists. MUST follow the line above — asking before the admin is
+            # provisioned is the entire bug. The `setup_completed_backfill`
+            # migration asks the same question inside `run_all_migrations`
+            # above, while `users` is still empty on a fresh install, finds
+            # nothing, and is then RECORDED as applied so it never asks again.
+            _mark_setup_completed_if_provisioned(cursor, conn)
+
+            # #2380: record install provenance. No ordering requirement —
+            # it needs only `system_settings`; placed last so none is implied.
+            _record_install_source(cursor, conn)
+
+
+_INSTALL_SOURCE_RECORDED_NOTE = (
+    "[#2380] Install provenance recorded: install_source=%s (from "
+    "TRINITY_INSTALL_SOURCE). This is written once and never overwritten."
+)
+_INSTALL_SOURCE_INVALID_NOTE = (
+    "WARNING: [#2380] TRINITY_INSTALL_SOURCE=%r is not a recognised install "
+    "source; nothing recorded and provenance reads as 'unknown'. Valid values: "
+    "%s"
+)
+_INSTALL_SOURCE_CONFLICT_NOTE = (
+    "WARNING: [#2380] TRINITY_INSTALL_SOURCE=%s but this install is already "
+    "recorded as %s; keeping the recorded value (provenance is written once)."
+)
+_INSTALL_SOURCE_SKIPPED_NOTE = (
+    "WARNING: [#2380] install provenance not recorded (%s); provenance reads "
+    "as 'unknown' and the marketplace hardening guide stays hidden"
+)
 
 
 _FRESH_INSTALL_SEED_NOTE = (
@@ -279,6 +339,91 @@ def _seed_fresh_install_retention(cursor, conn):
     except Exception as e:
         print(f"WARNING: [#1638] retention seed skipped ({e}); "
               f"install keeps the default (wider) retention windows")
+
+
+_RETENTION_WINDOW_SEED_NOTE = (
+    "[#2085] Seeded %d retention window(s) with the value already in force "
+    "(%s). This install no longer resolves a retention window from the image."
+)
+
+
+def _retention_window_seed_values():
+    """The (key, value) pairs to write: every retention window, at the value the
+    prune already uses for an install with no row (#2085).
+
+    Sourced from `RETENTION_OPS_KEYS` rather than a second hand-written list, so
+    a window added later (ent#433 added two, #2216 a third) is covered on the
+    day it ships instead of quietly inheriting the image default forever.
+    """
+    # config, NOT services.settings_service: that module imports `db` from this
+    # one and this runs at import time, so importing it here raises ImportError
+    # — which this seed's fail-safe contract then SWALLOWS, leaving the feature
+    # silently dead on every boot. Verified empirically before the move; the
+    # same #1638 circular-import trap, one seed later.
+    from config import OPS_SETTINGS_DEFAULTS, RETENTION_OPS_KEYS
+
+    return [
+        (key, OPS_SETTINGS_DEFAULTS[key])
+        for key in RETENTION_OPS_KEYS
+        if key in OPS_SETTINGS_DEFAULTS
+    ]
+
+
+def _seed_retention_windows(cursor, conn):
+    """Write an explicit `system_settings` row for every retention window that
+    has none — the half of #1638 that #1645 left undone (#2085).
+
+    #1645 applies the #1039 community floor by seeding rows on FRESH installs
+    only. Every install that has ever upgraded rather than been created fresh
+    therefore has no rows, and `cleanup_service` resolves its windows at prune
+    time from `OPS_SETTINGS_DEFAULTS` — a dict that ships inside the backend
+    image and is replaced on every rebuild. The only thing standing between a
+    future edit to that dict and the #1638 failure mode (a silent hard-DELETE
+    of existing data ~seconds after the next boot, green /health, no error) is
+    a code comment.
+
+    Three properties make this cheap and safe:
+
+    * BEHAVIOURALLY INERT. It writes the number already in force, so nothing
+      prunes differently the day it runs.
+    * ORDERING IS LOAD-BEARING. Must run AFTER `_seed_fresh_install_retention`.
+      Both use INSERT OR IGNORE, so the first writer wins: reversed, a fresh
+      install would get the wide defaults instead of the #1039 floor and the
+      community floor would be silently deleted by the change meant to protect
+      retention. Pinned by tests/unit/test_2085_retention_seed_existing_installs.py.
+    * NEVER CLOBBERS. OR IGNORE leaves an operator's explicit value alone, and
+      makes the seed idempotent under the racing workers both migration locks
+      permit (they fail open).
+
+    Stated tradeoff (#2085): a seeded install stops inheriting later changes to
+    the code default in EITHER direction, so widening a window for existing
+    installs becomes a deliberate migration. That is the intended consequence —
+    retention becomes explicit per-install config rather than an implicit
+    inheritance from whatever image happens to be running.
+
+    Fails SAFE and never raises: `init_database` runs at import, so raising here
+    is a permanent boot crash-loop rather than a failed request. A skip leaves
+    the install exactly where it is today — resolving from the wide code
+    defaults.
+    """
+    try:
+        pairs = _retention_window_seed_values()
+        now = utc_now_iso()
+        seeded = []
+        for key, value in pairs:
+            cursor.execute(
+                "INSERT OR IGNORE INTO system_settings (key, value, updated_at) "
+                "VALUES (?, ?, ?)",
+                (key, value, now),
+            )
+            if cursor.rowcount:
+                seeded.append(f"{key}={value}")
+        conn.commit()
+        if seeded:
+            print(_RETENTION_WINDOW_SEED_NOTE % (len(seeded), ", ".join(sorted(seeded))))
+    except Exception as e:
+        print(f"WARNING: [#2085] retention window seed skipped ({e}); "
+              f"install keeps resolving unset windows from the code defaults")
 
 
 _DEFAULT_SOURCE_SEED_NOTE = (
@@ -421,6 +566,283 @@ def _seed_fresh_install_retention_engine():
               f"install keeps the default (wider) retention windows")
 
 
+def _seed_retention_windows_engine():
+    """Retention-window seed — engine-based path for PostgreSQL (#2085).
+
+    Mirrors `_seed_retention_windows`; see it for the rationale, the ordering
+    requirement, and the fail-safe contract. Same must-run-AFTER relationship
+    with `_seed_fresh_install_retention_engine`.
+    """
+    from sqlalchemy import select
+
+    from db.engine import get_engine, make_insert
+    from db.tables import system_settings
+
+    try:
+        pairs = _retention_window_seed_values()
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            existing = {
+                row[0]
+                for row in conn.execute(
+                    select(system_settings.c.key).where(
+                        system_settings.c.key.in_([k for k, _ in pairs])
+                    )
+                )
+            }
+            seeded = []
+            for key, value in pairs:
+                if key in existing:
+                    continue
+                conn.execute(
+                    make_insert(system_settings)
+                    .values(key=key, value=value, updated_at=now)
+                    .on_conflict_do_nothing(index_elements=["key"])
+                )
+                seeded.append(f"{key}={value}")
+        if seeded:
+            print(_RETENTION_WINDOW_SEED_NOTE % (len(seeded), ", ".join(sorted(seeded))))
+    except Exception as e:
+        print(f"WARNING: [#2085] retention window seed skipped ({e}); "
+              f"install keeps resolving unset windows from the code defaults")
+
+
+
+_SETUP_COMPLETED_RECONCILE_NOTE = (
+    "[#2381] Admin account is provisioned — setting setup_completed=true. The "
+    "unauthenticated first-run wizard is now closed and login is permitted."
+)
+
+_SETUP_COMPLETED_RECONCILE_SKIPPED = (
+    "WARNING: [#2381] setup_completed reconciliation skipped (%s). The install "
+    "keeps today's behaviour and converges on the next boot."
+)
+
+
+def _mark_setup_completed_if_provisioned(cursor, conn):
+    """Set `setup_completed` when a usable admin account exists (#2381).
+
+    Deliberately NOT a migration. The existing `setup_completed_backfill`
+    migration asks this same question during `run_all_migrations`, which on a
+    fresh install runs while `users` is still empty — so it finds nothing, does
+    nothing, and is then recorded in `schema_migrations` as applied. It can
+    never answer correctly for anyone. A *new* migration would inherit the same
+    once-only semantics; a boot-time reconciliation re-runs every start, so an
+    install already stuck in the exposed state converges on its next restart
+    instead of staying exposed forever.
+
+    Covers both of `_ensure_admin_user`'s branches by asking about the RESULT
+    rather than the action: create, env-password re-sync, and already-correct
+    all end in the same observable state, and all three mean the same thing —
+    somebody can log in, so the wizard has nothing left to do.
+
+    The other branch — no admin, flag left alone — is not only a dev leftover.
+    Since trinity-enterprise#580 it is how a marketplace one-click image boots on
+    purpose (`ADMIN_PASSWORD` blank, `ADMIN_PASSWORD_SOURCE=browser`): the first
+    visitor creates the admin at /setup. Its residual risk is accepted and
+    written down in `docs/DEPLOYMENT.md` → Security Recommendations.
+
+    Fails SAFE and never raises. `init_database` runs at import time, so raising
+    here would crash-loop the backend permanently (the `_seed_fresh_install_*`
+    contract). A skipped write costs one more boot in the old behaviour; a raise
+    costs an instance that will not start at all.
+    """
+    try:
+        cursor.execute(
+            "SELECT password_hash FROM users WHERE username = ?",
+            (admin_username(),),
+        )
+        row = cursor.fetchone()
+        if row is None or not is_usable_password_hash(row[0]):
+            # No usable admin: this install genuinely needs the wizard, and it
+            # is the only way in (login is gated on the same flag). Leave it.
+            return
+
+        cursor.execute(
+            "SELECT value FROM system_settings WHERE key = 'setup_completed'"
+        )
+        current = cursor.fetchone()
+        if current is not None and current[0] == "true":
+            return
+
+        cursor.execute(
+            "INSERT OR REPLACE INTO system_settings (key, value, updated_at) "
+            "VALUES ('setup_completed', 'true', ?)",
+            (utc_now_iso(),),
+        )
+        conn.commit()
+        print(_SETUP_COMPLETED_RECONCILE_NOTE)
+    except Exception as e:
+        print(_SETUP_COMPLETED_RECONCILE_SKIPPED % e)
+
+
+def _mark_setup_completed_if_provisioned_engine():
+    """Engine-based twin of `_mark_setup_completed_if_provisioned` (#2381).
+
+    PostgreSQL previously had no writer for this key whatsoever — the SQLite
+    bespoke runner owns `setup_completed_backfill` and no Alembic revision
+    touches the key — so every PG install ran permanently with the flag absent
+    and the unauthenticated first-run endpoint open.
+
+    Same fail-safe contract as the SQLite twin: never raises.
+    """
+    try:
+        existing = UserOperations().get_user_by_username(admin_username())
+        if existing is None or not is_usable_password_hash(existing.get("password")):
+            return
+
+        settings_ops = SettingsOperations()
+        if settings_ops.get_setting_value("setup_completed", "false") == "true":
+            return
+
+        settings_ops.set_setting("setup_completed", "true")
+        print(_SETUP_COMPLETED_RECONCILE_NOTE)
+    except Exception as e:
+        print(_SETUP_COMPLETED_RECONCILE_SKIPPED % e)
+
+
+def _record_install_source(cursor, conn):
+    """Record HOW this instance was installed, once, at first boot (#2380).
+
+    Reads `TRINITY_INSTALL_SOURCE` (written into `.env` by whatever provisioned
+    the box — a Marketplace Packer script, cloud-init, `start.sh`) and persists
+    it to `system_settings`. Every later read goes to the row, not the env, so
+    provenance survives an operator editing `.env`, a compose change, or a
+    migration to a different host.
+
+    **Write-once, first-writer-wins.** An already-recorded value is never
+    overwritten, only logged if it disagrees. Provenance is a historical fact
+    about an installation event, not a setting: if a later `.env` edit could
+    rewrite it, then it would answer "what does this box currently claim" rather
+    than "how was this box installed", and the marketplace gate would become
+    self-assertable by anyone who can edit a file.
+
+    **An unrecognised value records NOTHING** — not the value, and not
+    `unknown`. Recording `unknown` would combine with write-once to freeze a
+    typo permanently; leaving the row absent reads as `unknown` all the same
+    (see `settings_service.get_install_source`) while letting a corrected marker
+    land on the next boot.
+
+    Deliberately NOT a migration, for #2381's reason: a migration runs once and
+    records itself, so an instance provisioned before it — or one whose marker
+    was fixed afterwards — could never be answered. A boot-time recorder
+    converges on the next restart.
+
+    No ordering requirement against the seeds or `_ensure_admin_user`; it needs
+    only `system_settings` to exist. Do not add one.
+
+    Fails SAFE and never raises. `init_database` runs at import time, so a raise
+    here would crash-loop the backend permanently (the `_seed_fresh_install_*`
+    contract). The cost of a skip is a hidden guide; the cost of a raise is an
+    instance that does not start.
+    """
+    try:
+        # Imported inside the guard, like everything else here: an import that
+        # raised outside it would defeat the fail-safe contract this docstring
+        # promises, on a function that runs at import time.
+        from config import (
+            INSTALL_SOURCE_SETTING_KEY,
+            INSTALL_SOURCE_VALUES,
+            TRINITY_INSTALL_SOURCE,
+        )
+
+        declared = TRINITY_INSTALL_SOURCE
+        if not declared:
+            return
+        if declared not in INSTALL_SOURCE_VALUES:
+            print(_INSTALL_SOURCE_INVALID_NOTE % (
+                declared, ", ".join(sorted(INSTALL_SOURCE_VALUES))
+            ))
+            return
+
+        cursor.execute(
+            "SELECT value FROM system_settings WHERE key = ?",
+            (INSTALL_SOURCE_SETTING_KEY,),
+        )
+        row = cursor.fetchone()
+        existing = (row[0] or "").strip() if row is not None else ""
+        if existing:
+            if existing.lower() != declared:
+                print(_INSTALL_SOURCE_CONFLICT_NOTE % (declared, existing))
+            return
+
+        # INSERT OR IGNORE, matching the seeds beside this one — write-once is
+        # then enforced by the PRIMARY KEY rather than resting solely on the
+        # SELECT above, which is a separate statement and therefore a
+        # check-then-act. OR REPLACE would overwrite on any path that reached
+        # here with a row already present.
+        #
+        # A row holding an EMPTY value is the one case the two disagree about:
+        # the read above treats it as absent (it carries no provenance), so the
+        # INSERT is attempted and correctly ignored, leaving the empty row. That
+        # is deliberate — an empty row can only come from a direct DB write, and
+        # silently upgrading someone's manual edit into a recorded provenance
+        # value is exactly the self-assertion this design refuses.
+        cursor.execute(
+            "INSERT OR IGNORE INTO system_settings (key, value, updated_at) "
+            "VALUES (?, ?, ?)",
+            (INSTALL_SOURCE_SETTING_KEY, declared, utc_now_iso()),
+        )
+        conn.commit()
+        if cursor.rowcount:
+            print(_INSTALL_SOURCE_RECORDED_NOTE % declared)
+    except Exception as e:
+        print(_INSTALL_SOURCE_SKIPPED_NOTE % e)
+
+
+def _record_install_source_engine():
+    """Engine-based twin of `_record_install_source` (#2380).
+
+    Same write-once contract and the same fail-safe guarantee; see that
+    docstring for why each property is load-bearing.
+    """
+    try:
+        from config import (
+            INSTALL_SOURCE_SETTING_KEY,
+            INSTALL_SOURCE_VALUES,
+            TRINITY_INSTALL_SOURCE,
+        )
+
+        declared = TRINITY_INSTALL_SOURCE
+        if not declared:
+            return
+        if declared not in INSTALL_SOURCE_VALUES:
+            print(_INSTALL_SOURCE_INVALID_NOTE % (
+                declared, ", ".join(sorted(INSTALL_SOURCE_VALUES))
+            ))
+            return
+
+        settings_ops = SettingsOperations()
+        # `.strip()` so an empty-or-whitespace row reads as absent on BOTH
+        # backends — the SQLite twin's `row[0]` and this accessor's `""` default
+        # must not disagree about what counts as "already recorded". This read
+        # exists only to LOG a disagreement; the write below is what enforces
+        # write-once, so nothing rests on the gap between the two.
+        existing = (settings_ops.get_setting_value(INSTALL_SOURCE_SETTING_KEY, "") or "").strip()
+        if existing:
+            if existing.lower() != declared:
+                print(_INSTALL_SOURCE_CONFLICT_NOTE % (declared, existing))
+            return
+
+        # `insert_setting_if_absent`, never `set_setting` — the latter is an
+        # upsert and now refuses this key outright. Write-once is enforced by
+        # the PRIMARY KEY here exactly as `INSERT OR IGNORE` does on the SQLite
+        # arm, so neither backend rests it on the SELECT above.
+        if settings_ops.insert_setting_if_absent(INSTALL_SOURCE_SETTING_KEY, declared):
+            print(_INSTALL_SOURCE_RECORDED_NOTE % declared)
+    except Exception as e:
+        print(_INSTALL_SOURCE_SKIPPED_NOTE % e)
+
+
+# Blank ADMIN_PASSWORD is a supported boot (ent#580: a marketplace image claimed
+# in the browser), so this says what happens next rather than "set the variable".
+_NO_ADMIN_AT_BOOT_NOTE = (
+    "ADMIN_PASSWORD not set - no admin account created at boot. The first "
+    "visitor to the web UI creates it at /setup (set ADMIN_PASSWORD to "
+    "provision it here instead)."
+)
+
+
 def _ensure_admin_user_engine():
     """Ensure the admin user exists — engine-based path for PostgreSQL (#300).
 
@@ -431,7 +853,7 @@ def _ensure_admin_user_engine():
     admin_password = os.getenv("ADMIN_PASSWORD", "")
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
     if not admin_password:
-        print("WARNING: ADMIN_PASSWORD not set - skipping admin user creation")
+        print(_NO_ADMIN_AT_BOOT_NOTE)
         return
 
     from passlib.context import CryptContext
@@ -484,8 +906,7 @@ def _ensure_admin_user(cursor, conn):
     if existing is None:
         # Create admin user
         if not admin_password:
-            print("WARNING: ADMIN_PASSWORD not set - skipping admin user creation")
-            print("         Set ADMIN_PASSWORD environment variable to create admin user")
+            print(_NO_ADMIN_AT_BOOT_NOTE)
             return
 
         now = utc_now_iso()
@@ -560,6 +981,9 @@ class DatabaseManager:
         self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
+        self._canvas_ops = CanvasOperations()
+        self._canvas_share_ops = CanvasShareOperations()
+        self._user_preference_ops = UserPreferenceOperations()
         self._product_event_ops = ProductEventOperations()
         self._evaluation_ops = EvaluationOperations()
         self._reminder_ops = RemindersOperations()
@@ -978,6 +1402,14 @@ class DatabaseManager:
     def set_mcp_exposed(self, agent_name: str, enabled: bool) -> bool:
         return self._agent_ops.set_mcp_exposed(agent_name, enabled)
 
+    # --- respond→resume opt-in (ent#329) ---
+
+    def get_operator_resume_enabled(self, agent_name: str) -> bool:
+        return self._agent_ops.get_operator_resume_enabled(agent_name)
+
+    def set_operator_resume_enabled(self, agent_name: str, enabled: bool) -> bool:
+        return self._agent_ops.set_operator_resume_enabled(agent_name, enabled)
+
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
 
@@ -1369,6 +1801,8 @@ class DatabaseManager:
         source_channel_chat_id: str = None,
         source_channel_thread: str = None,
         source_channel_agent: str = None,
+        source_channel_client: str = None,
+        open_canvas_id: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -1388,6 +1822,8 @@ class DatabaseManager:
             # ent#265: binding-agent for channel report-back (set only at the
             # /task inheritance point; None for direct rows).
             source_channel_agent=source_channel_agent,
+            source_channel_client=source_channel_client,
+            open_canvas_id=open_canvas_id,
         )
 
     def create_schedule_execution(
@@ -1416,13 +1852,21 @@ class DatabaseManager:
     def update_execution_status(self, execution_id: str, status: str, response: str = None, error: str = None,
                                 context_used: int = None, context_max: int = None, cost: float = None, tool_calls: str = None, execution_log: str = None,
                                 claude_session_id: str = None, compact_metadata: str = None, retry_count: int = None,
-                                claim_token: str = None):
+                                claim_token: str = None, turn_integrity: str = None):
         return self._schedule_ops.update_execution_status(execution_id, status, response, error,
                                                           context_used, context_max, cost, tool_calls, execution_log, claude_session_id,
-                                                          compact_metadata, retry_count, claim_token)
+                                                          compact_metadata, retry_count, claim_token,
+                                                          turn_integrity=turn_integrity)
 
     def mark_execution_dispatched(self, execution_id: str, async_dispatch: bool = False) -> bool:
         return self._schedule_ops.mark_execution_dispatched(execution_id, async_dispatch)
+
+    def restamp_execution_dispatch(self, execution_id: str) -> bool:
+        return self._schedule_ops.restamp_execution_dispatch(execution_id)
+
+    def stamp_execution_channel_context(self, execution_id: str, **kwargs) -> bool:
+        """ent#498 — attach a delivery destination to a pre-created row."""
+        return self._schedule_ops.stamp_execution_channel_context(execution_id, **kwargs)
 
     def resume_session_belongs_to_user(
         self, agent_name: str, claude_session_id: str, user_id: int
@@ -1440,15 +1884,24 @@ class DatabaseManager:
     def get_agent_executions(self, agent_name: str, limit: int = 50):
         return self._schedule_ops.get_agent_executions(agent_name, limit)
 
-    def get_agent_executions_summary(self, agent_name: str, limit: int = 50):
+    def get_agent_executions_summary(self, agent_name: str, limit: int = 50, *,
+                                     exclude_triggers=None):
         """Get execution summaries for list view - excludes large text fields.
+
+        `exclude_triggers` filters before the LIMIT — see the operation's own
+        docstring for why a caller must not do that in Python (#2423).
 
         PERF-001: Task List Performance Optimization
         """
-        return self._schedule_ops.get_agent_executions_summary(agent_name, limit)
+        return self._schedule_ops.get_agent_executions_summary(
+            agent_name, limit, exclude_triggers=exclude_triggers)
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
+
+    def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
+        """Every execution row of one fan-out batch (#2670)."""
+        return self._schedule_ops.get_fan_out_executions(agent_name, fan_out_id, limit)
 
     def get_all_agents_execution_stats(self, hours: int = 24):
         """Get execution statistics for all agents."""
@@ -1465,6 +1918,14 @@ class DatabaseManager:
     def get_fleet_executions(self, agent_names, **kwargs):
         """Cross-fleet execution list (EXEC-022 / Issue #18)."""
         return self._schedule_ops.get_fleet_executions(agent_names, **kwargs)
+
+    def get_running_for_chat(self, chat_id: str):
+        """ent#525 — the in-flight rows bound to one Workspace chat (delegated
+        children included; see `ScheduleExecutionsMixin.get_running_for_chat`).
+        Re-exported here because this facade delegates by name, not by
+        `__getattr__` — the ent#277 trap, guarded by
+        `tests/unit/test_ent525_portal_work.py::test_the_facade_exposes_every_ledger_read_the_service_makes`."""
+        return self._schedule_ops.get_running_for_chat(chat_id)
 
     def get_fleet_execution_stats(self, agent_names, hours: int = 24):
         """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
@@ -1490,6 +1951,14 @@ class DatabaseManager:
     def trigger_bucket_order(self):
         """Stack/legend order for trigger buckets (ent#96)."""
         return self._schedule_ops.trigger_bucket_order()
+
+    def count_terminal_executions_by_status(self, hours: int = 24):
+        """ent#437 — terminal execution counts by status for the telemetry aggregate."""
+        return self._schedule_ops.count_terminal_executions_by_status(hours)
+
+    def first_autonomous_success_at(self):
+        """ent#437 — the warm-ask milestone: earliest autonomous SUCCESS, or None."""
+        return self._schedule_ops.first_autonomous_success_at()
 
     # =========================================================================
     # Git Configuration Management (delegated to db/schedules.py)
@@ -1714,14 +2183,107 @@ class DatabaseManager:
 
     def create_report(self, agent_name, user_id, report_type, title, payload,
                        display_hint=None, schema_version=1,
-                       period_start=None, period_end=None):
+                       period_start=None, period_end=None,
+                       addressed_to_email=None, portal_session_id=None):
+        # Keyword-forwarded for the same reason `get_reports_for_agent` below
+        # is (#1539): this facade re-declares the signature, so a parameter
+        # added to the ops layer alone never arrives — ent#365 hit exactly that,
+        # as a 500 on the first live publish.
         return self._report_ops.create_report(
             agent_name, user_id, report_type, title, payload,
-            display_hint, schema_version, period_start, period_end,
+            display_hint=display_hint,
+            schema_version=schema_version,
+            period_start=period_start,
+            period_end=period_end,
+            addressed_to_email=addressed_to_email,
+            portal_session_id=portal_session_id,
         )
 
     def get_report(self, report_id: str):
         return self._report_ops.get_report(report_id)
+
+    def get_reports_for_client(self, agent_name: str, client_email: str,
+                               portal_session_id: str = None,
+                               limit: int = 20, offset: int = 0):
+        """ent#365 — reports ADDRESSED to one person (the Workspace question)."""
+        return self._report_ops.get_reports_for_client(
+            agent_name,
+            client_email,
+            portal_session_id=portal_session_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_report_for_client(self, report_id: str, client_email: str):
+        """ent#365 — one report, only if addressed to this person."""
+        return self._report_ops.get_report_for_client(report_id, client_email)
+
+    # =========================================================================
+    # Agent canvas (ent#438, delegated to db/canvas.py)
+    # =========================================================================
+
+    def list_agent_canvases(self, agent_name: str, audience: str = None):
+        return self._canvas_ops.list_canvases(agent_name, audience)
+
+    def get_agent_canvas(self, agent_name: str, canvas_id: str, audience: str = None):
+        return self._canvas_ops.get_canvas(agent_name, canvas_id, audience)
+
+    def upsert_agent_canvas(self, agent_name: str, canvas_id: str, **kwargs):
+        return self._canvas_ops.upsert_canvas(agent_name, canvas_id, **kwargs)
+
+    def delete_agent_canvas(self, agent_name: str, canvas_id: str) -> bool:
+        return self._canvas_ops.delete_canvas(agent_name, canvas_id)
+
+    def delete_agent_canvases(self, agent_name: str, canvas_ids):
+        return self._canvas_ops.delete_canvases(agent_name, canvas_ids)
+
+    def count_agent_canvases(self, agent_name: str) -> int:
+        return self._canvas_ops.count_canvases(agent_name)
+
+    def set_agent_canvas_pinned(self, agent_name: str, canvas_id: str, pinned: bool) -> bool:
+        return self._canvas_ops.set_canvas_pinned(agent_name, canvas_id, pinned)
+
+    # --- canvas share links (ent#554) ---------------------------------------
+
+    def create_canvas_share(self, agent_name: str, canvas_id: str, **kwargs):
+        return self._canvas_share_ops.create_share(agent_name, canvas_id, **kwargs)
+
+    def get_canvas_share_by_token(self, token: str):
+        return self._canvas_share_ops.get_share_by_token(token)
+
+    def list_canvas_shares(self, agent_name: str, canvas_id: str = None,
+                           include_revoked: bool = False):
+        return self._canvas_share_ops.list_shares(agent_name, canvas_id, include_revoked)
+
+    def revoke_canvas_share(self, agent_name: str, share_id: str) -> bool:
+        return self._canvas_share_ops.revoke_share(agent_name, share_id)
+
+    def record_canvas_share_view(self, share_id: str) -> None:
+        return self._canvas_share_ops.record_view(share_id)
+
+    def last_completed_execution_at(self, agent_name: str):
+        return self._canvas_ops.last_completed_execution_at(agent_name)
+
+    # =========================================================================
+    # Per-user UI preferences (trinity-enterprise#413, delegated to db/user_preferences.py)
+    # =========================================================================
+
+    def get_user_preferences(self, user_id: int):
+        return self._user_preference_ops.get_user_preferences(user_id)
+
+    def get_user_preference(self, user_id: int, key: str):
+        return self._user_preference_ops.get_user_preference(user_id, key)
+
+    def set_user_preference(self, user_id: int, key: str, value_json: str, *, base_updated_at):
+        return self._user_preference_ops.set_user_preference(
+            user_id, key, value_json, base_updated_at=base_updated_at
+        )
+
+    def delete_user_preference(self, user_id: int, key: str) -> bool:
+        return self._user_preference_ops.delete_user_preference(user_id, key)
+
+    def delete_user_preferences(self, user_id: int) -> int:
+        return self._user_preference_ops.delete_user_preferences(user_id)
 
     def get_reports_for_agent(self, agent_name: str, report_type: str = None,
                               hours: int = None, search: str = None,
@@ -2000,6 +2562,10 @@ class DatabaseManager:
     def set_setting(self, key: str, value: str):
         return self._settings_ops.set_setting(key, value)
 
+    def insert_setting_if_absent(self, key: str, value: str) -> bool:
+        """Write-once setting insert; True when a row was written (#2380)."""
+        return self._settings_ops.insert_setting_if_absent(key, value)
+
     def delete_setting(self, key: str):
         return self._settings_ops.delete_setting(key)
 
@@ -2138,6 +2704,9 @@ class DatabaseManager:
     def get_all_skill_assignments(self):
         return self._skills_ops.get_all_skill_assignments()
 
+    def get_assignable_agents(self, owner_username):
+        return self._skills_ops.get_assignable_agents(owner_username)
+
     # =========================================================================
     # Skill Sources (delegated to db/skill_sources.py) — ent#237 multi-source
     # =========================================================================
@@ -2215,6 +2784,27 @@ class DatabaseManager:
 
     def get_agent_evaluation(self, eval_id):
         return self._evaluation_ops.get_evaluation(eval_id)
+
+    # ent#366 — Workspace ratings. Keyword-forwarded: this facade re-declares
+    # signatures, so a parameter added only at the ops layer never arrives (the
+    # `create_report` lesson, hit as a 500 on the first live publish).
+    def upsert_workspace_rating(self, agent_name, *, evaluator, target_kind,
+                                target_id, quality, comment=None, execution_id=None):
+        return self._evaluation_ops.upsert_workspace_rating(
+            agent_name, evaluator=evaluator, target_kind=target_kind,
+            target_id=target_id, quality=quality, comment=comment,
+            execution_id=execution_id,
+        )
+
+    def get_workspace_rating(self, evaluator, target_kind, target_id):
+        return self._evaluation_ops.get_workspace_rating(evaluator, target_kind, target_id)
+
+    def list_workspace_ratings_for_targets(self, evaluator, target_kind, target_ids):
+        return self._evaluation_ops.list_workspace_ratings_for_targets(
+            evaluator, target_kind, target_ids)
+
+    def workspace_rating_tally(self, agent_name):
+        return self._evaluation_ops.workspace_rating_tally(agent_name)
 
     def list_agent_evaluations(self, agent_name, limit=50):
         return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit)
@@ -2363,6 +2953,10 @@ class DatabaseManager:
     def has_any_subscription(self):
         return self._subscription_ops.has_any_subscription()
 
+    def list_agents_awaiting_first_credential(self):
+        """ent#582: agents the install's first Claude credential should reach."""
+        return self._subscription_ops.list_agents_awaiting_first_credential()
+
     def list_subscriptions_with_agents(self, owner_id: int = None):
         return self._subscription_ops.list_subscriptions_with_agents(owner_id)
 
@@ -2384,29 +2978,102 @@ class DatabaseManager:
     def get_agent_subscription_id(self, agent_name: str):
         return self._subscription_ops.get_agent_subscription_id(agent_name)
 
-    def get_least_used_subscription(self):
-        return self._subscription_ops.get_least_used_subscription()
+    def list_assignable_subscriptions(self):
+        """#2409: the new-agent auto-assign candidate list — filter only,
+        load-balance order; ranking lives in `services.subscription_service`."""
+        return self._subscription_ops.list_assignable_subscriptions()
 
     # --- SUB-003: Rate-Limit Tracking ---
 
-    def record_rate_limit_event(self, agent_name: str, subscription_id: str, error_message: str = ""):
-        return self._subscription_ops.record_rate_limit_event(agent_name, subscription_id, error_message)
+    def record_rate_limit_event(self, agent_name: str, subscription_id: str, error_message: str = "", failure_kind: str = "rate_limit"):
+        return self._subscription_ops.record_rate_limit_event(agent_name, subscription_id, error_message, failure_kind)
 
     def is_subscription_rate_limited(self, subscription_id: str):
+        """Throttled (429) in the last 2h — the DISPLAY predicate (#2352)."""
         return self._subscription_ops.is_subscription_rate_limited(subscription_id)
+
+    def rate_limited_subscription_ids(self, subscription_ids):
+        """The batched form of `is_subscription_rate_limited` — one query for a
+        whole sweep or dashboard poll (#2443)."""
+        return self._subscription_ops.rate_limited_subscription_ids(subscription_ids)
+
+    def has_recent_subscription_failures(self, subscription_id: str, hours: int = 2):
+        """Failed for ANY reason in the window — the CANDIDATE-SKIP predicate
+        used by auto-switch and assignment (#2352). Not interchangeable with
+        `is_subscription_rate_limited`."""
+        return self._subscription_ops.has_recent_subscription_failures(
+            subscription_id, hours
+        )
 
     def clear_rate_limit_events(self, agent_name: str, subscription_id: str):
         return self._subscription_ops.clear_rate_limit_events(agent_name, subscription_id)
 
-    def cleanup_old_rate_limit_events(self):
-        return self._subscription_ops.cleanup_old_rate_limit_events()
+    def cleanup_old_rate_limit_events(self, retention_days: int = 30, chunk_size: int = 1000):
+        return self._subscription_ops.cleanup_old_rate_limit_events(
+            retention_days, chunk_size
+        )
 
-    def select_best_alternative_subscription(self, current_subscription_id: str):
-        return self._subscription_ops.select_best_alternative_subscription(current_subscription_id)
+    # ent#433 — subscription headroom history + failure-event retention.
+    # These delegations are hand-written because DatabaseManager has NO
+    # __getattr__ fallback; a missing one raises AttributeError on the first
+    # real request while every suite that mocks the `database` module stays
+    # green (docs/memory/learnings.md, 2026-07-06).
+    def insert_headroom_history(self, subscription_id: str, snapshot: dict):
+        return self._subscription_ops.insert_headroom_history(subscription_id, snapshot)
+
+    def get_headroom_history(self, subscription_id: str, *, hours: int, bucket: str):
+        return self._subscription_ops.get_headroom_history(
+            subscription_id, hours=hours, bucket=bucket
+        )
+
+    def count_headroom_history_candidates(self, retention_days: int, limit: int):
+        return self._subscription_ops.count_headroom_history_candidates(
+            retention_days, limit
+        )
+
+    def prune_headroom_history(self, retention_days: int = 30, chunk_size: int = 1000):
+        return self._subscription_ops.prune_headroom_history(retention_days, chunk_size)
+
+    def count_rate_limit_event_candidates(self, retention_days: int, limit: int):
+        return self._subscription_ops.count_rate_limit_event_candidates(
+            retention_days, limit
+        )
+
+    def list_viable_alternative_subscriptions(self, current_subscription_id: str):
+        """#2409: the auto-switch candidate list — filter only, load-balance
+        order; ranking lives in `services.subscription_auto_switch`."""
+        return self._subscription_ops.list_viable_alternative_subscriptions(current_subscription_id)
+
+    def list_recently_failed_alternatives(self, current_subscription_id: str):
+        """#2638: the COMPLEMENT of the candidate list — the alternatives the 2h
+        skip-list is excluding, which the switcher may readmit only on positive
+        fresh evidence."""
+        return self._subscription_ops.list_recently_failed_alternatives(current_subscription_id)
+
+    def last_failure_at_by_subscription(self, subscription_ids, hours: int = 2):
+        """#2638: newest failure instant per subscription inside the window, one
+        query — the instant a provider reset time is compared against."""
+        return self._subscription_ops.last_failure_at_by_subscription(
+            subscription_ids, hours=hours
+        )
 
     def get_subscription_usage(self, subscription_id: str):
         """Return rolling usage totals for a subscription (SUB-004)."""
         return self._subscription_ops.get_subscription_usage(subscription_id)
+
+    # --- #471: Usage observability ---
+
+    def get_failure_event_counts(self, subscription_id: str, hours: int = 24):
+        return self._subscription_ops.get_failure_event_counts(subscription_id, hours)
+
+    def get_failure_event_counts_by_subscription(self, hours: int = 24):
+        return self._subscription_ops.get_failure_event_counts_by_subscription(hours)
+
+    def get_agent_subscription_map(self, agent_names=None):
+        return self._subscription_ops.get_agent_subscription_map(agent_names)
+
+    def get_subscription_usage_breakdown(self, subscription_id: str):
+        return self._subscription_ops.get_subscription_usage_breakdown(subscription_id)
 
     # =========================================================================
     # Agent Monitoring (delegated to db/monitoring.py) - MON-001
@@ -2500,6 +3167,10 @@ class DatabaseManager:
     def get_agent_last_execution_at(self, agent_name: str):
         """#1854: all-time MAX(started_at) for the agent (MCP-key `stale` health)."""
         return self._schedule_ops.get_agent_last_execution_at(agent_name)
+
+    def agent_has_running_execution(self, agent_name: str):
+        """ent#582: would a restart kill a turn right now?"""
+        return self._schedule_ops.agent_has_running_execution(agent_name)
 
     def get_schedule_analytics(self, schedule_id: str, hours: int,
                                 agent_name: str):
@@ -3198,9 +3869,6 @@ class DatabaseManager:
     def list_non_terminal_loops(self):
         return self._loop_ops.list_non_terminal_loops()
 
-    def mark_orphan_loops_interrupted(self) -> int:
-        return self._loop_ops.mark_orphans_interrupted()
-
     def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
@@ -3209,6 +3877,26 @@ class DatabaseManager:
 
     def list_loop_runs(self, loop_id: str):
         return self._loop_ops.list_runs(loop_id)
+
+    # ---- Terminal-driven advance (#2523) -----------------------------------
+
+    def get_loop_run_by_execution(self, execution_id: str):
+        return self._loop_ops.get_run_by_execution(execution_id)
+
+    def claim_loop_advance(self, loop_id: str, run_number: int) -> bool:
+        return self._loop_ops.claim_loop_advance(loop_id, run_number)
+
+    def request_loop_stop(self, loop_id: str) -> bool:
+        return self._loop_ops.request_loop_stop(loop_id)
+
+    def schedule_loop_next_run(self, loop_id: str, next_run_at: str):
+        return self._loop_ops.schedule_next_run(loop_id, next_run_at)
+
+    def claim_due_loop(self, loop_id: str, next_run_at: str) -> bool:
+        return self._loop_ops.claim_due_loop(loop_id, next_run_at)
+
+    def list_due_loops(self, now: str, *, limit: int = 100):
+        return self._loop_ops.list_due_loops(now, limit=limit)
 
 
 # Global database manager instance

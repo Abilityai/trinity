@@ -524,12 +524,18 @@ failure that flipped this answer would either recreate the orchestrator or leak 
 `is_system`-flagged row). So
 writer and checker cannot disagree. `None` (every existing caller) = today's fleet-derived behaviour.
 
-**Restart-policy carry-forward (#1816):** `_provision_folders_and_run_agent_container` takes a keyword-only
-`restart_policy: Optional[dict]` and forwards it to `containers_run` only when `Name` is non-empty.
-`recreate_container_with_updated_config` reads it from the old container's `HostConfig` — previously an
-extracted-but-never-read variable, which is precisely why `unless-stopped` silently vanished on every
-recreate. Read null-safely as `(old_host_config.get("RestartPolicy") or {}).get("Name")`: the key can exist
-with a `null` value, and `.get` on `None` would abort the recreate.
+**Restart policy — unconditional, #2541** *(retired #1816's carry-forward)*:
+`_provision_folders_and_run_agent_container` bakes `restart_policy=AGENT_RESTART_POLICY`
+(`{"Name": "unless-stopped"}`, from `capabilities.py`) on **every** call, like every other property at that
+call site. #1816 had it as a keyword-only `restart_policy: Optional[dict]` read from the old container's
+`HostConfig` and forwarded only when `Name` was non-empty — faithful, and therefore sticky: it carried
+Docker's default `no` forward forever, which is why the 2026-09-04 power-off left 8 of 19 agents Exited for
+~42 hours. The tail's *other* caller, `recreate_missing_container` (#1559 recovery), passed nothing at all,
+so a recovered agent was rebuilt on `no` even when it had `unless-stopped`. The keyword and the
+`old_host_config` extraction are both **deleted** — keeping the latter would recreate the dead-variable
+shape #1816 was filed to fix. #1816's intent (`trinity-system` never loses `unless-stopped` across a
+recreate) now holds fleet-wide by construction. See [container-capabilities.md](container-capabilities.md)
+→ Container Restart Policy.
 
 **Canonical cold restart — `restart_agent_internal` (#1860)** (`src/backend/services/agent_service/lifecycle.py:469-488`, directly after `start_agent_internal` :257):
 
@@ -640,17 +646,28 @@ async def get_agent_logs_endpoint(agent_name: AuthorizedAgentByName, request: Re
 
 > **Performance Note (2026-01-12)**: `list_all_agents_fast()` was added to optimize agent listing. It extracts data ONLY from container labels, avoiding expensive Docker operations like `container.attrs`, `container.image`, and `container.stats()`. This reduced `/api/agents` response time from ~2-3s to <50ms.
 
-**Status Normalization (line 38-44):**
+**Status Normalization:**
 ```python
 # Docker statuses: created, running, paused, restarting, removing, exited, dead
 docker_status = container.status
-if docker_status in ("exited", "dead", "created"):
+if docker_status in ("exited", "dead", "created", "restarting"):  # #2541
     normalized_status = "stopped"
 elif docker_status == "running":
     normalized_status = "running"
 else:
-    normalized_status = docker_status  # paused, restarting, etc.
+    normalized_status = docker_status  # paused, removing, etc.
 ```
+
+These six lines exist **twice** — in `get_agent_status_from_container` and inline in
+`list_all_agents_fast` — so a change applied to one reaches one API surface only; a third mapping,
+`agent_container_states` (#2196), collapses to `"running" if … else "stopped"`. **#2541** added
+`restarting` to the stopped tuple in **both** copies, making all three agree. That state was
+effectively unreachable while `trinity-system` was the only container with a restart policy; now every
+agent has one, and `restarting` is precisely what a fleet shows while recovering from the host reboot
+`unless-stopped` exists to survive. Passed through verbatim it matched **neither** of
+`stores/agents.js`'s exact-equality filters (`runningAgents` / `stoppedAgents`), so the agent appeared
+in neither list. Extracting the duplicated block into one helper is the cleaner shape and is
+deliberately **not** bundled with the fix.
 
 ---
 
@@ -1057,6 +1074,7 @@ await log_audit_event(
 
 | Date | Changes |
 |------|---------|
+| 2026-09-07 | **#2541 — agent containers are born `unless-stopped`**: `AGENT_RESTART_POLICY` joins `AGENT_TMPFS_MOUNT` / `AGENT_LOG_CONFIG` in `capabilities.py` and is passed by all three create sites; the shared recreate tail bakes it **unconditionally**, which retires #1816's keyword-only `restart_policy` carry-forward and its now-dead `old_host_config` extraction — a faithful carry-forward carried Docker's default `no` forward forever, and the tail's other caller (`recreate_missing_container`, #1559) passed nothing at all. `restarting` now normalizes to `stopped` in **both** `docker_service` normalizers. Guard: `tests/unit/test_2541_restart_policy_parity.py`. Existing containers adopt on recreate — [AGENT_RESTART_POLICY_2026-09.md](../../migrations/AGENT_RESTART_POLICY_2026-09.md). |
 | 2026-07-31 | **#1919 — fleet-restart lock hardening** (PR #1912 review follow-up): the per-iteration lease refresh became an ownership-checked pre-action gate (`lock_token_matches` shared helper in `redis_breaker_util`, foreign ⇒ stop with `stopped_early="lease_lost_foreign"` + `processed` partial-run honesty in summary/audit, absent ⇒ SETNX re-acquire + `lease_reacquired` audit flag, EXPIRE→0 = absent, refresh errors fail-open with one throttled warning); `list_all_agents_fast()` moved inside the `try/finally` (abnormal exit audited as `stopped_early="error"` + class name); TTL 900→2100 sized above `skill_service._INJECT_LOCK_TTL_SECONDS` (1800) so one slow agent can no longer outlive the whole lease. +11 unit tests. |
 | 2026-07-31 | **#1860 — fleet restart adopts a rebuilt base image**: new canonical cold-restart helper `restart_agent_internal(agent_name, *, stop_timeout=30)` (`lifecycle.py:469-488` — explicit stop is load-bearing so the #1809 cold-start-only drift predicate can fire); `POST /api/ops/fleet/restart` routes each agent through it instead of raw stop+start, skips ephemeral ghosts (ent#69), adds `reject_agent_principal`, a single-flight `ops:fleet_restart` SETNX lock (409, 900s TTL, compare-and-delete release), explicit `recreated`/`recreate_reason`/injection field copy + `summary.recreated`, and a partial-safe `fleet_restart` audit entry written in `finally` with a per-agent `recreated: {name: reason}` map. Inline stop→start copies in `system_agent.py`/`systems.py`/`subscription_auto_switch.py` consolidate under #1817. See "Canonical cold restart" above. |
 | 2026-07-30 | **ent#109 — one owner for git env across both rebuild paths**: `_apply_git_env_from_db(agent_name, env_vars, *, pat_gate)` is now the sole writer of the GitHub-sync env block for **both** `recreate_container_with_updated_config` (config drift) and `_apply_persisted_auth_env` → `recreate_missing_container` (rebuild from nothing). The first path seeds `env_vars` from the **old container** and re-derived only `GITHUB_PAT`, replaying whatever `GITHUB_REPO`/`GIT_SYNC_*` it happened to carry — and its one production caller, `start_agent_internal`, fires on nine config-drift predicates **and base-image drift at cold start**, so a base-image rebuild armed that replay fleet-wide. The **PAT gate is a required per-call-site parameter, never a default**: `per_agent_only` (config drift) preserves #211 verbatim so a global-only platform PAT is never injected into a previously-tokenless container; `effective` (rebuild-from-nothing) uses the 2-tier per-agent → global resolver. Sharing one gate is the ent#162 credential leak (`configure_push_remote` clears the push blackhole ⇒ a private KB can reach the shared public upstream), so an AST guard pins the whole writer set (`{recreate_container_with_updated_config: per_agent_only, _apply_persisted_auth_env: effective}`) and fails CI on a flipped gate *or* a third writer on any container-seeded path. Also: **set-or-clear** over `_GIT_ENV_KEYS` (a deleted `agent_git_config` row pops the whole set incl. an orphaned `GITHUB_PAT`; a `source_mode` flip clears the mode/branch pair), `GIT_SYNC_AUTO` derived as **DB flag OR baked env** (derive-only — no write-back, because "baked true / DB 0" is also exactly an owner's explicit `PUT .../git/auto-sync {enabled:false}`, and the write would cross an `OwnedAgentByName` → `AuthorizedAgentByName` privilege boundary via Start), and **correct, never introduce** on the config-drift path (the block is written only when the old container already carried `GITHUB_REPO` or a PAT resolves — otherwise startup.sh scrubs the `.git/config` credential of an agent bound via `POST /{agent}/git/initialize` and blackholes its push remote; `effective` is exempt). Tests: `tests/unit/test_ent109_git_env_seam.py` (22). See [github-sync.md](github-sync.md) → Container-rebuild env, [git-sync-health.md](git-sync-health.md). |

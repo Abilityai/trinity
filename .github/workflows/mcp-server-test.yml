@@ -1,0 +1,50 @@
+name: MCP Server Tests
+
+# #2363 / #2661: nothing ran this package's suite. `helper-mcp-test.yml` covers
+# `src/helper-mcp/**` only, and `container-security.yml` filters on
+# `src/mcp-server/Dockerfile` — not `src/mcp-server/src/**`. So 341 tests across
+# 28 files never gated a PR, and `npm run build` (the ONLY typecheck for this
+# package) first ran when `deploy-dev.yml` built the image *on dev* — meaning a
+# type break landed on dev and broke the deploy instead of failing the PR.
+#
+# Build BEFORE test on purpose: `npm test` runs through tsx, which transpiles
+# per-file and does not typecheck, so a type error would otherwise pass here.
+
+on:
+  pull_request:
+    paths:
+      - 'src/mcp-server/**'
+      - '.github/workflows/mcp-server-test.yml'
+  push:
+    branches: [dev, main]
+    paths:
+      - 'src/mcp-server/**'
+      - '.github/workflows/mcp-server-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build (typecheck) + unit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/mcp-server
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/mcp-server/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build (typecheck)
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test

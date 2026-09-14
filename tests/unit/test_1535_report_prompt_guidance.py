@@ -36,7 +36,17 @@ MCP_TOOL = REPO_ROOT / "src/mcp-server/src/tools/reports.ts"
 # landed at ~1.3 KB (~330 tokens, +18% on the platform prompt) after a
 # deliberate trim from ~1.8 KB. Raising this ceiling should be a decision, not
 # an accident.
-MAX_BLOCK_CHARS = 2000
+#
+# ent#365 raised it 2000 -> 2400, deliberately. The audience half of reports
+# (`audience_email`) is what makes a report reach the person it was produced
+# for; without it in this block every agent keeps publishing operator-only and
+# the Workspace deliverables surface is empty by construction — the lever
+# exists and nothing pulls it (#1039/#1056 class). #1535's own argument applies
+# verbatim: reporting belongs in the platform prompt so it is a fleet-wide
+# default rather than a per-template opt-in, and the same is true of who a
+# report is for. Cost is ~400 chars (~100 tokens) per turn; the alternative was
+# trimming working guidance to fit, which trades one inert feature for another.
+MAX_BLOCK_CHARS = 2400
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +84,25 @@ def test_codex_prompt_uses_the_bare_tool_name():
     assert "mcp__trinity__report" not in prompt
     orientation = prompt.split("---", 1)[0]
     assert "`report`" in orientation, "Codex orientation enumerates tools; report must be listed"
+
+
+def test_audience_is_documented_so_the_deliverables_surface_can_fill():
+    """The audience arg must ship in the fleet-wide block (ent#365).
+
+    `addressed_to_email` is nullable and every agent defaults to NULL, so if
+    this block never mentions `audience_email` the Workspace deliverables list
+    is empty on every install forever — not "until agents adopt it", but with
+    no mechanism by which adoption happens. Caught in review on PR #2383.
+    """
+    block = _report_block()
+    assert "audience_email" in block, (
+        "the report block must document audience_email or no agent will ever "
+        "address a report, leaving the Workspace deliverables surface inert"
+    )
+    # The arg name must match what the MCP tool actually accepts.
+    assert "audience_email" in MCP_TOOL.read_text(), (
+        "prompt documents an argument the report tool does not accept"
+    )
 
 
 def test_every_display_hint_from_the_mcp_contract_is_documented():

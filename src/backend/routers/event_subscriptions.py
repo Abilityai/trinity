@@ -1,3 +1,4 @@
+# mcp: events.ts (emit_event, subscribe_to_event, list_event_subscriptions, delete_event_subscription)
 """
 Agent Event Subscriptions Router (EVT-001).
 

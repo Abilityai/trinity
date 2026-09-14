@@ -25,6 +25,12 @@ import httpx
 from database import db
 from models import ActivityState, TaskExecutionStatus
 from services import event_dispatch_service
+# #2433: eager, module-level — a stdlib leaf. A call-time lazy import here is
+# the learnings-2026-08-12 shape: under a leaked `sys.modules` MagicMock every
+# candidate would read as "in flight" and the watchdog would silently skip
+# every row. Bound once so tests patch `cleanup_service._inflight_verdicts`,
+# never a package attribute a lazy import would bypass.
+from services import agent_call_limiter
 from services.agent_auth import build_agent_auth_headers
 from services.capacity_manager import get_capacity_manager
 from services.slot_service import SLOT_TTL_BUFFER
@@ -32,6 +38,72 @@ from utils.helpers import utc_now, utc_now_iso, parse_iso_timestamp
 from utils.credential_sanitizer import sanitize_text
 
 logger = logging.getLogger(__name__)
+
+_inflight_verdicts = agent_call_limiter.inflight_verdicts
+
+
+async def _inflight_verdict_map(execution_ids) -> Dict[str, str]:
+    """#2433: ``{execution_id: "alive" | "absent" | "unknown"}`` for the given
+    ids, guarded so a stub leak can never read as "everything is in flight":
+    anything that is not a dict of string verdicts collapses to ``absent``."""
+    ids = [eid for eid in execution_ids if isinstance(eid, str) and eid]
+    if not ids:
+        return {}
+    try:
+        raw = await _inflight_verdicts(ids)
+    except Exception as e:  # noqa: BLE001 — fail-open to the pre-#2433 behaviour
+        logger.warning(f"[Watchdog] in-flight verdict lookup failed ({e}) — treating as absent")
+        return {eid: "absent" for eid in ids}
+    if not isinstance(raw, dict):
+        return {eid: "absent" for eid in ids}
+    out: Dict[str, str] = {}
+    for eid in ids:
+        verdict = raw.get(eid)
+        out[eid] = verdict if verdict in ("alive", "absent", "unknown") else "absent"
+    return out
+
+
+def _inflight_skip(verdict: str, age_seconds: float) -> bool:
+    """#2433: should orphan recovery be withheld for this row?
+
+    ``alive`` — a live backend dispatcher owns it: never orphan.
+    ``unknown`` — the cross-worker marker could not be asked (slow/flapping
+    Redis): withhold for as long as a dispatcher COULD still own the row
+    (#2196's rule — a read that could not be asked is not a read that said
+    no); rows older than that bound cannot be in flight and are orphaned.
+    ``absent`` — orphan.
+    """
+    if verdict == "alive":
+        return True
+    if verdict == "unknown":
+        return age_seconds < agent_call_limiter.inflight_max_age_seconds()
+    return False
+
+
+def _row_age_seconds(execution: Dict) -> float:
+    """Age of an execution row from its `started_at`; unparseable ⇒ +inf, so
+    an `unknown` in-flight verdict never withholds recovery on garbage."""
+    raw = execution.get("started_at")
+    try:
+        return (utc_now() - parse_iso_timestamp(raw)).total_seconds()
+    except Exception:  # noqa: BLE001
+        return float("inf")
+
+
+def _orphan_error_message(agent_name: str, agent_reports_pending: bool) -> str:
+    """#2433: say what was OBSERVED. The old text — "Execution completed on
+    agent but status not reported" — asserted a completion for a row the agent
+    had never received."""
+    agent_side = (
+        "not running, not pending, not recently completed"
+        if agent_reports_pending
+        else "not running, not recently completed"
+    )
+    return (
+        f"Execution not tracked by agent '{agent_name}' ({agent_side}) and no live "
+        f"backend dispatcher (not parked in this worker, no cross-worker marker) "
+        f"— recovered by watchdog"
+    )
 
 # Configuration
 CLEANUP_INTERVAL_SECONDS = 300  # 5 minutes
@@ -139,22 +211,39 @@ def set_cleanup_ws_manager(manager):
     _ws_manager = manager
 
 
+class _KnownIds(set):
+    """The agent-known id set, tagged with whether the agent's image reports
+    the #2433 `pending_ids` field (so the orphan error string can say
+    "not pending" only when that was actually observed)."""
+
+    reports_pending: bool = False
+
+
 def _extract_agent_known_ids(payload: Dict) -> set:
     """Set of execution IDs the agent considers 'known': currently-running
-    plus the recently-completed window (#921).
+    plus the recently-completed window (#921) plus, since #2433, the ids the
+    agent has ACCEPTED but not yet spawned (`pending_ids` — queued in its
+    thread pool, or waiting on the chat execution lock).
 
     Single source of truth for parsing the `/api/executions/running`
     response so the periodic watchdog (`_reconcile_orphaned_executions`)
     and the startup recovery (`recover_orphaned_executions`) can't drift
     out of sync. Defensive against malformed entries and missing fields:
     older agent images that haven't shipped the buffer return only the
-    `executions` field — the union degrades silently to pre-#921 behaviour.
+    `executions` field — the union degrades silently to pre-#921 behaviour,
+    and an image without `pending_ids` degrades to pre-#2433 behaviour.
     """
-    ids = {
+    ids = _KnownIds(
         eid for ex in (payload.get("executions") or [])
-        if (eid := ex.get("execution_id"))
-    }
-    ids.update(payload.get("recently_completed_ids") or [])
+        if isinstance(ex, dict) and (eid := ex.get("execution_id"))
+    )
+    recent = payload.get("recently_completed_ids")
+    if isinstance(recent, (list, tuple, set)):
+        ids.update(eid for eid in recent if isinstance(eid, str))
+    pending = payload.get("pending_ids")
+    if isinstance(pending, (list, tuple, set)):
+        ids.reports_pending = True
+        ids.update(eid for eid in pending if isinstance(eid, str))
     return ids
 
 
@@ -184,6 +273,29 @@ def _read_retention_settings() -> tuple[int, int, int, int]:
         _read("health_check_retention_days"),
         _read("agent_reports_retention_days"),
     )
+
+
+def _read_retention_setting(key: str) -> int:
+    """Read ONE retention window, with the same coercion as the 4-tuple reader.
+
+    Sweeps added after `_read_retention_settings` was written read their own key
+    rather than growing that tuple (the #1296 precedent). This is that read,
+    factored out so a third and fourth caller don't re-inline it.
+
+    Fail-safe in the #1638 direction: anything unparseable, negative, or
+    unreadable becomes `0`, which DISABLES the sweep. A malformed setting must
+    never enable an unbounded prune.
+    """
+    from services.settings_service import OPS_SETTINGS_DEFAULTS
+
+    try:
+        raw = db.get_setting_value(key, OPS_SETTINGS_DEFAULTS.get(key, "0"))
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        return 0
+    except Exception as e:  # noqa: BLE001 — an unreadable setting disables, never enables
+        logger.error(f"[Cleanup] Could not read retention setting {key}: {e}")
+        return 0
 
 
 def _log_prune(pruned: int, message: str) -> None:
@@ -372,11 +484,21 @@ class CleanupReport:
     ssh_credentials_expired: int = 0
     # Issue #1296: terminal agent_reminders rows deleted past their retention window
     agent_reminders_pruned: int = 0
+    # ent#433: subscription headroom probe history pruned past its window, and
+    # subscription rate-limit/auth failure events pruned past theirs (the latter
+    # replaces a hardcoded 24h sweep that had no window and no guard).
+    headroom_history_pruned: int = 0
+    rate_limit_events_pruned: int = 0
     # Issue #1804: dispatch activities closed by a recovery path that won the
     # terminal CAS (watchdog, startup recovery, the bulk sweeps). Post-merge
     # signal: `stale_activities` should trend to ~0 while this picks up the
     # volume — a non-zero `stale_activities` means a producer is still unowned.
     activities_closed_on_recovery: int = 0
+    # #2433: rows the watchdog / Phase-3 re-verify would have orphaned but
+    # withheld because a live backend dispatcher owns them (parked in the
+    # agent-call queue or mid-call) or the cross-worker marker could not be
+    # asked. Observability only — not a recovery, so NOT summed into `total`.
+    dispatch_inflight_skipped: int = 0
 
     @property
     def total(self) -> int:
@@ -393,7 +515,8 @@ class CleanupReport:
                 self.agent_volumes_removed + self.orphan_agent_volumes_reclaimed +
                 self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed +
                 self.operator_queue_pruned + self.ssh_credentials_expired +
-                self.agent_reminders_pruned)
+                self.agent_reminders_pruned +
+                self.headroom_history_pruned + self.rate_limit_events_pruned)
     # NOTE (#1804): activities_closed_on_recovery is deliberately NOT summed
     # into `total` — it is an observability counter over work already counted
     # by the sweep that closed the execution, not additional cleanup work.
@@ -405,6 +528,7 @@ class CleanupReport:
             "stale_executions": self.stale_executions,
             "no_session_executions": self.no_session_executions,
             "orphaned_skipped": self.orphaned_skipped,
+            "dispatch_inflight_skipped": self.dispatch_inflight_skipped,
             "stale_activities": self.stale_activities,
             "stale_slots": self.stale_slots,
             "stale_slot_executions": self.stale_slot_executions,
@@ -426,6 +550,8 @@ class CleanupReport:
             "operator_queue_pruned": self.operator_queue_pruned,
             "ssh_credentials_expired": self.ssh_credentials_expired,
             "agent_reminders_pruned": self.agent_reminders_pruned,
+            "headroom_history_pruned": self.headroom_history_pruned,
+            "rate_limit_events_pruned": self.rate_limit_events_pruned,
             "activities_closed_on_recovery": self.activities_closed_on_recovery,
             "total": self.total,
         }
@@ -520,11 +646,12 @@ class CleanupService:
         # reclaims — so within a single cycle the duration fabricator could beat
         # a real closer and permanently record a 15-minute run as a 2-hour one.
         self._sweep_stale_activities(report)
-        self._sweep_rate_limit_events()
+        self._sweep_rate_limit_events(report)
         self._sweep_shared_files(report)
         self._sweep_retention_772(report)
         self._sweep_operator_queue_retention(report)
         self._sweep_agent_reminders_retention(report)
+        self._sweep_headroom_history(report)
         await self._sweep_soft_deleted_agents(report)
         await self._sweep_orphan_agent_volumes(report)
         await self._sweep_ephemeral_agents(report)
@@ -865,21 +992,81 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Cleanup] Error cleaning stale slots: {e}")
 
-    def _sweep_rate_limit_events(self) -> None:
-        """4. Hourly maintenance: prune rate-limit events older than 24h (#476).
+    def _sweep_rate_limit_events(self, report: CleanupReport) -> None:
+        """4. Hourly maintenance: prune rate-limit events past their window.
 
         Runs every 12th cycle (60 min at 5-min interval) plus the first cycle
         after startup so we don't wait an hour on boot. The gate reads
         `_cycle_count` before the orchestrator increments it.
+
+        ent#433: the window used to be a hardcoded 24 hours inside the db
+        accessor — this table held the platform's only durable record of real
+        agent work hitting a provider rate limit (timestamped, attributed to
+        the causing agent) and destroyed it daily, with no operator-visible
+        window, no #1644 blast-radius guard, and no `GET /api/settings/retention`
+        entry, while every sibling table had all three. It is now a real
+        retention window like the others, and goes through the same guard.
         """
         if self._cycle_count % 12 != 0:
             return
+        days = _read_retention_setting("subscription_failure_event_retention_days")
+        if days <= 0:
+            return
         try:
-            pruned = db.cleanup_old_rate_limit_events()
-            if pruned > 0:
-                logger.info(f"[Cleanup] Pruned {pruned} rate-limit events (>24h old)")
+            if _guard_allows(
+                "subscription_failure_event_retention_days",
+                "subscription_rate_limit_events", days,
+                lambda limit: db.count_rate_limit_event_candidates(days, limit),
+            ):
+                pruned = db.cleanup_old_rate_limit_events(
+                    retention_days=days,
+                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
+                )
+                report.rate_limit_events_pruned = pruned
+                _after_guarded_prune("subscription_failure_event_retention_days")
+                if pruned > 0:
+                    _log_prune(
+                        pruned,
+                        f"[Cleanup] Pruned {pruned} subscription rate-limit events "
+                        f"older than {days} days (ent#433)",
+                    )
         except Exception as e:
             logger.error(f"[Cleanup] Error pruning rate-limit events: {e}")
+
+    def _sweep_headroom_history(self, report: CleanupReport) -> None:
+        """Prune subscription headroom probe history past its window (ent#433).
+
+        Steady state is a trickle: #471's own floors bound probing to <=1
+        ambient probe per 15 minutes per subscription (demand-driven — an
+        unwatched instance probes nothing), so a 5-minute cycle's candidate set
+        is single digits, three orders of magnitude under the guard threshold.
+        The guard therefore only ever fires if an operator NARROWS the window,
+        which is exactly the #1644 case it exists for — do not "optimize" it
+        away on the grounds that it never trips.
+        """
+        days = _read_retention_setting("subscription_headroom_retention_days")
+        if days <= 0:
+            return
+        try:
+            if _guard_allows(
+                "subscription_headroom_retention_days",
+                "subscription_headroom_history", days,
+                lambda limit: db.count_headroom_history_candidates(days, limit),
+            ):
+                pruned = db.prune_headroom_history(
+                    retention_days=days,
+                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
+                )
+                report.headroom_history_pruned = pruned
+                _after_guarded_prune("subscription_headroom_retention_days")
+                if pruned > 0:
+                    _log_prune(
+                        pruned,
+                        f"[Cleanup] Deleted {pruned} subscription_headroom_history "
+                        f"rows older than {days} days (ent#433)",
+                    )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error pruning headroom history: {e}")
 
     def _sweep_shared_files(self, report: CleanupReport) -> None:
         """4b. Purge expired / old-revoked shared files (C4 / FILES-001).
@@ -1662,7 +1849,10 @@ class CleanupService:
                            + report.soft_deleted_schedules_purged
                            + report.idempotency_keys_purged
                            + report.agent_reports_pruned
-                           + report.operator_queue_pruned)  # #1142
+                           + report.operator_queue_pruned  # #1142
+                           + report.agent_reminders_pruned  # #1296 — was omitted
+                           + report.headroom_history_pruned      # ent#433
+                           + report.rate_limit_events_pruned)    # ent#433
         if retention_total > 0:
             try:
                 _wal_checkpoint_truncate()
@@ -1725,6 +1915,11 @@ class CleanupService:
             return
 
         agent_names = list(reclaimed.keys())
+        # #2433 review: ONE Redis round-trip for the whole cycle, mirroring
+        # `_reconcile_orphaned_executions` — under a backlog these are the same
+        # cycle, and a per-row MGET made the cost scale with the reclaim count.
+        reclaimed_ids = [eid for ids in reclaimed.values() for eid in ids]
+        inflight = await _inflight_verdict_map(reclaimed_ids)
         async with httpx.AsyncClient(timeout=WATCHDOG_HTTP_TIMEOUT) as client:
             results = await asyncio.gather(
                 *(self._get_agent_running_ids(client, name) for name in agent_names),
@@ -1835,6 +2030,24 @@ class CleanupService:
                         )
                         continue
 
+                    # #2433: the agent does not know it — but a live backend
+                    # dispatcher may (parked in the agent-call queue past this
+                    # slot's TTL, or mid-call on an image that does not yet
+                    # report `pending_ids`). A row with a live dispatcher is not
+                    # stale: the refresher renews the lease while it is parked
+                    # and the dispatcher's own terminal (or its HTTP timeout)
+                    # finishes it. An unreadable marker is not "absent" either;
+                    # the registry-blind Phase-1 stale sweep stays the backstop.
+                    verdict = inflight.get(execution_id, "absent")
+                    if verdict != "absent":
+                        report.dispatch_inflight_skipped += 1
+                        logger.warning(
+                            f"[Cleanup] Skipping {execution_id} for '{agent_name}' — slot TTL "
+                            f"expired but a backend dispatcher is "
+                            f"{'alive' if verdict == 'alive' else 'unverifiable (Redis unreadable)'} (#2433)"
+                        )
+                        continue
+
                     # Re-verify confirmed inactive → safe to fail.
                     try:
                         # Issue #61: best-effort terminate before marking failed.
@@ -1935,11 +2148,29 @@ class CleanupService:
             recovery_failures = 0
             confirmed_running: set = set()  # #226: track IDs verified as still running
 
+            # #2433: proof-of-life has a second half — a LIVE BACKEND DISPATCHER.
+            # An admitted row can be parked in the backend agent-call queue (or
+            # queued on the agent, on an image that does not yet report
+            # `pending_ids`) with the agent never having heard of it. Collect
+            # every absent-from-agent candidate first so the cross-worker
+            # markers are read with ONE Redis round-trip per sweep.
+            candidates: List[str] = []
+            for agent_name, executions in agents.items():
+                known = agent_running.get(agent_name)
+                if known is None:
+                    continue
+                for ex in executions:
+                    if ex.get("id") and ex["id"] not in known:
+                        candidates.append(ex["id"])
+            inflight = await _inflight_verdict_map(candidates)
+            skipped_by_agent: Dict[str, Dict[str, int]] = defaultdict(lambda: {"alive": 0, "unknown": 0})
+
             for agent_name, executions in agents.items():
                 agent_running_ids = agent_running.get(agent_name)
                 if agent_running_ids is None:
                     # Agent unreachable — skip entirely, retry next cycle
                     continue
+                agent_reports_pending = bool(getattr(agent_running_ids, "reports_pending", False))
 
                 for ex in executions:
                     try:
@@ -1959,16 +2190,25 @@ class CleanupService:
                                 )
                                 continue
 
-                            # Orphan: missing from agent's running + recently-
-                            # completed sets. The agent-side window in
+                            # #2433: absent from the agent, but a live backend
+                            # dispatcher may still own it (parked or mid-call).
+                            # Orphan = the agent does not know it AND no
+                            # dispatcher is alive for it.
+                            verdict = inflight.get(execution_id, "absent")
+                            if _inflight_skip(verdict, age_seconds):
+                                skipped_by_agent[agent_name][verdict] += 1
+                                if report is not None:
+                                    report.dispatch_inflight_skipped += 1
+                                continue
+
+                            # Orphan: missing from agent's running + pending +
+                            # recently-completed sets AND no live dispatcher.
+                            # The agent-side window in
                             # `process_registry.list_recently_completed_ids`
                             # already absorbed the success-write race (#921),
                             # so this is a true orphan.
                             recovery_attempts += 1
-                            error_msg = (
-                                "Execution completed on agent but status not reported "
-                                "— recovered by watchdog"
-                            )
+                            error_msg = _orphan_error_message(agent_name, agent_reports_pending)
                             recovered = await self._recover_execution(
                                 execution_id, agent_name, error_msg, "orphan_recovered",
                                 client, report,
@@ -2015,6 +2255,16 @@ class CleanupService:
                             f"[Watchdog] Error recovering execution {ex.get('id', '?')} "
                             f"on agent '{agent_name}': {e}"
                         )
+
+        # #2433: one line per agent per cycle, never per row — under a backlog
+        # a per-row line would print every parked execution every 5 minutes.
+        for _agent, _counts in skipped_by_agent.items():
+            _log = logger.warning if _counts["unknown"] else logger.info
+            _log(
+                f"[Watchdog] Withheld orphan recovery on '{_agent}': {_counts['alive']} "
+                f"execution(s) owned by a live backend dispatcher (parked/in-flight), "
+                f"{_counts['unknown']} with an unreadable cross-worker marker (Redis) (#2433)"
+            )
 
         # Systemic failure detection: warn if majority of recoveries failed
         if recovery_attempts > 0 and recovery_failures > recovery_attempts / 2:
@@ -2302,17 +2552,26 @@ class CleanupService:
 
     async def _cleanup_loop(self):
         """Main cleanup loop."""
-        # One-shot startup hook for #740: any non-terminal agent_loops left
-        # over from a prior process get marked `interrupted`. Loops do not
-        # auto-resume. Runs once on boot, not every cycle.
+        # One-shot startup hook for #740, rewritten by #2523. It used to call
+        # `db.mark_orphan_loops_interrupted()`, flipping EVERY non-terminal loop
+        # to `interrupted` — correct while a loop was an in-process
+        # `asyncio.Task` whose state died with the process, and pure data loss
+        # now that the loop lives on its row. `reconcile_after_restart` instead
+        # leaves alone every loop with an execution still in flight (that
+        # execution's terminal — or this service's own recovery of it, which
+        # writes one — advances the loop) and re-arms only the loops that lost
+        # their dispatch. Runs once on boot, not every cycle.
         try:
-            interrupted = db.mark_orphan_loops_interrupted()
-            if interrupted > 0:
+            from services.loop_service import get_loop_service
+
+            rearmed = await get_loop_service().reconcile_after_restart()
+            if rearmed > 0:
                 logger.info(
-                    f"[Cleanup] Startup: marked {interrupted} orphan agent_loops as interrupted (#740)"
+                    f"[Cleanup] Startup: re-armed {rearmed} agent_loops that lost "
+                    f"their dispatch to a restart (#2523)"
                 )
         except Exception as e:
-            logger.error(f"[Cleanup] Loop orphan sweep error: {e}")
+            logger.error(f"[Cleanup] Loop restart reconcile error: {e}")
 
         # One-shot startup hook for #1664: agents renamed BEFORE
         # `volume_base_name` existed have an unpinned row, so their (still
@@ -2491,11 +2750,31 @@ async def recover_orphaned_executions() -> Dict:
         except AgentClientError as e:
             logger.warning(f"[Recovery] Could not reach agent {agent_name} registry: {e}")
 
+        # #2433: a row this agent does not know may still be owned by a live
+        # dispatcher in the OTHER uvicorn worker (this one just booted, so its
+        # own in-flight registry is empty — the cross-worker marker is the only
+        # signal). One MGET for the whole agent. After a FULL restart every
+        # marker lapses within INFLIGHT_MARKER_TTL_SECONDS, so at worst such a
+        # row waits one periodic sweep instead of being recovered here.
+        absent_ids = [
+            e["id"] for e in executions
+            if e["id"] not in registry_ids and not _within_startup_grace(e)
+        ]
+        inflight = await _inflight_verdict_map(absent_ids)
+
         for execution in executions:
             if execution["id"] in registry_ids:
                 still_running += 1
             elif _within_startup_grace(execution):
                 skipped_grace += 1
+            elif _inflight_skip(
+                inflight.get(execution["id"], "absent"), _row_age_seconds(execution)
+            ):
+                still_running += 1
+                logger.info(
+                    f"[Recovery] {execution['id']} on '{agent_name}' is owned by a live "
+                    f"(or unverifiable) backend dispatcher in another worker — left running (#2433)"
+                )
             else:
                 if await _recover_execution(execution, agent_name, capacity, stats):
                     recovered += 1

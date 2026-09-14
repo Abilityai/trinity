@@ -52,8 +52,6 @@ async def _call(loops_router, payload):
         name="a1",
         current_user=_user(),
         x_source_agent=None,
-        x_mcp_key_id=None,
-        x_mcp_key_name=None,
     )
 
 

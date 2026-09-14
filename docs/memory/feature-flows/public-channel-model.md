@@ -48,6 +48,17 @@ Each public call site passes `model=db.get_public_channel_model(agent_name)` int
 - `routers/public.py` — sync path + `_execute_public_chat_background` (async).
 - `adapters/message_router.py` — Slack/Telegram/WhatsApp.
 - `routers/paid.py` — x402 paid chat.
+- `client_portal/service.py` — the **Workspace / client-portal** turn (ent#403). Added
+  late, and deliberately: a Workspace turn has always dispatched as
+  `triggered_by="public"`, so the override was *expected* to apply and did not —
+  ent#403 calls that absence the defect. `resolve_turn_model` is the one ladder for
+  both portal turn routes (the streaming one and the synchronous ent#83 one), and it
+  runs the same `is_valid_public_channel_model` degradation as
+  `db.get_public_channel_model`, so the roster's label and the turn cannot disagree
+  about one stale stored value. **It applies to every portal turn, not only a platform
+  user's** — gating it on the principal would leave the two routes resolving
+  differently, which is the "two sources silently disagree" this whole field exists to
+  avoid. A Workspace user's own explicit pick (ent#403) sits one rung ABOVE this one.
 
 Non-public triggers (chat, schedule with its own `agent_schedules.model`, loop, fan-out,
 agent-to-agent) never touch this field — their model resolution is unchanged.

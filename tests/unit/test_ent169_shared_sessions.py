@@ -39,8 +39,8 @@ def rooms_db(tmp_path, monkeypatch):
     from db.tables import metadata as m, agent_ownership, users, schedule_executions
     m.create_all(get_engine(), tables=[agent_ownership, users, schedule_executions])
 
-    from shared_sessions.schema import init_shared_sessions_schema
-    init_shared_sessions_schema()
+    from conftest import ensure_schema_tables
+    ensure_schema_tables("enterprise_rooms", "enterprise_room_participants", "enterprise_room_messages")
 
     from sqlalchemy import insert
     with get_engine().begin() as conn:

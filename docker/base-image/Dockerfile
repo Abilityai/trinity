@@ -75,7 +75,104 @@ RUN git config --system gc.auto 0 && \
     git config --system maintenance.auto false && \
     git config --system maintenance.autoDetach false
 
-RUN npm install -g @anthropic-ai/claude-code@latest
+# Claude Code — install it in a way that CANNOT silently ship a dead CLI, and
+# prove it runs before the layer is allowed to succeed (Abilityai/lilu#20).
+#
+# The failure this replaces: on the arm64 DGX this layer exited 0 while leaving
+# `bin/claude.exe` as the 500-byte, shebang-less placeholder the package ships
+# instead of the ~214 MB native binary. The image was tagged `latest`, and the
+# damage only surfaced at an agent's first turn — execve() on a shebang-less
+# text file is ENOEXEC, the agent-server's exec reports "Exec format error", and
+# `chat_with_agent` answers 503. Every agent created against that tag was born
+# unusable.
+#
+# TWO independent exit-0 swallows stack up to produce that:
+#
+#   1. The native CLI ships as a per-platform *optionalDependency*
+#      (`@anthropic-ai/claude-code-linux-{x64,arm64}[-musl]`, ~214 MB, declaring
+#      os/cpu/libc). npm treats ANY failure to fetch or unpack an OPTIONAL
+#      dependency as non-fatal — it warns and exits 0. That tarball is the
+#      largest single download in this build, so it is also the likeliest one to
+#      fail, and the likeliest to hit ENOSPC while unpacking.
+#   2. The package's own postinstall (`install.cjs`) hardlinks that native
+#      binary over `bin/claude.exe`. Read its source: when `require.resolve` of
+#      the native package fails it prints to stderr and `return`s — exit code 0
+#      — leaving the placeholder in place.
+#
+# NOTE on the diagnosis: the placeholder's error text names `--ignore-scripts`
+# and `--omit=optional`, which reads like one of those flags was passed. It was
+# not, and no inherited npm config was involved either — at this point in the
+# build nothing has been COPYed into the image, no `NPM_CONFIG_*` ENV is set,
+# and `docker build` does not inherit host environment. `install.cjs` prints
+# that same text on ANY resolution failure ("This happens with --omit=optional
+# *or when the download failed*"). The suppression is npm's optional-dependency
+# semantics itself, not a flag. Both are closed below regardless.
+#
+# The three defences, in order:
+#
+#   a. Explicit CLI flags. `--include=optional --no-ignore-scripts` override any
+#      npmrc or NPM_CONFIG_* that a future base image or build environment might
+#      introduce (npm config precedence puts CLI flags above every other
+#      source), so cause (1) cannot be re-enabled from outside this file.
+#      `--foreground-scripts` puts the postinstall's stderr in the build log
+#      instead of buffering it away.
+#   b. A deterministic re-install of the platform-native package as a DIRECT,
+#      non-optional install target. This is the actual fix for arm64: as a
+#      direct target its download failure is FATAL to `npm install` rather than
+#      a warning, so the binary either lands or the build stops. The platform
+#      key is computed by the same rule `install.cjs` uses (platform + arch +
+#      musl detection via process.report), so this stays arch-neutral — it works
+#      on arm64 and x64, glibc and musl, with no arch literal in this file.
+#   c. `claude --version` as the layer's last, bare, unconditional command. The
+#      stub exits non-zero (ENOEXEC → 126); the real binary prints a version.
+#      It must stay in THIS RUN — a separate layer would still cache and publish
+#      the broken install. It is unconditional rather than `if arm64` precisely
+#      because npm's silent-optional behaviour is not arch-specific; arm64 is
+#      only where it happened to bite.
+#
+# Verified locally on x86_64 with npm 10.8.2 — the failure and both guards
+# reproduce without arm64 hardware, by starving the unpack of disk instead:
+#
+#   a. the exact DGX artifact, with NO suppressing flag passed (/tmp had 184 MB
+#      free; the native package needs 214 MB):
+#        $ npm install --prefix /tmp/p -g --include=optional
+#              --no-ignore-scripts @anthropic-ai/claude-code@2.1.252
+#        npm warn tar TAR_ENTRY_ERROR ENOSPC: no space left on device, write
+#        $ echo $?                                -> 0      # npm is happy
+#        $ stat -c %s .../bin/claude.exe          -> 500    # the stub, as on the DGX
+#      Note npm's entire report of a fatal-to-the-product failure is a `warn`.
+#   b. defence (c) catches exactly that image:
+#        $ /tmp/p/bin/claude --version; echo $?   -> 126    # set -eu aborts the layer
+#   c. defence (b) converts the same silent failure into a hard one:
+#        $ npm install --prefix /tmp/p -g @anthropic-ai/claude-code-linux-x64@2.1.252
+#        $ echo $?                                -> 1      # direct target => fatal
+#   d. and on a roomy disk that recovery repairs an already-stubbed install:
+#        $ node .../install.cjs && /tmp/p/bin/claude --version
+#        2.1.252 (Claude Code)
+#
+# Also measured, and the reason defence (a) names both flags explicitly rather
+# than trusting either: `--omit=optional` alone does NOT reproduce the stub (npm
+# still installs the optional dep of a directly-installed root), while
+# `--ignore-scripts` does — stub, exit 0.
+#
+# Related, deliberately NOT changed here (out of scope for Abilityai/lilu#20):
+# `@google/gemini-cli` and `@openai/codex` below resolve their binaries through
+# the same optional-dependency mechanism and carry the same silent-failure risk,
+# and the Go tarball above is hardcoded to linux-amd64.
+RUN set -eu; \
+    npm install -g --include=optional --no-ignore-scripts --foreground-scripts \
+        @anthropic-ai/claude-code@latest; \
+    CC_DIR="$(npm root -g)/@anthropic-ai/claude-code"; \
+    if ! claude --version >/dev/null 2>&1; then \
+        echo "[base-image] claude did not run after npm install: the platform-native optionalDependency did not land. Re-installing it as a direct (non-optional) dependency."; \
+        CC_VER="$(node -p "require('$CC_DIR/package.json').version")"; \
+        CC_KEY="$(node -e 'const r=typeof process.report?.getReport==="function"?process.report.getReport():null;const musl=r!=null&&r.header?.glibcVersionRuntime===undefined;process.stdout.write(process.platform+"-"+require("os").arch()+(process.platform==="linux"&&musl?"-musl":""))')"; \
+        echo "[base-image] platform key: $CC_KEY / claude-code version: $CC_VER"; \
+        npm install -g --no-ignore-scripts "@anthropic-ai/claude-code-$CC_KEY@$CC_VER"; \
+        node "$CC_DIR/install.cjs"; \
+        ls -l "$CC_DIR/bin/claude.exe"; \
+    fi; \
+    claude --version
 
 # Install Gemini CLI for multi-runtime support
 RUN npm install -g @google/gemini-cli
@@ -136,11 +233,83 @@ RUN chmod 0555 /opt/trinity/hooks/*.py && \
     chmod 0444 /opt/trinity/guardrails-baseline.json && \
     chown -R root:root /opt/trinity
 
+# ent#345 — the hook REGISTRATION goes where the agent cannot reach it.
+#
+# It used to live in `/home/developer/.claude/settings.json`, owned by
+# `developer`, mode 0644, inside the git-synced working tree (HOME is the repo
+# root) and read live by Claude Code. So the guarded agent had write access to its
+# own guardrail registration: one Edit call and the bash deny-list, file guard,
+# read-only guard and credential output-scanner stop running for every subsequent
+# tool call. That was not theoretical — an agent was observed editing this file
+# autonomously and committing it through git sync during the #2036 investigation.
+# Being git-synced also made it settable from OUTSIDE, by a push to the agent's
+# repo.
+#
+# Claude Code's managed-settings path is admin-controlled and takes precedence
+# over user and project settings, and it sits outside the synced tree — which
+# closes the self-edit vector and the inbound-git vector in one move. Verified
+# against the CLI shipped in this image: it resolves `/etc/claude-code`
+# (`managed-settings.json`, plus a `managed-settings.d` drop-in dir) on Linux.
+#
+# Root-owned and 0444: `developer` cannot write the file, and cannot write the
+# directory either (so it cannot be replaced or shadowed by a drop-in). Both
+# paths are already in the three write-deny lists
+# (`_FILE_WRITE_DENY_PATTERNS` / `guardrails-baseline.json::path_deny` /
+# `EDIT_PROTECTED_PATHS`) — belt and braces, not the primary control.
+RUN mkdir -p /etc/claude-code
+COPY ./hooks/managed-settings.json /etc/claude-code/managed-settings.json
+RUN chown -R root:root /etc/claude-code && \
+    chmod 0755 /etc/claude-code && \
+    chmod 0444 /etc/claude-code/managed-settings.json
+
+# `~/.claude` still belongs to the agent — Claude Code writes its own state there
+# (`.claude/projects/`, plugin cache). What is NO LONGER shipped is a
+# platform-owned `settings.json` inside it: the registration above is the single
+# source, so there is nothing there for an agent to edit away.
 RUN mkdir -p /home/developer/.claude && \
     chown developer:developer /home/developer/.claude
-COPY --chown=developer:developer ./hooks/claude-settings.json /home/developer/.claude/settings.json
-RUN chmod 0644 /home/developer/.claude/settings.json
 USER developer
+
+# --- Trinity plugin pre-install (ent#411) ---------------------------------
+# Bake the platform's own Claude Code plugin into the image so an agent created
+# from a BARE GitHub repo — no template.yaml, no plugins: block — can run
+# `/trinity:onboard` in its first session and make itself Trinity-compatible.
+# Reading the plugin set only from a declaration is chicken-and-egg for exactly
+# that agent: it declares nothing, so nothing installs, so the plugin that would
+# write template.yaml is missing.
+#
+# This lands under /home/developer, which is a named volume at runtime. Docker
+# populates an EMPTY named volume from the image on first mount, so a new agent
+# gets it; an agent whose volume predates this image does not, and for those the
+# #1704 boot hook (agent_server.plugins_reinstall) installs it on next start.
+# Same ordering caveat as #1704: an old base image silently lacks the pre-install.
+#
+# Never fatal. An air-gapped or rate-limited build must still produce an image —
+# the boot hook is the reconciler, so a missed pre-install costs subprocesses at
+# first start, not correctness. Set TRINITY_PREINSTALL_PLUGINS=0 to skip it
+# deliberately (and TRINITY_PLATFORM_PLUGINS=0 at runtime to keep the boot hook
+# from installing it either).
+#
+# `--yes` is feature-detected, never unconditional (#2305): CLI 2.1.227 rejects
+# it (`error: unknown option`), 2.1.235+ advertises it and requires it for a
+# command-install plugin when stdin is not a TTY — mirrors
+# `agent_server/plugins_reinstall.py::_install_supports_yes`. The fallback names
+# WHICH step failed: a flag/exit error must not be reported as network
+# unreachability (the #2305 mislabel that hid the broken flag).
+ARG TRINITY_PREINSTALL_PLUGINS=1
+RUN if [ "$TRINITY_PREINSTALL_PLUGINS" = "1" ]; then \
+        yes_flag=""; \
+        claude plugin install --help 2>&1 | grep -q -- '--yes' && yes_flag="--yes"; \
+        if ! claude plugin marketplace add abilityai/abilities; then \
+            echo "[base-image] withheld trinity@abilityai: marketplace add failed — the boot hook will retry"; \
+        elif ! claude plugin install trinity@abilityai $yes_flag; then \
+            echo "[base-image] withheld trinity@abilityai: plugin install failed — the boot hook will retry"; \
+        else \
+            echo "[base-image] pre-installed trinity@abilityai"; \
+        fi; \
+    else \
+        echo "[base-image] trinity@abilityai pre-install skipped (TRINITY_PREINSTALL_PLUGINS=$TRINITY_PREINSTALL_PLUGINS)"; \
+    fi
 
 # Copy agent server code to /app (outside persistent volume)
 # This ensures code updates reach agents without volume conflicts

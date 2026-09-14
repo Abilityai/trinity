@@ -23,6 +23,7 @@ from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ..utils.orphan_sweep import kill_cgroup_orphans
 from .activity_tracking import start_tool_execution, complete_tool_execution
 from .execution_env import build_execution_env
+from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
 
 logger = logging.getLogger(__name__)
@@ -239,10 +240,32 @@ class GeminiRuntime(AgentRuntime):
                 bufsize=1,  # Line buffered
                 env=build_execution_env({EXECUTION_TAG_NAME: execution_id}),
             )
+            # #2433: Gemini never registered with the process registry, so every
+            # Gemini turn longer than the watchdog's 60s grace was false-orphaned
+            # by the backend (absent from /api/executions/running), and a cancel
+            # requested while the turn was still pending had nothing to consume
+            # it. Register like the Claude/Codex paths; unregistered in the
+            # `finally` around the reader below.
+            _registered_id = execution_id
+            get_process_registry().register(
+                _registered_id, process, metadata={"type": "chat", "runtime": "gemini"}
+            )
 
-            # Write prompt to stdin and close it
-            process.stdin.write(prompt)
-            process.stdin.close()
+            # Write prompt to stdin and close it.
+            # #2433 review: `register()` above may have just SIGKILLed the group
+            # (a cancel that landed while the execution was still pending), so
+            # this write can raise BrokenPipeError — and the `finally:
+            # unregister()` below guards only the reader. Without this the
+            # registry entry leaks, and a leaked entry is reported to the
+            # backend as agent-known (bounded to one RECENTLY_COMPLETED TTL by
+            # `list_recently_completed_ids`, but still that long with orphan
+            # recovery blocked). Pair the register with the failure path here.
+            try:
+                process.stdin.write(prompt)
+                process.stdin.close()
+            except BaseException:
+                get_process_registry().unregister(_registered_id)
+                raise
 
             # Helper function that reads subprocess output (runs in thread pool)
             def read_subprocess_output():
@@ -288,7 +311,12 @@ class GeminiRuntime(AgentRuntime):
 
             # Run the blocking subprocess reading in a thread pool
             loop = asyncio.get_event_loop()
-            stderr_output, return_code = await loop.run_in_executor(_executor, read_subprocess_output)
+            try:
+                stderr_output, return_code = await loop.run_in_executor(_executor, read_subprocess_output)
+            finally:
+                # #2433: always unregister — a timeout/pipe error above must not
+                # leave a dead handle that /api/executions/running keeps reporting.
+                get_process_registry().unregister(_registered_id)
 
             # Check for errors
             if return_code != 0:
@@ -660,10 +688,30 @@ class GeminiRuntime(AgentRuntime):
                 bufsize=1,
                 env=build_execution_env({EXECUTION_TAG_NAME: session_id}),
             )
+            # #2433: register under the backend's execution id (`session_id` IS
+            # `execution_id` when the backend supplied one) so the watchdog's
+            # proof-of-life sees the run and a cancel-while-pending is consumed
+            # at spawn. See the chat path above.
+            _registered_id = session_id
+            get_process_registry().register(
+                _registered_id, process, metadata={"type": "task", "runtime": "gemini"}
+            )
 
-            # Write prompt to stdin and close it
-            process.stdin.write(prompt)
-            process.stdin.close()
+            # Write prompt to stdin and close it.
+            # #2433 review: `register()` above may have just SIGKILLed the group
+            # (a cancel that landed while the execution was still pending), so
+            # this write can raise BrokenPipeError — and the `finally:
+            # unregister()` below guards only the reader. Without this the
+            # registry entry leaks, and a leaked entry is reported to the
+            # backend as agent-known (bounded to one RECENTLY_COMPLETED TTL by
+            # `list_recently_completed_ids`, but still that long with orphan
+            # recovery blocked). Pair the register with the failure path here.
+            try:
+                process.stdin.write(prompt)
+                process.stdin.close()
+            except BaseException:
+                get_process_registry().unregister(_registered_id)
+                raise
 
             # Helper function that reads subprocess output
             def read_subprocess_output():
@@ -715,7 +763,12 @@ class GeminiRuntime(AgentRuntime):
 
             # Run the blocking subprocess reading in a thread pool
             loop = asyncio.get_event_loop()
-            stderr_output, return_code = await loop.run_in_executor(_executor, read_subprocess_output)
+            try:
+                stderr_output, return_code = await loop.run_in_executor(_executor, read_subprocess_output)
+            finally:
+                # #2433: always unregister — a timeout/pipe error above must not
+                # leave a dead handle that /api/executions/running keeps reporting.
+                get_process_registry().unregister(_registered_id)
 
             # Check for errors
             if return_code != 0:

@@ -188,3 +188,11 @@ Note: `cost_7d` includes today's `cost_24h`, so the denominator slightly dampens
 - `scheduling.md` — source of the `schedule_executions` rows this feature reads
 - `agent-lifecycle.md` — AgentHeader.vue component context
 - Context window monitoring (live session polling) is a separate, orthogonal feature using `GET /api/agents/context-stats`
+
+## #471 Tier 0 (2026-08-19) — API-equivalent relabel for subscription-funded agents
+
+A bare `$` on a subscription-funded agent reads as a bill; for Claude Code, `cost` is the runtime's native `total_cost_usd` — token counts at API prices. The TOKEN USAGE ROW now branches on the `authStatus` prop AgentHeader already receives for its auth chip (zero new backend):
+
+- `auth_mode === "subscription"` → an `≈ API-equiv` badge (tooltip names the funding subscription) and `≈` prefixes on Today/Lifetime cost. API-key agents keep plain metered semantics.
+- **Zeros-fork** (the #471 Step-0 design fork): if lifetime cost is 0 across real runs (cost structurally unreported under this auth), render an honest `—` with tooltip instead of `≈$0.00`. A zero *day* on a cost-reporting agent renders normally (lifetime > 0 proves the channel works). Note: Step 0 was ANSWERED live on 2026-08-19 — cost IS populated under subscription auth ($0.0687 for a one-sentence turn) — so the dash is a degradation path, not the expected state.
+- Fleet surfaces (AgentTile Zone-4 cost, AgentListPanel tablet cost) prefix `≈` when the subscription-pressure batch payload reports the agent subscription-funded (`utils/subscriptionPressure.js::isSubscriptionFunded`). Per-execution cost cells elsewhere stay plain `$` — records of individual runs; a mixed-mode fleet makes a global formatter relabel wrong (`useFormatters.js` untouched).

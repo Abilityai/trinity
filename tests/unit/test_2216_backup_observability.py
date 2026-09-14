@@ -55,6 +55,7 @@ def _admin():
     u.role = "admin"
     u.connector_agent = None
     u.agent_name = None
+    u.mcp_scope = None  # #2323: the admin gate allowlists `mcp_scope`; an absent field fails CLOSED (a `None` default would make it the privileged JWT value). None = interactive human.
     return u
 
 

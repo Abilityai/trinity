@@ -194,6 +194,25 @@ def _turn_timeout() -> int:
     return max(1, n)
 
 
+def _resolve_turn_timeout(overrides: Dict[str, Any]) -> int:
+    """The claimed row's own turn budget when the envelope carries one, else the
+    pool default (#2317).
+
+    The backend records a concrete ``timeout_seconds`` on every queued row
+    (``backlog_service.enqueue`` — the caller's override, or the agent's
+    ``execution_timeout_seconds``) and the PUSH path enforces it. Before #2317 the
+    claim envelope never carried it and this pool ran every pulled turn to
+    ``TRINITY_PULL_TURN_TIMEOUT`` instead, so a row asking for 60s got 900s.
+    Fail-soft: a missing / non-numeric / non-positive value falls back to the
+    pool default, never raises."""
+    raw = overrides.get("timeout_seconds")
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return _turn_timeout()
+    return n if n > 0 else _turn_timeout()
+
+
 # ---------------------------------------------------------------------------
 # Result body (§3.3 reply payload) construction
 # ---------------------------------------------------------------------------
@@ -373,7 +392,7 @@ async def _run_and_report(
     message = payload.get("message") or ""
     session_id = payload.get("session_id")
     overrides = payload.get("task_overrides") or {}
-    turn_timeout = _turn_timeout()
+    turn_timeout = _resolve_turn_timeout(overrides)
 
     agent_state.record_task_start()
     try:
@@ -416,7 +435,10 @@ async def _run_and_report(
         _persist_pull_result(execution_id, {"execution_id": execution_id, "body": body})
 
     # Deadline = now + (turn timeout + buffer) = the slot-lease TTL window.
-    deadline = time.monotonic() + turn_timeout + _SLOT_TTL_BUFFER_SECONDS
+    # #2317: keyed to the POOL's budget, not the row's — honouring a short
+    # per-task timeout must not also shrink the result-delivery retry window
+    # (the backend lease derives from the agent's execution_timeout, not the row's).
+    deadline = time.monotonic() + max(turn_timeout, _turn_timeout()) + _SLOT_TTL_BUFFER_SECONDS
     delivered = await _deliver_result(client, execution_id, body, backend_url, mcp_key, deadline)
     if delivered and persisted:
         _delete_pull_result(execution_id)

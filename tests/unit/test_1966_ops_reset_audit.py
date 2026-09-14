@@ -112,6 +112,12 @@ class _Admin:
     role: str = "admin"
     agent_name: Optional[str] = None
     connector_agent: Optional[str] = None
+    # #2323: the admin gate is now an ALLOWLIST over `mcp_scope`, and a
+    # principal that does not carry the field at all fails CLOSED — deliberately,
+    # because defaulting an absent authorization discriminator to `None` would
+    # make it the privileged JWT value. `models.User` always declares it, so a
+    # stand-in must too. `None` = an interactive human, which is what this is.
+    mcp_scope: Optional[str] = None
 
 
 class _Req:

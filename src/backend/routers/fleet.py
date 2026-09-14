@@ -1,3 +1,4 @@
+# mcp: none — sync-audit rollup for the dashboard (#390); per-agent git state is get_git_sync_state
 """
 Fleet-level endpoints (#390 / S6).
 

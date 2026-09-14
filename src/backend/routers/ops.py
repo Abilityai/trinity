@@ -1,3 +1,4 @@
+# mcp: none — Operating Room fleet ops (fleet restart, #1860) — an admin / ops-key surface, not an agent capability
 """
 Fleet Operations routes for the Trinity backend.
 
@@ -62,7 +63,11 @@ async def get_fleet_status(
     Admin-only. Returns a comprehensive list of all agents with their
     container status, context usage, last activity time, and system agent flag.
     """
-    assert_admin(current_user)
+    # #2323 — per-route opt-in for the bounded read-only `ops` key.
+    # `ADMIN_GATE_SCOPES` keeps ops keys out of admin gates by default, so a
+    # NEW ops route is inaccessible until someone adds this — the failure
+    # direction we want. Only GET routes carry it; every write below stays bare.
+    assert_admin(current_user, allow_scopes={"ops"})
 
     agents = list_all_agents_fast()
 
@@ -139,7 +144,11 @@ async def get_fleet_health(
     Admin-only. Identifies unhealthy agents based on context usage,
     container errors, and idle time.
     """
-    assert_admin(current_user)
+    # #2323 — per-route opt-in for the bounded read-only `ops` key.
+    # `ADMIN_GATE_SCOPES` keeps ops keys out of admin gates by default, so a
+    # NEW ops route is inaccessible until someone adds this — the failure
+    # direction we want. Only GET routes carry it; every write below stays bare.
+    assert_admin(current_user, allow_scopes={"ops"})
 
     agents = list_all_agents_fast()
 
@@ -676,7 +685,11 @@ async def list_all_schedules(
     Admin-only. Returns schedule information including next run times
     and recent execution status.
     """
-    assert_admin(current_user)
+    # #2323 — per-route opt-in for the bounded read-only `ops` key.
+    # `ADMIN_GATE_SCOPES` keeps ops keys out of admin gates by default, so a
+    # NEW ops route is inaccessible until someone adds this — the failure
+    # direction we want. Only GET routes carry it; every write below stays bare.
+    assert_admin(current_user, allow_scopes={"ops"})
 
     schedules = db.list_all_schedules()
 
@@ -967,7 +980,11 @@ async def list_alerts(
 
     Admin-only. Alerts are derived from platform events.
     """
-    assert_admin(current_user)
+    # #2323 — per-route opt-in for the bounded read-only `ops` key.
+    # `ADMIN_GATE_SCOPES` keeps ops keys out of admin gates by default, so a
+    # NEW ops route is inaccessible until someone adds this — the failure
+    # direction we want. Only GET routes carry it; every write below stays bare.
+    assert_admin(current_user, allow_scopes={"ops"})
 
     # TODO: Implement dedicated alerts table
     # For now, return placeholder - check fleet health for issues
@@ -1019,7 +1036,11 @@ async def get_ops_costs(
     Admin-only. Returns OTel metrics including cost breakdown,
     token usage, and productivity metrics.
     """
-    assert_admin(current_user)
+    # #2323 — per-route opt-in for the bounded read-only `ops` key.
+    # `ADMIN_GATE_SCOPES` keeps ops keys out of admin gates by default, so a
+    # NEW ops route is inaccessible until someone adds this — the failure
+    # direction we want. Only GET routes carry it; every write below stays bare.
+    assert_admin(current_user, allow_scopes={"ops"})
 
     if not OTEL_ENABLED:
         return {
@@ -1167,6 +1188,14 @@ def _format_model_name(model_id: str) -> str:
 
     # Map common model IDs
     mappings = {
+        # #2726: the substitution above strips only an 8-DIGIT suffix, so a
+        # point-release id keeps its `-1` and falls through to the title-case
+        # fallback, rendering "Claude Fable 5 1". Every earlier catalog addition
+        # degraded cleanly ("claude-opus-5" -> "Claude Opus 5"), so this is the
+        # first id that needs an exact entry. `claude-fable-5` is deliberately
+        # NOT mapped: its fallback is already correct, and a prefix entry for it
+        # would swallow this one (startswith, first match wins).
+        "claude-fable-5-1": "Claude Fable 5.1",
         "claude-sonnet-4": "Claude Sonnet 4",
         "claude-opus-4": "Claude Opus 4",
         "claude-haiku-4": "Claude Haiku 4",
@@ -1213,7 +1242,11 @@ async def get_auth_report(
 
     Admin-only. Shows subscription/API key usage across the fleet.
     """
-    assert_admin(current_user)
+    # #2323 — per-route opt-in for the bounded read-only `ops` key.
+    # `ADMIN_GATE_SCOPES` keeps ops keys out of admin gates by default, so a
+    # NEW ops route is inaccessible until someone adds this — the failure
+    # direction we want. Only GET routes carry it; every write below stays bare.
+    assert_admin(current_user, allow_scopes={"ops"})
 
     agents = list_all_agents_fast()
 

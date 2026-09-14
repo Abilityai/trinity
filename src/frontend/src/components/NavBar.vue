@@ -102,8 +102,16 @@
                  enterprise submodule has not yet dropped its registration
                  (trinity-enterprise#374), i.e. it was already relying on a
                  registration that is about to disappear. -->
+            <!-- ent#456: a new tab, because the Workspace is a place you go and
+                 stay — following it from the console used to throw away whatever
+                 you were looking at. `target` is enough: Vue Router's guardEvent
+                 declines to intercept a _blank (and a modified) click, so the
+                 link still resolves its href and the browser owns the rest.
+                 Hand-rolling window.open would take that back. -->
             <router-link
               to="/workspace"
+              target="_blank"
+              rel="noopener"
               class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
               :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/workspace') }"
             >

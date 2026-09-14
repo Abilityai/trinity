@@ -54,6 +54,7 @@ _ALLOWED = {
     "services/operator_queue_service.py": "opqueue:leader — leader lease, verbatim copy of monitoring (#1632)",
     "services/skills_sync_service.py": "skills:sync:leader — leader lease (ent#236)",
     "services/canary_service.py": "canary:leader — Lua-CAD leader lease, the 8th shape (#1881)",
+    "services/subscription_recovery_service.py": "subscription:recovery:leader — leader lease in the #1464 monitoring shape (#447). NOT adoptable: SingleFlightLock mints a UNIQUE token per acquire, so a lease could never recognise — and therefore never refresh — its own grant across cycles; this one keeps a stable per-worker id for exactly that",
     # --- pre-#1920 hand-rolled single-flight locks NOT in this issue's scope ---
     #     (the LeaderLease / other-lock consolidation follow-up surface).
     "routers/agent_data.py": "agent:data_op single-flight lock (#1169) — pre-#1920, follow-up",
@@ -68,6 +69,10 @@ _ALLOWED = {
     "caller decides. SingleFlightLock would be actively wrong here — its internal fail-open returns True on a Redis "
     "error, which for a port reservation reads as 'reserved' and hands two agents the same SSH port, the exact "
     "collision #2215 fixed",
+    "services/gemini_voice.py": "voice_session:{id}:saved transcript-save CLAIM (ent#534) — a one-shot 'who writes' "
+    "decision between the WebSocket `finally` and `/stop` on two workers: no release, no token, TTL-expiry only, over "
+    "redis.asyncio (the sync primitive cannot be awaited from the bridge). Fails OPEN by design — losing a transcript "
+    "is worse than a duplicate, and the in-process `_transcript_saved` flag covers the same-worker case",
     # --- genuine non-lock nx=True uses ---
     "adapters/transports/twilio_media_stream.py": "voip_saved:{call_id} single-fire transcript guard — a once-guard, not a mutex",
     "services/agent_service/ephemeral.py": "ephemeral:quota:{owner_id} counter seed — the discard LOCK now uses "

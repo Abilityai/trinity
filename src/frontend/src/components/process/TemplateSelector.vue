@@ -17,12 +17,22 @@
       </div>
     </div>
 
-    <!-- Loading state -->
-    <div v-if="loading" class="flex items-center justify-center py-12">
-      <svg class="animate-spin h-8 w-8 text-teal-500" fill="none" viewBox="0 0 24 24">
-        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-      </svg>
+    <!-- #1921: card-shaped placeholders in the grid the templates land in, so
+         the picker keeps one footprint through loading -> loaded.
+         The gate moved from a bare `loading` to `firstLoad` ("no data yet"):
+         re-opening the picker with templates already fetched used to swap the
+         whole grid back to a spinner. Shrinks this file's #1927 ratchet count. -->
+    <div v-if="firstLoad" class="grid grid-cols-1 sm:grid-cols-2 gap-3 py-2" aria-busy="true">
+      <div
+        v-for="n in 4"
+        :key="n"
+        class="rounded-lg border border-gray-200 dark:border-gray-700 p-3 space-y-2 animate-pulse motion-reduce:animate-none"
+      >
+        <div class="h-4 w-1/2 rounded bg-gray-200 dark:bg-gray-800"></div>
+        <div class="h-3 w-full rounded bg-gray-100 dark:bg-gray-800/60"></div>
+        <div class="h-3 w-3/4 rounded bg-gray-100 dark:bg-gray-800/60"></div>
+      </div>
+      <span class="sr-only">Loading…</span>
     </div>
 
     <!-- Failed state (#1926) — a failed fetch is NOT "no templates found":
@@ -216,6 +226,10 @@ const loading = ref(false)
 // #1926: distinct from `templates.length === 0` — a failed fetch must render as
 // failed, not as the empty state.
 const loadError = ref('')
+
+// #1921 / #1927: "no data yet", not "fetch in flight". A refetch with templates
+// already on screen must not blank the grid back to a placeholder.
+const firstLoad = computed(() => loading.value && templates.value.length === 0)
 const previewTemplate = ref(null)
 
 // Computed

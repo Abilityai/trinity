@@ -1,3 +1,4 @@
+# mcp: none — admin-only invariant-harness surface (CANARY-001); a platform self-check, not an agent capability
 """
 Canary Invariant Harness API (CANARY-001 / Issue #411).
 

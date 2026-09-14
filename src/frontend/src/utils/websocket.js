@@ -5,8 +5,13 @@ import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useExecutionsStore } from '../stores/executions'
 import { useLoopsStore } from '../stores/loops'
+import { usePortalLoopsStore } from '../stores/portalLoops'
+import { usePortalRailFeedsStore } from '../stores/portalRailFeeds'
+import { usePortalWorkStore } from '../stores/portalWork'
 import { useReportsStore, useFleetReportsStore } from '../stores/reports'
 import { useRoomsStore } from '../stores/rooms'
+import { useSkillsStore } from '../stores/skills'
+import { useClientPortalStore } from '../stores/clientPortal'
 
 const ws = ref(null)
 const isConnected = ref(false)
@@ -28,8 +33,13 @@ export function useWebSocket() {
   const executionsStore = useExecutionsStore()
   const roomsStore = useRoomsStore()
   const loopsStore = useLoopsStore()
+  const portalLoopsStore = usePortalLoopsStore()
+  const portalRailFeedsStore = usePortalRailFeedsStore()
+  const portalWorkStore = usePortalWorkStore()
   const reportsStore = useReportsStore()
   const fleetReportsStore = useFleetReportsStore()
+  const skillsStore = useSkillsStore()
+  const clientPortalStore = useClientPortalStore()
 
   const connect = async () => {
     if (ws.value) return
@@ -166,11 +176,41 @@ export function useWebSocket() {
         }
         if (data.type === 'agent_activity') {
           executionsStore.handleWebSocketEvent(data)
+          // ent#475: a TERMINAL activity on a Workspace participant means it
+          // may have rewritten a canvas or shared a file — the rail's feed
+          // store re-reads (debounced) through the access-controlled routes.
+          // No-op unless the rail is scoped to that agent.
+          portalRailFeedsStore.handleWebSocketEvent(data)
+          // ent#525: the Work feed re-reads on a participant's activity —
+          // started AND terminal, so *Now* cold-starts when a schedule or a
+          // loop begins in an idle chat. Debounced in the store.
+          portalWorkStore.handleWebSocketEvent(data)
         }
         // #1106: loop progress events (broadcast fleet-wide, keyed by type).
         // The store filters by the agent currently shown in LoopsPanel.
         if (data.type === 'loop_run_completed' || data.type === 'loop_completed') {
           loopsStore.handleWebSocketEvent(data)
+          // ent#458: the Workspace panel is a second consumer of the same
+          // fleet-wide broadcast, scoped to the chat's participants instead of
+          // the agent on Agent Detail. Two stores, one event — the
+          // reportsStore + fleetReportsStore shape above. Each is a no-op when
+          // its surface is not mounted.
+          portalLoopsStore.handleWebSocketEvent(data)
+          // ent#475: a loop run on a participant is the other moment a canvas
+          // or file may have changed — same thin trigger, third consumer.
+          portalRailFeedsStore.handleWebSocketEvent(data)
+          portalWorkStore.handleWebSocketEvent(data)   // ent#525: loop runs are one execution kind
+        }
+        // #2703: a skill was assigned / unassigned / synced on an agent — a
+        // THIN trigger ({type, agent_name}, no names: the #918 rule). Two
+        // consumers: the skills store ticks the agent so Agent Detail's
+        // playbook lists refetch through `/playbooks`; the Workspace store
+        // re-hydrates that agent's briefing (hint cards + `/` typeahead)
+        // through `/briefings`. Each is a no-op when its surface is not
+        // showing that agent.
+        if (data.type === 'agent_skills_changed' && data.agent_name) {
+          skillsStore.noteSkillsChanged(data.agent_name)
+          clientPortalStore.revalidateBriefing(data.agent_name)
         }
         // #918: agent report thin trigger (broadcast fleet-wide, keyed by type).
         // The agent store filters by the agent on screen; the fleet store does a

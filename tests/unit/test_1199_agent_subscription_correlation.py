@@ -5,8 +5,8 @@ subquery (introduced by the #1093 SQLAlchemy-Core db rewrite, v0.6.1).
 only FROM is `agent_ownership`, correlated to the outer query on
 `agent_ownership.subscription_id == subscription_credentials.id`. That is safe
 in callers whose outer FROM is just `subscription_credentials JOIN users`
-(`get_subscription`, `list_subscriptions`, `get_least_used_subscription`,
-`select_best_alternative_subscription`). But `get_agent_subscription` *also*
+(`get_subscription`, `list_subscriptions`, `list_assignable_subscriptions`,
+`list_viable_alternative_subscriptions`). But `get_agent_subscription` *also*
 joins `agent_ownership` in its outer query (to filter by `agent_name`), so
 SQLAlchemy auto-correlates `agent_ownership` *out* of the subquery — leaving it
 with no FROM clause and raising `InvalidRequestError` at statement-compile time.

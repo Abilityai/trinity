@@ -83,6 +83,10 @@ User sends message -> Telegram API -> Trinity webhook -> Agent -> Response -> Te
 
 The agent receives the message text plus context for any media (photos, documents, voice notes). Responses are sent back as replies in the same chat.
 
+### Formatting in replies
+
+Agent replies are written in Markdown and rendered as Telegram formatting: bold, italic, strikethrough, inline code, fenced code blocks (with syntax highlighting when a language is given), headings, links, bullet lists, horizontal rules, `||spoilers||`, and `>` blockquotes (long ones collapse as expandable quotes). Tables are rendered as preformatted text. Literal `<`, `>` and `&` in a reply — a code snippet, an HTML tag, a comparison — survive intact instead of breaking the message's formatting. A reply longer than Telegram's 4,096-character limit is split into several messages, and each chunk keeps its formatting intact: a bold run or code block that straddles a cut is closed at the end of one chunk and reopened in the next. Proactive messages and completion reports use the same rendering.
+
 ### Knowing the Agent Is Working
 
 A Telegram-triggered task can run for minutes or hours. Three layers of feedback cover the wait, all of them optional and all fail-soft:

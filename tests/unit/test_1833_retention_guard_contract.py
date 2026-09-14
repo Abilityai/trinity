@@ -482,6 +482,7 @@ class _Admin:
     role: str = "admin"
     agent_name: Optional[str] = None
     connector_agent: Optional[str] = None
+    mcp_scope: Optional[str] = None  # #2323
 
 
 class _EndpointDb:

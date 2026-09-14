@@ -34,7 +34,13 @@ ROW = {"agent_name": "acme-bot", "owner": "owner@example.com"}
 def _card(*, tts_ready: bool, effective_voice: str | None):
     """Build a card with the two voice inputs pinned independently."""
     with patch.object(tts_service, "resolve_voice_from_config", return_value=effective_voice):
-        return portal_service._row_to_card(dict(ROW), tts_ready, "platform-default")
+        # ent#403: keyword-only with no default (see the sibling note in
+        # test_2157). This file is about the two voice bits.
+        return portal_service._row_to_card(
+            dict(ROW), tts_ready, "platform-default",
+            is_platform=False, runtime="claude-code",
+            model_context=portal_service._model_context(),
+        )
 
 
 def test_key_but_no_agent_voice_can_transcribe_yet_cannot_narrate():
@@ -77,7 +83,11 @@ def test_card_bit_and_endpoint_gate_are_the_same_condition(key_available):
     with patch.object(portal_service, "agent_on_roster", return_value=True), \
             patch.object(tts_service, "is_available", return_value=key_available), \
             patch.object(tts_service, "resolve_voice_from_config", return_value=None):
-        card = portal_service._row_to_card(dict(ROW), tts_service.is_available())
+        card = portal_service._row_to_card(
+            dict(ROW), tts_service.is_available(),
+            is_platform=False, runtime="claude-code",
+            model_context=portal_service._model_context(),
+        )
         if key_available:
             # Past the gate: it fails later, at the provider call, not at the gate.
             with pytest.raises(ClientPortalError) as exc:

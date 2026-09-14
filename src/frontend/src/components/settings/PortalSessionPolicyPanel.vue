@@ -89,6 +89,22 @@
           </span>
         </div>
 
+        <!-- ent#473: whether the Workspace's generated chat titles are landing.
+             Every path in that generator is fail-soft for the client, which
+             left the operator with only a debug line; this is the one
+             Settings surface every edition renders for the Workspace, so a
+             bad state is said HERE, once, with the next action. Nothing
+             renders while it works. -->
+        <div
+          v-if="titleNotice"
+          class="rounded-md border border-status-warning-200 dark:border-status-warning-500/30 bg-status-warning-50 dark:bg-status-warning-500/10 p-3"
+          role="status"
+          data-testid="title-generation-notice"
+        >
+          <p class="text-sm font-medium text-status-warning-800 dark:text-status-warning-300">{{ titleNotice.title }}</p>
+          <p class="mt-1 text-xs text-status-warning-700 dark:text-status-warning-300">{{ titleNotice.body }}</p>
+        </div>
+
         <!-- Unentitled: state the current policy as a fact, not a dead end. -->
         <div v-else class="rounded-md bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-200 dark:border-indigo-800 p-4">
           <p class="text-sm text-indigo-800 dark:text-indigo-200">
@@ -108,6 +124,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import api from '../../api'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_PRIMARY_BUTTON_CLASS } from './fieldStyles'
+import { titleGenerationNotice } from '../portal/portalUtils'
 
 const FIELDS = [
   { key: 'idle_days', settingKey: 'portal_session_idle_days', label: 'Idle window',
@@ -123,6 +140,9 @@ const saving = ref(false)
 const saveError = ref(null)
 const saved = ref(false)
 const form = reactive({ idle_days: null, absolute_days: null })
+
+// ent#473 — derived from the payload's `title_generation`; null while fine.
+const titleNotice = computed(() => titleGenerationNotice(policy.value?.title_generation))
 
 const dirty = computed(() =>
   !!policy.value && FIELDS.some(f => Number(form[f.key]) !== Number(policy.value[f.key]))

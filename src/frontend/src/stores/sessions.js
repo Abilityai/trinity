@@ -48,6 +48,11 @@ export const useSessionsStore = defineStore('sessions', {
 
     // Feature-flag cache (resolved once per page load)
     featureFlagsLoaded: false,
+    // ent#581: `featureFlagsLoaded` is also true after a FAILED read, whose
+    // catch reports every flag closed — including `claudeAuthConfigured` false.
+    // The first-run overlay's one blocking step must not read that as "Claude
+    // is not configured", so it needs to tell the two apart.
+    featureFlagsFailed: false,
     sessionTabEnabled: false,
     voiceAvailable: false,
     workspaceAvailable: false,
@@ -57,6 +62,34 @@ export const useSessionsStore = defineStore('sessions', {
     brainOrbVoiceAvailable: false, // trinity-enterprise#60 — Brain Orb voice tile (Phase 3)
     brainOrbWriteAvailable: false, // trinity-enterprise#61 — Brain Orb KB-write surface (Phase 4a)
     claudeAuthConfigured: false,   // trinity-enterprise#52 — onboarding hard gate
+    // ent#553 — the per-agent canvas ceiling. 0 = "not told", which is the
+    // honest reading `canvasHeadroom` already gives a missing limit: the panel
+    // says nothing rather than inventing a bound.
+    canvasMaxPerAgent: 0,
+
+    // #2380 — install provenance + the URL posture this instance ADVERTISES.
+    // `hardeningGuideEligible` is THE gate for the first-run hardening guide and
+    // is resolved server-side, so the browser holds no second copy of which
+    // provenances qualify (the ent#386 rule). It is NOT `marketplace_install`,
+    // which the payload still carries and still means what it says: a droplet
+    // installed by following the DigitalOcean deploy doc gets the guide without
+    // claiming to have come from a vendor listing. `installSource` rides
+    // beside it for display only. `installTlsPosture` says what URL the
+    // instance hands out — nothing here probes a socket or reads a
+    // certificate, so no consumer may render it as a verified "secure".
+    installSource: 'unknown',
+    hardeningGuideEligible: false,
+    installTlsPosture: 'unconfigured',
+    // ent#437: the four booleans the Finish-setup consent card gates on. They
+    // ride the flags document so the card decides from a payload the page
+    // already awaits and never calls the admin status route on a Dashboard load
+    // it will not act on. `dismissed` defaults TRUE (hidden) until the answer
+    // arrives — the safe direction for a nudge, exactly like
+    // `hardeningGuideEligible` defaulting false for the hardening guide.
+    telemetrySharingEnabled: false,
+    telemetrySharingHardDisabled: false,
+    telemetrySharingDismissed: true,
+    telemetrySharingFirstValue: false,
   }),
 
   getters: {
@@ -98,6 +131,13 @@ export const useSessionsStore = defineStore('sessions', {
           { force }
         )
         this.sessionTabEnabled = !!r.data?.session_tab_enabled
+        // #2559: no reader in `src/` since the Agent Detail voice overlay was
+        // retired — the Talk door is ungated and the Workspace asks the roster
+        // for its own capability. Kept because this is a free parse of a payload
+        // already fetched for six other flags, and the backend key is
+        // load-bearing server-side (`settings.py` derives `workspace_available`
+        // from it). Registered on the same follow-up as the now caller-less
+        // `/api/agents/{name}/voice/*` routes.
         this.voiceAvailable = !!r.data?.voice_available
         this.workspaceAvailable = !!r.data?.workspace_available
         this.voipAvailable = !!r.data?.voip_available
@@ -105,11 +145,31 @@ export const useSessionsStore = defineStore('sessions', {
         this.brainOrbVoiceAvailable = !!r.data?.brain_orb_voice_available
         this.brainOrbWriteAvailable = !!r.data?.brain_orb_write_available
         this.claudeAuthConfigured = !!r.data?.claude_auth_configured
+        // ent#553: an integer, not a flag. `Number(...) || 0` collapses null,
+        // undefined, a string and a NaN to the same "not told" value the
+        // component treats as "say nothing", so an older backend that has never
+        // heard of this key renders exactly as it did before.
+        this.canvasMaxPerAgent = Number(r.data?.canvas_max_per_agent) || 0
+        // #2380: string flags, `platform_default_model`'s precedent on this
+        // surface. Coerced through the same safe default the catch below uses,
+        // so a null/absent field lands on the closed value rather than
+        // undefined — which reads as falsy but prints as "undefined".
+        this.installSource = r.data?.install_source || 'unknown'
+        this.hardeningGuideEligible = !!r.data?.hardening_guide_eligible
+        this.installTlsPosture = r.data?.install_tls_posture || 'unconfigured'
+        // ent#437: an absent field reads as hidden (`dismissed`), never as a
+        // fresh ask — an older backend must not pop the card on every load.
+        this.telemetrySharingEnabled = !!r.data?.telemetry_sharing_enabled
+        this.telemetrySharingHardDisabled = !!r.data?.telemetry_sharing_hard_disabled
+        this.telemetrySharingDismissed = r.data?.telemetry_sharing_dismissed !== false
+        this.telemetrySharingFirstValue = !!r.data?.telemetry_sharing_first_value
         // ent#158: the A2A config tab shows only when the enterprise A2A module
         // is entitled (registered in enterprise_features).
         this.a2aAvailable = Array.isArray(r.data?.enterprise_features)
           && r.data.enterprise_features.includes('a2a')
+        this.featureFlagsFailed = false
       } catch {
+        this.featureFlagsFailed = true
         this.sessionTabEnabled = false
         this.voiceAvailable = false
         this.workspaceAvailable = false
@@ -119,6 +179,20 @@ export const useSessionsStore = defineStore('sessions', {
         this.brainOrbWriteAvailable = false
         this.claudeAuthConfigured = false
         this.a2aAvailable = false
+        this.canvasMaxPerAgent = 0
+        // #2380 fails CLOSED like every flag above it: `unknown` provenance is
+        // not eligible, so the hardening guide stays hidden. Showing a
+        // security prompt on a correctly-configured managed instance is the
+        // exact failure this feature is shaped to avoid.
+        this.installSource = 'unknown'
+        this.hardeningGuideEligible = false
+        this.installTlsPosture = 'unconfigured'
+        // ent#437 fails in the HIDDEN direction: a failed flags fetch must not
+        // pop a consent ask, so `dismissed` reads true until a real answer.
+        this.telemetrySharingEnabled = false
+        this.telemetrySharingHardDisabled = false
+        this.telemetrySharingDismissed = true
+        this.telemetrySharingFirstValue = false
       } finally {
         this.featureFlagsLoaded = true
       }

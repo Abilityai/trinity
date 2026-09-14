@@ -547,3 +547,157 @@
   #2069 only ensures the merge *covers* everyone who auto-syncs.
 
 ---
+
+### 11.15 Canonical `.gitignore` Precedence and Sweep Reporting (#2529)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Description**: Both writers of an agent's `.gitignore` **appended**, and git is
+  **last-match-wins**. So the canonical `_GITIGNORE_PATTERNS` block — appended to the
+  END of the file on every Push — silently reversed every `!negation` the agent wrote
+  above it, and `_build_rm_cached_ignored_command` then `git rm --cached`'d the files
+  those negations were protecting, inside an unrelated sync commit that named none of
+  them. Two confirmed field instances: an internal fleet agent on 2026-07-30 (causing
+  commit `47efd80`, a commit about skill scripts that does not touch `.gitignore` at
+  all) and corbin on 2026-09-02, hand-restored with the comment *"Negation must stay
+  LAST in this file."* Casualties include **`.env.example`** — compat check **F-004**
+  requires it and `credential_requirements_service` reads it, so an agent that ships
+  one lost it on its first Push and then failed its own compatibility contract — and
+  **`.claude/settings.json`**, whose negation was the escape hatch #2036's own
+  rationale offered. `#1703` (repo root ≡ `$HOME`) retires this whole layer
+  structurally; until then this is the correctness fix, designed as the steady state
+  because #1703 is P3, unassigned and a decision issue first.
+- **Key Features**:
+  - **TWO managed regions, not one.** The merge is a **normalize-and-rebuild**: it
+    strips canonical / superseded / marker lines *wherever* they appear, then writes
+    `[DEFAULTS block][user region, original order][PROTECTED floor]`. Idempotent by
+    construction (a second run computes byte-identical output) and the file is written
+    only when the computed content differs, so the 15-minute auto-sync loop has nothing
+    to re-commit. One block provably cannot carry both *defaults the user may override*
+    and *guarantees the user may not* — see the next two entries; that is the whole
+    reason there are two regions and four marker lines.
+  - **Defaults region (top) — agent negations win.** Anything the agent writes below
+    the block beats a canonical default, so `!.env.example`, `!.claude/settings.json`
+    and `!**/.env.example` hold **without having to be the file's last line**.
+  - **Protected floor (bottom) — NOT overridable.** The seven credential patterns
+    (`.env`, `.env.*`, `.mcp.json`, `credentials.json`, `*.pem`, `*.key`, `.ssh/`) plus
+    their two canonical negations (`!.env.example`, `!.mcp.json.template`), and
+    `.trinity/*` with the 8 `!` re-includes derived from `_TRINITY_AUTHORED_PATHS`, sit
+    **below** the user region. Floor membership is decided against
+    `services/credential_paths.py` — the platform's own answer to *"is this secret
+    material"* — **not** against the source file's comment headings: `.ssh/` sits under
+    "Instance-specific directories" and was consequently missed on the first pass, which
+    left a fleet agent carrying `!.ssh` (with no `.ssh/` line of its own) newly committing
+    `.ssh/id_rsa` on its migration Push. Pinned by
+    `test_2529_gitignore_precedence.py::test_credential_bearing_defaults_are_all_in_the_floor`
+    and `::test_a_user_negation_cannot_un_ignore_ssh_key_material`. Two reasons, both measured: (1) hoisting a single block would flip
+    every currently-**inert** credential negation in the fleet live in one Push — today
+    a user's `!.env` with no `.env` line gets `.env` appended *below* it, so `.env` **is**
+    ignored; hoisting reverses that, and the unattended 15-minute `git add -A` commits
+    the result to the user's GitHub repo (the #458 class, on the path nobody watches).
+    (2) A user `*.sh` below a hoisted block would beat `!.trinity/setup.sh` —
+    trinity-enterprise#76 / #1704 reintroduced, failing *quietly* (never `git add`-ed
+    rather than untracked, because the rm-cached pathspec still exempts it).
+    `_GITIGNORE_PROTECTED` is **derived** as a filter over `_GITIGNORE_PATTERNS`, not a
+    second hand-written list, so a new authored path is still one edit and the two
+    cannot drift (#2070's principle).
+  - **AC-1 is rule (b): untrack only when no agent-authored negation covers it** —
+    enforced by **git itself**, not by an allowlist. Once the canonical block sits above
+    the user's rules, `git ls-files -ci --exclude-standard` no longer reports a path an
+    *effective* negation covers. Rule (a) as literally worded ("never untrack a path
+    already tracked before that Push") was rejected: it would delete #462's purpose and
+    #1596's more sharply still — #1596's patterns exist to untrack *long*-committed
+    `node_modules/`, so any recency window defeats them outright.
+  - **Dir-form residual — reported, not converted.** 23 of the 59 canonical patterns are
+    dir-form (`content/`, `node_modules/`, `.venv/`, `.claude/projects/`, …). Git does
+    not descend into an excluded directory, so a negation beneath one is inert **at any
+    position** — the exact trap #2070 fixed for `.trinity/` by going contents-only. The
+    contents-form conversion (`content/` → `content/*`) is recorded and **rejected on
+    cost**: forcing git to descend and stat a `node_modules/`-sized tree on every
+    `status`/`add` is the whole reason dir-form exists. The residual is surfaced instead,
+    via `shadowed_negations`.
+  - **Three honest report fields on `GitSyncResult`**, populated on **all four**
+    post-sweep returns (200 / 409 / non-200 / exception — the index mutation has already
+    happened by then): `removed_paths` (tracked → untracked by this Push),
+    `unignored_paths` (newly un-ignored and still untracked — the inverted-duplicate
+    case), `shadowed_negations` (`"!rule -> deciding managed pattern"`, the dir-form and
+    protected-floor residuals). The verdict comes from **`git check-ignore -v`**, never a
+    reimplemented matcher — and from the deciding **pattern text**, never the exit code,
+    which is 0 even when the deciding rule is itself a negation.
+  - **Five surfaces, one of which outlives the session.** API response, `git_sync` MCP
+    tool result, UI toast, the commit message, and — because both field incidents were
+    unattended and surfaced two months late — an **operator-queue entry**
+    (`gitignore_untracked`, the #1595 `git_bloat` precedent). **Every one of the five
+    gates on `GitignoreSweep.changed_tracking` — `removed` OR `unignored` — never on
+    `removed` alone.** The rebuild can change what is in the repo in *both* directions,
+    and the addition is the worse half: a removal is recoverable from the working tree,
+    whereas a newly un-ignored path is already in the remote's history and may need a
+    credential rotated. `shadowed` is deliberately **not** in the gate — it is standing
+    advice about the file, not a change this Push made, so including it would file an
+    alert on every single Push of every agent with a dir-form negation. An
+    unignored-ONLY entry files at `medium`, not `high`: `unignored` is
+    `after − before` across two execs against a live container, so a file the agent's
+    own session creates in that window lands there too, whereas a removal is a
+    confirmed destructive act. That entry is **budgeted**
+    (#1677 `create_bounded_alert`), not a direct create like its `git_bloat`/`sync_failing`
+    siblings: their cadence is the 60-second platform poller's, while this one fires from
+    `sync_to_github`, which the `git_sync` MCP tool lets an agent-scoped key drive on itself
+    — a repeated `git add -f <ignored>` + sync loop yields a fresh `removed` set each time
+    against a timestamped, non-idempotent id. Its `gitignore-untracked-` prefix is reserved
+    so an agent cannot pre-create the id and suppress its own alert through the sink's
+    `on_conflict_do_nothing`. The commit-message half is
+    explicitly **best-effort**: `git rm --cached` only *stages*, and if the in-container
+    auto-sync loop commits first the deletions ride in someone else's commit — which is
+    exactly what `47efd80` was. The operator-queue entry is the surface that does not
+    depend on who commits. Failure-path honesty: the router's `HTTPException` keeps only
+    `detail`, so the summary line is appended to `result.message` **inside**
+    `sync_to_github` rather than special-cased per status code.
+  - **Report, never block.** An inverted user duplicate (`!.env.production` above the
+    user's own `.env.*`) becomes tracked and is reported via `unignored_paths`. A
+    blocking detect-and-refuse was considered and rejected by the issue author: *"A
+    blocking detect-and-refuse on unattended crons trades a wrong repo for a frozen one
+    — and the frozen one is harder to notice because nothing changes. Proceed and
+    report."* The protected floor makes it structurally impossible for the cases where
+    it is dangerous.
+  - **Merge-command hardening** (each reproduced before being fixed): the strip `grep`
+    is a real command in the `&&` chain with an explicit `rc<=1` check, because a failure
+    inside a process substitution is invisible (`cat` still exits 0) and the `mv` then
+    replaces the user's `.gitignore` with the block alone — data loss, reproduced on the
+    real base image with a mode-000 file; `LC_ALL=C grep -a`, because without `-a` a
+    `.gitignore` carrying a NUL byte makes grep print `binary file matches` and emit
+    **zero** lines while exiting **0**, dropping the whole user region past even the
+    status check; the strip list carries each pattern **twice, bare and `\r`-suffixed**,
+    so a CRLF canonical copy is stripped instead of surviving below the block and still
+    overriding; `[ -e .gitignore ] || : > .gitignore` instead of `touch`, which bumped
+    mtime on every Push; and a module-level assertion rejecting an empty or
+    newline-bearing pattern, because an empty entry in a `grep -vxF -f` list matches
+    every blank line (and without `-x`, every line).
+  - **`.trinity/operator-queue.json` stays ignored** — deliberately **not** added to
+    `_TRINITY_AUTHORED_PATHS`. It is a live approval queue rewritten continuously;
+    committing it would put a diff in every 15-minute auto-sync cycle and push approval
+    payloads into the user's repo. Same call #919 / Invariant #8 made for
+    `.trinity/pipelines/` (definitions committed) vs `pipeline-state/` (state not).
+    Reviewed, not forgotten. If the fleet decides an orchestrator's approval record must
+    survive a rebuild, the answer is a `data_paths` / export mechanism, not a git commit
+    per 15 minutes.
+  - **Known contamination, stated**: `unignored_paths` is computed as `after − before`
+    across two execs against a **live** container, so a file the agent's own session
+    creates in that window is reported as newly un-ignored. Folding both probes into the
+    two execs the Push already ran narrows the window; it does not close it. The field is
+    advisory.
+  - **The 14 bundled templates are regenerated with the markers** so #1908's
+    byte-identity property — the zero-drift guarantee #953 depends on — still holds.
+    Without it the merge against a pristine bundled template yields `M .gitignore`,
+    39 insertions / 37 deletions, on every template-derived agent.
+  - **CI direction fixed**: `test_github_init_gitignore.py::test_doc_and_constant_in_sync`
+    asserted `constant ⊆ doc` only, which is exactly why the guide could carry
+    `!.env.example` for months while the constant did not. It is now set **equality**,
+    and `test_1908_bundled_template_gitignore.py::ALLOWED_NON_CANONICAL` shrinks to empty.
+- **Source of truth**: `services/git_service.py` (`_GITIGNORE_PROTECTED`, the four
+  `_GITIGNORE_BLOCK_*` / `_GITIGNORE_FLOOR_*` markers, `_build_gitignore_merge_command`,
+  `_build_rm_cached_ignored_command`, `_build_shadowed_negations_probe`,
+  `GitignoreSweep`, `_migrate_workspace_gitignore`, `sync_to_github`),
+  `db_models.py::GitSyncResult`, `routers/git.py`, `src/mcp-server/src/tools/git.ts`,
+  `src/frontend/src/composables/useGitSync.js`.
+- **Flow**: `docs/memory/feature-flows/github-sync.md`, `docs/memory/feature-flows/git-sync-health.md`
+- **GitHub Issue**: #2529 (continuation of #2069 / #2070)
+
+---

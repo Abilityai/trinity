@@ -112,7 +112,9 @@ class _FakePopen:
 @pytest.fixture
 def patched_loop(monkeypatch):
     monkeypatch.setattr(he, "_capture_pgid", lambda _p: 4242)
-    monkeypatch.setattr(he, "get_process_registry", lambda: MagicMock())
+    monkeypatch.setattr(  # #2433: model was_terminated — a bare MagicMock is truthy and reads as "cancelled before start"
+        he, "get_process_registry", lambda: MagicMock(**{"was_terminated.return_value": False})
+    )
     term = MagicMock()
     monkeypatch.setattr(he, "_terminate_process_group", term)
     monkeypatch.setattr(he, "_drain_bounded", MagicMock())
@@ -381,7 +383,9 @@ class TestKnownBound:
         lower `AGENT_IDLE_FINALIZE_S`.
         """
         monkeypatch.setattr(he, "_capture_pgid", lambda _p: 4242)
-        monkeypatch.setattr(he, "get_process_registry", lambda: MagicMock())
+        monkeypatch.setattr(  # #2433: model was_terminated — a bare MagicMock is truthy and reads as "cancelled before start"
+            he, "get_process_registry", lambda: MagicMock(**{"was_terminated.return_value": False})
+        )
         monkeypatch.setattr(he, "_terminate_process_group", MagicMock())
         monkeypatch.setattr(he, "_drain_bounded", MagicMock())
         monkeypatch.setattr(he, "_WAIT_POLL_S", 0.05)

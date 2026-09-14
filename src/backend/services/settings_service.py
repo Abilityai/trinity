@@ -46,123 +46,21 @@ def is_valid_public_channel_model(model: str) -> bool:
 
 # Re-exported from config.py (a leaf module) — database.py seeds these during
 # init_database(), which runs at import, and this module imports `db` from
-# database, so defining them here would be a circular import (#1638). Importers
-# keep using `from services.settings_service import ...`.
+# database, so defining them HERE is a circular import (#1638). Importers keep
+# using `from services.settings_service import ...`.
+#
+# #2085 is the proof that this is a live trap and not historical trivia: the
+# retention windows and their defaults were defined in this file, #2085's
+# `_seed_retention_windows` imported them from here, and the resulting
+# ImportError was swallowed by that seed's fail-safe contract — so the feature
+# no-opped on every boot with a fully green unit suite. Anything
+# `init_database()` reads belongs in config.py and is re-exported below.
 from config import (  # noqa: E402
     COMMUNITY_FRESH_INSTALL_SEED,  # noqa: F401  (re-export)
     COMMUNITY_RETENTION_FLOOR_DAYS,  # noqa: F401  (re-export)
+    OPS_SETTINGS_DEFAULTS,  # noqa: F401  (re-export)
+    RETENTION_OPS_KEYS,  # noqa: F401  (re-export)
 )
-
-# The operator-tunable retention OPS-settings keys reported by
-# `GET /api/settings/retention` (audit log excluded — separate env-driven
-# 365-day floor). Membership here means "is a retention window"; it does NOT
-# mean "gets the community floor" — that set is COMMUNITY_FRESH_INSTALL_SEED.
-RETENTION_OPS_KEYS = (
-    "execution_log_retention_days",
-    "execution_row_retention_days",
-    "health_check_retention_days",
-    "agent_soft_delete_retention_days",
-    "schedule_soft_delete_retention_days",
-    # #1644: these two ARE retention windows and were missing here, so three
-    # readers were silently blind to them:
-    #   - `POST /api/settings/ops/reset` skips only RETENTION_OPS_KEYS, so it
-    #     DELETED these two rows while reporting "retention windows unchanged";
-    #   - `GET /api/settings/retention` never reported them;
-    #   - `log_effective_retention_windows()` never logged them at boot — the
-    #     exact observability gap that made #1638 invisible.
-    # Membership means "is a retention window"; it does NOT mean "gets the
-    # community floor" (that set is COMMUNITY_FRESH_INSTALL_SEED, unchanged).
-    "agent_reports_retention_days",
-    "operator_queue_retention_days",
-    # #1296: terminal agent_reminders rows (fired/cancelled/failed). A retention
-    # window (surfaced/logged/reset-protected), NOT a community-floor key.
-    "agent_reminders_retention_days",
-    # #2216: database-backup artifacts under /data/backups. Membership here
-    # buys the write-path protections (validated /ops/config only, generic
-    # PUT 422-blocked, /ops/reset skips) — but its READ is special-cased:
-    # every surface renders it through
-    # services.db_backup_service.effective_backup_retention_days(), whose
-    # coercion is INVERTED (garbage → 14, never → 0/keep-forever), and
-    # GET /api/settings/retention excludes it from the generic windows map.
-    # NOT a community-floor key (fewer days = the destructive direction here).
-    "backup_retention_days",
-)
-
-# The RETENTION_OPS_KEYS members whose prune is NOT a #1644 row sweep (#2216).
-# `backup_retention_days` prunes FILE artifacts from the backup job's own tail;
-# its bounded-destruction guarantee is structural (the fixed BACKUP_MIN_KEEP
-# floor in db/backup_primitives.py — never zero recovery points), NOT the
-# count-threshold/ack-gated `_guard_allows` refusal in cleanup_service: an
-# ack-gated refusal fails in the INVERTED direction for backups (refused prune
-# → backups fill the disk, #1871 class), so that prune must run unconditionally
-# within its floor. `tests/unit/test_1771a_retention_edges.py` asserts every
-# key in RETENTION_OPS_KEYS minus THIS set has exactly one `_guard_allows`
-# call site — add a second file-artifact window HERE, or the guard fires.
-NON_ROW_RETENTION_OPS_KEYS = frozenset({"backup_retention_days"})
-
-
-# Default values for ops settings (as specified in requirements)
-OPS_SETTINGS_DEFAULTS = {
-    "ops_context_warning_threshold": "75",  # Context % to trigger warning
-    "ops_context_critical_threshold": "90",  # Context % to trigger reset/action
-    "ops_idle_timeout_minutes": "30",  # Minutes before stuck detection
-    "ops_cost_limit_daily_usd": "50.0",  # Daily cost limit (0 = unlimited)
-    "ops_max_execution_minutes": "10",  # Max chat execution time
-    "ops_alert_suppression_minutes": "15",  # Suppress duplicate alerts
-    "ops_log_retention_days": "7",  # Days to keep container logs
-    "ops_health_check_interval": "60",  # Seconds between health checks
-    "ssh_access_enabled": "false",  # Enable SSH access via MCP tool
-    # RETENTION DEFAULTS — READ THIS BEFORE CHANGING A NUMBER BELOW (#1638).
-    #
-    # These are the fallback used at PRUNE time for an install with no
-    # `system_settings` row, which is the default state for every install that
-    # never touched retention. Lowering one of them silently hard-DELETEs the
-    # existing data of every such install, ~seconds after its next boot, with no
-    # error and a green /health. That is #1638; it cost ~3 months of execution
-    # history on a real instance.
-    #
-    # So: these stay at the widest (safest) historical value. The #1039
-    # community floor is applied to NEW installs by seeding rows
-    # (COMMUNITY_FRESH_INSTALL_SEED), which only ever touches an empty DB.
-    # If you want to shrink a window for existing installs, that is a migration
-    # + a docs/migrations/ entry + an operator decision — not an edit here.
-    #
-    # Issue #772: retention policy for execution_log + agent_health_checks.
-    # "0" disables that prune step.
-    "execution_log_retention_days": "30",  # Null `execution_log` TEXT after N days (#772)
-    "execution_row_retention_days": "90",  # DELETE schedule_executions rows after N days (#772)
-    "health_check_retention_days": "7",    # DELETE agent_health_checks rows after N days (#772)
-    # Issue #834 Phase 1a: soft-delete retention for agents. After
-    # DELETE /api/agents/{name}, the agent_ownership row is marked
-    # `deleted_at = NOW` and child rows are preserved. The cleanup
-    # sweep hard-deletes rows older than this many days (cascading
-    # child tables via #816's purge primitive) AND removes the agent's
-    # data volumes (#1581). "0" disables the sweep entirely.
-    # #1638: EXEMPT from the community floor in every edition — this is a
-    # recovery window whose expiry destroys agent workspaces, not a log window.
-    "agent_soft_delete_retention_days": "180",
-    # Issue #834 Phase 1b: per-schedule soft-delete. "0" disables the sweep.
-    "schedule_soft_delete_retention_days": "30",
-    # Issue #918: retention for agent_reports. Rows older than this many days
-    # are deleted by the cleanup sweep. "0" disables the sweep.
-    "agent_reports_retention_days": "90",
-    # Issue #1142: retention for terminal operator_queue rows
-    # (acknowledged/cancelled/expired). "0" disables the sweep. `responded` rows
-    # get a more generous fixed floor (never deleted younger than #772's guard).
-    "operator_queue_retention_days": "90",
-    # Issue #1296: retention for TERMINAL agent_reminders (fired/cancelled/
-    # failed). Rows older than this many days are deleted; pending/firing never
-    # deleted. "0" disables the sweep. Wide/safe default per the #1638 floor rule.
-    "agent_reminders_retention_days": "90",
-    # Issue #2216: retention for database-backup artifacts. The #1638 "widest
-    # value" rule applies in spirit but the direction INVERTS: raising this
-    # default costs disk on every un-configured install (#1871 class), while
-    # lowering it deletes recovery points — NEVER lower it for existing
-    # installs without a migration note, and never raise it casually either.
-    # "0" is INVALID for this key (validated 1–3650): keep-forever is the
-    # disk-fill trap; disabling backups is DB_BACKUP_ENABLED=false.
-    "backup_retention_days": "14",
-}
 
 # Descriptions for each ops setting
 OPS_SETTINGS_DESCRIPTIONS = {
@@ -183,6 +81,8 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "agent_reports_retention_days": "Days to retain agent_reports rows (default: 90, 0 = disabled, #918)",
     "operator_queue_retention_days": "Days to retain terminal operator_queue rows (acknowledged/cancelled/expired; default: 90, 0 = disabled, #1142)",
     "agent_reminders_retention_days": "Days to retain terminal agent_reminders rows (fired/cancelled/failed; default: 90, 0 = disabled, #1296)",
+    "subscription_headroom_retention_days": "Days to retain subscription headroom probe history used for utilization trends (default: 30, 0 = disabled, ent#433)",
+    "subscription_failure_event_retention_days": "Days to retain subscription rate-limit/auth failure events (default: 30, 0 = disabled; was a hardcoded 24h sweep before ent#433)",
     "backup_retention_days": "Days to retain database-backup artifacts in /data/backups (default: 14, bounds 1-3650 — 0 is invalid; the newest 3 artifacts are always kept; disable backups via DB_BACKUP_ENABLED=false, #2216)",
 }
 
@@ -222,26 +122,206 @@ class SettingsService:
         value = db.get_setting_value(key, None)
         return value if value is not None else default
 
+    # =========================================================================
+    # Credential-bearing settings — encrypted at rest (trinity-enterprise#435)
+    # =========================================================================
+    #
+    # These rows hold LIVE third-party credentials and used to sit in cleartext
+    # (CWE-312). They now resolve encrypted-row → legacy-row-with-lazy-migration
+    # → env → '', with the policy in ``services/secret_settings.py``.
+    #
+    # Resolution order matters twice over. Encrypted-first means the steady state
+    # never touches the legacy key at all — one read, same cost as before. The
+    # legacy leg is not dead code that the migration made unreachable: a
+    # pre-fix backup restore, a rollback-then-roll-forward, or a direct DB write
+    # can all put cleartext back, and the read path is the only thing that
+    # notices. So it re-encrypts and DELETEs on sight, which makes cleartext
+    # transient by construction rather than merely absent right now.
+    #
+    # Fail-open on READ (an unreadable envelope degrades to env, never a 500 —
+    # ``get_elevenlabs_api_key``'s rule) and fail-CLOSED on WRITE (no encryption
+    # key ⇒ refuse, never silently store cleartext, which is the whole defect).
+
+    def _resolve_secret_setting(self, key: str, env_var: str) -> str:
+        """Encrypted row → legacy cleartext row (migrated on sight) → env → ''."""
+        return self._stored_secret_setting(key) or os.getenv(env_var, '')
+
+    def _stored_secret_setting(self, key: str) -> str:
+        """The settings half of ``_resolve_secret_setting`` — no env leg.
+
+        Split out (ent#582) for the one resolver whose env fallback is not a
+        single variable: the Gemini key, which `config` coalesces from two.
+        """
+        from services.secret_settings import (
+            decrypt_secret_setting,
+            encrypted_key_for,
+            looks_like_envelope,
+        )
+
+        envelope = self.get_setting(encrypted_key_for(key))
+        if envelope:
+            # Unreadable envelope (wrong/rotated key, corrupt row) → '' so the
+            # caller falls through to env rather than raising — but NOT to the
+            # legacy row: a stale cleartext value silently outranking the
+            # current encrypted one is worse than being unconfigured.
+            return decrypt_secret_setting(key, envelope) or ''
+
+        legacy = self.get_setting(key)
+        if legacy and legacy.strip():
+            if looks_like_envelope(legacy):
+                # Legacy key already holds an envelope — a half-applied older
+                # in-place scheme, or a hand-written row. Decrypt it, and let the
+                # migration below normalise it onto the encrypted key name.
+                decrypted = decrypt_secret_setting(key, legacy)
+                if decrypted:
+                    self._migrate_legacy_secret_setting(key, decrypted)
+                    return decrypted
+                return ''
+            self._migrate_legacy_secret_setting(key, legacy)
+            return legacy
+
+        return ''
+
+    def _migrate_legacy_secret_setting(self, key: str, value: str) -> None:
+        """Encrypt ``value`` onto the encrypted key and drop the cleartext row.
+
+        Best-effort: this runs on a READ path, so a failure must return the
+        credential the caller asked for rather than break agent startup. The
+        one-shot migration and the next read both retry it.
+
+        ``--workers 2``-safe without a lock: two workers racing produce two
+        different envelopes of the SAME plaintext, the upsert is last-write-wins,
+        and both DELETEs of the legacy row are idempotent. Order is
+        encrypt-then-write-then-delete, so a crash between steps leaves the
+        cleartext row intact and the next read retries — never a lost credential.
+        """
+        from services.secret_settings import encrypt_secret_setting, encrypted_key_for
+
+        try:
+            db.set_setting(encrypted_key_for(key), encrypt_secret_setting(key, value))
+            db.delete_setting(key)
+            logger.warning(
+                f"Migrated cleartext credential setting '{key}' to "
+                f"'{encrypted_key_for(key)}' on read (ent#435). Rotate this "
+                f"credential: historical backups still contain the plaintext."
+            )
+        except Exception as e:  # noqa: BLE001 — read path must not break
+            logger.error(f"Failed to encrypt legacy credential setting '{key}': {e}")
+
+    def set_secret_setting(self, key: str, value: str) -> None:
+        """Persist a credential-bearing setting AES-256-GCM encrypted.
+
+        The ONLY supported writer for the keys in ``SECRET_SETTING_KEYS`` — the
+        cleartext row is refused at the sink. Also clears any legacy cleartext
+        row, so re-setting a credential on a not-yet-migrated install is itself a
+        migration.
+        """
+        from services.secret_settings import (
+            SECRET_SETTING_KEYS,
+            encrypt_secret_setting,
+            encrypted_key_for,
+        )
+
+        if key not in SECRET_SETTING_KEYS:
+            raise ValueError(
+                f"'{key}' is not a registered credential setting; add it to "
+                f"services.secret_settings.SECRET_SETTING_KEYS first"
+            )
+        cleaned = value.strip()
+        if not cleaned:
+            # A blank write means "unset", not "store an envelope of nothing".
+            # Pre-ent#435 this stored `''`, which every reader treated as falsy
+            # and fell through to the env var — so clearing preserves the
+            # resolution exactly while keeping `has_secret_setting` (and the
+            # `source: settings|env` field it backs) honest: an envelope of an
+            # empty string would report "configured in settings" for a
+            # credential that resolves from the environment.
+            self.clear_secret_setting(key)
+            return
+        db.set_setting(encrypted_key_for(key), encrypt_secret_setting(key, cleaned))
+        db.delete_setting(key)
+
+    def clear_secret_setting(self, key: str) -> bool:
+        """Remove a credential setting (both forms). True if anything was removed."""
+        from services.secret_settings import encrypted_key_for
+
+        removed_encrypted = db.delete_setting(encrypted_key_for(key))
+        removed_legacy = db.delete_setting(key)
+        return removed_encrypted or removed_legacy
+
+    def has_secret_setting(self, key: str) -> bool:
+        """Whether the credential is configured via settings (either form).
+
+        Backs the ``source: "settings" | "env"`` fields on the admin status
+        endpoints. Deliberately presence-only — it never decrypts, so a row
+        written under a rotated key still reports "settings", which is the
+        honest answer to *where is this configured*.
+        """
+        from services.secret_settings import encrypted_key_for
+
+        return bool(self.get_setting(encrypted_key_for(key)) or self.get_setting(key))
+
     def get_anthropic_api_key(self) -> str:
-        """Get Anthropic API key from settings, fallback to env var."""
-        key = self.get_setting('anthropic_api_key')
-        if key:
-            return key
-        return os.getenv('ANTHROPIC_API_KEY', '')
+        """Get Anthropic API key: encrypted setting → legacy → env → ''."""
+        return self._resolve_secret_setting('anthropic_api_key', 'ANTHROPIC_API_KEY')
 
     def get_github_pat(self) -> str:
-        """Get GitHub PAT from settings, fallback to env var."""
-        key = self.get_setting('github_pat')
-        if key:
-            return key
-        return os.getenv('GITHUB_PAT', '')
+        """Get GitHub PAT: encrypted setting → legacy → env → ''."""
+        return self._resolve_secret_setting('github_pat', 'GITHUB_PAT')
 
     def get_google_api_key(self) -> str:
-        """Get Google API key from settings, fallback to env var."""
-        key = self.get_setting('google_api_key')
-        if key:
-            return key
-        return os.getenv('GOOGLE_API_KEY', '')
+        """Get Google API key: encrypted setting → legacy → env → ''."""
+        return self._resolve_secret_setting('google_api_key', 'GOOGLE_API_KEY')
+
+    # =========================================================================
+    # Platform keys configurable from the first-run flow (trinity-enterprise#582)
+    # =========================================================================
+    #
+    # Resolved at CALL time, never frozen at import (the `get_elevenlabs_api_key`
+    # rule), so a key saved in the browser works without a restart and in every
+    # uvicorn worker.
+
+    def get_gemini_api_key(self) -> str:
+        """The platform Gemini key (voice, avatars, transcription).
+
+        Encrypted ``google_api_key`` setting → ``GEMINI_API_KEY`` →
+        ``GOOGLE_API_KEY`` env. The setting reuses the ent#435 ``google_api_key``
+        secret because the platform already treats a Google API key as its Gemini
+        key (``config.GEMINI_API_KEY`` coalesces the two env vars); the env leg
+        reads that coalesced value at call time.
+        """
+        import config
+        return self._stored_secret_setting('google_api_key') or config.GEMINI_API_KEY
+
+    def get_resend_api_key(self) -> str:
+        """Resend key: encrypted setting → legacy → ``RESEND_API_KEY`` env → ''."""
+        return self._resolve_secret_setting('resend_api_key', 'RESEND_API_KEY')
+
+    def get_email_provider(self) -> str:
+        """The provider email is sent through: a Resend key SAVED IN SETTINGS
+        selects Resend; otherwise ``EMAIL_PROVIDER`` env.
+
+        A fresh install copies ``.env.example`` (``EMAIL_PROVIDER=console``), so a
+        key the operator configured in the browser would otherwise be silently
+        ignored — a dead end with no terminal-free way out.
+        """
+        import config
+        if self.has_secret_setting('resend_api_key'):
+            return 'resend'
+        return (config.EMAIL_PROVIDER or 'console').lower()
+
+    _EMAIL_FROM_SETTING = 'email_from_address'
+
+    def get_email_from_address(self) -> str:
+        """Sender address: ``email_from_address`` setting → ``SMTP_FROM`` env."""
+        import config
+        return (self.get_setting(self._EMAIL_FROM_SETTING) or '').strip() or config.SMTP_FROM
+
+    def set_email_from_address(self, address: str) -> None:
+        db.set_setting(self._EMAIL_FROM_SETTING, address.strip())
+
+    def clear_email_from_address(self) -> bool:
+        return db.delete_setting(self._EMAIL_FROM_SETTING)
 
     # =========================================================================
     # ElevenLabs / outbound-voice (TTS) settings (trinity-enterprise#117)
@@ -306,25 +386,25 @@ class SettingsService:
     # =========================================================================
 
     def get_slack_client_id(self) -> str:
-        """Get Slack Client ID from settings, fallback to env var."""
+        """Get Slack Client ID from settings, fallback to env var.
+
+        Deliberately NOT encrypted (ent#435): an OAuth client_id is a public
+        identifier — ``slack_service.get_oauth_url`` puts it verbatim in the
+        browser-visible authorize URL. Recorded as a reviewed exemption in
+        ``secret_settings.PUBLIC_CREDENTIAL_SHAPED_KEYS``.
+        """
         key = self.get_setting('slack_client_id')
         if key:
             return key
         return os.getenv('SLACK_CLIENT_ID', '')
 
     def get_slack_client_secret(self) -> str:
-        """Get Slack Client Secret from settings, fallback to env var."""
-        key = self.get_setting('slack_client_secret')
-        if key:
-            return key
-        return os.getenv('SLACK_CLIENT_SECRET', '')
+        """Get Slack Client Secret: encrypted setting → legacy → env (ent#435)."""
+        return self._resolve_secret_setting('slack_client_secret', 'SLACK_CLIENT_SECRET')
 
     def get_slack_signing_secret(self) -> str:
-        """Get Slack Signing Secret from settings, fallback to env var."""
-        key = self.get_setting('slack_signing_secret')
-        if key:
-            return key
-        return os.getenv('SLACK_SIGNING_SECRET', '')
+        """Get Slack Signing Secret: encrypted setting → legacy → env (ent#435)."""
+        return self._resolve_secret_setting('slack_signing_secret', 'SLACK_SIGNING_SECRET')
 
     def get_public_chat_url(self) -> str:
         """Get Public Chat URL from settings, fallback to env var."""
@@ -341,11 +421,8 @@ class SettingsService:
         return os.getenv('SLACK_TRANSPORT_MODE', 'socket')
 
     def get_slack_app_token(self) -> str:
-        """Get Slack App-Level Token (xapp-...) for Socket Mode."""
-        token = self.get_setting('slack_app_token')
-        if token:
-            return token
-        return os.getenv('SLACK_APP_TOKEN', '')
+        """Slack App-Level Token (xapp-…) for Socket Mode: encrypted → legacy → env."""
+        return self._resolve_secret_setting('slack_app_token', 'SLACK_APP_TOKEN')
 
     # =========================================================================
     # Session tab feature flag (Phase 1.6 of SESSION_TAB_2026-04)
@@ -454,6 +531,125 @@ class SettingsService:
         read/voice. Write routes also require the base flag (composed at the
         router)."""
         return self._resolve_bool_flag("brain_orb_write_enabled", "BRAIN_ORB_WRITE_ENABLED")
+
+    # =========================================================================
+    # Install provenance + advertised-URL posture (#2380)
+    # =========================================================================
+
+    def get_install_source(self) -> str:
+        """How this instance was installed — the recorded value, or `unknown`.
+
+        Reads the row `database._record_install_source` wrote at boot. The env
+        var is deliberately NOT a fallback here: provenance is a recorded fact,
+        and an env-var read leg would make it re-assertable at any time by
+        anyone who can edit `.env`, which is exactly the property that lets the
+        marketplace gate be self-granted.
+
+        Fail-open to `unknown` (never toward a marketplace value) on a missing
+        row, an unrecognised value, or a settings-read failure — this feeds
+        `GET /api/settings/feature-flags`, where a raise would 500 the endpoint
+        and zero EVERY flag in the frontend store (`_resolve_bool_flag`'s
+        rationale). An `unknown` verdict hides the guide; that is the safe
+        direction, since showing a hardening prompt on a correctly-configured
+        managed instance is the failure this whole feature is shaped to avoid.
+
+        Uncached, matching `_resolve_bool_flag`: the backend runs `--workers 2`
+        and one SQLite read per call is negligible.
+        """
+        from config import INSTALL_SOURCE_SETTING_KEY, INSTALL_SOURCE_UNKNOWN, INSTALL_SOURCE_VALUES
+
+        try:
+            recorded = self.get_setting(INSTALL_SOURCE_SETTING_KEY)
+        except Exception:
+            return INSTALL_SOURCE_UNKNOWN
+        if not recorded:
+            return INSTALL_SOURCE_UNKNOWN
+        value = str(recorded).strip().lower()
+        return value if value in INSTALL_SOURCE_VALUES else INSTALL_SOURCE_UNKNOWN
+
+    def is_marketplace_install(self) -> bool:
+        """Whether provenance is a marketplace channel — the guide's one gate.
+
+        Resolved here rather than in the browser so the frontend holds no second
+        copy of which sources count as a marketplace (the ent#386 rule); the
+        flag surface ships this boolean beside the raw value.
+        """
+        from config import MARKETPLACE_INSTALL_SOURCES
+
+        return self.get_install_source() in MARKETPLACE_INSTALL_SOURCES
+
+    def is_hardening_guide_eligible(self) -> bool:
+        """Whether the first-run hardening guide should be offered here (#2380).
+
+        A SEPARATE question from `is_marketplace_install`, not a rename of it.
+        The guide's subject is "you are on a public cloud VM reachable at a bare
+        IP with no domain" — true of a marketplace image AND of a droplet
+        installed by following the DigitalOcean deploy doc, which records
+        `do-script`. `marketplace_install` keeps answering only what it says.
+
+        Still resolved server-side, so the browser holds no second copy of which
+        provenances qualify (the ent#386 rule), and still gated on PROVENANCE
+        rather than TLS state: the managed fleet has no domain and no HTTPS
+        flag, so a posture-based gate would fire on every paying client forever.
+        """
+        from config import HARDENING_GUIDE_INSTALL_SOURCES
+
+        return self.get_install_source() in HARDENING_GUIDE_INSTALL_SOURCES
+
+    def get_install_tls_posture(self) -> str:
+        """What this instance ADVERTISES itself as reachable at (#2380).
+
+        Returns one of `unconfigured` / `http` / `https-ip` / `https-domain`.
+
+        Named for what it actually knows. Nothing here probes a socket or reads
+        a certificate — the backend serves plain HTTP and TLS is terminated
+        outside it (HOST-010), so no in-process check can observe the real
+        posture. This derives from the URL the instance is configured to hand
+        out (`public_chat_url`, else the baked `FRONTEND_URL`), and the guide's
+        copy must say "advertises" rather than assert a verified certificate.
+        That constraint is the AC — never claim `secure` on evidence not held.
+
+        `https-ip` vs `https-domain` is the distinction that matters to the
+        guide: an IP certificate is a real, browser-trusted cert, but it renews
+        on a ~6-day Let's Encrypt short-lived profile and the address is
+        unmemorable. It is a working posture to be upgraded, not a broken one.
+
+        Derived rather than returning the URL itself because the URL lives
+        behind an admin-only settings read, and this reaches every authenticated
+        principal on the flag surface.
+
+        Resolves through `get_public_chat_url()` — the CANONICAL resolver, which
+        is row → `PUBLIC_CHAT_URL` env — rather than reading the row directly.
+        Reading the row alone invented a third resolution order and diverged from
+        every other consumer (public links, Telegram/WhatsApp/VoIP webhooks): a
+        droplet provisioned with `PUBLIC_CHAT_URL` in `.env` and no row would
+        resolve its domain everywhere else while this function reported `http`,
+        nagging forever on an instance that already has a name.
+
+        `FRONTEND_URL` remains a last resort beneath both, since it is the other
+        address an image builder plausibly bakes and this must not report
+        `unconfigured` when the instance clearly knows its own address.
+
+        Everything is inside the guard, imports included: this feeds
+        `/api/settings/feature-flags`, where a raise zeroes every flag.
+        """
+        configured = ""
+        try:
+            configured = (self.get_public_chat_url() or "").strip()
+        except Exception:
+            configured = ""
+        if not configured:
+            # Separately guarded, deliberately: a DB blip must not also discard
+            # what the environment already told us. Folding the two into one try
+            # made a failing settings read skip the env leg entirely and report
+            # `unconfigured` on an instance whose address was never in doubt.
+            try:
+                from config import FRONTEND_URL
+
+                configured = (FRONTEND_URL or "").strip()
+            except Exception:
+                configured = ""
+        return classify_advertised_url(configured)
 
     # =========================================================================
     # Workspace / portal session policy (ent#375)
@@ -791,6 +987,11 @@ def get_google_api_key() -> str:
     return settings_service.get_google_api_key()
 
 
+def get_gemini_api_key() -> str:
+    """Platform Gemini key, resolved per call (ent#582) — see the method."""
+    return settings_service.get_gemini_api_key()
+
+
 # Slack Integration Settings (SLACK-001)
 def get_slack_client_id() -> str:
     """Get Slack Client ID from settings, fallback to env var."""
@@ -820,6 +1021,80 @@ def get_slack_transport_mode() -> str:
 def get_slack_app_token() -> str:
     """Get Slack App-Level Token for Socket Mode."""
     return settings_service.get_slack_app_token()
+
+
+# --- Credential-bearing settings (ent#435) ---------------------------------
+
+def set_secret_setting(key: str, value: str) -> None:
+    """Persist a credential-bearing setting AES-256-GCM encrypted."""
+    settings_service.set_secret_setting(key, value)
+
+
+def clear_secret_setting(key: str) -> bool:
+    """Remove a credential-bearing setting (encrypted + any legacy row)."""
+    return settings_service.clear_secret_setting(key)
+
+
+def has_secret_setting(key: str) -> bool:
+    """Whether a credential-bearing setting is configured in the DB."""
+    return settings_service.has_secret_setting(key)
+
+
+def classify_advertised_url(url: str) -> str:
+    """Pure classifier behind `get_install_tls_posture` (#2380).
+
+    Split out with no DB or settings dependency so the URL grammar can be tested
+    directly — the interesting cases are all parsing (bracketed IPv6, a port, a
+    trailing dot, `localhost`), and routing each through a settings read to
+    exercise them would test the wrong thing.
+
+    Fails toward `unconfigured` on anything unparseable rather than guessing:
+    every other verdict is a claim about how the instance is reached, and an
+    unparseable URL supports none of them.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    if not url:
+        return "unconfigured"
+    try:
+        # No schemeless-input handling on purpose. A bare `example.com` yields no
+        # scheme, and without one there is no claim to make about how the
+        # instance is reached — every posture but `unconfigured` asserts
+        # something about transport. Coercing a missing scheme to `https` would
+        # manufacture exactly the confidence this function exists to withhold.
+        parts = urlsplit(url)
+        scheme = (parts.scheme or "").lower()
+        host = (parts.hostname or "").strip().rstrip(".")
+    except Exception:
+        return "unconfigured"
+    if not host:
+        return "unconfigured"
+    if scheme not in ("http", "https"):
+        return "unconfigured"
+    if scheme == "http":
+        return "http"
+    try:
+        # `hostname` already strips the brackets from an IPv6 authority.
+        ipaddress.ip_address(host)
+        return "https-ip"
+    except ValueError:
+        return "https-domain"
+
+
+def get_install_source() -> str:
+    """Recorded install provenance, or `unknown` (#2380)."""
+    return settings_service.get_install_source()
+
+
+def is_marketplace_install() -> bool:
+    """Whether this install came from a marketplace channel (#2380)."""
+    return settings_service.is_marketplace_install()
+
+
+def get_install_tls_posture() -> str:
+    """What URL posture this instance advertises (#2380)."""
+    return settings_service.get_install_tls_posture()
 
 
 def is_session_tab_enabled() -> bool:

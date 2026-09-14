@@ -131,7 +131,7 @@ def portal(monkeypatch):
 
     monkeypatch.setattr(svc, "agent_on_roster", lambda a, e, include_owned=False: True)
     monkeypatch.setattr(svc, "_build_portal_system_prompt", lambda a, e: None)
-    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s: SESSION)
+    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s, **kw: SESSION)
     monkeypatch.setattr(svc, "_spawn_title_generation", lambda *a, **kw: None)
 
     async def _no_inbox(agent, email, message):
@@ -142,6 +142,11 @@ def portal(monkeypatch):
     monkeypatch.setattr(portal_db, "get_portal_session", lambda *a, **kw: {"title": "t"})
     monkeypatch.setattr(portal_db, "get_portal_messages",
                         lambda *a, **kw: state.history)
+    # #2694: the cold replay reads the thread as a window of typed turns; the
+    # rows a test stages are the window.
+    monkeypatch.setattr(portal_db, "get_portal_thread_window",
+                        lambda *a, **kw: portal_db.ThreadWindow(rows=list(state.history), truncated=False))
+    monkeypatch.setattr(portal_db, "get_platform_rows_since_last_reply", lambda *a, **kw: [])
     monkeypatch.setattr(portal_db, "add_portal_message", lambda *a, **kw: None)
     monkeypatch.setattr(portal_db, "touch_portal_session", lambda *a, **kw: None)
     monkeypatch.setattr(portal_db, "get_cached_claude_session_id",

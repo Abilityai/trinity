@@ -701,7 +701,12 @@ class TestModelManagementExtended:
         created_agent
     ):
         """Valid model options are accepted."""
-        valid_models = ["sonnet", "opus", "haiku"]
+        # #2726: `fable` is advertised by GET /api/model's `available_models` and
+        # is a valid Claude Code alias, but the sibling PUT rejected it — the
+        # agent server's `valid_aliases` omitted it. Covered here; note this case
+        # only exercises the fix once the agent BASE IMAGE carries it (a stale
+        # image 400s -> backend 503 -> the skip below, never a false red).
+        valid_models = ["sonnet", "opus", "haiku", "fable"]
 
         for model in valid_models:
             response = api_client.put(

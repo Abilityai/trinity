@@ -35,6 +35,14 @@ ALLOWED_SKIP_REASONS: tuple[tuple[str, str], ...] = (
     ("elevenlabs", "needs a paid ElevenLabs key"),
     ("gemini", "needs a Google AI Studio key"),
     ("anthropic api key", "needs a real Anthropic key (billable)"),
+    # #2336: the J03 first-turn journey asserts REAL model output, which needs a
+    # provider key — and every PR-triggered workflow here is deliberately
+    # credential-free, because `pull_request` exposes repository secrets to fork
+    # PRs while running the PR's own shell (integration-nightly.yml states the
+    # full reasoning). The journey runs on a developer's stack and in the
+    # nightly; the per-PR gate runs the credential-free lifecycle journey, which
+    # is where the 2026-08-14 regression actually was.
+    ("journey needs a real provider key", "credential-bound journey; see #2336"),
     ("openai", "needs a real OpenAI key (billable)"),
     ("nevermined", "needs the Nevermined testnet + a funded wallet"),
     # Platform/interpreter conditionals that are correct, not missing coverage.

@@ -151,6 +151,11 @@ def _captured_env(monkeypatch, tmp_path, *, key, source_env):
     monkeypatch.setattr(codex_runtime, "_ensure_codex_home", lambda: str(tmp_path))
     monkeypatch.setattr(codex_runtime, "_is_read_only", lambda: False)
     monkeypatch.setattr(codex_runtime, "_load_guardrails", lambda: {})
+    # #2208: auth materialisation spawns `codex login` BEFORE `codex exec`, so
+    # without this the first Popen captured here is the login, not the turn —
+    # this helper would then assert credential forwarding against the wrong
+    # process. What crosses into the CHILD is what #1971 is about.
+    monkeypatch.setattr(codex_runtime, "_login_with_api_key", lambda h, k: (True, ""))
 
     class _Stop(RuntimeError):
         pass

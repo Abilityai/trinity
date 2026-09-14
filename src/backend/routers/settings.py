@@ -1,3 +1,4 @@
+# mcp: none — platform admin settings — a grant surface, human-only (Invariant #8 grant-vs-use)
 """
 System settings routes for the Trinity backend.
 
@@ -24,6 +25,7 @@ from models import (
     ProactiveRateLimitsUpdate,
     ApiKeyTest,
     ApiKeyUpdate,
+    ResendKeyRequest,
     BrainOrbSettingsUpdate,
     ElevenLabsSettingsUpdate,
     GitHubTemplatesUpdate,
@@ -33,6 +35,7 @@ from models import (
     OpsSettingsUpdate,
     RetentionAcknowledge,
     SkillsLibraryAutomationUpdate,
+    OperatorIntakeUpdate,
     SlackConnectRequest,
     SlackSettingsUpdate,
     TelemetrySharingUpdate,
@@ -41,14 +44,22 @@ from models import (
 from database import db, SystemSetting, SystemSettingUpdate
 from dependencies import get_current_user, assert_admin
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services import telemetry_sharing_service
+from services import operator_intake_service, platform_keys_service, telemetry_sharing_service
+from services.subscription_service import (
+    connect_agents_to_first_credential,
+    is_claude_auth_configured,
+)
 
 # Import from settings_service (these are re-exported for backward compatibility)
 from services.settings_service import (
     get_anthropic_api_key,
+    get_gemini_api_key,
     get_github_pat,
     get_google_api_key,
     get_ops_setting,
+    set_secret_setting,
+    clear_secret_setting,
+    has_secret_setting,
     settings_service,
     OPS_SETTINGS_DEFAULTS,
     OPS_SETTINGS_DESCRIPTIONS,
@@ -96,6 +107,13 @@ LEGACY_SKILLS_LIBRARY_KEYS = {
     "skills_library_url",
     "skills_library_branch",
 }
+
+# ent#434 — the catch-all blocks this key in favour of the dedicated route.
+from services.subscription_headroom_alerts import (
+    THRESHOLD_SETTING as HEADROOM_ALERT_THRESHOLD_KEY,
+    MIN_THRESHOLD_PCT as HEADROOM_THRESHOLD_MIN,
+    MAX_THRESHOLD_PCT as HEADROOM_THRESHOLD_MAX,
+)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -166,7 +184,6 @@ async def get_public_feature_flags(
     still keep them out of the unauthenticated surface.
     """
     from config import (
-        GEMINI_API_KEY,
         VOICE_ENABLED,
         VOIP_ENABLED,
         MCP_AGENT_CHAT_PULL_ENABLED,
@@ -175,11 +192,15 @@ async def get_public_feature_flags(
     )
     from services.entitlement_service import entitlement_service
     from services import a2a_outbound_service
+    from models import CANVAS_MAX_PER_AGENT
     # Function-local (#2217): a top-level import would pull the whole canary
     # package into the settings-router load; the handler pattern here is
     # function-local imports.
     from services.canary_service import canary_service
-    voice_available = VOICE_ENABLED and bool(GEMINI_API_KEY)
+    # ent#582: the Gemini key resolves per request (Settings → env), so a key
+    # saved in the first-run flow lights these flags without a restart.
+    gemini_key = bool(get_gemini_api_key())
+    voice_available = VOICE_ENABLED and gemini_key
     # Brain Orb flags are RUNTIME-RESOLVED (#85): system_settings override →
     # BRAIN_ORB_* env opt-in → OFF. An admin flip via PUT /api/settings/brain-orb
     # is reflected here without a backend restart.
@@ -190,7 +211,7 @@ async def get_public_feature_flags(
         "workspace_available": voice_available and settings_service.is_workspace_enabled(),
         # VoIP telephony (VOIP-001, #1056) — default OFF, mirrors workspace_available.
         # Also requires a per-agent voip_bindings row to actually function.
-        "voip_available": VOIP_ENABLED and bool(GEMINI_API_KEY),
+        "voip_available": VOIP_ENABLED and gemini_key,
         # Brain Orb (#58, trinity-enterprise) — gates the per-agent /agents/:name/brain
         # route + tab. Static render needs no Gemini; the per-agent capability gate is
         # the template.yaml `brain-orb` token, checked frontend-side.
@@ -202,7 +223,7 @@ async def get_public_feature_flags(
         # on AND the agent carries the `brain-orb` capability. Default OFF.
         "brain_orb_voice_available": brain_orb_enabled
         and settings_service.is_brain_orb_voice_enabled()
-        and bool(GEMINI_API_KEY),
+        and gemini_key,
         # Brain Orb KB-write surface (#58 Phase 4a, trinity-enterprise#61) — owner-gated
         # capture/link. DISTINCT kill-switch from brain_orb_available so writes can be
         # disabled without downing read/voice. UI-only hint (the write routes independently
@@ -245,13 +266,57 @@ async def get_public_feature_flags(
         # routes enforce it themselves.
         "a2a_outbound_available": a2a_outbound_service.is_outbound_enabled(),
         "platform_default_model": settings_service.get_platform_default_model(),
+        # ent#553: the per-agent canvas ceiling, so the UI can WARN before the
+        # agent meets the refusal instead of only reporting it afterwards. An
+        # INTEGER, not a flag — `platform_default_model` above is the precedent
+        # for a non-boolean here, and this is the same shape of thing: a value
+        # the browser needs to render a surface honestly.
+        #
+        # Surfaced here rather than on a new route because it is a CONSTANT, not
+        # per-agent state: the client already knows the count (it holds the
+        # list), so the ceiling is the only missing half, and a dedicated
+        # endpoint would owe Invariant #13 a third surface for one integer.
+        # Not folded into the canvas LIST response either — that would turn
+        # `List[CanvasSummary]` into an envelope and break the MCP tool and the
+        # Workspace, both of which read the bare array.
+        "canvas_max_per_agent": CANVAS_MAX_PER_AGENT,
+        # Install provenance (#2380). A STRING, not a boolean — `platform_default_model`
+        # above is the precedent for a non-boolean on this surface. One of
+        # do-marketplace / vultr-marketplace / script / unknown, recorded once at
+        # first boot from TRINITY_INSTALL_SOURCE and read from `system_settings`
+        # thereafter. Surfaced HERE rather than on a new route because this is the
+        # established home for UI-gating flags and the browser already awaits it.
+        "install_source": settings_service.get_install_source(),
+        # The resolved gate for the first-run hardening guide. Ships beside the raw
+        # value so the browser holds no second copy of WHICH sources count as a
+        # marketplace (the ent#386 rule). False on every non-marketplace install —
+        # including the entire managed fleet, whose plain-HTTP-over-Tailscale shape
+        # is indistinguishable from an unhardened droplet by any other signal.
+        "marketplace_install": settings_service.is_marketplace_install(),
+        # Whether the first-run hardening guide is offered here. A SEPARATE gate
+        # from `marketplace_install` (#2380): the guide's subject is "public
+        # cloud VM at a bare IP with no domain", which is equally true of a
+        # droplet installed by following the DigitalOcean deploy doc
+        # (`do-script`). Widened to that provenance, NOT to all installs —
+        # provenance is why the gate exists, and the managed fleet's
+        # plain-HTTP-behind-a-tunnel shape would otherwise carry the card
+        # permanently.
+        "hardening_guide_eligible": settings_service.is_hardening_guide_eligible(),
+        # What URL this instance ADVERTISES itself at: unconfigured | http |
+        # https-ip | https-domain. Derived from `public_chat_url` (else the baked
+        # FRONTEND_URL) — nothing probes a socket or reads a certificate, because
+        # TLS terminates outside the backend (HOST-010) and no in-process check can
+        # see it. Derived rather than returning the URL because that read is
+        # admin-only and this surface is not. The guide's copy must say
+        # "advertises", never assert a verified certificate.
+        "install_tls_posture": settings_service.get_install_tls_posture(),
         # Onboarding (trinity-enterprise#52) — is Claude auth configured at all?
-        # Trinity agents can't think without it, so the first-run wizard uses
+        # Trinity agents can't think without it, so the first-run flow uses
         # this to surface the one hard setup gate. True if a platform-wide
         # Anthropic key exists (DB or env) OR any Claude subscription is
-        # registered. Non-sensitive: a boolean, never the key itself.
-        "claude_auth_configured": bool(settings_service.get_anthropic_api_key())
-        or db.has_any_subscription(),
+        # registered — one helper, shared with the ent#582 first-credential
+        # check. Non-sensitive: a boolean, never the key itself.
+        "claude_auth_configured": is_claude_auth_configured(),
         # #847 Phase 0 — enterprise entitlements. Empty list means OSS
         # build (or TRINITY_OSS_ONLY=1). UI uses this to hide
         # enterprise-only tabs cleanly without server-side conditional
@@ -259,24 +324,47 @@ async def get_public_feature_flags(
         "enterprise_features": entitlement_service.list_entitled_features(),
         # ent#12 Tier-2 opt-in sharing — observability only (the egress gate is
         # the stored consent + config switch). Default-off; the UI reads it to
-        # show the sharing state without a second round-trip. Non-sensitive bool.
-        "telemetry_sharing_enabled": telemetry_sharing_service.is_consent_enabled(),
+        # show the sharing state without a second round-trip. Non-sensitive
+        # bools. ent#437 adds three siblings (`_hard_disabled`, `_dismissed`,
+        # `_first_value`) so the Finish-setup consent card decides whether to
+        # render from THIS document alone and never calls the admin status route
+        # on a Dashboard load it will not act on. Fail-safe in the hidden
+        # direction inside `public_flags` — a raise here would zero every flag.
+        **telemetry_sharing_service.public_flags(),
     }
 
 
 @router.get("/telemetry-sharing")
-async def get_telemetry_sharing(current_user: User = Depends(get_current_user)):
+async def get_telemetry_sharing(
+    preview: bool = True,
+    current_user: User = Depends(get_current_user),
+):
     """Tier-2 opt-in sharing status + an inspectable preview of the exact
-    anonymized payload that would be sent (ent#12). Admin-only. Local read — no
-    egress. The preview lets the operator see precisely what is shared before
-    consenting (AC: payload documented and inspectable before send)."""
+    anonymized payload that would be sent (ent#12). Local read — no egress. The
+    preview lets the operator see precisely what is shared before consenting
+    (AC: payload documented and inspectable before send).
+
+    ent#437: `?preview=0` returns the status alone — what the Finish-setup
+    consent card needs to decide and render; the preview loads lazily when the
+    operator expands "See what would be sent". The response now also carries
+    the share identity and the last sent payloads, so the read is human-only as
+    well as admin-only (an agent-scoped key resolves to its owner carrying the
+    owner's role; `assert_admin` already rejects it since #1890 — this is the
+    explicit belt the PUT wears). Both reads run off the event loop: the
+    aggregate is three table scans.
+    """
+    from dependencies import reject_agent_principal
     assert_admin(current_user)
-    status = telemetry_sharing_service.get_status()
-    # Preview over the configured backfill window — what a consent-time share
-    # would contain. Coarse aggregates only; never any PII.
-    status["payload_preview"] = telemetry_sharing_service.build_aggregate_payload(
-        window_days=status.get("backfill_days"), backfill=True
-    )
+    reject_agent_principal(current_user)
+    status = await asyncio.to_thread(telemetry_sharing_service.get_status)
+    if preview:
+        # Preview over the configured backfill window — what a consent-time
+        # share would contain. Coarse aggregates only; never any PII.
+        status["payload_preview"] = await asyncio.to_thread(
+            telemetry_sharing_service.build_aggregate_payload,
+            status.get("backfill_days"),
+            backfill=True,
+        )
     return status
 
 
@@ -311,15 +399,160 @@ async def set_telemetry_sharing(
             event_action="telemetry_sharing_consent",
             source="api",
             actor_user=current_user,
-            details={"enabled": body.enabled, "backfill_days": status.get("backfill_days")},
+            # ent#437: whether a fresh share id was minted rides as a BOOL only —
+            # audit rows are exported and 365-day retained; the id itself never
+            # enters them.
+            details={
+                "enabled": body.enabled,
+                "backfill_days": status.get("backfill_days"),
+                "sharing_id_rotated": bool(status.get("sharing_id_rotated")),
+            },
         )
     except Exception:  # audit is best-effort
         logger.debug("[telemetry-share] audit log failed", exc_info=True)
 
-    # Consent-time backfill: only on the off→on transition, fire-and-forget.
+    # Consent-time backfill: only on the off→on transition, fire-and-forget —
+    # strong-ref'd (ent#437): a bare create_task can be GC'd mid-flight and the
+    # first send would vanish with nothing in the send log to say so.
     if body.enabled and not was_enabled:
-        asyncio.create_task(telemetry_sharing_service.share_now(backfill=True))
+        telemetry_sharing_service.spawn_share(backfill=True)
 
+    return status
+
+
+@router.post("/telemetry-sharing/ask/dismiss")
+async def dismiss_telemetry_ask(current_user: User = Depends(get_current_user)):
+    """"Don't ask again" for the Finish-setup consent card (ent#437).
+
+    Writes the once-per-install server marker (`telemetry_sharing_dismissed_at`)
+    so the card stops asking on every browser and device. Idempotent — the first
+    stamp wins. Admin + human-only: it silences a consent surface, which is a
+    grant-shaped act (learnings 2026-07-24), and the generic PUT /api/settings/
+    {key} already refuses the whole `telemetry_sharing_*` family, so this route
+    is the only writer. The softer "Not now" is a per-browser snooze the client
+    keeps to itself and never reaches the server. Reset: an admin DELETE of the
+    key on the generic route — deleting it only makes the card ask again.
+    Audit-logged.
+    """
+    from dependencies import reject_agent_principal
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+    status = telemetry_sharing_service.mark_ask_dismissed()
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="telemetry_sharing_ask_dismissed",
+            source="api",
+            actor_user=current_user,
+            details={"dismissed_at": status.get("dismissed_at")},
+        )
+    except Exception:  # audit is best-effort
+        logger.debug("[telemetry-share] audit log failed", exc_info=True)
+    return status
+
+
+@router.get("/operator-intake")
+async def get_operator_intake(current_user: User = Depends(get_current_user)):
+    """Operator-intake Settings status (ent#463).
+
+    Admin-only. The status is honest across the three orthogonal axes the panel
+    renders: `hard_disabled` (env kill), `already_submitted` (+ `submitted_at`),
+    and `enabled` (durable consent flag). A legacy install that had the marker
+    set before ent#463 shipped reports `already_submitted=true` with
+    `submitted_at=None`; the panel renders "date unknown" rather than lying.
+    """
+    assert_admin(current_user)
+    return operator_intake_service.get_status()
+
+
+@router.put("/operator-intake")
+async def set_operator_intake(
+    body: OperatorIntakeUpdate,
+    current_user: User = Depends(get_current_user),
+):
+    """Set or revoke the operator-intake consent (ent#463). Admin + human-only.
+
+    Three intents share the endpoint (see `OperatorIntakeUpdate`):
+
+    * ``enabled=true`` + ``email`` on a fresh install → durable consent recorded
+      AND the at-most-once intake POST is scheduled as a background task
+      (converges on the same ``submit_operator_intake`` path the welcome form
+      uses, AC #3).
+    * ``enabled=true`` on a submitted install → consent recorded, no re-send
+      (at-most-once marker preserved, AC #4 = no-op).
+    * ``enabled=false`` → durable decline recorded; the submitted marker is NOT
+      rolled back (AC #5: retracting the record itself requires contacting
+      support — the hosted endpoint has no local delete authority).
+
+    ``OPERATOR_INTAKE_ENABLED=false`` / ``DO_NOT_TRACK=1`` continue to win over
+    this Settings control (AC #6): an attempted enable-and-submit while
+    hard-disabled returns 409 rather than silently failing.
+
+    Audit-logged with a distinct action so a Settings-driven consent change is
+    distinguishable from a first-run one in the audit log.
+    """
+    from dependencies import reject_agent_principal
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    # Hard-disabled 409 mirrors the telemetry-sharing shape (ent#12). A silent
+    # accept-then-drop would fail AC #2 (state shown honestly) — the panel is
+    # entitled to a distinguishable error to render the disabled banner.
+    submit_intent = bool(
+        body.enabled
+        and (body.email or "").strip()
+        and not operator_intake_service.is_already_submitted()
+    )
+    if operator_intake_service.is_hard_disabled() and submit_intent:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Operator intake is disabled by configuration "
+                "(OPERATOR_INTAKE_ENABLED / DO_NOT_TRACK); consent cannot submit."
+            ),
+        )
+
+    was_enabled = operator_intake_service.is_consent_enabled()
+    status = operator_intake_service.set_consent(body.enabled)
+
+    # Fire the at-most-once submission only on the fresh consent-and-email path.
+    # If the install has already submitted, we deliberately no-op (AC #4). If the
+    # operator is opting OUT, no submission fires. If they enable without an
+    # email, we record consent as intent but nothing goes out — a subsequent PUT
+    # with an email will complete the submission, still at-most-once.
+    submit_outcome = None
+    if submit_intent:
+        submit_outcome = await operator_intake_service.submit_from_settings(
+            email=body.email,
+            company=body.company,
+            name=body.name,
+            role=body.role,
+            use_case=body.use_case,
+        )
+        # Refresh status after the fire so the response reflects the submitted
+        # marker + timestamp the caller's UI needs to switch to terminal state.
+        status = operator_intake_service.get_status()
+
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="operator_intake_consent",
+            source="api",
+            actor_user=current_user,
+            details={
+                "enabled": body.enabled,
+                "was_enabled": was_enabled,
+                "submit_outcome": submit_outcome,
+                # Never log the email or profile fields — the local no-PII
+                # invariant matches the service's rule.
+                "has_email": bool((body.email or "").strip()),
+            },
+        )
+    except Exception:  # audit is best-effort
+        logger.debug("[operator-intake] audit log failed", exc_info=True)
+
+    if submit_outcome is not None:
+        status["submit_outcome"] = submit_outcome
     return status
 
 
@@ -436,6 +669,7 @@ async def get_portal_session_policy_status(current_user: User = Depends(get_curr
         PORTAL_SESSION_MAX_ABSOLUTE_DAYS,
         PORTAL_SESSION_MIN_IDLE_MINUTES,
     )
+    from client_portal.service import title_generation_health
     from services.entitlement_service import entitlement_service
     from services.settings_service import settings_service
 
@@ -454,6 +688,10 @@ async def get_portal_session_policy_status(current_user: User = Depends(get_curr
         "min_idle_minutes": PORTAL_SESSION_MIN_IDLE_MINUTES,
         "max_absolute_days": PORTAL_SESSION_MAX_ABSOLUTE_DAYS,
         "editable": "portal_session_policy" in entitlement_service.list_entitled_features(),
+        # ent#473: whether the Workspace's generated thread titles are landing.
+        # Rides this OSS read because it is the one Workspace settings payload
+        # every edition renders; the state is in-process and credential-free.
+        "title_generation": title_generation_health(),
     }
 
 
@@ -664,12 +902,19 @@ async def get_api_keys_status(
         anthropic_configured = bool(anthropic_key)
 
         # Check if it's from settings or env
-        key_from_settings = bool(db.get_setting_value('anthropic_api_key', None))
+        key_from_settings = has_secret_setting('anthropic_api_key')
 
         # Get GitHub PAT
         github_pat = get_github_pat()
         github_configured = bool(github_pat)
-        github_from_settings = bool(db.get_setting_value('github_pat', None))
+        github_from_settings = has_secret_setting('github_pat')
+
+        def _status(value: str, setting_key: str) -> dict:
+            return {
+                "configured": bool(value),
+                "masked": mask_api_key(value) if value else None,
+                "source": "settings" if has_secret_setting(setting_key) else ("env" if value else None),
+            }
 
         return {
             "anthropic": {
@@ -681,7 +926,15 @@ async def get_api_keys_status(
                 "configured": github_configured,
                 "masked": mask_api_key(github_pat) if github_configured else None,
                 "source": "settings" if github_from_settings else ("env" if github_configured else None)
-            }
+            },
+            # ent#582 — the two keys the first-run flow adds.
+            "resend": {
+                **_status(settings_service.get_resend_api_key(), 'resend_api_key'),
+                # Which provider actually sends: a key saved here selects Resend.
+                "provider": settings_service.get_email_provider(),
+                "from_address": settings_service.get_email_from_address(),
+            },
+            "gemini": _status(get_gemini_api_key(), 'google_api_key'),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get API keys status: {str(e)}")
@@ -701,16 +954,20 @@ async def update_anthropic_key(
     assert_admin(current_user)
 
     try:
-        # Validate format
+        # Validate format — an `sk-ant-oat` subscription token is refused with
+        # the ent#582 copy that names the right tab.
         key = body.api_key.strip()
-        if not key.startswith('sk-ant-'):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid API key format. Anthropic keys start with 'sk-ant-'"
-            )
+        format_error = platform_keys_service.anthropic_api_key_error(key)
+        if format_error:
+            raise HTTPException(status_code=400, detail=format_error)
 
-        # Store in settings
-        db.set_setting('anthropic_api_key', key)
+        # ent#582: read BEFORE the write — did this save give the install its
+        # first Claude credential?
+        first_credential = not is_claude_auth_configured()
+
+        # Store in settings — AES-256-GCM encrypted at rest (ent#435)
+        set_secret_setting('anthropic_api_key', key)
+        connected = connect_agents_to_first_credential() if first_credential else 0
 
         # SEC-001: audit API key change
         await platform_audit_service.log(
@@ -726,12 +983,75 @@ async def update_anthropic_key(
 
         return {
             "success": True,
-            "masked": mask_api_key(key)
+            "masked": mask_api_key(key),
+            # ent#582: HOW MANY agents had no Claude credential and now use this
+            # one (int; running ones restart in the background).
+            "connected_agents": connected,
         }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update API key: {str(e)}")
+
+
+# #2572 Trigger A2 — the instance Anthropic key can be cleared through TWO
+# reachable routes, and both must fire the credential-less adoption sweep.
+#
+# The canonical migration off a metered key is *register a subscription, then
+# delete the key*. In that order the registration sweep (Trigger A1) finds
+# nothing — the key still resolves, so it short-circuits — and the deletion then
+# strands the whole fleet in exactly #2572's state with no trigger left.
+#
+# Route 1 is the dedicated `DELETE /api-keys/anthropic` below, which the
+# Settings UI uses and which clears BOTH the encrypted and the legacy row via
+# `clear_secret_setting`.
+# Route 2 is the generic `DELETE /{key}` catch-all, which reaches the same rows
+# through `db.delete_setting` — a sink that, unlike `db.set_setting`, carries no
+# ent#435 secret-settings guard, so it is reachable rather than theoretical.
+#
+# The hook deliberately sits on the ROUTES, not on `clear_secret_setting`: that
+# leaf also serves `github_pat` and the Slack keys, and hooking it would run a
+# Claude-subscription sweep on unrelated credential deletions. (A third clear
+# path exists at `set_secret_setting`'s blank-write branch but is unreachable
+# for this key — `update_anthropic_key` 400s anything not starting `sk-ant-`,
+# and the generic PUT is refused by ent#435's sink guard. If that prefix
+# validation is ever relaxed, re-check this.)
+_ANTHROPIC_KEY_ALIASES = {"anthropic_api_key", "anthropic_api_key_encrypted"}
+
+
+async def _adopt_after_instance_key_removed(current_user: User, request: Request) -> None:
+    """#2572 Trigger A2: the instance API key just went away, so every
+    ``api_key``-mode agent is now credential-less — sweep them onto an available
+    subscription.
+
+    Best-effort in the strongest sense: it must NEVER fail the deletion the
+    operator asked for, so everything is swallowed. Only Phase A (decide +
+    persist) is awaited; the service backgrounds the container apply, so this
+    never times out the DELETE on a real fleet.
+
+    It is also inert unless the key is genuinely gone: the sweep's own first
+    condition re-resolves through ``get_anthropic_api_key()``, which still finds
+    an ``ANTHROPIC_API_KEY`` in the backend environment (the ``.env``/compose
+    fallback this route reports as ``fallback_configured``) and correctly adopts
+    nobody in that case.
+    """
+    try:
+        from services.subscription_service import (
+            TRIGGER_INSTANCE_KEY_DELETED,
+            adopt_for_credentialless_agents,
+        )
+        await adopt_for_credentialless_agents(
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            trigger=TRIGGER_INSTANCE_KEY_DELETED,
+        )
+    except Exception as e:
+        logger.error(
+            f"[#2572] credential-less adoption sweep failed after instance "
+            f"API key deletion: {e}"
+        )
 
 
 @router.delete("/api-keys/anthropic")
@@ -747,7 +1067,7 @@ async def delete_anthropic_key(
     assert_admin(current_user)
 
     try:
-        deleted = db.delete_setting('anthropic_api_key')
+        deleted = clear_secret_setting('anthropic_api_key')
 
         # SEC-001: audit API key deletion
         if deleted:
@@ -761,6 +1081,10 @@ async def delete_anthropic_key(
                 request_id=getattr(request.state, "request_id", None),
                 details={"setting": "anthropic_api_key", "action": "delete"},
             )
+
+            # #2572 Trigger A2 — gated on `deleted` for the same reason the
+            # audit row above is: nothing changed ⇒ nothing to sweep.
+            await _adopt_after_instance_key_removed(current_user, request)
 
         # Check if env var fallback exists
         env_key = os.getenv('ANTHROPIC_API_KEY', '')
@@ -790,12 +1114,10 @@ async def test_anthropic_key(
     try:
         key = body.api_key.strip()
 
-        # Validate format first
-        if not key.startswith('sk-ant-'):
-            return {
-                "valid": False,
-                "error": "Invalid format. Anthropic keys start with 'sk-ant-'"
-            }
+        # Validate format first (ent#582: an `sk-ant-oat` token names its tab)
+        format_error = platform_keys_service.anthropic_api_key_error(key)
+        if format_error:
+            return {"valid": False, "error": format_error}
 
         # Make a lightweight API call to test the key
         # Using the models endpoint which is simple and doesn't create any resources
@@ -814,12 +1136,16 @@ async def test_anthropic_key(
             elif response.status_code == 401:
                 return {
                     "valid": False,
-                    "error": "Invalid API key"
+                    "error": (
+                        "Anthropic rejected this key — it may be revoked or mistyped. "
+                        "Copy it again from console.anthropic.com → API Keys "
+                        "(it starts with sk-ant-api)."
+                    ),
                 }
             else:
                 return {
                     "valid": False,
-                    "error": f"API returned status {response.status_code}"
+                    "error": f"Anthropic returned HTTP {response.status_code} — try again in a moment."
                 }
 
     except httpx.TimeoutException:
@@ -858,7 +1184,7 @@ async def update_github_pat(
             )
 
         # Store in settings
-        db.set_setting('github_pat', key)
+        set_secret_setting('github_pat', key)
 
         # Auto-propagate to running agents (#211). Never block the PAT save on
         # propagation failures — the token is already persisted.
@@ -906,7 +1232,7 @@ async def delete_github_pat(
     assert_admin(current_user)
 
     try:
-        deleted = db.delete_setting('github_pat')
+        deleted = clear_secret_setting('github_pat')
 
         # SEC-001: audit GitHub PAT deletion
         if deleted:
@@ -1034,6 +1360,157 @@ async def test_github_pat(
 
 
 # ============================================================================
+# Email provider (Resend) + Gemini keys (trinity-enterprise#582)
+# Env-only until ent#582; now writable from the first-run flow and Settings →
+# Integrations. Persisted through the ent#435 encrypted secret-settings path and
+# resolved per call (Settings → env). Registered before `/{key}` (Invariant #4).
+# ============================================================================
+
+async def _audit_key_change(request: Request, current_user: User, setting: str, action: str, **extra) -> None:
+    # Key value never logged — only which setting changed and how.
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={"setting": setting, "action": action, **extra},
+    )
+
+
+def _validated_resend_body(body: ResendKeyRequest) -> tuple:
+    """(key, from_address to check/keep, from_address to store or None); 400 on a bad field."""
+    key = body.api_key.strip()
+    new_from = (body.from_address or '').strip() or None  # blank = keep the one in force
+    error = platform_keys_service.resend_key_error(key)
+    if not error and new_from:
+        error = platform_keys_service.from_address_error(new_from)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    return key, new_from or settings_service.get_email_from_address(), new_from
+
+
+@router.put("/api-keys/resend")
+async def update_resend_key(
+    body: ResendKeyRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Set the Resend key (+ optional sender address) that email-code sign-in sends through.
+
+    Admin-only. Key stored AES-256-GCM encrypted (`resend_api_key_encrypted`);
+    the sender is the plain `email_from_address` setting. A key saved here
+    selects Resend as the provider, overriding `EMAIL_PROVIDER` (a fresh
+    install's `.env` says `console`). Takes effect on the next send.
+    """
+    assert_admin(current_user)
+    key, _from_in_force, new_from = _validated_resend_body(body)
+    set_secret_setting('resend_api_key', key)
+    if new_from:
+        settings_service.set_email_from_address(new_from)
+    await _audit_key_change(request, current_user, "resend_api_key", "update",
+                            from_address_changed=bool(new_from))
+    return {
+        "success": True,
+        "masked": mask_api_key(key),
+        "from_address": settings_service.get_email_from_address(),
+    }
+
+
+@router.delete("/api-keys/resend")
+async def delete_resend_key(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Remove the Resend key AND the stored sender — email reverts to the `.env` config."""
+    assert_admin(current_user)
+    deleted = clear_secret_setting('resend_api_key')
+    from_deleted = settings_service.clear_email_from_address()
+    if deleted or from_deleted:
+        await _audit_key_change(request, current_user, "resend_api_key", "delete")
+    return {
+        "success": True,
+        "deleted": deleted,
+        "fallback_configured": bool(os.getenv('RESEND_API_KEY', '')),
+    }
+
+
+@router.post("/api-keys/resend/test")
+async def test_resend_key(
+    body: ResendKeyRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Check a Resend key AND that Resend will send from the sender address.
+
+    Admin-only. Reads the account's domains; sends nothing. Format errors come
+    back as `{valid: false, error}` like the other key tests, not a 400.
+    """
+    assert_admin(current_user)
+    try:
+        key, from_address, _new = _validated_resend_body(body)
+    except HTTPException as e:
+        return {"valid": False, "error": e.detail}
+    return await platform_keys_service.check_resend_key(key, from_address)
+
+
+@router.put("/api-keys/gemini")
+async def update_gemini_key(
+    body: ApiKeyUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Set the platform Gemini key (voice features, generated agent avatars).
+
+    Admin-only. Stored through the ent#435 `google_api_key` secret
+    (`google_api_key_encrypted`) — the platform already treats a Google API
+    key as its Gemini key. Resolved per call, so no restart.
+    """
+    assert_admin(current_user)
+    key = body.api_key.strip()
+    error = platform_keys_service.gemini_key_error(key)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    set_secret_setting('google_api_key', key)
+    await _audit_key_change(request, current_user, "google_api_key", "update")
+    return {"success": True, "masked": mask_api_key(key)}
+
+
+@router.delete("/api-keys/gemini")
+async def delete_gemini_key(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Remove the stored Gemini key — falls back to `GEMINI_API_KEY`/`GOOGLE_API_KEY` env."""
+    assert_admin(current_user)
+    deleted = clear_secret_setting('google_api_key')
+    if deleted:
+        await _audit_key_change(request, current_user, "google_api_key", "delete")
+    return {
+        "success": True,
+        "deleted": deleted,
+        "fallback_configured": bool(get_gemini_api_key()),
+    }
+
+
+@router.post("/api-keys/gemini/test")
+async def test_gemini_key(
+    body: ApiKeyTest,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Check a Gemini key with a model-list call (no generation). Admin-only."""
+    assert_admin(current_user)
+    key = body.api_key.strip()
+    error = platform_keys_service.gemini_key_error(key)
+    if error:
+        return {"valid": False, "error": error}
+    return await platform_keys_service.check_gemini_key(key)
+
+
+# ============================================================================
 # Slack Integration Settings (SLACK-001)
 # ============================================================================
 
@@ -1062,8 +1539,8 @@ async def get_slack_settings_status(
 
         # Check sources
         client_id_from_settings = bool(db.get_setting_value('slack_client_id', None))
-        client_secret_from_settings = bool(db.get_setting_value('slack_client_secret', None))
-        signing_secret_from_settings = bool(db.get_setting_value('slack_signing_secret', None))
+        client_secret_from_settings = has_secret_setting('slack_client_secret')
+        signing_secret_from_settings = has_secret_setting('slack_signing_secret')
 
         return {
             "configured": bool(client_id and client_secret and signing_secret),
@@ -1108,11 +1585,11 @@ async def update_slack_settings(
             updated.append('client_id')
 
         if body.client_secret is not None:
-            db.set_setting('slack_client_secret', body.client_secret.strip())
+            set_secret_setting('slack_client_secret', body.client_secret)
             updated.append('client_secret')
 
         if body.signing_secret is not None:
-            db.set_setting('slack_signing_secret', body.signing_secret.strip())
+            set_secret_setting('slack_signing_secret', body.signing_secret)
             updated.append('signing_secret')
 
         return {
@@ -1137,8 +1614,12 @@ async def delete_slack_settings(
 
     try:
         deleted = []
-        for key in ['slack_client_id', 'slack_client_secret', 'slack_signing_secret']:
-            if db.delete_setting(key):
+        # client_id is a public identifier (plain row); the two secrets are
+        # encrypted, so clearing them must remove BOTH forms (ent#435).
+        if db.delete_setting('slack_client_id'):
+            deleted.append('slack_client_id')
+        for key in ['slack_client_secret', 'slack_signing_secret']:
+            if clear_secret_setting(key):
                 deleted.append(key)
 
         # Check env var fallbacks
@@ -1221,7 +1702,7 @@ async def connect_slack_transport(
 
     # Save settings to DB
     if body.app_token is not None:
-        db.set_setting("slack_app_token", body.app_token.strip())
+        set_secret_setting("slack_app_token", body.app_token)
     if body.transport_mode is not None:
         if body.transport_mode.strip() not in ("socket", "webhook"):
             raise HTTPException(status_code=400, detail="transport_mode must be 'socket' or 'webhook'")
@@ -2413,16 +2894,14 @@ async def get_brain_orb_settings(
     Get the Brain Orb platform flags with per-flag source (trinity-enterprise#85).
 
     Admin-only. Registered before the `/{key}` catch-all (Invariant #4).
-    `gemini_key_configured` reflects the env-only GEMINI_API_KEY secret the
-    voice tile additionally requires (boolean only — never the key).
+    `gemini_key_configured` reflects the Gemini key the voice tile additionally
+    requires — Settings → env, ent#582 (boolean only — never the key).
     """
     assert_admin(current_user)
 
-    from config import GEMINI_API_KEY
-
     return {
         "flags": _brain_orb_flag_state(),
-        "gemini_key_configured": bool(GEMINI_API_KEY),
+        "gemini_key_configured": bool(get_gemini_api_key()),
     }
 
 
@@ -2442,7 +2921,6 @@ async def update_brain_orb_settings(
     """
     assert_admin(current_user)
 
-    from config import GEMINI_API_KEY
     from services.settings_service import BRAIN_ORB_FLAGS
 
     clear = body.clear or []
@@ -2505,7 +2983,7 @@ async def update_brain_orb_settings(
         "updated": updated,
         "cleared": cleared,
         "flags": after,
-        "gemini_key_configured": bool(GEMINI_API_KEY),
+        "gemini_key_configured": bool(get_gemini_api_key()),
     }
 
 
@@ -2786,6 +3264,28 @@ async def update_setting(
     """
     assert_admin(current_user)
 
+    # #2380: install provenance is a RECORDED FACT, not a setting. It is written
+    # once at boot from TRINITY_INSTALL_SOURCE and gates a surface that is meant
+    # to appear on marketplace installs and nowhere else. Leaving it on the
+    # catch-all would make the gate self-assertable — an admin (or, on a default
+    # admin-owned install, anything holding an admin's credential) could type a
+    # marketplace value and summon the guide on a managed instance, or type a
+    # non-marketplace one and suppress it on a droplet that needs it.
+    # There is deliberately no dedicated write route to point at: the only
+    # supported way to set provenance is to provision the box with the marker.
+    from config import INSTALL_SOURCE_ENV_VAR, INSTALL_SOURCE_SETTING_KEY
+
+    if key == INSTALL_SOURCE_SETTING_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{INSTALL_SOURCE_SETTING_KEY} records how this instance was "
+                "installed and is not writable through the API. It is recorded "
+                f"once at first boot from the {INSTALL_SOURCE_ENV_VAR} "
+                "environment variable."
+            ),
+        )
+
     # #506: the fleet ceiling must go through the dedicated range-validated
     # route; block the generic PUT so it can't be written to junk/out-of-range
     # (same pattern as the skills_library_url SSRF special-case below).
@@ -2820,6 +3320,22 @@ async def update_setting(
             detail=(
                 "telemetry_sharing_* must be set via "
                 "PUT /api/settings/telemetry-sharing (admin + human-only, audit-logged)"
+            ),
+        )
+
+    # ent#463: operator-intake consent (identified contact record — email,
+    # optional company/name/role/use_case) is human-only and audit-logged, same
+    # rationale as telemetry_sharing_* one block up. The dedicated PUT enforces
+    # reject_agent_principal, the hard-disabled 409, at-most-once semantics, and
+    # the dedicated `operator_intake_consent` audit action; none of that
+    # replays here. Also cover the pre-ent#463 `operator_intake_submitted`
+    # marker so a raw PUT can't be used to fake the at-most-once claim.
+    if key.startswith("operator_intake_"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "operator_intake_* must be set via "
+                "PUT /api/settings/operator-intake (admin + human-only, audit-logged)"
             ),
         )
 
@@ -2950,6 +3466,64 @@ async def update_setting(
             ),
         )
 
+    # ent#435: this catch-all is the reason a route-level block is not enough —
+    # it can write ANY key, so it could put a live Anthropic/GitHub/Slack
+    # credential straight back into cleartext after the migration removed it.
+    # The authoritative refusal is the sink guard in `db.set_setting`
+    # (`SecretSettingWriteError`, caught below); this arm exists only to answer
+    # BEFORE the write with the same message the sink would give. Writing the
+    # ENCRYPTED key here is refused too: the value must be an envelope this
+    # platform produced, and a hand-pasted string would land as a row every
+    # reader then fails to decrypt — fail-closed, but silently and confusingly
+    # (the #736 A2A-endpoints rationale, exactly).
+    from services.secret_settings import (
+        ENCRYPTED_SETTING_KEYS,
+        SecretSettingWriteError,
+        assert_plaintext_write_allowed,
+    )
+
+    if key in ENCRYPTED_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} holds an AES-256-GCM envelope and cannot be written as a "
+                "raw value. Set the credential through its own settings route, "
+                "which encrypts on the way in (ent#435)."
+            ),
+        )
+    try:
+        assert_plaintext_write_allowed(key)
+    except SecretSettingWriteError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    # ent#434: the weekly-headroom alert threshold has a dedicated,
+    # range-validated route. Blocked here for the same reason as every sibling
+    # above — this catch-all takes an unvalidated string, and a small VALID
+    # integer is the dangerous input, not garbage (#1644's lesson): "5" would
+    # be stored verbatim and alarm on every subscription forever.
+    if key == HEADROOM_ALERT_THRESHOLD_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via "
+                "PUT /api/subscriptions/settings/headroom-alert-threshold "
+                f"(0 to disable, else {HEADROOM_THRESHOLD_MIN}-{HEADROOM_THRESHOLD_MAX})"
+            ),
+        )
+
+    # T1 (ent#434 review): close the standing hole rather than adding a
+    # twelfth `if key == ...` arm. Every key in OPS_SETTINGS_VALIDATION is
+    # type- and range-checked on PUT /api/settings/ops/config and was checked
+    # NOWHERE on this route, so an ops key reachable here accepted "abc" or
+    # "-40" verbatim. Validating here makes the two write paths agree, and it
+    # covers ops keys added in future without anyone remembering to.
+    from config import OPS_SETTINGS_VALIDATION, validate_ops_setting
+    if key in OPS_SETTINGS_VALIDATION:
+        try:
+            body.value = validate_ops_setting(key, body.value)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
     try:
         setting = db.set_setting(key, body.value)
 
@@ -2986,6 +3560,11 @@ async def update_setting(
                 logger.warning(f"WhatsApp webhook URL back-fill skipped: {e}")
 
         return setting
+    except SecretSettingWriteError as e:
+        # Belt for the pre-check above: if the guard ever grows a case the
+        # pre-check does not mirror, the caller still gets 422-with-a-pointer
+        # rather than a 500 that reads like a platform fault.
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update setting: {str(e)}")
 
@@ -3027,6 +3606,23 @@ async def delete_setting(
     """
     assert_admin(current_user)
 
+    # #2380: blocked here as well as on PUT, and for a sharper reason than
+    # ent#14's below. Provenance is write-once by design — `_record_install_source`
+    # refuses to overwrite an existing row — so a DELETE is not "revert to a
+    # default", it is the one move that UNLOCKS a rewrite: delete the row, edit
+    # `.env`, restart, and the boot recorder happily records the new value.
+    # Blocking the write while leaving the delete open would be no gate at all.
+    from config import INSTALL_SOURCE_SETTING_KEY
+
+    if key == INSTALL_SOURCE_SETTING_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{INSTALL_SOURCE_SETTING_KEY} records how this instance was "
+                "installed and cannot be cleared through the API."
+            ),
+        )
+
     # ent#14: blocked here as well as on PUT, unlike the #1644 retention acks.
     # Deleting an ack re-arms a guard and therefore fails safe; deleting
     # `template_registry_enabled` reverts it to its default of ON, which
@@ -3059,6 +3655,14 @@ async def delete_setting(
                 request_id=getattr(request.state, "request_id", None),
                 details={"setting": key, "action": "delete"},
             )
+
+            # #2572 Trigger A2, second clear path. `db.delete_setting` has no
+            # delete-side twin of ent#435's sink guard, so this route reaches
+            # the instance Anthropic key without ever touching
+            # `clear_secret_setting` — leaving it unhooked would reopen exactly
+            # the hole the dedicated route's hook closes.
+            if key in _ANTHROPIC_KEY_ALIASES:
+                await _adopt_after_instance_key_removed(current_user, request)
 
         return {"success": True, "deleted": deleted}
     except Exception as e:

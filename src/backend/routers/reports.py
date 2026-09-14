@@ -18,13 +18,19 @@ require an agent-scoped caller's bound ``agent_name`` to equal the path agent
 the access check.
 """
 import json
+import logging
 import os
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from database import db
-from dependencies import get_current_user, AuthorizedAgent, OwnedAgent
+from dependencies import (
+    get_current_user,
+    AuthorizedAgent,
+    OwnedAgent,
+    is_interactive_principal,
+)
 from models import (
     FleetReportStats,
     Report,
@@ -38,7 +44,76 @@ from models import (
 from services import rate_limiter, report_export, report_service
 from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api", tags=["reports"])
+
+
+def _hide_audience(row: dict, current_user: User) -> dict:
+    """Withhold `addressed_to` from any caller that is not an interactive human.
+
+    ent#365 review. The audience strip shipped in the MCP tool only
+    (`stripAudienceFromReports`), but an agent-scoped MCP key is a valid bearer
+    token against this API directly - that is how the heartbeat, the #1083
+    result callback and the reports WRITE path all authenticate. So an agent
+    could `curl` these routes and read `addressed_to` for every agent its owner
+    can access, which is strictly wider than the `{self} u permitted` scope the
+    MCP layer enforces.
+
+    The PR's own rationale for stripping at the tool was "a tool result is LLM
+    context wherever it lands". That argument applies at least as strongly to a
+    shell result, since the threat model is a prompt-injected agent and such an
+    agent has Bash. Closing it here rather than recording a residual, because
+    the alternative leaves code that READS as though the hole is shut.
+
+    The UI is unaffected: it reads over a JWT, which is exactly the allowlisted
+    case. The predicate is `dependencies.is_interactive_principal` - shared with
+    `reject_non_interactive_principal` so the two cannot drift, and an allowlist
+    rather than a denylist because `mcp_api_keys.scope` has no CHECK constraint
+    and the next scope to ship would otherwise be admitted silently (#2323).
+    """
+    if is_interactive_principal(current_user):
+        return row
+    if "addressed_to" not in row:
+        return row
+    redacted = dict(row)
+    redacted.pop("addressed_to", None)
+    return redacted
+
+
+def _resolve_portal_session(execution_id: str, agent_name: str) -> Optional[str]:
+    """The Workspace chat a publishing turn belongs to, or None (ent#365).
+
+    Two gates, in this order: the execution must belong to THIS agent
+    (`resolve_and_validate_execution`, the MEM-001 rule — the agent supplies an
+    id, never its own identity), and the id must be the turn currently in flight
+    for a portal session, which is what the ent#286 reverse marker answers.
+
+    Fail-soft to None everywhere: a report with no chat still lists on the agent
+    page, whereas a 5xx here would fail a publish over a card placement. The
+    marker is Redis-backed with a TTL sized to the turn, so a report published
+    after its own turn ended lands unlinked — correct, since by then the client
+    has the reply and the card belongs to the page, not to a closed exchange.
+    """
+    try:
+        from services.idempotency_service import resolve_and_validate_execution
+        if resolve_and_validate_execution(execution_id, agent_name) is None:
+            return None
+        from client_portal import service as portal_service
+        return portal_service.get_inflight_session_for_execution(execution_id)
+    except Exception as e:  # noqa: BLE001
+        # WARNING, not debug (caught in review on #2383). Fail-soft is right —
+        # a card placement must never fail a publish — but this is the one
+        # function the entire in-chat half of the deliverable depends on. A
+        # Redis outage, an import error or a renamed marker key would make
+        # every card silently stop appearing while the agent page still lists
+        # the reports, so nothing would give anyone a reason to look.
+        logger.warning(
+            "portal session resolution failed for execution %s (%s) — the "
+            "report will publish without an in-chat card",
+            execution_id, type(e).__name__,
+        )
+        return None
 
 _VALID_HOURS = {0, 1, 6, 24, 168, 720}  # 0 = all-time
 
@@ -143,6 +218,55 @@ async def create_report(
             detail=f"payload exceeds {REPORT_PAYLOAD_MAX_BYTES} bytes",
         )
 
+    # ent#365 — the audience, checked against the agent's OWN roster. An agent
+    # naming an address it does not already talk to is refused by name rather
+    # than silently stored: the column decides whose Workspace this appears in,
+    # so an unchecked value would let an agent post its output into a stranger's
+    # surface. `email_has_agent_access` is the same predicate the #848 inline
+    # auth path gates on — but that predicate is BROADER than the Workspace read
+    # gate, and the difference is a publish that nobody can read (review
+    # finding): `email_has_agent_access` returns True for any user whose role is
+    # `admin`, regardless of sharing, while `agent_on_roster` is `agent_sharing`
+    # ∪ owned. So a report addressed to a platform admin who neither owns nor is
+    # shared this agent stored happily and 404'd in that admin's Workspace,
+    # falsifying the invariant stated one line above.
+    #
+    # The publish therefore gates on the SAME predicate the reader uses. Import
+    # is local: `client_portal` is a sibling package and a module-level import
+    # here would couple the reports router to it at load time.
+    audience = data.audience_email
+    if audience:
+        try:
+            from client_portal.service import agent_on_roster
+            # `include_owned=False`: an owner reads their agent's reports on the
+            # operator surface, and addressing one to themselves is not what the
+            # audience column is for.
+            reachable = agent_on_roster(name, audience, include_owned=False)
+        except Exception as e:  # noqa: BLE001 — an unreadable roster must not publish
+            logger.warning("report audience check failed for %s: %s", name, e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not verify the report audience — try again.",
+            )
+        if not reachable:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "audience_email is not a client of this agent — share the "
+                    "agent with that address first, or omit it to publish an "
+                    "operator-only report."
+                ),
+            )
+
+    # Which Workspace chat this belongs in, resolved from the publishing TURN.
+    # Never read from the request: the agent supplies an execution id, the
+    # backend decides what conversation that is (the MEM-001 rule). Absent,
+    # unresolvable, or a non-portal turn ⇒ NULL, and the report simply lists on
+    # the agent page without a chat card.
+    portal_session_id = None
+    if audience and data.execution_id:
+        portal_session_id = _resolve_portal_session(data.execution_id, name)
+
     report = await report_service.create_report(
         agent_name=name,
         user_id=current_user.id,
@@ -153,8 +277,28 @@ async def create_report(
         schema_version=data.schema_version,
         period_start=data.period_start,
         period_end=data.period_end,
+        addressed_to_email=audience,
+        portal_session_id=portal_session_id,
     )
-    return Report(**report)
+    # The create dict now carries two fields the response model does not declare.
+    # Pydantic v2 ignores unknown keys by default, so this filter is a belt, not
+    # the mechanism.
+    #
+    # Review finding: the comment used to say it "keeps the audience out of the
+    # response shape", which stopped being true the moment `ReportSummary` gained
+    # `addressed_to` — `Report` extends it, so the field IS in `model_fields`, and
+    # the filter was instead silently dropping it because `db.create_report`
+    # returns the column under its DB name (`addressed_to_email`). So the same
+    # model meant two different things depending on the route: populated on
+    # `GET /reports/{id}` (via `_mapping_to_report`), always null here. Two
+    # intentions contradicting each other, with the MCP tool papering over it by
+    # echoing back the caller's own argument.
+    #
+    # Mapped explicitly, so the response says what the row says.
+    projected = {k: v for k, v in report.items() if k in Report.model_fields}
+    if "addressed_to" not in projected and "addressed_to_email" in report:
+        projected["addressed_to"] = report["addressed_to_email"]
+    return Report(**projected)
 
 
 @router.get("/agents/{name}/reports", response_model=List[ReportSummary])
@@ -165,6 +309,7 @@ async def list_agent_reports(
     search: Optional[str] = Query(None, max_length=200),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
 ):
     """List one agent's reports (metadata only, newest first).
 
@@ -184,7 +329,7 @@ async def list_agent_reports(
         limit=limit,
         offset=offset,
     )
-    return [ReportSummary(**r) for r in rows]
+    return [ReportSummary(**_hide_audience(r, current_user)) for r in rows]
 
 
 @router.delete("/agents/{name}/reports/{report_id}", status_code=204)
@@ -237,7 +382,7 @@ async def list_fleet_reports(
         limit=limit,
         offset=offset,
     )
-    return [ReportSummary(**r) for r in rows]
+    return [ReportSummary(**_hide_audience(r, current_user)) for r in rows]
 
 
 @router.get("/reports/{report_id}/export")
@@ -349,4 +494,4 @@ async def get_report_rows(
 @router.get("/reports/{report_id}", response_model=Report)
 async def get_report(report_id: str, current_user: User = Depends(get_current_user)):
     """Full report incl. payload. 404 (not 403) on no-access to avoid id leak."""
-    return Report(**_report_or_404(report_id, current_user))
+    return Report(**_hide_audience(_report_or_404(report_id, current_user), current_user))

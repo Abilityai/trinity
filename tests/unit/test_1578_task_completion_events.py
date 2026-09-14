@@ -764,8 +764,6 @@ class TestRouterRecursionBreakGate:
                         current_user=user,
                         x_source_agent=None,
                         x_via_mcp=None,
-                        x_mcp_key_id=None,
-                        x_mcp_key_name=None,
                         idempotency_key=None,
                         x_event_trigger=x_event_trigger,
                         x_internal_secret=x_internal_secret,

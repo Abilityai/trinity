@@ -108,10 +108,15 @@ body{
 #scopePanel .scopefoot{margin-top:11px;padding-top:9px;border-top:1px solid rgba(229,231,235,.10)}
 #scopePanel .scopefoot b{color:var(--color-ice-blue);font-weight:500;opacity:.9}
 
-/* inspector */
+/* inspector — right gutter. Vertically centred while short; once tall its TOP edge is floored so it
+   never rises into #stateBox (#2539): 26px top + 174px card (every STATES desc wraps to ≤3 lines at
+   26ch) + 24px gap = 224px. Its height is capped so the BOTTOM edge stays ≥26px inside the viewport.
+   (min()/max() are already load-bearing in this sheet — width:min(…) on #search/#reading/#tensionBox/
+   #actions — so no fallback declarations are needed.) A dragged/restored panel sets inline
+   right:auto + transform:none and is untouched by the floor. */
 #inspector{
-  top:50%;right:28px;transform:translateY(-50%);
-  width:384px;max-height:82vh;overflow-y:auto;
+  top:50%;right:28px;transform:translateY(max(-50%, calc(224px - 50vh)));
+  width:384px;max-height:min(82vh, calc(100vh - 224px - 26px));overflow-y:auto;
   opacity:0;pointer-events:none;transition:opacity .25s ease;
 }
 #inspector.show{opacity:1;pointer-events:auto}

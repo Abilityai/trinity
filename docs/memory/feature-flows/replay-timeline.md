@@ -483,6 +483,11 @@ return {
 - Every second: Bar grows as `effectiveDuration` increases
 - Tooltip: Shows live time like "In Progress - 45.3s"
 - Task completes: Bar snaps to final size from actual `duration_ms`
+- Task closed by a watchdog sweep (#2434): `duration_ms` is **NULL** — the sweep
+  invented the end time and no longer records a number for it — so the bar takes
+  the existing estimate path (`event.duration_ms || 30000`) and is flagged
+  `isEstimated`. Previously it snapped to a fabricated `now − started_at`, which
+  rendered a 15-minute run as a ~120-minute bar
 
 #### 6. Blinking Execution Indicator (Lines 178-186)
 

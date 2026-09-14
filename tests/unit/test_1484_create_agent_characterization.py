@@ -201,6 +201,11 @@ def _load_crud(monkeypatch, docker_available=True):
     capabilities_mod = MagicMock()
     capabilities_mod.AGENT_TMPFS_MOUNT = {"/tmp": "size=512m"}
     capabilities_mod.AGENT_DEFAULT_TMPDIR = "/home/developer/.tmp"
+    # #2541. Like AGENT_TMPFS_MOUNT above, this is a stand-in: the assertion it
+    # serves proves the create site PLUMBS the shared constant into
+    # containers_run. The constant's own value is pinned in
+    # tests/unit/test_2541_restart_policy_parity.py, which reads the real module.
+    capabilities_mod.AGENT_RESTART_POLICY = {"Name": "unless-stopped"}
     capabilities_mod.normalize_cpu = MagicMock(side_effect=lambda v, d: v or d)
     capabilities_mod.normalize_memory = MagicMock(side_effect=lambda v, d: v or d)
 
@@ -228,7 +233,7 @@ def _load_crud(monkeypatch, docker_available=True):
     db.get_agent_ephemeral_info.return_value = None
     db.get_user_by_username.return_value = {"id": 7}
     db.get_agent_mcp_api_key.return_value = None
-    db.get_least_used_subscription.return_value = None  # skip auto-assign
+    db.list_assignable_subscriptions.return_value = []  # skip auto-assign (#2409)
     db.get_subscription_token.return_value = None
     db.add_agent_permission.return_value = None
     db.assign_subscription_to_agent.return_value = None
@@ -431,6 +436,28 @@ async def test_case1_local_template_happy_path(crud_env):
     ctx["git_service"].materialize_data_paths.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_create_sets_unless_stopped_restart_policy(crud_env):
+    """#2541 — every user agent is born with restart_policy=unless-stopped, so
+    it survives a host reboot / daemon restart / non-graceful exit, exactly like
+    `trinity-system` always did.
+
+    Without the fix this raises KeyError: Docker's default is `no`, and the
+    2026-09-04 power-off left 8 of 19 agents Exited for ~42 hours.
+
+    This pins the PLUMBING — that the create site hands the shared constant to
+    containers_run (the harness stubs `capabilities`, so the value here is the
+    fixture's). That the constant is `unless-stopped` and not `always`, which
+    would resurrect an agent an operator deliberately stopped (RESTART-002), is
+    pinned against the real module in test_2541_restart_policy_parity.py.
+    """
+    crud, ctx = crud_env
+    await crud.create_agent_internal(_local_config("rp-agent"), _user(), None)
+
+    kw = _agent_run_kwargs(ctx)
+    assert kw["restart_policy"] == {"Name": "unless-stopped"}
+
+
 # ===========================================================================
 # Case 2 — github template happy path (predefined + dynamic), full env key-set
 # ===========================================================================
@@ -528,8 +555,8 @@ async def test_case4_no_template_no_github_env(crud_env):
 async def test_case5_claude_subscription_auto_assign(crud_env, monkeypatch):
     crud, ctx = crud_env
     monkeypatch.setattr(crud, "is_claude_runtime", lambda runtime: True)
-    ctx["db"].get_least_used_subscription.return_value = MagicMock(
-        id="sub-1", name="sub-a")
+    ctx["db"].list_assignable_subscriptions.return_value = [MagicMock(
+        id="sub-1", name="sub-a")]
     ctx["db"].get_subscription_token.return_value = "oauth-tok"
 
     await crud.create_agent_internal(_local_config("claude-a"), _user(), None)
@@ -886,8 +913,8 @@ async def test_case14_nonfatal_side_effects_still_succeed(crud_env, sink):
 async def test_case14_nonfatal_subscription_persist_failure(crud_env, monkeypatch):
     crud, ctx = crud_env
     monkeypatch.setattr(crud, "is_claude_runtime", lambda runtime: True)
-    ctx["db"].get_least_used_subscription.return_value = MagicMock(
-        id="sub-1", name="sub-a")
+    ctx["db"].list_assignable_subscriptions.return_value = [MagicMock(
+        id="sub-1", name="sub-a")]
     ctx["db"].get_subscription_token.return_value = "oauth-tok"
     ctx["db"].assign_subscription_to_agent.side_effect = Exception("boom")
     await crud.create_agent_internal(_local_config("nf-sub"), _user(), None)
@@ -919,6 +946,69 @@ async def test_case14_nonfatal_avatar_seed_failure(crud_env, monkeypatch, tmp_pa
         AgentConfig(name="nf-avatar", template="local:avtpl"), _user(), None)
     ctx["db"].set_default_avatar.assert_called_once()
     ctx["docker_utils"].containers_run.assert_awaited()
+
+
+def _png_bytes(size=64):
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (size, size), (40, 90, 160)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_2693_bundled_avatar_installed_as_default(crud_env, monkeypatch, tmp_path):
+    """#2693: a template's bundled avatar lands in the avatar store as WebP and the
+    row is still written as a DEFAULT avatar, so Generate Default Avatars can
+    overwrite it once a Gemini key exists."""
+    crud, ctx = crud_env
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
+    (tpl / "avatar.png").write_bytes(_png_bytes())
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    monkeypatch.setattr(crud, "_AVATAR_DIR", tmp_path / "avatars")
+
+    await crud.create_agent_internal(
+        AgentConfig(name="bundled-av", template="local:avtpl"), _user(), None)
+
+    installed = (tmp_path / "avatars" / "bundled-av.webp").read_bytes()
+    assert installed[:4] == b"RIFF" and installed[8:12] == b"WEBP"
+    ctx["db"].set_default_avatar.assert_called_once()
+    assert ctx["db"].set_default_avatar.call_args.args[:2] == ("bundled-av", "a wizard")
+
+
+@pytest.mark.asyncio
+async def test_2693_corrupt_bundled_avatar_keeps_prompt_seed(crud_env, monkeypatch, tmp_path):
+    crud, ctx = crud_env
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
+    (tpl / "avatar.webp").write_bytes(b"not an image")
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    monkeypatch.setattr(crud, "_AVATAR_DIR", tmp_path / "avatars")
+
+    await crud.create_agent_internal(
+        AgentConfig(name="bad-av", template="local:avtpl"), _user(), None)
+
+    assert not (tmp_path / "avatars" / "bad-av.webp").exists()
+    ctx["db"].set_default_avatar.assert_called_once()
+    ctx["docker_utils"].containers_run.assert_awaited()
+
+
+def test_2693_first_run_fleet_ships_bundled_avatars():
+    """AC4: every agent in the bundled first-run manifest carries both a bundled
+    image and the `avatar_prompt` that makes it installable + regenerable."""
+    import yaml
+    from PIL import Image
+    repo = Path(__file__).resolve().parents[2]
+    manifest = yaml.safe_load((repo / "config/manifests/default-system.yaml").read_text())
+    for spec in manifest["agents"].values():
+        tpl = repo / "config/agent-templates" / spec["template"].removeprefix("local:")
+        assert yaml.safe_load((tpl / "template.yaml").read_text()).get("avatar_prompt"), tpl
+        image = tpl / "avatar.webp"
+        assert image.stat().st_size <= 2 * 1024 * 1024, tpl
+        Image.open(image).verify()
 
 
 # ===========================================================================

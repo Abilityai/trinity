@@ -31,8 +31,16 @@ A direct channel turn is synchronous: the adapter already replies inline, and
 the execution is recorded with `triggered_by` == the channel name. Reporting on
 those would duplicate every normal channel reply. So the reporter fires ONLY
 when the execution *inherited* its channel context, i.e. `triggered_by` ∉
-`INLINE_CHANNEL_TRIGGERS` (`slack`/`telegram`/`whatsapp`). That single
+`INLINE_CHANNEL_TRIGGERS` (`slack`/`telegram`/`whatsapp`/`public`). That single
 condition keeps a customer workspace/chat from being spammed.
+
+`public` joined the set in ent#457 and is the one entry that does not name a
+channel adapter. A Workspace turn is synchronous in the same way — `portal_chat`
+persists the assistant reply itself — so without it every chat message would be
+followed by a duplicate "Finished". Public links and x402 share `triggered_by:
+"public"` and lose nothing: they stamp no `source_channel_chat_id`
+(`routers/public.py` writes `triggered_by` and `source_user_email` only), so
+they never reach this gate at all.
 
 ## Entry Points
 
@@ -145,9 +153,9 @@ reports (the user addressed A). Slack's displayed identity stays
 
 ## Delivery — resolver dispatch map (D10)
 
-`_CHANNEL_RESOLVERS = {"slack": _resolve_slack, "telegram": _resolve_telegram}`;
-`SUPPORTED_CHANNELS` derives from the keys, so a WhatsApp leg is one added
-entry. A resolver does consent + destination + token resolution and returns an
+`_CHANNEL_RESOLVERS = {"slack": _resolve_slack, "telegram": _resolve_telegram,
+"portal": _resolve_portal}`; `SUPPORTED_CHANNELS` derives from the keys, so a
+WhatsApp leg is one added entry. A resolver does consent + destination + token resolution and returns an
 async deliver closure (or `None` = suppress, already logged). The shared block
 then runs `effect_guard` and the send inside it.
 
@@ -203,6 +211,50 @@ loss). The adapter's parse-failure fallback stays the last-resort net.
 passed as `reply_to_message_id` when present and numeric (`thread.isdigit()` —
 the `int()` cast in `_send_message` sits outside its try). DMs anchor too;
 `allow_sending_without_reply: True` makes a deleted original safe.
+
+### Workspace (`_resolve_portal`, ent#457)
+
+The surface that had the contract stamped on it and no leg to walk on: #2157
+marks portal executions with `source_channel = "portal"` but that stamp names a
+SURFACE, not a delivery destination, so every portal row died at
+`report_completion`'s `if not source_channel_chat_id` gate. `chat_id` is the
+portal session id, stamped at both turn-creation sites.
+
+**Consent is by construction, not by flag.** Slack consults ent#223's
+`allow_proactive` on the channel binding and Telegram consults ent#265's on the
+group config, because both can deliver into a room holding people who never
+asked. A portal session belongs to exactly one client, so there is no third
+party to protect and no flag to look up — delivering into a person's own
+conversation with the agent they are talking to is what the conversation is
+for. That is *why* the recipient is read from the SESSION ROW rather than from
+the execution's stamp: a stamp is a string that rode an inheritance chain, and
+the session row is the platform's own record of whose chat this is.
+
+Suppressed (info-logged, never raised) when the session no longer exists or
+carries no client email.
+
+**Delivery is a persisted assistant message**, filed under `session.agent_name`
+— so a delegated child executing as a different agent files under the agent the
+client is actually talking to, and `_portal_body` names the executing agent in
+the text rather than silently attributing its work. Failure is stated
+("Didn't finish — <status>"), never a silent vanish, and the detail is capped at
+`_MAX_REPORT_CHARS`.
+
+No new transport, and — stated honestly — **no poll either**. An earlier version
+of this paragraph said the Workspace polls its threads so AC #7's "degrades to
+poll" holds by construction. It does not: `PortalConversation.vue` loads history
+on mount and on an agent/session prop change, `stores/clientPortal.js` says
+outright that `refreshThreads()` is event-driven rather than periodic, and the
+only interval in the Workspace is the 20s asks poll in `views/Portal.vue`, which
+calls `fetchAsks()` and nothing else. So the row is durable and never lost, but a
+client sitting on the thread sees it at their next reload or thread switch rather
+than while they watch. An idle history poll is the tracked follow-up; until it
+exists this doc does not claim the delivery it would provide. The deliver closure
+also calls `touch_portal_session(...,
+added=1)` — every other writer of a portal message does, and `last_message_at`
+is what orders the sidebar; a report filed into a thread that never moved is a
+notification pointing at the middle of a list, which is the same silence this
+contract exists to end.
 
 ## At-most-once (D9 — the dedup-disarm pin)
 
@@ -287,6 +339,29 @@ whatsapp; consent fixture keyed on binding agent) and the
 `test_agent_cleanup_parity.py` locks (D1a). The read-back layer caught a real
 facade passthrough gap pre-merge — see `docs/memory/learnings.md` 2026-07-31.
 
+`tests/unit/test_ent457_portal_completion_report.py` (27) covers the Workspace
+leg: the `"public"` inline-trigger addition and the proof that public links /
+x402 are untouched by it; session-missing and client-less suppression; filing
+under the session's agent with the executing agent named in the body when they
+differ; the failure wording; the `touch_portal_session(..., added=1)` paired
+write (one message, not a user+assistant pair); and the resolver's presence in
+the dispatch map. `tests/unit/test_2157_portal_narration.py` gains the cases
+where this supersedes that PR's stamp-only behaviour.
+
+**Six of those drive `report_completion` itself** (review finding 8). The rest
+reach `_portal_body` / `_resolve_portal` directly, or assert the review fixes by
+`inspect.getsource` — which is precisely why two real defects, an unsanitized
+body and a raise that released the effect claim, both survived a green suite:
+nothing exercised the entry point, so nothing exercised the gate ordering, the
+recipient guard and the sanitizer *together*. The end-to-end cases stub only the
+two edges the module does not own (the execution row and the portal DB) and let
+everything between run for real: a delegated terminal reaching the thread, a
+credential-shaped failure string proven absent from what is persisted, a report
+whose inherited client does not match the session's refusing before any write,
+a NULL client failing closed, the inline turn still refused at the gate, and a
+vanished session writing nothing. Each was verified to fail against a mutant
+(sanitizer removed; recipient guard removed).
+
 ## Related Flows
 
 - [task-completion-events.md](task-completion-events.md) — the #1578 sibling
@@ -304,3 +379,7 @@ facade passthrough gap pre-merge — see `docs/memory/learnings.md` 2026-07-31.
 - 2026-07 (ent#224, #1763): Slack leg shipped (undocumented — debt paid here)
 - 2026-07-31 (ent#265): Telegram leg; D0 inheritance persistence + provenance
   guard; D1 binding-agent identity; D3 failure-applier hook; this doc
+- 2026-08-24 (ent#457 AC#3): Workspace leg — `_resolve_portal`, consent by
+  construction rather than by flag, delivery as a persisted assistant message
+  with a paired `touch_portal_session`; `"public"` added to
+  `INLINE_CHANNEL_TRIGGERS`

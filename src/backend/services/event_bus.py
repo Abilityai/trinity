@@ -41,10 +41,8 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 try:
     import redis.asyncio as aioredis
-    from redis.exceptions import ResponseError as RedisResponseError
 except Exception:  # pragma: no cover — redis is a hard dependency
     aioredis = None
-    RedisResponseError = Exception
 
 from config import REDIS_URL
 
@@ -96,6 +94,10 @@ class _ClientSlot:
     send_func: Callable              # async fn(dict) that serializes appropriately
     is_admin: bool = False
     accessible_agents: Set[str] = field(default_factory=set)
+    # ent#467: the identity a SCOPE_ALL slot is filtered as. Empty for the
+    # legacy direct-construction path in tests and for admins (never filtered).
+    email: str = ""
+    refreshing: bool = False
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=CLIENT_QUEUE_MAXSIZE))
     last_delivered_id: str = "0-0"
     failure_count: int = 0
@@ -103,14 +105,113 @@ class _ClientSlot:
     resync_pending: bool = False
 
 
-def _event_is_visible(slot: _ClientSlot, event_scope: str, agent_name: Optional[str]) -> bool:
+# ---------------------------------------------------------------------------
+# Agent identity carried by a payload (ent#467)
+# ---------------------------------------------------------------------------
+#
+# ``/ws`` was SCOPE_ALL and unfiltered: every ``agent_activity``,
+# ``agent_created``, ``operator_queue_*`` and ``agent_shared`` event reached
+# EVERY authenticated client, carrying agent names, execution ids and — for
+# the sharing events — another user's email. A ``role=user`` with one shared
+# agent could mint a ``/ws`` ticket and read the whole instance's fleet
+# activity. ``/ws/events`` already scoped by ``accessible_agents``; ``/ws``
+# did not.
+#
+# The filter needs to know which agents an event is ABOUT, and the 36 live
+# ``manager.broadcast`` call sites do not agree on where that name lives:
+# ``agent_activity`` puts it at the top level, ``agent_created`` under
+# ``data.name``, ``operator_queue_new`` under ``data.agent_name``,
+# ``agent_collaboration`` under two keys at once. So identity is *derived*
+# here, once, from a named vocabulary — never re-guessed per call site.
+#
+# Two deliberate properties:
+#
+#   * The vocabulary is deliberately NARROW per container. ``details`` reads
+#     only the two collaboration keys, because activity ``details`` is
+#     free-form and a ``details["name"]`` holding a TOOL name would match no
+#     accessible agent and silently hide the event from the agent's own owner
+#     — over-filtering is this change's way of breaking a working UI.
+#   * A payload naming NO agent (``notifications_cleared`` for a fleet-wide
+#     clear, ``resync_required``, the room triggers) stays fleet-visible. That
+#     is fail-OPEN, and it is the reason `tests/unit/test_ent467_ws_agent_scope.py`
+#     enumerates every live `/ws` broadcast payload: the guard, not the
+#     extractor, is what stops a new event shape from leaking silently.
+#
+# The residual is the mirror case — a future payload whose top-level ``name``
+# means something other than an agent would be read as one and OVER-filter,
+# hiding the event. That is deliberately the direction left uncovered: an
+# event that stops arriving is noticed, an event that reaches a stranger is
+# not. Add such a key to the payload under a name outside this vocabulary.
+_PAYLOAD_AGENT_KEYS = ("agent_name", "agent", "name", "source_agent", "target_agent")
+_DATA_AGENT_KEYS = ("agent_name", "name", "source_agent", "target_agent", "old_name", "new_name")
+_DETAILS_AGENT_KEYS = ("source_agent", "target_agent")
+
+# Events that CHANGE who can see what. Observed on the wire by the dispatcher
+# rather than pushed from the routers: every worker reads the same Redis
+# stream, so one publish invalidates the cached roster on all of them with no
+# call-site edits and no cross-worker plumbing (ent#467).
+_ACCESS_CHANGING_EVENTS = frozenset({
+    "agent_created", "agent_deleted", "agent_shared", "agent_unshared", "agent_renamed",
+})
+
+
+def agent_names_in_payload(payload: Any) -> frozenset:
+    """Every agent name a ``/ws`` payload names, as a set.
+
+    A set rather than the single name ``publish()`` infers, because
+    ``agent_collaboration`` names two agents and ``agent_renamed`` names the
+    old and the new one. The visibility rule below requires the WHOLE set to
+    be accessible, so a collaboration between an agent you own and one you
+    cannot see is withheld — the conservative direction, since the value being
+    protected is the other agent's existence."""
+    if not isinstance(payload, dict):
+        return frozenset()
+    names = set()
+    for container, keys in (
+        (payload, _PAYLOAD_AGENT_KEYS),
+        (payload.get("data"), _DATA_AGENT_KEYS),
+        (payload.get("details"), _DETAILS_AGENT_KEYS),
+    ):
+        if not isinstance(container, dict):
+            continue
+        for key in keys:
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                names.add(value.strip())
+    return frozenset(names)
+
+
+def _event_is_visible(
+    slot: _ClientSlot,
+    event_scope: str,
+    agent_name: Optional[str],
+    agent_names: Optional[frozenset] = None,
+) -> bool:
     """Apply the scope/filter contract that replaces FilteredWebSocketManager.
 
-    ``scope=SCOPE_ALL`` events reach every ``/ws`` client. ``scope=SCOPE_SCOPED``
-    events reach admin /ws/events listeners and non-admins with access to the
-    named agent. Matches the legacy ``broadcast_filtered`` semantics."""
+    ``scope=SCOPE_SCOPED`` events reach admin /ws/events listeners and
+    non-admins with access to the named agent — unchanged, and deliberately
+    still keyed on the single envelope ``agent_name`` that ``publish()``
+    infers, because ent#467 is a ``/ws`` fix and widening ``/ws/events``'
+    inference in the same change would alter which events that surface
+    delivers.
+
+    ``scope=SCOPE_ALL`` events reach every ``/ws`` client that may see every
+    agent the event names (ent#467). ``agent_names`` is derived from the
+    payload by the caller — passing ``None`` means "no identity was derived",
+    which is the pre-ent#467 fleet-visible behaviour and is what keeps a
+    non-agent event (and every existing direct-construction test) working.
+    Admins short-circuit BEFORE the set is consulted: their roster is a
+    connect-time snapshot, so filtering them would blind an admin to any agent
+    created after they opened the page."""
     if slot.scope == SCOPE_ALL:
-        return event_scope == SCOPE_ALL
+        if event_scope != SCOPE_ALL:
+            return False
+        if slot.is_admin:
+            return True
+        if not agent_names:
+            return True
+        return agent_names <= slot.accessible_agents
     # slot.scope == SCOPE_SCOPED
     if event_scope != SCOPE_SCOPED:
         return False
@@ -304,6 +405,10 @@ class StreamDispatcher:
     def __init__(self) -> None:
         self._clients: Dict[str, _ClientSlot] = {}
         self._reader_task: Optional[asyncio.Task] = None
+        # ent#467: injected ``(email) -> List[str]``; strong refs so a roster
+        # refresh cannot be garbage-collected mid-flight.
+        self._accessible_resolver: Optional[Callable] = None
+        self._refresh_tasks: Set[asyncio.Task] = set()
         self._redis: Optional["aioredis.Redis"] = None
         self._last_stream_id: str = "$"   # start at live tip on boot
         self._lock = asyncio.Lock()
@@ -348,6 +453,7 @@ class StreamDispatcher:
         *,
         is_admin: bool = False,
         accessible_agents: Optional[List[str]] = None,
+        email: str = "",
         last_event_id: Optional[str] = None,
     ) -> str:
         """Register a WebSocket client. Returns the client_id used for lookups.
@@ -362,6 +468,7 @@ class StreamDispatcher:
             send_func=send_func,
             is_admin=is_admin,
             accessible_agents=set(accessible_agents or []),
+            email=email or "",
         )
         client_id = str(uuid.uuid4())
         slot.consumer_task = asyncio.create_task(
@@ -392,6 +499,74 @@ class StreamDispatcher:
         slot = self._clients.get(client_id)
         if slot:
             slot.accessible_agents = set(accessible_agents)
+
+    def set_accessible_resolver(self, resolver: Optional[Callable]) -> None:
+        """Inject ``(email) -> List[str]`` used to refresh a slot's roster.
+
+        Injected from ``main.py`` rather than imported: this module's only
+        import today is ``config``, and reaching into ``database`` from the
+        delivery layer would invert the router → service → db direction
+        (Invariant #1). No resolver ⇒ no refresh, which degrades to
+        "roster is a connect-time snapshot" — the ``/ws/events`` contract."""
+        self._accessible_resolver = resolver
+
+    def _maybe_invalidate_rosters(self, payload: Any) -> None:
+        """Refresh non-admin SCOPE_ALL rosters after an accessibility change.
+
+        Event-triggered rather than polled: at steady state this costs
+        nothing, and the events that change accessibility (create / delete /
+        share / unshare / rename) are rare. A MISSED invalidation degrades to
+        the pre-existing ``/ws/events`` behaviour — stale until the client
+        reconnects — never to a leak, because the stale roster is the older,
+        smaller one."""
+        if not isinstance(payload, dict):
+            return
+        event = payload.get("event") or payload.get("type")
+        if event not in _ACCESS_CHANGING_EVENTS:
+            return
+        resolver = getattr(self, "_accessible_resolver", None)
+        if resolver is None:
+            return
+        # Deduped by EMAIL, not by slot: several browser tabs are several
+        # slots with one roster, and an agent-create would otherwise fire one
+        # DB read per tab into a thread pool of ~32.
+        by_email: Dict[str, List[_ClientSlot]] = {}
+        for slot in list(self._clients.values()):
+            # Admins are never filtered, so their roster is never read.
+            if slot.scope != SCOPE_ALL or slot.is_admin or not slot.email:
+                continue
+            if slot.refreshing:
+                continue
+            by_email.setdefault(slot.email, []).append(slot)
+        for email, slots in by_email.items():
+            for slot in slots:
+                slot.refreshing = True
+            task = asyncio.create_task(self._refresh_slots(email, slots, resolver))
+            self._refresh_tasks.add(task)
+            task.add_done_callback(self._refresh_tasks.discard)
+
+    async def _refresh_slots(
+        self, email: str, slots: List[_ClientSlot], resolver: Callable
+    ) -> None:
+        """Re-resolve one email's roster off the event loop, onto every slot.
+
+        ``resolver`` is the synchronous SQLAlchemy read
+        ``db.get_accessible_agent_names``; calling it inline would block the
+        single reader loop for every connected client. A failure leaves the
+        previous roster in place — again the smaller, safer set."""
+        try:
+            names = await asyncio.to_thread(resolver, email)
+            if isinstance(names, (list, tuple, set)):
+                resolved = set(names)
+                for slot in slots:
+                    slot.accessible_agents = resolved
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — a refresh must never kill delivery
+            logger.warning("stream_dispatcher: roster refresh failed for a client: %s", e)
+        finally:
+            for slot in slots:
+                slot.refreshing = False
 
     def client_count(self) -> int:
         return len(self._clients)
@@ -447,6 +622,16 @@ class StreamDispatcher:
         payload = _deserialize({"data": fields.get("payload", "")})
         scope = fields.get("scope", SCOPE_ALL)
         agent_name = fields.get("agent_name") or None
+        # ent#467: derived ONCE per event, not per client — the walk is the
+        # same for everyone and this loop is the hot path.
+        agent_names = agent_names_in_payload(payload)
+
+        # ent#467: an accessibility-changing event invalidates the cached
+        # rosters BEFORE the filter runs on it, so a freshly-shared user's
+        # very next event arrives instead of waiting for a reconnect. The
+        # refresh itself is a background task — a synchronous DB read here
+        # would stall the single reader loop for every connected client.
+        self._maybe_invalidate_rosters(payload)
 
         # Inject stream id into the payload so frontend reconnect logic can
         # persist it. Additive — existing handlers ignore unknown fields.
@@ -454,7 +639,7 @@ class StreamDispatcher:
         payload["_eid"] = entry_id
 
         for client_id, slot in list(self._clients.items()):
-            if not _event_is_visible(slot, scope, agent_name):
+            if not _event_is_visible(slot, scope, agent_name, agent_names):
                 continue
             try:
                 slot.queue.put_nowait((entry_id, payload))
@@ -579,7 +764,11 @@ class StreamDispatcher:
             payload = _deserialize({"data": fields.get("payload", "")})
             scope = fields.get("scope", SCOPE_ALL)
             agent_name = fields.get("agent_name") or None
-            if not _event_is_visible(slot, scope, agent_name):
+            # ent#467: replay applies the SAME filter as live fan-out. A
+            # reconnect with `last-event-id` re-reads history straight out of
+            # Redis, so a filter wired only into `_fanout` would hand the whole
+            # unfiltered backlog to the client that asked for it.
+            if not _event_is_visible(slot, scope, agent_name, agent_names_in_payload(payload)):
                 continue
             payload = dict(payload)
             payload["_eid"] = entry_id

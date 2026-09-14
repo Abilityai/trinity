@@ -256,35 +256,113 @@ sequenceDiagram
 
     User->>UI: Click "Sync" button
     UI->>Backend: POST /api/agents/{name}/git/sync
-    Backend->>Container: docker exec — append missing _GITIGNORE_PATTERNS (#462)
-    Backend->>Container: docker exec — git rm --cached newly-ignored tracked files
-    Backend->>Container: POST /api/git/sync
+    Backend->>Container: docker exec — rebuild .gitignore: [defaults][user rules][protected floor] (#462, #2529)
+    Backend->>Container: docker exec — git rm --cached newly-ignored tracked files + report probes (#2529)
+    Backend->>Backend: parse GitignoreSweep (removed / unignored / shadowed)
+    Backend->>Backend: file gitignore_untracked operator-queue entry if anything was removed OR newly un-ignored
+    Backend->>Container: POST /api/git/sync (commit message names the removals)
     Container->>Container: git add -A
     Container->>Container: git commit -m "Trinity sync: {timestamp}"
     Container->>Container: git push --force-with-lease={branch}:{expected-sha}
     Container->>Backend: Return commit SHA (or 409 on stale lease)
+    Backend->>UI: Response + removed_paths / unignored_paths / shadowed_negations
     Backend->>UI: Show notification (or branch_ownership_collision modal)
 ```
 
-### Per-Push Gitignore Migration (#462)
+### Per-Push Gitignore Migration (#462, #2529)
 
 Before forwarding to the agent's `/api/git/sync`, the platform calls
 `_migrate_workspace_gitignore(agent_name)` in `services/git_service.py`.
 This runs two `docker exec` steps inside the agent container:
 
-1. **Append missing patterns**: `_build_gitignore_merge_command` idempotently
-   appends any `_GITIGNORE_PATTERNS` entries not already present in
-   `/home/developer/.gitignore`. Pre-existing user rules are preserved
-   (each pattern is gated by an exact-line `grep -qxF` check).
+1. **Rebuild the file around two managed regions** (#2529):
+   `_build_gitignore_merge_command` strips every managed line *wherever* it
+   appears and rewrites `/home/developer/.gitignore` as
+
+   ```
+   # >>> Trinity default ignore rules — managed; your own rules go BELOW and win (#2529) >>>
+      <canonical patterns, minus the protected ones>
+   # <<< Trinity default ignore rules <<<
+      <the agent's own rules, in their ORIGINAL order>
+   # >>> Trinity protected rules — managed; NOT overridable (...) >>>
+      <credentials + `.trinity/*` and its 8 derived `!` re-includes>
+   # <<< Trinity protected rules <<<
+   ```
+
+   It used to *append*, and git is last-match-wins — so the canonical block
+   landed BELOW every `!negation` the agent had written and silently reversed
+   it, after which step 2 untracked the files those negations were protecting.
+   That is #2529, twice confirmed in the field.
+
+   **Why two regions and not one hoisted block.** Hoisting a single block would
+   reverse the platform's *own* negations instead: a user's currently-INERT
+   `!.env` (inert because the old merge appended `.env` below it) would go live
+   fleet-wide in one Push and the unattended 15-minute `git add -A` would commit
+   the credential to the user's repo; and a user `*.sh` would beat
+   `!.trinity/setup.sh`, reintroducing trinity-enterprise#76 / #1704 *quietly*
+   (the rm-cached pathspec still exempts the path, so nothing is untracked — the
+   hook is simply never staged again). `_GITIGNORE_PROTECTED` is a filter over
+   `_GITIGNORE_PATTERNS`, not a second list, so the floor cannot drift from it.
+
+   **Idempotent by content**: a second run computes byte-identical output and
+   `cmp` then leaves the file — and its mtime — untouched, so the auto-sync loop
+   has nothing to re-commit.
+
 2. **Untrack newly-ignored files**: `_build_rm_cached_ignored_command`
    runs `git ls-files -ci --exclude-standard | xargs -0 git rm --cached`
    so files that were force-tracked before a pattern was added (e.g.
    `.cache/foo` from an old agent) are removed from the index. Working-tree
-   files are left on disk; only the index changes.
+   files are left on disk; only the index changes. Because the canonical block
+   now sits ABOVE the agent's rules, `git ls-files -ci` no longer lists a path
+   an **effective** negation covers — git itself enforces "untrack only when no
+   agent-authored negation covers it", with no allowlist and no second exemption
+   mechanism beside #2070's.
+
+**Reporting (#2529).** Both `docker exec`s carry per-line-tagged probes (a
+per-line tag, not begin/end markers: `container_exec_run` does not pass
+`demux=True`, so stdout and stderr arrive as one blob and a region parser would
+swallow a stray `grep: ...` line as a path). `_parse_gitignore_sweep` turns them
+into a `GitignoreSweep`:
+
+| Field | Meaning |
+|---|---|
+| `removed_paths` | tracked → untracked by this Push |
+| `unignored_paths` | newly un-ignored and still untracked — an inverted user duplicate the same Push's `git add -A` is about to commit. Advisory: it is `after − before` across two execs against a LIVE container, so a file the agent's own session creates in that window lands here too |
+| `shadowed_negations` | `"!rule -> deciding managed pattern"`. The verdict comes from `git check-ignore -v` — never a reimplemented matcher — and from the deciding PATTERN TEXT, never the exit code, which is 0 even when the deciding rule is itself a negation |
+
+The sweep reaches five surfaces: the API response, the `git_sync` MCP result,
+the UI toast, the commit message, and a `gitignore_untracked` **operator-queue**
+entry. All five gate on `GitignoreSweep.changed_tracking` — `removed` **or**
+`unignored`, never `removed` alone: the rebuild changes what is in the repo in
+both directions, and the addition is the worse half (a removal is recoverable
+from the working tree; a newly un-ignored path is already in the remote's
+history and may need a credential rotated). `shadowed` is not in the gate — it
+is standing advice about the file, not a change this Push made. The entry is
+filed through the #1677 **budget seam** (`create_bounded_alert`), not as a
+direct create like its `git_bloat`/`sync_failing` siblings, because those fire
+on the 60-second platform poller's cadence while this one fires from
+`sync_to_github`, which the `git_sync` MCP tool lets an agent drive on itself.
+The last surface is the point: both field incidents were unattended
+15-minute cycles and surfaced two months late, and every other surface is read
+only by whoever ran the Push. The commit-message half is explicitly
+**best-effort** — `git rm --cached` only *stages*, and the backend's
+`docker exec` runs outside the agent server's `_REPO_LOCK`, so if the auto-sync
+loop commits first the deletions ride in someone else's commit. That is exactly
+what `47efd80` was.
+
+**Known residual, reported rather than fixed.** 23 of the canonical patterns are
+dir-form (`content/`, `node_modules/`, `.claude/projects/`, …). Git does not
+descend into an excluded directory, so a negation beneath one is inert at *any*
+position — the trap #2070 fixed for `.trinity/` by going contents-only.
+Contents-form conversion was costed and rejected (it would force git to stat
+`node_modules/`-sized trees on every `status`/`add`, which is the whole reason
+dir-form exists), so the case is surfaced via `shadowed_negations` and
+documented in the agent guide instead.
 
 The migration is **best effort** — failures are caught, logged at WARNING,
 and Push proceeds against whatever `.gitignore` already exists. Rationale:
-a transient docker exec glitch must not break an operator's Push.
+a transient docker exec glitch must not break an operator's Push. Every failure
+path returns the empty sweep, so the reporting can never break a Push either.
 
 This is the **REMEDIATE** half (merge + untrack). As of #2069 the same
 canonical merge (merge-only, PREVENT — never the untrack sweep) also runs at

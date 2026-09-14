@@ -63,14 +63,14 @@ def portal(monkeypatch):
     state = types.SimpleNamespace(chat_calls=[], created=[], row=None, availability="ready")
 
     monkeypatch.setattr(svc, "agent_on_roster", lambda a, e, include_owned=False: True)
-    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s: s or SESSION)
+    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s, **kw: s or SESSION)
 
     # `availability` (#2196): `start_portal_turn` resolved the state for its own
     # gate and hands it down, so the streamed turn costs ONE Docker read rather
     # than one at dispatch and another inside `portal_chat`.
     async def _fake_chat(agent_name, message, email, session_id=None,
                         include_owned=False, execution_id=None,
-                        turn_timeout_seconds=None, availability=None):
+                        turn_timeout_seconds=None, availability=None, **kw):
         state.chat_calls.append({
             "agent": agent_name, "message": message, "email": email,
             "session_id": session_id, "execution_id": execution_id,
@@ -338,9 +338,16 @@ def test_the_marker_is_set_while_the_turn_is_still_running(portal, redis_stub, m
 
     seen = {}
 
+    # `**_` like the other stand-ins in this suite, so this stub does not have
+    # to be re-edited every time the real `portal_chat` gains an optional
+    # per-turn field (ent#451's new_thread, ent#403's model / resolved_model,
+    # ent#555's open_canvas_id). A stub that refuses an unknown kwarg raises
+    # inside the background task, where the failure surfaces as a missing key
+    # rather than a TypeError anyone can read. The test is about the in-flight
+    # MARKER, not about the signature.
     async def _slow_chat(agent_name, message, email, session_id=None,
                          include_owned=False, execution_id=None,
-                         turn_timeout_seconds=None, availability=None):
+                         turn_timeout_seconds=None, availability=None, **_):
         seen["during"] = svc.get_turn_inflight(session_id)
         return {"response": "done", "cost": 0.0, "session_id": session_id}
 

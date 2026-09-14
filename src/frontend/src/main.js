@@ -5,6 +5,7 @@ import router from './router'
 import App from './App.vue'
 import './style.css'
 import { useAuthStore } from './stores/auth'
+import { setPlatformSessionLostHandler } from './stores/clientPortal'
 import { installConsoleBuffer } from './utils/consoleBuffer'
 
 // #1116: capture recent console errors/warnings from the very start so the
@@ -21,6 +22,18 @@ app.use(router)
 // Initialize auth state from localStorage/cookies on app startup
 const authStore = useAuthStore()
 authStore.initializeAuth()
+
+// #2261 — workspace requests run on their own axios instance now
+// (`stores/clientPortal.js`), so the global 401 interceptor below no longer sees
+// them. The operator bounce for that surface is registered here, where the router
+// and the auth store already live, and the instance's interceptor calls it ONLY
+// when the workspace session is the platform one — never for a client's 401 on a
+// browser that happens to hold an operator's JWT.
+setPlatformSessionLostHandler(() => {
+  console.log('🔐 Workspace: platform session expired - redirecting to login')
+  authStore.logout()
+  router.push('/login')
+})
 
 // Setup axios interceptor to handle token expiration
 axios.interceptors.response.use(

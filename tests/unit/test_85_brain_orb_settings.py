@@ -61,7 +61,7 @@ def _isolate_brain_orb_state(monkeypatch):
 def _user(role):
     return types.SimpleNamespace(
         id=1, username=role, role=role, email=f"{role}@example.com",
-        agent_name=None, connector_agent=None
+        agent_name=None, connector_agent=None, mcp_scope=None
     )
 
 

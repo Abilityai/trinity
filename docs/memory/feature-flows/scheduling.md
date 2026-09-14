@@ -45,7 +45,9 @@ The Agent Scheduling feature enables users to automate agent tasks by configurin
 │  │  └── SchedulesPanel.vue                                          │    │
 │  │      ├── Schedule List (enable/disable, trigger, edit, delete)   │    │
 │  │      ├── Create/Edit Modal (cron presets, timezone)              │    │
-│  │      └── Execution History (expandable, auto-polls every 10s)    │    │
+│  │      └── Execution History (expandable; auto-polls every 10s    │    │
+│  │          while a run is `running` — in place, never a re-flash,  │    │
+│  │          per-schedule loading/error state, stale banner #1927)   │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -845,6 +847,7 @@ except Exception as e:
 | Backend | `src/backend/dependencies.py` | Access control dependencies |
 | Frontend | `src/frontend/src/components/SchedulesPanel.vue` | Schedule management UI |
 | Frontend | `src/frontend/src/components/ExecutionsPanel.vue` | Execution history UI |
+| Frontend | `src/frontend/src/components/SchedulesPanel.vue` | Per-schedule execution history (expand → `loadExecutions(id)`; 10s poll while a run is `running`). #1927: `executions[id]` is assigned only on success (`undefined` = never loaded, `[]` = loaded-empty), `executionsLoading`/`executionsError`/`executionsLoadedAt` are keyed by schedule id, the chain is `viewState(...)` (loading only with no data; `LoadFailed dense` on a failed first fetch — never "No executions yet"; sibling `InlineError` stale banner on a failed poll with rows on screen); the `agentName` watcher resets this state and stops the poll |
 | Frontend | `src/frontend/src/views/AgentDetail.vue` | Tab integration |
 | Docker | `docker/scheduler/Dockerfile` | Scheduler container |
 

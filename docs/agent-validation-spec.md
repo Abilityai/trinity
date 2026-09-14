@@ -94,6 +94,7 @@
 | X-008 | INFO | AI | Consistency | Resource allocation (`cpu`/`memory`) is appropriate for the agent's stated workload |
 | I-001 | SOFT | AI | Composability | If the agent is callable by others (declares Trinity MCP or `permissions`), it documents its output format in `template.yaml` or `CLAUDE.md` |
 | I-002 | SOFT | AI | Composability | Scheduled/autonomous tasks write structured output to a file or shared folder, not only as a chat response |
+| I-006 | INFO | STATIC | Composability | The Trinity plugin (`trinity@abilityai`) is installed, so the agent can run `/trinity:onboard` in place and make itself compatible without a human checkout |
 | DP-001 | HARD | STATIC | Runtime Data | Every `data_paths` entry in `template.yaml` resolves under `data/` (relative to `/home/developer`) — no `../`, no absolute paths, no escape from the data root |
 | DP-002 | SOFT | STATIC | Runtime Data | If `data_paths` is declared, the `data/` root is excluded in `.gitignore` (Trinity appends it at creation; a template that ships `.gitignore` should pre-include it) |
 | DP-003 | SOFT | STATIC | Runtime Data | `data_paths` entries do not overlap `.trinity/`, `.claude/`, `.env`, `.mcp.json`, `git.commit_paths`, or `persistent_state` (those are managed separately) |
@@ -433,7 +434,7 @@ Parse the file; syntax errors prevent the dashboard from rendering.
 
 **D-002** — All widget types are supported  
 Severity: SOFT | Type: STATIC  
-Allowed types: `metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer`. Unknown types are silently ignored by the UI.
+Allowed types: `metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer`. An unknown type is never rendered: the agent server strips the widget before the dashboard reaches the UI and lists it in the Dashboard tab's warning banner (a file with no `sections:` is rejected whole), and D-002 names each offending type with its count, e.g. `unsupported dashboard widget type(s): 'chart' ×5 — not rendered; supported: …`. The list above is closed — there is no chart, badge, or countdown type; trend lines come from the platform's metric history (DASH-001), not from a widget.
 
 **D-003** — Widget required fields present  
 Severity: HARD | Type: STATIC  
@@ -510,6 +511,10 @@ If the agent's `template.yaml` or `CLAUDE.md` indicates it is intended to be cal
 **I-002** — Scheduled tasks produce structured, consumable output  
 Severity: SOFT | Type: AI  
 Autonomous tasks that feed downstream agents or systems should write structured output (JSON file, CSV, markdown report to a known path, shared folder write) rather than relying solely on the chat response text. Prompt: "Do this agent's scheduled tasks or autonomous skills produce output in a structured, file-based form that another agent or system could consume without parsing a conversation? Flag skills that only produce chat responses with no file or structured output."
+
+**I-006** — Trinity plugin present (deploy-as-is bootstrap)  
+Severity: INFO | Type: STATIC  
+Reports whether `trinity@abilityai` is installed in the agent's container, from `.trinity/plugins-state.json` (written by the boot reconciler, ent#411). The plugin is what lets a **deployed** agent make itself compatible — `/trinity:onboard` run in place writes `template.yaml`, `.env.example`, `.gitignore` and `.mcp.json.template` and pushes them back — so its absence is the difference between an agent that can fix its own findings and one that needs a human with a local checkout. INFO, never a defect tier: an operator may switch platform plugins off (`TRINITY_PLATFORM_PLUGINS=0`), and a bare repo is not at fault for an install the platform failed to make. When the plugin is missing the check reports the reconciler's own withheld reason, so "the marketplace was unreachable" is distinguishable from "it was never wanted" — a bare presence flag cannot tell those apart. A missing state file is a SKIP (image or boot predates the mechanism), not a failure.
 
 ---
 

@@ -3,11 +3,12 @@ Timezone-aware timestamp helpers for the standalone scheduler (#1474).
 
 CANONICAL SOURCE: src/backend/utils/helpers.py. The scheduler is a *separate*
 package (own pyproject.toml / Dockerfile that copies only src/scheduler) and
-cannot import src/backend at runtime, so ``utc_now_iso`` / ``to_utc_iso`` are
-vendored here. This is a **behavioral** mirror, not a byte copy: it must AGREE
-ON OUTPUT with the backend (same Z-suffixed ISO format), and ``to_utc_iso`` is
-functionally identical but written with an early return rather than the
-backend's if/else — so "regenerate and diff" cannot mechanically verify it.
+cannot import src/backend at runtime, so ``utc_now_iso`` / ``to_utc_iso`` /
+``duration_ms_between`` (#2434) are vendored here. This is a **behavioral**
+mirror, not a byte copy: it must AGREE ON OUTPUT with the backend (same
+Z-suffixed ISO format), and ``to_utc_iso`` is functionally identical but
+written with an early return rather than the backend's if/else — so
+"regenerate and diff" cannot mechanically verify it.
 Edit the backend copy and keep the *outputs* in sync; the contract is enforced
 by ``tests/unit/test_1713_scheduler_utils_parity.py`` (#1713). (Contrast
 ``failure_classifier.py``, whose two copies ARE genuinely byte-identical and are
@@ -43,6 +44,27 @@ def to_utc_iso(dt: datetime) -> str:
     if dt.tzinfo is None:
         return dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
     return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+
+_PG_INT4_MAX = 2**31 - 1  # 24.855 days in ms — the PostgreSQL INTEGER ceiling
+
+
+def duration_ms_between(started_at, completed_at):
+    """Elapsed milliseconds, or ``None`` when the result is not a measurement.
+
+    Mirror of ``src/backend/utils/helpers.py::duration_ms_between`` (#2434).
+    Read that docstring for the full rationale; the short version is that
+    ``duration_ms`` is a PostgreSQL ``INTEGER`` and the scheduler DOES run
+    against PostgreSQL (``database.py`` ``_PgConn``), so a value above the int4
+    ceiling raises instead of persisting.
+
+    Both datetimes are parameters and ``now()`` is never called in here: this
+    package parses timestamps to **naive** UTC (``parse_scheduler_ts``) while
+    the backend parses to **aware**, and resolving "now" internally would mix
+    the two shapes. Callers pass a matched pair.
+    """
+    ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
+    return None if ms > _PG_INT4_MAX else ms
 
 
 def parse_scheduler_ts(timestamp: str) -> datetime:

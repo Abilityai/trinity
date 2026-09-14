@@ -301,6 +301,14 @@
       <button type="button" class="x" aria-label="Dismiss" @click="dismissToast">✕</button>
     </div>
 
+    <!-- Persistence notice (ent#413): the server could not load or save the
+         user's record. Honest, dismissable, and never blocking — the grid
+         keeps working from this browser's copy. -->
+    <div v-if="gridStore.persistNotice" class="gv-orgtoast gv-persist error" role="status">
+      <span class="msg">{{ gridStore.persistNotice }}</span>
+      <button type="button" class="x" aria-label="Dismiss" @click="gridStore.dismissPersistNotice()">✕</button>
+    </div>
+
     <!-- Board-level legend: the activity chart's trigger colors, once -->
     <div class="gv-legend" title="Execution trigger types (14-day activity chart)">
       <span><i class="ls"></i>Scheduled</span>
@@ -612,6 +620,15 @@ const {
 // has positioned tiles — newcomers with a department place beside their zone
 // hull — then re-sync whenever the fleet roster changes.
 syncLayoutFromAgents()
+// Then ask the server for the user's record (ent#413). The first paint above
+// used the per-user cache / legacy blob / default; when the record lands (or a
+// 409 adoption replaces it later) the store bumps `layoutGeneration` and the
+// reconcile re-runs over the adopted map. Nothing here blocks first paint.
+gridStore.loadPreferences()
+watch(
+  () => gridStore.layoutGeneration,
+  () => syncLayoutFromAgents()
+)
 watch(
   () => props.agents.map((a) => a.name).join('\n'),
   () => {
@@ -931,14 +948,24 @@ onMounted(() => {
   // Wheel needs passive:false to preventDefault page scroll.
   canvasEl.value.addEventListener('wheel', onWheel, { passive: false })
   window.addEventListener('keydown', onOrgKeydown)
+  // A debounced layout write must survive the tab going away (ent#413). Its
+  // own listener, not the store's visibility poll hook, which `stopPolling`
+  // tears down.
+  window.addEventListener('pagehide', onPageHide)
   tickTimer = setInterval(() => {
     if (!document.hidden) now.value = Date.now()
   }, 1000)
   nextTick(fitView)
 })
 
+function onPageHide() {
+  gridStore.flushPending()
+}
+
 onBeforeUnmount(() => {
   gridStore.stopPolling()
+  window.removeEventListener('pagehide', onPageHide)
+  gridStore.flushPending({ keepalive: false }) // mode switch: the page stays
   if (resizeObserver) resizeObserver.disconnect()
   if (canvasEl.value) canvasEl.value.removeEventListener('wheel', onWheel)
   clearInterval(tickTimer)
@@ -1786,6 +1813,10 @@ onBeforeUnmount(() => {
 }
 .gv-orgtoast.error {
   border-color: color-mix(in srgb, var(--gv-red) 55%, var(--gv-border));
+}
+.gv-orgtoast.gv-persist {
+  /* Above the org toast's slot so a save failure and an org verb can coexist. */
+  bottom: 104px;
 }
 .gv-orgtoast .msg {
   line-height: 1.45;

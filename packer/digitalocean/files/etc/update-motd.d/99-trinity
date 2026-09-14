@@ -1,0 +1,65 @@
+#!/bin/bash
+# Trinity 1-Click login banner.
+#
+# Nobody NEEDS this banner any more (ent#580): a 1-Click droplet has no admin
+# until the first person to open the Web UI creates one at /setup, so the
+# operator never has to open a terminal. It prints the URL to open, TLS state,
+# and which of the two admin paths this droplet took — never a password.
+STATE_DIR=/etc/trinity
+IP="$(cat ${STATE_DIR}/public-ip 2>/dev/null)"
+TAG="$(cat ${STATE_DIR}/baked-image-tag 2>/dev/null)"
+
+echo
+echo "  Trinity ${TAG:-} — the sovereign AI agents platform"
+echo "  ---------------------------------------------------------------"
+
+if [ -f "${STATE_DIR}/firstboot-failed" ]; then
+    echo "  ⚠  First boot did NOT complete."
+    echo "     Log:   /var/log/trinity-firstboot.log"
+    echo "     Retry: sudo /opt/trinity-firstboot/firstboot.sh"
+    echo
+    exit 0
+fi
+
+# The scheme comes from what first boot actually VERIFIED, not from what the
+# Caddyfile intended. Printing `https://` after a failed issuance sends the
+# user to a browser warning and tells them the box is fine.
+TLS="$(cat ${STATE_DIR}/tls-status 2>/dev/null)"
+if [ "$TLS" = "ok" ]; then
+    SCHEME="https"
+else
+    SCHEME="http"
+fi
+
+if [ -n "$IP" ]; then
+    echo "  Web UI:  ${SCHEME}://${IP}"
+else
+    echo "  Web UI:  ${SCHEME}://<this droplet's IP>"
+fi
+
+if [ "$TLS" != "ok" ] && [ "$TLS" != "unknown" ]; then
+    echo
+    echo "  ⚠  HTTPS is NOT active — no certificate was issued for this IP."
+    echo "     Traffic is unencrypted. Check: journalctl -u caddy -n 100"
+fi
+
+SOURCE="$(sed -n 's/^source=//p' ${STATE_DIR}/admin-credentials 2>/dev/null)"
+if [ "$SOURCE" = "user-data" ]; then
+    echo "  Login:   admin / the password you supplied in user-data"
+elif curl -fsS --max-time 2 http://127.0.0.1:8000/api/setup/status 2>/dev/null \
+        | grep -q '"setup_completed": *true'; then
+    echo "  Login:   the admin account created in the browser at first visit"
+else
+    # Unclaimed (or the backend is not answering yet): the one action is to
+    # open the URL above. Until someone does, anyone who finds it can.
+    echo "  Admin:   none yet. Open the Web UI above and create it (email +"
+    echo "           password). The first visitor does — so do it now."
+fi
+
+echo
+echo "  Next:    open the Web UI and follow the first-run setup"
+echo "           (add a domain, then serve it through a Cloudflare Tunnel)."
+echo "  Docs:    https://docs.ability.ai"
+echo "  Support: https://github.com/abilityai/trinity/issues  (label: do-marketplace)"
+echo "  DigitalOcean does not build or support Trinity."
+echo

@@ -1,0 +1,193 @@
+# The journey catalog — what Trinity promises, in the words of whoever it is
+# promised to (#2338, Rail R4).
+#
+# WHY THIS FILE EXISTS, and why it is not the epic. An epic is a delivery
+# vehicle: it closes, and its % is burn-down on one wave. The list of promises
+# has to outlive that, and it has to be QUERYABLE — coverage debt you can read
+# off a file rather than rediscover in an exploratory sweep six months later.
+#
+# TWO RULES THIS FILE DOES NOT BEND
+#
+# 1. NO STATUS IS EVER COMMITTED HERE. No `last_green`, no `green`/`red`, no
+#    pass counts. A status field in git has exactly two futures: a human owns it
+#    and it rots, or a bot owns it and every CI run writes a commit — history
+#    spam plus merge conflicts on a file everyone touches. Git holds INTENT;
+#    CI holds STATE. Coverage % is computed at report time from CI artifacts by
+#    `scripts/ci/generate_journeys_md.py`, never read from here.
+#    Enforced by `tests/unit/test_2338_journey_catalog.py`, which fails on any
+#    status-shaped key.
+#
+# 2. ONE INVARIANT NAMESPACE. `invariants:` holds REFERENCES into
+#    `docs/testing/orchestration-invariant-catalog.md` — never a restatement.
+#    Every id is checked to resolve there. A journey whose invariants do not
+#    exist yet carries an EMPTY list rather than an invented id: the gap is the
+#    information, and #2337 (Rail R3) is what fills it.
+#
+# `built: false` is legal, and visible. That is the point of declaring all ten
+# before any of them exists.
+version: 1
+
+# Lanes a journey must hold on. Named here so a record cannot invent one.
+lanes:
+  - local          # a developer's own stack
+  - digitalocean   # supported: must be green to cut a release (epic decision 4)
+  - vultr          # best-effort
+  - hostinger      # best-effort
+
+journeys:
+  - id: J01
+    issue: 2340
+    promise: "I can install Trinity on a clean machine and log in."
+    actor: operator
+    lanes: [local, digitalocean]
+    # Needs a fresh host, so it gates the release cut rather than every PR
+    # (#2336's split-by-cost rule).
+    tier: live-stack
+    harness: null
+    built: false
+    owner: operator
+    # P-05: the login half — a first-login role that respects the whitelist.
+    # The install half has no invariant yet (#2337 left it in Gaps).
+    invariants: [P-05]
+    # ent#580: on the digitalocean lane a cold install has two shapes, and J01
+    # holds only if it holds on both — the harness (#2340) must drive each. Until
+    # it exists, the image and installer halves are pinned by
+    # tests/unit/test_ent580_marketplace_admin_claim.py and
+    # tests/unit/test_2281_firstboot_password.py.
+    variants:
+      - name: claimable
+        promise: "I open my new one-click droplet in a browser and create the admin account there, without ever opening a terminal."
+      - name: pre-provisioned
+        promise: "I gave a password when I created the droplet, so it has an admin from the start and nobody else can claim it."
+
+  - id: J02
+    issue: 2341
+    promise: "I can upgrade my instance and keep my agents, data and schedules."
+    actor: operator
+    lanes: [local, digitalocean]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: operator
+    invariants: [G-01]
+
+  - id: J03
+    issue: 2342
+    promise: "I can create an agent with no configuration and get a useful answer."
+    actor: user
+    lanes: [local, digitalocean]
+    tier: journey-smoke
+    # PARTIALLY built (#2336): the create/stop/start half runs on every PR; the
+    # first-turn half is credential-bound and skips with an allowlisted reason.
+    # `built` stays false because the promise is "a useful ANSWER", and the half
+    # that asserts an answer is the half that does not run.
+    # The harness landed with #2403 (2026-08-28); the create/stop/start half is
+    # `tests/journeys/test_agent_lifecycle_journey.py` (see the note at the end
+    # of this file). Recording a path that resolves nowhere would be the same
+    # lie as an invented invariant id — the validator checks the file exists.
+    harness: tests/journeys/test_first_turn_journey.py
+    built: false
+    owner: operator
+    invariants: [E-05]
+
+  - id: J04
+    issue: 2343
+    promise: "My agents keep working when several things run at once, and nothing silently stalls."
+    actor: operator
+    lanes: [local]
+    tier: soak
+    harness: null
+    built: false
+    owner: trinity
+    invariants: [S-01, S-02, S-03, E-01, E-02, B-01, B-02, R-01]
+
+  - id: J05
+    issue: 2344
+    promise: "I can schedule work, walk away, and find out what happened."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    invariants: [E-01, E-05]
+
+  - id: J06
+    issue: 2345
+    promise: "I can give an agent a credential and it can use the tools that credential unlocks."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    # L-06: injection precedes the first turn; G-04: the credential never
+    # leaks into backlog metadata on the way.
+    invariants: [L-06, G-04]
+
+  - id: J07
+    issue: 2346
+    promise: "A skill I add shows up in the agent's head and it uses it."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    invariants: [SK-01, SK-02, SK-03]
+
+  - id: J08
+    issue: 2347
+    promise: "I can install a marketplace plugin and the agent can use it."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    invariants: [PLG-01]
+
+  - id: J09
+    issue: 2348
+    promise: "I can point Trinity at my repo and get a working agent from it."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    invariants: [RD-01, RD-02, RD-03]
+
+  - id: J10
+    issue: 2349
+    promise: "My agents can call each other, and I can see what they said."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    # P-01/P-02: the permission edge and the MCP gate that consults it;
+    # AC-01: every call leaves an activity ("I can see what they said");
+    # L-03: a deleted callee cascades; IA-01..03: the recorded call had an
+    # edge, a fan-out batch is bounded, a stopped callee fails fast (#2337).
+    invariants: [P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03]
+
+  - id: J11
+    issue: 2565
+    promise: "A companion's brief reaches me where I already work, without me asking."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/journeys/test_j11_brief_delivery_journey.py
+    built: false
+    owner: trinity
+    # E-01/E-05 are the terminal-closure and dispatched-rows-have-a-session
+    # invariants the delivering execution rides on; L-03 covers the cascade that
+    # must not strand a delivered thread when the agent goes away.
+    invariants: [E-01, E-05, L-03]
+
+# The agent-lifecycle journey #2336 shipped is NOT a journey of its own — it is
+# J03's first half. Recording it here rather than minting a J11 keeps the
+# catalog a list of PROMISES; "an agent can be restarted" is a step inside
+# "I get a useful answer", not something a user asks for on its own.

@@ -1,0 +1,12 @@
+#!/bin/bash
+# cloud-init per-instance hook — runs once per droplet, on first boot.
+#
+# Thin on purpose: the work lives in /opt/trinity-firstboot/firstboot.sh so it
+# can be re-run by hand during support without re-triggering cloud-init.
+#
+# A failure here must not leave cloud-init wedged, so the exit status is always
+# 0; the log is the record and the MOTD reports the state.
+/opt/trinity-firstboot/firstboot.sh || \
+  echo "Trinity first boot FAILED — see /var/log/trinity-firstboot.log" \
+    > /etc/trinity/firstboot-failed
+exit 0

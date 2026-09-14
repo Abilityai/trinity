@@ -138,7 +138,7 @@ def portal(monkeypatch, redis_stub):
     state = types.SimpleNamespace(chat_calls=[], redis=redis_stub)
 
     monkeypatch.setattr(svc, "agent_on_roster", lambda a, e, include_owned=False: True)
-    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s: s or SESSION)
+    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s, **kw: s or SESSION)
     # #2219 moved the availability gate to the async `_agent_availability`;
     # `_agent_is_running` survives DEFINED BUT UNCALLED, so patching it would
     # not raise and would silently leave the real gate reaching Docker.
@@ -152,7 +152,7 @@ def portal(monkeypatch, redis_stub):
 
     async def _fake_chat(agent_name, message, email, session_id=None,
                          include_owned=False, execution_id=None,
-                         turn_timeout_seconds=None, availability=None):
+                         turn_timeout_seconds=None, availability=None, **kw):
         state.chat_calls.append({
             "execution_id": execution_id,
             "turn_timeout_seconds": turn_timeout_seconds,
@@ -203,7 +203,7 @@ def real_chat(monkeypatch):
 
     monkeypatch.setattr(svc, "agent_on_roster", lambda a, e, include_owned=False: True)
     monkeypatch.setattr(svc, "_build_portal_system_prompt", lambda a, e: None)
-    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s: SESSION)
+    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s, **kw: SESSION)
     monkeypatch.setattr(svc, "_spawn_title_generation", lambda *a, **kw: None)
 
     async def _no_inbox(agent, email, message):

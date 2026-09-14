@@ -45,8 +45,37 @@ the `Operations.vue` (`?tab=`-driven) tab strip can adopt it next.
 
 | Prop | Type | Default | Description |
 |------|------|---------|-------------|
-| `tabs` | Array | **required** | `[{ id, label, badge? }]` — tab definitions, in display order |
+| `tabs` | Array | **required** | `[{ id, label, badge?, signal?: 'live'\|'updated', pinned? }]` — tab definitions, in display order. `pinned` (ent#523) draws a bookmark before the label; `signal` (ent#474) draws an activity dot after it. Both are drawn in the MIRROR row too — a glyph the visible row renders and the mirror does not is a tab measured narrower than it draws |
 | `modelValue` | String \| null | **required** | active tab id (v-model) |
+| `moreLabel` | Function | `() => 'More'` | the overflow trigger's label, given the hidden count (ent#451 — the contract's counted "N more"). The mirror measures the WIDEST label the strip can need, so a growing count never reflows the fit |
+| `dense` | Boolean | `false` | compact pad and type for a strip above a thread (ent#451) |
+| `fixedWidth` | Boolean | `false` | every tab one width (`FIXED_TAB_WIDTH`, exported), label clamped, full text on `title=` — the opt-in for a strip of **unbounded** labels (#2579). See below |
+
+*(The middle three rows were added by #2579 — the props themselves shipped with
+ent#451/#474/#523 and the table had drifted behind them.)*
+
+### The fixed-width variant (#2579)
+
+Added for the Workspace chat strip, whose labels are user and model text: one
+long title stretched its tab and pushed every sibling under "N more". Under
+`fixedWidth` each tab is `FIXED_TAB_WIDTH` (`'w-40'` — a named export from a
+companion `<script>` block, since `<script setup>` cannot carry one), the label
+clamps in a `min-w-0 truncate` span, and the full text rides `title=` on the
+button **and** on the overflow-menu row.
+
+Default **false**, and every width-related class — the native tooltip included —
+is gated on it, so Agent Detail, Library and the portal rail are unchanged by
+construction; a tooltip on "Overview" would be noise and a 160px "Files" tab
+waste. Two of the gated classes are load-bearing rather than cosmetic:
+`inlineCount` starts at `+Infinity`, so on first paint every tab renders inline,
+and a truncating label drops the button's min-content to padding — without
+`shrink-0` on the visible button (and `overflow-hidden` on the visible nav) flex
+squeezes the row to ~50px per tab for a frame while the `max-content` mirror
+still reports 160. The mirror takes the width class and **nothing else**: it
+never shrinks, and `getBoundingClientRect` returns the border box.
+
+This is a recorded amendment to the design contract's "never wrap or truncate",
+which governs the **set** — the strip still overflows into a counted menu.
 
 ### Events
 
@@ -176,6 +205,7 @@ is a separate concern.
 
 - **[Agent Overview Dashboard](agent-overview-dashboard.md)** — the Agent Detail Overview tab + tab IA (#1107)
 - **[Operating Room](operating-room.md)** — Operations `?tab=` strip, candidate adopter of this component
+- **[Workspace chat tabs and titles](workspace-chat-tabs-and-titles.md)** — the `dense` + `fixedWidth` consumer, and the only one that opts into either
 
 ---
 
@@ -184,3 +214,4 @@ is a separate concern.
 | Date | Change |
 |------|--------|
 | 2026-06-10 | Initial — `OverflowTabs.vue` introduced (#1114), wired into AgentDetail tab nav |
+| 2026-09-07 | `fixedWidth` opt-in for strips of unbounded labels (#2579, the Workspace chat tabs); the props table brought current with `dense` / `moreLabel` / `pinned` / `signal`. Geometry pinned in `src/frontend/e2e/workspace-chat-tabs.spec.js` |

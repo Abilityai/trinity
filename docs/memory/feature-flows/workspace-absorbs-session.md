@@ -3,7 +3,7 @@
 > **Status**: ✅ Implemented (2026-08-12)
 > **Issues**: abilityai/trinity-enterprise#358 (absorb) · abilityai/trinity-enterprise#286 (streaming)
 > **Requirement**: `docs/memory/requirements/core-agent.md` §5.9
-> **Related**: [session-tab.md](session-tab.md) (the engine, still accurate), [architecture.md → Resumable Turns](../architecture.md#resumable-turns)
+> **Related**: [session-tab.md](session-tab.md) (the engine, still accurate), [architecture.md → Resumable Turns](../architecture/execution.md#resumable-turns)
 
 ## Overview
 
@@ -85,7 +85,10 @@ JSONL, and is resumable from then on. No stored history changes.
 ### 3. History replay became cold-turn-only
 
 This looks cosmetic and is the subtlest part of the change. `portal_chat`
-composes **two** messages:
+composes **two** messages (since trinity#2694 the resumed one is prefixed with
+the *delta* of rows the live session never heard — a voice call's spoken
+turns — see [workspace-voice-conversation.md → One timeline](workspace-voice-conversation.md#one-timeline-and-the-agent-knows-what-was-said-trinity2694);
+the rule below is otherwise unchanged):
 
 - **turn message** — omits the history block when resuming. The session already
   holds that context, so replaying it re-pays for it *and* places a summary of
@@ -106,9 +109,16 @@ JSONL one hour after it was written (the age guard) and every thread on that
 agent would go cold — no error, no log, no failed request. Just an agent that
 forgot.
 
-The keep set is now the union of both tables, and a failure reading **either**
-half aborts the sweep rather than reaping against a partial set: skipping a
-cycle costs disk, reaping blind costs conversations.
+The keep set is now the union of every table that resumes, and a failure
+reading **any** of them aborts the sweep rather than reaping against a partial
+set: skipping a cycle costs disk, reaping blind costs conversations.
+
+It was two tables here; #2610 added a third (an open room's
+`enterprise_room_participants`), after rooms shipped as a resume surface without
+one and every multi-agent room lost its memory on the next sweep — this
+section's failure, one surface over. So the rule this section states is now
+guarded rather than remembered: `test_2610_resume_surface_parity` fails when a
+table gains a resume-handle column that no keep-set accessor covers.
 
 ### 5. The surface came out
 
@@ -125,6 +135,17 @@ cycle costs disk, reaping blind costs conversations.
   `resolveAgentLanding()` in `portalUtils.js`: most-recent thread with that
   agent, or a fresh one; `?new=1` forces fresh; an agent not on the caller's
   roster is ignored rather than surfaced as an error.
+
+  **ent#451 — the landing is only half the answer.** Deciding *which thread to
+  show* and deciding *what the first send asks for* are two questions, and an
+  absent `session_id` could not distinguish "unresolved" from "deliberately
+  fresh". `resolveAgentQuery` reads `route.query.new` ONCE into a local that
+  feeds both `resolveAgentLanding` and `startingNewChat`, which rides to
+  `PortalConversation` as `:new-chat` and becomes `new_thread` on the turn.
+  Without the second half `?new=1` rendered an empty conversation and then
+  resumed the old thread on the first turn — the landing honoured the deep link
+  and the send did not. Every site that nulls `pendingSession` also settles the
+  intent, so the two bits cannot desync.
 
 `agent_sessions` rows, the six endpoints, and `stores/sessions.js` are all
 untouched — AC #3. Only the entry point went away.
@@ -152,6 +173,8 @@ untouched — AC #3. Only the entry point went away.
 | `src/frontend/e2e/workspace-absorbs-session.spec.js` | the redirect, that it replaces history, and that no mode toggle remains |
 | `tests/unit/test_2133_bounded_reply_poll.py` | the turn-bound chain (#2214 successors of the #2133 pins): derived arithmetic over the whole TIMEOUT-001 range against the real retry constant; resolver clamp + fail-open-to-default; marker TTL == 202 budget == dispatched timeout proven on one observed dispatch; reattach budget on the history response (remaining TTL / -2 / -1 / exception); the honest 504 |
 | `src/frontend/tests/unit/portalSidebarIA.spec.js` | `resolveWaitBudgetMs` (positive budget wins; unusable → fallback) and that the fallback stays frozen at the pre-#2214 server bound |
+| `tests/unit/test_2320_portal_failed_turn_visibility.py` | the failure taxonomy as two parametrised tables (a new unclassified branch is a missing row); outcome written BEFORE the marker clears; cleared at dispatch and on success; raw exception text never leaves the server; `AUTH`/`BILLING` no longer falls through; the substring fallback still classifies a `None` code; `last_turn_outcome` declared on `PortalHistory` (the `response_model` strip trap); the `@dataclass` enum cannot be compared with `==` |
+| `src/frontend/tests/unit/portalFailedTurn.spec.js` | the first spec to exercise `PortalConversation.vue` — the retryable rule `res?.retryable ?? !res?.lost`, the execution-id match before a verdict is believed, and `markLastUserTurnFailed` marking only the unanswered tail. Extracts the shipped expressions and runs them (there is no component-mount harness in this project) |
 
 ## Streaming (ent#286, same PR)
 
@@ -193,6 +216,17 @@ resolved availability, placed after the roster check (so a state-dependent
 refusal cannot become an existence oracle) and before `_resolve_session_id` (so a
 refused turn does not even open a thread). `start_portal_turn` passes the state
 it already resolved, so a streamed turn still costs one Docker read.
+
+**`_resolve_session_id` has three states, not two (ent#451).** An explicit
+`session_id` must belong to (agent, client) — a miss is 404. With none given it
+resumes the client's latest, which is right for a deep link, a refresh and a
+headless caller that never held an id. `new_thread=True` is the third: open one
+even though a latest exists. An explicit id WINS over the flag — a caller
+sending both contradicts itself, and the id is a fact where the flag is an
+intent — and the ownership check runs first either way, so the flag is never a
+route past it. `ensure_thread_for_ask` deliberately does NOT pass it: ent#429's
+landing rule reuses the latest thread so asks do not accumulate beside the
+conversation, which matters more once several chats can exist, not less.
 
 **Reading a stream requires all three:** the agent on the caller's roster, the
 execution belonging to that agent, and the execution having been started by that
@@ -256,6 +290,111 @@ A turn that hits the bound 504s naming the agent's limit (seconds below 120,
 else rounded minutes). Long-timeout **headless** integrators should prefer the
 streaming route — the synchronous `POST .../chat` holds a byte-silent response
 for the whole turn, which is proxy read-timeout territory at hour scale.
+
+## Failed turns are visible, and Retry follows the billing evidence (#2320)
+
+A turn that fails before or at start persists **no assistant message** and its
+`finally` clears the in-flight marker on every exit path. The client learns an
+outcome exactly two ways — a new assistant row, or the marker still being set —
+so a fast failure produced neither, and after `REPLY_IDLE_GIVE_UP_MS` the client
+rendered the #2133 *"we've lost track of this turn — it may still finish"* copy
+for a turn the backend had diagnosed precisely and written to
+`schedule_executions.error`. Every clause of that message was false, and Retry
+was suppressed on the one path where re-sending is safe.
+
+Three parts:
+
+**The two bits live on the exception, decided at the raise site.**
+`ClientPortalError(status, detail, *, category, retryable)`. Not inferred
+downstream — `_fail_unstarted_execution` is reached from the pre-start branch
+**and** from the generic `except Exception`, which can fire after `execute_task`
+already returned, so "was this billed" is not a property of the row being
+written. `retryable` defaults **False**, so a raise site that forgets it gets the
+unprivileged answer.
+
+| Raise site | category | retryable |
+|---|---|---|
+| roster miss / stopped / containerless | `agent_unavailable` | ✗ — unbilled, but ent#286 settled that retrying cannot work |
+| `ResumeLockBusy` | `busy` | **✓** never reached the agent |
+| `CAPACITY` | `capacity` | **✓** admission refused; the queue drains |
+| `AUTH` / `BILLING` | `auth` | ✗ retry re-fails |
+| `TIMEOUT` | `timeout` | ✗ ran to the bound |
+| generic turn failure | `agent_error` | ✗ ran |
+| uncaught crash | `internal` | ✗ fixed sentence; raw text stays operator-only |
+
+Classification now reads `TaskExecutionResult.error_code` (via
+`_error_code_name`, which takes `.name` — the enum is `@dataclass`-decorated so
+`AUTH == TIMEOUT` is **True**, the #1085 footgun) and keeps the old substring
+tests as the `None`-code fallback, so it is additive. `AUTH`/`BILLING` had no
+branch at all before and fell through to the generic 502 — that is the
+subscription-limit case #2320 was reported from.
+
+**The record rides Redis beside the marker it is the terminal half of.**
+`portal_turn_outcome:{session_id}`, TTL 900s, written in `_run`'s except
+branches — **before** the `finally` that clears the marker, which is the whole
+ordering contract: the client's give-up timer starts when the marker vanishes,
+so an outcome written after it races a 6s window. Cleared at dispatch (so turn
+N+1 never inherits turn N's verdict) and on success. Redis down ⇒ no outcome ⇒
+the pre-#2320 message, never worse. Surfaced as `PortalHistory.last_turn_outcome`
+— **declared** on the model, because the route's `response_model` strips
+undeclared keys, so a service-layer-only change is a no-op.
+
+Deliberately **not** a message row in `enterprise_portal_messages`: `role` is
+bare TEXT with no enum, but `_format_history_context` replays any non-`user`,
+non-`system` role to the agent **as its own words** (a `system` row is a bracketed
+platform marker since trinity#2694 — still not a message), and `_persist_user_turn`'s dedupe reads
+`recent[-1].role == "user"`, so an error row would make Retry duplicate the user
+message — breaking a #2120 pin that does have a test. No schema change, no
+migration.
+
+**The client believes a verdict only for the turn it is waiting on**
+(`outcome.execution_id === executionId`), reports it instead of the lost-track
+copy, and offers Retry iff the verdict says nothing reached the agent. The two
+give-ups are now worded distinctly. `reattach()` and `loadThread()` render
+failures too — that surface previously checked only for a reply and rendered
+**nothing at all** on a failed or lost turn, so refreshing mid-turn showed less
+than staying put. `markLastUserTurnFailed` marks only the thread's **unanswered
+tail**, never "the last user row": two raise sites record a verdict without
+persisting a user row of their own, and a backwards walk would pin the failure
+onto an earlier, answered turn.
+
+Residual: the synchronous `POST .../chat` path records no outcome — it raises
+into a live request, where the client already gets a real HTTP error.
+
+## Entry points open a new tab (trinity-enterprise#456)
+
+Two links reach the Workspace from the operator console: the NavBar
+**Workspace** entry, and this flow's **Continue in Workspace →** on the Chat
+tab. Both now carry `target="_blank" rel="noopener"`.
+
+The reason is what this flow established: the Workspace is where the continuing
+conversation lives, so following a link to it replaced whatever the operator was
+looking at, and getting back meant re-finding the agent, the tab and the scroll
+position.
+
+`target` alone is the whole mechanism. Vue Router's `guardEvent` declines to
+intercept a click whose target is `_blank` (and any modified click), so
+`<router-link>` still resolves the href while the browser owns the click.
+Hand-rolling `window.open` would take that back and break cmd/ctrl/shift-click
+with it — which is why there is none.
+
+**The `?tab=session` redirect deliberately stays same-tab.** It is a
+`router.replace` rewrite of a navigation already in flight, not an entry point;
+spawning a tab from it would leave the original tab sitting on a URL nobody
+asked for. Its existing @smoke specs above are the guard, and
+`workspaceNewTab.spec.js` pins the same-tab shape from the other side.
+
+Also pinned there: **`views/Portal.vue` mounts no NavBar.** NavBar is mounted
+per view (`App.vue` renders none), so the entry's active-class expression can
+never be true in the new tab — pinning that ABSENCE is the real guarantee, where
+pinning the expression would be pinning dead code.
+
+The AC's "a portal-token session in a fresh tab" is unreachable through these
+links: a portal-token client never sees the NavBar or Agent Detail. Stated here
+rather than claimed as verified.
+
+There is deliberately no preference for the behaviour — the new tab is simply
+the default.
 
 ## Known Limitations
 

@@ -88,8 +88,6 @@ def _call(async_mode):
         current_user=_user(),
         x_source_agent=None,
         x_via_mcp=None,
-        x_mcp_key_id=None,
-        x_mcp_key_name=None,
         idempotency_key="k1",
     ))
 

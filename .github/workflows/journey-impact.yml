@@ -1,0 +1,60 @@
+name: Journey Impact
+
+# Gate G1 of the journey-coverage deck (#2350).
+#
+# Every epic and user-facing feature declares what it does to the promise list.
+# The DECLARATION is cheap; the gate is the load-bearing part. An intake field
+# on its own would be `none:` for everything inside a month and would read as
+# compliance — so the burden sits on the `new:` path, where declaring a new
+# promise obliges the same PR to carry a skeleton for it. That is what stops
+# `none:` being the free option: choosing it is a visible claim, in writing,
+# next to a diff a reviewer can check it against.
+#
+# What FAILS: a malformed declaration (including a bare `none`), and a `new:`
+# declaration — on the PR or on an epic it references — with no skeleton in the
+# diff. What PASSES with a note: no declaration at all, deliberately, so
+# adopting the field does not red-X every in-flight PR and dependabot bump on
+# day one. Tightening that is a follow-up once the templates have been in use.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches: [dev, main]
+
+permissions:
+  contents: read
+  issues: read
+
+concurrency:
+  group: journey-impact-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  journey-impact:
+    name: journey-impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Need the base to diff against for the skeleton check.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          # #1891: must equal the image pin; tests/unit/test_1891_python_version_parity.py
+          # scans every workflow and fails on a stale one.
+          python-version: '3.13'
+
+      - name: Check the declaration
+        env:
+          # Through env, never `${{ }}` inside the shell body: a PR body is
+          # attacker-authored text, so interpolating it into a `run:` script is
+          # a command-injection sink.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: python scripts/ci/check_journey_impact.py

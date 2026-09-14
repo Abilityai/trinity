@@ -6,11 +6,13 @@
  */
 
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import axios from 'axios'
 import api from '../api'
 import { useAuthStore } from './auth'
 import { apiErrorMessage } from '../utils/apiError'
+import { decideAutoExpand } from '../utils/loadingState'
+import { queueResponseBody, QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending } from '../utils/operatorQueue'
 
 // Agent display helpers
 const AGENT_COLORS = [
@@ -33,6 +35,10 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   // State
   const items = ref([])
   const expandedItemId = ref(null)
+  // #1927: the landing rule's arming bit. True until a human toggles any card
+  // (they have taken control of expansion — principle 5), re-armed whenever the
+  // open set drains to zero so the next 0→N arrival lands expanded again.
+  const autoExpandArmed = ref(true)
   const loading = ref(false)
   const error = ref(null)
   // #1926: "the list is empty" is only true once a fetch has SUCCEEDED and
@@ -110,18 +116,24 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   async function respondToItem(id, response, responseText = '') {
     const item = items.value.find(i => i.id === id)
     if (!item) return
+    // A decision is required — never let an empty/undefined one be stringified
+    // into the body (the callers guard this today; this is the belt).
+    if (response == null || String(response).trim() === '') return
 
+    // #2370: ONE builder for every producer of this body — the decision rides
+    // `response`, the note rides `response_text` (trimmed; empty → null).
+    const body = queueResponseBody(response, responseText)
     try {
       await axios.post(
         `/api/operator-queue/${id}/respond`,
-        { response, response_text: responseText || null },
+        body,
         { headers: authStore.authHeader }
       )
 
-      // Optimistic update
+      // Optimistic update — mirror the body that was sent
       item.status = 'responded'
-      item.response = response
-      item.response_text = responseText
+      item.response = body.response
+      item.response_text = body.response_text
       item.responded_by_email = authStore.userEmail || authStore.user?.username
       item.responded_at = new Date().toISOString()
       expandedItemId.value = null
@@ -132,11 +144,26 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
         expandedItemId.value = nextOpen.id
       }
     } catch (err) {
-      if (err.response?.status === 409) {
-        // Item left 'pending' under us (e.g. another operator cleared the
-        // queue) — the response was NOT recorded (#1017).
-        error.value = 'This item was cancelled or answered by another operator — your response was not recorded.'
-        fetchItems()
+      if (respondRefusedAsNotPending(err)) {
+        // Item left 'pending' under us (409 — e.g. another operator cleared
+        // the queue, #1017), was already terminal (400) or the row is gone
+        // (404) — the response was NOT recorded. Copy shared with `/m` (#2370)
+        // and attribution-free: the status may be responded, cancelled or
+        // expired.
+        //
+        // The refetch is AWAITED and the copy assigned after it: `fetchItems`
+        // sets `error.value = null` in its own synchronous prologue, so
+        // assigning first and calling it un-awaited destroyed the notice
+        // before anything rendered. That cost nothing while 409 was the only
+        // refused status (#2377 owns that half), but this branch now also
+        // takes 400 and 404 — which used to fall through to the `else` and
+        // leave a message — so ordering it the other way would have widened a
+        // silent failure to two statuses that previously reported. The
+        // refetch's own error, if it failed, is deliberately overwritten: the
+        // operator needs to know their answer was not recorded more than they
+        // need to know the list is stale.
+        await fetchItems()
+        error.value = QUEUE_RESPONSE_NOT_RECORDED
       } else {
         error.value = apiErrorMessage(err, 'Request failed')
       }
@@ -177,7 +204,33 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
 
   function toggleExpand(id) {
     expandedItemId.value = expandedItemId.value === id ? null : id
+    // A human chose — no poll, WS delta or remount may override it (#1927).
+    autoExpandArmed.value = false
   }
+
+  // #1927: auto-expand the first open item ONCE per armed episode. Lives beside
+  // the expansion state it governs (design-system p21), not in the view — the
+  // store is a singleton fed by WS events and earlier visits, so a view-local
+  // "once per mount" either misses a warm store or re-expands over a remembered
+  // collapse. `decideAutoExpand` checks MEMBERSHIP of expandedItemId in the open
+  // set, so an id that was answered while the operator was away never blocks
+  // the rule forever. `respondToItem`'s auto-advance is a separate, unchanged rule.
+  function maybeAutoExpand() {
+    const id = decideAutoExpand({
+      armed: autoExpandArmed.value,
+      openIds: openItems.value.map(i => i.id),
+      expandedId: expandedItemId.value,
+    })
+    if (id == null) return false
+    expandedItemId.value = id
+    autoExpandArmed.value = false
+    return true
+  }
+
+  // Re-arm when the queue drains, whatever drained it (poll, respond, WS, clear).
+  watch(() => openItems.value.length, (len) => {
+    if (len === 0) autoExpandArmed.value = true
+  })
 
   // WebSocket event handler
   function handleWebSocketEvent(data) {
@@ -222,6 +275,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   return {
     items,
     expandedItemId,
+    autoExpandArmed,
     loading,
     error,
     hasLoaded,
@@ -234,6 +288,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     getProfile,
     fetchItems,
     toggleExpand,
+    maybeAutoExpand,
     respondToItem,
     acknowledgeItem,
     bulkCancel,

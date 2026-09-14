@@ -106,6 +106,19 @@ updates:
     labels:
       - dependencies
       - docker
+    # Runtime MAJORs are a coordinated migration, not a dependency bump (#2477).
+    # The Python version is a single declaration (#1891): the three image
+    # Dockerfiles are the source of truth and every `python-version:` in
+    # `.github/workflows/` must equal them, so a major cannot land as a
+    # Dockerfile-only edit. #2477 (3.13 -> 3.14) also could not build at all —
+    # `psycopg2-binary` ships no cp314 wheel, so pip fell back to a source build
+    # needing `pg_config`, which `-slim` does not carry. Ecosystem readiness is
+    # the thing to check first, and that is issue work, not PR review.
+    # Patch/minor still flow (that is where the CVE fixes are).
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
     groups:
       docker-base-images:
         patterns:

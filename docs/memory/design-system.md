@@ -124,7 +124,7 @@ Shared primitives are the unit of consistency: **compose them, never re-implemen
 |---|---|---|
 | BaseButton | `components/base/BaseButton.vue` | `ConfirmDialog.vue` actions · TemplateRegistryPanel Save/Reset |
 | BaseInput | `components/base/BaseInput.vue` | TemplateRegistryPanel registry URL |
-| BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU |
+| BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU (`field`) · `PortalConversation.vue` model picker (`ghost`, #2662) |
 | BaseToggle | `components/base/BaseToggle.vue` | TemplateRegistryPanel enable switch |
 | BaseTextarea | `components/base/BaseTextarea.vue` | `SystemInstallPanel.vue` manifest editor (mono) |
 | BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips |
@@ -162,10 +162,21 @@ The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16
 
 ### BaseSelect
 
-Same field recipe as BaseInput. `appearance: none`, custom 14px chevron absolutely positioned right 10px (tertiary ink, pointer-events none), padding-right 32px so text never collides. Same focus/error treatment.
+Two variants, both native `<select>` under the hood — keyboard operation, the `:focus-visible` ring and the platform picker on touch come free, and a trigger + popover inherits none of them.
 
-- **Do:** reuse the shared select for every dropdown.
-- **Don't:** ship a per-view custom dropdown when a select does the job.
+**`variant="field"` (default).** Same field recipe as BaseInput. `appearance: none`, custom 14px chevron absolutely positioned right 10px (tertiary ink, pointer-events none), padding-right 32px so text never collides. Same focus/error treatment.
+
+**`variant="ghost"` (#2662).** The same control wearing chat chrome instead of form chrome: no border, no fill, **content-width** (no `w-full`), `h-11` so it is the same 44px box as the icon buttons it sits beside, 13.5 ink like every sibling recipe, 12px chevron at right 8px with a 28px gutter. Hover tints the **ground only** (`gray-100` / dark `gray-750`, the chrome shade — a `gray-800` tint is invisible on the `gray-800` composer shell). It carries a 1px `border` with **no colour in the base string** — the width is reserved so the focus border costs no layout shift, and which colour it takes is the valid/invalid arms' business, exactly as on `field`. Resting-transparent lives on the valid arm; the disabled hover reset is spelled in **both** theme arms. Both of those are cascade fixes, not style: with `border-transparent` in the base string a ghost select carrying an `error` rendered with no danger border, and with only the unvariated `disabled:hover:bg-transparent` a disabled one still lit up under the cursor in dark mode — see the ordering rule below. Live at `PortalConversation.vue`'s composer control row.
+
+**Open-state chevron (#2662, `ghost` only).** The chevron points **up while the picker is open** and animates the flip over 150ms, held still under `prefers-reduced-motion`. This is the chevron idiom the rest of the app already follows — `ChatHistoryDropdown`, `OverflowTabs`, `InfoPanel`, and the disclosure rows in `LoopsPanel` / `TasksPanel` / `PortalAgentDetails` / `PortalDeliverables` / `ChannelDisclosure` all flip on open — and selects were the one control excluded from it, because all nine of those own their open state in JS while a **native** `<select>`'s picker is drawn by the platform and reports nothing to the page. `:open` is the only hook that exists for it (Baseline newly-available 2026-05: Chrome 133, Firefox 136, Safari 26.5); on an older engine the chevron simply stays static, so nothing depends on it. The rule is a **sibling** selector on the select (`[&:open~svg]:rotate-180`), not `:has()` on the wrapper, because the chevron is the select's next sibling — so no group class is needed on the parent. `~` is the GENERAL sibling combinator, so the precondition is that the svg FOLLOWS the select as a sibling, not that it is adjacent to it: an element inserted between the two still matches (`select ~ svg` does, `select + svg` does not — measured in Chrome 151). The two edits that do kill it silently are wrapping the svg in an element and moving it above the select. It is resolved in the one `recipe` computed (`flip`), **not** on the shared `<select>`: #2662 is a Workspace composer bug and `field` is what Settings and `ResourceModal` render, so `field` keeps a byte-identical class string and a static chevron. Bringing every select into the idiom is the right end state, but it changes surfaces this issue does not own and belongs in its own issue. Guarded by `tests/unit/baseSelectChevron.spec.js`, which strips comments before matching, pins the sibling adjacency, and fails if the flip is widened onto the shared element.
+
+Both recipes live in `base/fieldClasses.js` (`FIELD_CLASS` / `FIELD_GHOST_CLASS`), and `BaseSelect.vue` resolves every variant-dependent class in one `recipe` computed so a third variant cannot be half-added.
+
+**Ordering rule for every field recipe (#2662).** Never let two utilities of the same CSS property sit in one class string and rely on which Tailwind emits last — the class attribute's order is not the stylesheet's order, and the stylesheet's order is a per-plugin implementation detail. State-dependent colour goes on **mutually exclusive arms** (base string carries the width, arms carry the colour), and a `dark:`-variant utility needs its state resets spelled in the dark arm too, because `dark:hover:bg-*` compiles to `:hover:is(.dark *)` and TIES an unvariated `disabled:hover:*` on specificity while being emitted later. Both mistakes shipped on this variant and both were green under `npm run test:unit`, `check:tokens` and the raw-colour ratchet: a class-string assertion is structurally blind to the cascade. `tests/unit/portalComposerAlignment.spec.js` pins the arrangement (colour on the arms, every dark hover tint paired with a dark disabled reset); the cascade itself is only checkable by reading `getComputedStyle` off a live render, in both themes.
+
+- **Do:** reuse the shared select for every dropdown; pick `ghost` when the select is a preference beside content, `field` when it is a field in a form.
+- **Don't:** ship a per-view custom dropdown when a select does the job — including a "just borderless" one in chat chrome, which is what `ghost` exists to absorb.
+- **Note:** `ghost` here is gray-inked chrome; `BaseButton`'s `ghost` is accent-inked. Same word, two recipes — see the open naming question in #2662.
 
 ### BaseToggle
 
@@ -228,6 +239,29 @@ The existing `OverflowTabs` component (#1114, `docs/memory/feature-flows/agent-d
 - **Do:** OverflowTabs with the counted "+N more" menu.
 - **Don't:** tabs wrapping to a second row, or silent truncation.
 
+**Fixed-width variant — `fixedWidth` (#2579, amendment to "never truncate").** "Never
+truncate" governs the **set**: the strip overflows into a counted menu rather than
+dropping or wrapping tabs, and that is unchanged. It does *not* mean every label must be
+laid out at its intrinsic width — which for a strip of **unbounded** labels (user and
+model text, today only the Workspace chat tabs) means one long title stretches its tab
+and pushes every sibling under "N more". Such a strip may opt into `fixedWidth`.
+
+**Recipe:** every tab `FIXED_TAB_WIDTH` (`w-40` / 160px) and `shrink-0`, Main and short
+labels included — uniform width is the point, so an ellipsis is a property of the
+content, not a jagged strip; the label clamps in a `min-w-0 truncate` span; the full
+text rides `title=` on the button **and** on the overflow-menu row, so nothing is
+recoverable only by widening the window.
+
+- **Do:** opt in per consumer; keep every width class behind the prop.
+- **Don't:** make it the default, couple it to `dense`, or clamp a strip of short fixed
+  labels — a tooltip on "Overview" is noise, and a 160px "Files" tab is waste.
+- **Watch:** the width class belongs in **both** rows (a mirror that measures narrower
+  than the visible row overflows one tab too late), but `shrink-0` and the visible nav's
+  `overflow-hidden` belong to the **visible** row only. `inlineCount` starts at
+  `+Infinity`, so every tab is inline before the first measurement; a truncating label
+  drops the button's min-content to padding, and flex's default shrink would squeeze the
+  row for a frame while the `width: max-content` mirror still reports 160.
+
 ### Data table
 
 **Recipe:** header — chrome bg, mono 10.5 caps tracking .1em, weight 500, tertiary ink, `position: sticky; top: 0` while scrolling · rows ≥40px (padding 10×14), 1px dividers (gray-200 / gray-750), hover row → chrome bg · status cells use BaseBadge · numbers right-aligned, mono 12.5, tabular-nums.
@@ -277,9 +311,41 @@ failure. Inspect the settlement and report the count that did not apply.
 **Alert recipe:** tinted ground per token family (light token-100 bg + token-700 text; dark token-500/16% + token-300), radius 8, padding 12×14, 13.5, 16px stroke icon, bold lead sentence, plain-language body. Errors say what went wrong **and how to fix it** ("Execution failed — exit 137 (out of memory). Raise the agent's memory limit in Settings → Resources."). Warnings carry their action inline.
 **Toast recipe:** surface bg + border-strong + shadow-lg, radius 8, padding 10×16. Toasts confirm **completed verbs** and include the fact you'd check next ("Schedule created — next run Mon 09:00 UTC"); auto-dismiss ~5s; **never used for errors** (principle 18) — errors persist until acknowledged. Enforced in `composables/useNotification.js` (#1926): a `type: 'error'` notification does not start the dismiss timer and stays until the user closes it, so every toast host renders a dismiss control for it. A failure that belongs next to a control should not be a toast at all — use `InlineError`/`LoadFailed` above.
 
+### Canvas design kit — the v-html twin (trinity-enterprise#537)
+
+An agent's canvas renders agent-authored `html` / `markdown` through
+`v-html`, where no component can mount. The **canvas design kit** is the one
+sanctioned exception to primitives-first for that reason, and it is held to the
+same values rather than exempted from them: `ck-card` carries BaseCard's
+surface / 1px border / radius 8 / padding 16 / shadow-sm; `ck-chip` carries
+BaseBadge's pill recipe (11.5/550, token-100 ground + token-700 text light,
+token-500/16% + token-300 dark); `ck-kpi` and `ck-table` carry the report
+tile's and the bounded data table's tokens (sticky mono-caps header on chrome,
+`tabular-nums`, max-height + internal scroll); `ck-callout` is the alert
+recipe; `ck-section` the 18/650 section title. Type stays on the six-size
+scale and spacing on the 4px grid.
+
+- **Home:** `src/frontend/src/components/canvas/CanvasKit.vue` — an UNSCOPED
+  `<style>` whose every selector sits under `.canvas-kit` (Vue scoped CSS
+  cannot reach `v-html` children; the prefix is the scope). An SFC, not a
+  `.css` file, so the raw-colour ratchet walks it: every colour is a `theme()`
+  token with a `.dark .canvas-kit` override and the file ships at zero raw
+  colours. The class allowlist is `utils/canvasKit.js::KIT_CLASSES`; the
+  sanitiser drops anything else on a canvas (`sanitizeCanvasHtml`).
+- **Both themes** through the kit's own custom properties (`--ck-*`), set once
+  light and once under `.dark` — never a per-theme hex in a rule.
+- **Bounded by construction:** collapse is keyed on the kit's inline size
+  (`@container`), never the viewport; inline styles admit only a bounded
+  `width` / `max-width`; the `<style>` element is forbidden on every
+  sanitised surface (design principle 28 applied to agent markup).
+- **Audit:** `/audit-design-system` covers the kit through the scanner (the
+  ratchet) and this section (the principles); a `ck-*` rule that introduces a
+  literal colour, a viewport media query, or a value off the primitive it
+  twins is a regression.
+
 ## 6. Motion — the data-loading standard
 
-The app has **one** data-loading motion (design session, 2026-07). Bespoke per-component spinners and skeletons do not survive adoption.
+The app has **two** data-loading treatments, decided by the surface (design session 2026-07; amended by the operator ruling of 2026-09-06, #2540): the **scanline beam + wipe-in reveal is the chart-loading motion** — `StackedBarChart`, `TrendLineChart`, the grid tile charts, metrics panels — and **every other first load is a skeleton placeholder** keyed on "no data yet": pages, panels, lists, message threads. Bespoke per-component spinners do not survive adoption; a skeleton follows the recipe below, never a hand-rolled one.
 
 ### Scanline beam — anatomy
 
@@ -302,9 +368,47 @@ never celebrate); swap loading/loaded content inside the SLOT of one persistent 
 zone. During the arrival pass the track is wiped OUT behind the beam (complementary
 `clip-path`), so revealed pixels sit on their final background from the first frame — no
 end-of-pass background snap. Theme via `--scan-core`/`--scan-track` overrides (the Grid
-rides `--gv-*`). Reference adoption: the Grid `AgentTile.vue` chart zones — Dashboard-only
-for now by product decision; adopting any further surface = the ent#253 pass; do not build
-a new spinner.
+rides `--gv-*`). Reference adoption: the Grid `AgentTile.vue` chart zones and the
+Executions info tile's chart zone (ent#449, via the chassis opt-in `owns-loading` — a tile
+may own its LOADING face inside `InfoTile`'s slot; the chassis keeps `error`/`empty`). The
+Workspace's stage, thread and briefing adopted it under #2163 and were moved back to
+skeletons by #2540 — a conversation is not a chart. Adopting a further CHART surface = the
+ent#253 pass; adopting it on a page, list or thread is a violation, and
+`tests/unit/portalLoadingTreatment.spec.js` pins the importer set as an allowlist so a new
+non-chart adoption fails CI (the two pre-ruling holdovers, `LibrarySkillsSection` and
+`onboarding/FinishSetupCard` — the latter since deleted, replaced by the ent#581 first-run
+overlay `onboarding/FirstRunOverlay.vue` — were swept to skeletons by #1921, so the
+holdover list is empty).
+
+`content-class` (#2163) is the consumer's hook on the primitive's OWN content wrapper —
+`.scan-content` is child-owned DOM and `:deep()` is forbidden here, so a zone whose
+loaded content must FILL the zone (a full-height flex column, rather than be measured by
+it) had no way to say so. Default `''`; sizing the ZONE stays the consumer's job either
+way. Note `announce` puts `role="status"` on the zone ROOT, which is an implicit
+aria-live region — never pass it for a zone wrapping content that keeps changing (a
+transcript, a composer), or every update is re-announced in full.
+
+### Skeleton placeholder — pages, panels, lists, threads (#2540)
+
+The non-chart first load. Two sanctioned forms: `components/SkeletonLoader.vue` (generic
+stacked rows / node placeholders — the Dashboard's) and a **content-shaped** placeholder
+that mirrors the loaded surface's own footprint (the #2159 sidebar rows, `PortalAgentPage`'s
+section blocks, the Workspace's `components/portal/PortalSkeleton.vue` — stage / thread /
+briefing). Either way the recipe is:
+
+- pulse blocks in the two chrome fills — `bg-gray-100 dark:bg-gray-800/60` for content,
+  `bg-gray-200 dark:bg-gray-800` for heavier "heading" bars — with
+  `animate-pulse motion-reduce:animate-none` (a static placeholder under reduced motion);
+- `aria-busy="true"` on the placeholder root and ONE `sr-only` "Loading…" line;
+- keyed on a **verdict** — `hasLoaded`, `state === 'loading'`, `!historyLoaded` — never a
+  fetch-in-flight flag, and never a bare `<x>.loading` path (the #1927 ratchet counts that
+  spelling as a bare gate, so `stage.loading` as a `v-if` is a regression even when the
+  value is a verdict);
+- the same footprint as the loaded state, owned by a wrapper BOTH faces sit inside
+  (principle 4) — a stage-shaped placeholder draws the frame the common terminal takes
+  (header, thread, composer);
+- the placeholder is the FIRST arm of the branch chain, so no terminal arm can render under
+  it (the ent#253 lesson holds for skeletons as much as for the beam).
 
 ### Rules (all mandatory)
 
@@ -314,6 +418,8 @@ a new spinner.
 - **No layout shift** at any phase: the zone keeps one fixed footprint through loading → reveal → loaded (principle 4).
 - **`prefers-reduced-motion: reduce`** → no beam, no wipe: static placeholder, instant reveal.
 - **A failing refresh is honest** (principle 15): never present stale data as fresh — "Refresh failed — showing data from 10:42 · Retry".
+- **A failed request never becomes a statement about the subject** (ent#253, the #1926 class one layer down). The three surfaces that pass swept — `MetricsPanel`, `DashboardPanel`, `ObservabilityPanel` — each answered a failed poll by *overwriting* their data with a synthetic "this agent has no metrics / no dashboard / the collector is unavailable", so one transient 502 rewrote a working agent as a misconfigured one and the real values were gone until the next success. The rule: on a refresh failure **keep the data, set an error, raise the stale banner**; the empty state stays reserved for a fetch that succeeded and returned nothing. A `catch` that assigns the data ref is the smell.
+- **The gate is auditable, so audit before sweeping**: `scan-loading-gates.mjs` finds bare `v-if="loading"` gates, but a compliant-looking gate can still re-flash (the flag is set by the polled fetch) and a *bare-looking* one can be harmless (the flag is only ever set on mount). ent#253's inventory of all 31 interval-refreshed files — with the verdict and the evidence for each — is the audit comment on trinity-enterprise#253; extend it rather than re-deriving it. **Record consumer-reachability in the same pass**: `grep setInterval` finds code that polls, not surfaces a user can reach, and ent#253 found two of its three flagged panels (`MetricsPanel`, `ObservabilityPanel`) mounted by nothing at all — a defect worth fixing in code but not a live symptom, and the difference decides how loudly it is reported.
 - The 16px in-flight spinner inside BaseButton is *action feedback*, not data loading — it is the one sanctioned spinner, and it lives only inside a pressed control.
 
 ## 7. UI Construction Principles
@@ -333,6 +439,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 6. Dimensions never oscillate as async data trickles in — size to the stable state.
 7. Panels flex to available width; no overlap at narrow widths; wide content scrolls in its own container, never the page.
 8. Scrolling is axis-locked — one axis at a time.
+29. **Recommendation, verified by eye: enabling something should not shove the rest of the panel (#954, #1563, #1939, #2640).** A user-driven state change — a toggle switched on, a checkbox that reveals dependent fields, a mode that swaps a column, a tab switch — deserves the same care as data arrival (principle 4), but this is guidance, not a hard rule: some reveals are genuinely better as an instant snap, and the judgement is the reviewer's. Preferred shapes, chosen by size: a **reserved footprint** for small dependents (the block already occupies its space, disabled or dimmed, and enabling fills it in place — the natural default for settings forms), or a **height/flex transition** for a whole section or column (150–300ms ease-out, `motion-reduce:transition-none`, via `<Transition>` or an animatable property such as `grid-template-rows` / `flex-grow`) rather than a bare `v-if` that lands the new layout in one paint. Aim for: the activated control stays under the pointer, new content opens below or beside its trigger rather than above it, and what the user was reading stays in view. A swap that must remount should let the leaving element finish before the entering one takes its width — a mid-transition third column is a worse jump than the one being fixed (#2647). **No scanner can see this** — it is confirmed only by a human toggling the control in the browser, in both themes, and watching what moves; record that you did in the PR.
 
 ### C. Density & progressive disclosure
 
@@ -342,7 +449,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 
 ### D. Data loading & refresh
 
-12. One loading motion app-wide: scanline beam + wipe-in reveal (design session, 2026-07); no bespoke spinners or skeletons.
+12. Two loading treatments, decided by the surface (design session 2026-07; amended 2026-09-06, #2540): the scanline beam + wipe-in reveal on **chart** surfaces only; a skeleton placeholder keyed on "no data yet" on every other first load — pages, panels, lists, threads. No bespoke spinners; no scanline over a non-chart surface.
 13. First load animates; background refresh is invisible — stale-while-revalidate, in-place swap.
 14. Loading means "no data yet", never "fetch in flight"; cache hits skip the animation; reduced motion is honored.
 
@@ -373,7 +480,10 @@ The recurring failure modes, in one place:
 | Hand-rolled `<button class="…">` | `BaseButton` |
 | `dark:text-gray-500` on meta text | `dark:text-gray-300` (secondary) or `-400` (tertiary) |
 | A new skeleton/spinner for a loading chart | The scanline primitive, keyed off store state |
+| A scanline beam over a page, list or thread | A skeleton placeholder keyed on `hasLoaded` (§6, #2540) |
+| A "Loading…" line or an `animate-spin` on a page | The skeleton recipe (§6), keyed on a verdict |
 | Skeleton re-flash on a 30s poll | Stale-while-revalidate, in-place swap |
+| A toggle whose `v-if` pops a block open and shoves the form below it, unreviewed | Prefer a reserved footprint or a height transition; either way, a human toggles it and watches what moves (principle 29, a recommendation) |
 | Tabs wrapping to two rows | OverflowTabs with "+N more" |
 | A table that grows the page unbounded | Bounded viewport + sticky header + stated total |
 | Red border as the whole error | Named error + fix + example |
@@ -381,8 +491,9 @@ The recurring failure modes, in one place:
 
 ## 9. Enforcement
 
-Three layers keep the standard true:
+Four layers keep the standard true:
 
 1. **The token ratchet.** `src/frontend/scripts/check-design-tokens.mjs` (`npm run check:tokens`, wired into the frontend build workflow) validates token→palette aliasing and resolvable references, extended with a **raw-color ratchet**: a checked-in baseline (`raw-color-baseline.json`, per-file raw-palette counts) that **only shrinks**. CI fails when any file exceeds its baseline; migrating a file lowers its entry. New code starts at a baseline of zero raw colors — there is no legal way to add one.
 2. **The component reference page.** The living catalog renders every primitive and pattern from this document in both themes. It is re-rendered from the real primitives once they exist, so page, code, and doc cannot drift apart. When reviewing UI, compare against the page.
 3. **The review checklist.** Every frontend PR is checked against the builder contract's self-check (the condensed companion of this document); the validation playbook sweeps the frontend for the mechanically checkable principles — raw palette, hand-rolled primitives, off-scale spacing, unbounded surfaces — always reading rules from this document and the token file, never from a hardcoded copy. Findings are named and actionable: file, violation, suggested token or primitive.
+4. **The loading-gate ratchet (#1927).** `src/frontend/scripts/scan-loading-gates.mjs` counts, per `.vue` file, the bare `v-if`/`v-else-if` gates whose whole expression is a loading flag (`loading`, `loading.queue`, `executionsLoading`, …) — the p13/p14 violation class (#1634, #1926, #1927): such a gate swaps rendered data for a spinner on every background poll. `loading-gate-baseline.json` freezes today's per-file counts and `tests/unit/loadingGateRatchet.spec.js` (part of `npm run test:unit`) fails when any file's count grows, when a new file gains one, or when an entry is stale (a fixed file must lower its entry — `node scripts/scan-loading-gates.mjs src --baseline loading-gate-baseline.json`). The sanctioned shape is `utils/loadingState.js::viewState({ loading, hasLoaded, error, count })` → `loading | failed | empty | ready` + `stale`, with the stale-refresh banner (`InlineError retryable`, copy from `staleBannerMessage`) rendered as a **sibling before** the chain. Freeze, then pay down: the baseline is the sweep's worklist, not its permission slip.

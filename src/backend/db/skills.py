@@ -17,7 +17,7 @@ from sqlalchemy import select, insert, delete, or_
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
-from .tables import agent_skills, agent_ownership
+from .tables import agent_skills, agent_ownership, users
 from db_models import AgentSkill
 from utils.helpers import utc_now_iso
 
@@ -254,6 +254,62 @@ class SkillsOperations:
         )
         with get_engine().connect() as conn:
             return [row["agent_name"] for row in conn.execute(stmt).mappings()]
+
+    def get_assignable_agents(self, owner_username: Optional[str]) -> List[Dict]:
+        """Agents the caller may ASSIGN a skill to (ent#386).
+
+        Deliberately adjacent to ``get_all_skill_assignments`` and filtered
+        identically (live rows only, ghosts excluded), because the two lists are
+        read together by one screen: the holder chips come from that query and
+        the assign dropdown from this one. If the exclusions drift apart, the
+        dropdown offers an agent the holder list can never show — you assign a
+        skill and nothing appears.
+
+        ``owner_username=None`` means admin ⇒ no ownership filter, mirroring the
+        ``visible is None`` convention the assignments route already uses. That
+        is NOT the same as an empty result for a user who owns nothing, and
+        collapsing the two would hand a non-admin the whole fleet.
+
+        The predicate is the WRITE gate's, not the read's: the skill write
+        routes take ``get_owned_agent_by_name`` (owner-or-admin), while the
+        holder list is owned ∪ shared. A shared agent therefore appears as a
+        holder but never as an assign target — correct, and the reason this
+        cannot reuse the visibility helper.
+
+        Ephemeral agents are excluded for the same reason the holder list
+        excludes them: a ghost is hard-discarded at budget, so an assignment to
+        one is a row that stops meaning anything within minutes.
+        """
+        stmt = (
+            select(
+                agent_ownership.c.agent_name,
+                agent_ownership.c.display_label,
+            )
+            .select_from(
+                agent_ownership.join(
+                    users, agent_ownership.c.owner_id == users.c.id
+                )
+            )
+            .where(agent_ownership.c.deleted_at.is_(None))
+            .where(
+                or_(
+                    agent_ownership.c.is_ephemeral.is_(None),
+                    agent_ownership.c.is_ephemeral == 0,
+                )
+            )
+            .order_by(agent_ownership.c.agent_name)
+        )
+        if owner_username is not None:
+            stmt = stmt.where(users.c.username == owner_username)
+
+        with get_engine().connect() as conn:
+            return [
+                {
+                    "agent_name": row["agent_name"],
+                    "display_label": row["display_label"],
+                }
+                for row in conn.execute(stmt).mappings()
+            ]
 
     def get_all_skill_assignments(self) -> List[Dict[str, Optional[str]]]:
         """Every (skill, agent) assignment in one statement (ent#384).

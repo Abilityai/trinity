@@ -78,7 +78,7 @@ curl -s http://localhost:8000/api/agents -H "Authorization: Bearer test" 2>&1 | 
 ```bash
 curl -s -X POST http://localhost:8000/api/token \
   -d "username=admin&password=YOUR_PASSWORD" \
-  -H "Content-Type: application/x-www-form-urlencoded" | jq -r '.access_token'
+  -H "Content-Type: application/x-www-form-urlencoded" | jq -r '.access_token // empty'
 ```
 
 **Expected**: JWT token string (starts with "eyJ...")

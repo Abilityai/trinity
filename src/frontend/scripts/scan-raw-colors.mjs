@@ -40,6 +40,7 @@
 
 import { readFileSync, readdirSync, statSync, writeFileSync, existsSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { execSync } from 'node:child_process'
 
 // ---------------------------------------------------------------- config
@@ -72,7 +73,10 @@ const SEMANTIC_RE = new RegExp(
   `(?<![\\w-])(${VARIANT})${UTIL}-(${SEMANTIC_TOKENS.join('|')})-${SHADE}(?:\\/\\d{1,3})?(?![\\w-])`, 'g')
 
 // Hex literal (not an HTML entity like &#160;) and rgb()/rgba() with a numeric body.
-const HEX_RE = /(?<!&)#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\b/g
+// The (?<![\\w&]) guard refuses an HTML entity (&#160;) and a `#` glued to a word,
+// which is what an issue reference looks like in copy: `(ent#184)` is not a colour
+// (#2718). A hex literal is never preceded by a word character.
+const HEX_RE = /(?<![\w&])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\b/g
 const RGB_RE = /\brgba?\(\s*\d[^)]*\)/g
 
 // ---------------------------------------------------------------- helpers
@@ -106,15 +110,77 @@ function lineOf(content, index) {
   return line
 }
 
-/** Extract [start, end) offset ranges of <template> and <style> blocks of a .vue file. */
+/** Extract [start, end, kind) offset ranges of <template> and <style> blocks of a .vue file. */
 function vueTemplateStyleRanges(content) {
   const ranges = []
   const t = content.match(/<template[^>]*>[\s\S]*<\/template>/) // greedy: nested </template> safe
-  if (t) ranges.push([t.index, t.index + t[0].length])
+  if (t) ranges.push([t.index, t.index + t[0].length, 'template'])
   for (const s of content.matchAll(/<style[^>]*>[\s\S]*?<\/style>/g)) {
-    ranges.push([s.index, s.index + s[0].length])
+    ranges.push([s.index, s.index + s[0].length, 'style'])
   }
   return ranges
+}
+
+/** Blank a text run but keep `{{ }}` interpolations, which are expressions, not copy. */
+function blankProse(text) {
+  let out = '', i = 0
+  while (i < text.length) {
+    const open = text.indexOf('{{', i)
+    if (open < 0) { out += blank(text.slice(i)); break }
+    out += blank(text.slice(i, open))
+    const close = text.indexOf('}}', open)
+    if (close < 0) { out += text.slice(open); break }
+    out += text.slice(open, close + 2)
+    i = close + 2
+  }
+  return out
+}
+
+/** Blank the rendered copy of a <template> block, preserving offsets (#2718).
+ *
+ * `#190` is a valid three-digit hex and also what an issue reference looks like,
+ * and rendered text is the one place in a .vue file where a colour cannot appear.
+ * Tags, attribute values and interpolations are code and stay scanned; the copy
+ * between them does not. Offsets are preserved, so sample line numbers hold.
+ *
+ * Quote aware on purpose: `v-if="nowX >= 0"` would otherwise end the tag early
+ * and blank the stroke="#10b981" that follows it.
+ */
+function blankTemplateProse(block) {
+  let out = '', i = 0
+  while (i < block.length) {
+    const lt = block.indexOf('<', i)
+    out += blankProse(block.slice(i, lt < 0 ? block.length : lt))
+    if (lt < 0) break
+    let j = lt + 1, quote = null
+    while (j < block.length) {
+      const ch = block[j]
+      if (quote) { if (ch === quote) quote = null }
+      else if (ch === '"' || ch === "'") quote = ch
+      else if (ch === '>') break
+      j++
+    }
+    out += block.slice(lt, Math.min(j + 1, block.length))
+    i = j + 1
+  }
+  return out
+}
+
+/** Hardcoded colours in the template/style blocks of one .vue source. */
+export function countHardcodedColors(source, onSample) {
+  const content = stripComments(source)
+  let n = 0
+  for (const [start, end, kind] of vueTemplateStyleRanges(content)) {
+    const span = content.slice(start, end)
+    const block = kind === 'template' ? blankTemplateProse(span) : span
+    for (const re of [HEX_RE, RGB_RE]) {
+      for (const m of block.matchAll(re)) {
+        n++
+        onSample?.({ line: lineOf(content, start + m.index), text: m[0], kind: 'hardcoded' })
+      }
+    }
+  }
+  return n
 }
 
 function collect(content, re, file, samples, kind) {
@@ -126,140 +192,162 @@ function collect(content, re, file, samples, kind) {
   return n
 }
 
-// ---------------------------------------------------------------- main
+// ---------------------------------------------------------------- scan
 
-const args = process.argv.slice(2)
-const baselineIdx = args.indexOf('--baseline')
-const baselineOut = baselineIdx >= 0 ? args[baselineIdx + 1] : null
-const printJson = args.includes('--json')
-const rootArg = args.find(a => !a.startsWith('--') && a !== baselineOut)
-if (!rootArg) {
-  console.error('usage: node scan-raw-colors.mjs <path-to-frontend-or-src> [--baseline out.json] [--json]')
-  process.exit(2)
-}
-let scanRoot = resolve(rootArg)
-if (existsSync(join(scanRoot, 'src')) && !existsSync(join(scanRoot, 'App.vue'))) scanRoot = join(scanRoot, 'src')
+/** Repo-relative baseline key for a path relative to the scan root. */
+export const baselineKey = (rel) => 'src/frontend/src/' + rel
 
-const files = {}          // repo-relative path → counts
-const samples = {}        // path → sample violations (raw classes + hardcoded)
-const spot = { overflowXAuto: [], textareas: [] }
-const totals = { raw_nongray: 0, raw_gray: 0, hardcoded_colors: 0, semantic_tokens: 0 }
+/**
+ * Scan `root` and return the measurement (#2605).
+ *
+ * Exported so the ratchet spec can call it directly, the way
+ * `loadingGateRatchet.spec.js` calls `scan-loading-gates.mjs`. Until this
+ * existed the raw-colour ratchet had a scanner and a baseline file and NOTHING
+ * that ran them, while CLAUDE.md and the design-system contract both described
+ * the counts as enforced.
+ *
+ * The CLI below is unchanged and still the way a human regenerates the
+ * baseline; it now consumes this function instead of inlining the scan.
+ */
+export function scanRawColors(rootArg) {
+  let scanRoot = resolve(rootArg)
+  if (existsSync(join(scanRoot, 'src')) && !existsSync(join(scanRoot, 'App.vue'))) scanRoot = join(scanRoot, 'src')
 
-for (const file of walk(scanRoot)) {
-  const rel = relative(scanRoot, file)
-  const raw = readFileSync(file, 'utf8')
-  const content = stripComments(raw)
-  const fileSamples = []
+  const files = {}          // repo-relative path → counts
+  const samples = {}        // path → sample violations (raw classes + hardcoded)
+  const spot = { overflowXAuto: [], textareas: [] }
+  const totals = { raw_nongray: 0, raw_gray: 0, hardcoded_colors: 0, semantic_tokens: 0 }
 
-  // 1. raw palette + semantic classes (whole file — class maps live in <script> too)
-  let rawNongray = 0, rawGray = 0
-  for (const m of content.matchAll(RAW_RE)) {
-    const family = m[2]
-    if (family === 'gray') rawGray++
-    else {
-      rawNongray++
-      fileSamples.push({ line: lineOf(content, m.index), text: m[0], kind: 'raw' })
-    }
-  }
-  const semantic = collect(content, SEMANTIC_RE)
+  for (const file of walk(scanRoot)) {
+    const rel = relative(scanRoot, file)
+    const raw = readFileSync(file, 'utf8')
+    const content = stripComments(raw)
+    const fileSamples = []
 
-  // 2. hardcoded colors — .vue template/style blocks only
-  let hardcoded = 0
-  if (file.endsWith('.vue')) {
-    for (const [start, end] of vueTemplateStyleRanges(content)) {
-      const block = content.slice(start, end)
-      for (const re of [HEX_RE, RGB_RE]) {
-        for (const m of block.matchAll(re)) {
-          hardcoded++
-          fileSamples.push({ line: lineOf(content, start + m.index), text: m[0], kind: 'hardcoded' })
-        }
+    // 1. raw palette + semantic classes (whole file — class maps live in <script> too)
+    let rawNongray = 0, rawGray = 0
+    for (const m of content.matchAll(RAW_RE)) {
+      const family = m[2]
+      if (family === 'gray') rawGray++
+      else {
+        rawNongray++
+        fileSamples.push({ line: lineOf(content, m.index), text: m[0], kind: 'raw' })
       }
     }
-  }
+    const semantic = collect(content, SEMANTIC_RE)
 
-  // 3. spot-checks
-  for (const m of content.matchAll(/overflow-x-auto/g)) {
-    const line = lineOf(content, m.index)
-    const lineText = content.split('\n')[line - 1] ?? ''
-    const ctx = content.slice(Math.max(0, m.index - 400), m.index + 400)
-    spot.overflowXAuto.push({
-      file: rel, line,
-      tabNavCandidate: /tab|nav/i.test(rel) || /tab|nav/i.test(ctx),
-      lineText: lineText.trim().slice(0, 160),
-    })
-  }
-  for (const m of content.matchAll(/<textarea[\s\S]*?>/g)) {
-    const tag = m[0]
-    spot.textareas.push({
-      file: rel, line: lineOf(content, m.index),
-      resize: tag.includes('resize-none') ? 'none'
-        : tag.includes('resize-y') ? 'vertical'
-        : tag.includes('resize-x') ? 'horizontal'
-        : /\bresize\b/.test(tag) ? 'both' : 'unconstrained',
-    })
-  }
+    // 2. hardcoded colors — .vue template/style blocks only
+    const hardcoded = file.endsWith('.vue')
+      ? countHardcodedColors(raw, (sample) => fileSamples.push(sample))
+      : 0
 
-  if (rawNongray || rawGray || hardcoded || semantic) {
-    files[rel] = { raw_nongray: rawNongray, raw_gray: rawGray, hardcoded_colors: hardcoded, semantic_tokens: semantic }
-    totals.raw_nongray += rawNongray
-    totals.raw_gray += rawGray
-    totals.hardcoded_colors += hardcoded
-    totals.semantic_tokens += semantic
-    if (fileSamples.length) samples[rel] = fileSamples
-  }
-}
+    // 3. spot-checks
+    for (const m of content.matchAll(/overflow-x-auto/g)) {
+      const line = lineOf(content, m.index)
+      const lineText = content.split('\n')[line - 1] ?? ''
+      const ctx = content.slice(Math.max(0, m.index - 400), m.index + 400)
+      spot.overflowXAuto.push({
+        file: rel, line,
+        tabNavCandidate: /tab|nav/i.test(rel) || /tab|nav/i.test(ctx),
+        lineText: lineText.trim().slice(0, 160),
+      })
+    }
+    for (const m of content.matchAll(/<textarea[\s\S]*?>/g)) {
+      const tag = m[0]
+      spot.textareas.push({
+        file: rel, line: lineOf(content, m.index),
+        resize: tag.includes('resize-none') ? 'none'
+          : tag.includes('resize-y') ? 'vertical'
+          : tag.includes('resize-x') ? 'horizontal'
+          : /\bresize\b/.test(tag) ? 'both' : 'unconstrained',
+      })
+    }
 
-// ---------------------------------------------------------------- output
-
-const count = (key) => Object.values(files).filter(f => f[key] > 0).length
-const summary = {
-  scanned_root: scanRoot,
-  totals,
-  file_counts: {
-    with_raw_nongray: count('raw_nongray'),
-    with_raw_gray: count('raw_gray'),
-    with_raw_any: Object.values(files).filter(f => f.raw_nongray + f.raw_gray > 0).length,
-    with_hardcoded: count('hardcoded_colors'),
-    with_semantic: count('semantic_tokens'),
-  },
-}
-
-if (baselineOut) {
-  let commit = null
-  try { commit = execSync('git rev-parse HEAD', { cwd: scanRoot }).toString().trim() } catch { /* not a repo */ }
-  const baselineFiles = {}
-  for (const [rel, c] of Object.entries(files)) {
-    if (c.raw_nongray + c.raw_gray + c.hardcoded_colors === 0) continue
-    baselineFiles['src/frontend/src/' + rel] = {
-      raw_nongray: c.raw_nongray, raw_gray: c.raw_gray, hardcoded_colors: c.hardcoded_colors,
+    if (rawNongray || rawGray || hardcoded || semantic) {
+      files[rel] = { raw_nongray: rawNongray, raw_gray: rawGray, hardcoded_colors: hardcoded, semantic_tokens: semantic }
+      totals.raw_nongray += rawNongray
+      totals.raw_gray += rawGray
+      totals.hardcoded_colors += hardcoded
+      totals.semantic_tokens += semantic
+      if (fileSamples.length) samples[rel] = fileSamples
     }
   }
-  const baseline = {
-    generated: new Date().toISOString().slice(0, 10),
-    branch: 'dev',
-    commit,
-    files: baselineFiles,
-    totals: {
-      raw_nongray: totals.raw_nongray,
-      raw_gray: totals.raw_gray,
-      hardcoded_colors: totals.hardcoded_colors,
-      semantic_tokens: totals.semantic_tokens,
-      files_with_violations: Object.keys(baselineFiles).length,
+
+
+  const count = (key) => Object.values(files).filter(f => f[key] > 0).length
+  const summary = {
+    scanned_root: scanRoot,
+    totals,
+    file_counts: {
+      with_raw_nongray: count('raw_nongray'),
+      with_raw_gray: count('raw_gray'),
+      with_raw_any: Object.values(files).filter(f => f.raw_nongray + f.raw_gray > 0).length,
+      with_hardcoded: count('hardcoded_colors'),
+      with_semantic: count('semantic_tokens'),
     },
   }
-  writeFileSync(baselineOut, JSON.stringify(baseline, null, 2) + '\n')
-  console.error(`baseline written: ${baselineOut} (${Object.keys(baselineFiles).length} files)`)
+
+  return { scanRoot, files, samples, spot, totals, summary }
 }
 
-if (printJson) {
-  console.log(JSON.stringify({ ...summary, files, samples, spot }, null, 2))
-} else {
-  console.log(JSON.stringify(summary, null, 2))
-  const top = Object.entries(files)
-    .sort((a, b) => b[1].raw_nongray - a[1].raw_nongray)
-    .slice(0, 15)
-  console.log('\nTop offenders by raw_nongray:')
-  for (const [rel, c] of top) {
-    console.log(`  ${String(c.raw_nongray).padStart(4)} nongray  ${String(c.raw_gray).padStart(4)} gray  ${String(c.hardcoded_colors).padStart(3)} hardcoded  ${rel}`)
+// ---------------------------------------------------------------- main (CLI)
+
+// Only when run as a script — importing this module must not parse argv or
+// exit the process (the spec imports it).
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) main()
+
+function main() {
+
+  const args = process.argv.slice(2)
+  const baselineIdx = args.indexOf('--baseline')
+  const baselineOut = baselineIdx >= 0 ? args[baselineIdx + 1] : null
+  const printJson = args.includes('--json')
+  const rootArg = args.find(a => !a.startsWith('--') && a !== baselineOut)
+  if (!rootArg) {
+    console.error('usage: node scan-raw-colors.mjs <path-to-frontend-or-src> [--baseline out.json] [--json]')
+    process.exit(2)
   }
+
+  const { scanRoot, files, samples, spot, totals, summary } = scanRawColors(rootArg)
+
+  if (baselineOut) {
+    let commit = null
+    try { commit = execSync('git rev-parse HEAD', { cwd: scanRoot }).toString().trim() } catch { /* not a repo */ }
+    const baselineFiles = {}
+    for (const [rel, c] of Object.entries(files)) {
+      if (c.raw_nongray + c.raw_gray + c.hardcoded_colors === 0) continue
+      baselineFiles[baselineKey(rel)] = {
+        raw_nongray: c.raw_nongray, raw_gray: c.raw_gray, hardcoded_colors: c.hardcoded_colors,
+      }
+    }
+    const baseline = {
+      generated: new Date().toISOString().slice(0, 10),
+      branch: 'dev',
+      commit,
+      files: baselineFiles,
+      totals: {
+        raw_nongray: totals.raw_nongray,
+        raw_gray: totals.raw_gray,
+        hardcoded_colors: totals.hardcoded_colors,
+        semantic_tokens: totals.semantic_tokens,
+        files_with_violations: Object.keys(baselineFiles).length,
+      },
+    }
+    writeFileSync(baselineOut, JSON.stringify(baseline, null, 2) + '\n')
+    console.error(`baseline written: ${baselineOut} (${Object.keys(baselineFiles).length} files)`)
+  }
+
+  if (printJson) {
+    console.log(JSON.stringify({ ...summary, files, samples, spot }, null, 2))
+  } else {
+    console.log(JSON.stringify(summary, null, 2))
+    const top = Object.entries(files)
+      .sort((a, b) => b[1].raw_nongray - a[1].raw_nongray)
+      .slice(0, 15)
+    console.log('\nTop offenders by raw_nongray:')
+    for (const [rel, c] of top) {
+      console.log(`  ${String(c.raw_nongray).padStart(4)} nongray  ${String(c.raw_gray).padStart(4)} gray  ${String(c.hardcoded_colors).padStart(3)} hardcoded  ${rel}`)
+    }
+  }
+
 }

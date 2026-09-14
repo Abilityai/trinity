@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { ALL_LAYOUT_KEYS } from '../src/utils/gridStorageKeys.js'
+import { clearBrowserGridState, resetServerGridPrefs } from './helpers/grid-prefs.js'
 
 /**
  * Grid org overlay e2e (trinity-enterprise#305).
@@ -10,14 +10,15 @@ import { ALL_LAYOUT_KEYS } from '../src/utils/gridStorageKeys.js'
  * create org facts via the tags API on it and clean up after themselves.
  */
 
-// Layout keys come from the store's own module (#2199) — this file's
-// hand-copied 'v1' literal silently stopped clearing the real (v2) layout
-// after the #2042 bump. ORG_KEY stays local on purpose: it has never been
-// bumped and this copy matches composables/useOrgOverlay.js.
-const ORG_KEY = 'trinity-grid-org-v1'
+// Every storage key comes from the store's own module via the shared helper
+// (#2199) — this file's hand-copied 'v1' literal silently stopped clearing
+// the real (v2) layout after the #2042 bump, and ORG_KEY moved there with
+// ent#413 when the toggles' persistence moved into the store.
 
 async function gotoGrid(page) {
   await page.goto('/')
+  // The user's server record too (ent#413), before Grid mode loads it.
+  await resetServerGridPrefs(page)
   await page.getByRole('button', { name: 'grid', exact: true }).click()
   await expect(page.locator('.fleet-canvas')).toBeVisible()
 }
@@ -60,12 +61,7 @@ test.describe('grid org overlay (trinity-enterprise#305)', () => {
   test.beforeEach(async ({ page }) => {
     // Spread into one flat array and iterate — nesting would call removeItem()
     // with an Array and silently clear nothing (#2199).
-    await page.addInitScript(
-      (keys) => {
-        keys.forEach((k) => localStorage.removeItem(k))
-      },
-      [...ALL_LAYOUT_KEYS, ORG_KEY]
-    )
+    await clearBrowserGridState(page)
     priorSystemTags = null
   })
 

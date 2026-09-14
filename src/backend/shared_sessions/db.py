@@ -122,6 +122,14 @@ def list_all_rooms() -> list[dict]:
         return [dict(r) for r in conn.execute(stmt).mappings()]
 
 
+def rename_room(room_id: str, name: str) -> bool:
+    """A person renames a room (ent#473). Plain UPDATE, open or closed — a
+    closed room is a past chat, and naming a past chat is the point."""
+    stmt = text("UPDATE enterprise_rooms SET name = :name WHERE id = :id")
+    with get_engine().begin() as conn:
+        return (conn.execute(stmt, {"id": room_id, "name": name}).rowcount or 0) > 0
+
+
 def close_room(room_id: str, stop_reason: str, now: str) -> bool:
     """CAS close — only an OPEN room transitions, so a concurrent close (user vs
     budget sweep) produces one winner and the reason can't be overwritten."""
@@ -208,6 +216,39 @@ def count_messages_for_rooms(room_ids: list[str]) -> dict[str, int]:
                 for r in conn.execute(stmt, dict(zip(keys, room_ids))).mappings()}
 
 
+
+def last_message_for_rooms(room_ids: list[str]) -> dict[str, str]:
+    """Newest message timestamp per room, batched (trinity-enterprise#491).
+
+    `enterprise_rooms` carries no `last_message_at` column, so before this a room
+    row reached the Workspace with only `created_at` and the sidebar fell back to
+    it (`normalizeRoomRow`). A busy month-old room therefore sorted as month-old
+    and a room created this morning that nobody used sorted above it — the
+    opposite of "most recent collaboration first".
+
+    Derived rather than denormalised: a `last_message_at` column on the room would
+    need a writer on every append and would be one more thing to keep true, for a
+    value this GROUP BY already gets in the same round trip the sibling
+    `count_messages_for_rooms` makes. If the sidebar ever needs it per-keystroke
+    that trade is worth revisiting; it does not.
+
+    A room with no messages is absent from the result — the caller keeps
+    `created_at`, which for an empty room is the honest answer.
+    """
+    if not room_ids:
+        return {}
+    keys = [f"r{i}" for i in range(len(room_ids))]
+    stmt = text(
+        "SELECT room_id, MAX(created_at) AS last_at FROM enterprise_room_messages "
+        "WHERE room_id IN (%s) GROUP BY room_id"
+        % ",".join(f":{k}" for k in keys)
+    )
+    with get_engine().connect() as conn:
+        return {r["room_id"]: r["last_at"]
+                for r in conn.execute(stmt, dict(zip(keys, room_ids))).mappings()
+                if r["last_at"]}
+
+
 def get_participant(room_id: str, kind: str, identity: str) -> Optional[dict]:
     stmt = text(
         "SELECT kind, identity, role, joined_at, left_at, last_read_seq, "
@@ -263,6 +304,49 @@ def clear_cached_session(room_id: str, identity: str) -> None:
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {"room": room_id, "identity": identity})
+
+
+def list_active_claude_session_ids(agent_name: str) -> list[str]:
+    """Every Claude session id a room of this agent can still resume (#2610).
+
+    The JSONL reaper unions this with the `agent_sessions` and Workspace-thread
+    keep sets. Without it every room handle is an orphan by construction: rooms
+    are the third surface to store a `--resume` id, and the sweep deleted their
+    files an hour after they were written. The next mention of any agent in the
+    room then failed with `No conversation found with session ID: <uuid>` —
+    seen in production on a room left overnight, each participant failing on
+    its own id, while single-agent chats on the same agents were fine because
+    THEIR ids were in the keep set. Same class as ent#358, one surface over.
+
+    The predicate deliberately mirrors `service._wake_agent`'s early returns
+    rather than returning every stored handle, and the two must move together:
+
+    * `left_at IS NULL` — a departed participant is never woken, and nothing
+      clears `left_at` (`add_participant` is an idempotent no-op on conflict).
+    * `status = 'open'` — a closed room is never woken, and `close_room` is a
+      one-way CAS.
+
+    Both are permanent, so those handles can never be resumed and keeping them
+    would trade #2610 for an unbounded disk leak: rooms expire, so every room
+    eventually closes, and a status-blind keep set would pin every JSONL they
+    ever wrote. Widening this is only correct alongside a wake path that can
+    actually use the extra rows.
+
+    `kind = 'agent'` is load-bearing, not decoration: `identity` is polymorphic
+    (agent name / user id / verified email, per the sibling `kind`), so without
+    it a human participant whose username equals an agent name would inject a
+    handle into that agent's keep set.
+    """
+    stmt = text(
+        "SELECT DISTINCT p.cached_session_id "
+        "FROM enterprise_room_participants p "
+        "JOIN enterprise_rooms r ON r.id = p.room_id "
+        "WHERE p.kind = 'agent' AND p.identity = :agent "
+        "  AND p.left_at IS NULL AND r.status = 'open' "
+        "  AND p.cached_session_id IS NOT NULL"
+    )
+    with get_engine().connect() as conn:
+        return [row[0] for row in conn.execute(stmt, {"agent": agent_name}).all() if row[0]]
 
 
 # --- messages ----------------------------------------------------------------

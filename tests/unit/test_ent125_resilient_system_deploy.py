@@ -58,7 +58,7 @@ permissions:
 def _user(role="admin"):
     return types.SimpleNamespace(
         id=1, username=role, role=role, email=f"{role}@example.com",
-        agent_name=None, connector_agent=None
+        agent_name=None, connector_agent=None, mcp_scope=None
     )
 
 

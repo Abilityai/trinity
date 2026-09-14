@@ -345,3 +345,128 @@ describe("#736 outbound A2A tools are operator-scope only", () => {
     assert.doesNotMatch(serverSrc, /connectorGroup\s*=\s*createA2ACallTools/);
   });
 });
+
+describe("#279 credential-vault tools are operator-scope only", () => {
+  // list_available_credentials / fetch_credential deliver a granted secret to
+  // the calling key's agent. A connector key is consumption-only and bound to
+  // one agent; an anonymous session holds no credential at all. Neither may ever
+  // see these tools — and because the allow-list is what decides, that holds for
+  // any scope added later. The backend fetch route is agent-scoped-key-only, so
+  // even a user/system operator key gets a named 403; the tool is nonetheless
+  // advertised to the operator tier (it is license-blind and reports honestly).
+  const operatorOnly = makeOperatorOnly(true);
+
+  it("advertises to user, agent and system scopes", () => {
+    for (const scope of ["user", "agent", "system"]) {
+      assert.equal(
+        operatorOnly({ scope }),
+        true,
+        `${scope} should see the credential-vault tools`,
+      );
+    }
+  });
+
+  it("hides them from connector and anonymous sessions", () => {
+    for (const scope of ["connector", "anonymous"]) {
+      assert.equal(
+        operatorOnly({ scope }),
+        false,
+        `${scope} must not see the credential-vault tools`,
+      );
+    }
+  });
+
+  it("hides them from a scope nobody has thought of yet (fails CLOSED)", () => {
+    assert.equal(operatorOnly({ scope: "portal_delegate" }), false);
+    assert.equal(operatorOnly({ scope: "some_future_tier" }), false);
+  });
+
+  it("registers the vault tools in the operator group, not the connector one", async () => {
+    const { createCredentialVaultTools } = await import(
+      "./tools/credential_vault.js"
+    );
+    const tools = createCredentialVaultTools(
+      { getBaseUrl: () => "http://x" } as any,
+      false,
+    );
+    assert.deepEqual(Object.keys(tools).sort(), [
+      "fetch_credential",
+      "list_available_credentials",
+    ]);
+    const serverSrc = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("./server.ts", import.meta.url), "utf8"),
+    );
+    assert.match(serverSrc, /createCredentialVaultTools\(client, requireApiKey\)/);
+    assert.doesNotMatch(
+      serverSrc,
+      /connectorGroup\s*=\s*createCredentialVaultTools/,
+    );
+  });
+});
+
+describe("ent#500 get_agent_assignments is operator-scope only", () => {
+  // The tool names a real person — the human an agent works for. A connector key
+  // is an end-user consumption credential bound to one agent, and an anonymous
+  // session is pre-login; neither may ever see staff identities. The `agent`
+  // scope IS in the allow-list, which is why the BACKEND self-scopes an agent
+  // principal to its own roster: advertisement is not authorization, and an
+  // agent-scoped key resolves to its owner carrying the owner's role.
+  const operatorOnly = makeOperatorOnly(true);
+
+  it("advertises to user, agent and system scopes", () => {
+    for (const scope of ["user", "agent", "system"]) {
+      assert.equal(
+        operatorOnly({ scope }),
+        true,
+        `${scope} should see get_agent_assignments`,
+      );
+    }
+  });
+
+  it("hides it from connector and anonymous sessions", () => {
+    for (const scope of ["connector", "anonymous"]) {
+      assert.equal(
+        operatorOnly({ scope }),
+        false,
+        `${scope} must not see get_agent_assignments`,
+      );
+    }
+  });
+
+  it("hides it from a scope nobody has thought of yet (fails CLOSED)", () => {
+    assert.equal(operatorOnly({ scope: "portal_delegate" }), false);
+    assert.equal(operatorOnly({ scope: "some_future_tier" }), false);
+  });
+
+  it("registers the tool in the operator group, not the connector one", async () => {
+    const { createAssignmentTools } = await import("./tools/assignments.js");
+    const tools = createAssignmentTools(
+      { getBaseUrl: () => "http://x" } as any,
+      false,
+    );
+    assert.deepEqual(Object.values(tools).map((t: any) => t.name), [
+      "get_agent_assignments",
+    ]);
+    const serverSrc = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("./server.ts", import.meta.url), "utf8"),
+    );
+    assert.match(serverSrc, /createAssignmentTools\(client, requireApiKey\)/);
+    assert.doesNotMatch(serverSrc, /connectorGroup\s*=\s*createAssignmentTools/);
+  });
+
+  it("exposes no write tool — an assignment is a grant, and the backend " +
+     "refuses every non-interactive principal on the write path", async () => {
+    const { createAssignmentTools } = await import("./tools/assignments.js");
+    const tools = createAssignmentTools(
+      { getBaseUrl: () => "http://x" } as any,
+      false,
+    );
+    for (const tool of Object.values(tools) as any[]) {
+      assert.doesNotMatch(
+        tool.name,
+        /^(create|set|update|delete|assign|remove)_/,
+        `${tool.name} looks like a write tool; assignments are read-only over MCP`,
+      );
+    }
+  });
+});

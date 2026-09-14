@@ -1,3 +1,4 @@
+# mcp: none — per-user resumable-session rows for the UI (retired from Agent Detail, ent#358); agents talk via chat_with_agent
 """
 Session endpoints — per-platform-user `--resume` conversations.
 

@@ -28,6 +28,13 @@ services:
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: trinity-backend
     logging: *default-logging
+    # #2541: the platform half of the same bug the agent containers had. Both
+    # prod and hosted already carried this; the BASE file — the one start.sh
+    # uses without --hosted, i.e. the README quickstart and the source install
+    # — did not, so a self-hosted Trinity's own control plane did not survive a
+    # host reboot either. `unless-stopped`, so an operator `docker compose stop`
+    # is still honoured.
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
@@ -47,6 +54,7 @@ services:
       - GEMINI_TRANSCRIPTION_MODEL=${GEMINI_TRANSCRIPTION_MODEL:-gemini-3.5-flash}  # Telegram voice transcription
       - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
+      - WORKSPACE_VOICE_MAX_DURATION=${WORKSPACE_VOICE_MAX_DURATION:-1800}  # Workspace voice call cap, seconds (ent#534)
       - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
       # Brain Orb (#58 static render / scope) + voice tile (#60, needs GEMINI_API_KEY).
       # Both default OFF; must reach the container or the flags stay false (config.py).
@@ -83,11 +91,18 @@ services:
       - PORTAL_CHAT_HOURLY_LIMIT=${PORTAL_CHAT_HOURLY_LIMIT:-300}  # ... per 3600s
       - PORTAL_UPLOAD_BURST_LIMIT=${PORTAL_UPLOAD_BURST_LIMIT:-20} # portal uploads per email per 60s
       - PORTAL_UPLOAD_HOURLY_LIMIT=${PORTAL_UPLOAD_HOURLY_LIMIT:-100}  # ... per 3600s
+      - PORTAL_FILE_BURST_LIMIT=${PORTAL_FILE_BURST_LIMIT:-20}     # portal file downloads per email per 60s
+      - PORTAL_FILE_HOURLY_LIMIT=${PORTAL_FILE_HOURLY_LIMIT:-100}  # ... per 3600s — the tier that actually bounds it
+      - PORTAL_FILE_DELETE_BURST_LIMIT=${PORTAL_FILE_DELETE_BURST_LIMIT:-60}  # deletes per email per 60s
       - PORTAL_TITLE_MODEL=${PORTAL_TITLE_MODEL:-claude-haiku-4-5-20251001}  # thread-title model
       - PORTAL_TITLE_TIMEOUT_SECONDS=${PORTAL_TITLE_TIMEOUT_SECONDS:-15}
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Must reach the container or the .env lever is inert in prod (the #1039 packaging class).
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.
+      # The refusal names this number, so it must reach the container or the
+      # operator is told to raise a lever that is inert (the #1039 class).
+      - CANVAS_MAX_PER_AGENT=${CANVAS_MAX_PER_AGENT:-100}        # canvases per agent
       # Skills library lifecycle automation (ent#236). The reconcile cap is named in the
       # refusal alarm's own remediation text, so it must be tunable from .env or the
       # operator is told to raise a lever that never reaches the container.
@@ -121,6 +136,7 @@ services:
       - OPERATOR_QUEUE_OPTIONS_MAX_BYTES=${OPERATOR_QUEUE_OPTIONS_MAX_BYTES:-4096}             # options byte cap (dropped over)
       - OPERATOR_QUEUE_ID_MAX=${OPERATOR_QUEUE_ID_MAX:-256}                                    # max agent-supplied id length
       - OPERATOR_QUEUE_EXECUTION_ID_MAX=${OPERATOR_QUEUE_EXECUTION_ID_MAX:-128}                # max execution_id kept in a marker
+      - OPERATOR_QUEUE_EMAIL_MAX=${OPERATOR_QUEUE_EMAIL_MAX:-320}                               # ent#364: addressee email length clamp (RFC 5321)
       - OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS=${OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:-300}  # one flood alert / agent / window
       - OPERATOR_ALERT_MAX_PENDING_PER_TYPE=${OPERATOR_ALERT_MAX_PENDING_PER_TYPE:-5}     # per-(agent,type) platform-alert budget (#1677)
       - GITHUB_PAT=${GITHUB_PAT:-}
@@ -140,6 +156,10 @@ services:
       #   bare, set to ""      -> "" -> seed disabled, as documented
       - TRINITY_DEFAULT_SKILL_SOURCE
       - TRINITY_DEFAULT_SKILL_SOURCE_REF
+      # #2380: install provenance marker, written by whatever
+      # provisioned this box. Bare passthrough (not ${VAR:-}) so an
+      # unset marker never reaches the container as an empty string.
+      - TRINITY_INSTALL_SOURCE
       # ent#126: directory the bundled-manifest catalog
       # (GET /api/systems/manifests) reads. Empty = the image's own
       # config/manifests (already bind-mounted :ro below). Point it at another
@@ -301,6 +321,11 @@ services:
       # without this line the owner-facing PUT .../circuit-breaker toggle silently
       # no-ops (#1487, the #1039 packaging-gap class).
       - DISPATCH_BREAKER_ENABLED=${DISPATCH_BREAKER_ENABLED:-false}
+      # ent#434: how many subscriptions the background headroom sweep probes
+      # concurrently. Bounded so an N-subscription fleet x a 15s probe timeout
+      # cannot outlive the sweep's leader lease. A real operator lever (fleet
+      # size dependent), so it is forwarded rather than left inert.
+      - SUBSCRIPTION_SWEEP_CONCURRENCY=${SUBSCRIPTION_SWEEP_CONCURRENCY:-4}
       # Issue #874: uvicorn --reload writes __pycache__/ next to source files
       # in the ./src/backend bind mount. On Linux dev hosts the host dir is
       # owned by the developer UID, not container UID 1000, so the writes
@@ -400,6 +425,7 @@ services:
     image: trinity-frontend:latest
     container_name: trinity-frontend
     logging: *default-logging
+    restart: unless-stopped   # #2541
     ports:
       - "${FRONTEND_PORT:-80}:80"
     volumes:
@@ -423,6 +449,7 @@ services:
     image: redis:7-alpine
     container_name: trinity-redis
     logging: *default-logging
+    restart: unless-stopped   # #2541
     # Loopback-only host port (test suites connect from the dev machine).
     # External LAN cannot reach Redis even with auth — defense in depth.
     ports:
@@ -526,6 +553,10 @@ services:
       # a structured `queued_timeout` receipt instead of `fetch failed`.
       # Default 25000ms sits below the typical 30-60s MCP gateway ceiling.
       - MCP_CHAT_TIMEOUT_MS=${MCP_CHAT_TIMEOUT_MS:-25000}
+      # #2661 ceiling for the executions lookup that recovery runs AFTER the
+      # abort — whatever is left of the gateway ceiling is all it has, so it
+      # must fail fast rather than hang into the same `fetch failed`.
+      - MCP_RECOVERY_TIMEOUT_MS=${MCP_RECOVERY_TIMEOUT_MS:-5000}
       # MCP server authenticates to backend as ADMIN_USERNAME/ADMIN_PASSWORD.
       # Read directly from ADMIN_PASSWORD so devs do not have to set the same
       # secret twice (issue #692).

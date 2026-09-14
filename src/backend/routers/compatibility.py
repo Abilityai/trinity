@@ -1,3 +1,4 @@
+# mcp: agents.ts (get_agent_compatibility_report)
 """
 Agent compatibility validation routes (#668).
 

@@ -431,7 +431,7 @@ def _decision():
 
 
 def _user(user_id=1, username="owner", role="user", agent_name=None,
-          connector_agent=None):
+          connector_agent=None, mcp_scope=None):
     """A principal. ``agent_name`` set ⇒ an AGENT-scoped MCP key (scope='agent'),
     which is what the provenance guard's agent arm keys on — NOT the
     X-Source-Agent header (unvalidated client input for a human caller)."""
@@ -439,7 +439,7 @@ def _user(user_id=1, username="owner", role="user", agent_name=None,
 
     return User(id=user_id, username=username, role=role,
                 email=f"{username}@example.com", agent_name=agent_name,
-                connector_agent=connector_agent)
+                connector_agent=connector_agent, mcp_scope=mcp_scope)
 
 
 def _request(message="do the thing", parent_execution_id=None):
@@ -462,8 +462,6 @@ async def _create_child(*, name, current_user, x_source_agent=None, parent_id=No
             name=name,
             current_user=current_user,
             x_source_agent=x_source_agent,
-            x_mcp_key_id=None,
-            x_mcp_key_name=None,
             triggered_by="agent" if x_source_agent else "manual",
             is_self_task=False,
             idem=_decision(),

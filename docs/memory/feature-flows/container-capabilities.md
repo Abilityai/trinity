@@ -24,6 +24,7 @@ Both modes apply the same baseline security (`cap_drop=['ALL']`, AppArmor, noexe
 - `security_opt=['apparmor:docker-default']`
 - `tmpfs={'/tmp': 'noexec,nosuid,size=<AGENT_TMP_SIZE>'}` (default `512m`; size operator-configurable via the `AGENT_TMP_SIZE` env var, `noexec,nosuid` always fixed — see [Agent `/tmp` tmpfs size](#agent-tmp-tmpfs-size-1231--tmpdir-scratch-redirect-1098))
 - `log_config=AGENT_LOG_CONFIG` (json-file `max-size`/`max-file`, default `10m` × 3 — see [Container log rotation](#container-log-rotation-agent_log_max_size--agent_log_max_file-1871))
+- `restart_policy=AGENT_RESTART_POLICY` (`{"Name": "unless-stopped"}`, always — see [Container restart policy](#container-restart-policy-2541))
 - **Allows**: `sudo apt-get install` and similar package-installation flows
 - **Still prevents** (Issue #602 / Phase 3c, 2026-05-13): `SYS_PTRACE` (heap-read escalation), `MKNOD` (device-node escape), `NET_RAW` (raw-packet crafting), `FSETID` (setuid-preserve on chmod)
 
@@ -33,6 +34,7 @@ Both modes apply the same baseline security (`cap_drop=['ALL']`, AppArmor, noexe
 - `security_opt=['apparmor:docker-default']`
 - `tmpfs={'/tmp': 'noexec,nosuid,size=<AGENT_TMP_SIZE>'}` (default `512m`; see [Agent `/tmp` tmpfs size](#agent-tmp-tmpfs-size-1231--tmpdir-scratch-redirect-1098))
 - `log_config=AGENT_LOG_CONFIG` (json-file `max-size`/`max-file`, default `10m` × 3 — see [Container log rotation](#container-log-rotation-agent_log_max_size--agent_log_max_file-1871))
+- `restart_policy=AGENT_RESTART_POLICY` (`{"Name": "unless-stopped"}`, always — see [Container restart policy](#container-restart-policy-2541))
 - **Prevents**: Package installation, most privileged operations
 
 ## Backend Layer
@@ -141,6 +143,7 @@ container = docker_client.containers.run(
     cap_add=[] if full_capabilities else ['NET_BIND_SERVICE', 'SETGID', 'SETUID', 'CHOWN', 'SYS_CHROOT', 'AUDIT_WRITE'],
     tmpfs=AGENT_TMPFS_MOUNT,  # {'/tmp': 'noexec,nosuid,size=<AGENT_TMP_SIZE>'}, default 512m
     log_config=AGENT_LOG_CONFIG,  # json-file max-size/max-file, default 10m x 3 (#1871)
+    restart_policy=AGENT_RESTART_POLICY,  # {'Name': 'unless-stopped'} (#2541)
     ...
 )
 ```
@@ -213,6 +216,7 @@ new_container = docker_client.containers.run(
     cap_add=[] if full_capabilities else ['NET_BIND_SERVICE', 'SETGID', 'SETUID', 'CHOWN', 'SYS_CHROOT', 'AUDIT_WRITE'],
     tmpfs=AGENT_TMPFS_MOUNT,  # {'/tmp': 'noexec,nosuid,size=<AGENT_TMP_SIZE>'}, default 512m
     log_config=AGENT_LOG_CONFIG,  # json-file max-size/max-file, default 10m x 3 (#1871)
+    restart_policy=AGENT_RESTART_POLICY,  # {'Name': 'unless-stopped'} (#2541)
     ...
 )
 ```
@@ -254,6 +258,26 @@ Docker's `json-file` driver ships with **no** `max-size` and **no** `max-file`, 
 | Apply semantics | Creation-time, exactly like the tmpfs spec: platform services adopt on the next `docker compose up`; existing agents adopt on **recreate**, not on a plain restart |
 | Relationship to Vector | The raw Docker log is a **secondary** copy. Vector's aggregate at `/data/logs` is the primary, queryable one and keeps its own `LOG_RETENTION_DAYS` — see [vector-logging.md](vector-logging.md). Live streaming is lossless across rotation; only post-hoc `docker logs` history shortens, and the platform's own log endpoint defaults to `tail=100` |
 | Drift guard | `tests/unit/test_1871_log_config_parity.py` fails CI when a **new** durable-container create site ships without `log_config` (the `learnings.md` 2026-07-10 "the create path is never one call site" class). Ephemeral `remove=True` helpers are exempt — Docker deletes their log with the container |
+
+## Container Restart Policy (#2541)
+
+Docker's default restart policy is `no`: a container created without an explicit `restart_policy` stays `Exited` after a host reboot or a daemon restart until somebody starts it by hand. Before #2541 only `trinity-system` was created with one, so the 2026-09-04 power-off brought back 11 of 19 agents — exactly the cohort a manual `docker update` had patched after the FIRST occurrence (2026-07-23) — and left 8 dead ~42h: 48 failed dispatches, ~168 lost `fleet-poll` runs, 17 schedules dark.
+
+Same split as log rotation. `docker compose`'s `restart:` bounds the platform services and **cannot** reach agent containers, which are created through the Docker SDK; `AGENT_RESTART_POLICY` is the agent-side half. (#2541 also fixed the platform side: `backend`, `frontend` and `redis` were missing `restart:` in the **base** `docker-compose.yml` — the file `start.sh` uses without `--hosted` — while prod and hosted were correct.)
+
+**Single source of truth**: `AGENT_RESTART_POLICY` in `capabilities.py`, imported by all three agent-container create sites — `crud.py` (`_create_agent_container`), `lifecycle.py` (`_provision_folders_and_run_agent_container`) and `system_agent_service.py` (`_create_system_agent`). `lifecycle.py`'s site is the shared tail of **both** `recreate_container_with_updated_config` and `recreate_missing_container`, so one constant covers every retrofit path.
+
+| Aspect | Detail |
+|--------|--------|
+| Value | `{"Name": "unless-stopped"}`, fixed |
+| Env var | **None, deliberately** — unlike `AGENT_TMP_SIZE` and `AGENT_LOG_MAX_SIZE`. This is a safety floor, not a policy dial: the only other reachable values are `always` (breaks the guarantee below) and `on-failure:N` (strictly weaker), and a typo must not reach either (#1638) |
+| Why `unless-stopped`, not `always` | Trinity stops agents through `container.stop()` (`docker_utils.container_stop`, and the Operating Room fast path `routers/ops.py::_stop_agent_container`), which sets Docker's manual-stop flag. `unless-stopped` honours it, so an agent an operator deliberately quarantined stays down across a reboot; `always` would resurrect it. A safety property, not an availability preference. **Qualified**: the flag is only set when the stop *succeeds*. Both `_restore_stopped_state` (#2092) and `POST /api/ops/emergency-stop` tolerate a failed stop — the latter returns a per-agent `{"result": "error"}`, so an emergency stop is only as durable as its per-agent success |
+| Recreate semantics | Re-baked **unconditionally**, replacing #1816's carry-forward. Faithful carry-forward carries `no` forward forever, and the tail's other caller (the #1559 recovery rebuild) passed nothing at all — so a recovered agent was rebuilt on `no` even when it had `unless-stopped`. Every sibling property here is already unconditional; the restart policy was the sole exception |
+| Apply semantics | Creation-time, exactly like `log_config`: existing agents adopt on **recreate**, not on a plain restart. One-shot sweep for the existing fleet: [AGENT_RESTART_POLICY_2026-09.md](../../migrations/AGENT_RESTART_POLICY_2026-09.md) |
+| `restarting` is now reachable | For every agent, most visibly during the reboot recovery this produces. Both `docker_service.py` normalizers map it to `stopped`, agreeing with `agent_container_states`; verbatim it matched neither of the frontend's exact-equality filters, so the agent appeared in **neither** running nor stopped |
+| Two alert paths go live | Docker increments `RestartCount` only under a policy, so `monitoring_service`'s `High restart count (N)` issue and `alert_high_restart_count` had effectively never fired for a regular agent. Desirable — it makes a crash loop visible — but new |
+| `docker compose down` is now worse | A recreated `trinity-agent-network` gets a new id and pre-existing containers fail `docker start`. Before, that bit only `trinity-system`, once, loudly; now it bites every agent in a dockerd backoff loop. `stop.sh` uses `stop`, not `down`, for this reason |
+| Drift guard | `tests/unit/test_2541_restart_policy_parity.py`, both directions: a durable create must pass `restart_policy=AGENT_RESTART_POLICY` **by name** (presence alone would let `{"Name": "always"}` through), and a `remove=True` helper must pass **none** — Trinity's transient helpers are non-detached, so docker-py never sets `auto_remove`, the daemon accepts the combination, and the helper leaks as a forever-restarting orphan. It also matches `<x>.containers.run(...)`, the third docker-py creation form #1871's guard misses |
 
 ## Frontend Layer
 

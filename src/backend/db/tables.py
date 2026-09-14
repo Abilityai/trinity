@@ -8,9 +8,16 @@ ONLY to build dialect-agnostic queries in the migrated db/*.py modules
 (init_schema for sqlite, init_schema_postgres for PostgreSQL). Column
 types are coarse (Integer/Float/Text) — sufficient for query building and
 matching the sqlite storage classes. Regenerate when schema.py changes.
+
+ONE deliberate exception (ent#366 review): an index that carries a RULE rather
+than a performance characteristic is declared here too. `migrations/env.py`
+autogenerates against this MetaData, so an index it does not know about is
+proposed for DROP by the first `--autogenerate` run — harmless for a
+performance index, and for `idx_agent_evaluations_rating_target` it would
+silently turn "one rating per person per thing" into "one row per click".
 """
 
-from sqlalchemy import Column, Float, MetaData, Table, Text
+from sqlalchemy import Column, Float, ForeignKey, Index, MetaData, Table, Text, text
 from sqlalchemy import Integer as _Integer
 from sqlalchemy.types import TypeDecorator
 
@@ -103,6 +110,10 @@ agent_ownership = Table(
     Column("circuit_breaker_enabled", Integer),
     Column("mcp_exposed", Integer),
     Column("a2a_exposed", Integer),                # ent#157: A2A inbound-server exposure opt-in (default OFF)
+    # ent#329: owner opt-in — an operator answer re-triggers the agent. Default OFF:
+    # a dispatch on respond spends money, so it is never unconditional. Per-AGENT and
+    # not per-request, so hosting asks cannot hand a client a spend button (ent#430 AC #3).
+    Column("operator_resume_enabled", Integer),
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
     Column("tts_voice_telegram_enabled", Integer),   # ent#117: per-channel voice-allowed flag
@@ -212,6 +223,8 @@ agent_schedules = Table(
     Column("webhook_enabled", Integer),
     Column("webhook_secret_encrypted", Text),  # ent#77: AES-256-GCM HMAC secret
     Column("webhook_auth_enabled", Integer),    # ent#77: gate signature verify
+    # ent#498 — nullable, no backfill; see db/schema.py for the contract.
+    Column("deliver_to_workspace_email", Text),
     Column("deleted_at", Text),
 )
 
@@ -244,6 +257,7 @@ schedule_executions = Table(
     Column("validation_execution_id", Text),
     Column("validates_execution_id", Text),
     Column("compact_metadata", Text),
+    Column("turn_integrity", Text),
     Column("source_user_id", Integer),
     Column("source_user_email", Text),
     Column("source_agent_name", Text),
@@ -268,6 +282,11 @@ schedule_executions = Table(
     # ent#265: binding-agent for channel report-back — the agent whose channel
     # binding owns this execution's INHERITED context (NULL = executing agent).
     Column("source_channel_agent", Text),
+    # ent#457 review: WHICH human the channel context belongs to. Only the
+    # portal leg reads it today — see `_resolve_portal`'s recipient check.
+    Column("source_channel_client", Text),
+    # ent#555 — the canvas the user had open for this turn (context, not authority).
+    Column("open_canvas_id", Text),
 )
 
 agent_loops = Table(
@@ -301,6 +320,11 @@ agent_loops = Table(
     Column("created_at", Text),
     Column("started_at", Text),
     Column("completed_at", Text),
+    # #2523 — the two pieces of runner-local state that had no durable home once
+    # the in-process `for` loop was deleted. Everything else the runner held is
+    # already persisted here or derivable from `agent_loop_runs`.
+    Column("next_run_at", Text),        # ISO-Z; NULL = not waiting on a delay
+    Column("stop_requested_at", Text),  # ISO-Z; replaces the in-memory should_stop
 )
 
 agent_loop_runs = Table(
@@ -470,6 +494,13 @@ enterprise_portal_sessions = Table(
     Column("cached_claude_session_id", Text),
     Column("last_resume_at", Text),
     Column("consecutive_resume_failures", Integer),
+    # ent#473 — NULL (derived fallback / pre-#473) | 'generated' | 'user'.
+    Column("title_source", Text),
+    # ent#523 — the pinned Main chat (exactly one live row per pair; the
+    # partial unique index in schema.py is the enforcement) and the Reset
+    # tombstone that retires one. NULL `archived_at` = live.
+    Column("is_main", Integer),
+    Column("archived_at", Text),
 )
 
 enterprise_portal_messages = Table(
@@ -483,6 +514,8 @@ enterprise_portal_messages = Table(
     Column("content", Text),
     Column("cost", Float),
     Column("created_at", Text),
+    Column("source", Text),         # ent#534: NULL typed | 'voice'
+    Column("voice_call_id", Text),  # ent#534: groups one voice call's rows
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind
@@ -560,6 +593,58 @@ enterprise_room_messages = Table(
 )
 
 
+agent_canvas_shares = Table(
+    # ent#554 — one share link for one canvas. Separate from
+    # `agent_public_links` on purpose; see the DDL comment in db/schema.py.
+    "agent_canvas_shares",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("canvas_id", Text),
+    Column("token", Text),
+    Column("scope", Text),
+    Column("created_by", Text),
+    Column("created_at", Text),
+    Column("expires_at", Text),
+    Column("revoked_at", Text),
+    Column("last_viewed_at", Text),
+    Column("view_count", Integer),
+)
+
+agent_canvases = Table(
+    # ent#438 — a durable, addressable surface an agent renders onto and
+    # UPDATES. Composite PK (agent_name, canvas_id): the write is an upsert,
+    # not an append, which is the whole difference from `agent_reports`.
+    "agent_canvases",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("canvas_id", Text, primary_key=True),
+    Column("title", Text),
+    Column("blocks", Text),
+    # 'operator' (default) | 'roster' — a validated column, never a key inside
+    # `blocks`, so a prompt-injected agent cannot decide who reads it.
+    Column("audience", Text),
+    Column("schema_version", Integer),
+    Column("created_at", Text),
+    Column("updated_at", Text),
+    Column("updated_by_execution_id", Text),
+    # ent#537 — starter layout by name; NULL = stacked.
+    Column("template", Text),
+    # ent#553 — a human's pin, so the pile stays navigable. Never agent-written.
+    Column("pinned", Integer),
+)
+
+user_ui_preferences = Table(
+    # ent#413 — generic per-user UI preference record; (user_id, key) → JSON
+    # object. Per-key `updated_at` is the compare-and-set base for PUT.
+    "user_ui_preferences",
+    metadata,
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("key", Text, primary_key=True),
+    Column("value_json", Text),
+    Column("updated_at", Text),
+)
+
 agent_reports = Table(
     "agent_reports",
     metadata,
@@ -574,6 +659,11 @@ agent_reports = Table(
     Column("period_start", Text),
     Column("period_end", Text),
     Column("created_at", Text),
+    # ent#365 — audience + the chat it was produced in. Both nullable: NULL
+    # means "operator-only" and "not tied to a chat" respectively, which is
+    # exactly what every pre-existing row meant.
+    Column("addressed_to_email", Text),
+    Column("portal_session_id", Text),
 )
 
 product_events = Table(
@@ -601,6 +691,29 @@ agent_evaluations = Table(
     Column("judge_json", Text),
     Column("evaluator", Text),
     Column("created_at", Text),
+    # ent#366 — the rated object, the client's optional words, and when the
+    # rating last changed. All nullable: every row written before this is a
+    # graded run, not a click.
+    Column("target_kind", Text),
+    Column("target_id", Text),
+    Column("comment", Text),
+    Column("updated_at", Text),
+    # ent#366 review — declared HERE, not only in schema.py/Alembic, because
+    # this one is not a performance index: it IS the "one rating per person per
+    # thing" rule, and `upsert_workspace_rating` relies on the IntegrityError it
+    # raises. `migrations/env.py` autogenerates against this MetaData, so an
+    # index the model does not know about is proposed for DROP by the first
+    # `alembic revision --autogenerate` anyone runs — and accepting that turns
+    # the rule into "one row per click": no error, no failing test, just a tally
+    # that counts clicks. Partial, matching the DDL exactly, so the NULL-target
+    # rows a Tier-0 grading pass writes are unaffected.
+    Index(
+        "idx_agent_evaluations_rating_target",
+        "evaluator", "target_kind", "target_id",
+        unique=True,
+        sqlite_where=text("target_id IS NOT NULL"),
+        postgresql_where=text("target_id IS NOT NULL"),
+    ),
 )
 
 agent_notifications = Table(
@@ -658,6 +771,25 @@ agent_shared_files = Table(
     Column("consumed_at", Text),
     Column("download_count", Integer),
     Column("last_downloaded_at", Text),
+)
+
+# #2582 / ent#548 — a Workspace viewer removes an agent-shared file from THEIR
+# list without revoking the share. `agent_shared_files` has no audience column,
+# so every rostered client already sees every active share of that agent; this
+# is the per-viewer preference layered over it.
+#
+# `agent_name` is load-bearing, not decoration: `agent_shared_files` is
+# registered CASCADE in `db/agent_cleanup.py`, so deleting an agent hard-deletes
+# its share rows WITHOUT going through the revoke sweeper — every dismissal
+# keyed on those ids would be orphaned forever. It is also what keeps the table
+# inside the cleanup parity guard rather than sidestepping it.
+portal_file_dismissals = Table(
+    "portal_file_dismissals",
+    metadata,
+    Column("client_email", Text, primary_key=True),
+    Column("file_id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("dismissed_at", Text),
 )
 
 system_settings = Table(
@@ -1117,7 +1249,30 @@ subscription_rate_limit_events = Table(
     Column("agent_name", Text),
     Column("subscription_id", Text),
     Column("error_message", Text),
+    Column("failure_kind", Text),  # #471 — "rate_limit" | "auth"; NULL = pre-#471 row (kind unknown)
     Column("occurred_at", Text),
+)
+
+# ent#433 — one row per headroom probe (see db/schema.py for the contract).
+# `*_utilization_pct` are Float and NULLABLE independently of `status`: a 429
+# reports `*_status='rate_limited'` with no utilization figure, and a reader
+# that coerces that NULL to 0 inverts the signal it most needs.
+subscription_headroom_history = Table(
+    "subscription_headroom_history",
+    metadata,
+    Column("id", _Integer, primary_key=True, autoincrement=True),
+    Column("subscription_id", Text),
+    Column("fetched_at", Text),
+    Column("status", Text),
+    Column("five_hour_utilization_pct", Float),
+    Column("five_hour_resets_at", Text),
+    Column("five_hour_status", Text),
+    Column("seven_day_utilization_pct", Float),
+    Column("seven_day_resets_at", Text),
+    Column("seven_day_status", Text),
+    Column("representative_claim", Text),
+    Column("overage_status", Text),
+    Column("unified_status", Text),
 )
 
 operator_queue = Table(
@@ -1143,6 +1298,10 @@ operator_queue = Table(
     Column("responded_at", Text),
     Column("acknowledged_at", Text),
     Column("cleared_at", Text),  # #1017 — Clear All hide flag
+    # ent#364: the human this item is addressed to. NULL = an operator ask
+    # (every pre-ent#364 row). Validated at ingestion against the agent's
+    # roster — never trusted from the agent-authored payload.
+    Column("addressed_to_email", Text),
 )
 
 nevermined_agent_config = Table(

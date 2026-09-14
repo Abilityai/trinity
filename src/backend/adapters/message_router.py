@@ -33,7 +33,7 @@ from services.settings_service import settings_service
 from services.task_execution_service import get_task_execution_service
 from services.docker_utils import container_exec_run
 from services.telegram_media import process_voice
-from services.upload_service import process_file_uploads, format_file_size, sanitize_filename
+from services.upload_service import process_file_uploads, format_file_size
 from adapters.base import ChannelAdapter, ChannelResponse, FileAttachment, NormalizedMessage, OutboundFile
 
 logger = logging.getLogger(__name__)
@@ -304,10 +304,6 @@ def _check_rate_limit(key: str, max_msgs: Optional[int] = None, window: Optional
 
 def _format_file_size(size_bytes: int) -> str:
     return format_file_size(size_bytes)
-
-
-def _sanitize_filename(name: str, file_id: str, used_names: set) -> str:
-    return sanitize_filename(name, file_id, used_names)
 
 
 # Filename sanitization (Issue #487)

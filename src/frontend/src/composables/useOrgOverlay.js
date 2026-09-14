@@ -40,34 +40,17 @@ export function useOrgOverlay({ agents, layout, canvasEl, vz, vtx, vty, dragging
   const gridStore = useFleetGridStore()
   const networkStore = useNetworkStore()
 
-  // --- visibility toggles (persisted per user) ---
-  const ORG_KEY = 'trinity-grid-org-v1'
-  let _orgSaved = {}
-  try {
-    _orgSaved = JSON.parse(localStorage.getItem(ORG_KEY)) || {}
-  } catch {
-    _orgSaved = {}
-  }
-  const showZones = ref(_orgSaved.zones !== false)
-  const showLines = ref(_orgSaved.lines !== false)
+  // --- visibility toggles (persisted per user, server-side since ent#413) ---
+  // The store owns the record (`grid_org`) beside the layout and tile prefs;
+  // this composable only reads and toggles it.
+  const showZones = computed(() => gridStore.orgPrefs.zones !== false)
+  const showLines = computed(() => gridStore.orgPrefs.lines !== false)
 
-  function _persistOrg() {
-    try {
-      localStorage.setItem(
-        ORG_KEY,
-        JSON.stringify({ zones: showZones.value, lines: showLines.value })
-      )
-    } catch {
-      /* private mode */
-    }
-  }
   function toggleZones() {
-    showZones.value = !showZones.value
-    _persistOrg()
+    gridStore.setOrgPref('zones', !showZones.value)
   }
   function toggleLines() {
-    showLines.value = !showLines.value
-    _persistOrg()
+    gridStore.setOrgPref('lines', !showLines.value)
   }
 
   // --- derived org state ---

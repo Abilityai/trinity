@@ -1,3 +1,4 @@
+# mcp: none — renders dashboard.yaml for the Vue dashboard only; no external consumer
 """
 Agent Dashboard routes.
 

@@ -2,7 +2,7 @@
 
 > **Purpose**: Catalog of system invariants that must hold across Trinity's orchestration layer, and the design approach for a continuous canary harness that verifies them on staging/dev.
 >
-> **Status**: Proposal — pending research & implementation (see tracking issue).
+> **Status**: Living catalog. Phases 1–5 of the canary harness are shipped (`src/backend/canary/`, 16 invariants evaluated live — see § Canary mapping); every other entry is a journey-level reference (`tests/journeys/catalog.yaml`, #2338) or open design. Each `**ID**` entry below is the single definition of that id (#2337): `tests/unit/_invariant_catalog.py` is how the validators read it, and a summary table is never a definition.
 
 ---
 
@@ -125,16 +125,20 @@ report only the failed-predicate reason code (`queued_at_null`/`backlog_metadata
 **E-05** Dispatched rows have session *(Tier B ≤ 60 s, 🟡)* — Issue #106 guard.
 `status='running' AND started_at < now() - 60s` ⇒ `claude_session_id IS NOT NULL` (even just `'dispatched'`). If not, `mark_no_session_executions_failed` should have fired.
 
-**E-06** No stuck "completed-on-agent-but-not-reported" *(Tier B ≤ 5 min, 🔴)* — Issue #129 invariant.
-For every `status='running'` row with `started_at < now() - 60s`, the agent's `/api/executions/running` must report the `execution_id`. If not, watchdog must mark it failed within one cycle.
-Signal: cross-check DB × agent registry; violations older than one cycle are true orphans.
-> ⚠️ **Catalog-id ≠ registry-id drift:** the shipped registry id `E-06` is a *different* invariant — "no overdue `next_run_at`" (#1472) — not this catalog #129 check (which remains unimplemented). When stamping catalog entries "shipped", map to the registry id explicitly (as E-03/G-03 above do) rather than assuming a 1:1 correspondence.
+**E-06** No overdue `next_run_at` *(Tier B ≤ misfire grace, 🟡)* — ✅ **SHIPPED, #1472** (registry id `E-06`; module `e06_no_overdue_next_run.py`).
+An enabled schedule of a live agent has a `next_run_at` no more than `MISFIRE_GRACE_SECONDS` (3600, hard-coded in the module so the canary stays decoupled from `src/scheduler/config.py` drift) in the past. A projection further behind means the scheduler never advanced it — the "Next: Nd ago" bug (#1472): a silent `_add_job` failure, or a fire path that returned without advancing. The population is `db/schedules/crud.py::list_all_enabled_schedules` — enabled, not soft-deleted, parent agent not soft-deleted (ent#335) — mirrored by `snapshot._collect_enabled_schedules`. Same predicate as **SCH-03**, which stays the schedule-family statement; this is the execution-family home the registry id lives under.
+Signal: for each schedule in that population, `next_run_at < now() - 3600s` → must be 0.
+> Until #2337 this id named the unimplemented #129 orphan check while the registry's `E-06` was this invariant — one id, two meanings. The #129 check moved to **E-09** (operator ruling, 2026-09-12) so the id means the same thing here and in the module; § Canary mapping is the join, and `tests/unit/test_2337_invariant_namespace.py` fails on any row where the two ids differ.
 
 **E-07** Retry chain integrity *(Tier A, 🟢)*
 `retry_of_execution_id IS NOT NULL` ⇒ referenced row exists and has same `agent_name` and `schedule_id`.
 
 **E-08** Cancellation is sticky *(Tier A, 🔴)*
 Once `status='cancelled'`, no service writes a different terminal state (see `task_execution_service.py:498, 548`). Check: watchdog's `mark_execution_failed_by_watchdog` refuses to overwrite `cancelled`.
+
+**E-09** No stuck "completed-on-agent-but-not-reported" *(Tier B ≤ 5 min, 🔴)* — Issue #129 invariant (carried the id `E-06` until #2337; **unimplemented**).
+For every `status='running'` row with `started_at < now() - 60s`, the agent's `/api/executions/running` must report the `execution_id`. If not, watchdog must mark it failed within one cycle.
+Signal: cross-check DB × agent registry; violations older than one cycle are true orphans.
 
 ---
 
@@ -231,7 +235,7 @@ After a create request, either (row AND container) both exist, or neither does. 
 Test: kill backend mid-create; after restart, reconcile finds neither.
 
 **L-03** Delete cascades *(Tier A post-delete, 🔴)*
-After `DELETE /api/agents/{name}`, ALL these are 0: rows in `agent_ownership`, `agent_sharing`, `agent_schedules`, `schedule_executions (non-terminal)`, `agent_permissions` (as source OR target), `agent_event_subscriptions` (as subscriber OR source), `mcp_api_keys (scope='agent')`, `slack_channel_agents`, `agent_shared_folder_config`, `chat_sessions (status='active')`, and Redis `agent:slots:{name}` + metadata keys.
+After `DELETE /api/agents/{name}`, ALL these are 0: rows in `agent_ownership`, `agent_sharing`, `agent_schedules`, `schedule_executions (non-terminal)`, `agent_permissions` (as source OR target), `agent_event_subscriptions` (as subscriber OR source), `mcp_api_keys (scope='agent')`, `slack_channel_agents`, `agent_shared_folder_config`, `chat_sessions (status='active')`, `agent_skills`, `agent_tags`, `agent_shared_files`, `agent_public_links`, `access_requests`, `agent_reports`, and Redis `agent:slots:{name}` + metadata keys. The `agent_name`-keyed set the shipped check scans is `canary.snapshot.ORPHAN_SCAN_TABLES` — that constant, not this sentence, is the list (it had grown past this prose by six tables when #2337 re-synced it).
 
 **L-04** No orphan container outlives DB row *(Tier B ≤ 60 s, 🔴)*
 Container exists without `agent_ownership` row ⇒ cleanup stops/removes it.
@@ -447,13 +451,104 @@ non-empty.
 
 ---
 
+## 16. Skills (`agent_skills` / `skill_sources`)
+
+An assignment is a row in `agent_skills(agent_name, skill_name, assigned_by, assigned_at, source_id)`; library sources live in `skill_sources`; since #2703 assigning a library skill **delivers** it into the container at `~/.claude/skills/<skill_name>/` in the same step. Journey J07 — *"a skill I add shows up in the agent's head and it uses it."*
+
+**SK-01** Assignment references resolve *(Tier A, 🔴)*
+Every `agent_skills.agent_name` is a live `agent_ownership` row (the delete side is L-03 — `agent_skills` is in `ORPHAN_SCAN_TABLES`), and every non-NULL `agent_skills.source_id` is a `skill_sources.id`. A dangling `source_id` is an assignment nothing can sync, with no error anywhere.
+Signal: `SELECT count(*) FROM agent_skills s LEFT JOIN skill_sources src ON src.id = s.source_id WHERE s.source_id IS NOT NULL AND src.id IS NULL` → must be 0.
+
+**SK-02** Assigned ⇒ delivered *(Tier B ≤ one delivery pass, 🟡)* — #2703 class.
+For every running agent, every `agent_skills` row has `~/.claude/skills/<skill_name>/SKILL.md` present in the container. Before #2703 the row was written and delivery waited for a later Sync, so the DB said "assigned" while the agent's head said nothing — the promise J07 exists to test.
+Signal: file predicate per running agent — for each `SELECT skill_name FROM agent_skills WHERE agent_name = ?`, `docker exec agent-<name> test -f /home/developer/.claude/skills/<skill_name>/SKILL.md` → every exit 0. Journey-only; a canary implementation would ride R-01's per-container `exec_run`.
+
+**SK-03** A source is never silently un-synced *(Tier B ≤ sync interval, 🟢)*
+`skill_sources.enabled = 1 AND last_sync_at IS NOT NULL` ⇒ `last_sync_status = 'success' OR last_error IS NOT NULL` — either the last sync worked, or the row says why it did not.
+Signal: `SELECT count(*) FROM skill_sources WHERE enabled = 1 AND last_sync_at IS NOT NULL AND last_sync_status <> 'success' AND last_error IS NULL` → must be 0.
+
+---
+
+## 17. Repo-bound deployment (`agent_git_config` / `agent_sync_state`)
+
+An agent deployed from, or synced to, a repository carries one `agent_git_config` row (`github_repo`, `working_branch`, `source_branch`, `sync_enabled`, `freeze_schedules_if_sync_failing`) and one `agent_sync_state` row (`last_sync_status`, `consecutive_failures`, `last_error_summary`, ahead/behind counters). Journey J09 — *"I can point Trinity at my repo and get a working agent from it."*
+
+**RD-01** Git state belongs to a live agent *(Tier A, 🔴)*
+Every `agent_git_config.agent_name` and every `agent_sync_state.agent_name` resolves to an `agent_ownership` row. Both FKs are declared, but SQLite enforces them only under `PRAGMA foreign_keys=ON` — the predicate is the check.
+Signal: `SELECT count(*) FROM agent_git_config g LEFT JOIN agent_ownership o ON o.agent_name = g.agent_name WHERE o.agent_name IS NULL` → 0; the same query over `agent_sync_state` → 0.
+
+**RD-02** Sync state is honest *(Tier A on write, 🟡)*
+`agent_sync_state.last_sync_status = 'failed'` ⇒ `last_error_summary IS NOT NULL AND consecutive_failures >= 1`; `last_sync_status = 'success'` ⇒ `consecutive_failures = 0`. A failed sync with no summary is an operator dead-end; a success that keeps a failure count freezes schedules for nothing (RD-03).
+Signal: `SELECT count(*) FROM agent_sync_state WHERE (last_sync_status = 'failed' AND (last_error_summary IS NULL OR consecutive_failures < 1)) OR (last_sync_status = 'success' AND consecutive_failures <> 0)` → must be 0.
+
+**RD-03** A freeze freezes *(Tier A, 🟡)* — #389/#1808.
+When the owner opted in (`agent_git_config.freeze_schedules_if_sync_failing = 1`) and sync is failing (`agent_sync_state.last_sync_status = 'failed' AND consecutive_failures >= SYNC_FAILURE_FREEZE_THRESHOLD`, `src/scheduler/database.py`), the scheduler fires nothing for that agent: no `schedule_executions` row with `triggered_by = 'schedule'` is created after the failing state was recorded. The scheduler's own check is fail-OPEN (an error fires anyway — a freeze-on-error would stop the fleet), so this invariant is the only thing that notices a freeze that stopped freezing.
+Signal: `SELECT count(*) FROM schedule_executions e JOIN agent_git_config g ON g.agent_name = e.agent_name JOIN agent_sync_state s ON s.agent_name = e.agent_name WHERE g.freeze_schedules_if_sync_failing = 1 AND s.last_sync_status = 'failed' AND s.consecutive_failures >= <SYNC_FAILURE_FREEZE_THRESHOLD> AND e.triggered_by = 'schedule' AND e.started_at > s.updated_at` → must be 0.
+
+---
+
+## 18. Plugins (agent-side manifest)
+
+Plugin state lives on the agent, not in a table: the backend writes `~/.trinity/plugins.yaml` at creation, the agent server's reinstall pass (`docker/base-image/agent_server/plugins_reinstall.py`) records each outcome in `~/.trinity/plugins-state.json`, and a compatibility run surfaces both into `agent_compatibility_results.checks_json` (`GET /api/agents/{name}/compatibility`). Journey J08 — *"I can install a marketplace plugin and the agent can use it."*
+
+**PLG-01** Manifest ⇒ installed, or the state names why not *(Tier B ≤ one reinstall pass, 🟡)* — #2305 class.
+Every plugin named in `~/.trinity/plugins.yaml` appears in `~/.trinity/plugins-state.json` either as installed or with a recorded error. A plugin that is neither is the #2305 shape — an install silently withheld (a CLI flag that did not exist) with nothing anywhere saying so.
+Signal: file predicate inside the container — `names(plugins.yaml) − (installed(plugins-state.json) ∪ errored(plugins-state.json))` → ∅ (`plugins_reinstall.py` owns both schemas); readable without `exec` from the agent's latest `agent_compatibility_results.checks_json`. Journey-only: the state is per-container, not per-row.
+
+---
+
+## 19. Inter-agent calls (`chat_with_agent` · A2A · fan-out)
+
+The permission boundary itself is P-01/P-02 (the edge table, and the MCP-layer gate that consults it). This family covers what a call leaves behind: the recorded execution, the fan-out batch, and the failure shape when the callee is not there. `fan_out` is **self-only** in v1 (`routers/fan_out.py` rejects any other target with 400), so a batch is one agent's N subtasks, not a cross-agent call. Journey J10 — *"my agents can call each other, and I can see what they said."* **No depth counter exists on any inter-agent path** — see *Gaps to fill next*.
+
+**IA-01** A recorded agent-to-agent execution had an edge *(Tier A, 🔴)* — the DB-side twin of P-02.
+`schedule_executions.source_agent_name IS NOT NULL AND source_agent_name <> agent_name` ⇒ `agent_permissions(source_agent = source_agent_name, target_agent = agent_name)` exists, or the source is the system agent (`scope='system'` bypasses the gate — `src/mcp-server/src/tools/chat.ts checkAgentAccess`). P-02 says the gate denies; this says nothing got past it. **Trust boundary:** `source_agent_name` comes from the `X-Source-Agent` header, whose presence is also what makes `triggered_by = 'agent'` (`chat_execution_service`); the SELF-EXEC-001 guard (`routers/chat.py`) rejects a header that does not match an **agent** principal's own key, but a human REST caller may set it freely — such a row is not an inter-agent call and is this invariant's one false-positive source. The journey harness drives the MCP path with agent-scoped keys, so its population is clean; a canary implementation needs a principal marker on the row first.
+Signal: `SELECT count(*) FROM schedule_executions e LEFT JOIN agent_permissions p ON p.source_agent = e.source_agent_name AND p.target_agent = e.agent_name WHERE e.source_agent_name IS NOT NULL AND e.source_agent_name <> e.agent_name AND e.source_agent_name <> 'trinity-system' AND p.id IS NULL AND e.started_at > now() - 24h` → must be 0 (windowed: an edge revoked later does not indict the call that was permitted).
+
+**IA-02** A fan-out batch is bounded and self-targeted *(Tier A, 🟡)*
+Every `fan_out_id` groups at most `MAX_TASKS` (= 50, `models.py`) rows, and every row in a batch carries the same `agent_name`. Concurrency (`max_concurrency`, default 3) is a request-scoped semaphore (`fan_out_service.py`) and is **not** persisted — it is a scenario assertion (staggered `duration_ms` across the batch), not a row predicate.
+Signal: `SELECT fan_out_id FROM schedule_executions WHERE fan_out_id IS NOT NULL GROUP BY fan_out_id HAVING count(*) > 50 OR count(DISTINCT agent_name) > 1` → no rows.
+
+**IA-03** A stopped callee fails fast, and leaves no row *(Tier A, 🟡)*
+A call to an agent whose container is not running returns `503 {"detail": "Agent is not running"}` on `/api/agents/{name}/chat` (`chat_execution_service`, surfaced verbatim through `chat_with_agent`) or `409` on the A2A `message/send` route (`routers/a2a.py`) within the connect timeout — never a hang to `execution_timeout_seconds`, never a `schedule_executions` row. Measured on a live instance at 0.16 s (#2337 analysis, 2026-09-12).
+Signal: HTTP — status ∈ {503, 409} within 5 s, AND `SELECT count(*) FROM schedule_executions WHERE agent_name = <callee> AND started_at > <call time>` = 0.
+
+---
+
+## Canary mapping — what the harness evaluates live
+
+`src/backend/canary/invariants/__init__.py` registers the live set (`INVARIANTS`), one module per id; `POST /api/canary/run-cycle` evaluates exactly those and answers `422` naming them for anything else. **Every other `**ID**` entry in this catalog is journey-only**: a reference a `tests/journeys/catalog.yaml` record may cite, asserted by that journey's harness, and not evaluated by the canary until a later phase registers it. The entries #2337 added (SK-, RD-, PLG-, IA-, E-09) are **unverified** — no harness has run their predicate yet.
+
+The first column is the module, on purpose: a table whose first cell is an id is exactly the shape the pre-#2337 resolver read as a second definition site. `tests/unit/test_2337_invariant_namespace.py` asserts that the `registry id` column equals `INVARIANTS` and every module's `INVARIANT_ID`, that every `catalog id` resolves to a `**ID**` entry above, and that **no row's two ids differ** — the `E-06` collision this table replaced is why that last assertion exists.
+
+| module (`src/backend/canary/invariants/`) | registry id | catalog id | shipped |
+|---|---|---|---|
+| `b01_queue_status_coherence.py` | B-01 | B-01 | #882 Phase 2 |
+| `b02_no_queued_without_slots_full.py` | B-02 | B-02 | #882 Phase 3 |
+| `e01_terminal_state_closure.py` | E-01 | E-01 | #882 Phase 2 |
+| `e02_no_phantom_reversal.py` | E-02 | E-02 | #653 Phase 1 |
+| `e03_completed_rows_populated.py` | E-03 | E-03 | #1077 Phase 4 |
+| `e04_queued_rows_have_metadata.py` | E-04 | E-04 | #1077 Phase 4 |
+| `e05_dispatched_rows_have_session.py` | E-05 | E-05 | #882 Phase 2 |
+| `e06_no_overdue_next_run.py` | E-06 | E-06 | #1472 |
+| `g03_clock_sanity.py` | G-03 | G-03 | #1077 Phase 4 |
+| `g04_no_creds_in_backlog_metadata.py` | G-04 | G-04 | #1077 Phase 4 |
+| `h01_collector_blindness.py` | H-01 | H-01 | #1813 Phase 5 |
+| `l03_delete_cascades.py` | L-03 | L-03 | #653 Phase 1 |
+| `r01_no_zombie_claude.py` | R-01 | R-01 | #882 Phase 3 |
+| `s01_slot_row_bijection.py` | S-01 | S-01 | #653 Phase 1 |
+| `s02_no_overbooking.py` | S-02 | S-02 | #882 Phase 2 |
+| `s03_slot_ttl_floor.py` | S-03 | S-03 | #882 Phase 3 |
+
+---
+
 ## Design notes
 
 - **Every Tier-A invariant is a single SQL/Redis query** — make the canary compute it continuously. Tier-B invariants run every SLA window.
-- **S-01, E-02, E-06, L-03, G-01 are the five "must never break" invariants** — these encode the fixes from #378/#403/#407/#129 and agent-delete cascades. Put them in a red-alert dashboard. (**E-06 here is the _catalog_ id** — the #129 check, still unimplemented. The shipped registry `E-06` is a different invariant; see the drift note above.)
+- **S-01, E-02, E-09, L-03, G-01 are the five "must never break" invariants** — these encode the fixes from #378/#403/#407/#129 and agent-delete cascades. Put them in a red-alert dashboard. (E-09 is the #129 orphan check, still unimplemented; it carried the id `E-06` until #2337, which now names the shipped `next_run_at` check — see § Canary mapping.)
 - **Invariants with Redis ↔ SQLite ↔ Docker triplets** (S-01, L-01, L-03, G-01) are the highest-leverage targets for chaos testing — they fail under partition/crash, not under ordinary load.
 - **Audit log** (AU-01/02) gives you retroactive reasoning when a live invariant fires — without it, a Tier-A violation has no forensic trail.
-- **Gaps to fill next**: chat-session cascade on user-delete (no such path today); soft-delete vs hard-delete of shared-with-me agents; per-subscription quota invariants (SUB-004 path); fan-out (`fan_out_id`) completion aggregation.
+- **Gaps to fill next**: chat-session cascade on user-delete (no such path today); soft-delete vs hard-delete of shared-with-me agents; per-subscription quota invariants (SUB-004 path); fan-out (`fan_out_id`) completion aggregation (the batch *bound* is IA-02; the join-completion half is open); **install/boot** — "a fresh install comes up alive" (J01, J02) has no state invariant beyond G-01's restart sweep and P-05's first-login role; the boot itself is asserted as a scenario by J01's harness until one exists; **inter-agent recursion depth** — no depth counter or caller chain exists on `chat_with_agent`, A2A or fan-out (`X-Source-Agent` is one hop; only rooms carry `ROOM_MAX_CHAIN_DEPTH=8`), so a self-permitted agent can recurse until `max_parallel_tasks` and timeouts bound it. A product guard has to exist before this can be an invariant; file it when J10's harness (#2349) meets it.
 
 ---
 
@@ -469,21 +564,16 @@ Twelve invariants cover ~80% of orchestration risk:
 | E-01 | Terminal-state closure | No stuck executions |
 | E-02 | No phantom reversal | #378/#403 |
 | E-05 | Dispatched rows have session | #106 |
-| E-06 † | No completed-but-not-reported | #129 |
+| E-09 | No completed-but-not-reported | #129 |
 | B-01 | Queue-status coherence | Backlog integrity |
 | B-02 | No queued without slots-full | Drain liveness |
 | L-03 | Delete cascades | Prevents dangling references |
 | G-01 | No resource leak on restart | Recovery correctness |
 | R-01 | No zombie Claude processes | #407 |
 
-† **Catalog id, not the registry id.** Catalog `E-06` is the #129
-"completed-but-not-reported" check, which remains unimplemented. The shipped
-registry `E-06` is "no overdue `next_run_at`" (#1472) — semantically **SCH-03**
-in this catalog. Do not source an alert name or runbook for registry `E-06`
-from this row; the invariant module's own docstring title is the source of
-truth (`src/backend/canary/invariants/*.py`). See the drift note in §Executions.
-
-Start here. Expand as the harness stabilizes.
+Start here. Expand as the harness stabilizes. This is advice for a new canary deployment, not a
+definition list: which invariants run today is § Canary mapping, and a journey record resolves
+its ids against the `**ID**` entries above — never against this table (#2337).
 
 ---
 

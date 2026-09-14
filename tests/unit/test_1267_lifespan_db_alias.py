@@ -34,13 +34,41 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_MAIN = REPO_ROOT / "src" / "backend" / "main.py"
 
 
-def _lifespan_node() -> ast.AsyncFunctionDef:
-    """Return main.py's ``lifespan`` async handler node."""
+def _lifespan_surface() -> list[ast.AsyncFunctionDef]:
+    """`lifespan` plus the phase helpers it awaits, in call order.
+
+    #1028 split the former 580-line `lifespan` into ordered phase helpers, so
+    the transport-startup blocks this guard is about no longer live inside
+    `lifespan` itself. Following the calls keeps the guard pointed at the code
+    rather than at a function name — and that matters more than usual here,
+    because the split RE-INTRODUCED this very bug in a new form: `_db` was bound
+    in phase 1 and used in three later helpers where it was no longer in scope,
+    swallowed by the same `try/except` that made #1267 invisible.
+    """
     tree = ast.parse(BACKEND_MAIN.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "lifespan":
-            return node
-    pytest.fail("async def lifespan(...) not found in src/backend/main.py")
+    fns = {
+        n.name: n for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    lifespan = fns.get("lifespan")
+    if lifespan is None:
+        pytest.fail("async def lifespan(...) not found in src/backend/main.py")
+
+    surface = [lifespan]
+    for stmt in lifespan.body:
+        if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Await):
+            continue
+        call = stmt.value.value
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name):
+            helper = fns.get(call.func.id)
+            if helper is not None:
+                surface.append(helper)
+    return surface
+
+
+def _lifespan_node() -> ast.AsyncFunctionDef:
+    """The `lifespan` handler itself (kept for the callers that mean only it)."""
+    return _lifespan_surface()[0]
 
 
 def _bound_names(fn: ast.AST) -> set[str]:
@@ -72,7 +100,8 @@ def _binding_fetches(method: str) -> list[ast.Call]:
     """All ``<recv>.<method>(...)`` calls inside lifespan."""
     return [
         node
-        for node in ast.walk(_lifespan_node())
+        for fn in _lifespan_surface()
+        for node in ast.walk(fn)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == method
@@ -82,15 +111,37 @@ def _binding_fetches(method: str) -> list[ast.Call]:
 @pytest.mark.unit
 def test_lifespan_imports_db_alias() -> None:
     """lifespan must bind the DB singleton as ``_db`` — the alias the fix relies on."""
-    has_alias = any(
-        isinstance(node, ast.ImportFrom)
-        and node.module == "database"
-        and any(a.name == "db" and a.asname == "_db" for a in node.names)
-        for node in ast.walk(_lifespan_node())
+    def _binds_alias(fn: ast.AST) -> bool:
+        return any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "database"
+            and any(a.name == "db" and a.asname == "_db" for a in node.names)
+            for node in ast.walk(fn)
+        )
+
+    surface = _lifespan_surface()
+    assert any(_binds_alias(fn) for fn in surface), (
+        "no function on the lifespan surface does `from database import db as _db` "
+        "— the in-scope DB alias the Telegram/WhatsApp transport blocks reference "
+        "(#1267)."
     )
-    assert has_alias, (
-        "lifespan must `from database import db as _db` — the in-scope DB alias "
-        "the Telegram/WhatsApp transport blocks reference (#1267)."
+
+    # #1028 strengthens this: after the phase split each helper is its own scope,
+    # so binding the alias SOMEWHERE is no longer sufficient. Every function that
+    # loads `_db` must bind it itself — the exact defect the split shipped, where
+    # `_db` was imported in phase 1 and read in three later helpers.
+    offenders = [
+        fn.name for fn in surface
+        if any(
+            isinstance(n, ast.Name) and n.id == "_db" and isinstance(n.ctx, ast.Load)
+            for n in ast.walk(fn)
+        )
+        and not _binds_alias(fn)
+    ]
+    assert not offenders, (
+        f"{offenders} read `_db` without importing it — after the #1028 phase "
+        f"split each helper is its own scope, so this is a NameError, swallowed "
+        f"by the surrounding try/except exactly as in #1267."
     )
 
 
@@ -121,15 +172,14 @@ def test_lifespan_transport_binding_fetch_uses_db_alias(method: str) -> None:
 def test_lifespan_has_no_unbound_bare_db() -> None:
     """General guard for the #1267 bug class: lifespan must not ``Load`` a bare
     ``db`` name that is never bound in its scope (only ``_db`` is imported)."""
-    node = _lifespan_node()
-    bound = _bound_names(node)
     unbound = [
         n.lineno
-        for n in ast.walk(node)
+        for fn in _lifespan_surface()
+        for n in ast.walk(fn)
         if isinstance(n, ast.Name)
         and n.id == "db"
         and isinstance(n.ctx, ast.Load)
-        and "db" not in bound
+        and "db" not in _bound_names(fn)
     ]
     assert not unbound, (
         f"lifespan references unbound bare `db` at line(s) {unbound} — only `_db` "

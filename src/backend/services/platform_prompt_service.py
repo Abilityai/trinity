@@ -13,7 +13,13 @@ from typing import List, Optional
 import httpx
 
 from database import db
-from models import REPORT_PAYLOAD_MAX_BYTES
+from models import (
+    CANVAS_BLOCKS_MAX_BYTES,
+    CANVAS_DIAGRAM_MAX_CHARS,
+    CANVAS_IMAGE_INLINE_MAX_BYTES,
+    CANVAS_MAX_BLOCKS,
+    REPORT_PAYLOAD_MAX_BYTES,
+)
 from services.prompt_tier import PromptTier, resolve_prompt_tier
 
 logger = logging.getLogger(__name__)
@@ -26,6 +32,12 @@ MAX_FIELD_LEN = 80
 MAX_COLLAB_NAME_LEN = 60
 MAX_TIMESTAMP_LEN = 40
 MAX_PLATFORM_URL_LEN = 200
+# Assignment fields (trinity-enterprise#500). A person's display name and a
+# stakeholder entry ("approver: A. Smith") both run longer than the generic
+# MAX_FIELD_LEN = 80, which would truncate mid-name; a role id is an id.
+MAX_DISPLAY_NAME_LEN = 120
+MAX_ROLE_ID_LEN = 64
+MAX_STAKEHOLDER_LEN = 140
 
 # Static platform instructions — moved from agent-side trinity.py
 PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
@@ -64,8 +76,11 @@ mcp__trinity__report(
     title="Week 30: 14 leads, 3 qualified",
     payload={...},                         # max __REPORT_PAYLOAD_MAX__ serialized
     display_hint="table",                  # optional, see below
+    audience_email="ada@client.com",       # optional, see below
     period_start="...", period_end="...")  # optional ISO-8601
 ```
+
+Reports are operator-facing by default. When the work was done **for** a person the operator shared you with, pass `audience_email`: it also reaches their Workspace — their deliverables, and a card in the chat it came from. Address what a client asked for; leave it off for fleet telemetry. An address that cannot reach you is refused, never silently dropped.
 
 Match the payload to the `display_hint` or it renders as raw JSON:
 
@@ -78,6 +93,32 @@ Match the payload to the `display_hint` or it renders as raw JSON:
 Aggregate before publishing: the 20 rows that matter, not 5,000 raw ones. Oversized payloads are rejected and reports are rate-limited.
 
 Before filing a recurring report, read back what you already filed — `mcp__trinity__list_reports` (metadata; filter by `report_type`) then `mcp__trinity__get_report(report_id)` for a payload. That is how you continue a series instead of duplicating or contradicting last period's numbers.
+
+### Your Canvas
+
+A **canvas** is a surface you keep *current* — a status board, a running tally, the latest version of an analysis, the chart someone just asked for. A report is published once and accumulates; a canvas is rewritten in place and lives on your Canvas tab (and, with `audience="roster"`, on the Workspace of the people you work with). When someone asks you to "put X on your canvas", "show me a chart of X", or wants something they will come back to, write the canvas instead of pasting it into chat.
+
+```
+mcp__trinity__set_canvas(blocks=[...])                    # full state of your default canvas "main"
+mcp__trinity__patch_canvas(blocks=[{"id": "b2", ...}])    # replace only the named blocks
+mcp__trinity__get_canvas()                                # read back first; ids are assigned b1..bN
+```
+
+A block is `{"id"?, "kind", "title"?, "payload"}`. Kinds and their payloads:
+
+- `chart` — `{"type": "bar"|"stacked_bar"|"line"|"area"|"pie"|"donut", "series": [{"label": "Leads", "unit": "new", "points": [{"ts": "2026-09-01", "value": 14}]}]}` — one series per line, stack segment or slice; `ts` is a date/time, or a category name for a bar per series
+- `kpi` — `{"tiles": [{"label": "Leads", "value": 14, "unit": "new"}]}`
+- `table` — `{"columns": ["Name","Status"], "rows": [["Acme","qualified"]]}`
+- `timeline` — `{"events": [{"ts": "2026-09-01T09:00:00Z", "label": "Deal closed", "detail": "..."}]}`
+- `markdown` — `{"markdown": "## Findings\\n..."}`; it may embed ```chart, ```kpi and ```table fences (JSON inside) and ```mermaid fences — they render as figures, so one block can be a page with charts in it
+- `diagram` — `{"mermaid": "graph TD; A-->B"}` (max __CANVAS_DIAGRAM_MAX__ chars)
+- `image` — `{"src": "https://..." or "content/chart.png" (a file in your workspace) or "data:image/png;base64,..." (max __CANVAS_IMAGE_INLINE_MAX__), "caption": "..."}`
+- `html` — `{"html": "..."}` static markup, sanitised; scripts never run
+- `json` — anything else
+
+Layouts: `template` ∈ dashboard(header, kpis, main, side, footer) · report(header, summary, body, figures, appendix) · brief(header, key-points, body) · status-board(header, status, issues, next, log); each block names its `"slot"`. Unslotted blocks render after the layout; no template = stacked. Example: `set_canvas(template="dashboard", blocks=[{"slot":"header","kind":"markdown","payload":{"markdown":"## Pipeline · W36"}},{"slot":"kpis","kind":"kpi","payload":{"tiles":[{"label":"Open","value":42},{"label":"Won","value":7}]}},{"slot":"side","kind":"html","payload":{"html":"<div class=\"ck-card\"><div class=\"ck-card-title\">Next</div><span class=\"ck-chip ck-warning\">2 stalled</span></div>"}}])`
+Kit classes for `html`/`markdown` (only these survive): ck-card / ck-card-title / ck-card-meta · ck-grid-2 / ck-grid-3 / ck-grid-4 + ck-span-2 · ck-section / ck-section-title / ck-section-sub · ck-callout + ck-info | ck-success | ck-warning | ck-danger · ck-chip (same tones, ck-neutral) · ck-kpi / ck-kpi-label / ck-kpi-value / ck-kpi-unit / ck-kpi-delta ck-up | ck-down · ck-table + ck-num · ck-figure / ck-caption · ck-muted · ck-mono. Other classes, `<style>` and inline styles (except width/max-width) are dropped. Prefer the kpi/table/chart kinds for data; the kit dresses the page around them. The `canvas` skill has full worked examples.
+Limits: __CANVAS_MAX_BLOCKS__ blocks, __CANVAS_BLOCKS_MAX__ serialized — aggregate first. Never put JavaScript in a block: you provide the data, Trinity draws it.
 
 ### Operator Communication
 
@@ -150,6 +191,32 @@ This is entirely your judgment. Some situations where it may be appropriate:
 - Situations requiring domain knowledge you don't have
 - Important alerts the operator should be aware of
 
+### Repeating Work and Deferred Ticks
+
+Each turn here is a **one-shot, headless process**: it exits when you stop writing, and anything you scheduled inside it dies with it. So "run a loop", "do this every N minutes" and "check back later" mean the Trinity primitives, which outlive the turn:
+
+- `mcp__trinity__run_agent_loop(message, max_runs, ...)` — bounded, budgeted repetition. Visible in the Loops panel and stoppable from there.
+- `mcp__trinity__set_reminder(message, delay_seconds=...)` — one-shot deferred tick that re-invokes you later as a real execution.
+
+Both default to yourself; pass `agent_name` only to drive another agent you have permission for.
+
+**Never** reach for the Claude Code `/loop` skill or the `ScheduleWakeup` tool. They belong to a persistent interactive harness that does not exist in this runtime: `ScheduleWakeup` **returns success** and then nothing ever fires, so telling the user "loop armed, next tick in 60s" after calling it is a false claim.
+
+The same is true of the whole family of harness tools that promise a future event or a peer session — `Workflow`, `Monitor`, `TaskOutput`, `CronCreate`, `CronList`, `CronDelete`, `SendMessage`, `ListAgents`, `PushNotification` and `RemoteTrigger`. None of them can deliver here: a wakeup, cron job, workflow, monitor stream, peer message or desktop notification dies with this process. The platform removes them where it can, so if one of those tools seems to be missing, that is this rule and not a permissions problem — reach for the Trinity tools above instead.
+
+### Nothing survives the end of your turn
+
+Your turn is a process. When you stop writing it exits, and **anything still running is killed a few seconds later** — a backgrounded command, a `sleep`, a build, a download. No completion notification will ever reach you, and even where a conversation resumes later, that later turn is a fresh process in which your background work is already dead.
+
+This matters because the tools say otherwise. Backgrounding a command answers *"You will be notified when it completes"*, and a command promoted to the background at its timeout says the same. **That sentence is false here** and cannot be changed from Trinity's side, so it is on you not to believe it. Treat every "you'll be notified" as "this will be killed". (Subagents are the one exception: the process waits for agents you launch before exiting — but a *command* you background is not waited for.)
+
+So:
+
+- Run work in the **foreground**, to completion, inside your execution timeout. A long command that finishes is worth more than a backgrounded one that does not.
+- Need to wait for something? Wait in the foreground with a bounded loop — e.g. `timeout 300 bash -c 'until <condition>; do sleep 5; done'` — then read the result. (Bash's own text suggests `Monitor` or backgrounding for this; neither survives your turn.)
+- Never end a turn with work outstanding, and never report success for something you only started.
+- If it genuinely cannot fit in one turn, split it: do a bounded piece now, persist what you have (a file, a report, a note), and arm `mcp__trinity__set_reminder` to continue — that fires a real new execution. Say plainly what is done and what is not.
+
 ### Package Persistence
 
 When installing system packages (apt-get, npm -g, etc.), add them to your setup script so they persist across container updates:
@@ -195,6 +262,15 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
     "__REPORT_PAYLOAD_MAX__", f"{REPORT_PAYLOAD_MAX_BYTES // (1024 * 1024)} MB"
 )
+# The canvas ceilings the same way (ent#536): four numbers the platform already
+# owns, none of them typed twice.
+for _marker, _value in (
+    ("__CANVAS_MAX_BLOCKS__", str(CANVAS_MAX_BLOCKS)),
+    ("__CANVAS_BLOCKS_MAX__", f"{CANVAS_BLOCKS_MAX_BYTES // 1024} KB"),
+    ("__CANVAS_DIAGRAM_MAX__", f"{CANVAS_DIAGRAM_MAX_CHARS:,}"),
+    ("__CANVAS_IMAGE_INLINE_MAX__", f"{CANVAS_IMAGE_INLINE_MAX_BYTES // 1024} KB"),
+):
+    PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(_marker, _value)
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +297,7 @@ _MINIMAL_DROP_SECTIONS = frozenset({
     "Agent Collaboration",              # → list_agents / chat_with_agent descriptions
     "Sharing Files with Users",         # → share_file description
     "Publishing Reports",               # → report description (+ #1535 display_hint enum)
+    "Your Canvas",                      # → set_canvas description (ent#536 kinds + payloads, ent#537 layouts + kit)
 })
 
 # Every top-level section, CI-pinned (tests/unit/test_ent243_prompt_tier.py).
@@ -232,7 +309,10 @@ _KNOWN_SECTION_HEADINGS = frozenset({
     "Agent Collaboration",
     "Sharing Files with Users",
     "Publishing Reports",
+    "Your Canvas",
     "Operator Communication",
+    "Repeating Work and Deferred Ticks",
+    "Nothing survives the end of your turn",
     "Package Persistence",
     "Remembering Things About Users (Public & Channel Sessions)",
 })
@@ -247,6 +327,24 @@ _KNOWN_SECTION_HEADINGS = frozenset({
 #     warning. A privacy guard, un-gateable by construction.
 #   * Package Persistence — a Trinity environment gotcha (~/.trinity/setup.sh)
 #     that no model can infer from tool signatures.
+#   * Repeating Work and Deferred Ticks — #2454. Its load-bearing half is a
+#     NEGATIVE rule about the harness's own `/loop` skill and `ScheduleWakeup`,
+#     which no Trinity tool description can carry (they are not our tools). The
+#     wrong path reports success and silently never fires, so dropping this at
+#     MINIMAL would restore exactly the false-success the section exists to
+#     stop. #2468 widened the rule to the whole denied family, phrased as a
+#     capability fact ("dies with this process") rather than a policy fact, so
+#     the sentence stays true on fleet images the deny has not reached yet.
+#   * Nothing survives the end of your turn — #2468. The counterweight to a
+#     tool result the platform cannot edit: backgrounding a Bash command
+#     answers "You will be notified when it completes", which is true
+#     interactively and false in a one-shot `claude --print` run where the
+#     task is killed seconds after the turn ends (Bash also routes polling to
+#     the denied Monitor tool, so the section carries the working wait idiom).
+#     No tool description can carry a correction to a DIFFERENT tool's
+#     description, so this cannot be gated. Scoped honestly: subagents
+#     (`local_agent`) ARE waited for, and resumable surfaces do get later
+#     turns — the section claims neither away.
 # Derived, not hand-listed, so it cannot disagree with the drop set.
 _ALWAYS_SECTIONS = _KNOWN_SECTION_HEADINGS - _MINIMAL_DROP_SECTIONS
 
@@ -303,7 +401,9 @@ _CODEX_MCP_ORIENTATION = (
     "## MCP Tools (Codex runtime)\n\n"
     "A Trinity MCP server named `trinity` is configured for you. Call its tools "
     "by the bare names documented below — `list_agents`, `chat_with_agent`, "
-    "`share_file`, `report`, `list_reports`, `get_report`, `write_user_memory` — "
+    "`share_file`, `report`, `list_reports`, `get_report`, `set_canvas`, "
+    "`patch_canvas`, `get_canvas`, `write_user_memory`, "
+    "`set_reminder`, `run_agent_loop` — "
     "exactly as your client "
     "auto-discovers them. Do not add any vendor-specific tool-name prefix."
     "\n\n---\n\n"
@@ -555,6 +655,16 @@ class ExecutionContext:
     platform_url: Optional[str] = None
     timestamp: Optional[str] = None
     execution_id: Optional[str] = None                  # MEM-001: for write_user_memory tool
+    # Role assignments (trinity-enterprise#500). Auto-filled from the assignment
+    # seam alongside collaborators/platform_url; all None in a build with no
+    # provider registered, so the block renders exactly as before.
+    # `primary_user_display` is a DISPLAY NAME, never an email address — this
+    # block reaches anonymous public-link and paid-chat turns, so a third
+    # party's address must never enter it.
+    primary_user_display: Optional[str] = None
+    role_id: Optional[str] = None
+    stakeholders: Optional[List[str]] = None
+    proactive_consent: Optional[bool] = None
 
     @staticmethod
     def derive_mode(triggered_by: Optional[str]) -> str:
@@ -629,6 +739,51 @@ def _render_collaborators(ctx: ExecutionContext) -> Optional[str]:
     return ", ".join(cleaned)
 
 
+def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
+    """Render the `Primary human` line body (trinity-enterprise#500).
+
+    Requires a display name: a role id with nobody in it is not a *primary
+    human*, and rendering the role alone would state a relationship that does
+    not exist. Consent is appended as an explicit qualifier rather than left
+    blank — the agent must not infer permission to reach out from the mere
+    presence of a name (the assignment is a RECORD of who fills the role, not a
+    grant of contact permission, which lives on the separate sharing consent
+    bit).
+    """
+    display = _sanitize_field(ctx.primary_user_display, max_len=MAX_DISPLAY_NAME_LEN)
+    if not display:
+        return None
+    line = display
+    role = _sanitize_field(ctx.role_id, max_len=MAX_ROLE_ID_LEN)
+    if role:
+        line = f"{line} (role: {role})"
+    if ctx.proactive_consent is not None:
+        line = (
+            f"{line} — proactive contact permitted"
+            if ctx.proactive_consent
+            else f"{line} — proactive contact NOT yet permitted; do not message "
+                 "them unprompted"
+        )
+    return line
+
+
+def _render_stakeholders(ctx: ExecutionContext) -> Optional[str]:
+    """Render the stakeholder list, capped like collaborators."""
+    if not ctx.stakeholders:
+        return None
+    cleaned: List[str] = []
+    for entry in ctx.stakeholders:
+        safe = _sanitize_field(entry, max_len=MAX_STAKEHOLDER_LEN)
+        if safe:
+            cleaned.append(safe)
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_COLLABORATORS:
+        shown = cleaned[:MAX_COLLABORATORS]
+        return ", ".join(shown) + f", … ({len(cleaned) - MAX_COLLABORATORS} more)"
+    return ", ".join(cleaned)
+
+
 def _mode_guidance(mode: str) -> str:
     # The task-mode carve-out below is the #1402 async human-gate contract:
     # without it, "execute to completion — do not ask questions" directly
@@ -685,6 +840,14 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if ctx.execution_id:
             lines.append(f"- **Execution ID**: {ctx.execution_id}")
 
+        assignment = _render_assignment(ctx)
+        if assignment:
+            lines.append(f"- **Primary human**: {assignment}")
+
+        stakeholders = _render_stakeholders(ctx)
+        if stakeholders:
+            lines.append(f"- **Stakeholders**: {stakeholders}")
+
         collaborators = _render_collaborators(ctx)
         if collaborators:
             lines.append(f"- **Collaborators**: {collaborators}")
@@ -715,6 +878,23 @@ def _resolve_collaborators(agent_name: Optional[str]) -> List[str]:
     except Exception as e:
         logger.debug(f"_resolve_collaborators({agent_name}) failed: {e}")
         return []
+
+
+def _resolve_assignment(
+    agent_name: Optional[str], triggered_by: Optional[str]
+) -> dict:
+    """Resolve role-assignment facts through the OSS seam. ``{}`` on any miss.
+
+    The seam owns the try/except and the shape validation — this is a thin
+    adapter that normalises "nothing to render" to an empty dict so the caller
+    can `.get()` without a None check.
+    """
+    # Imported at call time, not module scope: the name is then re-resolved on
+    # every call, so a test that patches `services.assignment_provider` takes
+    # effect here without also having to patch this module's binding.
+    from services.assignment_provider import resolve_assignment
+
+    return resolve_assignment(agent_name, triggered_by) or {}
 
 
 def _resolve_platform_url() -> Optional[str]:
@@ -758,10 +938,29 @@ def compose_system_prompt(
     ]
 
     if include_execution_context and execution_context is not None:
-        # Auto-fill collaborators and platform URL without mutating the caller's
-        # object — construct a shallow copy with the resolved fields filled in.
+        # Auto-fill collaborators, platform URL and role assignments without
+        # mutating the caller's object — construct a shallow copy with the
+        # resolved fields filled in.
         ctx = execution_context
-        if ctx.collaborators is None or ctx.platform_url is None:
+        # The assignment fields are auto-filled as ONE unit: they come from a
+        # single provider answer, so they are resolved once and spread across
+        # the four fields (a per-field `_resolve_assignment(...)` would call the
+        # provider four times for one line of output).
+        needs_assignment = (
+            ctx.primary_user_display is None
+            and ctx.role_id is None
+            and ctx.stakeholders is None
+        )
+        # `needs_assignment` is part of the guard, not just of the value: a
+        # caller that pre-fills BOTH collaborators and platform_url would
+        # otherwise skip the whole replace block, and the assignment fields
+        # would silently never render.
+        if ctx.collaborators is None or ctx.platform_url is None or needs_assignment:
+            assignment = (
+                _resolve_assignment(ctx.agent_name, ctx.triggered_by)
+                if needs_assignment
+                else {}
+            )
             ctx = replace(
                 ctx,
                 collaborators=(
@@ -773,6 +972,26 @@ def compose_system_prompt(
                     ctx.platform_url
                     if ctx.platform_url is not None
                     else _resolve_platform_url()
+                ),
+                primary_user_display=(
+                    ctx.primary_user_display
+                    if ctx.primary_user_display is not None
+                    else assignment.get("primary_user_display")
+                ),
+                role_id=(
+                    ctx.role_id
+                    if ctx.role_id is not None
+                    else assignment.get("role_id")
+                ),
+                stakeholders=(
+                    ctx.stakeholders
+                    if ctx.stakeholders is not None
+                    else assignment.get("stakeholders")
+                ),
+                proactive_consent=(
+                    ctx.proactive_consent
+                    if ctx.proactive_consent is not None
+                    else assignment.get("proactive_consent")
                 ),
             )
         block = build_execution_context(ctx)
@@ -893,6 +1112,56 @@ def build_narrated_surface_prompt(agent_name: str) -> Optional[str]:
         "- If a client asks to be spoken to, point them at the speaker control in this "
         "conversation. Never tell them this surface is text-only, and never send them "
         "to another channel to be heard."
+    )
+
+
+def build_user_facing_room_prompt() -> str:
+    """Tell an agent that a PERSON outside the fleet is reading this room
+    (trinity-enterprise#363).
+
+    Full transcript visibility is the deliberate choice for Workspace rooms —
+    watching the team work is the differentiator over a summary — and that choice
+    is only safe while the agents know they are being watched. Without this an
+    agent-to-agent exchange in front of a customer discusses internals, other
+    customers, costs and platform mechanics, because nothing in its context says
+    anyone is there.
+
+    Takes NO arguments, and that is deliberate twice over:
+
+    * it states **that** a person is reading, never **who**. The block is
+      composed into a prompt handed to every woken agent in the room, so a
+      participant's address would be disclosed sideways to agents the person
+      never addressed, and it buys nothing — the behaviour change is the same
+      whoever is reading. ent#362's per-line ``(human)`` label already answers
+      "who said this"; this answers "who is in the room".
+    * the fact is derived by the caller from room MEMBERSHIP
+      (``shared_sessions.service._wake_agent``), never asserted by a participant.
+      Keeping the derivation out of here is what makes that guarantee checkable
+      in one place.
+
+    Pure and constant — no DB read, so nothing to fail and no ``Optional``. The
+    caller decides whether to include it at all; see the sibling
+    ``build_narrated_surface_prompt`` for the shape.
+    """
+    return (
+        "## A person is reading this room\n"
+        "This room includes at least one human participant from outside the agent "
+        "fleet — a client or an operator — and they can read **every** message in "
+        "it, including the ones you address to other agents. There is no private "
+        "side channel here.\n\n"
+        "So, for this turn:\n"
+        "- Write every message as if it will be read by that person, because it "
+        "will be. Address other agents normally; just do not say anything to them "
+        "you would not say in front of the reader.\n"
+        "- Keep platform mechanics out of it — infrastructure, container and model "
+        "internals, costs and token spend, queue and scheduling plumbing — unless "
+        "the person asked about them.\n"
+        "- Never mention another client, another customer's data, or work done for "
+        "anyone who is not in this room.\n"
+        "- Say what you are doing and what you need in plain language. Half a "
+        "sentence of shorthand to a peer reads as evasion to someone watching.\n"
+        "- If you need to raise something the reader should not see, do it outside "
+        "this room."
     )
 
 

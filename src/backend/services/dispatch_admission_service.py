@@ -41,18 +41,30 @@ logger = logging.getLogger(__name__)
 
 
 async def _audit_idempotent_replay(
-    *, name, endpoint, x_via_mcp, x_source_agent, x_mcp_key_id, x_mcp_key_name,
+    *, name, endpoint, x_via_mcp, x_source_agent,
     current_user, idempotency_key, idem,
 ):
     """Emit the idempotent-replay audit row (shared by /chat and /task)."""
+    # #2323 — attribution comes from the presented credential on `current_user`,
+    # never from `X-MCP-Key-Id`/`X-MCP-Key-Name`. Those arrived as plain
+    # `Header(None)` on routes gated by `get_current_user` alone and were
+    # validated nowhere, so honouring them let any authenticated caller forge the
+    # credential named in the two highest-volume audit events on the platform.
+    # #2389 finished the removal: the headers are no longer declared on any route
+    # and `backlog_service` no longer persists them into the replay blob, so the
+    # forgery can no longer surface minutes later on queue drain either. The
+    # principal knows which key it presented; that is the only trustworthy
+    # source, and it works on the agent-to-agent branch too, where `actor_user`
+    # is deliberately None.
     await platform_audit_service.log(
         event_type=AuditEventType.EXECUTION,
         event_action="idempotent_replay",
         source="mcp" if x_via_mcp else "api",
         actor_user=current_user if not x_source_agent else None,
         actor_agent_name=x_source_agent,
-        mcp_key_id=x_mcp_key_id,
-        mcp_key_name=x_mcp_key_name,
+        mcp_key_id=getattr(current_user, "mcp_key_id", None),
+        mcp_key_name=getattr(current_user, "mcp_key_name", None),
+        mcp_scope=getattr(current_user, "mcp_scope", None),
         target_type="agent",
         target_id=name,
         endpoint=endpoint,
@@ -65,19 +77,33 @@ async def _audit_idempotent_replay(
 
 
 async def _audit_chat_started(
-    *, name, x_via_mcp, x_source_agent, x_mcp_key_id, x_mcp_key_name, current_user,
+    *, name, x_via_mcp, x_source_agent, current_user,
     execution_id, queue_result, source, message,
 ):
     """Emit the chat_started audit row on a successful /chat admission."""
+    # #2323 — attribution comes from the presented credential on `current_user`,
+    # never from `X-MCP-Key-Id`/`X-MCP-Key-Name`. Those arrived as plain
+    # `Header(None)` on routes gated by `get_current_user` alone and were
+    # validated nowhere, so honouring them let any authenticated caller forge the
+    # credential named in the two highest-volume audit events on the platform.
+    # #2389 finished the removal: the headers are no longer declared on any route
+    # and `backlog_service` no longer persists them into the replay blob, so the
+    # forgery can no longer surface minutes later on queue drain either. The
+    # principal knows which key it presented; that is the only trustworthy
+    # source, and it works on the agent-to-agent branch too, where `actor_user`
+    # is deliberately None.
     await platform_audit_service.log(
         event_type=AuditEventType.EXECUTION,
         event_action="chat_started",
         source="mcp" if x_via_mcp else "api",
         actor_user=current_user if not x_source_agent else None,
         actor_agent_name=x_source_agent,
-        mcp_key_id=x_mcp_key_id,
-        mcp_key_name=x_mcp_key_name,
-        mcp_scope="agent" if x_source_agent else ("user" if x_via_mcp else None),
+        mcp_key_id=getattr(current_user, "mcp_key_id", None),
+        mcp_key_name=getattr(current_user, "mcp_key_name", None),
+        # Was `"agent" if x_source_agent else ("user" if x_via_mcp else None)` —
+        # a guess assembled from two client-set headers, which would have
+        # reported a bounded #2323 ops key as an unbounded "user" one.
+        mcp_scope=getattr(current_user, "mcp_scope", None),
         target_type="agent",
         target_id=name,
         endpoint=f"/api/agents/{name}/chat",
@@ -98,8 +124,6 @@ async def admit_chat_request(
     current_user: User,
     x_source_agent: Optional[str],
     x_via_mcp: Optional[str],
-    x_mcp_key_id: Optional[str],
-    x_mcp_key_name: Optional[str],
     idempotency_key: Optional[str],
 ):
     """Admission gate for chat_with_agent (#1026 slice 1), HTTP-free.
@@ -125,8 +149,7 @@ async def admit_chat_request(
     if idem.replay:
         await _audit_idempotent_replay(
             name=name, endpoint=f"/api/agents/{name}/chat", x_via_mcp=x_via_mcp,
-            x_source_agent=x_source_agent, x_mcp_key_id=x_mcp_key_id,
-            x_mcp_key_name=x_mcp_key_name, current_user=current_user,
+            x_source_agent=x_source_agent, current_user=current_user,
             idempotency_key=idempotency_key, idem=idem,
         )
         return ChatAdmissionReplay(
@@ -177,7 +200,6 @@ async def admit_chat_request(
         logger.info(f"[Chat] Agent '{name}' execution {chat_execution_id}: {queue_result}")
         await _audit_chat_started(
             name=name, x_via_mcp=x_via_mcp, x_source_agent=x_source_agent,
-            x_mcp_key_id=x_mcp_key_id, x_mcp_key_name=x_mcp_key_name,
             current_user=current_user, execution_id=chat_execution_id,
             queue_result=queue_result, source=source, message=request.message,
         )
@@ -226,13 +248,17 @@ def begin_task_idempotency(
 
 
 async def audit_idempotent_replay(
-    *, name, endpoint, x_via_mcp, x_source_agent, x_mcp_key_id, x_mcp_key_name,
+    *, name, endpoint, x_via_mcp, x_source_agent,
     current_user, idempotency_key, idem,
 ):
-    """Public wrapper so ``/task`` can emit the same replay audit row."""
+    """Public wrapper so ``/task`` can emit the same replay audit row.
+
+    #2323 dropped `x_mcp_key_id`/`x_mcp_key_name` from this signature rather
+    than accepting-and-ignoring them: a parameter nothing reads is how a
+    forgeable value quietly finds a new consumer later.
+    """
     await _audit_idempotent_replay(
         name=name, endpoint=endpoint, x_via_mcp=x_via_mcp,
-        x_source_agent=x_source_agent, x_mcp_key_id=x_mcp_key_id,
-        x_mcp_key_name=x_mcp_key_name, current_user=current_user,
+        x_source_agent=x_source_agent, current_user=current_user,
         idempotency_key=idempotency_key, idem=idem,
     )

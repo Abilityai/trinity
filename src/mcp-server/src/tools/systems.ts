@@ -159,15 +159,21 @@ export function createSystemTools(
       name: "restart_system",
       description:
         "Restart all agents belonging to a system. " +
-        "Finds all agents with the given system prefix and stops then starts them. " +
+        "Membership is resolved from the system's tag when the agents carry one, " +
+        "falling back to the '{system_name}-*' name prefix. " +
+        "Stops then starts each member. " +
         "Useful after configuration changes (credentials, schedules, shared folders). " +
-        "Returns list of successfully restarted agents and any failures.",
+        "Returns list of successfully restarted agents and any failures. " +
+        "Requires the 'creator' role AND a human caller: an agent-scoped key is " +
+        "refused with 403 (#2373), because this restarts every member without the " +
+        "per-agent spawn-scope check that start_agent/stop_agent apply one at a time.",
       parameters: z.object({
         system_name: z
           .string()
           .describe(
-            "System prefix to restart (e.g., 'content-production'). " +
-            "All agents matching '{system_name}-*' will be restarted."
+            "System to restart (e.g., 'content-production'). " +
+            "Members are the agents tagged with the system, else those matching " +
+            "'{system_name}-*'."
           ),
       }),
       execute: async (

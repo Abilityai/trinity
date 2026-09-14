@@ -34,17 +34,16 @@ setup('authenticate as admin', async ({ page }) => {
     .not.toBeNull()
   await expect(passwordInput).toBeHidden({ timeout: 5000 })
 
-  // Pre-dismiss the first-run onboarding wizard (trinity-enterprise#52). On a
-  // fresh CI stack with zero user-created agents it auto-opens on the Dashboard
-  // (see Dashboard.vue::maybeAutoOpenOnboarding), and its `fixed inset-0`
-  // backdrop intercepts pointer events — any spec that navigates to `/` and
-  // clicks (e.g. dashboard-grid-view) races the auto-open and flakes. Seeding
-  // the same dismissal key the product remembers keeps every spec's inherited
-  // storageState wizard-free (specs that WANT it can navigate with
-  // `?onboarding=1`, which bypasses this key). Same origin as `token`, so it
-  // is captured by the storageState snapshot below.
+  // Pre-close the first-run overlay (ent#581, which replaced the ent#52
+  // wizard). On a fresh CI stack — no Claude credential, no agent of the
+  // admin's own — it opens on the Dashboard, and its `fixed inset-0` backdrop
+  // intercepts pointer events: any spec that navigates to `/` and clicks
+  // (e.g. dashboard-grid-view) would race it and flake. Seeding the same key
+  // "Finish later" writes keeps every spec's inherited storageState free of it
+  // (specs that WANT it navigate with `?onboarding=1`, which bypasses this
+  // key). Same origin as `token`, so it is captured by the storageState below.
   await page.evaluate(() =>
-    localStorage.setItem('trinity_onboarding_dismissed_v1', '1')
+    localStorage.setItem('trinity_first_run_closed', '1')
   )
 
   await page.context().storageState({ path: 'e2e/.auth/admin.json' })

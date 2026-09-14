@@ -16,6 +16,7 @@ Click any agent to open its detail page. The page lands on the **Overview** tab 
 | **Dashboard** | `dashboard` | The agent's own dashboard — only when it ships a `dashboard.yaml` |
 | **Brain** | `brain` | Knowledge-graph page — only for agents that declare the capability |
 | **Reports** | `reports` | Structured results the agent published -- see [Agent Reports](../operations/agent-reports.md) |
+| **Canvas** | `canvas` | The surface the agent keeps current -- see [Agent Canvas](agent-canvas.md) |
 | **Schedules** | `schedules` | Cron-based automation -- see [Scheduling](../automation/scheduling.md) |
 | **Loops** | `loops` | Sequential bounded task runs -- see [Agent Loops](../automation/agent-loops.md) |
 | **Playbooks** | `playbooks` | Reusable command templates |
@@ -51,17 +52,21 @@ The Overview tab is a glanceable, database-backed summary. It renders even when 
 - **Recent activity** -- the last five executions; click one to open it in the Tasks tab.
 - **Footprint** -- schedule, skill, and share counts, plus git sync status.
 
-The persistent header above the tabs still owns live "now" state: status, CPU/memory gauges, cost, and quick controls. The Overview shows trends; the header shows the present.
+The persistent header above the tabs still owns live "now" state: status, CPU/memory gauges, cost, and quick controls. The Overview shows trends; the header shows the present. Two of its buttons are doors into other surfaces:
+
+- **Workspace** opens this agent in the [Workspace](../sharing-and-access/workspace.md) — the conversation surface where you and the agent work together.
+- **Talk** starts a voice call with this agent. The call opens in the Workspace and the conversation lives there, not in this page's Chat tab — see [Voice Chat](../advanced/voice-chat.md).
 
 - **API:** `GET /api/agents/{name}/analytics?window=7d|14d|30d`
 
 ### Start and Stop
 
-Toggle an agent between Running and Stopped using the switch on the Dashboard, Agents page, or Agent Detail page. A loading spinner displays during state transitions.
+Toggle an agent between Running and Stopped using the switch on a Dashboard tile or list row, or in the Agent Detail header. A loading spinner displays during state transitions.
 
-- **UI component:** `RunningStateToggle.vue` (supports size variants)
 - **API:** `POST /api/agents/{name}/start` and `POST /api/agents/{name}/stop`
 - **MCP:** `start_agent(name)` and `stop_agent(name)`
+
+**After a host reboot.** Agent containers are created with Docker's `unless-stopped` restart policy, so when the host reboots or the Docker daemon restarts, every agent that was running comes back on its own — schedules resume without anyone starting agents by hand. An agent you deliberately stopped stays stopped: the policy honours Docker's manual-stop flag, so a quarantined agent is never resurrected by a reboot. While Docker is bringing agents back they may briefly show as stopped. The policy is set when the container is created; agents created before this behaviour shipped adopt it on their next recreate (a resource, runtime, or base-image change), not on a plain restart — an upgrading install can sweep its existing fleet once using [`AGENT_RESTART_POLICY_2026-09.md`](../../migrations/AGENT_RESTART_POLICY_2026-09.md).
 
 ### Display Label
 
@@ -111,7 +116,7 @@ The agent's timeout is the ceiling for any of its schedules — setting it below
 
 ### Listing
 
-The Agents page shows horizontal row tiles with success rate bars. Filter by name, status, or tags. The Dashboard offers a network graph view and a timeline view.
+The Dashboard lists the fleet in three modes — **Timeline**, **Grid**, and **List** (press `v` to cycle them). List mode is the row view with success-rate bars; filter by name, status, or tags. The old `/agents` page redirects to the Dashboard's List mode. See [Dashboard](../operations/dashboard.md).
 
 - **API:** `GET /api/agents` returns all agents
 - **MCP:** `list_agents()`

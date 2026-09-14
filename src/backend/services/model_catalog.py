@@ -70,6 +70,19 @@ class ModelEntry:
       (#1080: an admin must not be able to default the whole fleet to the cheap tier).
     * ``recommended`` — drives the admin dropdown's "(recommended)" marker. Exactly
       one entry carries it, and it is pinned to ``PLATFORM_DEFAULT_MODEL_VALUE``.
+    * ``workspace`` / ``workspace_tier`` (ent#403) — offered in the **Workspace
+      composer's** client-facing dropdown, and the plain-language primary text
+      that option renders. A separate dimension rather than a reuse of ``note``,
+      which is copy written for the operator picker: joining ``label — note``
+      yields two options both leading with "Most capable", and one em-dash nested
+      inside another. Same precedent as ``admin_default_selectable`` vs
+      ``recommended`` — a new policy dimension on the same source, never a second
+      hand-typed list.
+
+    ⚠️ **This is a positional frozen dataclass** — every entry below passes its
+    booleans positionally. A field inserted anywhere but LAST silently reassigns
+    ``public_channel`` / ``admin_default_selectable`` / ``recommended`` on every
+    entry, with no error. Append; set the new ones by keyword.
     """
 
     id: str
@@ -78,6 +91,8 @@ class ModelEntry:
     public_channel: bool
     admin_default_selectable: bool
     recommended: bool
+    workspace: bool = False
+    workspace_tier: str = ""
 
 
 # The ordered catalog. Order is preserved into the picker and the admin dropdown.
@@ -85,6 +100,10 @@ class ModelEntry:
 # memory): ``claude-opus-5`` is the current Opus tier; the ``-5`` family and
 # ``claude-sonnet-4-6`` are current; ``opus-4-8/4-7/4-6`` are the prior Opus
 # generation (legacy). The date-suffixed ids are kept verbatim.
+#
+# Canonical lineup (keep this comment as the bump-anchor):
+#     https://platform.claude.com/docs/en/about-claude/models/overview
+# Last synced: 2026-09-12 (#2726 — Claude Fable 5.1)
 MODEL_CATALOG: tuple[ModelEntry, ...] = (
     # Current generation.
     ModelEntry(
@@ -94,11 +113,21 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         True,
         True,
         False,
+        workspace=True,
+        workspace_tier="Most capable",
+    ),
+    ModelEntry(
+        "claude-fable-5-1",
+        "Claude Fable 5.1",
+        "Most capable \u2014 longest tasks (latest)",
+        True,
+        True,
+        False,
     ),
     ModelEntry(
         "claude-fable-5",
         "Claude Fable 5",
-        "Most capable \u2014 longest tasks (latest)",
+        "Most capable \u2014 longest tasks",
         True,
         True,
         False,
@@ -110,6 +139,8 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         True,
         True,
         False,
+        workspace=True,
+        workspace_tier="Balanced \u2014 fast and smart",
     ),
     # Prior Opus generation — still selectable, relabelled Legacy (#2086).
     ModelEntry(
@@ -129,6 +160,8 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         True,
         False,
         False,
+        workspace=True,
+        workspace_tier="Fastest",
     ),
     # Legacy, picker-only (neither public-channel nor admin-default).
     ModelEntry(
@@ -154,10 +187,32 @@ assert _recommended[0].admin_default_selectable, (
     "(you cannot recommend a model the admin cannot pick)"
 )
 
+# ent#403: the Workspace dimension IS a subset lattice, unlike the two above.
+# The Workspace turn route validates against WORKSPACE_MODELS, and the value it
+# accepts is resolved through the same #894 ladder the operator route writes —
+# so a workspace-only model would be accepted at the composer and refused by
+# `is_valid_public_channel_model` wherever the two meet. Build failure, not a
+# runtime surprise.
+assert all(m.public_channel for m in MODEL_CATALOG if m.workspace), (
+    "a workspace-selectable model must also be public-channel-selectable — the "
+    "Workspace must never accept a model the #894 operator route would 422"
+)
+assert all(m.workspace_tier for m in MODEL_CATALOG if m.workspace), (
+    "a workspace-selectable model needs its plain-language tier — the option "
+    "would render blank"
+)
+
 
 # The #894 server-validated allow-list. Consumers keep importing it from
 # ``settings_service`` (which re-exports); this is the definition.
 PUBLIC_CHANNEL_MODELS = frozenset(m.id for m in MODEL_CATALOG if m.public_channel)
+
+# ent#403: the Workspace composer's closed allow-list. This is the SECURITY
+# control on `PortalChatRequest.model`, not a nicety — the value reaches the
+# agent as a `--model` argv element, so it is validated against a closed set,
+# never a regex and never a prefix check. Asserted above to be a subset of
+# PUBLIC_CHANNEL_MODELS.
+WORKSPACE_MODELS = frozenset(m.id for m in MODEL_CATALOG if m.workspace)
 
 
 # snake_case source field -> camelCase JS key. Applied when building the emitted
@@ -169,6 +224,11 @@ _JS_KEY_MAP: tuple[tuple[str, str], ...] = (
     ("public_channel", "publicChannel"),
     ("admin_default_selectable", "adminDefaultSelectable"),
     ("recommended", "recommended"),
+    # ent#403 — APPENDED, like the dataclass fields. The parity test's
+    # `_expected_records` hard-codes this key set and asserts equality, so a new
+    # pair here is a two-file change by construction.
+    ("workspace", "workspace"),
+    ("workspace_tier", "workspaceTier"),
 )
 
 _GENERATED_HEADER = (

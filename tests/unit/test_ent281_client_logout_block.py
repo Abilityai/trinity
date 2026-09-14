@@ -49,8 +49,8 @@ def portal_db(tmp_path, monkeypatch):
     m.create_all(get_engine(), tables=[
         agent_sharing, agent_ownership, users, email_login_codes, mcp_api_keys,
     ])
-    from client_portal.schema import init_client_portal_schema
-    init_client_portal_schema()
+    from conftest import ensure_schema_tables
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
 
     from sqlalchemy import insert
     with get_engine().begin() as conn:

@@ -5,6 +5,7 @@ import { useAgentsStore } from './agents'
 import { parseUTC, getTimestampMs } from '@/utils/timestamps'
 import { isOrgTag } from '@/utils/gridOrg'
 import { agentDisplayName } from '@/utils/agentName'
+import { VIEW_MODES, DEFAULT_VIEW_MODE } from '@/utils/viewModes'
 
 export const useNetworkStore = defineStore('network', () => {
   // State
@@ -50,16 +51,16 @@ export const useNetworkStore = defineStore('network', () => {
   // a network blip replays missed events instead of dropping them.
   const lastEventId = ref(null)
 
-  // View mode state (grid | timeline | list) — default timeline, persisted.
+  // View mode state (timeline | grid | list) — default timeline, persisted.
   // trinity-enterprise#47 added 'grid'; trinity-enterprise#260 added 'list'
   // (the Agents page consolidated into the dashboard); the legacy 'graph' Vue
   // Flow canvas was decommissioned (#1689). A persisted stale mode (e.g.
   // 'graph', or 'list' on an older bundle) degrades to the default (timeline)
-  // via the VIEW_MODES.includes() guard below. NOTE: the Dashboard's mode
-  // toggle v-for is the second home of this list — keep them in sync.
-  const VIEW_MODES = ['grid', 'timeline', 'list']
+  // via the VIEW_MODES.includes() guard below. The list lives in
+  // `utils/viewModes.js` (#2536) — ONE home shared with the Dashboard's mode
+  // toggle v-for, the `v` cycle order and the e2e specs; do not re-declare it.
   const savedViewMode = localStorage.getItem('trinity-dashboard-view')
-  const viewMode = ref(VIEW_MODES.includes(savedViewMode) ? savedViewMode : 'timeline')
+  const viewMode = ref(VIEW_MODES.includes(savedViewMode) ? savedViewMode : DEFAULT_VIEW_MODE)
   const isTimelineMode = computed(() => viewMode.value === 'timeline')
   const isPlaying = ref(false)
   const replaySpeed = ref(10) // 10x default
@@ -1445,7 +1446,7 @@ export const useNetworkStore = defineStore('network', () => {
   // write — used by the `?view=` deep-link/redirect (ent#260), which is a
   // one-shot intent that must not rewrite the user's saved view selection.
   function setViewMode(mode, { persist = true } = {}) {
-    if (!VIEW_MODES.includes(mode)) mode = 'timeline'
+    if (!VIEW_MODES.includes(mode)) mode = DEFAULT_VIEW_MODE
     viewMode.value = mode
     if (persist) {
       localStorage.setItem('trinity-dashboard-view', mode)

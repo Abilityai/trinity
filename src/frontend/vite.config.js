@@ -35,7 +35,7 @@ const devSecurityHeaders = {
     "default-src 'self'; " +
     "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
     "style-src 'self' 'unsafe-inline'; " +
-    "img-src 'self' data: blob:; " +
+    "img-src 'self' data: blob: https:; " +
     "media-src 'self' blob:; " +
     "font-src 'self'; " +
     "connect-src 'self' blob: ws: wss: https://us-central1-mcp-server-project-455215.cloudfunctions.net https://intake.abilityai.dev; " +
@@ -64,6 +64,18 @@ export default defineConfig({
     alias: {
       '@': path.resolve(__dirname, './src'),
     },
+  },
+  // #2705: pre-bundle every package a dynamic `import('…')` names. Vite's dependency
+  // scanner tree-shakes each script block before it records imports, so a dynamic
+  // bare import inside an unexported helper (CanvasDiagram.vue's `ensureMermaid()`,
+  // in a plain <script> block only <script setup> calls) is never discovered at
+  // startup. The first served page that includes the file then re-optimises and
+  // full-reloads every open tab — every developer's, and every Playwright page
+  // mid-run. Static imports are always found; only dynamic ones can be missed, and
+  // whether one is found depends on how its caller happens to be wired, so the rule
+  // lists them all. Guard: tests/unit/optimizeDepsIncludeGuard.spec.js.
+  optimizeDeps: {
+    include: ['mermaid', 'qrcode'],
   },
   server: {
     port: 80,

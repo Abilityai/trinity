@@ -23,9 +23,13 @@ def _profile_from_context() -> Optional[str]:
 
 
 class TrinityAPIError(Exception):
-    def __init__(self, status_code: int, detail: str):
+    def __init__(self, status_code: int, detail: str, body: Optional[dict] = None):
         self.status_code = status_code
         self.detail = detail
+        # #2322 — the parsed JSON body when there was one. `detail` alone is a
+        # human string; a caller that must branch on the failure KIND (a login
+        # deferred by a second factor, say) needs the structured fields.
+        self.body = body or {}
         super().__init__(f"HTTP {status_code}: {detail}")
 
 
@@ -52,11 +56,16 @@ class TrinityClient:
             print("Error: Authentication failed. Run 'trinity login' to re-authenticate.", file=sys.stderr)
             sys.exit(1)
         if resp.status_code >= 400:
+            body = None
             try:
-                detail = resp.json().get("detail", resp.text)
+                body = resp.json()
+                detail = body.get("detail", resp.text) if isinstance(body, dict) else resp.text
             except Exception:
                 detail = resp.text
-            raise TrinityAPIError(resp.status_code, str(detail))
+            raise TrinityAPIError(
+                resp.status_code, str(detail),
+                body=body if isinstance(body, dict) else None,
+            )
         if resp.status_code == 204:
             return None
         return resp.json()

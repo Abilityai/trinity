@@ -648,6 +648,87 @@
 - **Flow**: `docs/memory/feature-flows/activity-stream.md`,
   `docs/memory/feature-flows/task-execution-service.md`
 
+### 10.15.1 Unmeasurable Durations Are NULL (#2434)
+- **Status**: ✅ Implemented (2026-09-07, Issue #2434); amends §10.15
+- **GitHub Issue**: #2434; recurrence chain #1832 (low end) → #2243 (high end, in CI) → #2434 (high end, in production)
+- **Description**: `duration_ms` is a SQLAlchemy `Integer` (PostgreSQL `int4`, ceiling `2^31−1` ms =
+  **24.855 days**). The §10.15 backstop and every watchdog sweep closed a stale row with a
+  **fabricated** `duration_ms = now − started_at`. Past 24.8 days that `UPDATE` raises
+  `psycopg2.errors.NumericValueOutOfRange`. **The blast radius is the transaction, not the row**:
+  each sweep runs its SELECT *and* its whole per-row UPDATE loop inside one
+  `with get_engine().begin() as conn:`, so on PostgreSQL the first overflow aborts the transaction,
+  every later `conn.execute` raises `InFailedSqlTransaction`, and `begin()` rolls back rows already
+  updated in that batch. While one ≥24.8-day row exists, **no stale execution and no stale activity
+  anywhere in the fleet is ever closed**, every cycle, forever — and each sweep reports itself
+  complete (`recovered=0 … errors=1`) because `cleanup_service` catches, logs and returns a falsy
+  value. #2216's restore path leads straight here: an instance restored from a backup older than
+  24.8 days lands wedged on first boot. Invisible in CI because **SQLite does not enforce INTEGER
+  width** — the same code path succeeds on an 8-byte int.
+- **The rule**: *a duration nobody measured is `NULL`, never a number.*
+  - **Fabrication sites write `NULL` unconditionally** — the sweep is inventing the end time, so
+    there is no measurement to record at any magnitude. `db/schedules/cleanup.py`
+    (`mark_stale_executions_failed`, `mark_no_session_executions_failed`,
+    `fail_stale_slot_execution`, `mark_execution_failed_by_watchdog`) and `db/activities.py`
+    (`close_open_activities_for_executions`, `mark_stale_activities_failed`). Deliberately **one
+    rule, not a magnitude-dependent two**: *all* swept rows now record NULL, not only overflowing
+    ones. The weakest case is `mark_no_session_executions_failed`, whose ~60 s lifetime is arguably
+    real; it is included for uniformity and that is recorded rather than glossed.
+  - **Measured writers route through one representability helper**,
+    `utils/helpers.py::duration_ms_between(started_at, completed_at)` — `max(0, …)` at the low end
+    (#1832, unchanged) and `None` above the int4 ceiling, where a value that large means
+    `started_at` is stale or corrupt, not that the work ran that long. Applied at
+    `db/schedules/executions.py::update_execution_status`, `db/activities.py::complete_activity`,
+    and both `src/scheduler/database.py` finalizers. The helper takes both datetimes as parameters
+    and never calls `now()` — the backend passes **aware** datetimes and the scheduler **naive**
+    ones, and mixing them would raise. Its high branch logs a `warning` carrying the row id and the
+    computed value, so the number survives where an operator can find it (NULL alone collides three
+    meanings: swept, unrepresentable, bulk-terminated).
+  - `finalize_orphaned_skipped_executions` keeps its literal `duration_ms=0` (a skipped row ran for
+    zero time — that *is* a measurement).
+  - Invariant #16 applies: `src/scheduler` cannot import `utils/helpers.py`, so the helper is a
+    **vendored behavioural mirror** in `src/scheduler/utils.py`, parity-tested — not an import.
+- **NULL is already a blessed value on terminal rows**: canary **E-03**
+  (`canary/invariants/e03_completed_rows_populated.py`) deliberately omits a `duration_ms IS NOT
+  NULL` clause because the bulk queue-terminators already leave it NULL. The column is already
+  nullable — **no schema change, so Invariant #9's dual-track migration is not engaged** (no SQLite
+  `MIGRATIONS` entry, no Alembic revision, no `schema.py` / `tables.py` edit).
+- **The column is deliberately NOT widened.** `execution_timeout_seconds` is hard-bounded to
+  [60, 7200] (TIMEOUT-001), so a legitimate `schedule_executions` duration tops out at 7.2M ms —
+  298× below the int4 ceiling — and `agent_loop_runs.duration_ms` is copied from an execution, so it
+  inherits that bound. Stated honestly, that bound does **not** cover `agent_activities` (non-dispatch
+  activity types have no owning closer and can be arbitrarily old — the §10.15 class) or
+  `voip_call_logs` (`VOIP_MAX_CALL_DURATION` is an unvalidated env int). So the helper is required
+  **regardless of column width**, and widening is an independent, optional hardening — deferred, not
+  an alternative. Widening would also fix neither the poison-transaction property above nor
+  `process_schedule_executions.duration_ms`, which exists in no migration track at all. Four OSS
+  tables carry the column (`schedule_executions`, `agent_loop_runs`, `agent_activities`,
+  `voip_call_logs`), not the six the issue names, plus that scheduler-only fifth.
+- **Hostile input path closed in the same change**: `models.TaskResultPayload.execution_time_ms` is
+  agent-supplied and was unbounded, arriving on the #1083 async result callback and landing in two
+  `Integer` columns — bounded to `ge=0, le=2**31-1`.
+- **Reader contract**: every consumer already tolerates NULL — two NULL-skipping SQL `AVG`
+  aggregates, four guarded `int()` call sites, **zero** `ORDER BY` / comparison / `sorted()` on the
+  column, and every Pydantic duration field `Optional`. One user-visible change:
+  `ReplayTimeline.vue` renders a swept activity as a 30 s bar flagged *estimated* instead of a
+  fabricated ~120-minute one.
+- **Operator remedy for an already-wedged instance**: the upgrade **restart** self-heals — boot
+  recovery closes the rows, capacity is released, `_reconcile_orphaned_slots` reclaims the slot, and
+  canary **E-01** (pinned permanently critical by this bug, with no way to clear it) goes green on
+  the next cycle. No manual SQL required post-upgrade.
+- **Guards**: `tests/unit/test_2434_duration_overflow.py` (the regression proof — **db-ops layer,
+  never the service layer**, which catches and returns falsy so a service-layer test passes on
+  pre-fix code; seeds **two** stale rows so the batch-integrity property is what is pinned, since a
+  one-row seed passes against a per-row `except`), the extended AST source guard in
+  `tests/unit/test_1832_duration_clamp.py` (now covering `ast.keyword` sinks — `.values(duration_ms=…)`
+  is the actual sink at all six fabrication sites — and classifying acceptance per site), and
+  `tests/unit/test_1713_scheduler_utils_parity.py` for the vendored mirror. The proof requires
+  **PostgreSQL**: a SQLite-only run cannot fail, so `schema-parity.yml` (a *required*, unconditional
+  check that already path-matches `src/backend/db/**` and `utils/helpers.py`) now stands up a
+  `postgres:16-alpine` service and exports `TEST_POSTGRES_URL` for the backend-parametrized tests.
+- **Flow**: `docs/memory/feature-flows/cleanup-service.md`,
+  `docs/memory/feature-flows/activity-stream.md`,
+  `docs/memory/feature-flows/dashboard-timeline-view.md`
+
 ### 10.16 Template-Declared Schedules at Creation (trinity-enterprise#89)
 - **Status**: ✅ Implemented (2026-08-02, trinity-enterprise#89, sub of Epic #122)
 - **GitHub Issue**: trinity-enterprise#89 (code lands as a public `abilityai/trinity` PR)
@@ -1023,7 +1104,7 @@ schedules:
 
 ---
 
-## 37. MCP Chat Timeout Recovery (#914)
+## 37. MCP Dispatch Timeout Recovery (#914, #2661)
 
 ### 37.1 `chat_with_agent` Gateway-Timeout Receipt (#914)
 - **Status**: ✅ Implemented (#933)
@@ -1069,10 +1150,173 @@ schedules:
   - Real push-completion redesign (#408 / #428) — this is the
     cheap interim until that lands.
   - Idempotency keys (#914 comment) — needs new backend column
-    + write-path coordination; bigger surface.
+    + write-path coordination; bigger surface. **Superseded by
+    #2661**: the column shipped with RELIABILITY-006 (#525), and
+    37.2 now reads the `execution_id` the backend already returns
+    on an in-flight 409.
   - Backend-side change to return `execution_id` as a streaming
     response header on long calls — would obsolete the heuristic
     lookup but requires a `chat_with_agent` API contract change.
+    Still out of scope, and for a firmer reason than "contract
+    change": the handler is non-streaming, so headers cannot
+    precede the body — `task_execution_id` is only assembled once
+    the agent has answered.
+
+### 37.2 Sync `/task` Gateway-Timeout Receipt (#2661)
+- **Status**: ✅ Implemented (#2661)
+- **Implements**: Issue #2661
+- **Description**: 37.1 covered the synchronous `/chat` route only.
+  `chat_with_agent(parallel=true, async=false)` dispatches through
+  `client.ts::task()`, which held the backend fetch for
+  `timeout_seconds + 60` (up to 7260s). The MCP client's own gateway
+  timeout kills the JSON-RPC call long before that, so the caller saw
+  a bare `fetch failed` while the target kept running — no receipt,
+  no `execution_id`. The tool description's advice ("poll
+  `get_execution_result` instead of retrying") was unreachable on this
+  route because the caller never received an id. Fleet incident
+  2026-09-08: every duplicate dispatch in a three-hop cascade was a
+  re-send after "could not confirm delivery" on this path.
+- **Why 37.1's matcher could not simply be reused**: `/chat` is
+  queue-serialised, so "newest non-terminal MCP row wins" is
+  near-unambiguous there. `/task` exists to run N tasks concurrently
+  (`max_parallel_tasks`, default 3), and **every** filter that matcher
+  applies — `triggered_by`, `source_mcp_key_id`, the recency window —
+  is identical across one caller's concurrent tasks. Mirroring it would
+  have handed caller A the `execution_id` of caller B's task; A then
+  polls and acts on a well-formed **foreign** result. Silent wrong data
+  is worse than the loud `fetch failed` it replaces, so the receipt is
+  emitted only when attribution is *provable*.
+- **Attribution rule (applies to every route — state it once)**:
+  1. **Exact, when the backend already knows.** A duplicate dispatch
+     under the same `Idempotency-Key` answers `409` carrying
+     `execution_id` (RELIABILITY-006). That is an exact key→execution
+     mapping and is read directly rather than discarded as an opaque
+     `API error (409)`.
+  2. **Otherwise identify, never guess.** The executions scan matches
+     on the call's own `message` in addition to the key id and trigger
+     set, and **returns nothing when more than one candidate survives**.
+     Ambiguity yields no receipt — which is exactly the pre-#2661
+     behaviour, so refusing to guess is never worse than before.
+  3. The trigger set is **per call site**, not a widened shared
+     constant: `/chat` keeps `{mcp, agent}`; `/task` additionally
+     accepts `self_task` (SELF-EXEC-001). Widening the shared list
+     would let a `/chat` abort attribute a concurrently-running
+     parallel self-task row — a regression in the already-shipped route.
+- **Recovery must be bounded**: the abort exists because the gateway
+  ceiling is near; the lookup that follows spends what is left of that
+  budget. It gets its own short deadline (`MCP_RECOVERY_TIMEOUT_MS`,
+  default 5000) and does **not** re-authenticate on 401, so a slow
+  backend — the usual cause of the abort — cannot make the recovery
+  reproduce the very `fetch failed` it exists to prevent.
+- **`AbortError` only**: a `TypeError` (transport failure) may mean the
+  request never reached the backend. On the concurrent `/task` route a
+  peer execution is the normal state, so recovering from a transport
+  error would attribute someone else's row. `/chat` keeps its historical
+  `TypeError` branch.
+- **Configurability**: the recency window is **derived** from
+  `MCP_CHAT_TIMEOUT_MS` (`timeout + 10s`), not a fixed 30s. The fixed
+  window was a latent defect in 37.1: raising the documented knob to
+  ≥30s put every candidate row outside the window, silently degrading
+  every receipt on both routes to the no-match throw.
+- **`timeout_seconds` in sync parallel mode**: now bounds only the
+  agent-side run, not the client wait. A value above
+  `MCP_CHAT_TIMEOUT_MS` yields a receipt at the ceiling rather than a
+  held connection. (The parameter was already deprecated by #1068.)
+- **Out of scope**:
+  - `fan_out` (the third route of this class) — closed by #2670, §37.3.
+  - A read-only `(scope, key) → execution_id` probe endpoint, which
+    would retire the heuristic on every route at once. Tracked
+    separately; deliberately not built under a P1 incident fix because
+    it is new authenticated surface.
+  - Re-POSTing the dispatch with the same key as a "probe":
+    `idempotency_service.begin()` fails **open**, so on that path the
+    probe would dispatch a second execution — precisely the bug being
+    fixed.
+### 37.3 `fan_out` Gateway-Timeout Receipt + Batch Read Surface (#2670)
+- **Status**: ✅ Implemented (#2670)
+- **Implements**: Issue #2670
+- **Description**: the third and last route of the #914 class, and the
+  one that hits it most reliably — a fan-out dispatches N tasks and by
+  construction runs longer than any single one of them, so it exceeds
+  the gateway ceiling more often than the two routes already fixed.
+  `client.ts::fanOut()` carried the identical unbounded
+  `(timeout_seconds ?? 7200) + 60`; the caller saw `fetch failed` while
+  every dispatched task kept running, with nothing to poll.
+- **The receipt names a `fan_out_id`, not an `execution_id`.** A batch
+  is N rows sharing one id, so a single execution id could only ever
+  name an arbitrary member of it. Shape:
+  ```json
+  {
+    "status": "fan_out_timeout",
+    "agent": "research-agent",
+    "fan_out_id": "fo_9SxaR2mQ4tKe",
+    "execution_ids": ["…", "…"],
+    "task_count": 8,
+    "message": "… Poll get_fan_out_result(agent_name, fan_out_id) instead of re-sending …"
+  }
+  ```
+  `execution_ids` is **evidence, not a manifest**: a slot-starved
+  subtask has no row yet, so the list can be a subset of the batch.
+- **Ambiguity is redefined, not reused.** §37.2 refuses when more than
+  one ROW survives, because on `/task` it cannot tell which row is the
+  caller's. A fan-out stamps one `fan_out_id` on all N of its rows, so
+  finding *any* row finds the batch and N survivors is the expected
+  shape. The unit that must be unambiguous is therefore the **batch**:
+  `pickRecentFanOut` returns nothing when more than one distinct
+  `fan_out_id` survives. Same rule as §37.2 rule 2, measured on the
+  right unit.
+- **Status is deliberately NOT filtered.** `/chat` and `/task` require a
+  non-terminal row, because a terminal one is evidence the receipt is
+  unnecessary. By abort time a fan-out is normally a mix — some
+  subtasks finished, others running — so requiring non-terminal rows
+  would drop exactly the batches furthest along. The derived recency
+  window (§37.2) is what bounds staleness.
+- **Polling surface**: `GET /api/agents/{name}/fan-out/{fan_out_id}`
+  (`AuthorizedAgent`), folding `schedule_executions` — where
+  `fan_out_id` has been stamped on every subtask since FANOUT-001 — into
+  `{status, total, completed, failed, running, results[]}`. Batch status
+  is `running` while any subtask can still change, then `completed` /
+  `partial` / `failed`; `partial` exists because best-effort is the
+  fan-out's default policy, so a batch where four of five succeeded is
+  neither a success nor a failure. Per-task status is the **execution**
+  status verbatim (`queued`/`running`/`success`/…), not the dispatch
+  response's two-value `completed`/`failed` pair — a live batch has to
+  distinguish "waiting for a slot" from "running".
+- **It reads rows, NOT the idempotency snapshot.** `routers/fan_out.py`
+  stores the whole aggregated response under the call's key, which looks
+  like a free receipt — but `complete()` runs only once the batch has
+  finished, so the snapshot cannot answer the question a timed-out
+  caller is actually asking, which is *what is happening right now*.
+- **`deadline_exceeded` is absent by construction**: it is the
+  dispatcher's verdict on its own outer deadline, held in memory by the
+  call that timed out, and not a property of any row. This surface
+  cannot observe it and does not invent it.
+- **Enumeration-safe** (Invariant #8): a malformed id, an unknown id and
+  one belonging to another agent are one uniform 404. The id is
+  server-minted and unguessable, so this costs a caller nothing.
+- **Backend counterparts**: the in-flight `409` now returns the same
+  `{error, message, execution_id}` shape `/chat` and `/task` do — it was
+  a bare string, so `fan_out` could not benefit from the §37.2 client
+  that reads that field — and the batch id is attached to the
+  idempotency claim **when it is minted**
+  (`FanOutService.execute(on_started=…)`) rather than at `complete()`.
+  Attaching at the end records the id exactly when nobody needs it any
+  more: the window in which a concurrent duplicate arrives, and in which
+  this call's own gateway gives up, is the whole run. The hook is
+  best-effort — a raising hook must not fail a dispatch that is fine.
+- **MCP surface** (Invariant #13): new `get_fan_out_result(agent_name,
+  fan_out_id)` in `tools/executions.ts`, gated to `{self} ∪ permitted`
+  like `get_execution_result` beside it; the `fan_out` tool description
+  states the receipt shape and the retry asymmetry (an identical re-send
+  dedupes server-side; a **reworded** one derives a different key and
+  dispatches all N tasks again).
+- **Out of scope**: the read-only `(scope, key) → execution_id` probe
+  (#2671), which would retire the executions-scan heuristic on all three
+  routes at once. It does **not** subsume this section: the snapshot it
+  would read is written only at `complete()`, so it cannot report a
+  batch that is still running — which is every batch a receipt is issued
+  for.
+
 ## 38. Sequential Agent Loops (#740)
 
 ### 38.1 `run_agent_loop` MCP Tool + Backend Loop Service (#740 — Phase 1)
@@ -1285,3 +1529,163 @@ failed iteration and proceeds, bounded so a fully-broken agent still terminates.
   Loops panel UI. Unset = `abort`, a strict no-op for existing callers.
 
 ---
+
+### 38.6 Per-run timeout is bounded by the agent's own ceiling (ent#338)
+- **Status**: ✅ Implemented
+- **Implements**: trinity-enterprise#338
+- **Description**: `agent_ownership.execution_timeout_seconds` is the per-agent
+  ceiling, and **nothing downstream re-applied it** for loops:
+  `task_execution_service` reads the cap only when the caller passed no
+  `timeout_seconds`, so an explicit `timeout_per_run` went straight to dispatch.
+  A loop could therefore run iterations *longer* than the ceiling its owner set —
+  a bypass rather than a number displayed wrongly, and one that multiplies,
+  since `max_runs` reaches 100.
+- **Behaviour**: `POST /api/agents/{name}/loops` refuses `timeout_per_run > cap`
+  with **400** and a structured `detail`
+  (`error: "loop_timeout_exceeds_agent_cap"`, `agent_cap_seconds`,
+  `requested_seconds`) so a UI can show the real bound instead of guessing.
+  Equal to the cap is allowed.
+- **Refuse, not clamp** — mirroring #929 for schedules, the closest sibling
+  (explicit, human-set config). ent#458 puts these guardrails on screen *before*
+  Start, so a silent clamp would begin a loop whose bounds differ from the ones
+  the user was shown. Reminders (§10.14, #1296) clamp instead, deliberately: there
+  the timeout comes from an agent's own mid-turn request with no human reading a
+  form.
+- **Ordering**: the cap check runs **before** #1156's deadline comparison, so
+  that comparison can never quote a per-run timeout the caller is not allowed to
+  have. Pinned in `tests/unit/test_ent338_loop_timeout_cap.py`.
+- **Fail-open on an unreadable cap**: a settings-read failure skips the check
+  rather than blocking the loop. This is a resource ceiling, not a security
+  gate, and the pre-ent#338 behaviour was no check at all — so degrading to that
+  on a DB blip costs nothing that was not already true, while failing closed
+  would take loops down whenever the settings read did.
+
+### 38.7 Loops in the Workspace — run and watch from chat (ent#458)
+- **Status**: ✅ Implemented (AC #3 deferred — see below)
+- **Implements**: trinity-enterprise#458
+- **Description**: A workspace user starts, watches and stops loops from the
+  conversation they belong to. A collapsed strip above the composer stays quiet
+  until an agent in this chat is looping, then shows each participating agent's
+  active loops, how much of each guardrail is left, and a Stop that is always
+  available.
+- **No new backend surface.** ent#458 scopes this to the **platform-authenticated
+  door** (ent#78's auth-path invariant), so the panel calls the existing operator
+  loop endpoints with the operator's own JWT. An external client holding a portal
+  token never mounts it — hidden, not disabled, because a disabled control
+  advertises a capability that credential can never satisfy.
+- **Guardrails are visible before Start** (AC #1): the form shows the run limit
+  and cost budget as fields, and states the self-stopping defaults it does not
+  ask about (`no_progress_threshold`, `max_consecutive_failures`). Those values
+  mirror `models.StartLoopRequest` and are **pinned against it** by
+  `portalLoops.spec.js`, since they are cross-language and cannot be imported.
+  `max_runs` is deliberately excluded from that mirror: it is REQUIRED on the
+  server, so the form's `10` is a suggestion, and pinning it as a "default"
+  would enshrine a fiction.
+- **Honest terminal words** (AC #3's vocabulary, applied to the live panel):
+  `stop_reason` is never flattened to "Stopped" — cost budget, time limit,
+  no-progress, agent-reported-done, user-stopped and max-runs-reached are six
+  different situations with six different next actions, and `max_runs_reached`
+  reads as **Done** rather than "Stopped" on both the completed and stopped rows.
+- **Headroom reports `null` for a guardrail that was never set**, never 0% or
+  100%: "no budget" and "budget untouched" are different facts and a bar drawn
+  at either extreme asserts the wrong one. An overshoot clamps to the end of the
+  track, because the runtime lets the current run finish and cost can legitimately
+  exceed its budget (§38.3).
+- **Live, degrading to poll** (AC #4): loop events are already broadcast
+  fleet-wide and the Workspace runs inside the same app shell, so the existing
+  global WebSocket carries them — the one handler now routes each event to
+  **two** stores, the operator one filtered to the agent on Agent Detail and the
+  workspace one filtered to the chat's participants (the `reportsStore` +
+  `fleetReportsStore` shape, #918). A 12s backstop poll runs **only while
+  something is active**, so an idle tab issues no traffic, and an unknown status
+  is treated as NOT active so the panel can never sit claiming work is in flight
+  forever.
+- **Partial failure keeps the data**: one unreachable agent in a room degrades to
+  "this list may be incomplete" rather than blanking the panel (#2382's rule).
+- **State**: `stores/portalLoops.js`, participant-scoped — deliberately a second
+  store rather than a reuse of the agent-at-a-time `stores/loops.js`, which the
+  operator panel owns; a shared singleton would have each surface clearing the
+  other's list on navigation (the `skillsLibrary` vs `skills` split, ent#263).
+- **AC #3 (loop history)** landed with ent#525: a loop run is one execution
+  kind (`loop`) in the rail's Work tab — *Now* and *Earlier* — and there is
+  no parallel surface (core-agent §5.21).
+
+
+### 10.18 A schedule can deliver its output into a Workspace conversation (trinity-enterprise#498)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: SCHEDULE_WORKSPACE_DELIVERY
+- **GitHub Issue**: abilityai/trinity-enterprise#498
+- **Journey**: J11 — *a companion's brief reaches me where I already work, without
+  me asking* (`tests/journeys/catalog.yaml`, harness abilityai/trinity#2565)
+- **Description**: `agent_schedules` gains one nullable column,
+  `deliver_to_workspace_email`. When set and the schedule fires, the execution's
+  output lands as a new turn in that person's **Main** Workspace chat with the
+  agent (§5.23). Absent → today's behaviour, byte-for-byte. **API and MCP only
+  this cut**: no schedule-form toggle.
+- **Why this is the most visible piece of Tandem.** A role companion's daily
+  brief is a scheduled playbook call whose output has to reach one primary human
+  where they already work. Until now every scheduled run terminated in an
+  execution row — the operator's surface — and a person who is not the operator
+  never saw it.
+- **Almost all of it already existed.** `channel_completion_report` has resolved,
+  persisted and effect-guarded a portal-bound completion since ent#457, and
+  `report_completion` is trigger-agnostic: `schedule` is deliberately **not** in
+  `INLINE_CHANNEL_TRIGGERS`, because a scheduled run has no surface that already
+  answered. What was missing was only that a scheduled execution row never
+  carried `source_channel='portal'`.
+- **The stamp is written backend-side, and that is forced.** The scheduler
+  creates the execution row itself and always sends `execution_id`, so
+  `execute_task`'s channel-persisting branch (`if not execution_id:`) can never
+  run for a cron fire — passing the columns as kwargs would be silently inert
+  (the #2426 class). The scheduler is also a separate process that cannot import
+  the portal package, so it cannot resolve *which* session. So the scheduler
+  carries the **email**, and `POST /api/internal/execute-task` resolves the Main
+  session and stamps the pre-created row **before** dispatch.
+- **The destination is Main** (ruled 2026-09-06, decision 6b), reached through
+  `client_portal.service.ensure_main_session` — the same landing rule an
+  agent-initiated message and an ask outside a chat already use, so a brief is
+  not a fourth thing that decides where to land. An explicit session id still
+  wins wherever one exists.
+- **Access is checked against where the message will land**, not against a
+  broader notion of permission: `agent_on_roster(agent, email, include_owned=True)`
+  — the Workspace's own roster (shared ∪ owned). `email_has_agent_access` was
+  rejected because it admits any admin, and an admin who neither owns the agent
+  nor is shared it cannot open that thread, so a brief delivered there would be
+  invisible. A blocked client (`is_client_blocked`) is refused for the same
+  reason.
+- **Addressing someone else needs ownership** (review finding). Schedule creation
+  is `assert_agent_access` — owner OR shared OR admin — so without a gate any user
+  merely shared on an agent could schedule a recurring message, with a prompt of
+  their choosing, into a colleague's Main chat, where it renders as an ordinary
+  turn from the agent (`ensure_main_session` creates the thread if absent).
+  ent#457's "a portal session belongs to exactly one client, so there is no third
+  party for an `allow_proactive` bit to protect" does NOT carry over: here the
+  schedule's author need not be its recipient. The rule is *address yourself
+  freely, address anyone else only as the owner* — which leaves the common
+  self-service case open to a shared user. Enforced on **both** the create and the
+  update path (create-only would be a formality) and fail-closed on an unreadable
+  ownership read.
+- **A bad target is a visible failure, never a silent no-op** (AC 5). An unknown
+  address, a revoked share or a blocked client **refuses the dispatch** and
+  writes a FAILED terminal on the pre-created row naming the reason
+  (`workspace_delivery_target_unreachable`). Running the turn anyway would spend
+  the tokens and put the answer somewhere nobody can read; failing before the
+  spend is both cheaper and louder.
+- **At-most-once per fire is inherited, not rebuilt.** `report_completion`'s
+  `effect_guard` is keyed on the execution id, and a fire is one execution — so a
+  re-delivered fire posts once by construction (#1083's rule).
+- **Never interleaved with an in-flight turn** (C9). The portal delivery leg
+  waits, bounded, on the ent#286 in-flight marker for that session before writing,
+  then writes regardless — the report is never dropped, only deferred. This
+  narrows the pre-existing ent#457 ambiguity (`PortalConversation` detects a reply
+  by an assistant-row count delta, so a row landing mid-turn can be read as that
+  turn's answer) for every portal report, not only scheduled ones. The complete
+  fix needs a per-row discriminator `enterprise_portal_messages` does not carry.
+- **Delivery is durable, not live-pushed.** The Workspace does not poll thread
+  history, so the brief appears on the next load or thread switch — acceptable at
+  daily cadence, and stated rather than implied.
+- **Rateable like any agent message** (#366) by construction: it is an ordinary
+  `assistant` row in that session, so ent#366's visibility rule already admits it.
+- **Not this issue**: rooms as a destination and agent-initiated `post_to_room`
+  (both trinity-enterprise#442), and a schedule-form toggle.
+- **Flow**: `docs/memory/feature-flows/schedule-workspace-delivery.md`

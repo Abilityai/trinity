@@ -134,7 +134,9 @@ describe("#2759 create_agent_schedule carries the validation config", () => {
     // is buying one extra execution per successful run, and the schema is
     // the only place they will read that.
     const { tools } = makeTools();
-    const described = JSON.stringify(tools.createAgentSchedule.parameters.shape.validation_enabled);
+    // Read the description through the accessor, not JSON.stringify: zod 4
+    // (dev) no longer serialises `description` into the schema JSON.
+    const described = tools.createAgentSchedule.parameters.shape.validation_enabled.description ?? "";
 
     assert.match(described, /execution/i);
     assert.match(described, /not retry|does NOT retry/i);

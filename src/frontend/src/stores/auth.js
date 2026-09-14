@@ -51,6 +51,23 @@ export const useAuthStore = defineStore('auth', {
       return this.user?.picture || null
     },
 
+    // trinity-enterprise#413: the identity that is available SYNCHRONOUSLY
+    // from the stored token on every login path. The JWT `sub` IS the
+    // username (routers/auth.py mints `{"sub": user["username"]}` for admin,
+    // email and post-2FA logins, and dependencies.get_current_user resolves
+    // the principal from it). `user.username` is NOT safe for this: the admin
+    // seed has no `username` until `/api/users/me` lands, SSO/MFA seeds `null`,
+    // and that fetch is swallowed on failure. Used to namespace per-user
+    // browser caches so two users of one browser never read each other's.
+    principalId() {
+      if (!this.token) return null
+      try {
+        return this.parseJwtPayload(this.token)?.sub || null
+      } catch {
+        return null
+      }
+    },
+
     // ROLE-001: 4-tier hierarchy user < operator < creator < admin.
     // Returns 'user' as the conservative fallback for callers that read
     // role before the /api/users/me response has landed.
@@ -194,6 +211,14 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
+    // Bind a sign-in email to the current account (#82 / #2381), then re-read
+    // the profile so `userEmail` — and every predicate reading it — updates in
+    // place. Throws on failure; the caller owns the InlineError (ent#581).
+    async setOwnEmail(email) {
+      await axios.put('/api/users/me/email', { email }, { headers: this.authHeader })
+      await this.fetchUserProfile()
+    },
+
     // Login with username/password (for admin login)
     async loginWithCredentials(username, password) {
       try {
@@ -202,12 +227,6 @@ export const useAuthStore = defineStore('auth', {
         formData.append('password', password)
 
         const response = await axios.post('/api/token', formData)
-
-        // Enterprise 2FA (#5): a second factor is required — defer the token.
-        if (response.data?.mfa_required) {
-          this._setMfaChallenge(response.data)
-          return false
-        }
 
         // Create a dev user profile
         const devUser = {
@@ -221,6 +240,17 @@ export const useAuthStore = defineStore('auth', {
         console.log('🔐 Admin login: authenticated as', username)
         return true
       } catch (error) {
+        // Enterprise 2FA (#5): a second factor is required — defer the token.
+        // #2322 moved this from a 200 body to a 403: a password grant that
+        // issued no session is an error for the grant, so the challenge now
+        // arrives on the error path. Branch on the boolean, never on `detail`.
+        // 403 (not 401) is deliberate — the global axios 401 interceptor in
+        // main.js logs out and redirects, which is wrong for a login that is
+        // still in flight.
+        if (error.response?.status === 403 && error.response?.data?.mfa_required) {
+          this._setMfaChallenge(error.response.data)
+          return false
+        }
         console.error('Admin login failed:', error)
         const detail = error.response?.data?.detail || 'Invalid username or password'
         this.authError = detail

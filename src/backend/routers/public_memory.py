@@ -1,3 +1,4 @@
+# mcp: memory.ts (write_user_memory)
 """
 Public User Memory Router (MEM-001 write path).
 

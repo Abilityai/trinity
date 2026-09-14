@@ -31,6 +31,163 @@ cp .env.example .env
 # API Docs: http://localhost:8000/docs
 ```
 
+## Which compose files go together (#2528)
+
+Trinity ships **three complete stacks**, not one base file plus overlays.
+`docker-compose.prod.yml` and `docker-compose.hosted.yml` are standalone: each
+restates the hardening (`security_opt`, `group_add`, `cap_drop`) because nothing
+else supplies it. The supported file sets are exactly these, and CI renders every
+one of them (`container-security.yml` → `verify-compose-file-sets`):
+
+| Install | Command | Where `/data` lives |
+|---|---|---|
+| Dev (source build, localhost) | `./scripts/deploy/start.sh` — i.e. `docker compose up -d` (auto-merges `docker-compose.override.yml` if present) | named volume `trinity-data` |
+| Production (source build) | `docker compose -f docker-compose.prod.yml up -d` (+ `-f docker-compose.prod.enterprise.yml` with the enterprise submodule) | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
+| Hosted (prebuilt GHCR images) | `./scripts/deploy/start.sh --hosted` — day-two: `docker compose -f docker-compose.hosted.yml …` | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
+
+**Never stack the dev file under prod or hosted** (`-f docker-compose.yml -f
+docker-compose.prod.yml`). Compose merges list-type keys by concatenation, so the
+combination either fails validation on the duplicated hardening entries (Compose
+≥ 2.24) or, on older versions, silently gives the frontend two host mappings for
+one port and it never joins its network. The "duplicates" are not the bug — the
+stack is.
+
+**Never run a bare `docker compose up -d` on a production host.** It loads the
+dev file, whose `/data` is the named volume, and boots a healthy-looking backend
+on an empty database while the real one sits untouched in `TRINITY_DATA_PATH`.
+`start.sh` refuses this crossing and names the file set the host was installed
+with; `quickstart.sh` is now an alias for `start.sh`, so it inherits the refusal.
+If both stores already exist (the state a wrong-file start leaves behind),
+`start.sh` warns which one it is about to use rather than staying silent.
+
+## Installing on a server — use the pull-only path (#2280)
+
+**On a server, `--hosted` is the default you want.** The Quick Start above builds
+every image from source, and the agent base image alone (Python + Node + Go +
+Claude Code, ~1.9 GB) takes 5-10 minutes and wants more RAM than a small VM has
+spare. Hosted mode pulls prebuilt images from GHCR instead, so a fresh VM is
+serving in roughly two minutes:
+
+```bash
+git clone https://github.com/abilityai/trinity.git && cd trinity
+cp .env.example .env          # set ADMIN_PASSWORD, ANTHROPIC_API_KEY, ...
+
+# Pin the release you want, in .env — `latest` moves on every Trinity release,
+# so an unpinned install turns your next upgrade into an unscheduled one.
+# Each release publishes v0.9.0, 0.9.0, 0.9, latest and sha-<short> for the
+# same digest, so either version spelling works.
+echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env
+
+./scripts/deploy/start.sh --hosted --unattended
+```
+
+`start.sh` reads `TRINITY_IMAGE_TAG` from `.env` (an explicit shell or CI value
+wins over it). Put it in the file rather than the environment: `.env` is where
+the pin survives a reboot, an unattended re-run, and whoever runs the upgrade
+next.
+
+This is the same script, the same `.env` contract and the same
+`ADMIN_PASSWORD` behaviour as a source install — only the image source differs.
+`--hosted` selects [`docker-compose.hosted.yml`](../docker-compose.hosted.yml),
+which is `docker-compose.prod.yml` with the `build:` blocks replaced by GHCR
+`image:` references and nothing else changed (a CI guard,
+`tests/unit/test_2280_hosted_compose_parity.py`, fails the build if the two ever
+disagree on a service, port, volume, network or environment variable).
+
+If a pull fails with `denied` or `unauthorized` rather than `manifest unknown`,
+the tag exists but its GHCR package is not public. That is a publishing fault,
+not a local one — the release workflow verifies anonymous pullability for every
+image it pushes (`Verify anonymous pull` in
+[`publish-images.yml`](../.github/workflows/publish-images.yml)), so a red step
+there is the signal; report it rather than working around it with a login.
+
+**Minimum size: 8 GB RAM.** Below that the agent containers and the platform
+services contend and turns start failing under load.
+
+**Converting an existing source install in place is not a drop-in.** The dev
+stack keeps `/data` in the named volume `trinity-data`; hosted (like prod) binds
+`${TRINITY_DATA_PATH:-./trinity-data}`. They are different stores, so `--hosted`
+in a checkout that has been running `docker-compose.yml` would come up on an
+empty database and migrate from zero while the real one sat in the volume —
+with Redis, which the two stacks share, not reset. `start.sh --hosted` detects
+this and refuses with the copy command rather than starting; run that, then
+re-run.
+
+**Run `start.sh --hosted` to upgrade, not a bare `docker compose pull`.** The
+agent base image is not a compose service — the backend creates agent containers
+through the Docker SDK from the local tag `trinity-agent-base:latest` — so the
+script pulls it and retags it separately. A plain `docker compose -f
+docker-compose.hosted.yml pull` updates the four platform images and silently
+leaves every agent on the old runtime.
+
+Useful commands on a hosted install (note the explicit `-f` — hosted opts out of
+compose's default file merge):
+
+```bash
+docker compose -f docker-compose.hosted.yml logs -f backend
+docker compose -f docker-compose.hosted.yml stop     # 'stop', never 'down'
+```
+
+### The shape you are building toward
+
+![Trinity deployment topology — one host, VPN-private access, tunnel-published public endpoints, agents isolated from the data plane](assets/trinity-deployment-topology.webp)
+
+One host runs everything as Docker containers on two isolated bridge networks —
+agents have no route to Redis or the platform database. Operators reach the full
+UI + API over your VPN (Tailscale recommended); public users and channel
+webhooks reach only the routes you publish through an outbound tunnel, so the
+host opens no inbound ports. The table below is how you pick that public edge.
+
+### TLS on a bare VM
+
+Trinity serves plain HTTP and terminates TLS **outside** the application. There
+is no HTTPS listener in the compose file and no auto-certificate step, so pick
+one of these before putting an instance on a public address:
+
+| Path | What it gives you | When to use it |
+|---|---|---|
+| **Tunnel** (Cloudflare Tunnel — set `TUNNEL_TOKEN` in `.env`) | HTTPS at a real hostname, no inbound ports open at all | The default for a public instance. Nothing to renew. |
+| **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport, instance not on the public internet | What the managed fleet runs. HTTP over a WireGuard tunnel is encrypted — this is a finished posture, not a compromise. |
+| **Reverse proxy you run** (Caddy / nginx + Let's Encrypt) | HTTPS at your own domain | You already operate a proxy, or you need a domain the tunnel can't serve. |
+
+Plain HTTP on a public IPv4 with none of the above is the one combination to
+avoid: credentials and JWTs cross the network in the clear.
+
+The `cloudflared` service is **profile-gated** (`profiles: ["tunnel"]`), so it
+does not start just because `TUNNEL_TOKEN` is set. `start.sh --hosted` activates
+the profile for you when the token is present; any other invocation needs it
+passed explicitly:
+
+```bash
+docker compose -f docker-compose.hosted.yml --profile tunnel up -d
+# or: COMPOSE_PROFILES=tunnel docker compose -f docker-compose.hosted.yml up -d
+```
+
+Check it actually came up — `docker ps | grep cloudflared`. A missing tunnel
+container is silent, and leaves the instance in exactly the plain-HTTP state
+this table says to avoid.
+
+A provisioned DigitalOcean droplet — the Marketplace image (#2281) or one created
+by `scripts/deploy/trinity-do-create.sh`, both through `start.sh --provision` — is
+a special case: it comes up on a bare public IP with no domain, which is why
+provisioning installs Caddy with Let's Encrypt's short-lived IP certificates, and
+why Trinity's first-run overlay carries a **Secure this instance** step there
+(#2380, ent#581) prompting for a real domain, then a Cloudflare Tunnel. That step
+is gated on install provenance and never appears on an install like this one. A
+Marketplace droplet also boots with **no admin account**: the first person to
+open it in a browser creates one at `/setup` (ent#580) — see Security
+Recommendations below for what that means before you open it. A
+`trinity-do-create.sh` droplet does not: the installer asks for the admin
+password before it creates the droplet.
+
+Provenance is written by whatever provisions the box (in this repo,
+`start.sh --provision`) — `TRINITY_INSTALL_SOURCE` in
+`.env` (`do-marketplace` / `vultr-marketplace` / `do-script` / `script`), read once
+at first boot and recorded permanently. Setting it by hand afterwards does nothing: the
+recorder never overwrites an existing value and the API refuses to write or
+clear it, because a gate that can be self-asserted is not a gate. Leave it unset
+on an ordinary install — the guide then renders nowhere, which is the intent.
+
 ## Configuration
 
 > **Database backend:** Trinity uses **SQLite by default** (zero-config). To run
@@ -241,16 +398,69 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
 
 ## Security Recommendations
 
-1. **Protect the first-run setup window** — first-time setup (`/setup` → create the
-   admin account) is **unauthenticated by design** so it works on a fresh install,
-   and it carries **no setup token** (removed in trinity-enterprise#49 to keep
-   self-hosted bring-up frictionless). The endpoint self-disables the moment the
-   admin account is created, but until then **anyone who can reach the URL can
-   claim the admin account**. On an instance reachable by anyone other than you
-   before setup completes (a public IP, a shared network), **keep it behind a
-   tunnel/VPN or otherwise network-restricted until you have created the admin
-   account.** On localhost / a trusted LAN this is a non-issue. After setup, login
-   is fully authenticated and the window is closed.
+1. **Set `ADMIN_PASSWORD` before first boot — that is what closes the setup window.**
+   First-time setup (`/setup` → create the admin account) is **unauthenticated by
+   design** so it works on an install that has no admin yet, and it carries **no
+   setup token** (removed in trinity-enterprise#49 to keep self-hosted bring-up
+   frictionless).
+
+   Since #2381 the endpoint refuses whenever a usable admin account already
+   exists — not merely once setup has been "completed", which on a fresh install
+   was a flag that said `false` while a real admin sat in the database. So an
+   install that boots with `ADMIN_PASSWORD` set is **never** in the vulnerable
+   window: the admin is provisioned during startup and the endpoint is closed
+   before the first request is served. `scripts/deploy/start.sh` refuses to run
+   without one (auto-generating it under `--unattended`), so following it is
+   sufficient. `docker-compose.prod.yml` refuses to render with `ADMIN_PASSWORD`
+   unset **or** blank. `docker-compose.hosted.yml` alone refuses only an
+   **unset** one and renders an **explicitly blank** one (`ADMIN_PASSWORD=`, as
+   `.env.example` ships it) — that is the marketplace claim path below, which
+   `start.sh --hosted` marks with `ADMIN_PASSWORD_SOURCE=browser`. Without that
+   marker the hosted file passes `ADMIN_PASSWORD_SOURCE=unset` and `/setup`
+   refuses to create an admin, so a hand-run hosted stack with a blank password
+   is not claimable either: set the password in `.env` and restart.
+
+   The window is still open on an install with **no** admin — a blank
+   `ADMIN_PASSWORD`, or a hand-rolled backend — because there the wizard is the
+   only way in. Until you create that account, **anyone who can reach the URL can
+   claim it.** On such an instance reachable by anyone other than you (a public
+   IP, a shared network), keep it behind a **tunnel/VPN or otherwise
+   network-restricted** until you have created the admin account. On localhost /
+   a trusted LAN this is a non-issue. After setup, login is fully authenticated
+   and the window is closed.
+
+   **Marketplace one-click droplets are claimed in the browser — an accepted
+   risk.** DigitalOcean's 1-Click create page has no input form, so a droplet
+   created without a password boots with **no admin account**, and the first
+   person to open `https://<droplet-ip>` creates it — email, password,
+   product-updates consent — without ever opening a terminal (ent#580). Between
+   creating the droplet and that first visit, **anyone who finds its IP can claim
+   it instead.** This was accepted on 2026-09-10: the window is the operator's
+   responsibility, the instance holds nothing at that moment, and a squatted
+   droplet can simply be destroyed and recreated. To keep the window short:
+
+   - open the droplet's URL right after creating it (first boot takes about
+     ninety seconds) and create the admin account straight away; or
+   - until you have claimed it, restrict port 443 to your own IP with a cloud
+     firewall. Leave port 80 open: Let's Encrypt validates the droplet's IP
+     certificate over it, and it serves nothing but a redirect to HTTPS; or
+   - supply the password at create time instead — `#cloud-config` `write_files`
+     to `/etc/trinity/admin-password`, see
+     [`packer/digitalocean/README.md`](../packer/digitalocean/README.md). That
+     droplet boots with the admin already provisioned and never shows the
+     wizard.
+
+   If a droplet you have never opened sends you to the login page rather than
+   the "create your admin account" screen, someone else got there first:
+   destroy it and create another. On a claimed droplet `.env` keeps
+   `ADMIN_PASSWORD` blank on purpose — the password lives only in the database,
+   and reboots and `start.sh --hosted` updates leave it alone. Forgotten it?
+   Set `ADMIN_PASSWORD` in `/opt/trinity/.env` and re-run `start.sh --hosted`;
+   the backend adopts it on the next boot.
+
+   Note the corollary: after a provisioned first boot there is no wizard, so
+   binding an admin **sign-in email** is a post-login step in
+   Settings → General — the dashboard prompts for it.
 2. **Never expose Redis externally** - Keep it internal only
 3. **Use strong SECRET_KEY** - Generate with `openssl rand -hex 32`
 4. **Use email whitelist** - Restrict access to approved email addresses only

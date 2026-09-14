@@ -11,9 +11,15 @@
       </div>
 
       <!-- Loading State (detecting mode or authenticating) -->
-      <div v-if="isLoading" class="text-center">
-        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-        <p class="mt-4 text-gray-600 dark:text-gray-400">{{ loadingMessage }}</p>
+      <!-- #1921: shaped like the sign-in form it becomes, so the card keeps one
+           footprint while the auth mode is detected. `loadingMessage` stays — it
+           is what distinguishes "working out how you sign in" from
+           "authenticating", which a placeholder alone cannot say. -->
+      <div v-if="isLoading" class="mt-8 space-y-4" aria-busy="true">
+        <div class="h-10 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+        <div class="h-10 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+        <div class="h-10 w-1/2 mx-auto rounded bg-gray-200 dark:bg-gray-800 animate-pulse motion-reduce:animate-none"></div>
+        <p class="text-center text-gray-600 dark:text-gray-400">{{ loadingMessage }}</p>
       </div>
 
       <!-- Two-Factor step (#5) — shown after the first factor when 2FA is required -->

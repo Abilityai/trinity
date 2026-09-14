@@ -311,7 +311,13 @@ class TestBulkCloseOpenActivities:
         for act_id in ("a1", "a2", "b1"):
             row = _fetch_activity(act_id)
             assert row["activity_state"] == "failed"
-            assert row["duration_ms"] is not None
+            # #2434 (was `is not None`): this bulk closer FABRICATES the end
+            # time — the execution's terminal writer knows when the work
+            # stopped, this sweep does not. The fabricated value was the
+            # ~120-minute-failure fiction #1804 already named, and past 24.8
+            # days it overflowed the int4 column and rolled back the whole
+            # batch. A duration nobody measured is now NULL.
+            assert row["duration_ms"] is None
             assert row["error"] == "marked failed by cleanup sweep"
         assert _fetch_activity("untouched")["activity_state"] == "started"
 

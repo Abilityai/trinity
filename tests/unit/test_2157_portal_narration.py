@@ -291,22 +291,86 @@ async def test_channel_turn_still_delivers():
 # ---------------------------------------------------------------------------
 
 def test_portal_source_channel_is_not_a_messaging_channel():
-    """It must never resolve as a delivery destination — the completion-report
-    resolver map and the voice service's supported set both have to miss it."""
+    """The portal is not a messaging transport — no bot, no outbound leg, so the
+    voice service must miss it. That half of #2157 is permanent: there is
+    nothing to speak *through*, which is why `send_voice_reply` answers
+    `portal_client_narrated` there.
+
+    **The completion-report half is superseded by ent#457** (operator ruling
+    2026-08-22, committed to the release cut). It asserted that portal must miss
+    `_CHANNEL_RESOLVERS` too, and that was true *because a portal row carried no
+    destination* — #2157 stamped the surface and nothing else, so every portal
+    terminal died at `report_completion`'s `if not source_channel_chat_id` gate.
+    ent#457 gives the row its session id and makes reporting back a platform
+    contract, so the Workspace is now a legitimate report destination.
+
+    What "not a messaging channel" still means, and is asserted below: the portal
+    has no outbound transport and no bot token. Its report is a persisted
+    assistant message in the same history the client already reads, which is why
+    it needs no consent flag — there is no third party.
+
+    It is also not pushed, and NOT polled. An earlier version of this docstring
+    said the client reads it "on the next poll" and that AC #7's "degrades to
+    poll" is the mode it has. Neither is true: `PortalConversation.vue` loads
+    history on mount and on a prop change, `stores/clientPortal.js` states that
+    `refreshThreads()` is event-driven rather than periodic, and the Workspace's
+    only interval is the 20s asks poll, which fetches asks alone. The row is
+    durable and arrives at the client's next reload or thread switch. Said here
+    because a sentence in a test docstring reads as VERIFIED rather than as
+    claimed, and a green suite beside a false one is what makes the gap
+    permanent."""
     import services.voice_reply_service as vrs
-    from services.channel_completion_report import _CHANNEL_RESOLVERS
+    from services.channel_completion_report import _CHANNEL_RESOLVERS, INLINE_CHANNEL_TRIGGERS
 
     assert config.PORTAL_SOURCE_CHANNEL not in vrs._SUPPORTED_CHANNELS
-    assert config.PORTAL_SOURCE_CHANNEL not in _CHANNEL_RESOLVERS
+
+    # ent#457: it IS a completion destination now...
+    assert config.PORTAL_SOURCE_CHANNEL in _CHANNEL_RESOLVERS
+    # ...and the turn's own execution still must not be reported, or every chat
+    # message would gain a duplicate "done" — the #2157 surface stamp is what
+    # makes that discrimination possible in the first place.
+    assert "public" in INLINE_CHANNEL_TRIGGERS
 
 
 def test_portal_stamps_the_surface_on_its_executions():
-    """Both creation sites — the pre-created streaming row (ent#286) and the turn
-    itself — carry the stamp; a stamp on only one leaves half the turns unanswerable."""
+    """EVERY creation site carries the stamp; one without it leaves that slice of
+    turns unanswerable.
+
+    Three since the ent#365 review: the pre-created streaming row (ent#286), the
+    turn itself, and the pre-created SYNCHRONOUS row — that third one exists so
+    `mark_turn_inflight` has an id on the `/chat` path, which is what lets an
+    addressed report find its chat there. Asserted as "every site", not as a
+    count, so adding a fourth is a decision rather than a broken test.
+    """
+    import ast
     import inspect
     svc = _portal_service()
     source = inspect.getsource(svc)
-    assert source.count("source_channel=PORTAL_SOURCE_CHANNEL") == 2
+
+    # Per SITE, not by count (ent#365 review). This was
+    # `count("source_channel=...") == creates + 1`, where the `+ 1` stood for the
+    # turn's own dispatch stamp — so a SECOND dispatch-site stamp would have
+    # broken it for a reason that has nothing to do with what it tests. Walking
+    # the calls asserts the actual rule: every row this module creates carries
+    # the portal stamp, however many other stamps exist elsewhere.
+    creation_sites = [
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "create_task_execution"
+    ]
+    assert len(creation_sites) >= 2, (
+        "expected the streaming, synchronous and turn creation sites"
+    )
+    unstamped = [
+        site.lineno for site in creation_sites
+        if not any(kw.arg == "source_channel" for kw in site.keywords)
+    ]
+    assert not unstamped, (
+        f"create_task_execution sites without a source_channel stamp: {unstamped}. "
+        f"An unstamped portal row cannot be joined back to its chat, which is "
+        f"what makes an addressed report unanswerable."
+    )
     assert svc.PORTAL_SOURCE_CHANNEL == config.PORTAL_SOURCE_CHANNEL
 
 
@@ -318,7 +382,12 @@ def _card(*, tts_ready=True, enabled=True, voice_id="own", default_voice="plat")
     svc = _portal_service()
     row = {"agent_name": "agent-x", "tts_voice_id": voice_id,
            "tts_voice_replies_enabled": 1 if enabled else 0}
-    return svc._row_to_card(row, tts_ready, default_voice)
+    # ent#403 made `is_platform` / `runtime` / `model_context` keyword-only with
+    # NO default — a default would let a call site silently serve the wrong
+    # card. This file is about the voice bits, so it passes the neutral values.
+    return svc._row_to_card(row, tts_ready, default_voice,
+                            is_platform=False, runtime="claude-code",
+                            model_context=svc._model_context())
 
 
 def test_card_voice_available_falls_back_to_platform_default():

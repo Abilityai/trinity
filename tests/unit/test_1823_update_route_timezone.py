@@ -142,7 +142,7 @@ def _wire(monkeypatch, router, stored: _StoredSchedule):
 
 
 def _put(router, updates):
-    user = types.SimpleNamespace(username="owner", role="user", connector_agent=None)
+    user = types.SimpleNamespace(username="owner", role="user", connector_agent=None, mcp_scope=None)
     return asyncio.run(
         router.update_schedule(
             name="alice", schedule_id="sched-1", updates=updates, current_user=user,

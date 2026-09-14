@@ -88,4 +88,176 @@
 - **Writes** reuse the existing owner-gated inject path — no new write surface.
 - **Flow**: [`feature-flows/guided-credential-setup.md`](../feature-flows/guided-credential-setup.md)
 
+### 3.7 Credential Vault — Public Surfaces (ent#279)
+- **Status**: OSS-visible half shipped (MCP proxy tools + runtime secret-scrub
+  seam + a gated Settings tab). The vault control plane and the agent-facing
+  fetch are an **entitlement-gated module in the private submodule** — absent
+  (404) on an OSS or unentitled build. This entry documents only the public
+  half; the paid module's schema and internals are not in this repo.
+- **Description**: a governed platform credential vault lets an admin store
+  named, encrypted credentials and grant them per agent, so an agent can obtain
+  a **shared** secret **by name at runtime** instead of every agent carrying its
+  own injected copy. **Additive to CRED-002** — the file-injection path (§3.1–3.6)
+  is untouched.
+- **MCP proxy tools (license-blind, Invariant #13)**: `list_available_credentials`
+  and `fetch_credential({name, execution_id?})` are public MCP tools that proxy
+  to the entitlement-gated backend routes. On an OSS or unentitled build the
+  routes are absent, so the tools **degrade** rather than throw:
+  `list_available_credentials` returns the `enabled:false` shape (mirrors
+  `list_runnable_skills`), `fetch_credential` returns a `{success:false, error, …}`
+  flag shape (mirrors `call_a2a_agent`), each branching on the response body so
+  the three cases stay distinct — `agent_key_required` (call it from an agent
+  context) ≠ not-licensed ≠ not-available-on-this-build — and a human operator on
+  a user-scoped key is never told an entitled feature "doesn't exist".
+- **Entitlement-gate shape**: the control plane and the fetch surface sit behind
+  the generic `requires_entitlement("credential_vault")` seam (see §Enterprise
+  Modules in [architecture.md](../architecture.md)); `credential_vault` surfaces
+  in `enterprise_features` only on an entitled build. The MCP tools ship in the
+  OSS bundle regardless — they are the public proxy.
+- **Runtime secret-scrub seam** (`services/runtime_secret_scrub.py`): a fetched
+  credential reaches the agent as a plaintext MCP tool result **by design**, but
+  its live value must not survive verbatim into any durable backend sink (the
+  transcript, the exec-log, or an idempotency response-snapshot replayed for
+  24h). A generic OSS mechanism closes that: a producer **stages** the value by
+  identity (fail **closed** — an unstageable value refuses delivery), and the
+  execution-terminal persistence chokepoints **scrub** every staged value out of
+  the persisted output (marker `***REDACTED***`, three renditions, longest-first)
+  **before** the row is written. The scrub side fails **open** — the terminal
+  must persist, and the pattern-based `utils/credential_sanitizer` still runs.
+  Global 24h-TTL Redis store holding only encrypted envelopes; behaviour-neutral
+  when nothing is staged. Residuals (in-container `~/.claude/projects/*.jsonl`
+  holds tool results verbatim; the 24h window; encodings beyond the three
+  renditions) are stated in the flow doc.
+- **Vue gating**: a Settings **Vault** tab is gated `requires:'credential_vault'`
+  and renders only on an entitled build; the backend admin gate is the real
+  boundary (an entitled non-admin sees the tab and gets a named admin-required
+  state, matching the SSO-panel precedent).
+- **Flow**: [`feature-flows/runtime-secret-scrub.md`](../feature-flows/runtime-secret-scrub.md)
+
 ---
+
+### 3.7 Platform Credential Settings Encrypted at Rest (ent#435)
+- **Status**: ✅ Implemented
+- **Description**: The six `system_settings` rows that hold live third-party
+  credentials — `anthropic_api_key`, `github_pat`, `google_api_key`,
+  `slack_app_token`, `slack_client_secret`, `slack_signing_secret` — are
+  persisted as AES-256-GCM envelopes under `<key>_encrypted`, never in cleartext
+  (CWE-312). Closes the gap where Architectural Invariant #12's own table read as
+  though everything was covered while these six were readable by any DB dump,
+  backup, replica or snapshot **without** `CREDENTIAL_ENCRYPTION_KEY`.
+- **The key NAME moves, not only the value**: the cleartext row is DELETED. A
+  same-named key that may hold either form leaves "is this install encrypted?"
+  unanswerable by inspection, which is the reported defect rather than a
+  cosmetic detail; with the rename, `SELECT key FROM system_settings WHERE key
+  IN (…)` returning nothing is itself the verification.
+- **Sink guard**: `db.set_setting` raises `SecretSettingWriteError` (mapped to
+  422) for a registered secret key **or** any merely credential-*shaped* key
+  (`*_api_key` / `*_token` / `*_secret` / `*_pat` / `*_password` /
+  `*_credentials`). It lives at the sink because the generic
+  `PUT /api/settings/{key}` catch-all can address any key — the door #506,
+  #1609, ent#12, #1644, ent#14 and ent#346 each found open — and because
+  `system_settings` has more than one writer.
+- **Lazy migration on read**: resolution is encrypted → legacy-cleartext
+  (encrypted-and-deleted on sight) → env → `''`. A one-shot migration converts
+  what is on disk once; the read path is what makes cleartext *transient* rather
+  than merely absent, since a restored pre-fix backup or a direct DB write can
+  put it back. Steady state costs one read and zero writes.
+- **Fail direction is asymmetric on purpose**: fail-OPEN on read (an unreadable
+  envelope degrades to the env var, never a 500 on the agent-start path) but
+  never down to a stale legacy row, which would resurrect a replaced credential;
+  fail-CLOSED on write (no encryption key ⇒ refuse, never silently store
+  cleartext).
+- **Documented exemption**: `slack_client_id` stays a plain row — an OAuth
+  client_id is a public identifier emitted verbatim in the browser-visible
+  authorize URL (the `whatsapp_bindings.account_sid` "(public)" precedent). It is
+  recorded with its reason in `PUBLIC_CREDENTIAL_SHAPED_KEYS` so a later reader
+  can tell *reviewed* from *overlooked*.
+- **Dual-track** (Invariant #9): `secret_settings_encryption` (SQLite) + Alembic
+  `0041_secret_settings_encryption` (PostgreSQL — the backend the defect was
+  reported on). Both call one `plan_migration`, because the two drivers cannot
+  share SQL but must not disagree on policy. Hard-fails on a missing encryption
+  key only when there is something to encrypt, so a fresh install still boots.
+  `downgrade()` is a deliberate no-op: the honest inverse is "write these live
+  credentials back in cleartext".
+- **Rotation**: `scripts/deploy/rotate-credential-key.py` gains a row-keyed
+  `system_settings` pass, which also closes the pre-existing gap that left
+  `elevenlabs_api_key_encrypted` / `a2a_outbound_endpoints_encrypted` out of
+  every key rotation (an envelope-in-a-row is invisible to a column sweep).
+- **Operator follow-up**: encryption protects the DB going forward only —
+  historical backups still hold the plaintext, so the affected tokens must be
+  rotated. Runbook:
+  [`docs/migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md`](../../migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md).
+
+---
+
+### 3.8 Platform Keys in the First-Run Flow — No Terminal (ent#582)
+- **Status**: ✅ Implemented
+- **Description**: The first-run overlay (ent#581) configures every credential an
+  instance needs from the browser. The chassis owns the sequence; this entry owns
+  the two credential steps' content and validation and the backend they write
+  through. Every write goes through the same endpoints Settings → Integrations
+  uses — no parallel path.
+- **`claude` step (the only required step)**: two tabs — *Subscription token*
+  (`sk-ant-oat01-…`, from `claude setup-token` on the operator's own machine) and
+  *API key* (`sk-ant-api…`, created in the browser at console.anthropic.com, so
+  there is always a path with no terminal at all). The copy says plainly that
+  without a credential no agent can run. A credential is **validated before it is
+  accepted**: format client-side, then a live check (`POST /api/subscriptions/test`
+  — one `max_tokens=1` probe on the token, the #471 headroom probe's request;
+  `POST /api/settings/api-keys/anthropic/test`). The step emits `complete` only
+  after a validated save. An `sk-ant-oat` token pasted into the API-key tab is
+  refused client-side AND server-side with the spec's copy: *"That key was
+  rejected. API keys start with `sk-ant-api` — this one starts with `sk-ant-oat`,
+  which is a subscription token. Paste it on the Subscription token tab instead."*
+- **The first credential reaches the agents that already exist**: agents created
+  before any credential (the ent#124 seeded fleet, Cornelius, `trinity-system`)
+  were baked with no Claude auth — #74 auto-assign runs only at create and nothing
+  re-bakes a running container. So when a write makes the install go from *no
+  Claude credential* to *one* (`POST /api/subscriptions`,
+  `PUT /api/settings/api-keys/anthropic`), every agent that could not
+  authenticate is connected. Candidates are the DB agent rows (not the container
+  list, which reads empty on a Docker fault): Claude runtime, not ephemeral, no
+  subscription, `use_platform_api_key` on, and **no successful execution ever** —
+  a success proves the agent authenticates another way (its own `.env` key or a
+  terminal login) that a subscription would shadow (#2114). A subscription is
+  assigned to each; agents whose container is running are restarted in the
+  background so the new env is baked (an auth-mode change is a recreate), except
+  one with a **running execution** (left alone; it picks the credential up on its
+  next start) or whose env already carries it. Agents with `use_platform_api_key`
+  off are never touched; an install that already had a credential is never
+  touched. Both responses carry `connected_agents: int` — how many agents now use
+  it. Because first-run seeding runs in the background right after `/setup`, a
+  seed pass that created agents re-runs the same idempotent connect at its end, so
+  an agent whose create straddled the save is not left without a credential.
+  After this step the operator can reach a running execution with nothing else
+  configured.
+- **`claude_auth_configured`** (feature flags) is true for every credential the
+  step accepts — a platform API key (settings or env) OR any registered
+  subscription — resolved by one helper
+  (`subscription_service.is_claude_auth_configured`) that both the flag and the
+  first-credential check use. The chassis refreshes it with
+  `stores/sessions.js::loadFeatureFlags(true)`.
+- **`keys` step (optional, each skippable)**: GitHub PAT · email provider (Resend)
+  · Gemini. Each names where to get the key (provider link), links the Trinity
+  docs page, states the consequence of skipping (no email-code sign-in; no voice
+  and no generated agent avatars) and where to do it later (Settings →
+  Integrations, where every key stays manageable).
+- **Resend** (`PUT/DELETE /api/settings/api-keys/resend`, `POST …/resend/test`):
+  the key persists as `resend_api_key` (added to `SECRET_SETTING_KEYS`, so
+  AES-256-GCM under `resend_api_key_encrypted`); the "send from" address persists
+  as the plain setting `email_from_address`. Resolved per send: settings → env
+  (`RESEND_API_KEY`, `SMTP_FROM`). A Resend key **saved in Settings selects Resend
+  as the provider** — a fresh install's `.env` says `EMAIL_PROVIDER=console`, and
+  a key the env silently overrides would be a dead end. The live test lists the
+  account's domains and refuses a from-address whose domain Resend has not
+  verified (Resend rejects that send), naming the verified ones.
+- **Gemini** (`PUT/DELETE /api/settings/api-keys/gemini`, `POST …/gemini/test`):
+  persists through the existing ent#435 `google_api_key` secret (the platform
+  already coalesces `GOOGLE_API_KEY` into its Gemini key). Every platform Gemini
+  consumer (voice, Workspace/VoIP/Brain Orb voice, Telegram transcription, image
+  and avatar generation, the feature flags) resolves it at call time: encrypted
+  setting → `GEMINI_API_KEY` → `GOOGLE_API_KEY` env. No restart.
+- **Write gates**: every new endpoint is `assert_admin` (rejects agent principals
+  itself — never `require_role("admin")`); key values are never logged or echoed
+  (masked reads, audit rows record set/cleared only). No schema change —
+  `system_settings` rows only.
