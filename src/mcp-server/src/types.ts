@@ -202,6 +202,12 @@ export interface Schedule {
   timeout_seconds: number;
   allowed_tools?: string[];
   model?: string;
+  // Validation configuration (VALIDATE-001). The backend has returned these
+  // on every read since the feature landed; they were missing from the write
+  // surface only. #2759
+  validation_enabled?: boolean;
+  validation_prompt?: string;
+  validation_timeout_seconds?: number;
 }
 
 export interface ScheduleCreate {
@@ -217,6 +223,10 @@ export interface ScheduleCreate {
   // RETRY-001: Retry configuration
   max_retries?: number;
   retry_delay_seconds?: number;
+  // VALIDATE-001: Post-execution validation configuration
+  validation_enabled?: boolean;
+  validation_prompt?: string;
+  validation_timeout_seconds?: number;
 }
 
 export interface ScheduleUpdate {
@@ -232,6 +242,10 @@ export interface ScheduleUpdate {
   // RETRY-001: Retry configuration
   max_retries?: number;
   retry_delay_seconds?: number;
+  // VALIDATE-001: Post-execution validation configuration
+  validation_enabled?: boolean;
+  validation_prompt?: string;
+  validation_timeout_seconds?: number;
 }
 
 export interface ScheduleExecution {
