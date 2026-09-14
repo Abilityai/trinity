@@ -4,6 +4,7 @@ Agent Service CRUD - Agent creation and deletion operations.
 Contains the core logic for creating and deleting agents.
 """
 import asyncio
+import io
 import os
 import re
 import json
@@ -2060,6 +2061,41 @@ async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> Non
         }))
 
 
+_BUNDLED_AVATAR_NAMES = ("avatar.webp", "avatar.png")
+_BUNDLED_AVATAR_MAX_BYTES = 2 * 1024 * 1024
+_AVATAR_DIR = Path("/data/avatars")  # routers/avatar.py AVATAR_DIR
+
+
+def _install_bundled_avatar(config: AgentConfig) -> None:
+    """#2693: copy a `local:` template's bundled `avatar.webp`/`avatar.png` into
+    the avatar store, so an agent has a face with no Gemini key and no network.
+
+    Stored as a DEFAULT avatar (the caller writes `is_default_avatar=1`), so
+    Settings → Generate Default Avatars still overwrites it once a key exists.
+    Always re-encoded through `optimize_avatar`: the deploy-local root holds
+    user-uploaded templates, and a decode/re-encode is what keeps an arbitrary
+    file from being served verbatim on the unauthenticated avatar route."""
+    if not config.template or not config.template.startswith("local:"):
+        return
+    template_dir = _resolve_local_template_dir(config.template[6:])
+    for filename in _BUNDLED_AVATAR_NAMES:
+        source = template_dir / filename
+        if not source.is_file() or source.stat().st_size > _BUNDLED_AVATAR_MAX_BYTES:
+            continue
+        from PIL import Image
+        from utils.image_optimize import optimize_avatar
+
+        data = source.read_bytes()
+        # A 2 MB PNG can still declare a gigapixel canvas; read the header only.
+        with Image.open(io.BytesIO(data)) as img:
+            if img.width * img.height > 4096 * 4096:
+                raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
+        _AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+        (_AVATAR_DIR / f"{config.name}.webp").write_bytes(optimize_avatar(data))
+        logger.info(f"[AVATAR-003] Installed bundled avatar from {config.template} for {config.name}")
+        return
+
+
 def _register_agent(
     config: AgentConfig,
     current_user: User,
@@ -2142,6 +2178,13 @@ def _register_agent(
     # durable-identity nicety a disposable agent never benefits from)
     _avatar_prompt = (template_data.get("avatar_prompt") if template_data else None) if not config.ephemeral else None
     if _avatar_prompt:
+        try:
+            # #2693: install the template's bundled image BEFORE the DB row, so
+            # `avatar_url` never points at a file that isn't there yet. A bad
+            # image must not cost the prompt seed — that is the regeneration path.
+            _install_bundled_avatar(config)
+        except Exception as e:
+            logger.warning(f"[AVATAR-003] Failed to install bundled avatar for {config.name}: {e}")
         try:
             db.set_default_avatar(config.name, _avatar_prompt, datetime.now(timezone.utc).isoformat())
             logger.info(f"[AVATAR-003] Seeded avatar prompt from template for {config.name}")
