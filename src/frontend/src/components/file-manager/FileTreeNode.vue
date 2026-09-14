@@ -31,12 +31,12 @@
       </span>
 
       <!-- Size (files only) -->
-      <span v-if="item.type === 'file' && item.size" class="ml-auto text-xs text-gray-400 dark:text-gray-500 flex-shrink-0">
+      <span v-if="item.type === 'file' && item.size" class="ml-auto text-xs text-gray-500 dark:text-gray-400 flex-shrink-0">
         {{ formatSize(item.size) }}
       </span>
 
       <!-- File count (folders only) -->
-      <span v-if="item.type === 'directory' && item.file_count" class="ml-auto text-xs text-gray-400 dark:text-gray-500 flex-shrink-0">
+      <span v-if="item.type === 'directory' && item.file_count" class="ml-auto text-xs text-gray-500 dark:text-gray-400 flex-shrink-0">
         {{ item.file_count }}
       </span>
     </div>
@@ -51,7 +51,7 @@
         :search-query="searchQuery"
         @select="$emit('select', $event)"
       />
-      <div v-if="!item.children?.length" class="px-2 py-1 text-xs text-gray-400 dark:text-gray-500 italic">
+      <div v-if="!item.children?.length" class="px-2 py-1 text-xs text-gray-500 dark:text-gray-400 italic">
         Empty folder
       </div>
     </div>

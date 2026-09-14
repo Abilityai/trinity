@@ -22,8 +22,8 @@
       >
         <!-- Header hint -->
         <div class="px-3 py-1.5 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
-          <span class="text-xs text-gray-400 dark:text-gray-500 font-medium">Playbooks</span>
-          <span class="text-xs text-gray-400 dark:text-gray-500">
+          <span class="text-xs text-gray-500 dark:text-gray-400 font-medium">Playbooks</span>
+          <span class="text-xs text-gray-500 dark:text-gray-400">
             <kbd class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-[10px] font-mono">↑↓</kbd>
             navigate &nbsp;
             <kbd class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-[10px] font-mono">Tab</kbd>
@@ -57,7 +57,7 @@
             <!-- Argument hint preview -->
             <span
               v-if="playbook.argument_hint"
-              class="shrink-0 text-xs text-gray-400 dark:text-gray-500 font-mono hidden sm:block"
+              class="shrink-0 text-xs text-gray-500 dark:text-gray-400 font-mono hidden sm:block"
             >
               {{ playbook.argument_hint }}
             </span>
@@ -65,7 +65,7 @@
             <!-- Tab badge on the highlighted item -->
             <span
               v-if="idx === ac.selectedIndex.value"
-              class="shrink-0 ml-auto text-[10px] text-gray-400 dark:text-gray-500 font-mono"
+              class="shrink-0 ml-auto text-[10px] text-gray-500 dark:text-gray-400 font-mono"
             >
               Tab ⇥
             </span>
@@ -75,7 +75,7 @@
         <!-- Overflow hint -->
         <div
           v-if="ac.filteredPlaybooks.value.length > 8"
-          class="px-3 py-1 border-t border-gray-100 dark:border-gray-700 text-xs text-gray-400 dark:text-gray-500"
+          class="px-3 py-1 border-t border-gray-100 dark:border-gray-700 text-xs text-gray-500 dark:text-gray-400"
         >
           {{ ac.filteredPlaybooks.value.length - 8 }} more — keep typing to filter
         </div>
@@ -133,7 +133,7 @@
           aria-hidden="true"
           class="ghost-overlay absolute inset-0 pointer-events-none select-none overflow-hidden break-words whitespace-pre-wrap text-sm leading-6"
         >
-          <span class="text-transparent">{{ localMessage }}</span><span class="text-gray-400 dark:text-gray-500">{{ ac.ghostCompletion.value }}</span>
+          <span class="text-transparent">{{ localMessage }}</span><span class="text-gray-500 dark:text-gray-400">{{ ac.ghostCompletion.value }}</span>
         </div>
 
         <textarea
@@ -215,13 +215,13 @@
     >
       <div
         v-if="ac.activeArgHint.value"
-        class="mt-1.5 flex items-center gap-1.5 text-xs font-mono text-gray-400 dark:text-gray-500"
+        class="mt-1.5 flex items-center gap-1.5 text-xs font-mono text-gray-500 dark:text-gray-400"
       >
         <span class="text-action-primary-500 dark:text-action-primary-400">/{{ ac.activeArgHint.value.name }}</span>
         <span>{{ ac.activeArgHint.value.argument_hint }}</span>
         <span
           v-if="ac.activeArgHint.value.description"
-          class="ml-1 not-italic text-gray-400 dark:text-gray-500 font-sans truncate"
+          class="ml-1 not-italic text-gray-500 dark:text-gray-400 font-sans truncate"
         >
           — {{ ac.activeArgHint.value.description }}
         </span>

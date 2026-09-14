@@ -15,7 +15,7 @@
        `PortalDeliverables` mounts this outside any row and needs it. A component
        that hard-codes spacing for one of its two parents is how these drift. -->
   <div class="flex flex-col">
-  <div class="flex items-center gap-1 text-gray-400 dark:text-gray-500">
+  <div class="flex items-center gap-1 text-gray-500 dark:text-gray-400">
     <button
       v-for="choice in ['up', 'down']"
       :key="choice"
@@ -23,8 +23,8 @@
       class="p-1 rounded-md transition hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
       :class="rating === choice
         ? (choice === 'up'
-          ? 'text-status-success-600 dark:text-status-success-400'
-          : 'text-status-warning-600 dark:text-status-warning-400')
+          ? 'text-status-success-700 dark:text-status-success-400'
+          : 'text-status-warning-700 dark:text-status-warning-400')
         : 'hover:text-gray-700 dark:hover:text-gray-300'"
       :title="labels[choice]"
       :aria-label="labels[choice]"

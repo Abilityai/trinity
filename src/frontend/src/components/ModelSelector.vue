@@ -51,7 +51,7 @@
             </svg>
           </span>
         </div>
-        <p v-if="model.note" class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">{{ model.note }}</p>
+        <p v-if="model.note" class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{{ model.note }}</p>
       </button>
     </div>
   </div>
