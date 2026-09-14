@@ -243,11 +243,22 @@
         </div>
       </form>
     </div>
+    <ConfirmDialog
+      :visible="confirmDelete"
+      variant="danger"
+      title="Delete system view"
+      :message="`Delete “${props.editingView?.name}”? The view and its saved tag filter are removed. Agents and tags are not affected.`"
+      confirm-text="Delete view"
+      cancel-text="Keep view"
+      @confirm="performDelete"
+      @cancel="confirmDelete = false"
+    />
   </BaseModal>
 </template>
 
 <script setup>
 import BaseModal from './base/BaseModal.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useSystemViewsStore } from '@/stores/systemViews'
 import { isOrgTag } from '@/utils/gridOrg'
@@ -383,12 +394,18 @@ async function handleSubmit() {
   }
 }
 
-async function handleDelete() {
-  if (!props.editingView) return
+// #1924: native confirm() names no verb ("OK"), restates no consequence and
+// focuses the unsafe action. ConfirmDialog does all three.
+const confirmDelete = ref(false)
 
-  if (!confirm(`Delete "${props.editingView.name}"? This action cannot be undone.`)) {
-    return
-  }
+function handleDelete() {
+  if (!props.editingView) return
+  confirmDelete.value = true
+}
+
+async function performDelete() {
+  confirmDelete.value = false
+  if (!props.editingView) return
 
   isSubmitting.value = true
   error.value = null
