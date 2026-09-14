@@ -147,7 +147,7 @@ one of these before putting an instance on a public address:
 | Path | What it gives you | When to use it |
 |---|---|---|
 | **Tunnel** (Cloudflare Tunnel — set `TUNNEL_TOKEN` in `.env`) | HTTPS at a real hostname, no inbound ports open at all | The default for a public instance. Nothing to renew. |
-| **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport, instance not on the public internet | What the managed fleet runs. HTTP over a WireGuard tunnel is encrypted — this is a finished posture, not a compromise. |
+| **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport, instance not on the public internet | What the managed fleet runs. HTTP over a WireGuard tunnel is encrypted — this is a finished posture, not a compromise. On a provisioned host, set `PRIVATE_NETWORK_CIDRS` so the web server serves those sources rather than redirecting them to an HTTPS address a private IP can never hold. Inbound channels (Telegram, WhatsApp, VoIP, public links, webhooks) need a public URL and stop working — pair with a tunnel if you use them. |
 | **Reverse proxy you run** (Caddy / nginx + Let's Encrypt) | HTTPS at your own domain | You already operate a proxy, or you need a domain the tunnel can't serve. |
 
 Plain HTTP on a public IPv4 with none of the above is the one combination to

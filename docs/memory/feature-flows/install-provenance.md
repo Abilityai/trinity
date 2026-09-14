@@ -268,6 +268,13 @@ Caddy obtains an ordinary Let's Encrypt certificate and serves the name
   or a mismatch. `on_demand` without a working gate makes the instance request
   certificates for any name anyone points at it, until the ACME account is
   rate-limited and the operator's own renewals fail.
+- **A private network gets plain HTTP, opt-in** (#2692) — `PRIVATE_NETWORK_CIDRS`
+  renders an `@private remote_ip` matcher into the `http://` site that serves
+  those sources instead of redirecting them, because a VPN already encrypts the
+  transport and a private address can never obtain a public certificate. Source
+  address, never the `Host` header, which is caller-supplied. Empty by default;
+  `--caddy-only` re-renders without redoing the site phase (which would re-stamp
+  `FRONTEND_URL` and provenance).
 - **Moves no privilege** — Trinity is containerised and cannot rewrite the
   Caddyfile or reload Caddy. Caddy asking Trinity keeps the operator out of a
   root shell. The route discloses only whether a guessed hostname matches, which

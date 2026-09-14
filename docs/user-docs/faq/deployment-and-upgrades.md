@@ -144,7 +144,7 @@ Trinity issues no certificates itself — it only tells the web server in front 
 
 ## If I only reach Trinity over a VPN, do I still need the web server in front of it?
 
-Strictly it is redundant — a private network already encrypts the traffic, so terminating TLS a second time buys nothing. But turning it off does not give you a working UI, because the blocker is elsewhere: the web server is a host process, while the frontend is a container port, and Trinity's container firewall drops anything reaching a container from off-box, tailnet traffic included. Until Trinity can serve a private address natively, reach the UI by tunnelling over SSH to the local frontend port. See [Hardening a Marketplace Install](../guides/deploying/hardening.md#reaching-the-ui-over-the-tailnet).
+Strictly it is redundant — a private network already encrypts the traffic, so terminating TLS a second time buys nothing. But turning it off does not give you a working UI, because the blocker is elsewhere: the web server is a host process, while the frontend is a container port, and Trinity's container firewall drops anything reaching a container from off-box, tailnet traffic included. Set `PRIVATE_NETWORK_CIDRS` in `.env` to your VPN's ranges and re-render the config with `--caddy-only`; Trinity then serves those sources over plain HTTP, which is safe because the VPN already encrypts the transport. An SSH tunnel to the local frontend port works too, with no configuration. See [Hardening a Marketplace Install](../guides/deploying/hardening.md#reaching-the-ui-over-the-tailnet).
 
 ## Why do I have to log in again after restarting the backend?
 
