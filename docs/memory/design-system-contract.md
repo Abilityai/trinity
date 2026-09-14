@@ -61,6 +61,7 @@ Layout stability:
 6. Dimensions never oscillate as async data trickles in — size to the stable state.
 7. Panels flex to width; no overlap when narrow; wide content scrolls in its own container, never the page.
 8. Scrolling is axis-locked — one axis at a time.
+29. Recommendation, not a hard rule: enabling something should not shove the rest of the panel. Prefer a reserved footprint (small dependents: disabled in place) or a height/flex transition (section/column: 150–300ms, `motion-reduce:transition-none`) over a bare `v-if` snap; aim for the trigger staying under the pointer, new content opening below or beside it, and what the user was reading staying in view. No scanner sees this — a human toggles it in the browser and watches (#954, #1563, #1939, #2640).
 
 Density:
 9. Overflowing tabs collapse into a counted "More ▾" menu (OverflowTabs) — everywhere.
@@ -99,6 +100,7 @@ Before requesting review, verify:
 - [ ] Verified in light AND dark; dark meta text is gray-300/400, never gray-500
 - [ ] Spacing on the 4px grid; radii 6px controls / 8–10px surfaces; type within the six-size scale
 - [ ] Loading/empty/failed states all exist, visually distinct, sharing one footprint — no layout shift on arrival; the empty branch gates on a succeeded fetch (`hasLoaded`), not on list length
+- [ ] Every toggle, checkbox, or mode switch that reveals or hides content was exercised by a human in the browser, in both themes, watching what moves — a reserved footprint or a transition is the recommendation (principle 29), a snap is acceptable when judged so, and the PR says it was looked at
 - [ ] Every action failure has a user-visible home (`InlineError` near the control); no `console.error`-only catch, no `alert()`, and `Promise.allSettled` bulk helpers report their rejected count
 - [ ] Data loading uses the scanline primitive on chart surfaces and a skeleton placeholder on every other first load, keyed off store state; background refresh is invisible (no re-flash, no scroll reset) — no bare `v-if="loading"` gate on a data surface: gate on "no data yet" (`utils/loadingState.js::viewState`), stale refresh = sibling `InlineError` banner; `tests/unit/loadingGateRatchet.spec.js` fails if a file's bare-gate count grows (#1927)
 - [ ] `prefers-reduced-motion` handled on any animation touched
