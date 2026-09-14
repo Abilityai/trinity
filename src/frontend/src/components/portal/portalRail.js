@@ -528,6 +528,42 @@ export function railVisibleFor({
   return Boolean(activeAgent) && !unreachable
 }
 
+/**
+ * Should the rail's COLUMN be held open while the stage is still loading (#2711)?
+ *
+ * `railVisibleFor` answers "may the rail render", and it is false for every
+ * non-ready stage — correctly, since the rail's tabs need the roster. But the
+ * column's WIDTH does not: it comes from the persisted rail state and is known
+ * synchronously at first paint. Without this the conversation column rendered
+ * full width and then lost the rail's width the moment the roster landed,
+ * shifting the composer, the thread and the header left — animated since #2676,
+ * which made it a 300ms slide rather than a jump, but still a shift. The
+ * contract's layout-stability rule is that loading and loaded share ONE
+ * footprint.
+ *
+ * Deliberately narrower than `railVisibleFor`'s route set:
+ *
+ *   - an agent page never carries a rail, so reserving there would invent a gap;
+ *   - a ROOM route is excluded even though a ready room usually has a rail,
+ *     because that depends on `roomsAvailable`, which arrives ON the roster
+ *     payload (#2128) — reserving on a capability we have not been told about
+ *     yet would trade this shift for the opposite one on any install without it.
+ *
+ * So this reserves for exactly the case the bug is about: a 1:1 conversation
+ * route, mid-load. If the rail then turns out not to render (an unreachable deep
+ * link), the column leaves through the same width transition rather than
+ * vanishing — a shrink, not a jump.
+ */
+export function railColumnReservedFor({
+  agentPage = null,
+  stageState = 'loading',
+  roomId = null,
+} = {}) {
+  if (agentPage) return false
+  if (roomId) return false
+  return stageState === 'loading'
+}
+
 // ---------------------------------------------------------------- slice 2 (ent#475): feeds, seen markers, openers
 
 /**

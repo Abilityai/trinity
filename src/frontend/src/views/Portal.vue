@@ -571,11 +571,19 @@
         leave-to-class="!w-0"
       >
       <div
-        v-if="railHasColumn"
+        v-if="railHasColumn || railColumnReserved"
         class="hidden sm:flex shrink-0 min-h-0 w-[var(--ws-rail,24rem)]"
         data-testid="ws-rail-column"
+        :data-reserved="railColumnReserved && !railHasColumn ? 'true' : undefined"
       >
+      <!-- #2711: the column exists while the stage loads, EMPTY. Its width is
+           the persisted one, known synchronously, so the conversation column
+           lands on the footprint it will keep instead of losing the rail's width
+           the moment the roster arrives. The rail itself still waits for a ready
+           stage — `railHasColumn` is unchanged — because its tabs need the
+           roster; what is reserved is space, not content. -->
       <PortalRail
+        v-if="railHasColumn"
         :tabs="railTabs"
         :active-tab="railState.tab"
         :open="railState.open"
@@ -729,6 +737,7 @@ import {
   railOpenPlan,
   emptySignal,
   loadRailState,
+  railColumnReservedFor,
   railParticipantsFor,
   railVisibleFor,
   saveRailState,
@@ -1035,6 +1044,19 @@ const railVisible = computed(() => railVisibleFor({
 // carries `v-if="tabs.length"` — with the width now on a wrapper this view
 // owns, a tabless rail would otherwise leave a full-width empty column behind.
 // Reading the same list the component does keeps the two from disagreeing.
+// #2711 — the column is held open while the stage loads, so the conversation
+// column lands on the footprint it keeps. The rule is pure (`portalRail.js`)
+// and deliberately narrower than `railVisible`: see its docblock for why a room
+// route is excluded. `voiceCanvasHasColumn` still wins — the canvas and the rail
+// are never both in the row.
+const railColumnReserved = computed(() => Boolean(
+  railColumnReservedFor({
+    agentPage: activeAgentPageName.value,
+    stageState: stage.value.state,
+    roomId: activeRoomIdFromRoute.value,
+  }) && !voiceCanvasHasColumn.value
+))
+
 const railHasColumn = computed(() => Boolean(
   railVisible.value && railTabs.value.length && !voiceCanvasHasColumn.value
 ))
