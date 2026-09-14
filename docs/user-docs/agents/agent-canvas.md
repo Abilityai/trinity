@@ -67,9 +67,15 @@ the **Canvas tab in the Workspace rail**.
   one action. You are asked to confirm once, and the confirmation names how many
   will go. Deleting is recorded in the audit log — from the Workspace as well as
   from Agent Detail, attributed to the person who did it either way.
-- **Only the agent's owner (or an admin) can delete or pin.** If you can see an
-  agent's canvases but do not own the agent, there are no delete controls —
+- **Only the agent's owner (or an admin) can delete, pin or share.** If you can
+  see an agent's canvases but do not own the agent, there are no delete controls —
   rather than buttons that would refuse.
+- **Sharing is yours alone, never the agent's.** An agent can write a canvas and
+  mark it for its roster, but it cannot create, list or revoke a share link —
+  the share routes refuse an agent's own key outright, the same way the pin
+  route does. Deciding who *outside* the platform may read a canvas is a
+  person's call, and a link that reaches the open internet is not something an
+  agent should be able to mint for itself.
 - **Pin** the ones you use daily and they stay at the top as the list grows. A
   pin is yours, not the agent's: the agent cannot pin its own canvas — the pin
   route refuses an agent's own key outright — and rewriting a canvas does not

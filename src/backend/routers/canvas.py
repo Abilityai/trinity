@@ -100,27 +100,87 @@ def _gate_human_removal(current_user: User, name: str) -> None:
     assert_agent_owner(current_user, name, detail="Only the agent's owner may change its canvases")
 
 
-def _gate_pin(current_user: User, name: str) -> None:
-    """Who may PIN a canvas (ent#553 review) — humans only, and the owner.
+def _gate_human_only(current_user: User, name: str, *, agent_detail: str) -> None:
+    """Owner-or-admin, and **no agent principal at all** — the gate for the
+    verbs that GRANT rather than use (ent#553 review, widened by ent#554 review).
 
     Deliberately NOT `_gate_human_removal`. That gate lets an agent-scoped key
     act on its own canvases, which is right for delete ("an agent tidying up
-    after itself") and wrong for pin: a pin decides which canvas a whole roster
-    sees first, so an agent that could set it could promote itself up its own
-    list. Nothing in the agent-facing surface offers it — `pinned` is absent
-    from the MCP tools by design — but "no tool exposes it" is a property of the
-    client, and this route is reachable with the agent's own key.
+    after itself") and wrong for every verb that decides what someone OTHER
+    than the agent may see. The distinction is the grant-vs-use line Invariant
+    #8 draws: the endpoint that *uses* a capability may be agent-callable, the
+    one that *grants* one is human-only.
+
+    Factored out of `_gate_pin` because reusing a gate under a name that
+    describes only one of its callers is exactly how ent#554 shipped a share
+    route whose docstring said "human-only" while calling the gate that admits
+    agents. A gate with a name that states its RULE cannot be reached for by
+    accident; one named after a verb can.
+
+    `agent_detail` is per-caller because the refusal is read by an agent that
+    has to decide what to do next, and "may not pin" is unhelpful on a share.
+    """
+    if current_user.agent_name:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=agent_detail,
+        )
+    assert_agent_owner(current_user, name, detail="Only the agent's owner may change its canvases")
+
+
+def _gate_pin(current_user: User, name: str) -> None:
+    """Who may PIN a canvas (ent#553 review) — humans only, and the owner.
+
+    A pin decides which canvas a whole roster sees first, so an agent that
+    could set it could promote itself up its own list. Nothing in the
+    agent-facing surface offers it — `pinned` is absent from the MCP tools by
+    design — but "no tool exposes it" is a property of the client, and this
+    route is reachable with the agent's own key.
 
     `docs/user-docs/agents/agent-canvas.md` already tells users "the agent
     cannot pin its own canvas". This is what makes that sentence true rather
     than aspirational; the alternative was editing the doc to admit it could.
     """
-    if current_user.agent_name:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="A pin is a human's ordering; an agent may not pin a canvas",
-        )
-    assert_agent_owner(current_user, name, detail="Only the agent's owner may change its canvases")
+    _gate_human_only(
+        current_user, name,
+        agent_detail="A pin is a human's ordering; an agent may not pin a canvas",
+    )
+
+
+def _gate_share(current_user: User, name: str) -> None:
+    """Who may mint, list or revoke a canvas SHARE LINK (ent#554 review).
+
+    Humans only, and the owner — for the same reason as `_gate_pin` but with a
+    far larger blast radius, which is why this shipped as a defect and the pin
+    did not.
+
+    `create_canvas_share` originally called `_gate_human_removal` while its own
+    docstring claimed to be human-only. That gate admits an agent-scoped key
+    acting on its own agent, so a prompt-injected agent could `POST
+    /api/agents/<self>/canvas/<id>/share {"scope": "public"}` with the
+    `TRINITY_MCP_API_KEY` already in its container and publish its own canvas
+    at an unauthenticated URL. Three properties made that worse than it first
+    reads:
+
+    * the share is **live, not a snapshot**, so one minted link is a
+      self-updating channel rather than a one-time disclosure;
+    * the agent is the only writer of canvas blocks, so anything it can read it
+      can copy into a canvas and publish;
+    * `audience` is not consulted on the share path, so ent#438's fail-closed
+      "a canvas reaches a client only because the agent said so" does not
+      apply — the agent would have been choosing for itself.
+
+    `list_canvas_shares` is gated identically because it returns the **token**,
+    which IS the capability; and `revoke_canvas_share` because an agent with no
+    legitimate way to create a link has none to turn off a person's either.
+    """
+    _gate_human_only(
+        current_user, name,
+        agent_detail=(
+            "A share link decides who outside the platform may read this "
+            "canvas; an agent may not create, list or revoke one"
+        ),
+    )
 
 
 def _gate_write(current_user: User, name: str, request: Request) -> None:
@@ -249,10 +309,11 @@ async def list_canvas_shares(
     valid canvas id shape, so this route would otherwise be captured by it and
     answer "canvas not found" forever.
 
-    Owner-gated like the mutations: a link's TOKEN is in the payload, so this
-    read hands over the capability itself and cannot be wider than the write.
+    Human-only and owner-gated like the mutations (`_gate_share`): a link's
+    TOKEN is in the payload, so this read hands over the capability itself and
+    cannot be wider than the write.
     """
-    _gate_human_removal(current_user, name)
+    _gate_share(current_user, name)
     rows = db.list_canvas_shares(name, canvas_id)
     return [CanvasShare(**r, url=_share_url(r["token"])) for r in rows]
 
@@ -267,15 +328,20 @@ async def create_canvas_share(
 ):
     """Mint a share link for one canvas (ent#554).
 
-    Owner-or-admin and human-only via `_gate_human_removal`: a share is a
-    GRANT, not a use, and the agent that writes a canvas does not decide who
-    outside the platform may read it.
+    Owner-or-admin and human-only via `_gate_share`: a share is a GRANT, not a
+    use, and the agent that writes a canvas does not decide who outside the
+    platform may read it.
+
+    This sentence was true of the intent and false of the code until the
+    ent#554 review — it called `_gate_human_removal`, which admits an
+    agent-scoped key acting on its own agent. See `_gate_share` for what that
+    allowed and why the gate is now named after its rule rather than a verb.
 
     `public` is audited distinctly from `authorized` because it is the one that
     widens the audience — the audit trail should make "who made this readable
     by anyone with the URL" answerable without reading the payload.
     """
-    _gate_human_removal(current_user, name)
+    _gate_share(current_user, name)
     try:
         canvas_service.validate_canvas_id(canvas_id)
     except CanvasError as e:
@@ -313,8 +379,11 @@ async def revoke_canvas_share(
     current_user: User = Depends(get_current_user),
 ):
     """Turn a share link off (ent#554). The row is kept, not deleted, so the
-    link can say it was revoked instead of 404-ing blankly."""
-    _gate_human_removal(current_user, name)
+    link can say it was revoked instead of 404-ing blankly.
+
+    `_gate_share`, not `_gate_human_removal`: an agent with no legitimate way
+    to create a link has none to turn off a person's either."""
+    _gate_share(current_user, name)
     revoked = db.revoke_canvas_share(name, share_id)
     if revoked:
         await platform_audit_service.log(

@@ -201,6 +201,35 @@ must not have. Creating a `public` link audits under its own action
 answerable without reading payloads; the token is never in the audit row (it IS
 the capability — the G-04 rule).
 
+**Minting, listing and revoking are human-only — `_gate_share`, never
+`_gate_human_removal`.** This is the grant-vs-use line (Invariant #8): the
+endpoint that *uses* a capability may be agent-callable, the one that *grants*
+one is not. It shipped the other way in the first cut — all three routes called
+`_gate_human_removal`, whose own docstring says it admits an agent-scoped key
+acting on its own agent (correct for `clear_canvas`, an agent tidying up after
+itself) — while `create_canvas_share`'s docstring claimed to be human-only. A
+prompt-injected agent could therefore `POST /api/agents/<self>/canvas/<id>/share
+{"scope": "public"}` with the `TRINITY_MCP_API_KEY` already in its container and
+publish its own canvas at an unauthenticated URL. Three things made that worse
+than it first reads: the share is **live rather than a snapshot**, so one link
+is a self-updating channel; the agent is the **only writer** of canvas blocks,
+so anything it can read it can copy in and publish; and **`audience` is not
+consulted on the share path**, so ent#438's fail-closed "a canvas reaches a
+client only because the agent said so" would not have applied. `list_canvas_shares`
+is gated identically because it returns the **token**, which is the capability
+itself.
+
+The shared predicate is `_gate_human_only`, which `_gate_pin` and `_gate_share`
+both delegate to. It is named after the rule it enforces rather than after a
+verb on purpose: `_gate_human_removal` is a correct gate with a name that
+describes one caller, and reaching for it by that name is precisely how the
+share routes acquired the wrong rule. The delete routes (`clear_canvas`,
+`bulk_delete_canvases`) deliberately keep `_gate_human_removal` — `clear_canvas`
+is a real MCP tool and an agent retiring its own surface is wanted behaviour —
+and `test_deleting_a_canvas_is_deliberately_still_agent_callable` guards that
+boundary in the other direction, because the first attempt at this fix swept
+both delete routes into the human-only gate with one over-broad replace.
+
 **A shared canvas is LIVE, and says so** (AC #3, operator ruling 2026-09-08).
 The link renders the canvas as it is now, carrying its `updated_at` and stale
 mark, and the page states that it is not a copy taken at share time. This
