@@ -166,6 +166,11 @@ def is_token_revoked(jti: Optional[str]) -> bool:
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+# ent#554 — the same scheme with `auto_error=False`, so a route can accept an
+# ANONYMOUS caller and decide for itself. Used by the canvas share view, where
+# a `public` link must render with no credential at all while an `authorized`
+# link needs to know who is asking.
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
 
 
 def hash_password(password: str) -> str:
@@ -765,6 +770,30 @@ _EPHEMERAL_ALLOWED_ROUTES = (
     ("GET", re.compile(r"^/api/agents/(?P<name>[^/]+)$")),
     ("GET", re.compile(r"^/api/agents/(?P<name>[^/]+)/info$")),
 )
+
+
+
+async def get_optional_user(
+    request: Request, token: str = Depends(oauth2_scheme_optional)
+) -> Optional[User]:
+    """The current user, or None when the caller presented no usable credential.
+
+    ent#554. Delegates to `get_current_user` rather than re-implementing any of
+    it: there is exactly one place that decides what a credential means, and a
+    second one that merely agreed today is how an auth bypass gets written.
+
+    A PRESENT-but-invalid credential also reads as None rather than 401. That is
+    right for the one caller — a `public` share link must render for a stranger,
+    including one whose session merely expired — and it is safe because every
+    route using this makes its own authorization decision afterwards. Do not
+    reach for it on a route that would otherwise have required auth.
+    """
+    if not token:
+        return None
+    try:
+        return await get_current_user(request, token)
+    except HTTPException:
+        return None
 
 
 def _enforce_ephemeral_key_fence(request: Request, agent_name: str) -> None:

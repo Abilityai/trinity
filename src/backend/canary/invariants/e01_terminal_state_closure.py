@@ -77,13 +77,13 @@ whose failure E-01 exists to detect: `mark_stale_executions_failed` carries
 `lease_expires_at IS NULL`, as do `get_running_executions`,
 `get_running_executions_with_agent_info`, `fail_stale_slot_execution` and
 `mark_no_session_executions_failed` — five functions carrying the six
-selectors recorded in `docs/testing/PULL_MIGRATION_TESTING.md` §Appendix. The
+selectors recorded in `docs/planning/PULL_MIGRATION_TESTING.md` §Appendix. The
 canary was the layer that had not caught up. Mirrors S-01's exclusion and
 E-05's (#1982).
 
 The grace is keyed on the lease, **not** a blanket silencing: a NULL-lease
 (push) row of identical age still fires, unchanged. Closes T3.7 in
-`docs/testing/PULL_MIGRATION_TESTING.md` §3.
+`docs/planning/PULL_MIGRATION_TESTING.md` §3.
 
 ### Two states that fire deliberately, and are not false positives
 

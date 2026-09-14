@@ -10,7 +10,7 @@ API endpoints for agent chat, voice, streaming, and public chat access.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents/{name}/chat` | POST | Send message (stream-json output) |
+| `/api/agents/{name}/chat` | POST | Send message (stream-json output); accepts `files` attachments (see below) |
 | `/api/agents/{name}/chat/sessions` | GET | List sessions |
 | `/api/agents/{name}/chat/sessions/{id}` | GET | Session with messages |
 | `/api/agents/{name}/chat/sessions/{id}/close` | POST | Close session |
@@ -33,6 +33,9 @@ API endpoints for agent chat, voice, streaming, and public chat access.
 |----------|--------|-------------|
 | `/api/public/chat/{token}` | POST | Public chat |
 | `/api/public/history/{token}` | GET | Public history |
+| `/api/public/executions/{token}/{execution_id}/status` | GET | Status of a turn started from this link |
+| `/api/public/executions/{token}/{execution_id}/stream` | GET | Live activity for that turn (SSE) |
+| `/api/public/executions/{token}/{execution_id}/terminate` | POST | Stop a turn started from this link. Scoped per link **and** per trigger: it stops only turns this public link started — never a scheduled run, an operator chat, or a Workspace turn on the same agent. A link with email verification requires the same `session_token` that started the turn. |
 
 ### Paid Chat (x402)
 
@@ -45,9 +48,25 @@ API endpoints for agent chat, voice, streaming, and public chat access.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents/{name}/task` | POST | Submit task |
+| `/api/agents/{name}/task` | POST | Submit a stateless task. `async_mode: true` returns at once with `status: "accepted"` and an `execution_id`; otherwise the call holds until the task finishes (see below). Accepts `files` attachments. |
 | `/api/agents/{name}/executions` | GET | List executions |
-| `/api/agents/{name}/executions/{id}` | GET | Execution details |
+| `/api/agents/{name}/executions/{id}` | GET | Execution details (status, response, cost) — the polling target for `async_mode` and for a receipt |
+| `/api/agents/{name}/executions/{id}/log` | GET | Full execution transcript (tool calls and results) |
+| `/api/agents/{name}/executions/{id}/stream` | GET | Live execution log (SSE) while it runs |
+| `/api/agents/{name}/executions/running` | GET | Executions currently running on the agent |
+| `/api/agents/{name}/executions/{id}/terminate` | POST | Stop a running or queued execution. Answers `terminated`, `cancelled_while_queued`, `cancelled_while_parked`, or `already_finished`; a stopped run ends as `cancelled`, not `failed`. |
+| `/api/agents/{name}/fan-out` | POST | Dispatch N tasks in parallel — see [Fan-Out](../automation/fan-out.md) |
+| `/api/agents/{name}/fan-out/{fan_out_id}` | GET | Poll a fan-out batch while it runs — see [Fan-Out](../automation/fan-out.md#polling-a-batch) |
+
+#### Sync task calls and the `execution_id` receipt
+
+A synchronous `/task` call (the default, `async_mode: false`) holds the HTTP connection for the whole run — at capacity it queues on the same connection and long-polls until the execution reaches a terminal state. The MCP `chat_with_agent(parallel=true)` tool wraps this route and gives up before the MCP gateway does, answering with `{status: "queued_timeout", execution_id}` so you poll `GET /api/agents/{name}/executions/{id}` instead of re-sending — see [MCP Server](../integrations/mcp-server.md#key-tools-worth-knowing). If you know the task will run long, send `async_mode: true` from the start.
+
+A sync `/task` that fails, times out, or is cancelled releases its `Idempotency-Key` claim, so a legitimate retry with the same key goes through instead of answering `409` for the rest of the day; a call whose long-poll timed out while the execution was still queued or running completes the claim with the same `queued_timeout` receipt, so a replay answers `200` with the execution to poll.
+
+#### File attachments
+
+`POST /chat` and `POST /task` accept a `files` array of `{name, mimetype, size, data_base64}` (raw base64 or a `data:` URI). Images are passed to the agent as vision content; other files land in `/home/developer/uploads/` inside the container. Accepted: images, plain text, CSV, JSON, and **ZIP** (stored unextracted — the agent unpacks it itself). Rejected: PDF, tar/gzip/rar, audio, video. Web limits: 3 files per message, 5 MB per file, 10 MB of images in total.
 
 #### Deprecated: per-task `timeout_seconds`
 
@@ -68,7 +87,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/task \
 ```
 
 - The same key within 24 hours returns the original result with the header `X-Idempotent-Replay: true` — no second execution is created.
-- A duplicate sent while the first request is still running returns **409** with the original `execution_id` to poll.
+- A duplicate sent while the first request is still running returns **409** with the original `execution_id` to poll (for `/fan-out`, that field carries the batch's `fan_out_id`).
 - If the first attempt was rejected before dispatch (e.g., at capacity), the key is released so the retry goes through.
 - The header is optional and fail-open: omitting it preserves normal behavior, and a dedup-layer error never blocks a real request.
 

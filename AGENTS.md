@@ -130,7 +130,7 @@ Caveats that matter to agents:
 
 - **This is a PUBLIC repository.** Never commit credentials, API keys, internal URLs, or PII. Use placeholders (`your-domain.com`, `user@example.com`). Review `git diff` before every commit.
 - Run the stack: `./scripts/deploy/start.sh` (Docker must be running). Stop: `./scripts/deploy/stop.sh`. Rebuild the agent base image after `docker/base-image/` changes: `./scripts/deploy/build-base-image.sh`.
-- Tests: `python -m pytest -v --tb=short` (markers: `unit` needs no backend, `requires_agent` needs a running agent).
+- Tests: `cd tests && pytest unit/` is the per-PR unit island and needs no backend; every other tier creates and deletes real agents on the instance `TRINITY_API_URL` points at, so read [tests/README.md](tests/README.md) first — and [docs/testing/STRATEGY.md](docs/testing/STRATEGY.md) for what each lane proves.
 - Layout: `src/backend` (FastAPI), `src/frontend` (Vue 3 + Pinia), `src/mcp-server` (TypeScript MCP proxy), `src/cli`, `docker/base-image` (agent runtime).
 - Backend pattern: router → service → db (`src/backend/routers|services|db`); schema changes require a versioned migration in `src/backend/db/migrations.py`.
 - Workflow: GitHub Issues with priority/type/theme labels; feature branches off `dev`; PRs target `dev` (releases merge `dev` → `main`). **Two-tracker open-core model:** bugs/refactor/docs live in public `abilityai/trinity`; features/epics in private `abilityai/trinity-enterprise` (see `.claude/DEVELOPMENT_WORKFLOW.md` → Repository Routing). See [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -146,6 +146,7 @@ Caveats that matter to agents:
 | [docs/MULTI_AGENT_SYSTEM_GUIDE.md](docs/MULTI_AGENT_SYSTEM_GUIDE.md) | Multi-agent YAML manifests and coordination patterns |
 | [docs/CLI.md](docs/CLI.md) | Full `trinity` CLI reference and multi-instance profiles |
 | [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) | Current limitations and workarounds |
+| [docs/testing/STRATEGY.md](docs/testing/STRATEGY.md) | How Trinity is tested — the method, the CI lanes, and the bar a harness must meet; read it before adding or running tests |
 | [abilityai/abilities](https://github.com/abilityai/abilities) | The plugin marketplace — agent lifecycle workflows (scaffold, develop, deploy, iterate) |
 
 Programmatic docs Q&A: `./scripts/ask-trinity.sh "your question"` from a checkout, or the hosted endpoint linked in [docs/user-docs/getting-started/help.md](docs/user-docs/getting-started/help.md).
