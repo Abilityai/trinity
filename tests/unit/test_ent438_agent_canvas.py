@@ -285,7 +285,14 @@ def test_the_write_routes_are_self_gated():
     for handler in ("def write_canvas", "def patch_canvas", "def clear_canvas"):
         body = source[source.index(handler):]
         body = body[:body.index("@router.") if "@router." in body[10:] else len(body)]
-        assert "_require_self(" in body or "_gate_write(" in body, f"{handler} is not self-gated"
+        # ent#553: `clear_canvas` gates through `_gate_human_removal`, which
+        # calls `_require_self` for an agent principal and additionally
+        # requires ownership for a human. Still self-gated — via one more hop.
+        assert (
+            "_require_self(" in body
+            or "_gate_write(" in body
+            or "_gate_human_removal(" in body
+        ), f"{handler} is not self-gated"
 
 
 def test_reads_are_not_self_gated():

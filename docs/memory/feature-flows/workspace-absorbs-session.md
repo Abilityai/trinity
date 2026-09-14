@@ -85,7 +85,10 @@ JSONL, and is resumable from then on. No stored history changes.
 ### 3. History replay became cold-turn-only
 
 This looks cosmetic and is the subtlest part of the change. `portal_chat`
-composes **two** messages:
+composes **two** messages (since trinity#2694 the resumed one is prefixed with
+the *delta* of rows the live session never heard — a voice call's spoken
+turns — see [workspace-voice-conversation.md → One timeline](workspace-voice-conversation.md#one-timeline-and-the-agent-knows-what-was-said-trinity2694);
+the rule below is otherwise unchanged):
 
 - **turn message** — omits the history block when resuming. The session already
   holds that context, so replaying it re-pays for it *and* places a summary of
@@ -337,8 +340,9 @@ the pre-#2320 message, never worse. Surfaced as `PortalHistory.last_turn_outcome
 undeclared keys, so a service-layer-only change is a no-op.
 
 Deliberately **not** a message row in `enterprise_portal_messages`: `role` is
-bare TEXT with no enum, but `_format_history_context` replays any non-`user` role
-to the agent **as its own words**, and `_persist_user_turn`'s dedupe reads
+bare TEXT with no enum, but `_format_history_context` replays any non-`user`,
+non-`system` role to the agent **as its own words** (a `system` row is a bracketed
+platform marker since trinity#2694 — still not a message), and `_persist_user_turn`'s dedupe reads
 `recent[-1].role == "user"`, so an error row would make Retry duplicate the user
 message — breaking a #2120 pin that does have a test. No schema change, no
 migration.

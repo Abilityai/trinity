@@ -714,10 +714,28 @@
   fallback with no name, evidence, or next step (#1880). Enforced by
   `tests/unit/test_1880_canary_alert_parity.py`, bidirectionally (a stale or
   typo'd id fails too). Source the name from the invariant module's own
-  docstring title, **not** the catalog: catalog ids are not registry ids
-  (catalog `E-06` is the unimplemented #129 check, while registry `E-06` is
-  "no overdue `next_run_at`"), so a catalog-sourced name can confidently
-  mislabel a live alert.
+  docstring title, **not** the catalog: a catalog title can over-claim what
+  shipped (G-03/G-04 carry an "implemented predicate deviates" note), so a
+  catalog-sourced name can confidently mislabel a live alert. The ids
+  themselves agree since #2337: the catalog's `E-06` had named the
+  unimplemented #129 orphan check while the registry's `E-06` was "no overdue
+  `next_run_at`" — the #129 entry was re-homed to `E-09` (operator ruling,
+  2026-09-12), the catalog's *Canary mapping* table joins every registry
+  module to its catalog entry, and `tests/unit/test_2337_invariant_namespace.py`
+  fails on any row where the two ids differ. Journey records
+  (`tests/journeys/catalog.yaml`) resolve their `invariants:` against the
+  catalog's `**X-NN**` definitions through the same parser
+  (`tests/unit/_invariant_catalog.py`), never against a summary table.
+- **Testing method — one document (Rail R5, #2339)**: the method these guards
+  serve — promises (journeys) and invariants (this catalog) asserted against a
+  live stack, the CI lanes as built, and the acceptance bar for a harness — is
+  written once in `docs/testing/STRATEGY.md`. `docs/testing/` is held to that
+  file plus the catalog and the generated `JOURNEYS.md`, with `phases/` (the
+  click-through scenarios `/ui-sweep` runs) and `ui-sweep/` (its dated reports)
+  as the only subdirectories, by `tests/unit/test_2339_testing_docs_consolidated.py`,
+  which also pins STRATEGY's tier and workflow claims to `tests/run-full.sh` and
+  `.github/workflows/`. Retired material is archived under `docs/archive/testing/`
+  and indexed in `docs/archive/README.md`; nothing is deleted.
 
 ### 31.2 Canary Run-State Observability (#2217)
 - **Status**: ✅ Implemented (2026-08-16)

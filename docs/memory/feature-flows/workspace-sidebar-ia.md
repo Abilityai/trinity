@@ -140,6 +140,96 @@ A cursor is written the first time the viewer opens or sends in a thread
 acquires one immediately and the first reply the viewer *doesn't* see is the
 first thing that badges.
 
+**ent#557 amended the absent-cursor half, and only that half.** The rule above
+is right about conversations the VIEWER starts and wrong about the ones an agent
+starts. ent#523 made Main the landing place for everything an agent initiates —
+agent-initiated messages, asks raised outside a chat, scheduled briefs all
+resolve to it — and a freshly minted Main has never been read by anyone. So the
+single case an unread badge exists for produced no badge anywhere: the agent
+replied, and nothing indicated it.
+
+A thread with no cursor now counts agent messages newer than the viewer's
+**account baseline**. Read as: *anything an agent has said to you since the
+first time you read anything here, in a chat you have never opened.* A chat
+that existed before that instant and was never opened still reports nothing —
+the conservative direction, and the property the original rule was written for.
+
+The baseline is a **stored, write-once row**, not a value derived from the
+cursors that happen to exist. That is the whole of the design, and it is worth
+saying why, because both obvious derivations were tried and both fail the same
+test:
+
+| derivation | reads as | why it is wrong |
+|---|---|---|
+| `MAX(last_read_at)` | "since you were last here" | It advances every time the viewer reads anything, so a reply sitting unread in a chat they have not opened is **silently cleared by reading a different chat**. |
+| `MIN(last_read_at)` | "since the first time you read anything" | Looks stable and is not: `mark_chat_read` UPDATES the row it advances, so a viewer with one chat has MIN == MAX and inherits the identical bug. |
+
+Only a value nothing updates is stable, so it is stored: a row in
+`enterprise_portal_chat_state` under the reserved kind `account` / id
+`baseline`, written on the viewer's first ever `mark_chat_read` and never moved.
+Every read of that table excludes it — `get_chat_state` so it never reaches the
+sidebar payload as a phantom chat, `count_chat_state_rows` so it cannot spend
+one of the viewer's capped rows on bookkeeping they did not ask for.
+
+A viewer with no baseline row — a first-ever sign-in — has no baseline, so the
+subquery is NULL, so the comparison is NULL, so nothing counts. ent#359's
+property is preserved rather than traded away, and it falls out of SQL's NULL
+semantics rather than a second branch.
+
+**The payload is built from two passes, and the second one is the feature.**
+`service.get_chat_state` iterates the viewer's state ROWS and reads the unread
+map off them — which reaches every chat that has a cursor and, by construction,
+none of the chats ent#557 exists for: a never-opened Main has no row. Since the
+SQL now LEFT JOINs, `count_unread_by_session` is the WIDER of the two sets, so a
+second pass emits its remaining thread ids as `starred: false` entries. Without
+it the SQL is correct and nothing on screen changes — no badge, no per-agent
+pill, no wordmark total, no tab title. The pass is bounded by the same read
+(scoped to the caller's own `enterprise_portal_messages`), de-duplicated against
+the ids the first pass already emitted so one chat cannot be counted twice in
+the wordmark total, and the account baseline is excluded one layer down so it
+can never surface as a phantom chat.
+
+**And only while the badge is CLEARABLE.** `mark_chat_read` silently no-ops when
+the row would be a new one and the viewer is at `MAX_CHAT_STATE_ROWS`, on the
+stated ground that a read marker is "incidental to what the user asked for". A
+cursorless thread is by definition a new row, so ent#557 made that no-op
+load-bearing: before it a cursorless thread showed nothing and the no-op was
+invisible; after it a capped viewer would get a badge on the wordmark, the agent
+pill *and* the browser tab title that opening the chat cannot dismiss. So the
+second pass is gated on there being room, and a capped viewer degrades to
+ent#359's behaviour — the state they were in before this feature — rather than
+to a stuck badge. The gate is read-side only and applies to the cursorless pass
+alone: a thread that already has a row can always be marked read, so capping its
+badge would hide unread the viewer can perfectly well clear. It fails OPEN (an
+unreadable count reports room — the write path is what enforces the cap) and the
+COUNT is paid only when there is something to emit, which is never on the
+ordinary load.
+
+**Liveness.** `refreshThreads()` is event-driven — a send, a navigation, a turn
+finishing — so before ent#557 an agent-initiated reply reached the sidebar on
+the viewer's next action and not before, which is the same as never for someone
+in another tab. It now also runs on the ent#364 asks poll (20 s,
+visibility-aware). Folded into that timer rather than given its own: the
+Workspace has no WebSocket a portal client is on (`operator_queue_new` is
+broadcast on the platform `/ws`), and a second cadence for one badge is a second
+thing to reason about. Since #2198 the thread half is ONE request for every
+agent rather than one per agent, which is what makes it cheap enough to ride
+there.
+
+**The browser tab.** While anything is unread the tab title carries a compact
+`(3) ` prefix; it returns to the plain title when everything is read, and is
+cleared when the Workspace unmounts — the count would otherwise outlive the only
+surface that can explain it. `utils/tabTitle.js` owns it, and the reason it is a
+module rather than two lines is that `document.title` has **two** writers: the
+router sets a label on every navigation (#1418) and the count changes on its own
+schedule. With both writing directly the last one to fire would erase the
+other's half. Neither writes it now; both call in, the module renders the whole
+string. The count is a prefix on whatever the router computed — never a
+replacement — which is what makes it compose with ent#556's branding work. It
+caps at `99+` like the sidebar (a browser truncates a tab to a few characters,
+and it truncates from the RIGHT, which is also why the marker leads), and zero
+renders nothing rather than a `(0)`.
+
 ### 3. Where the counts surface
 
 | Count | Where | Why there |
@@ -340,6 +430,10 @@ can actually see.
 
 | Test | Pins |
 |---|---|
+| `tests/unit/test_ent557_unread_never_opened_chat.py` | ent#557: the agent-started Main case; a first-ever sign-in still counting nothing; a chat predating the baseline not retroactively unread; **reading one chat not clearing another** (the case that rejects both derived baselines); the baseline frozen at the first read; the baseline row invisible to the sidebar and both caps; cross-viewer isolation of the baseline subquery |
+| `src/frontend/tests/unit/portalUnreadTabTitle.spec.js` | ent#557: the marker's format executed (prefix, cap, zero, non-numbers, empty base) and the two-writer ordering — a navigation keeps the count, a count change keeps the label |
+| `src/frontend/tests/unit/portalUnreadLiveness.spec.js` | ent#557: the poll refreshes threads, stays visibility-aware and adds no second timer; the tab reads the same total the rows do; asks and unread stay separate |
+| `tests/unit/test_ent557_unread_never_opened_chat.py` (service section) | ent#557: the db→service boundary — a cursorless thread reaches the API payload, a chat with a row is emitted once, a star survives gaining a count, the baseline is never a chat, and a first-ever viewer still gets nothing |
 | `tests/unit/test_ent359_portal_chat_state.py` | cross-viewer isolation; kind/id key separation; email-case normalisation; no-cursor ⇒ nothing unread; only agent messages after the cursor count; re-reading clears; star and read don't overwrite each other; unstar keeps the cursor; validation; unknown ids don't 404; the cap bounds new rows but never freezes owned ones; mark-read at the cap is a no-op |
 | `src/frontend/tests/unit/portalSidebarDateFlushRight.spec.js` | #2641: the list-level reservation as a pure table (all-running reserves nothing; one stopped agent reserves for all; derived from `availabilityChip` rather than re-listing the states), that the template removes the ELEMENT rather than its width and computes over the rendered rows, and that #2580's date column is still fixed, right-aligned, `tabular-nums` and unconditional |
 | `src/frontend/tests/unit/portalSidebarIA.spec.js` | starred lifted out of every date group and appearing once; per-agent sums; a room crediting every participant; wordmark total; row-avatar cap and overflow |
@@ -350,6 +444,6 @@ can actually see.
 | Limitation | Detail |
 |---|---|
 | **Rooms report `unread: 0`** | A room already has its own seq cursor (`since`), which is a different model from a timestamp cursor. Stars work for rooms; unread does not, so a room never badges. Reconciling the two is follow-up work. |
-| **Unread needs one open first** | A thread the viewer has never opened *since this shipped* has no cursor and so never badges, by design (see above). It acquires one the first time they open or send. |
+| ~~**Unread needs one open first**~~ | **Fixed by ent#557.** A never-opened thread now counts agent messages newer than the viewer's stored account baseline. What remains is narrower and deliberate: a viewer who has never read *anything* has no baseline and sees no badge, and a chat that predates their baseline and was never opened still reports nothing. |
 | **The agent badge counts replies, not questions** | "Waiting on the user" is read here as "the agent replied and you haven't read it". An agent blocked on an operator-queue approval is a different signal and is not surfaced here — that queue belongs to operators, and a Workspace viewer may be an external client with no standing in it. |
 | **Optimistic star, no cross-tab sync** | A star toggled in one tab does not appear in another until its next `refreshThreads`. |

@@ -194,12 +194,15 @@ def chat(monkeypatch):
     from services import session_turn_service as sts
 
     state = types.SimpleNamespace(
-        availability="ready", on_roster=True, lock_busy=False,
+        availability="ready", on_roster=True, lock_busy=False, voice_active=False,
         result=_Result(), turn_calls=[],
     )
 
     monkeypatch.setattr(svc, "agent_on_roster",
                         lambda a, e, include_owned=False: state.on_roster)
+    # #2694: the live-call marker the turn side reads before creating anything.
+    from client_portal import voice as portal_voice
+    monkeypatch.setattr(portal_voice, "voice_call_active", lambda sid: state.voice_active)
 
     async def _availability(name):
         return state.availability
@@ -253,6 +256,9 @@ RAISE_SITES = [
     ("stopped_agent",       {"availability": "stopped"},                   502,   "agent_unavailable", False),
     ("containerless_agent", {"availability": "unavailable"},               502,   "agent_unavailable", False),
     ("resume_lock_busy",    {"lock_busy": True},                           429,   "busy",              True),
+    # #2694: a typed turn while a voice call is on in this thread — unbilled,
+    # and sending again after the call is exactly right.
+    ("voice_call_on",       {"voice_active": True},                        409,   "voice_call_active", True),
 ]
 
 
@@ -336,7 +342,7 @@ def test_the_only_retryable_verdicts_are_the_two_where_nothing_reached_the_agent
         # reset the mutated field so the next row starts clean
         for k in setup:
             setattr(state, k, {"on_roster": True, "availability": "ready",
-                               "lock_busy": False}[k])
+                               "lock_busy": False, "voice_active": False}[k])
 
     for label, kwargs, _status, category, _r in TERMINAL_SITES:
         kwargs = dict(kwargs)
@@ -347,7 +353,9 @@ def test_the_only_retryable_verdicts_are_the_two_where_nothing_reached_the_agent
         if err.retryable:
             retryable.add(category)
 
-    assert retryable == {"busy", "capacity"}
+    # #2694 added `voice_call_active`: refused before any row or dispatch
+    # exists, like `busy`, and "send it again after the call" is exactly right.
+    assert retryable == {"busy", "capacity", "voice_call_active"}
 
 
 def test_a_turn_that_ran_is_never_retryable(chat):

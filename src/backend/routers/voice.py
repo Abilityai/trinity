@@ -130,6 +130,13 @@ async def voice_stop(
     messages_saved = 0
     if not getattr(session, "portal_session_id", None) and await _claim_save(session.session_id):
         messages_saved = _save_transcript(session)
+    else:
+        # #2694: a `/stop` that lands BEFORE the socket closes ends the session
+        # here, so the bridge's `finally` gets None back and never clears the
+        # live-call marker — the owner's own thread would refuse typed turns
+        # until the TTL. Cleared here as well; the delete is idempotent.
+        from client_portal.voice import clear_voice_call_active
+        clear_voice_call_active(getattr(session, "portal_session_id", None))
 
     # Clean up
     await voice_service.remove_session(request.voice_session_id)
@@ -256,6 +263,7 @@ async def voice_websocket(
     Server sends: {"type": "audio", "data": "<base64 PCM 24kHz mono>"}
                   {"type": "transcript", "role": "user|assistant", "text": "..."}
                   {"type": "status", "state": "connecting|listening|speaking|ended"}
+                  {"type": "task", "state": "started|finished|failed", "task_id": "t1", "label": "...", "running": 1}
     """
     # Authenticate via query param token (WebSocket can't use Authorization header)
     if not token:
@@ -373,6 +381,15 @@ async def voice_websocket(
         except Exception:
             pass
 
+    # ent#551: a background task's lifecycle — started / finished / failed —
+    # so the orb can show work in flight across turns, distinct from the
+    # per-call amber badge, and the canvas column can refetch when it lands.
+    async def on_task_event(event: dict):
+        try:
+            await websocket.send_json({"type": "task", **event})
+        except Exception:
+            pass
+
     # Start the Gemini connection in a background task
     gemini_task = asyncio.create_task(
         voice_service.connect_and_stream(
@@ -383,6 +400,7 @@ async def voice_websocket(
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
             on_turn=on_turn,
+            on_task_event=on_task_event,
         )
     )
 
@@ -410,10 +428,12 @@ async def voice_websocket(
             if getattr(ended, "portal_session_id", None):
                 # Workspace (ent#534): turns are already in the thread; close
                 # the call with its one summary row.
-                from client_portal.voice import persist_voice_call_end
+                from client_portal.voice import clear_voice_call_active, persist_voice_call_end
                 messages_saved = persist_voice_call_end(
                     ended, ended._duration_seconds, ended.end_reason, ended.end_message,
                 )
+                # #2694: the thread may take typed turns again.
+                clear_voice_call_active(getattr(ended, "portal_session_id", None))
             elif await _claim_save(voice_session_id):
                 messages_saved = _save_transcript(ended)
             await voice_service.remove_session(voice_session_id)

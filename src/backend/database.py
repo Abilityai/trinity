@@ -1895,6 +1895,10 @@ class DatabaseManager:
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
 
+    def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
+        """Every execution row of one fan-out batch (#2670)."""
+        return self._schedule_ops.get_fan_out_executions(agent_name, fan_out_id, limit)
+
     def get_all_agents_execution_stats(self, hours: int = 24):
         """Get execution statistics for all agents."""
         return self._schedule_ops.get_all_agents_execution_stats(hours)
@@ -2225,6 +2229,15 @@ class DatabaseManager:
 
     def delete_agent_canvas(self, agent_name: str, canvas_id: str) -> bool:
         return self._canvas_ops.delete_canvas(agent_name, canvas_id)
+
+    def delete_agent_canvases(self, agent_name: str, canvas_ids):
+        return self._canvas_ops.delete_canvases(agent_name, canvas_ids)
+
+    def count_agent_canvases(self, agent_name: str) -> int:
+        return self._canvas_ops.count_canvases(agent_name)
+
+    def set_agent_canvas_pinned(self, agent_name: str, canvas_id: str, pinned: bool) -> bool:
+        return self._canvas_ops.set_canvas_pinned(agent_name, canvas_id, pinned)
 
     def last_completed_execution_at(self, agent_name: str):
         return self._canvas_ops.last_completed_execution_at(agent_name)
@@ -3008,6 +3021,19 @@ class DatabaseManager:
         """#2409: the auto-switch candidate list — filter only, load-balance
         order; ranking lives in `services.subscription_auto_switch`."""
         return self._subscription_ops.list_viable_alternative_subscriptions(current_subscription_id)
+
+    def list_recently_failed_alternatives(self, current_subscription_id: str):
+        """#2638: the COMPLEMENT of the candidate list — the alternatives the 2h
+        skip-list is excluding, which the switcher may readmit only on positive
+        fresh evidence."""
+        return self._subscription_ops.list_recently_failed_alternatives(current_subscription_id)
+
+    def last_failure_at_by_subscription(self, subscription_ids, hours: int = 2):
+        """#2638: newest failure instant per subscription inside the window, one
+        query — the instant a provider reset time is compared against."""
+        return self._subscription_ops.last_failure_at_by_subscription(
+            subscription_ids, hours=hours
+        )
 
     def get_subscription_usage(self, subscription_id: str):
         """Return rolling usage totals for a subscription (SUB-004)."""

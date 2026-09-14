@@ -92,6 +92,16 @@ class PortalAgentCard(BaseModel):
     # which answers with real statuses and real messages) over the browser Web
     # Speech API, and to drop the mic entirely when neither path can work.
     stt_available: bool = False
+    # ent#553 — may THIS caller delete or pin this agent's canvases (owner or
+    # admin, platform sessions only). Per-agent, unlike the instance-level
+    # capability bits above, because ownership is.
+    #
+    # Fails CLOSED like its siblings, and for the same reason stated at
+    # `voice_available`: the bug being guarded is showing a control that then
+    # refuses. AC #2 asks that a user who may not delete never sees the
+    # affordance, so this is the field that decides it. UX, not containment —
+    # the routes re-check with the same predicate.
+    can_manage_canvases: bool = False
     # #138 briefing — ships with the roster at sign-in so the new-chat screen
     # renders with zero extra fetches. Best-effort live data (a stopped/slow
     # agent yields None/[]). `playbooks` is the hint-card set (ent#380): the
@@ -690,6 +700,11 @@ class PortalHistory(BaseModel):
     # the budget above is: an undeclared key is stripped by `response_model` and
     # never reaches the client.
     last_turn_outcome: Optional[PortalTurnOutcome] = None
+    # #2694: the window is counted in typed turns and bounded by a row ceiling;
+    # True when the ceiling cut rows off the OLD end, so the client can say
+    # "earlier messages aren't shown" instead of rendering a thread that
+    # silently starts mid-call. Declared for the same reason as the two above.
+    truncated: bool = False
 
 
 # --- Operator controls over a signed-in client (ent#281) ----------------------

@@ -1,0 +1,43 @@
+{
+  "version": "1.1",
+  "date": "2026-09-11",
+  "mode": "diff",
+  "scope": "feature/2703-skill-assign-delivery vs 3edd0dc6 (working tree)",
+  "issue": "abilityai/trinity#2703",
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    9,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_ws_event_types": 1,
+    "new_mcp_tools": 0,
+    "new_agent_key_surfaces": 0,
+    "new_unauthenticated_surfaces": 0
+  },
+  "findings": [],
+  "supply_chain_summary": "no dependency/lockfile/workflow change",
+  "filter_stats": {
+    "candidate_areas": 9,
+    "promoted": 0,
+    "tentative": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "first run for this branch; 0 findings",
+  "notes": [
+    "agent-scoped key reach is pre-existing via /skills/inject; MCP-layer gate deferred to DEBT_INBOX",
+    "delivery.error echoes agent-server text already exposed by /skills/inject; never rendered",
+    "fleet-wide agent-name broadcast matches ent#305/#918 precedent"
+  ]
+}

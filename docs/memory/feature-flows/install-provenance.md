@@ -117,7 +117,7 @@ already in the closed set.
 ## The surface
 
 `GET /api/settings/feature-flags` — the established home for UI-gating flags, and
-an explicit AC that no new endpoint appear (`routers/settings.py:274-297`):
+an explicit AC that no new endpoint appear (`routers/settings.py:283-312`):
 
 | field | type | notes |
 |---|---|---|
@@ -129,7 +129,7 @@ an explicit AC that no new endpoint appear (`routers/settings.py:274-297`):
 Both booleans are resolved server-side, so the browser holds no second copy of
 which provenances qualify (the ent#386 rule). The store reads only
 `hardening_guide_eligible` for the step and fails closed to `false` on a failed
-fetch (`stores/sessions.js:148-150`, `:177-179`).
+fetch (`stores/sessions.js:157-159`, `:187-189`).
 
 `GET /api/version` also carries `install_source`, for operator support. It is
 threaded into `_build_version_payload` as a **parameter** — that function is

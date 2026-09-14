@@ -93,9 +93,95 @@ CREATE INDEX idx_agent_canvases_agent ON agent_canvases(agent_name, updated_at D
   would leave a renamed agent's canvas addressed to a name nothing resolves,
   and the agent's next write would silently mint a **second** canvas under the
   new name while the old one stayed visible.
-- **No retention window.** The table is bounded by the composite key — one row
-  per surface, replaced on write — unlike the append-only tables
-  `RETENTION_OPS_KEYS` governs. It is deliberately absent from that set.
+- **A per-agent CAP, not a retention window** (corrected by ent#553). ent#438
+  recorded "no retention window" on the grounds that the composite key bounds
+  the table — one row per surface, replaced on write. That bounds the rows *per
+  canvas*, not the *number of canvases*: `canvas_id` is agent-chosen, so an
+  agent writing one canvas per run grows the table without limit. The unbounded
+  axis was missed, not decided.
+
+  The bound is `CANVAS_MAX_PER_AGENT` (default 100, env-tunable), enforced
+  inside `upsert_canvas`'s insert branch — in the same transaction as the
+  INSERT, so it is not a check-then-act race. Two properties follow:
+  **updating an existing canvas is never refused** (a cap that froze updates
+  would punish the agent that reuses ids, which is the behaviour we want), and
+  the refusal is a named 409 telling the agent to retire one, never an
+  eviction. Deleting a person's surfaces on a timer is the #1638 failure
+  direction; the table therefore stays deliberately absent from
+  `RETENTION_OPS_KEYS`, now for a stated reason rather than a mistaken one.
+
+## Lifecycle — removing, pinning, and living with a lot of them (ent#553)
+
+An agent that uses its canvas as intended accumulates dozens: one per report,
+per topic, per run. Before ent#553 the Workspace could only ever *add* to that
+pile — there was no delete on the client-portal surface at all, and the only
+ordering was "newest updated".
+
+**Who may remove one.** Owner-or-admin for a human; an agent may still clear
+its *own* (`clear_canvas`, the #918 self-gate). This is the answer ent#548
+gives for files — the owner deletes the shared artifact — and it *narrowed* the
+platform DELETE route, which previously accepted any user with agent access.
+Safe to narrow because no UI called it, so no workflow depended on the wider
+gate. A canvas is one shared surface with no per-user copy, so a non-owner has
+no "remove it from my list only" middle ground to be offered: per AC #2 they
+see **no control at all** rather than one that fails. The Workspace learns this
+from `PortalAgentCard.can_manage_canvases`, the portal's only capability
+channel (#2128) — a portal principal cannot read `/api/settings/feature-flags`.
+Both surfaces resolve it through `db.can_user_share_agent`, the *same*
+predicate `dependencies.assert_agent_owner` uses, so Agent Detail and the
+Workspace cannot disagree about who owns an agent.
+
+**Bulk removal** is `POST .../canvas/bulk-delete` on both surfaces — a POST
+rather than a body-carrying DELETE, because bodies on DELETE are
+permitted-but-unreliable and this one is not optional. It reports the ids that
+*existed*, not the ids requested, so the UI can say "3 of 5 removed" honestly.
+Declared above the parameterized routes on both routers (Invariant #4).
+
+**Pinning** is `pinned` on `agent_canvases` (dual-track: `agent_canvases_pinned`
++ Alembic `0059_agent_canvases_pinned`, NOT NULL DEFAULT 0, no backfill). It is
+written *only* by the human-facing pin route and is deliberately absent from
+every agent-facing tool: `audience` is the agent's decision about who may read
+a canvas, `pinned` is the reader's decision about what they want to see first,
+and an agent that could pin itself to the top would defeat the ordering. A pin
+survives the agent rewriting the canvas. Ordering is pinned-first then
+newest-updated, in the SQL *and* in `canvasUtils.sortCanvases` — the client
+re-derives it because an optimistic pin or delete mutates the list in place and
+re-sorting only on refetch would leave a just-pinned canvas where it was.
+
+**Living with many** is `CanvasPanel.vue`, shared by Agent Detail and the
+Workspace rail (one rendering layer, as ent#475 established): search over title
+and id once the list passes six, a height-bounded scrolling strip so a long
+list does not cost the rail its other tabs, and a Manage mode giving each row
+its age, its stale mark, a pin toggle and a delete. Decidable rules live in
+`components/canvas/canvasUtils.js` (`sortCanvases`, `filterCanvases`,
+`selectionState`, `bulkDeletePrompt`, `bulkDeleteOutcome`, `canvasHeadroom`,
+`canvasSelectorVisible`, `canvasAutoSelect`, `canvasSearchVisible`), because
+vitest runs `environment: 'node'` with no mount harness — a rule inside the SFC
+is one no test can reach; `canvasPanelSelectorGate.spec.js` goes one step
+further and slices the SFC's own gate expressions out of the source to **run**
+them against the numbers each review ejection was proven with.
+
+**A search is state the list can change under** — two review-found defects of
+one class, both fixed by a pure rule rather than a template tweak. (1) The chip
+strip was gated on the *filtered* list (`visible.length > 1`), so a query
+narrowing to exactly one match hid the strip, the no-match line stayed hidden
+too, and the auto-select watcher — keyed off the *unfiltered* `props.canvases`
+— never selected the match: the user searched, hit one result, and the chips
+vanished with the previous canvas still on screen. `canvasSelectorVisible`
+shows any hit while a query is active and keeps the "no choice" collapse for
+the un-searched case; `canvasAutoSelect` makes the selection follow the
+matches. (2) `query` has exactly one writer, the search input's `v-model`, and
+that input was `v-if`'d on `count > threshold` alone — so seven canvases, type
+"Topic 3", delete the one match: six canvases, the box unmounts, `visible`
+keeps filtering on text nobody can see, the strip collapses, and the panel
+says *No canvas matches "Topic 3"* with no control left to clear it (also
+reachable with no operator action, via the agent's own `clear_canvas` plus a
+rail refresh). `canvasSearchVisible` keeps the box while a query is active
+regardless of the count — the typed intent survives the shrink and the
+no-match line keeps its one control; resetting `query` on the flip was
+rejected because it would erase a search the user was mid-way through because
+a sibling canvas went away.
+
 - Dual-track migration: `db/migrations.py::agent_canvases_table` +
   Alembic `0050_agent_canvases`. ent#536 changes **no DDL**: block ids and the
   new kinds live inside the `blocks` JSON, so there is no migration and no

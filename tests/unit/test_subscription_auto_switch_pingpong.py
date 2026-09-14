@@ -17,6 +17,7 @@ first-match pick into the service layer; the db-level FILTER is what #444 pins).
 from __future__ import annotations
 
 import sqlite3
+import re
 import sys
 import uuid
 from datetime import datetime
@@ -490,8 +491,36 @@ class TestSingleEventThreshold:
             "reading_age_seconds": None,
         }
         headroom_stub.is_auto_refresh_enabled = lambda: True
+        # #2638 / #2645 ejection: the selector also reaches for these. With them
+        # absent every selector call logged "[#2409] headroom ranking unavailable
+        # (AttributeError …)" and took the FAIL-OPEN branch, so this whole suite
+        # "passed" without its ping-pong regressions ever reaching ranking or
+        # readmission — the silent inertness `test_2409`'s fixture already fixed.
+        # The stub is a leaf with the REAL semantics: no readings ⇒ no
+        # readmission, no failure ⇒ nothing to order against.
+        headroom_stub.FRESHNESS_SECONDS = 1800
+        headroom_stub.RECOVERY_INSTANT_MAX_AGE_SECONDS = 7 * 24 * 3600
+        headroom_stub.RECOVERY_SERVING_NOW = "serving_now"
+        headroom_stub.RECOVERY_WINDOW_RESET = "window_reset"
+        headroom_stub.recovery_verdict = (
+            lambda fresh, aged, last_failure_at, **kw:
+                "serving_now" if (fresh is not None and not getattr(fresh, "refusing", False)) else None
+        )
+        stub_db.list_recently_failed_alternatives.return_value = []
+        stub_db.last_failure_at_by_subscription.return_value = {}
         monkeypatch.setitem(
             sys.modules, "services.subscription_headroom_service", headroom_stub
+        )
+        # The suite must FAIL, not degrade, if the service grows a name this
+        # stub lacks: the fail-open branch is exactly what hid the ejection.
+        _seen_names = set()
+        for _line in open(auto_switch.__file__, encoding="utf-8"):
+            for _m in re.finditer(r"\bheadroom\.([A-Za-z_][A-Za-z0-9_]*)", _line):
+                _seen_names.add(_m.group(1))
+        _missing = sorted(n for n in _seen_names if not hasattr(headroom_stub, n))
+        assert not _missing, (
+            f"headroom stub lacks {_missing} — the selector would take the fail-open "
+            "branch and this suite would go inert (#2645 ejection)"
         )
 
         # Stub the heavy sub-call. Record args, return a synthetic switch result.

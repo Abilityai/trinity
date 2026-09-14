@@ -285,8 +285,29 @@ def register_env(monkeypatch):
 
     monkeypatch.setattr(auto_switch, "reload_subscription_for_all_agents", _fanout)
 
+    # #2572: the endpoint also fires the credential-less adoption sweep. This
+    # file is about the #1089 rollover fan-out, so neutralize it here (its own
+    # behaviour is covered by tests/unit/test_2572_credentialless_adoption.py).
+    import services.subscription_service as _ss
+
+    async def _no_adopt(**_kwargs):
+        return {}
+
+    monkeypatch.setattr(_ss, "adopt_for_credentialless_agents", _no_adopt)
+
     return types.SimpleNamespace(
-        rs=rs, db=fake_db, created=created, fanout_calls=fanout_calls, auto_switch=auto_switch
+        rs=rs, db=fake_db, created=created, fanout_calls=fanout_calls,
+        auto_switch=auto_switch, http_request=_stub_http_request(),
+    )
+
+
+def _stub_http_request():
+    """The injected `Request` `register_subscription` now takes (#2572) — it is
+    read only for audit context (client IP / path / request id)."""
+    return types.SimpleNamespace(
+        client=types.SimpleNamespace(host="127.0.0.1"),
+        url=types.SimpleNamespace(path="/api/subscriptions"),
+        state=types.SimpleNamespace(request_id="req-1"),
     )
 
 
@@ -300,7 +321,9 @@ class TestRegisterKeyRollover:
 
         request = SubscriptionCredentialCreate(name="sub-X", token="sk-ant-oat01-rolled")
 
-        result = await register_env.rs.register_subscription(request, current_user=admin_user)
+        result = await register_env.rs.register_subscription(
+            request, http_request=register_env.http_request, current_user=admin_user
+        )
 
         assert result.id == register_env.created.id and result.connected_agents == 0
         assert register_env.fanout_calls == ["sub-x"]  # fanned out to the upserted sub id
@@ -318,7 +341,9 @@ class TestRegisterKeyRollover:
 
         request = SubscriptionCredentialCreate(name="sub-X", token="sk-ant-oat01-rolled")
 
-        result = await register_env.rs.register_subscription(request, current_user=admin_user)
+        result = await register_env.rs.register_subscription(
+            request, http_request=register_env.http_request, current_user=admin_user
+        )
 
         assert result.id == register_env.created.id  # upsert NOT failed by the fan-out error
 
@@ -332,7 +357,9 @@ class TestRegisterKeyRollover:
         request = SubscriptionCredentialCreate(name="sub-X", token="sk-ant-oat01-rolled")
 
         with pytest.raises(HTTPException) as exc:
-            await register_env.rs.register_subscription(request, current_user=owner_user)
+            await register_env.rs.register_subscription(
+                request, http_request=register_env.http_request, current_user=owner_user
+            )
 
         assert exc.value.status_code == 403
         assert register_env.fanout_calls == []  # never reached the rollover fan-out

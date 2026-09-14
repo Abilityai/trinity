@@ -13,12 +13,13 @@ subscription is assigned, ANTHROPIC_API_KEY is removed from the container.
 import asyncio
 import logging
 import os
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from typing import Optional, List
 
 from models import SubscriptionHeadroomHistory, SubscriptionRegistration, SubscriptionTokenTest, User
 from database import db
 from dependencies import get_current_user, assert_admin, assert_agent_access, assert_agent_owner
+from services.platform_audit_service import platform_audit_service, AuditEventType
 from db_models import (
     SubscriptionCredentialCreate,
     SubscriptionCredential,
@@ -48,7 +49,8 @@ async def get_encryption_status(
 
 @router.post("", response_model=SubscriptionRegistration)
 async def register_subscription(
-    request: SubscriptionCredentialCreate,
+    payload: SubscriptionCredentialCreate,
+    http_request: Request,
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -59,6 +61,12 @@ async def register_subscription(
     the same name exists, it will be updated.
 
     Token must start with `sk-ant-oat01-` (Claude Code OAuth access token).
+
+    The body parameter is `payload`, not `request`: the handler now also takes
+    the injected `Request` (for the audit context the #2572 sweep writes), and
+    two things called `request` in one handler is how a log line inside an
+    `except` block ends up raising `AttributeError` — which would escape to the
+    outer handler below and return a 500 *with the credential already stored*.
     """
     assert_admin(current_user)
 
@@ -86,14 +94,14 @@ async def register_subscription(
         first_credential = not is_claude_auth_configured()
 
         subscription = db.create_subscription(
-            name=request.name,
-            token=request.token,
+            name=payload.name,
+            token=payload.token,
             owner_id=user["id"],
-            subscription_type=request.subscription_type,
-            rate_limit_tier=request.rate_limit_tier,
+            subscription_type=payload.subscription_type,
+            rate_limit_tier=payload.rate_limit_tier,
         )
 
-        logger.info(f"Registered subscription '{request.name}' by {current_user.username}")
+        logger.info(f"Registered subscription '{payload.name}' by {current_user.username}")
 
         # #1089 (F1): a re-register (upsert) is a key rollover — fan a best-effort
         # hot-reload out to every running agent on this subscription so they pick
@@ -106,7 +114,30 @@ async def register_subscription(
         except Exception as e:
             logger.error(
                 f"[#1089] key-rollover hot-reload fan-out failed for "
-                f"subscription '{request.name}': {e}"
+                f"subscription '{payload.name}': {e}"
+            )
+
+        # #2572 (Trigger A1): registering a subscription is the one action the
+        # product tells a keyless operator to take, and until now it assigned
+        # nobody — every pre-existing agent stayed in api_key mode with nothing
+        # behind it. Sweep the credential-less agents onto an available
+        # subscription. Same swallow-everything contract as the #1089 fan-out
+        # above: this must NEVER fail a registration whose credential is already
+        # stored. Only Phase A (decide + persist) is awaited — the container
+        # apply is backgrounded by the service — so the panel's immediate
+        # `GET /api/subscriptions` refetch already sees the adopted agents.
+        try:
+            from services.subscription_service import adopt_for_credentialless_agents
+            await adopt_for_credentialless_agents(
+                actor_user=current_user,
+                actor_ip=http_request.client.host if http_request.client else None,
+                endpoint=str(http_request.url.path),
+                request_id=getattr(http_request.state, "request_id", None),
+            )
+        except Exception as e:
+            logger.error(
+                f"[#2572] credential-less adoption sweep failed after registering "
+                f"subscription '{payload.name}': {e}"
             )
 
         # ent#582: the first credential reaches the agents created without one
@@ -447,10 +478,45 @@ async def delete_subscription(
 # Agent Subscription Assignment
 # ============================================================================
 
+async def _log_subscription_assignment(
+    *,
+    event_action: str,
+    agent_name: str,
+    current_user: User,
+    request: Optional[Request],
+    details: dict,
+) -> None:
+    """SEC-001 audit row for a MANUAL subscription assign/clear (#2572 AC5).
+
+    `AuditEventType.CREDENTIALS` because a subscription token is a credential.
+    Best-effort by contract — `platform_audit_service.log` returns `None` on
+    failure and callers must not branch on it. `details` carries the
+    subscription id and name only; a token never enters an audit sink
+    (Invariant #12).
+    """
+    await platform_audit_service.log(
+        event_type=AuditEventType.CREDENTIALS,
+        event_action=event_action,
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request is not None and request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=str(request.url.path) if request is not None else None,
+        request_id=getattr(request.state, "request_id", None) if request is not None else None,
+        details=details,
+    )
+
+
 @router.put("/agents/{agent_name}")
 async def assign_subscription_to_agent(
     agent_name: str,
     subscription_name: str = Query(..., description="Name of subscription to assign"),
+    # Audit context only, so it carries the `= None` default the repo already
+    # uses for that role (`routers/reports.py`, `routers/canvas.py`): FastAPI
+    # injects a `Request`-annotated parameter regardless of its default, while
+    # direct callers (and the #1310 auth-guard suite) need not supply one.
+    request: Request = None,
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -495,6 +561,27 @@ async def assign_subscription_to_agent(
             logger.info(
                 f"Assigned subscription '{subscription_name}' to agent '{agent_name}' "
                 f"by {current_user.username}"
+            )
+
+            # SEC-001 / #2572 AC5: adoption is recorded "alongside manual
+            # assignment" — which is only literally true if the manual move is
+            # recorded too. #2421 (still open) found this router carried no
+            # audit call at all, so an auditor asking "how did agent X get onto
+            # this subscription?" got a false negative for every manual move.
+            # This takes `subscription_assign` / `subscription_clear` only;
+            # #2421's register / delete / settings actions stay unclaimed.
+            # Never the token (Invariant #12) — id and name only.
+            await _log_subscription_assignment(
+                event_action="subscription_assign",
+                agent_name=agent_name,
+                current_user=current_user,
+                request=request,
+                details={
+                    "subscription_id": subscription.id,
+                    "subscription_name": subscription.name,
+                    "previous_subscription_id": old_sub_id,
+                    "auth_mode_change": old_sub_id is None,
+                },
             )
 
             restart_result = None
@@ -552,6 +639,8 @@ async def assign_subscription_to_agent(
 @router.delete("/agents/{agent_name}")
 async def clear_agent_subscription(
     agent_name: str,
+    # Audit context only — see the note on the assign route above.
+    request: Request = None,
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -572,6 +661,18 @@ async def clear_agent_subscription(
             f"Cleared subscription '{current_sub.name}' from agent '{agent_name}' "
             f"by {current_user.username}"
         )
+
+    # SEC-001 / #2572 AC5 — the manual half of the trail (see the assign route).
+    await _log_subscription_assignment(
+        event_action="subscription_clear",
+        agent_name=agent_name,
+        current_user=current_user,
+        request=request,
+        details={
+            "subscription_id": current_sub.id if current_sub else None,
+            "subscription_name": current_sub.name if current_sub else None,
+        },
+    )
 
     # Restart running agent so ANTHROPIC_API_KEY is restored (if use_platform_api_key=1)
     restart_result = None
@@ -775,6 +876,61 @@ async def set_headroom_auto_refresh_setting(
     logger.info(
         f"Subscription headroom auto-refresh {'enabled' if enabled else 'disabled'} "
         f"by {current_user.username}"
+    )
+    return {"enabled": enabled}
+
+
+@router.get("/settings/api-key-fallback")
+async def get_api_key_fallback_setting(
+    current_user: User = Depends(get_current_user)
+):
+    """Whether a turn may fall back to the platform API key when NO
+    subscription can serve it (#2638 AC#4). Default ON.
+
+    `key_configured` is the honest half the AC asks for: with the setting on
+    and no key stored, the fallback is enabled and inert, and a toggle that
+    says only "on" would be describing a remedy that cannot run. Never echoes
+    the key — only whether one resolves (`has_secret_setting`'s presence rule,
+    so a row written under a rotated encryption key still reports configured).
+    """
+    assert_admin(current_user)
+    from services.subscription_auto_switch import (
+        API_KEY_FALLBACK_SETTING, is_api_key_fallback_enabled,
+    )
+    from services.settings_service import get_anthropic_api_key
+
+    enabled = await asyncio.to_thread(is_api_key_fallback_enabled)
+    key_configured = bool(await asyncio.to_thread(get_anthropic_api_key))
+    return {
+        "enabled": enabled,
+        "key_configured": key_configured,
+        "setting_key": API_KEY_FALLBACK_SETTING,
+    }
+
+
+@router.put("/settings/api-key-fallback")
+async def set_api_key_fallback_setting(
+    enabled: bool,
+    current_user: User = Depends(get_current_user)
+):
+    """Enable/disable the API-key fallback (#2638 AC#4).
+
+    Turning it OFF is a real choice, not an edge case: an operator who
+    registered subscriptions did so to control where spend goes, and a silent
+    move onto a metered key is exactly what they were avoiding. Turning it ON
+    is the default because the alternative is a user's message dying while a
+    usable key sits in settings.
+
+    The fallback CLEARS the agent's subscription assignment when it fires, so
+    it is not a temporary redirect — see `fallback_to_api_key`.
+    """
+    assert_admin(current_user)
+    from services.subscription_auto_switch import API_KEY_FALLBACK_SETTING
+
+    db.set_setting(API_KEY_FALLBACK_SETTING, "true" if enabled else "false")
+    logger.info(
+        "Subscription API-key fallback %s by %s",
+        "enabled" if enabled else "disabled", current_user.username,
     )
     return {"enabled": enabled}
 

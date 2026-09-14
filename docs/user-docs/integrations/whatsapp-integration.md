@@ -261,7 +261,7 @@ If the log shows no `Refusing…` line at all, the failure is elsewhere:
 
 ### Attachment says "unsupported format"
 
-This is different from "download failed" — the file **was** fetched successfully, then rejected by Trinity's file-type policy. PDFs, archives, video, and audio (including WhatsApp voice notes) are not accepted into agent workspaces on any channel. Text, CSV, JSON, and images are.
+This is different from "download failed" — the file **was** fetched successfully, then rejected by Trinity's file-type policy. PDFs, tar/gzip/rar archives, video, and audio (including WhatsApp voice notes) are not accepted into agent workspaces on any channel. Text, CSV, JSON, ZIP, and images are.
 
 ## See Also
 

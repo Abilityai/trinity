@@ -14,6 +14,8 @@
 
 **Key directories:** `src/views/` (page components), `src/stores/` (Pinia state), `src/components/` (reusable UI), `src/utils/` (WebSocket client, helpers, `markdown.js` with DOMPurify — plus the pure leaves `markedConfig.js`, `codeBlocks.js` and `clipboard.js` it composes, #2515).
 
+**Dev-server pre-bundling rule (#2705):** every package a dynamic `import('…')` under `src/` names is listed in `vite.config.js`'s `optimizeDeps.include`. Vite 8's dependency scanner tree-shakes each script block before it records imports, so a dynamic bare import inside an unexported helper (`CanvasDiagram.vue`'s `ensureMermaid()`, a plain `<script>` block only `<script setup>` calls) is never pre-bundled; the first served page that includes the file then re-optimises and full-reloads every open tab — every developer's, and every Playwright page mid-run. Static imports are always found; only dynamic ones can be missed, and whether one is found depends on how its caller happens to be wired, so the rule lists them all. `scripts/scan-dynamic-imports.mjs` finds them; `tests/unit/optimizeDepsIncludeGuard.spec.js` checks the list against the *resolved* config and fails `npm run test:unit` on a missing entry, a non-literal specifier, or an entry that is not a `package.json` dependency.
+
 **Stores (domain-scoped, Invariant #6):**
 - `stores/agents.js` - Agent CRUD, chat, activity
 - `stores/auth.js` - Email/admin authentication + JWT; `principalId` getter = the JWT `sub` (the username on every login path, available synchronously from the stored token — `user.username` is NOT, it lands with `/api/users/me`), the identity every per-user browser cache is namespaced by (trinity-enterprise#413)

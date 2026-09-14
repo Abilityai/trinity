@@ -287,7 +287,7 @@ async def get_model():
             "model": agent_state.current_model,
             "runtime": runtime,
             "available_models": ["sonnet", "opus", "haiku", "fable"],
-            "note": "Claude model aliases (Anthropic API): sonnet (Sonnet 5), opus (Opus 4.8), haiku (Haiku 4.5), fable (Fable 5). Add [1m] suffix for the 1M extended-context beta (e.g. sonnet[1m])."
+            "note": "Claude model aliases (Anthropic API): each resolves to the current generation of its family — today sonnet (Sonnet 5), opus (Opus 5), haiku (Haiku 4.5), fable (Fable 5.1). Add [1m] suffix for the 1M extended-context beta (e.g. sonnet[1m])."
         }
 
 
@@ -316,7 +316,8 @@ async def set_model(request: ModelRequest):
             )
     else:
         # Claude Code validation
-        valid_aliases = ["sonnet", "opus", "haiku", "sonnet[1m]", "opus[1m]", "haiku[1m]"]
+        valid_aliases = ["sonnet", "opus", "haiku", "fable",
+                         "sonnet[1m]", "opus[1m]", "haiku[1m]", "fable[1m]"]
         if request.model in valid_aliases or request.model.startswith("claude-"):
             agent_state.current_model = request.model
             logger.info(f"Model changed to: {request.model}")
@@ -328,7 +329,7 @@ async def set_model(request: ModelRequest):
         else:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid Claude model: {request.model}. Use aliases (sonnet, opus, haiku) or full model names."
+                detail=f"Invalid Claude model: {request.model}. Use aliases (sonnet, opus, haiku, fable) or full model names."
             )
 
 

@@ -610,6 +610,8 @@ agent_canvases = Table(
     Column("updated_by_execution_id", Text),
     # ent#537 — starter layout by name; NULL = stacked.
     Column("template", Text),
+    # ent#553 — a human's pin, so the pile stays navigable. Never agent-written.
+    Column("pinned", Integer),
 )
 
 user_ui_preferences = Table(

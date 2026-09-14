@@ -28,6 +28,24 @@ import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
+
+/**
+ * Every transitioning element's class string, read out of CLASS ATTRIBUTES.
+ *
+ * Deliberately not a file-wide match for `transition-[...]`: this shell's
+ * comments discuss the transitions they configure, and a raw scan reports the
+ * PROSE as a transitioning element with no `motion-reduce`. Matching
+ * `class="..."` and `*-class="..."` keeps the guard on the code.
+ */
+function transitionClasses(src) {
+  const out = []
+  const attr = /(?:^|\s)(?:[a-z-]*-)?class="([^"]*)"/g
+  let m
+  while ((m = attr.exec(src)) !== null) {
+    if (m[1].includes('transition-[')) out.push(m[1])
+  }
+  return out
+}
 const SHELL = read('../../src/views/Portal.vue')
 const OVERLAY = read('../../src/components/chat/VoiceOverlay.vue')
 
@@ -81,7 +99,12 @@ describe('#2640 — the column swap is animated, not discrete', () => {
     // alone nothing animates and every leave is still gated for 300ms: the
     // canvas vanishes, the column sits empty, the rail pops in. Asserting only
     // the class string is why this shipped green (#2640 review).
-    const transitions = SHELL.match(/transition-\[[^\]]+\][^"]*/g) || []
+    // Scanned out of CLASS ATTRIBUTES, not out of the file's prose: #2676's
+    // comments name `transition-[width]` while explaining it, and a raw
+    // file-wide match would have failed on the explanation rather than on the
+    // code. `transitionClasses` is shared with the test below so the two
+    // cannot disagree about what counts as a transitioning element.
+    const transitions = transitionClasses(SHELL)
     expect(transitions.length).toBeGreaterThan(0)
     for (const t of transitions) {
       expect(t, `missing motion-reduce on: ${t}`).toContain('motion-reduce:transition-none')
@@ -96,7 +119,7 @@ describe('#2640 — the column swap is animated, not discrete', () => {
     // transitioning element pairs a non-zero duration with a reduced-motion
     // zero, and the zero is declared AFTER it so the cascade lands the right
     // way round (Tailwind emits variants after base utilities).
-    const transitions = SHELL.match(/transition-\[[^\]]+\][^"]*/g) || []
+    const transitions = transitionClasses(SHELL)
     for (const t of transitions) {
       expect(t).toMatch(/duration-\d+/)
       expect(t.indexOf('motion-reduce:duration-0'))
@@ -104,30 +127,53 @@ describe('#2640 — the column swap is animated, not discrete', () => {
     }
   })
 
-  it('the rail column\'s own step is a recorded limitation, not an oversight', () => {
-    // #2640 review: two of the three columns interpolate, the rail does not.
-    // Its <aside> carries no width transition and it is a `shrink-0` flex
-    // sibling of <main>, so it mounts at full width in one frame — up to the
-    // dragged `--ws-rail`, which can be a bigger step than the 211px snap this
-    // work removed. Fixing it means owning the rail column's width, which is
-    // ent#492's, so it is tracked at #2676 rather than guessed at here. This
-    // test exists so the limitation cannot quietly disappear from the record.
-    const FLOW = read('../../../../docs/memory/feature-flows/workspace-voice-conversation.md')
-    expect(FLOW).toMatch(/Known limitation — the rail column itself still steps \(#2676\)/)
-    const RAIL = read('../../src/components/portal/PortalRail.vue')
-    // If the rail ever DOES animate its width, this test is what tells the
-    // author to come back and delete the limitation.
-    expect(RAIL).not.toMatch(/transition-\[width/)
+  it('the rail column is a WIDTH, so it moves with the canvas (#2676)', () => {
+    // The #2640 review finding, and what this replaces: the rail was a bare
+    // `v-if` on a `shrink-0` flex sibling carrying no width transition, so on
+    // call end it appeared at full size in one frame — up to the dragged
+    // `--ws-rail`, which on a wide rail is a bigger step than the 211px snap
+    // #2640 removed.
+    expect(SHELL).toMatch(/enter-from-class="!w-0"/)
+    expect(SHELL).toMatch(/leave-to-class="!w-0"/)
+    expect(SHELL).toMatch(/transition-\[width\] duration-300 ease-out overflow-hidden/)
+    // The width is the RENDERED one, so a collapsed rail animates its 48px and
+    // an open one animates whatever it was dragged to — one binding, both
+    // states, and it agrees with the inner aside at rest.
+    expect(SHELL).toMatch(/data-testid="ws-rail-column"[\s\S]{0,80}|w-\[var\(--ws-rail,24rem\)\]/)
   })
 
-  it('the rail waits for the canvas to finish leaving', () => {
-    // A leaving element stays in the DOM for its transition. Without this the
-    // rail would mount at its full fixed width beside a canvas that is still
-    // shrinking — three columns in a row sized for two, main squeezed by flex
-    // for 300ms, which is a worse jump than the one being fixed.
-    expect(SHELL).toMatch(/v-if="railVisible && !voiceCanvasHasColumn && !voiceCanvasLeaving"/)
-    expect(SHELL).toMatch(/@before-leave="voiceCanvasLeaving = true"/)
-    expect(SHELL).toMatch(/@after-leave="voiceCanvasLeaving = false"/)
+  it('does not transition the width outside the enter/leave window', () => {
+    // The reason this is Vue enter/leave classes and not a permanent
+    // `transition-[width]`: `--ws-rail` is rewritten on every `pointermove` of
+    // a rail drag, and an always-on transition would make dragging rubber-band
+    // by 300ms. Vue adds the active class for the window and removes it after.
+    const column = SHELL.slice(
+      SHELL.indexOf('data-testid="ws-rail-column"') - 400,
+      SHELL.indexOf('data-testid="ws-rail-column"') + 200,
+    )
+    const staticClass = column.match(/class="([^"]*w-\[var\(--ws-rail[^"]*)"/)
+    expect(staticClass, 'the rail column wrapper was not found').toBeTruthy()
+    expect(staticClass[1]).not.toMatch(/transition-/)
+  })
+
+  it('retires voiceCanvasLeaving — the hazard is gone by construction', () => {
+    // That flag held the rail out of the row for the canvas's whole leave,
+    // because a rail mounting at FULL width beside a shrinking canvas put three
+    // columns in a row sized for two. A rail entering from zero width is
+    // complementary to a canvas leaving towards zero grow, so the row's total
+    // is conserved at every frame and the two motions overlap instead of
+    // running back to back.
+    expect(SHELL).not.toMatch(/@before-leave="voiceCanvasLeaving/)
+    expect(SHELL).not.toMatch(/@after-leave="voiceCanvasLeaving/)
+    expect(SHELL).not.toMatch(/const voiceCanvasLeaving = ref\(/)
+    expect(SHELL).not.toMatch(/!voiceCanvasLeaving/)
+  })
+
+  it('a tabless rail leaves no empty column behind', () => {
+    // `PortalRail`'s own root carries `v-if="tabs.length"`. With the width now
+    // on a wrapper this view owns, that gate has to be read out here too — or a
+    // rail with no visible tabs renders a full-width empty column.
+    expect(SHELL).toMatch(/railTabs\.value\.length/)
   })
 
   it('both columns read ONE condition, so they cannot both claim the slot', () => {

@@ -26,6 +26,9 @@ import type {
   CompatibilityReport,
   AgentFileTreeResponse,
   ReportSummary,
+  FanOutBatchStatus,
+  FanOutDispatchResult,
+  FanOutTimeoutReceipt,
 } from "./types.js";
 
 /**
@@ -77,35 +80,77 @@ export class ApiError extends Error {
 }
 
 /**
- * #914 pure matcher for the chat-timeout recovery lookup. Extracted from
+ * Default trigger set for the #914 `/chat` recovery lookup.
+ *
+ * Deliberately NOT widened to cover `/task` (#2661). `/chat` never produces a
+ * `self_task` row, so adding it here would buy that route nothing and cost it
+ * correctness: `/task` is unqueued, so a `self_task` row can be RUNNING while a
+ * `/chat` sits queued, and the `/chat` abort would then attribute it. The
+ * trigger set is a per-call-site argument for exactly this reason.
+ */
+export const CHAT_RECOVERY_TRIGGERS = ["mcp", "agent"] as const;
+
+/** #2661: `/task` additionally sees `self_task` rows (SELF-EXEC-001). */
+export const TASK_RECOVERY_TRIGGERS = ["mcp", "agent", "self_task"] as const;
+
+/**
+ * #914 pure matcher for the dispatch-timeout recovery lookup. Extracted from
  * `TrinityClient.findRecentMcpExecution` so a unit test can drive it
  * without spinning up a real backend.
  *
- * Selects the newest execution row that:
- *   - is in a non-terminal status (`pending`, `queued`, `running`)
- *   - was triggered via MCP (`triggered_by === "mcp"` or `"agent"`)
+ * Selects the execution row that:
+ *   - is in a non-terminal status (`queued`, `running`, `pending_retry`)
+ *   - was triggered via MCP (`opts.triggers`, default `{mcp, agent}`)
  *   - carries the calling key's `source_mcp_key_id` when one was supplied
  *     (rows with no key id pass — older backends or pre-AUDIT-001 rows)
- *   - started within the last `windowMs` (default 30s, covers the typical
- *     MCP gateway abort + a small clock-skew buffer)
+ *   - carries exactly `opts.message` when one was supplied (#2661)
+ *   - started within the last `windowMs`
  *
- * Returns `undefined` when nothing matches; caller falls back to a
- * clearer error message instead of returning a wrong execution_id.
+ * **Ambiguity yields `undefined` (#2661).** The pre-#2661 shape returned
+ * `matches[0]` — the newest survivor. On the queue-serialised `/chat` route
+ * that was near-unambiguous; on `/task`, which exists to run N tasks
+ * concurrently, every filter above is IDENTICAL across one caller's concurrent
+ * tasks, so "newest wins" hands caller A the execution_id of caller B's task.
+ * A then polls and acts on a well-formed FOREIGN result — silent wrong data,
+ * strictly worse than the loud `fetch failed` this feature replaces. Returning
+ * nothing reproduces the pre-#914 behaviour for that call, so refusing to guess
+ * is never worse than not having the receipt at all.
+ *
+ * Returns `undefined` when nothing matches OR when the match is not provably
+ * ours; the caller falls back to a clearer error instead of a wrong id.
  */
 export function pickRecentMcpExecution(
   executions: ScheduleExecution[],
-  opts: { mcpKeyId?: string; now?: number; windowMs?: number } = {},
+  opts: {
+    mcpKeyId?: string;
+    now?: number;
+    windowMs?: number;
+    /** Accepted `triggered_by` values. Per call site — see the two constants above. */
+    triggers?: readonly string[];
+    /** #2661 discriminator: the exact message this call dispatched. */
+    message?: string;
+  } = {},
 ): ScheduleExecution | undefined {
   const now = opts.now ?? Date.now();
   const windowMs = opts.windowMs ?? 30_000;
   const cutoffMs = now - windowMs;
-  const nonTerminal = new Set(["pending", "queued", "running"]);
+  const triggers = new Set(opts.triggers ?? CHAT_RECOVERY_TRIGGERS);
+  // `pending` is not a TaskExecutionStatus the backend ever writes (models.py
+  // TaskExecutionStatus is queued/running/success/failed/cancelled/skipped/
+  // pending_retry); it is kept only so an older backend cannot regress, while
+  // `pending_retry` — a REAL non-terminal state the original set omitted — is
+  // now covered.
+  const nonTerminal = new Set(["pending", "queued", "running", "pending_retry"]);
   const matches = executions.filter((e) => {
     if (!nonTerminal.has(e.status)) return false;
-    if (e.triggered_by !== "mcp" && e.triggered_by !== "agent") return false;
+    if (!triggers.has(e.triggered_by)) return false;
     if (opts.mcpKeyId && e.source_mcp_key_id && e.source_mcp_key_id !== opts.mcpKeyId) {
       return false;
     }
+    // Exact match, not prefix: the MCP `task()`/`chat()` bodies never carry
+    // `files`, so `process_task_file_uploads` (which appends a file block to
+    // request.message before the row is created) cannot apply to these rows.
+    if (opts.message !== undefined && e.message !== opts.message) return false;
     const started = Date.parse(e.started_at);
     if (Number.isNaN(started) || started < cutoffMs) return false;
     return true;
@@ -113,7 +158,107 @@ export function pickRecentMcpExecution(
   // Newest first — backend returns DESC by started_at, but sort defensively
   // in case the contract drifts.
   matches.sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
+  // More than one survivor means the filters could not identify THIS call.
+  // Emit nothing rather than the newest guess (see the ambiguity note above).
+  if (matches.length > 1) return undefined;
   return matches[0];
+}
+
+/** #2670: the trigger a fan-out subtask row carries (`fan_out_service.py`). */
+export const FAN_OUT_RECOVERY_TRIGGERS = ["fan_out"] as const;
+
+/**
+ * #2670 pure matcher for the fan-out dispatch-timeout recovery lookup.
+ *
+ * The batch analogue of `pickRecentMcpExecution`, and the difference is what
+ * makes it tractable: a fan-out stamps ONE `fan_out_id` on all N of its rows,
+ * so "which row is mine" — the question that forced #2661's >1-candidate
+ * refusal — is not asked at all. Finding ANY row of the batch finds the batch.
+ * N surviving rows is the EXPECTED shape here, not ambiguity.
+ *
+ * Ambiguity is therefore redefined, not dropped: **more than one distinct
+ * `fan_out_id`** means two of the caller's batches are in the window and the
+ * filters cannot say which is this call's, so nothing is returned. Same rule as
+ * #2661 ("a wrong id is worse than none"), measured on the right unit.
+ *
+ * Filters, and why each is needed:
+ *   - `triggered_by === "fan_out"` — the only trigger a subtask row carries, so
+ *     no other route's rows can be attributed to a batch;
+ *   - `fan_out_id` present — a row with none cannot identify a batch;
+ *   - `source_mcp_key_id` matches when supplied (rows with none pass, for an
+ *     older backend);
+ *   - the row's `message` is one this call dispatched — the per-call
+ *     discriminator #2661 established, and a fan-out has N of them, so it is a
+ *     STRONGER filter here than on a single-message route;
+ *   - started within `windowMs` — derived from the abort budget by the caller,
+ *     never a fixed constant (#2661: a fixed window turned raising the timeout
+ *     knob into a silent kill-switch for every receipt).
+ *
+ * Status is deliberately NOT filtered. On `/chat` and `/task` a terminal row is
+ * evidence the receipt is unnecessary; here, by the time the gateway gives up,
+ * some subtasks have usually finished while others run — a batch is a mix by
+ * construction, and requiring non-terminal rows would drop exactly the batches
+ * furthest along. The window is what bounds staleness.
+ */
+export function pickRecentFanOut(
+  executions: ScheduleExecution[],
+  opts: {
+    mcpKeyId?: string;
+    now?: number;
+    windowMs?: number;
+    triggers?: readonly string[];
+    /** The messages THIS call dispatched. Empty/absent skips the discriminator. */
+    messages?: readonly string[];
+  } = {},
+): { fan_out_id: string; execution_ids: string[] } | undefined {
+  const now = opts.now ?? Date.now();
+  const windowMs = opts.windowMs ?? 30_000;
+  const cutoffMs = now - windowMs;
+  const triggers = new Set(opts.triggers ?? FAN_OUT_RECOVERY_TRIGGERS);
+  const wanted = opts.messages && opts.messages.length
+    ? new Set(opts.messages)
+    : undefined;
+
+  const byBatch = new Map<string, string[]>();
+  for (const e of executions) {
+    if (!e.fan_out_id) continue;
+    if (!triggers.has(e.triggered_by)) continue;
+    if (opts.mcpKeyId && e.source_mcp_key_id && e.source_mcp_key_id !== opts.mcpKeyId) {
+      continue;
+    }
+    if (wanted && !wanted.has(e.message)) continue;
+    const started = Date.parse(e.started_at);
+    if (Number.isNaN(started) || started < cutoffMs) continue;
+    const ids = byBatch.get(e.fan_out_id) ?? [];
+    ids.push(e.id);
+    byBatch.set(e.fan_out_id, ids);
+  }
+
+  // Two batches of ours in the same window: the filters identified the caller,
+  // not the call. Refusing degrades to the pre-#2670 behaviour for this call,
+  // which is never worse than not having the receipt at all.
+  if (byBatch.size !== 1) return undefined;
+  const [fanOutId, executionIds] = [...byBatch.entries()][0];
+  return { fan_out_id: fanOutId, execution_ids: executionIds };
+}
+
+/**
+ * #2661: pull `execution_id` out of a 409 idempotency-replay body.
+ *
+ * FastAPI serialises `HTTPException(detail={...})` as `{"detail": {...}}`, but
+ * the shape is read defensively (detail-wrapped, bare, or a non-JSON string)
+ * because this runs on an error path — a parser throwing here would replace a
+ * recoverable 409 with an unrecoverable crash.
+ */
+export function extractIdempotencyExecutionId(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const root = (parsed as { detail?: unknown })?.detail ?? parsed;
+    const id = (root as { execution_id?: unknown })?.execution_id;
+    return typeof id === "string" && id ? id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Bound for #848 inline-auth control-plane calls (not chat). */
@@ -772,7 +917,17 @@ export class TrinityClient {
       if (isAbort || isNetwork) {
         const reason = isAbort ? "client abort" : "network error";
         debugLog(`[chat] ${reason} after ${Date.now() - startTime}ms on '${name}'; attempting execution-id lookup (#914)`);
-        const receipt = await this.findRecentMcpExecution(name, mcpKeyInfo?.keyId);
+        // #2661: the window is DERIVED from the abort deadline, not a fixed 30s.
+        // A fixed window is a silent kill-switch on the documented operator knob
+        // — set MCP_CHAT_TIMEOUT_MS to 30000+ (its stated purpose: "unusually
+        // slow networks") and every candidate row is already older than the
+        // window at abort time, so every receipt degrades to the no-match throw.
+        // `message` identifies THIS call among an agent's concurrent rows.
+        const receipt = await this.findRecentMcpExecution(name, mcpKeyInfo?.keyId, {
+          triggers: CHAT_RECOVERY_TRIGGERS,
+          message,
+          windowMs: timeoutMs + 10_000,
+        });
         if (receipt) {
           return {
             status: "queued_timeout",
@@ -814,6 +969,18 @@ export class TrinityClient {
 
     if (!response.ok) {
       const error = await response.text();
+      // #2661: same rule as `task()` below — a 409 idempotency replay carries
+      // the execution_id of the in-flight claim (routers/chat.py), and the tool
+      // description promises the receipt on EVERY sync route. The sequential
+      // route hit it too: a re-sent identical message inside the 24h window
+      // used to come back as an opaque `API error (409)` with nothing to poll.
+      if (response.status === 409) {
+        const executionId = extractIdempotencyExecutionId(error);
+        if (executionId) {
+          debugLog(`[chat] 409 in-flight replay on '${name}' -> execution_id=${executionId} (#2661)`);
+          return this.inFlightReplayReceipt(name, executionId);
+        }
+      }
       throw new Error(`API error (${response.status}): ${error}`);
     }
 
@@ -821,12 +988,16 @@ export class TrinityClient {
   }
 
   /**
-   * #914 recovery lookup. After the chat() fetch aborts, query the
-   * agent's recent executions and pick the newest non-terminal row that
-   * (a) was triggered through MCP, (b) carries the calling key's id if
-   * one was supplied, and (c) started within the last ~30s. The caller
-   * uses this to return a structured `queued_timeout` receipt instead of
-   * propagating `fetch failed`.
+   * #914/#2661 recovery lookup. After a dispatch fetch aborts, query the
+   * agent's recent executions and identify the row that (a) was triggered
+   * through MCP under this call site's trigger set, (b) carries the calling
+   * key's id if one was supplied, (c) carries this call's own message, and
+   * (d) started within the derived window. The caller uses this to return a
+   * structured `queued_timeout` receipt instead of propagating `fetch failed`.
+   *
+   * NOT "newest wins" any more (#2661): if more than one row survives, the
+   * filters could not identify THIS call and nothing is returned — see
+   * `pickRecentMcpExecution`.
    *
    * Best-effort: any failure (executions endpoint unreachable, no rows,
    * no match) returns `undefined` and the caller falls back to a clearer
@@ -835,13 +1006,68 @@ export class TrinityClient {
   private async findRecentMcpExecution(
     agentName: string,
     mcpKeyId?: string,
+    opts: { triggers?: readonly string[]; message?: string; windowMs?: number } = {},
   ): Promise<ScheduleExecution | undefined> {
     try {
-      const recent = await this.getAgentExecutions(agentName, 10);
-      return pickRecentMcpExecution(recent, { mcpKeyId, now: Date.now() });
+      // #2661: 50, not 10. On the concurrent /task route one orchestrator burst
+      // (or a fan-out) can push the row we want past a 10-row page, which reads
+      // as "no execution" and throws instead of recovering.
+      const recent = await this.getRecentExecutionsForRecovery(agentName, 50);
+      return pickRecentMcpExecution(recent, {
+        mcpKeyId,
+        now: Date.now(),
+        triggers: opts.triggers,
+        message: opts.message,
+        windowMs: opts.windowMs,
+      });
     } catch (err) {
       debugLog(`[chat] findRecentMcpExecution failed for '${agentName}': ${(err as Error)?.message}`);
       return undefined;
+    }
+  }
+
+  /**
+   * #2661: the executions read used by the timeout-recovery path, on its own
+   * short deadline and WITHOUT the shared transport's 401-reauth retry.
+   *
+   * `_fetch` has no AbortController at all and re-authenticates once on 401, so
+   * a recovery routed through it gets an unbounded budget across up to three
+   * round trips. That is the wrong shape here by construction: we aborted the
+   * dispatch at `MCP_CHAT_TIMEOUT_MS` precisely BECAUSE the MCP gateway ceiling
+   * is close, and whatever remains of that ceiling is all the recovery has. When
+   * the backend is the slow party — the usual reason the dispatch aborted in the
+   * first place — an unbounded lookup hangs and the caller receives the exact
+   * `fetch failed` this whole feature exists to prevent.
+   *
+   * Failing fast is correct rather than merely safe: no receipt degrades to the
+   * pre-#914 behaviour, while a hung recovery degrades to worse-than-#914 (the
+   * same opaque error, arriving later).
+   */
+  private async getRecentExecutionsForRecovery(
+    agentName: string,
+    limit: number,
+  ): Promise<ScheduleExecution[]> {
+    if (!this.token) {
+      throw new Error("Not authenticated.");
+    }
+    const timeoutMs = Number(process.env.MCP_RECOVERY_TIMEOUT_MS || 5000);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/api/agents/${encodeURIComponent(agentName)}/executions?limit=${limit}`,
+        {
+          method: "GET",
+          headers: { Authorization: `Bearer ${this.token}` },
+          signal: controller.signal,
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`executions lookup failed: ${response.status}`);
+      }
+      return (await response.json()) as ScheduleExecution[];
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -878,7 +1104,13 @@ export class TrinityClient {
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
     idempotencyKey?: string
-  ): Promise<ChatResponse | { status: "accepted"; execution_id: string; agent_name: string; message: string; async_mode: true }> {
+  ): Promise<
+    | ChatResponse
+    | { status: "accepted"; execution_id: string; agent_name: string; message: string; async_mode: true }
+    // #2661: sync mode may answer with the gateway-timeout receipt (same shape
+    // chat() returns for #914) instead of a completed ChatResponse.
+    | { status: "queued_timeout"; agent: string; execution_id: string; message: string }
+  > {
     // Prepare headers
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -926,34 +1158,140 @@ export class TrinityClient {
       parent_execution_id: options?.parent_execution_id,   // ent#224
     };
 
-    // Async mode returns immediately; sync mode waits for full execution.
-    // When timeout_seconds is omitted, backend resolves the target agent's
-    // configured execution_timeout_seconds (max 7200s). Use platform max + buffer
-    // as the HTTP client ceiling so we don't abort before the backend does.
-    const timeout = options?.async_mode
-      ? 30
-      : (options?.timeout_seconds ?? 7200) + 60;
+    // #2661: sync mode is bounded by the MCP-server ceiling, not the platform
+    // execution timeout. Holding for `timeout_seconds + 60` (up to 7260s) was
+    // never reachable: the MCP client's own gateway timeout (30-60s observed)
+    // kills the JSON-RPC call first, so the caller got a bare `fetch failed`
+    // while the target kept running. Aborting first is what buys us the chance
+    // to answer with an execution_id instead.
+    //
+    // Consequence worth stating: in sync parallel mode `timeout_seconds` now
+    // bounds only the AGENT-side run, not the client wait — a task exceeding
+    // the ceiling returns a receipt rather than a held connection. (#1068
+    // already deprecated the parameter.)
+    //
+    // `||` (not `??`) so a set-but-empty value coalesces to the default — the
+    // TS twin of the #1076 os.getenv shadow bug. `'' ?? 25000` is `''` and
+    // `Number('')` is 0, which would abort every parallel task instantly.
+    //
+    // async_mode keeps its own 30s: it returns a receipt immediately by
+    // contract, so it is deliberately allowed to exceed the sync ceiling.
+    const syncTimeoutMs = Number(process.env.MCP_CHAT_TIMEOUT_MS || 25000);
+    const timeoutMs = options?.async_mode ? 30_000 : syncTimeoutMs;
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const startTime = Date.now();
 
+    let response: Response;
     try {
-      const response = await fetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/task`, {
+      response = await fetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/task`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
         signal: controller.signal,
       });
-
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`API error (${response.status}): ${error}`);
+    } catch (err) {
+      // #2661: AbortError ONLY — deliberately narrower than chat()'s
+      // abort-or-TypeError branch. A TypeError means the request may never have
+      // reached the backend, and on this route a concurrent PEER execution is
+      // the normal state (that is what parallel mode is for), so recovering
+      // from a transport error would attribute someone else's row. chat() is
+      // queue-serialised and keeps its historical TypeError branch.
+      const isAbort = (err as Error)?.name === "AbortError";
+      if (isAbort && !options?.async_mode) {
+        debugLog(
+          `[task] client abort after ${Date.now() - startTime}ms on '${name}'; attempting execution-id lookup (#2661)`
+        );
+        const receipt = await this.findRecentMcpExecution(name, mcpKeyInfo?.keyId, {
+          triggers: TASK_RECOVERY_TRIGGERS,
+          message,
+          windowMs: timeoutMs + 10_000,
+        });
+        if (receipt) {
+          return this.queuedTimeoutReceipt(name, receipt.id, timeoutMs);
+        }
+        // No PROVABLE match. Deliberately not a guess: see
+        // pickRecentMcpExecution's ambiguity note — a wrong execution_id makes
+        // the caller poll and act on a foreign result, which is worse than the
+        // opaque error this replaces.
+        throw new Error(
+          `MCP-server timeout on chat_with_agent (${timeoutMs}ms, parallel mode) and no execution could be ` +
+          `attributed to this call on '${name}'. Check list_recent_executions(agent_name="${name}") before ` +
+          `retrying to avoid duplicate-queue (#2661).`
+        );
       }
-
-      return (await response.json()) as ChatResponse;
+      throw err;
     } finally {
       clearTimeout(timeoutId);
     }
+
+    if (!response.ok) {
+      const error = await response.text();
+      // #2661: a 409 on this boundary is an idempotency replay of a still
+      // in-flight claim, and RELIABILITY-006 puts the execution_id IN the body
+      // (routers/chat.py). Collapsing it into an opaque `API error (409)` threw
+      // away an EXACT key->execution mapping and left the caller with nothing to
+      // poll — the same dead end the timeout receipt exists to close.
+      //
+      // Note the wording deliberately says "already dispatched", not "still
+      // running": a sync /task that ended failed/cancelled/timed-out used to
+      // leave its claim in_flight (fixed alongside this in
+      // chat_execution_service), and a pre-fix row can still be replayed here.
+      // Resolve the id rather than trusting the claim's liveness.
+      if (response.status === 409) {
+        const executionId = extractIdempotencyExecutionId(error);
+        if (executionId) {
+          debugLog(`[task] 409 in-flight replay on '${name}' -> execution_id=${executionId} (#2661)`);
+          return this.inFlightReplayReceipt(name, executionId);
+        }
+      }
+      throw new Error(`API error (${response.status}): ${error}`);
+    }
+
+    return (await response.json()) as ChatResponse;
+  }
+
+  /**
+   * #2661: the receipt for a 409 idempotency replay, shared by `chat()` and
+   * `task()` so the two routes cannot drift on what "already dispatched" says.
+   *
+   * The wording deliberately says "already dispatched", not "still running": a
+   * sync call that ended failed/cancelled/timed-out used to leave its claim
+   * in_flight (fixed alongside this in chat_execution_service), and a pre-fix
+   * row can still be replayed here. Resolve the id rather than trusting the
+   * claim's liveness.
+   */
+  private inFlightReplayReceipt(
+    name: string,
+    executionId: string,
+  ): { status: "queued_timeout"; agent: string; execution_id: string; message: string } {
+    return {
+      status: "queued_timeout",
+      agent: name,
+      execution_id: executionId,
+      message:
+        `This exact call was already dispatched to '${name}' and has not been replayed as complete. ` +
+        `Poll get_execution_result(execution_id="${executionId}") for its outcome; re-sending a reworded ` +
+        `variant would dispatch a SECOND execution (#2661).`,
+    };
+  }
+
+  /** Shared #914/#2661 receipt body so both routes speak one contract. */
+  private queuedTimeoutReceipt(
+    name: string,
+    executionId: string,
+    timeoutMs: number,
+  ): { status: "queued_timeout"; agent: string; execution_id: string; message: string } {
+    return {
+      status: "queued_timeout",
+      agent: name,
+      execution_id: executionId,
+      message:
+        `MCP-server timeout (${timeoutMs}ms) on chat_with_agent — task is still running on '${name}'. ` +
+        `Poll get_execution_result(execution_id="${executionId}") instead of retrying; retry will ` +
+        `duplicate-queue and Trinity's concurrent-duplicate guard will kill mid-execution (#914).`,
+    };
   }
 
   /**
@@ -1051,24 +1389,7 @@ export class TrinityClient {
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
     idempotencyKey?: string
-  ): Promise<{
-    fan_out_id: string;
-    status: string;
-    total: number;
-    completed: number;
-    failed: number;
-    results: Array<{
-      id: string;
-      status: string;
-      response?: string;
-      error?: string;
-      error_code?: string;
-      execution_id?: string;
-      cost?: number;
-      context_used?: number;
-      duration_ms?: number;
-    }>;
-  }> {
+  ): Promise<FanOutDispatchResult | FanOutTimeoutReceipt> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
@@ -1114,14 +1435,30 @@ export class TrinityClient {
       body.timeout_seconds = options.timeout_seconds;
     }
 
-    // HTTP ceiling: when no explicit fan-out timeout, cover the platform max
-    // per-agent timeout (7200s) + buffer so we don't abort before the backend.
-    const timeout = (options?.timeout_seconds ?? 7200) + 60;
+    // #2670: bounded by OUR ceiling, not the backend's. The old
+    // `(timeout_seconds ?? 7200) + 60` was written (#418) to avoid aborting
+    // before the backend — correct against the backend, and irrelevant to the
+    // party that actually gives up first: the MCP client's own 30-60s gateway
+    // timeout kills the JSON-RPC call long before 7260s, and the caller sees a
+    // bare `fetch failed` while N executions keep running.
+    //
+    // This is the third route of the #914 class and the one that hits it most
+    // reliably, because a fan-out runs longer than any single task in it by
+    // construction. Same knob as the other two so an operator has one number to
+    // reason about, and `||` not `??` for the #1076 empty-string shadow.
+    const timeoutMs = Number(process.env.MCP_CHAT_TIMEOUT_MS || 25000);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const startTime = Date.now();
+    // Derived from the abort budget, never fixed (#2661): a constant window
+    // turns raising MCP_CHAT_TIMEOUT_MS into a silent kill-switch for every
+    // receipt, because the row is then always older than the window.
+    const recoveryWindowMs = timeoutMs + 10_000;
+    const messages = tasks.map((t) => t.message);
 
+    let response: Response;
     try {
-      const response = await fetch(
+      response = await fetch(
         `${this.baseUrl}/api/agents/${encodeURIComponent(name)}/fan-out`,
         {
           method: "POST",
@@ -1130,33 +1467,123 @@ export class TrinityClient {
           signal: controller.signal,
         }
       );
-
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`API error (${response.status}): ${error}`);
+    } catch (err) {
+      // AbortError ONLY, matching `/task` (#2661) and deliberately not `/chat`.
+      // A `TypeError` can mean the request never landed, and on a route whose
+      // normal state is N concurrent rows a wrong attribution is worse than a
+      // loud error.
+      if ((err as Error)?.name !== "AbortError") throw err;
+      debugLog(
+        `[fanOut] client abort after ${Date.now() - startTime}ms on '${name}'; ` +
+        `attempting fan_out_id lookup (#2670)`
+      );
+      const batch = await this.findRecentFanOut(name, mcpKeyInfo?.keyId, {
+        messages,
+        windowMs: recoveryWindowMs,
+      });
+      if (batch) {
+        return this.fanOutReceipt(name, batch, tasks.length, timeoutMs);
       }
-
-      return (await response.json()) as {
-        fan_out_id: string;
-        status: string;
-        total: number;
-        completed: number;
-        failed: number;
-        results: Array<{
-          id: string;
-          status: string;
-          response?: string;
-          error?: string;
-          error_code?: string;
-          execution_id?: string;
-          cost?: number;
-          context_used?: number;
-          duration_ms?: number;
-        }>;
-      };
+      throw new Error(
+        `MCP-server timeout on fan_out (${timeoutMs}ms) and no matching batch found on '${name}'. ` +
+        `The tasks are probably still running — check list_recent_executions(agent_name="${name}") ` +
+        `before re-sending, since a reworded fan-out derives a different idempotency key and ` +
+        `dispatches the whole batch a second time (#2670).`
+      );
     } finally {
       clearTimeout(timeoutId);
     }
+
+    if (response.status === 409) {
+      // #2670: an in-flight duplicate. The backend now returns the same
+      // `{error, message, execution_id}` shape `/chat` and `/task` do, and for
+      // this route that id is the BATCH id — attached to the idempotency claim
+      // the moment it is minted. Reading it turns `API error (409)` into a
+      // pollable receipt, which is the whole reason the backend shape changed.
+      const body409 = await response.text();
+      const fanOutId = extractIdempotencyExecutionId(body409);
+      if (fanOutId) {
+        return this.fanOutReceipt(
+          name, { fan_out_id: fanOutId, execution_ids: [] }, tasks.length, timeoutMs,
+          "A fan-out with this idempotency key is already running",
+        );
+      }
+      throw new Error(`API error (409): ${body409}`);
+    }
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`API error (${response.status}): ${error}`);
+    }
+
+    return (await response.json()) as FanOutDispatchResult;
+  }
+
+  /** #2670: the receipt text, in one place so both paths word it identically. */
+  private fanOutReceipt(
+    agent: string,
+    batch: { fan_out_id: string; execution_ids: string[] },
+    taskCount: number,
+    timeoutMs: number,
+    lead = `MCP-server timeout (${timeoutMs}ms) on fan_out`,
+  ): FanOutTimeoutReceipt {
+    return {
+      status: "fan_out_timeout",
+      agent,
+      fan_out_id: batch.fan_out_id,
+      execution_ids: batch.execution_ids,
+      task_count: taskCount,
+      message:
+        `${lead} — the batch is still running on '${agent}'. ` +
+        `Poll get_fan_out_result(agent_name="${agent}", fan_out_id="${batch.fan_out_id}") ` +
+        `instead of re-sending. An IDENTICAL re-send is deduplicated server-side and answers ` +
+        `with this same batch; a REWORDED one derives a different idempotency key and ` +
+        `dispatches all ${taskCount} tasks again (#2670).`,
+    };
+  }
+
+  /**
+   * #2670 recovery lookup: which batch did this call start?
+   *
+   * Reuses the `/task` recovery read verbatim — separately bounded
+   * (`MCP_RECOVERY_TIMEOUT_MS`), no 401-reauth — because whatever is left of the
+   * gateway budget is all this has, and an unbounded lookup reproduces the
+   * `fetch failed` the feature exists to prevent.
+   *
+   * 50 rows: a fan-out is up to `MAX_TASKS` rows of its own, so a 10-row page
+   * cannot even hold one batch.
+   */
+  private async findRecentFanOut(
+    agentName: string,
+    mcpKeyId?: string,
+    opts: { messages?: readonly string[]; windowMs?: number } = {},
+  ): Promise<{ fan_out_id: string; execution_ids: string[] } | undefined> {
+    try {
+      const recent = await this.getRecentExecutionsForRecovery(agentName, 50);
+      return pickRecentFanOut(recent, {
+        mcpKeyId,
+        now: Date.now(),
+        messages: opts.messages,
+        windowMs: opts.windowMs,
+      });
+    } catch (err) {
+      debugLog(`[fanOut] findRecentFanOut failed for '${agentName}': ${(err as Error)?.message}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * #2670: read one fan-out batch back from its execution rows.
+   *
+   * The polling surface the receipt points at. Goes through `request()` (not the
+   * bounded recovery client) because this is an ordinary tool call with the
+   * caller's full budget, not an abort-path lookup.
+   */
+  async getFanOutResult(agentName: string, fanOutId: string): Promise<FanOutBatchStatus> {
+    return this.request<FanOutBatchStatus>(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/fan-out/${encodeURIComponent(fanOutId)}`,
+    );
   }
 
   // ============================================================================

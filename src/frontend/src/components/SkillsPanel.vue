@@ -151,7 +151,19 @@
           </button>
           <button v-if="dirty" @click="resetDraft"
                   class="text-sm text-gray-500 dark:text-gray-400 hover:underline">Reset</button>
-          <span v-if="savedNote" class="text-xs text-status-success-600 dark:text-status-success-400">{{ savedNote }}</span>
+          <!-- #2703: the save's DELIVERY outcome, not a fixed sentence — "delivered"
+               / "applies on next start" / "not delivered: why". Tone follows it. -->
+          <span
+            v-if="savedNote"
+            data-testid="skills-saved-note"
+            :data-tone="savedTone"
+            class="text-xs"
+            :class="savedTone === 'bad'
+              ? 'text-status-danger-600 dark:text-status-danger-400'
+              : savedTone === 'pending'
+                ? 'text-status-warning-700 dark:text-status-warning-300'
+                : 'text-status-success-600 dark:text-status-success-400'"
+          >{{ savedNote }}</span>
         </div>
       </section>
     </template>
@@ -161,6 +173,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useSkillsStore } from '../stores/skills'
+import { deliveryText } from '../utils/skillDelivery'
 import { useRole } from '../composables/useRole'
 // ent#263 shared contract seam — one rendering of the #183 package facts
 // consumed by BOTH this per-agent tab and the Library page's fleet browse.
@@ -178,6 +191,7 @@ const { isAdmin } = useRole()
 
 const draft = ref([])
 const savedNote = ref('')
+const savedTone = ref('ok')   // #2703: ok | pending | bad | none
 
 function resultFor(name) {
   return store.injectionResults?.[name] || null
@@ -250,8 +264,13 @@ async function onSave() {
   savedNote.value = ''
   if (await store.saveAssignments([...draft.value])) {
     resetDraft()
-    pendingSync.value = true
-    savedNote.value = 'Saved. Sync now, or the agent picks them up on next start.'
+    // #2703: the PUT delivers; say what happened. Sync is only "needed" when
+    // delivery did NOT land (busy / not ready / failed) — an injected or
+    // pending-start save has nothing for the button to repair.
+    const verdict = deliveryText(store.lastDelivery, { saved: true })
+    pendingSync.value = verdict.needsSync
+    savedNote.value = verdict.text
+    savedTone.value = verdict.tone
   }
 }
 

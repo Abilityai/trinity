@@ -294,8 +294,18 @@ for this surface. Save-at-end was rejected by both independent plan reviews: und
 uvicorn workers a `/stop` landing off-worker reconstructs an EMPTY session from Redis and
 would write a phantom call, and a restart mid-call would lose it all. The chat folds one
 call's rows into a collapsed "Voice call · N min" block **keyed on the call id, never an
-opener row** (`portalVoiceMode.js::groupVoiceBlocks`) — the history window is 100 rows
-and a long call is more. The session must outlive the provider connection: every
+opener row** (`portalVoiceMode.js::groupVoiceBlocks`) — a long call is ~180 rows, and
+since trinity#2694 the history window is counted in **typed turns** (the newest 100, the
+spoken rows of the calls among them riding along, under a row ceiling that reports
+`truncated`), so a call can no longer push the typed turns before it off the screen; the
+reply poll reads `?limit=N` (row semantics) and finds the reply by identity, never by
+count. The agent's next typed turn is told what was said: a resumed turn is prefixed with
+the platform-written rows since its last typed reply (`get_platform_rows_since_last_reply`
+→ `_format_voice_delta`), the cold replay carries the same rows in the same form under one
+24k spoken-char budget, and the two are mutually exclusive — a call is refused (409) while a
+typed reply is in flight and a typed turn is refused (409) while a call is on — see
+[workspace-voice-conversation.md → One timeline](../feature-flows/workspace-voice-conversation.md#one-timeline-and-the-agent-knows-what-was-said-trinity2694).
+The session must outlive the provider connection: every
 session asks for context-window compression + session resumption and `connect_and_stream`
 reconnects on `go_away`; the cap speaks a wrap-up at T-30 s and ends with a reason the
 `status` and `saved` frames carry, so the surface reloads the thread only after the rows
@@ -744,6 +754,14 @@ roster card renders, so the UI and the enforcement cannot disagree: the affordan
 simply not offered rather than offered-and-refused. `portal_file_dismissals` is per-viewer
 storage because `agent_shared_files` has no audience column and `user_ui_preferences` is
 FK'd to `users.id`, which a portal principal has no row in.
+
+**Every `/api/files/` share URL is previewed same-origin (#2733).**
+`portalFiles.js::sharePreviewPath` takes the path from that route onward and drops whatever
+origin `get_portal_base_url()` put on `download_url`, because `connect-src` is a build
+artefact while the portal base URL is a runtime setting — a portal base URL on a different
+host is a supported topology (ent#79), and no static header can carry it (CORS would refuse
+it a second time). The scope word is load-bearing: only that one route is rewritten, and
+`download_url` itself stays absolute and shareable for the anchor-click Download.
 
 ## The compact header — Info as a rail tab, one paperclip, voice at the composer (ent#547, #2580)
 

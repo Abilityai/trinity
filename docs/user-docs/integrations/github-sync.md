@@ -25,6 +25,26 @@ Agents created from a Git template automatically get sync configured. The defaul
 3. Click **Sync** to run a full sync operation (pull-only in Source mode; pull + push in Working Branch mode).
 4. View the git log to inspect recent commits.
 
+### What a Push does to `.gitignore`
+
+Before every push, Trinity rebuilds the agent's `.gitignore` around its own rules and then untracks anything the rules now cover:
+
+```
+# >>> Trinity default ignore rules — managed; your own rules go BELOW and win >>>
+   (caches, virtualenvs, local databases, generated content, …)
+# <<< Trinity default ignore rules <<<
+   (the agent's own rules, in their original order)
+# >>> Trinity protected rules — managed; NOT overridable >>>
+   (credential files and the agent's .trinity/ state)
+# <<< Trinity protected rules <<<
+```
+
+The order is the point. Git is last-match-wins, so the managed defaults sit **above** the agent's own rules and a `!negation` the agent wrote keeps winning — a file the agent chose to keep is never silently untracked by the platform's defaults. The protected floor at the bottom cannot be overridden, so a stray rule can never re-track a credential file or drop the agent's `.trinity/` hooks. The rebuild is idempotent: an unchanged file is left untouched, so the auto-sync loop has nothing to re-commit.
+
+A Push then reports what the sweep changed. The sync response and the `git_sync` MCP result carry `removed_paths` (tracked → untracked by this push), `unignored_paths` (newly un-ignored and committed by this same push), and `shadowed_negations` (a `!rule` of yours that a managed pattern still overrides — the deciding pattern is named); the Git tab's toast and the commit message state the untracked and un-ignored counts and paths. When a push actually changed what is tracked, Trinity also files an operator-queue notice — *Push untracked files that now match .gitignore*, *Push committed files that were previously gitignored*, or *Push changed which files are tracked (.gitignore sweep)* — naming the paths, so an unattended scheduled sync cannot untrack files for weeks without anyone noticing. Find it on the [Operations page](../operations/operating-room.md). A newly un-ignored path that was a secret is already in the remote's history: rotate it and remove the rule.
+
+One limit, reported rather than fixed: many default patterns are directory-form (`node_modules/`, `content/`), and git never descends into an excluded directory, so a negation *beneath* one is inert wherever it sits. Such rules appear under `shadowed_negations`.
+
 ### Initializing sync for existing agents
 
 Agents created without a Git repository can be connected after the fact:
@@ -102,7 +122,7 @@ Trailing slashes are stripped automatically. Defaults target `github.com` and `h
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/git/status` | GET | Git sync status including `ahead`, `behind`, `common_ancestor_sha`, `pull_branch` |
-| `/api/agents/{name}/git/sync` | POST | Trigger sync |
+| `/api/agents/{name}/git/sync` | POST | Trigger sync; the response carries `removed_paths`, `unignored_paths`, and `shadowed_negations` from the `.gitignore` sweep |
 | `/api/agents/{name}/git/log` | GET | Recent commits |
 | `/api/agents/{name}/git/pull` | POST | Pull from remote |
 | `/api/agents/{name}/git/bind-to-own-repo` | POST | Bind to a repository you own (owner-only, human-only) |
@@ -127,3 +147,4 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 - [GitHub PAT Setup](github-pat-setup.md) — Configure a Personal Access Token before using sync
 - [Creating Agents](../agents/creating-agents.md) — Creating agents from Git templates
 - [Monitoring](../operations/monitoring.md) — Sync-health alerts and repository-bloat warnings
+- [Operating Room](../operations/operating-room.md) — Where a push's `.gitignore` sweep notice lands
