@@ -134,6 +134,8 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
       name: "set_canvas",
       description:
         "Render structured output onto your canvas — a durable surface the people you work with can open, " +
+        "SHARE as a link with people outside Trinity, or save as a PDF — so give it a `title` worth showing " +
+        "someone, not an internal id. " +
         "which you UPDATE over time rather than re-publish. Use it for the thing that has a current state: " +
         "a live status board, a running tally, the latest version of an analysis, the chart someone just " +
         "asked for. Use `report` instead for a thing that happened once and should accumulate as a record " +

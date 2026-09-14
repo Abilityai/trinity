@@ -154,7 +154,67 @@
             :title="fresh.note"
             class="rounded-full bg-status-warning-100 px-2 py-0.5 text-[11px] font-medium text-status-warning-700 dark:bg-status-warning-500/16 dark:text-status-warning-300"
           >may be out of date</span>
+
+          <!-- ent#554 — available from EVERY canvas surface (AC #7), because
+               they all render this component. `print:hidden`: chrome is never
+               part of the document. -->
+          <button
+            class="shrink-0 rounded-lg border border-gray-300 px-2 py-0.5 text-[11px] font-medium hover:bg-gray-100 dark:border-gray-700 dark:hover:bg-gray-800 print:hidden"
+            data-testid="canvas-pdf"
+            @click="downloadPdf"
+          >PDF</button>
+          <button
+            v-if="canManage && shareCanvas"
+            class="shrink-0 rounded-lg border border-gray-300 px-2 py-0.5 text-[11px] font-medium hover:bg-gray-100 dark:border-gray-700 dark:hover:bg-gray-800 print:hidden"
+            data-testid="canvas-share-open"
+            @click="openShare"
+          >Share</button>
         </header>
+
+        <p v-if="pdfNote" class="border-b border-gray-200 px-4 py-2 text-xs text-status-warning-700 dark:border-gray-800 dark:text-status-warning-300 print:hidden"
+           data-testid="canvas-pdf-note">{{ pdfNote }}</p>
+
+        <!-- The share dialog. The wider reach names what it means AT the point
+             of choosing (AC #2), not behind a warning nobody opens. -->
+        <div v-if="shareOpen" class="border-b border-gray-200 px-4 py-3 dark:border-gray-800 print:hidden" data-testid="canvas-share-panel">
+          <p class="text-xs font-semibold">Share this canvas</p>
+          <label v-for="opt in shareScopes" :key="opt.scope" class="mt-2 flex items-start gap-2 text-xs">
+            <input type="radio" :value="opt.scope" v-model="shareScope" :data-share-scope="opt.scope" class="mt-0.5" />
+            <span>
+              <span class="font-medium">{{ opt.label }}</span>
+              <span v-if="opt.wide" class="ml-1 rounded bg-status-warning-100 px-1 text-[10px] text-status-warning-700 dark:bg-status-warning-500/16 dark:text-status-warning-300">wider</span>
+              <span class="block text-gray-500 dark:text-gray-400">{{ opt.detail }}</span>
+            </span>
+          </label>
+          <div class="mt-3 flex items-center gap-2">
+            <button class="rounded-lg bg-action-primary-600 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50"
+                    :disabled="busy" data-testid="canvas-share-create" @click="createShare">Create link</button>
+            <button class="text-xs underline" @click="shareOpen = false">Close</button>
+          </div>
+
+          <ul v-if="shares.length" class="mt-3 space-y-1" data-testid="canvas-share-list">
+            <li v-for="sh in shares" :key="sh.id" class="flex items-center gap-2 text-[11px]">
+              <span class="min-w-0 flex-1 truncate">{{ summarize(sh) }}</span>
+              <button class="underline" :data-share-copy="sh.id" @click="copyShare(sh)">Copy</button>
+              <button class="text-status-danger-600 underline" :data-share-revoke="sh.id" @click="revokeShare(sh)">Revoke</button>
+            </li>
+          </ul>
+          <p v-if="shareNote" class="mt-2 text-[11px] text-gray-500 dark:text-gray-400" data-testid="canvas-share-note">{{ shareNote }}</p>
+        </div>
+
+        <!-- The printable document, teleported to <body>. It has to be a body
+             CHILD for the print rules to isolate it: they hide every other
+             body child, which is what stops the browser printing the whole app
+             around the canvas. Rendered only while printing, so the DOM does
+             not carry a permanent hidden copy of every canvas.
+
+             Same component the shared-link page renders, so the PDF is
+             identical whichever surface produced it (AC #7). -->
+        <Teleport to="body">
+          <div v-if="printing" class="canvas-print-root" data-testid="canvas-print-doc">
+            <CanvasDocument :canvas="detail || selected" :agent-name="agentName" />
+          </div>
+        </Teleport>
 
         <p
           v-if="fresh.stale"
@@ -208,10 +268,12 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import CanvasBlock from './CanvasBlock.vue'
 import CanvasKit from './CanvasKit.vue'
 import { placeBlocks } from './canvasLayouts'
+import CanvasDocument from './CanvasDocument.vue'
+import { SHARE_SCOPES, scopeCopy, shareSummary, shareUrl } from './canvasShare'
 import {
   bulkDeleteOutcome,
   bulkDeletePrompt,
@@ -251,6 +313,12 @@ const props = defineProps({
   // The per-agent cap, so the header can warn BEFORE the agent hits the
   // refusal — the person who can act on it is not the one who receives it.
   canvasLimit: { type: Number, default: 0 },
+  // ent#554 — the agent this canvas belongs to, for the document's byline.
+  agentName: { type: String, default: '' },
+  // ent#554 — injected like the others; null on a surface that cannot share.
+  shareCanvas: { type: Function, default: null },      // (id, scope) => Promise<share>
+  listShares: { type: Function, default: null },       // (id) => Promise<share[]>
+  revokeCanvasShare: { type: Function, default: null }, // (shareId) => Promise
 })
 const emit = defineEmits(['start-chat', 'changed'])
 
@@ -280,6 +348,82 @@ const selectorVisible = computed(() => canvasSelectorVisible({
 const canManage = computed(() => props.canManage && !!props.deleteCanvas)
 
 function ageOf(c) { return c?.updated_at ? relativeTime(c.updated_at) : 'never updated' }
+
+// ent#554 — share + PDF.
+const shareOpen = ref(false)
+const shareScope = ref('authorized')   // the NARROW one is preselected
+const shares = ref([])
+const shareNote = ref('')
+const pdfNote = ref('')
+// Only true while the print dialog is being prepared/shown.
+const printing = ref(false)
+const shareScopes = SHARE_SCOPES.map((scope) => ({ scope, ...scopeCopy(scope) }))
+
+function summarize(sh) { return shareSummary(sh) }
+
+async function openShare() {
+  shareOpen.value = true
+  shareNote.value = ''
+  if (!props.listShares) return
+  const rows = await run(() => props.listShares(selectedId.value))
+  if (rows !== null) shares.value = Array.isArray(rows) ? rows : []
+}
+
+async function createShare() {
+  if (!props.shareCanvas) return
+  const created = await run(() => props.shareCanvas(selectedId.value, shareScope.value))
+  if (created === null) return
+  shares.value = [created, ...shares.value]
+  await copyShare(created)
+}
+
+async function copyShare(sh) {
+  const url = shareUrl(sh.url || `/canvas/s/${sh.token}`,
+                       typeof window !== 'undefined' ? window.location.origin : '')
+  try {
+    await navigator.clipboard.writeText(url)
+    shareNote.value = 'Link copied.'
+  } catch {
+    // Clipboard access is denied in plenty of ordinary situations (insecure
+    // origin, permissions). Showing the link is the fallback that always works.
+    shareNote.value = url
+  }
+}
+
+async function revokeShare(sh) {
+  if (!props.revokeCanvasShare) return
+  if (!window.confirm('Revoke this link? Anyone holding it will be told it was turned off.')) return
+  const ok = await run(() => props.revokeCanvasShare(sh.id))
+  if (ok !== null) {
+    shares.value = shares.value.filter((s) => s.id !== sh.id)
+    shareNote.value = 'Link revoked.'
+  }
+}
+
+async function downloadPdf() {
+  // Print-first (AC #4): the browser's own PDF over a print stylesheet. One
+  // renderer — `CanvasDocument` — so the document cannot drift from the screen,
+  // and no headless service to run or keep in step.
+  pdfNote.value = ''
+  if (typeof window === 'undefined' || typeof window.print !== 'function') {
+    pdfNote.value = 'This browser cannot produce a PDF here — use Print and choose Save as PDF.'
+    return
+  }
+  // Mount the teleported document first and let Vue flush, or `print()` fires
+  // against a DOM that does not contain it yet and the sheet comes out empty.
+  printing.value = true
+  await nextTick()
+  try {
+    window.print()
+  } catch {
+    pdfNote.value = 'The PDF could not be produced. Use your browser’s Print → Save as PDF.'
+  } finally {
+    // `print()` blocks in every browser that implements it, but Safari has
+    // historically returned early — `afterprint` is the reliable teardown and
+    // this is the belt for browsers that never fire it.
+    printing.value = false
+  }
+}
 
 function toggleSelected(id) {
   const next = new Set(selectedIds.value)
