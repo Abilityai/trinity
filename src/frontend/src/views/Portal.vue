@@ -1081,7 +1081,12 @@ const railHasColumn = computed(() => Boolean(
 // conversation to an empty roster must not inherit the conversation's verdict.
 const railEverHeldRail = ref(false)
 watch(railHasColumn, (has) => { if (has) railEverHeldRail.value = true })
-watch(() => route.value.fullPath, () => { railEverHeldRail.value = railHasColumn.value })
+// `route.fullPath`, not `route.value.fullPath`: `useRoute()` returns a REACTIVE
+// OBJECT, not a ref. The `.value` spelling threw on every Workspace load —
+// Vue routes a watch-getter error to its error handler rather than aborting
+// setup, so the page still rendered and the e2e still passed while this
+// watcher was dead. Every other route read in this file is the plain form.
+watch(() => route.fullPath, () => { railEverHeldRail.value = railHasColumn.value })
 // ent#475: the ONE owner of what the Loops / Canvas / Files tabs read. It
 // feeds `portalLoops` and `portalRailFeeds` off the same door gate and
 // participant list the rail renders from — nothing is fetched for a tab this
