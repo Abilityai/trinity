@@ -2216,6 +2216,15 @@ class DatabaseManager:
     def delete_agent_canvas(self, agent_name: str, canvas_id: str) -> bool:
         return self._canvas_ops.delete_canvas(agent_name, canvas_id)
 
+    def delete_agent_canvases(self, agent_name: str, canvas_ids):
+        return self._canvas_ops.delete_canvases(agent_name, canvas_ids)
+
+    def count_agent_canvases(self, agent_name: str) -> int:
+        return self._canvas_ops.count_canvases(agent_name)
+
+    def set_agent_canvas_pinned(self, agent_name: str, canvas_id: str, pinned: bool) -> bool:
+        return self._canvas_ops.set_canvas_pinned(agent_name, canvas_id, pinned)
+
     def last_completed_execution_at(self, agent_name: str):
         return self._canvas_ops.last_completed_execution_at(agent_name)
 

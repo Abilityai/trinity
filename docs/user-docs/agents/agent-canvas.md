@@ -34,9 +34,40 @@ During a [voice call](../advanced/voice-chat.md) the agent draws on `main` while
 
 - **Prefer data blocks.** Ask for "a KPI row" or "a table of open items" and the agent uses the `kpi` / `table` kinds, which render with the same look as the kit and stay live-updatable.
 - **Shared or private.** A canvas is private to the operator unless the agent publishes it to its roster. Ask the agent to "share this canvas with the team" and it appears in your clients' Workspace. When an agent writes a canvas from a public-link conversation, the write tells it whether the person asking can actually see the result, so it can widen the audience instead of reporting a success nobody sees.
-- **No skill needed.** The platform prompt every agent receives teaches the canvas itself — every block kind with a payload example, the fences, the four layouts and their slots, the design kit's classes, and one worked dashboard — so a fresh agent produces a designed canvas without coaching. (A fuller `canvas` reference skill is planned for the skills library but is not yet published to the catalog.)
+- **No skill needed.** The platform prompt every agent receives teaches the canvas itself — every block kind with a payload example, the fences, the four layouts and their slots, the design kit's classes, and one worked dashboard — so a fresh agent produces a designed canvas without coaching — including when to *retire* a canvas rather than add another. (A fuller `canvas` reference skill is planned for the skills library but is not yet published to the catalog.)
 - **Markdown and raw HTML.** In a `markdown` block, kit markup must not contain blank lines (Markdown treats a blank line as the end of the HTML). For a fully custom layout the agent uses an `html` block.
 - **Nothing vanishes.** A block Trinity cannot draw — a chart with no points, an image whose source was refused, a diagram that does not parse — shows its data, or a contained error with the source, in place. Long tables and timelines scroll inside a bounded box rather than stretching the page, and a wide diagram scrolls inside its own frame.
+
+## Removing canvases
+
+An agent that uses its canvas well accumulates them — one per report, per topic,
+per run. You can clear the pile from either the **Canvas tab** on Agent Detail or
+the **Canvas tab in the Workspace rail**.
+
+- **Delete one**, or switch on **Manage** to select several and delete them in
+  one action. You are asked to confirm once, and the confirmation names how many
+  will go. Deleting is recorded in the audit log — from the Workspace as well as
+  from Agent Detail, attributed to the person who did it either way.
+- **Only the agent's owner (or an admin) can delete or pin.** If you can see an
+  agent's canvases but do not own the agent, there are no delete controls —
+  rather than buttons that would refuse.
+- **Pin** the ones you use daily and they stay at the top as the list grows. A
+  pin is yours, not the agent's: the agent cannot pin its own canvas — the pin
+  route refuses an agent's own key outright — and rewriting a canvas does not
+  un-pin it. Pinning is recorded in the audit log too, from either surface,
+  because a pin decides what everyone who can see the agent sees first.
+- **Search** appears once there are more than six, matching the title or the id.
+  Each row in Manage shows how old it is and whether it may be out of date.
+- **Deleting the default canvas is fine.** The agent recreates it the next time
+  it writes; you lose the contents, not the surface.
+
+**There is a limit.** Each agent can hold 100 canvases, and the Canvas tab tells
+you the count as you approach it rather than only when the agent is refused. At the limit the agent
+can still *update* everything it has, but creating a *new* one is refused with a
+message telling it to retire one first — nothing is ever deleted automatically to
+make room. If you see an agent bumping into this, it is usually writing a new
+canvas per run instead of keeping one per topic current; asking it to reuse a
+canvas, or clearing the finished ones, fixes it.
 
 ## Security
 
