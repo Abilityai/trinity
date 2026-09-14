@@ -370,6 +370,17 @@ class TestPollIntervalReachesTheContainer:
     "disable" sentinel for a cadence: unset and empty must both land on the
     60 s default, which is the documented promise that this issue does not
     move the poll rate.
+
+    `docker-compose.hosted.yml` is deliberately NOT asserted here even though it
+    is a third file the var must reach — `test_2280_hosted_compose_parity.py`
+    already guards `hosted == prod` wholesale on the backend `environment` list,
+    which is strictly stronger than anything this file could restate, and two
+    guards over one fact drift apart. It is worth recording HOW that was
+    learned: the first cut of this fix wired dev and prod only, and #2280 caught
+    the hosted omission in CI. A fix for "the knob never reaches the container"
+    that itself missed a compose file is the class reproducing inside its own
+    repair — which is precisely why that guard compares wholesale rather than
+    per-variable.
     """
 
     COMPOSE_FILES = ("docker-compose.yml", "docker-compose.prod.yml")
