@@ -236,6 +236,11 @@
         <p class="text-xs mt-1">Users who message via Telegram or WhatsApp will appear here.</p>
       </div>
 
+      <!-- #1925 triage — NOT a tab strip: a bounded wide table. Horizontal scroll
+           INSIDE the container is the correct treatment for unbounded column width
+           (design-system principle 7); collapsing columns into a "More" menu would
+           hide data, not navigation. Left as-is deliberately so a later audit does
+           not re-flag it. -->
       <div v-else class="overflow-x-auto border border-gray-200 dark:border-gray-700 rounded-lg">
         <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700 text-sm">
           <thead class="bg-gray-50 dark:bg-gray-900/50">
