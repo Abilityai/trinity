@@ -56,7 +56,7 @@ Both options reach the same outcome — nothing listening on the public interfac
 
 | | Cloudflare Tunnel | Private network (Tailscale) |
 |---|---|---|
-| Web UI, Workspace, MCP | Anyone you give the address to | Your devices only |
+| Web UI, Workspace, MCP | Anyone you give the address to | Your devices only — but see the caveat in [Step 2b](#step-2b-private-network-tailscale): reaching the UI over a tailnet needs an extra step on this image |
 | Telegram, WhatsApp, VoIP | Work | **Broken** |
 | Public chat links, agent websites, webhook triggers, paid chat, inbound agent-to-agent | Work | **Broken** |
 | Slack | Works | Works — Trinity connects outward over a WebSocket |
@@ -91,12 +91,40 @@ A non-empty `TUNNEL_TOKEN` is treated as intent: the installer starts the tunnel
 
 ### Step 2b: Private network (Tailscale)
 
-Trinity has no Tailscale integration — this is a host-level install, and Trinity neither configures nor monitors it. Install it from Tailscale's own instructions, then mind two things specific to this image:
+Trinity has no Tailscale integration — this is a host-level install that Trinity neither configures nor monitors. There is no one-click or invite mechanism to lean on: neither DigitalOcean nor Vultr lists a Tailscale app, and both apply marketplace images at create time only, so nothing can be added to a droplet that is already running. The install is two commands.
 
-- **Install Tailscale *after* provisioning, never before.** The installer resets the host firewall when it provisions a machine, discarding rules you added by hand. If you re-run provisioning later, re-add your rules afterwards.
-- **Reach Trinity through Caddy, not container ports.** Over the tailnet, `https://your-domain.com` and the droplet's ports 80/443 work. Direct container ports — 8000 for the API, 8080 for MCP, 8686 for the log collector — do **not**, and a firewall rule cannot open them, because Trinity's container rules are evaluated first. Point MCP clients at `https://your-domain.com/mcp`.
+> **Reaching the web UI over a tailnet needs one extra step on this image, and it is not yet documented here.** The web server in front of Trinity holds a certificate for the droplet's public IP and for the domain you saved — not for a tailnet address — so `https://<tailnet-ip>` gets no certificate, and your public domain still resolves to the public IP that you are about to close off. Until this page carries a verified recipe, treat the private-network path as SSH and CLI access, and reach the UI through a tunnel or the public address. If you only need shell and agent access, the steps below are complete.
 
-Slack is the one integration that survives this path: Trinity connects outward to Slack over a WebSocket, so channels keep working. Installing the Slack app the first time still needs a public address for the OAuth callback — do that before closing the instance off.
+**Before you start**, in the Tailscale admin console → **Keys** → *Generate auth key*: make it **reusable**, set an expiry (90 days is the maximum Tailscale allows), tick **pre-approved** if your tailnet has device approval on, and leave **ephemeral** off — ephemeral devices are removed 30–60 minutes after they go quiet, which would evict a server.
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --auth-key=tskey-auth-XXXX --ssh --hostname=trinity
+tailscale ip -4
+```
+
+`--ssh` matters: it is what still gives you a shell after the next step closes port 22, and it must be opted into per device.
+
+**Then turn off key expiry for this machine** — admin console → Machines → the device's menu → *Disable key expiry*. New tailnets expire node keys after 180 days by default, and a server that silently drops off the tailnet with port 22 already closed leaves the provider's recovery console as the only way back in. This is a required step, not a nicety.
+
+Only once `tailscale ip -4` answers and you have confirmed you can SSH over the tailnet:
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow in on tailscale0
+sudo ufw delete allow 22/tcp
+sudo ufw enable
+```
+
+Order matters — the tailnet rule has to exist before the deny takes effect. (Tailscale's own guide enables the firewall first and writes the delete without `allow`, which does not match the rule as added.)
+
+Two more things specific to this image:
+
+- **Install Tailscale *after* provisioning, never before.** The installer resets the host firewall when it provisions a machine, discarding rules you added by hand. If you re-run provisioning later, re-add these.
+- **Container ports stay unreachable over the tailnet.** 8000 for the API, 8080 for MCP, 8686 for the log collector — a firewall rule cannot open them, because Trinity's container rules are evaluated first.
+
+Worth knowing: a new tailnet's default policy lets **every** device on your tailnet reach this one, not only the laptop you joined from. And Slack is the one integration that survives this path, because Trinity connects outward to Slack over a WebSocket — though installing the Slack app the first time still needs a public address for the OAuth callback.
 
 ### Step 3: Close the public ports
 
