@@ -363,3 +363,123 @@ def test_the_public_scope_is_audited_distinctly():
     from routers import canvas as canvas_router
     src = inspect.getsource(canvas_router.create_canvas_share)
     assert "canvas_share_public" in src
+
+
+# --- who may mint a share link (ent#554 review) ------------------------------
+#
+# This block exists because the original cut had none of it, and that is how the
+# defect shipped: `create_canvas_share`'s docstring said "human-only" while it
+# called `_gate_human_removal`, the gate that deliberately ADMITS an agent-scoped
+# key acting on its own agent (right for `clear_canvas`, wrong for a grant).
+# Every test here fails against that version.
+
+
+def _agent_key(agent_name="agent-a"):
+    """An agent-scoped principal — what a container's own TRINITY_MCP_API_KEY
+    resolves to. The key is already in every agent's environment and the REST
+    API accepts it as a bearer token, so "no MCP tool exposes this route" is a
+    property of the client and not a control."""
+    return User(id=1, username="alice", role="user", agent_name=agent_name)
+
+
+def test_an_agent_key_may_not_mint_a_share_link():
+    """The critical one: a prompt-injected agent must not be able to publish
+    its own canvas at an unauthenticated URL.
+
+    The share is LIVE rather than a snapshot, and the agent is the only writer
+    of canvas blocks — so a link minted this way would be a self-updating
+    exfiltration channel for anything the agent can read and copy.
+    """
+    from fastapi import HTTPException
+    from routers import canvas as canvas_router
+
+    with pytest.raises(HTTPException) as excinfo:
+        canvas_router._gate_share(_agent_key("agent-a"), "agent-a")
+    assert excinfo.value.status_code == 403
+    assert "share link" in str(excinfo.value.detail)
+
+
+def test_the_share_gate_refuses_an_agent_even_for_its_own_agent():
+    """Not a scoping question — there is no agent/canvas pair that passes.
+
+    `_gate_human_removal` refuses a SIBLING agent but admits self; this gate
+    admits neither, which is the whole difference between the two.
+    """
+    from fastapi import HTTPException
+    from routers import canvas as canvas_router
+
+    for target in ("agent-a", "agent-b"):
+        with pytest.raises(HTTPException) as excinfo:
+            canvas_router._gate_share(_agent_key("agent-a"), target)
+        assert excinfo.value.status_code == 403
+
+
+def test_all_three_share_routes_use_the_human_only_gate():
+    """Source-level, because the bug was a call site rather than a predicate.
+
+    The gate itself was always correct — `_gate_pin` had the right rule since
+    ent#553. What shipped wrong was three routes reaching for the neighbouring
+    gate whose name described a verb ("removal") instead of a rule.
+    """
+    import inspect
+    from routers import canvas as canvas_router
+
+    for route in (canvas_router.create_canvas_share,
+                  canvas_router.list_canvas_shares,
+                  canvas_router.revoke_canvas_share):
+        src = inspect.getsource(route)
+        assert "_gate_share(" in src, f"{route.__name__} must use _gate_share"
+        assert "_gate_human_removal(" not in src, (
+            f"{route.__name__} must not use the gate that admits agent keys"
+        )
+
+
+def test_listing_shares_is_gated_because_it_returns_the_token():
+    """`list_canvas_shares` hands back the token, which IS the capability — so
+    the read cannot be wider than the write that created it."""
+    import inspect
+    from routers import canvas as canvas_router
+
+    src = inspect.getsource(canvas_router.list_canvas_shares)
+    assert "token" in src and "_gate_share(" in src
+
+
+def test_deleting_a_canvas_is_deliberately_still_agent_callable():
+    """The guard against over-correcting.
+
+    `clear_canvas` is a real MCP tool and an agent tidying up after itself is
+    the documented, wanted behaviour — so the fix must NOT sweep the delete
+    routes into the human-only gate. (It did, on the first attempt: one
+    `str.replace` matched both the create-share and clear-canvas bodies.)
+    """
+    import inspect
+    from routers import canvas as canvas_router
+
+    for route in (canvas_router.clear_canvas, canvas_router.bulk_delete_canvases):
+        src = inspect.getsource(route)
+        assert "_gate_human_removal(" in src, f"{route.__name__} must stay agent-callable"
+        assert "_gate_share(" not in src
+
+    # And the gate itself still admits an agent acting on its own canvases.
+    canvas_router._gate_human_removal(_agent_key("agent-a"), "agent-a")
+
+
+def test_the_human_only_gate_names_its_rule_not_a_verb():
+    """`_gate_human_only` is the shared predicate `_gate_pin` and `_gate_share`
+    both delegate to.
+
+    Named after what it ENFORCES rather than which route calls it, because a
+    gate named for a verb is one a fourth caller reaches past — which is
+    precisely what happened when the share routes reached for
+    `_gate_human_removal`.
+    """
+    from fastapi import HTTPException
+    from routers import canvas as canvas_router
+
+    assert hasattr(canvas_router, "_gate_human_only")
+    with pytest.raises(HTTPException) as excinfo:
+        canvas_router._gate_human_only(
+            _agent_key("agent-a"), "agent-a", agent_detail="nope"
+        )
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.detail == "nope"
