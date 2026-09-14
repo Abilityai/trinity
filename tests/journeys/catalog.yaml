@@ -46,7 +46,9 @@ journeys:
     harness: null
     built: false
     owner: operator
-    invariants: []
+    # P-05: the login half — a first-login role that respects the whitelist.
+    # The install half has no invariant yet (#2337 left it in Gaps).
+    invariants: [P-05]
 
   - id: J02
     issue: 2341
@@ -110,7 +112,9 @@ journeys:
     harness: null
     built: false
     owner: trinity
-    invariants: []
+    # L-06: injection precedes the first turn; G-04: the credential never
+    # leaks into backlog metadata on the way.
+    invariants: [L-06, G-04]
 
   - id: J07
     issue: 2346
@@ -121,7 +125,7 @@ journeys:
     harness: null
     built: false
     owner: trinity
-    invariants: []
+    invariants: [SK-01, SK-02, SK-03]
 
   - id: J08
     issue: 2347
@@ -132,7 +136,7 @@ journeys:
     harness: null
     built: false
     owner: trinity
-    invariants: []
+    invariants: [PLG-01]
 
   - id: J09
     issue: 2348
@@ -143,7 +147,7 @@ journeys:
     harness: null
     built: false
     owner: trinity
-    invariants: []
+    invariants: [RD-01, RD-02, RD-03]
 
   - id: J10
     issue: 2349
@@ -154,7 +158,11 @@ journeys:
     harness: null
     built: false
     owner: trinity
-    invariants: [L-03]
+    # P-01/P-02: the permission edge and the MCP gate that consults it;
+    # AC-01: every call leaves an activity ("I can see what they said");
+    # L-03: a deleted callee cascades; IA-01..03: the recorded call had an
+    # edge, a fan-out batch is bounded, a stopped callee fails fast (#2337).
+    invariants: [P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03]
 
   - id: J11
     issue: 2565

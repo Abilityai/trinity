@@ -64,7 +64,7 @@ Yes. Both chat surfaces have a model selector next to the chat controls (placeho
 
 ## What are the Fable 5 and Sonnet 5 models?
 
-Fable 5 is the most capable model — reach for it on the longest, hardest, most involved tasks where quality matters more than speed. Sonnet 5 is the fast, smart everyday model, and it carries a 1M-token context window, so it holds far more of a long conversation or large codebase before compaction. Both appear in the model picker next to the chat controls (and in the per-schedule and per-loop model overrides), so you can match the model to the task. See [Agent Configuration](../agents/agent-configuration.md).
+Fable is the most capable tier — reach for it on the longest, hardest, most involved tasks where quality matters more than speed. **Fable 5.1** is the current one; Fable 5 is still offered and still supported, just no longer the latest in its tier. Sonnet 5 is the fast, smart everyday model, and it carries a 1M-token context window, so it holds far more of a long conversation or large codebase before compaction. Both appear in the model picker next to the chat controls (and in the per-schedule and per-loop model overrides), so you can match the model to the task. See [Agent Configuration](../agents/agent-configuration.md).
 
 ## Does chat render markdown, and can I attach files?
 

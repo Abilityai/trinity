@@ -2167,6 +2167,7 @@ const buildInfo = useBuildInfo()
 // because "do-marketplace" means nothing to an operator reading a panel.
 const INSTALL_SOURCE_LABELS = {
   'do-marketplace': 'DigitalOcean Marketplace',
+  'do-script': 'DigitalOcean (install script)',
   'vultr-marketplace': 'Vultr Marketplace',
   script: 'Install script',
   unknown: 'Not recorded',

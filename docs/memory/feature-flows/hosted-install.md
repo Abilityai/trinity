@@ -22,6 +22,8 @@ As an operator provisioning a server (by hand, from a marketplace image, or from
 | `workflow_dispatch` (optional `ref:`) | same workflow | **Smoke build only** — publishes `sha-<short>` and nothing else (see *Tag gating* below) |
 | `./scripts/deploy/start.sh --hosted` | `scripts/deploy/start.sh` | Or `TRINITY_HOSTED=1`. Same script as the source install; only the image source differs |
 | `./scripts/deploy/stop.sh` | `scripts/deploy/stop.sh` | Reads the running stack's own compose label to pick the right `-f`, then `stop` (never `down`) |
+| `start.sh --provision --cloud digitalocean` | `scripts/deploy/start.sh:392-414` | Brings a **bare** cloud VM to the state `--hosted` assumes (#2380). Called by the Packer bakery, the 1-Click first boot, and the installer below — see *Provision Layer* |
+| `bash trinity-do-create.sh` (on the operator's machine) | `scripts/deploy/trinity-do-create.sh` | Prompting installer: creates a DigitalOcean droplet whose user-data runs `start.sh --provision … --hosted --unattended` |
 
 ## Publish Layer — `.github/workflows/publish-images.yml`
 
@@ -101,6 +103,80 @@ Both crossings are refused with the copy command, not warned about: the failure 
 
 The project name is derived by **compose's own rule** (`compose_project_name()`: lowercase → keep `[a-z0-9_-]` → trim leading `_`/`-`, `COMPOSE_PROJECT_NAME` winning, shell over `.env`). The two disagreeing derivations it replaces stripped `_` and `-`, which compose keeps — so in a checkout named `project_trinity`, `trinity-dev`, or a worktree like `trinity-2280`, the derived name matched no real volume and this guard failed **open** on exactly the directory names most likely to be in use.
 
+## Provision Layer — `start.sh --provision` (#2380)
+
+`--hosted` assumes a machine that already has Docker. `--provision` gets a **bare** cloud VM there, and it is the only implementation of that: the Packer bakery, the 1-Click first boot and a hand-written doc script used to carry three copies, which had already drifted (the image's DROP list was missing 8081, so the login page answered plain HTTP past the certificate — #2281 review C1). The `packer/` copies are deleted; every caller enters here. Requirements: PROV-012…015.
+
+```
+start.sh --provision --cloud digitalocean [--machine-only | --site-only] [--provenance X]
+  ├─ guard: Linux + root + the cloud's metadata service answers         (start.sh:392-404)
+  ├─ machine phase — provision_machine (:188)       IP-independent, safe to bake
+  │    Docker · Caddy 2.11.4 (floor 2.11.3 asserted) · ufw 22/80/443
+  │    · trinity-docker-firewall.service → scripts/deploy/docker-firewall.sh
+  ├─ site phase — provision_site (:271)             once per instance
+  │    public IP from 169.254.169.254 → /etc/trinity/public-ip
+  │    .env: FRONTEND_PORT=8081 · FRONTEND_URL=https://<ip> · TRINITY_INSTALL_SOURCE · [TRINITY_IMAGE_TAG]
+  │    Caddyfile (:325-362) → restart caddy → poll https://<ip>/ verified → /etc/trinity/tls-status
+  └─ --machine-only exits here; otherwise the normal install continues (with --hosted, the layer above)
+```
+
+| Caller | Invocation |
+|---|---|
+| Packer bakery (`packer/digitalocean/scripts/01-provision.sh:67`) | `--machine-only` — packages and the firewall unit go into the snapshot; Trinity is not installed |
+| 1-Click first boot (`packer/digitalocean/files/opt/trinity-firstboot/firstboot.sh:114`) | `--site-only --provenance do-marketplace --hosted --unattended` — the machine phase is already baked, so no `apt-get update` per droplet |
+| Installer user-data (`scripts/deploy/trinity-do-create.sh:189`) | `--hosted --unattended`, both phases, default provenance `do-script` |
+
+| Concern | Resolution |
+|---|---|
+| **Inert on a laptop** | Off by default. It installs packages, resets ufw and claims :80/:443, so it refuses unless root, Linux and a reachable metadata service, which no laptop satisfies. `--cloud` accepts only `digitalocean`; the metadata URL is the one per-cloud difference |
+| **Caddy is pinned, with a floor** | 2.11.4, and the installed version is asserted ≥ 2.11.3: earlier Caddy cannot issue a Let's Encrypt IP certificate (caddyserver/caddy#7399), and the no-domain HTTPS story rests on one. Not `apt-mark hold`, which would block security updates |
+| **Certificate verified, never fatal** | The site phase polls `https://<ip>/` with normal verification for ~150 s. Trinity is not up yet, so Caddy answers 502 — a zero curl exit means the chain validated. A failure is recorded and warned, and the install continues |
+| **One `.env` writer** | `scripts/deploy/env-file.sh::set_env_key` rewrites the line rather than `sed`-substituting a user-controlled value, where `&`, `\` and the delimiter corrupt it silently. `start.sh` also writes an `ADMIN_PASSWORD` from the environment into `.env` when `.env` has none — the installer's user-data relies on this |
+| **`X-DO-MARKETPLACE` follows provenance** | DigitalOcean's 1-Click header is emitted only for `do-marketplace`, not for every DigitalOcean install — the doc install did not come from the catalog |
+
+### Host firewall — no port list (`scripts/deploy/docker-firewall.sh`)
+
+Docker's published-port rules are evaluated ahead of ufw's chain, so `ufw deny 8000` on a host publishing `8000:8000` does nothing. The fix lives in `DOCKER-USER`, the one chain Docker leaves to the operator. It used to be a `DROP_PORTS` list kept in step with compose by a test — the hand-maintained-list shape this repo has shipped wrong before (#1039, #1056, #1707, #1871), and it shipped wrong here. Now it is inverted, in its own `TRINITY-FW` chain, in load-bearing order:
+
+| # | Rule | Why |
+|---|---|---|
+| 1 | `RELATED,ESTABLISHED` → RETURN | replies to connections a container opened; without it agents lose outbound internet |
+| 2 | `-d 169.254.0.0/16` → DROP | containers cannot read the cloud metadata service (below) |
+| 3 | `-i docker0` / `-i br+` → RETURN | container→internet and container→container |
+| 4 | everything else → DROP | nothing Docker publishes is reachable from off-box, whatever the port |
+
+Users reach Caddy on 80/443 — host ports, which never traverse this chain (Caddy proxies `127.0.0.1:8081`). Naming what is inside rather than the public interface also closes a private VPC interface. The chain is rebuilt only when its final DROP is missing and the jump is inserted only once the chain is populated, so no run leaves an empty chain live; the systemd unit reapplies it on every boot (it replaces `iptables-persistent`, which ufw `Breaks:`). IPv4 only: Docker maintains an IPv6 `DOCKER-USER` only with daemon IPv6 enabled, which no Trinity compose file sets.
+
+**The metadata block.** DigitalOcean serves a droplet's user-data verbatim from `169.254.169.254` for the life of the machine, and the installer's user-data carries the admin password and the Claude subscription token. An agent container is precisely the untrusted-code case, so the whole RFC 3927 range is dropped, and the rule must sit **ahead of** the bridge RETURNs or container traffic leaves the chain before reaching it. `tests/unit/test_2380_provision_single_source.py` pins the ordering.
+
+### The installer — `scripts/deploy/trinity-do-create.sh`
+
+Runs on the **operator's** machine, fetched from a release tag, and ends with an HTTPS address.
+
+```
+checks (before any prompt): doctl installed + signed in; a snap doctl needs $HOME
+prompts: admin password (×2, ≥12 chars, guessable prefixes refused) · Claude token (sk-ant-oat01-…)
+         · region · name · confirm the monthly cost
+user-data (umask 077 temp file, removed on exit):
+    clone the pinned tag → /opt/trinity
+    start.sh --provision --cloud digitalocean --hosted --unattended
+    register the Claude subscription, assign it to every agent the install created
+doctl compute droplet create (ubuntu-24-04-x64, s-4vcpu-8gb, the account's SSH keys) --wait
+poll https://<ip>/ with verification for 15 min → print the address, or the console fallback
+```
+
+| Concern | Resolution |
+|---|---|
+| **Prompts, not a file to edit** | A guide that says "change four lines" fails its audience and leaves two secrets on disk. `read -rs` keeps them off the terminal, out of shell history, and out of every file but the droplet's user-data |
+| **Portability (#2683)** | A full `mktemp` template (GNU rejects `-t NAME`). A snap `doctl` has a private `/tmp`, so the file goes under `$HOME` (non-hidden: snap's `home` interface denies dotfiles), and an unset `$HOME` is refused before the first prompt. Every value in the user-data — both secrets and the tag — is `'\''`-quoted, because a `'` in a valid password broke first boot after the droplet was already billing. An empty SSH-key array under `set -u` on macOS's bash 3.2 |
+| **A shell to support it** | Every SSH key already on the account is attached; without one, DigitalOcean emails a root password and the browser console is the only way in |
+| **Release pin** | The default tag is tied to `VERSION` by `tests/unit/test_2380_installer_release_pin.py`, so a release cut cannot ship an installer that installs the previous RC |
+| **Provenance** | `do-script` — guide-eligible, not a marketplace install ([install-provenance.md](install-provenance.md)) |
+
+### A domain is a Settings field
+
+The provisioned Caddyfile has two HTTPS sites: the bare IP on the `shortlived` profile, and a catch-all with `tls { on_demand }` gated by `ask http://127.0.0.1:8000/api/public/tls-allowed`. So Caddy obtains a certificate for the saved Public URL's host on its first request and refuses every other name; the operator never needs a root shell on the host. The gate's contract — exact parsed host, unauthenticated, fails closed — lives in [install-provenance.md](install-provenance.md) → *The card*.
+
 ## Stop Layer — `scripts/deploy/stop.sh`
 
 Hosted mode passes an explicit `-f`, which disables compose's default file merge — so a bare `docker compose` in the checkout loads the **dev** file instead. Same project name, so it acts on the same containers, but it knows nothing about `cloudflared`, which the dev file does not define: the tunnel keeps running and the instance stays publicly reachable after the script prints "All services stopped". That is the same hazard `persist_compose_profile` closes, re-entering through the one entry point that change did not touch.
@@ -109,15 +185,15 @@ So `stop.sh` reads the running stack's own `com.docker.compose.project.config_fi
 
 It also runs `stop`, not `down`. `down` removes the platform containers and tears down `trinity-agent-network`, which every agent container is attached to — and it is the command `start.sh`'s own closing summary tells operators **not** to run, in both branches. A script named `stop.sh` running the forbidden verb was a standing contradiction.
 
-## TLS (decided, documented, not automated)
+## TLS (decided and documented; automated only under `--provision`)
 
-Trinity serves plain HTTP and terminates TLS **outside** the application; there is no HTTPS listener in any compose file and no auto-certificate step. Three supported postures, documented in `docs/DEPLOYMENT.md`:
+Trinity serves plain HTTP and terminates TLS **outside** the application; there is no HTTPS listener in any compose file, and no auto-certificate step outside `--provision`. Three supported postures, documented in `docs/DEPLOYMENT.md`:
 
 1. **Tunnel** — Cloudflare Tunnel; `cloudflared` is already a service, set `TUNNEL_TOKEN`. The default for a public instance, nothing to renew.
 2. **Private network** — Tailscale/WireGuard/VPC, what the managed fleet runs. HTTP over a WireGuard tunnel is encrypted transport and a finished posture, not a compromise.
 3. **Operator-run reverse proxy** — Caddy/nginx + Let's Encrypt.
 
-Plain HTTP on a public IPv4 with none of the three is the one combination called out as unsafe. A marketplace droplet is the deliberate exception — it comes up on a bare public IP with no domain, so that channel provisions a Caddy sidecar with Let's Encrypt short-lived IP certificates (#2281) and Trinity shows a provenance-gated first-run hardening guide (#2380).
+Plain HTTP on a public IPv4 with none of the three is the one combination called out as unsafe. A provisioned DigitalOcean droplet — the 1-Click image (#2281) or the installer, both through `--provision` — is the deliberate exception: it comes up on a bare public IP with no domain, so provisioning installs a host Caddy with a Let's Encrypt short-lived IP certificate plus on-demand TLS for the domain an admin saves later, and Trinity shows a provenance-gated first-run hardening guide (#2380).
 
 ## Upgrade Path
 
@@ -135,6 +211,9 @@ A plain `docker compose -f docker-compose.hosted.yml pull` skips the base image 
 | `tests/unit/test_2280_hosted_compose_parity.py` | Wholesale prod↔hosted service parity, third-party pin equality, top-level volumes/networks, the 8 GB floor in the header, `FRONTEND_PORT` in both files |
 | `tests/unit/test_2280_publish_workflow_and_stop.py` | The verify step never passes a mixed-case owner as an image reference and lowercases the one it builds; `flavor: latest=false`; every non-sha tag gated on `github.event_name == 'push'` and the sha tag on nothing; `stop.sh` never runs `compose down` and selects its file from the compose label |
 | `tests/unit/test_2390_start_sh_env_and_project_name.py` | `env_value()` dotenv parity with compose (quotes, inline comments, last-wins) and `compose_project_name()` against compose's real derivation, including the `_`/`-`-bearing directory names that made the data guard fail open |
+| `tests/unit/test_2380_provision_single_source.py` | The Packer tree calls `start.sh --provision` for both phases and re-implements nothing (no packages, no Caddyfile); the firewall has no port list, RETURNs `ESTABLISHED` before it drops, and drops link-local ahead of the bridge RETURNs; ufw and `iptables-persistent` never both installed; the unit reapplies on boot; `--provision` refuses a workstation; the Caddyfile's `ask` gate and the endpoint's exact-host, fail-closed match |
+| `tests/unit/test_2380_installer_portability.py` | Full `mktemp` template; snap `doctl` gets the file under `$HOME` and a missing `$HOME` is refused before any question; every single-quoted user-data interpolation is quoted, executed round-trip through a shell; the installer run against a stub `doctl` with no SSH keys |
+| `tests/unit/test_2380_installer_release_pin.py` | The installer's default tag matches `VERSION` and is `v`-prefixed |
 | `tests/unit/test_2528_compose_file_sets.py` | `quickstart.sh` is an alias for `start.sh` (static + argv passthrough); the data-switch guard executed under `bash` with a `docker` shim — reverse refusal names prod, both-stores-present warns naming the store in use, clean states silent; both standalone compose headers state they are not overlays; every supported file set renders locally (skips without a Compose CLI) and is listed verbatim in `container-security.yml` → `verify-compose-file-sets` |
 
 ## Outstanding
