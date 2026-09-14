@@ -48,7 +48,7 @@ def _run(legacy_key, sources, count=None):
     with patch.object(ss, "get_skills_library_url", return_value=legacy_key), \
          patch.object(ss, "db") as db, \
          patch.object(ss.SkillService, "_record_adoption_failure",
-                      lambda self, url, msg: alerts.append((url, msg))):
+                      lambda self, url, msg, **kw: alerts.append((url, msg))):
         db.list_skill_sources.return_value = sources
         db.count_skill_sources.return_value = len(sources) if count is None else count
         db.create_skill_source.side_effect = lambda **kw: created.append(kw) or SimpleNamespace(
