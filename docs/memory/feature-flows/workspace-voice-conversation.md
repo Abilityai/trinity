@@ -580,5 +580,18 @@ mechanics live in [voice-chat.md § VOICE-007](voice-chat.md); the requirement i
   `{"type":"end"}` nor closes, so the socket closes only on the client's 5 s
   `saved`-frame timeout.
 - **The marker is one key per thread**, so two deliberate concurrent calls on
-  one thread share it. The release is owner-matched, so a closing call cannot
-  free a newer one; what governs from then on is the newer call's own lease.
+  one thread share it, and the owner match narrows that rather than closing it.
+  Two live bridges renew alternately, so the value flip-flops between their two
+  ids: a closing call frees the newer one only if its own id happened to be the
+  last write, and the newer call's next tick re-arms within 15 s. The permanent
+  free an unconditional delete would have caused is gone; a ≤15 s window in a
+  deliberately rare shape is not.
+- **A release is not durable while the lease's renewer is still alive**, which
+  is the same fact seen from two sides. The bridge cancels its renewer as the
+  first statement of its `finally`, but `asyncio.to_thread` hands the Redis
+  write to a worker thread cancellation does not reach, so a renewal already
+  inside that write can land after the release — the thread keeps refusing
+  typed turns for ≤60 s (one lease) after the call ends, self-healing, with the
+  read still fail-OPEN. The REST `/stop` sees the same thing at a coarser
+  scale: it releases, and a bridge that is still up re-arms within a tick, so
+  that path frees the thread only once the socket is gone.

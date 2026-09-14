@@ -136,7 +136,11 @@ async def voice_stop(
         # its own lease unconditionally now (#2700), so this is not a second
         # live clear path — the Workspace UI never calls it (`restStop: false`)
         # — but it stays because it is idempotent, owner-matched, and reachable
-        # by a direct API client.
+        # by a direct API client. What it is NOT is durable while that bridge is
+        # still up: the bridge's renewer re-arms the lease within a tick, so the
+        # thread reopens only once the socket is actually gone (then the
+        # bridge's own release fires). Bounded like every other live-bridge
+        # residual by the renewer's `cap + slack` lifetime.
         from client_portal.voice import clear_voice_call_active
         clear_voice_call_active(getattr(session, "portal_session_id", None),
                                 owner=request.voice_session_id)
@@ -451,10 +455,17 @@ async def voice_websocket(
     except WebSocketDisconnect:
         logger.info(f"Voice WebSocket disconnected: {voice_session_id}")
     finally:
-        # #2700: stop renewing FIRST, before anything that can await, so no
-        # renewal can re-arm the lease after the release below. A renewal
-        # already in flight lands before the release (which is last), and the
-        # delete wins.
+        # #2700: stop renewing FIRST, before anything that can await, so a
+        # renewer suspended at its `asyncio.sleep` can never tick again. It is
+        # NOT a total ordering, and the honest bound is worth more than the
+        # neat claim: `asyncio.to_thread` hands the Redis write to a worker
+        # thread that cancellation does not reach, so a renewal already inside
+        # that write can land AFTER the release below — re-arming the lease for
+        # one TTL. It needs the renewer to be inside its ~1 ms `SET` at exactly
+        # this instant AND that `SET` to outlast the whole close-out, so the
+        # cost is a thread that keeps refusing typed turns for <= 60 s after a
+        # call ends, self-healing, with the read still fail-OPEN. Recorded in
+        # `workspace-voice-conversation.md` -> Known limits.
         if marker_renew_task is not None and not marker_renew_task.done():
             marker_renew_task.cancel()
 
