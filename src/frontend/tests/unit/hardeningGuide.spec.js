@@ -53,7 +53,11 @@ import { useSessionsStore } from '@/stores/sessions'
 import { resetInFlight } from '@/utils/inflight'
 import {
   HARDENING_GUIDE_DISMISSED_KEY,
+  DOMAIN_BENEFIT,
   DOMAIN_POSTURE,
+  DOMAIN_PREREQUISITE,
+  DOMAIN_SIDE_EFFECT,
+  HARDENING_DOCS_URL,
   POSTURE_COPY,
   hardeningStage,
   postureCopy,
@@ -129,7 +133,7 @@ describe('stage', () => {
     expect(GUIDE_SFC).toMatch(/hardeningStage\(props\.ctx\.tlsPosture\)/)
     // Step one's field cannot render once the domain exists — there is nothing
     // left to collect in-app, and a control that leads nowhere is the defect.
-    expect(GUIDE_SFC).toMatch(/<form v-if="stage === 'address'"[\s\S]{0,900}Save domain/)
+    expect(GUIDE_SFC).toMatch(/<form v-if="stage === 'address'"[\s\S]{0,1600}Save domain/)
   })
 
   it('advances in-session on the save that configures the domain', () => {
@@ -151,25 +155,55 @@ describe('honest copy', () => {
     expect(Object.keys(POSTURE_COPY).sort()).toEqual([
       'http',
       'https-domain',
+      'https-domain-reached',
       'https-ip',
       'unconfigured',
     ])
+    // #2691: `https-domain-reached` is not a fifth posture — it is the same
+    // posture once the name has actually been reached. The posture is parsed
+    // from a string an admin typed, so it can only ever say "saved"; claiming
+    // the domain WORKS takes evidence, and `reached` carries it.
+    expect(postureCopy(DOMAIN_POSTURE, true)).toBe(POSTURE_COPY['https-domain-reached'])
+    expect(postureCopy(DOMAIN_POSTURE, false)).toBe(POSTURE_COPY['https-domain'])
+    expect(postureCopy(DOMAIN_POSTURE)).toBe(POSTURE_COPY['https-domain'])
+    // `reached` is meaningless on every other posture: there is no domain yet.
+    expect(postureCopy('https-ip', true)).toBe(POSTURE_COPY['https-ip'])
     // An unrecognised posture still has nothing to say, and the component's own
     // belt hides the card rather than rendering an empty shell.
     expect(postureCopy('something-new')).toBeNull()
   })
 
+  it('a saved domain is reported as saved, not as working (#2691)', () => {
+    // The state every domain is in the moment it is entered, and where a typo
+    // or a missing DNS record stays forever. It must not read as an achievement.
+    const { headline, detail, badgeVariant } = POSTURE_COPY['https-domain']
+    expect(badgeVariant).not.toBe('success')
+    expect(headline.toLowerCase()).toMatch(/saved/)
+    expect(headline.toLowerCase()).toMatch(/first visit/)
+    // And it says who obtains the certificate and when, so "nothing happened
+    // yet" is a state the operator can act on rather than a mystery.
+    expect(detail.toLowerCase()).toMatch(/first request that actually arrives/)
+    expect(detail.toLowerCase()).toMatch(/does not point at this server/)
+  })
+
   it('the tunnel stage names the remaining step on the card FACE', () => {
     // At this stage there is no button — the last move happens on the host — so
     // a reader who dismisses without expanding must still have met the point.
-    const { headline, detail, badgeVariant } = POSTURE_COPY['https-domain']
+    const { headline, detail, badgeVariant } = POSTURE_COPY['https-domain-reached']
     expect(headline).toMatch(/Cloudflare Tunnel/)
-    expect(headline.toLowerCase()).toMatch(/optional/)
     expect(badgeVariant).toBe('success')
     // Honest about reach: it hedges rather than asserting what is in front of
     // this server, exactly as the `http` copy does.
-    expect(detail.toLowerCase()).toMatch(/unless something in front of/)
-    expect(detail.toLowerCase()).toMatch(/dismissing it here is a fine answer/)
+    expect(detail.toLowerCase()).toMatch(/still answers anyone who finds the address/)
+    // #2691/#2692: the stance the docs page takes and the card must match —
+    // optional, but not a shrug. The retired wording ("dismissing it here is a
+    // fine answer") undercut the guide it links to, which says to keep a real
+    // instance off the open internet. Skippable stays skippable: that is the
+    // overlay's Skip control and the step's `required: false`, not the copy's
+    // job to soften further.
+    expect(detail.toLowerCase()).not.toMatch(/a fine answer/)
+    expect(detail.toLowerCase()).toMatch(/optional/)
+    expect(detail.toLowerCase()).toMatch(/before this instance matters/)
   })
 
   // `install_tls_posture` is derived by PURE STRING PARSING of the URL this
@@ -264,8 +298,11 @@ describe('honest copy', () => {
       expect(copy.badgeVariant, `${posture} must not read as broken`).not.toBe('urgent')
     }
     // And `success` is reserved for the one posture that completed a step.
+    // #2691: reserved for the one state resting on something OBSERVED — a
+    // request for the saved name arrived and a certificate followed. A saved
+    // but never-reached domain is `info`, not a green tick.
     const successes = ALL.filter(([, c]) => c.badgeVariant === 'success').map(([k]) => k)
-    expect(successes).toEqual(['https-domain'])
+    expect(successes).toEqual(['https-domain-reached'])
   })
 })
 
@@ -384,8 +421,10 @@ describe('step one is finishable from the browser (#2380, on-demand TLS)', () =>
     // here and have this server request certificates for it?
     expect(prose).toMatch(/Only the name you save is allowed/)
     // DNS first: on-demand issuance fails until the record resolves here, and it
-    // fails on somebody's page load rather than announcing itself.
-    expect(prose).toMatch(/until the record points here/)
+    // fails on somebody's page load rather than announcing itself — which is
+    // exactly why Trinity cannot report it, and now says so.
+    expect(prose).toMatch(/Point the domain at this server before you save/)
+    expect(prose).toMatch(/the visitor sees a certificate error/)
   })
 })
 
@@ -457,5 +496,71 @@ describe('the store fails closed', () => {
     expect(store.hardeningGuideEligible).toBe(false)
     expect(store.installTlsPosture).toBe('unconfigured')
     expect(store.featureFlagsLoaded).toBe(true) // resolved, just not to a gate
+  })
+})
+
+
+describe('the domain step says why, and what has to be true first (#2691)', () => {
+  it('states the benefit and the prerequisite without opening the disclosure', () => {
+    // The defect this issue was filed for: walked live on a fresh droplet,
+    // nobody could say why an operator would add a domain or what it changes.
+    // The field's help text said only "the address people will use to reach
+    // this instance", and the A-record prerequisite was four sentences deep
+    // inside <details>.
+    expect(DOMAIN_BENEFIT).toMatch(/certificate/i)
+    expect(DOMAIN_PREREQUISITE.toLowerCase()).toMatch(/point the domain at this server/)
+
+    const face = withoutComments(GUIDE_SFC).split('<details')[0]
+    expect(face).toContain(':help="DOMAIN_BENEFIT"')
+    expect(face).toContain('{{ DOMAIN_PREREQUISITE }}')
+  })
+
+  it('names the side effect where the setting is owned, not in the first-run flow', () => {
+    // Saving re-registers every Telegram webhook and rewrites every WhatsApp
+    // binding immediately. That matters to an operator who already has
+    // channels — which a first-run visitor does not — so it is stated in
+    // Settings and left out of the overlay.
+    expect(DOMAIN_SIDE_EFFECT.toLowerCase()).toMatch(/telegram and whatsapp/)
+    expect(SETTINGS_SFC).toContain('{{ DOMAIN_SIDE_EFFECT }}')
+    expect(withoutComments(GUIDE_SFC)).not.toContain('DOMAIN_SIDE_EFFECT')
+  })
+
+  it('gives Settings the same explanation, from the same module', () => {
+    // Two writers, one meaning: the explanation cannot depend on which surface
+    // the operator arrived through, and shared constants are what stop the two
+    // drifting apart.
+    expect(SETTINGS_SFC).toMatch(/import \{[\s\S]{0,200}DOMAIN_BENEFIT[\s\S]{0,200}\} from '..\/components\/onboarding\/hardeningGuide'/)
+    expect(SETTINGS_SFC).toContain('{{ DOMAIN_BENEFIT }}')
+    expect(SETTINGS_SFC).toContain('{{ DOMAIN_PREREQUISITE }}')
+    // And the corrected consumer list: the old text named three of a dozen and
+    // omitted the one that fails outright without it.
+    expect(SETTINGS_SFC).toMatch(/voice calls fail outright without it/)
+  })
+
+  it('refuses a plain-HTTP address instead of congratulating the operator for it', () => {
+    // The pattern was `https?`, so `http://…` passed, the step emitted
+    // `complete` and advanced, and the badge then read "Advertises HTTP" — the
+    // step celebrating the posture it exists to move people off.
+    expect(GUIDE_SFC).toMatch(/\^https:\\\/\\\//)
+    expect(GUIDE_SFC).not.toMatch(/\^https\?:/)
+  })
+
+  it('waits for a real visit before showing a tick', () => {
+    // The tick rests on the one thing observed rather than typed. A DNS lookup
+    // at save time could not do this job: a Cloudflare-proxied domain, a load
+    // balancer or a reserved IP all resolve somewhere other than this server by
+    // design, and the card's own step two is "put your domain on Cloudflare".
+    expect(GUIDE_SFC).toContain('props.ctx.publicUrlReached')
+    expect(GUIDE_SFC).toMatch(/stage === 'tunnel' && reached \? 'Done' : 'Recommended'/)
+    expect(GUIDE_SFC).toMatch(/postureCopy\(props\.ctx\.tlsPosture, reached\.value\)/)
+  })
+
+  it('links the full walkthrough at the published docs site', () => {
+    // The only other docs link in the first-run flow points at a github blob
+    // path on `main` and 404s between release cuts.
+    expect(HARDENING_DOCS_URL).toMatch(/^https:\/\/docs\.ability\.ai\//)
+    expect(HARDENING_DOCS_URL).not.toMatch(/github\.com/)
+    expect(GUIDE_SFC).toContain(':href="HARDENING_DOCS_URL"')
+    expect(GUIDE_SFC).toContain('data-testid="first-run-secure-docs"')
   })
 })

@@ -461,8 +461,16 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
    Note the corollary: after a provisioned first boot there is no wizard, so
    binding an admin **sign-in email** is a post-login step in
    Settings → General — the dashboard prompts for it.
-2. **Never expose Redis externally** - Keep it internal only
-3. **Use strong SECRET_KEY** - Generate with `openssl rand -hex 32`
-4. **Use email whitelist** - Restrict access to approved email addresses only
-5. **Regular backups** - Automate database backups
-6. **Keep Docker updated** - Regular security patches
+2. **Get a marketplace install off the open internet.** A one-click droplet is
+   reachable from the moment it boots — acceptable for evaluation, which is what
+   the listing is for, and not a posture to leave a working instance in. The
+   step-by-step path (bare IP → domain → Cloudflare Tunnel, or a private network
+   instead, with a verification step for each) is
+   [Hardening a Marketplace Install](user-docs/guides/deploying/hardening.md).
+   The TLS choices themselves are summarised under
+   [TLS on a bare VM](#tls-on-a-bare-vm) above.
+3. **Never expose Redis externally** - Keep it internal only
+4. **Use strong SECRET_KEY** - Generate with `openssl rand -hex 32`
+5. **Use email whitelist** - Restrict access to approved email addresses only
+6. **Regular backups** - Automate database backups
+7. **Keep Docker updated** - Regular security patches

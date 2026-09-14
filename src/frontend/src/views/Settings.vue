@@ -320,12 +320,29 @@
                       </svg>
                       <span class="text-status-success-600 dark:text-status-success-400">Saved</span>
                     </template>
-                    <template v-else-if="publicUrlCurrent">
+                    <!-- #2691: a saved URL is a string an admin typed. The tick
+                         waits until a request for that exact name has actually
+                         arrived here and a certificate was obtained for it —
+                         the same distinction the first-run step draws. -->
+                    <template v-else-if="publicUrlCurrent && sessionsStore.publicUrlReached">
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
                       <span class="text-status-success-600 dark:text-status-success-400">
                         {{ publicUrlCurrent }}
+                      </span>
+                    </template>
+                    <template v-else-if="publicUrlCurrent">
+                      <!-- Same icon box as every other branch, so the line does
+                           not shift when the latch flips. A clock, not the
+                           warning triangle the unconfigured branch uses: same
+                           token, different shape, different meaning — nothing
+                           is wrong here, it just has not happened yet. -->
+                      <svg class="h-4 w-4 text-state-autonomous-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                        {{ publicUrlCurrent }} — saved, waiting for the first visit to confirm it resolves here
                       </span>
                     </template>
                     <template v-else>
@@ -337,9 +354,18 @@
                       </span>
                     </template>
                   </div>
+                  <!-- #2691: the old text named three consumers out of a dozen
+                       and no side effect. The corrected list and the two shared
+                       lines live in `onboarding/hardeningGuide.js`, so this
+                       field and the first-run step cannot drift apart. -->
                   <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
                     The externally-accessible URL of this Trinity instance (e.g. <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">https://your-domain.com</code>).
-                    Used for Telegram webhooks, Slack OAuth callbacks, and shareable public links.
+                    {{ DOMAIN_BENEFIT }}
+                    It is the address Telegram, WhatsApp and VoIP call back on, the one Slack's
+                    OAuth returns to, and the base for every shareable public link, workspace
+                    link and file download — voice calls fail outright without it, and the rest
+                    fall back to an address nobody outside can use.
+                    {{ DOMAIN_PREREQUISITE }} {{ DOMAIN_SIDE_EFFECT }}
                   </p>
                 </div>
 
@@ -2155,6 +2181,14 @@ import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
 import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
+// #2691: one home for what the Public URL buys, what must be true first, and
+// what saving it re-points — shared with the first-run step so the explanation
+// does not depend on which surface the operator arrives through.
+import {
+  DOMAIN_BENEFIT,
+  DOMAIN_PREREQUISITE,
+  DOMAIN_SIDE_EFFECT,
+} from '../components/onboarding/hardeningGuide'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
 import PlatformKeyField from '../components/settings/PlatformKeyField.vue'

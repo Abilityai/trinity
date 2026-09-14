@@ -33,7 +33,7 @@ from services.chat_execution_service import terminate_execution as _terminate_ex
 from services.chat_signals import ChatDispatchError
 from services.docker_service import get_agent_container
 from services.email_service import email_service
-from services.settings_service import settings_service
+from services.settings_service import PUBLIC_URL_REACHED_KEY, settings_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_prompt_service import (
     build_public_channel_caller_prompt,
@@ -49,7 +49,7 @@ router = APIRouter(prefix="/api/public", tags=["public"])
 
 
 @router.get("/tls-allowed")
-async def tls_allowed(domain: str = ""):
+async def tls_allowed(request: Request, domain: str = ""):
     """Caddy's on-demand-TLS gate: may a certificate be issued for `domain`? (#2380)
 
     Caddy calls this with `?domain=<hostname>` before obtaining a certificate for
@@ -78,10 +78,17 @@ async def tls_allowed(domain: str = ""):
     could not verify. A 404 body is what Caddy documents as "not authorised", and
     the response must be fast — it runs inside a handshake — so this is one
     settings read and a string compare, never a network call.
+
+    Both sides go through `canonical_host` (#2691). SNI is ASCII, so Caddy always
+    asks about the A-label (`xn--…`), while an operator saves the name as they
+    read it. Lower-casing alone left those two forms unequal, so a domain with
+    any non-ASCII character was refused here forever — silently, on every
+    visitor's page load, with the UI reporting the domain as set.
     """
     from urllib.parse import urlparse
+    from utils.url_validation import canonical_host
 
-    requested = (domain or "").strip().strip(".").lower()
+    requested = canonical_host(domain or "")
     if not requested:
         raise HTTPException(status_code=404, detail="No domain supplied")
 
@@ -96,11 +103,90 @@ async def tls_allowed(domain: str = ""):
 
     # Parse rather than substring-match: `evil-example.com` contains
     # `example.com`, and a naive check would issue for the attacker's name.
-    allowed = (urlparse(configured).hostname or "").strip(".").lower()
+    allowed = canonical_host(urlparse(configured).hostname or "")
     if not allowed or requested != allowed:
         raise HTTPException(status_code=404, detail="Not authorised")
 
+    if _is_caddy_ask(request):
+        # Off the event loop: the write below is synchronous SQLAlchemy against
+        # an engine that can block for its lock timeout, and this handler runs
+        # inside a TLS handshake on the one uvicorn worker.
+        await asyncio.to_thread(_latch_public_url_reached, allowed)
     return {"authorized": True, "domain": allowed}
+
+
+# Hosts Caddy's `ask` can address the backend as. The provisioned Caddyfile
+# hard-codes `http://127.0.0.1:8000/api/public/tls-allowed`, pinned by
+# tests/unit/test_2380_provision_single_source.py.
+_ASK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+# Hosts already recorded in this process. The stamp is written once per host per
+# instance, but Caddy re-asks on every certificate renewal and the handler is on
+# an unauthenticated path — so after the first hit the fast path touches no
+# database at all.
+_reached_memo: set[str] = set()
+
+
+def _is_caddy_ask(request: Request) -> bool:
+    """Is this the web server's gate call, or a request off the public internet?
+
+    It matters because the stamp this guards is the product's evidence that a
+    name really works. The gate is reachable two ways on a provisioned host:
+    Caddy calls `http://127.0.0.1:8000/...` directly, and the SAME route is also
+    exposed through the public front door, because Caddy proxies everything to
+    the frontend and nginx forwards `/api/` to the backend. The domain is not a
+    secret — it is published in every webhook URL and public link — so without
+    this check anyone could `curl https://<ip>/api/public/tls-allowed?domain=…`
+    and flip the instance to "domain reached" with no DNS record in existence.
+
+    The two paths are distinguishable at the headers: nginx always sets
+    `X-Forwarded-For` and `X-Forwarded-Proto` (`src/frontend/nginx.conf`), and
+    Caddy's ask sets neither and carries the loopback authority it dialled.
+    Fails CLOSED — an unrecognised shape costs the stamp, never the certificate,
+    and the gate's own answer is decided before this is consulted.
+    """
+    headers = request.headers
+    if headers.get("x-forwarded-for") or headers.get("x-forwarded-proto"):
+        return False
+    host = (headers.get("host") or "").strip().lower()
+    return host.rsplit(":", 1)[0] in _ASK_HOSTS if host else False
+
+
+def _latch_public_url_reached(host: str) -> None:
+    """Record that the saved public URL has actually been reached (#2691).
+
+    Reaching here means Caddy is mid-handshake for the exact name an admin saved
+    and is about to obtain a certificate for it. That is proof of the whole chain
+    the operator cannot otherwise confirm from inside Trinity: DNS resolves,
+    traffic reaches this box, SNI matches, a certificate follows. It stays true
+    behind Cloudflare's proxy, a load balancer or a reserved IP, where comparing
+    the name's DNS answer against this instance's own address says the opposite.
+
+    The HOST is stored beside the stamp, and the reader compares it to the host
+    currently configured (`settings_service.is_public_url_reached`). Recording
+    which name was reached, rather than clearing the row when the setting
+    changes, is what keeps this honest without coupling it to the settings
+    write: a restored backup, a direct row edit or a second writer can leave a
+    stale row, but a stale row describes a host that no longer matches and reads
+    as not-reached. It also removes the interleaving where a handshake landing
+    mid-save was wiped by the save that provoked it.
+
+    Never raises: a settings write that fails must not cost a certificate.
+    """
+    if host in _reached_memo:
+        return
+    try:
+        from utils.helpers import utc_now_iso
+
+        db.set_setting(PUBLIC_URL_REACHED_KEY, f"{utc_now_iso()}|{host}")
+        _reached_memo.add(host)
+        logger.info(f"[#2691] Public URL reached for the first time: {host}")
+    except Exception as e:  # noqa: BLE001 — advisory stamp, never fatal
+        # Warning, not debug: Caddy asks once per obtain, so a failure here is
+        # the difference between an earned tick and an operator staring at
+        # "waiting for the first visit" over a domain that works.
+        logger.warning(f"[#2691] Could not record public-URL reachability: {e}")
+
 
 # Rate limiting constants
 MAX_VERIFICATION_REQUESTS_PER_EMAIL = 3  # per 10 minutes
