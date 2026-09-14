@@ -2341,11 +2341,6 @@ print(json.dumps(out))
                     "skills-legacy-adoption-refused-"
                     f"{hashlib.sha256(url.strip().encode()).hexdigest()[:12]}"
                 )
-                # One `alert_type` + one title now spans both `low` (benign
-                # resting state) and `high` (a URL that failed validation — the
-                # signature of an attempted injection), so give a machine
-                # consumer something better than `priority` to read.
-                context["reason"] = "already_migrated"
             else:
                 # Timestamped, so a repeated failure is visible as repeated
                 # rather than silently deduped by the ON CONFLICT DO NOTHING

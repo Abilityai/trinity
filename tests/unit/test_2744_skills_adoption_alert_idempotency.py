@@ -271,12 +271,6 @@ def test_the_terminal_refusal_is_not_high_priority(monkeypatch, caplog):
     assert items[0]["priority"] != "high"
     assert items[0]["priority"] == "low"
 
-    # One `alert_type` and one title now span both `low` (this benign resting
-    # state) and `high` (a URL that failed validation — the signature of an
-    # attempted injection), so the branch carries a machine-readable
-    # discriminator rather than leaving `priority` to be read as the cause.
-    assert items[0]["context"]["reason"] == "already_migrated"
-
     ent346 = [r for r in caplog.records if "[ent#346]" in r.getMessage()]
     assert ent346, "the refusal must still be logged"
     assert [r.levelno for r in ent346] == [logging.INFO], (
