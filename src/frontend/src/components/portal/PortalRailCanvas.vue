@@ -4,8 +4,8 @@
 
   ONE rendering layer: this is `CanvasPanel` — the same component, fed by the
   same client-portal store the Workspace agent page uses — per participating
-  agent. Selector, the always-shown timestamp, the "may be out of date" mark,
-  and the blocks are all its; nothing here re-renders a canvas. The audience
+  agent. Selector, the always-shown freshness line, and the blocks are all its;
+  nothing here re-renders a canvas. The audience
   narrowing is the server's and unchanged (`audience='roster'` for every
   Workspace principal, the ent#438 ruling), so an operator-only canvas never
   reaches this body.
@@ -57,6 +57,7 @@
             :pin-canvas="(id, pinned) => portal.pinAgentCanvas(agent, id, pinned)"
             :agent-name="agent"
             viewer="client"
+            @canvas-selected="(id) => portal.setOpenCanvas(agent, id)"
             @changed="feeds.refresh()"
           />
           <p v-else-if="participants.length > 1" class="text-xs text-gray-400">Nothing published yet.</p>

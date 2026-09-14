@@ -25,6 +25,7 @@ new package no longer carries. Pure packaging primitives live in
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -201,6 +202,38 @@ def _scrub_pat(text: str) -> str:
 # the item's ACL and whose 5s queue-sync loop would start writing it into that
 # agent's queue file (#1644 precedent).
 RECONCILE_ALARM_AGENT_NAME = "_skills-sync"
+
+
+def _same_skills_repo(stored_url: str, normalized_url: str) -> bool:
+    """Do these two strings name the same skills repository? (#2763)
+
+    `normalized_url` has already been through `validate_skills_library_url`;
+    `stored_url` comes off a `skill_sources` row and may be in EITHER form —
+    the bundled default is seeded from a bare literal (`config.py`'s
+    `TRINITY_DEFAULT_SKILL_SOURCE`, no scheme) while a source created through
+    `POST /api/skills/sources` is stored normalized. So the stored side is
+    normalized here too rather than trusted to already be.
+
+    Fail-safe on an unusable stored value: a row whose url cannot be normalized
+    simply does not match, which lands on the refusal branch. That is the
+    conservative direction — the alternative is treating an unparseable row as
+    equal to the key and silently adopting it.
+
+    Deliberately NOT a general URL-equality helper. It collapses the
+    scheme/no-scheme split the platform itself creates, and nothing else:
+    `…/repo.git`, a trailing `/` and the bare `owner/repo` shorthand stay
+    distinct, and closing that tail is tracked separately. Widening this
+    quietly would change which strings count as "already configured", which is
+    an ent#346 decision, not a tidy-up.
+    """
+    if not stored_url or not normalized_url:
+        return False
+    if stored_url == normalized_url:
+        return True
+    try:
+        return validate_skills_library_url(stored_url) == normalized_url
+    except ValueError:
+        return False
 
 
 def _reconcile_max_removals() -> int:
@@ -731,7 +764,17 @@ class SkillService:
         # carrying a PAT would be laundered into a durable row and read back by
         # anything that lists sources (the ent#334 disclosure).
         try:
-            validate_skills_library_url(url)
+            # #2763: ASSIGN the return. `validate_skills_library_url` is a
+            # validator AND a normalizer — it turns `github.com/o/r` into
+            # `https://github.com/o/r` — and `routers/skills.py` uses it as one
+            # when it stores a source. Discarding it here meant the match below
+            # compared a NORMALIZED stored url against a RAW setting value, so
+            # the same repository written two ways never matched and this
+            # install alerted on every sync forever (#2744 is that flood).
+            #
+            # Validate the ORIGINAL for credentials — `reject_embedded_credentials`
+            # must see what was actually written, not a form we produced.
+            normalized_url = validate_skills_library_url(url)
             reject_embedded_credentials(url)
         except ValueError as e:
             # Refuse, and SAY SO. A bare `logger.warning` — what every failure
@@ -751,7 +794,21 @@ class SkillService:
             # migration for an install not yet migrated. Once any source exists
             # the install is on the source model, and the legacy key is no
             # longer a migration input — it is an unvalidated back door.
-            existing = [s for s in db.list_skill_sources() if s.url == url]
+            # #2763: normalize BOTH sides. Sources exist in both forms on a
+            # live install — the bundled default is seeded from a bare literal
+            # (`config.py`'s TRINITY_DEFAULT_SKILL_SOURCE, no scheme) while one
+            # created through `POST /api/skills/sources` is stored normalized —
+            # so normalizing only the setting would still miss half the fleet.
+            #
+            # This CANNOT weaken ent#346: a match returns an existing id and
+            # creates no row, so it is the no-op branch. The grant branch below
+            # (`count_skill_sources() == 0` -> `create_skill_source`) is
+            # untouched, and a key naming a genuinely different repo still
+            # falls through to the refusal exactly as before. Normalizing
+            # removes false positives from the detector; it does not widen what
+            # may be granted.
+            existing = [s for s in db.list_skill_sources()
+                        if _same_skills_repo(s.url, normalized_url)]
             if existing:
                 return existing[0].id
 
@@ -761,6 +818,12 @@ class SkillService:
                     "legacy skills_library_url ignored: this install already has "
                     "skills sources, so it is past migration. Add the repo via "
                     "POST /api/skills/sources if it is wanted (ent#346).",
+                    # Not a failure: the designed resting state of a migrated
+                    # install whose legacy key lingers. `sync_library` re-enters
+                    # this on EVERY sync, unattended under ent#236 auto-sync, so
+                    # a timestamped id at `high` meant one permanent
+                    # operator-unclearable row per sync, forever (#2744).
+                    steady_state=True,
                 )
                 return None
 
@@ -2249,8 +2312,10 @@ print(json.dumps(out))
         except Exception as e:  # noqa: BLE001 — the alarm is decorative
             logger.warning(f"could not raise skills reconcile alarm: {e}")
 
-    def _record_adoption_failure(self, url: str, message: str) -> None:
-        """ERROR + operator alarm for a refused/failed legacy adoption (ent#346).
+    def _record_adoption_failure(
+        self, url: str, message: str, *, steady_state: bool = False
+    ) -> None:
+        """Log + operator alarm for a refused/failed legacy adoption (ent#346).
 
         Never raises — adoption is fail-soft and must not block a sync of
         already-migrated sources.
@@ -2263,31 +2328,90 @@ print(json.dumps(out))
         silently is how the refusal gets rediscovered as "skills stopped
         working".
 
-        The URL is included: it is operator-authored configuration, already
-        visible to admins via the sources API, and the alarm is useless without
-        naming what was refused. `reject_embedded_credentials` runs BEFORE this
-        on the validation path, so a credential-bearing URL is refused by a
-        message that does not echo it — the one case where echoing would leak.
+        A NEW CALL SITE MUST CHOOSE `steady_state` EXPLICITLY. The default is
+        the unbounded timestamped/`high` shape, which is correct only for a
+        genuine transient failure — nothing enforces that choice (the #1677 AST
+        guard scans call sites of `create_operator_queue_item`, not of this
+        method), so the docstring is the enforcement.
+
+        Two classes of refusal share this emitter (#2744):
+
+        * A genuine FAILURE — the URL failed validation, or adoption threw.
+          `priority: "high"` and a TIMESTAMPED id, so a repeat is visible AS a
+          repeat rather than deduped away by `create_item`'s ON CONFLICT DO
+          NOTHING. Repeat-visible here is a PRODUCT DECISION, not a claim that
+          these branches are bounded: a permanently invalid `skills_library_url`
+          re-enters the validation branch on every sync just as forever.
+        * The STEADY STATE — "this install already has sources, so it is past
+          migration": the designed resting state of every migrated install whose
+          legacy key lingers, not a failure. `priority: "low"`, `logger.info`,
+          and a STABLE id derived from the refused URL, so the `(agent_name,
+          request_id)` ON CONFLICT collapses every repeat to ONE row and an
+          operator's dismissal sticks. The family prefix is registered in
+          `operator_queue_service._RESERVED_ID_PREFIXES`, because a stable id
+          derived from an admin-visible URL is guessable and an agent could
+          otherwise pre-create it and silence the alarm (the #1632 C2 class);
+          that tuple also drives `is_platform_minted`.
+
+        The id is the sha256 of the URL, never the URL itself: `request_id` is a
+        conflict key, not a display field, and a raw URL would break the
+        id-shape (`^[A-Za-z0-9._:-]+$`) the reserved-prefix machinery assumes.
+
+        **The bound this emitter's #1677 platform-only classification rests on**
+        is: the only input is the `skills_library_url` setting, which
+        `routers/settings.py` blocks on the generic settings PUT
+        (`LEGACY_SKILLS_LIBRARY_KEYS`, 422) and no other writer reaches — so no
+        agent can drive the volume. It is NOT "admin-driven cadence": ent#236's
+        auto-sync calls the same `sync_library()` unattended on a 300s-86400s
+        timer. Keep this comment and the `_ALLOWED_CALLERS` justification in
+        `tests/unit/test_1677_operator_alert_emitters.py` in step.
+
+        The echoed URL is SCRUBBED (#2744). Naming what was refused is the whole
+        point of the alarm, but `EmbeddedCredentialError` is a `ValueError`
+        subclass, so the validation-reject branch is exactly the one a
+        PAT-bearing URL reaches — and the raw value used to land at ERROR in the
+        Vector-captured log and, durably, in `operator_queue.context` (SQLite,
+        every backup, rendered in the Operating Room). Invariant #12. The HASH
+        is still taken over the raw value: scrubbing first would collide two
+        different tokens on one repo.
         """
-        logger.error(f"[ent#346] {message} (url={url})")
+        safe_url = strip_url_credentials(url)
+        if steady_state:
+            logger.info(f"[ent#346] {message} (url={safe_url})")
+        else:
+            logger.error(f"[ent#346] {message} (url={safe_url})")
         try:
             from utils.helpers import utc_now_iso
+
+            context = {
+                "alert_type": "skills_legacy_adoption_refused",
+                "url": safe_url,
+            }
+            if steady_state:
+                # Computed INSIDE the try: `url.strip().encode()` raises
+                # AttributeError on a non-str setting value, and out here that
+                # degrades to a warning and no alarm — the fail-soft guarantee.
+                # Hoisting it above the try turns a decorative alarm into a
+                # raiser.
+                request_id = (
+                    "skills-legacy-adoption-refused-"
+                    f"{hashlib.sha256(url.strip().encode()).hexdigest()[:12]}"
+                )
+            else:
+                # Timestamped, so a repeated failure is visible as repeated
+                # rather than silently deduped by the ON CONFLICT DO NOTHING
+                # in `create_item`.
+                request_id = f"skills-legacy-adoption-{utc_now_iso()}"
 
             db.create_operator_queue_item(
                 RECONCILE_ALARM_AGENT_NAME,
                 {
-                    # Timestamped, so a repeated failure is visible as repeated
-                    # rather than silently deduped by the ON CONFLICT DO NOTHING
-                    # in `create_item`.
-                    "id": f"skills-legacy-adoption-{utc_now_iso()}",
+                    "id": request_id,
                     "type": "alert",
-                    "priority": "high",
+                    "priority": "low" if steady_state else "high",
                     "title": "Legacy skills-library adoption refused",
                     "question": message,
-                    "context": {
-                        "alert_type": "skills_legacy_adoption_refused",
-                        "url": url,
-                    },
+                    "context": context,
                     "expires_at": None,
                 },
             )

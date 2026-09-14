@@ -285,6 +285,8 @@ schedule_executions = Table(
     # ent#457 review: WHICH human the channel context belongs to. Only the
     # portal leg reads it today — see `_resolve_portal`'s recipient check.
     Column("source_channel_client", Text),
+    # ent#555 — the canvas the user had open for this turn (context, not authority).
+    Column("open_canvas_id", Text),
 )
 
 agent_loops = Table(

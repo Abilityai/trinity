@@ -2971,6 +2971,18 @@
         "unit"
       ],
       "description": "The voice WebSocket + REST ownership gates (#600): `/ws/voice/{id}` and `POST .../voice/stop` reject a JWT user who does not own the session (4001 no/invalid token, 4004 unknown session, 4003 wrong user, admin bypass, JWT verified before the session lookup), the `/panel` read gate (ent#536), and the #705 audit-attribution kwargs. Plus the Workspace live-call lease (#2700, `TestWorkspaceLiveCallMarker`): the bridge arms a 60 s owned lease at connect and releases it on EVERY exit — normal close, `end_session` returning None, a raising close-out (which no longer skips the gemini cancel, the `saved` frame or the socket close), and task cancellation — the renewer is bounded at the call's `max_duration` + slack and does not outlive the bridge, an Agent Detail call never arms a thread marker, and the REST `/stop` release is owner-matched."
+    },
+    {
+      "file": "unit/test_2744_skills_adoption_alert_idempotency.py",
+      "feature": "#2744",
+      "added": "2026-09-14",
+      "categories": [
+        "backend",
+        "skills",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "Legacy skills-library adoption alert idempotency (#2744): the terminal 'already has sources' refusal mints a STABLE URL-derived request_id (sha256[:12], reserved family prefix) at priority low + logger.info, so N syncs collapse to one operator-queue row and an operator's dismissal sticks; a different refused URL still gets its own item; the validation-reject and adoption-exception branches keep priority high and timestamped repeat-visible ids; the echoed URL is credential-scrubbed so a PAT-bearing setting never reaches the log or operator_queue.context."
     }
   ]
 }

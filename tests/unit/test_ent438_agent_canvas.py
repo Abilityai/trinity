@@ -45,6 +45,7 @@ from db.canvas import (
     VALID_AUDIENCES,
     normalize_audience,
 )
+import models
 from models import (
     CANVAS_BLOCKS_MAX_BYTES,
     CANVAS_ID_RE,
@@ -133,6 +134,11 @@ def test_the_workspace_audience_is_decided_by_principal_kind():
 # ---------------------------------------------------------------------------
 
 def test_stale_when_the_agent_finished_a_run_after_the_write():
+    """`is_stale` is RETIRED IN PLACE as of #2734: it is still computed and still
+    ships on the payload, and nothing renders it. These six assertions pin the
+    derivation as it stands so it stays recoverable — they do NOT describe what a
+    reader sees. The header renders two facts and draws no conclusion; see the
+    #2734 block below."""
     canvas = {"updated_at": "2026-09-02T10:00:00Z"}
     assert canvas_service.is_stale(canvas, "2026-09-02T10:05:00Z") is True
 
@@ -142,12 +148,18 @@ def test_not_stale_when_nothing_ran_since():
     assert canvas_service.is_stale(canvas, "2026-09-02T09:55:00Z") is False
 
 
-def test_the_turn_that_wrote_the_canvas_does_not_mark_it_stale():
-    """The writing turn completes AFTER it writes, so a naive comparison would
-    mark every canvas stale the moment its own run ended. It does not, because
-    the canvas is written during the turn and the run completes later — this
-    pins the case explicitly since it is the one that would make the mark
-    meaningless by firing always."""
+def test_a_completion_that_predates_the_write_is_not_a_run_since():
+    """What this fixture actually pins, said correctly (#2734).
+
+    It was named for the writing turn, but the data is the opposite orientation:
+    the canvas is written at 10:00:05 and the completion is at 10:00:00, i.e. the
+    write comes AFTER the completion — which a writing run cannot produce, since
+    a run completes after it writes. So it never pinned the writer case at all,
+    and the mark did fire on every writing run's own output. That inversion is
+    why the reported contradiction ("Updated just now" beside "may be out of
+    date") shipped green, and it is why #2734 retired the verdict rather than
+    correcting it. The assertion is unchanged: an earlier completion is not a run
+    "since"."""
     canvas = {"updated_at": "2026-09-02T10:00:05Z"}
     assert canvas_service.is_stale(canvas, "2026-09-02T10:00:00Z") is False
 
@@ -189,6 +201,149 @@ def test_a_failing_staleness_read_never_fails_the_render(monkeypatch):
     monkeypatch.setattr(canvas_service, "db", _Db())
     out = canvas_service.decorate([{"updated_at": "2026-09-02T10:00:00Z"}], "alpha")
     assert out[0]["stale"] is False
+
+
+# ---------------------------------------------------------------------------
+# Freshness — two facts, never a verdict (#2734)
+#
+# The header stopped rendering a derived verdict and started rendering two
+# neutral facts: when the canvas was written, and when the agent last FINISHED a
+# run. The second one is the payload's new `agent_last_run_at`, carried by the
+# read `decorate` already performs once per agent. These tests pin the honest
+# half: the value is the one that was read, the read costs one query for a whole
+# list, and every way of not having it degrades to OMISSION — never to a
+# fabricated time and never to a claim about the agent.
+# ---------------------------------------------------------------------------
+
+def _canvas_row(**over):
+    """A canvas metadata row shaped like the db read, so a model round trip is
+    possible without hand-building a second, differently-spelled dict."""
+    row = {
+        "agent_name": "alpha",
+        "canvas_id": "main",
+        "title": "Status",
+        "audience": AUDIENCE_OPERATOR,
+        "schema_version": 1,
+        "created_at": "2026-09-02T09:00:00.000000Z",
+        "updated_at": "2026-09-02T10:00:00.000000Z",
+        "updated_by_execution_id": None,
+        "template": None,
+    }
+    row.update(over)
+    return row
+
+
+class _RunTimeDb:
+    """Defines ONLY `last_completed_execution_at` — deliberately. An
+    implementation that reached for any other db call (a `MAX(started_at)`, say)
+    raises AttributeError here, so the field's shorter name cannot quietly come
+    to mean something else."""
+
+    def __init__(self, value="2026-09-02T10:05:00.000000Z"):
+        self.value = value
+        self.calls = []
+
+    def last_completed_execution_at(self, agent):
+        self.calls.append(agent)
+        return self.value
+
+
+def test_decorate_carries_the_agents_last_completed_run_time(monkeypatch):
+    monkeypatch.setattr(canvas_service, "db", _RunTimeDb())
+    out = canvas_service.decorate([_canvas_row()], "alpha")
+    assert out[0]["agent_last_run_at"] == "2026-09-02T10:05:00.000000Z"
+
+
+def test_the_run_time_is_read_once_per_agent_not_once_per_canvas(monkeypatch):
+    """The one-read invariant covers the NEW field too: eight canvases still pay
+    one query, and all eight carry the same answer. A future contributor moving
+    the read inside the loop fails here, not in production."""
+    stub = _RunTimeDb()
+    monkeypatch.setattr(canvas_service, "db", stub)
+    out = canvas_service.decorate([_canvas_row() for _ in range(8)], "alpha")
+    assert stub.calls == ["alpha"]
+    assert {r["agent_last_run_at"] for r in out} == {"2026-09-02T10:05:00.000000Z"}
+
+
+def test_an_agent_that_never_finished_a_run_makes_no_run_claim(monkeypatch):
+    monkeypatch.setattr(canvas_service, "db", _RunTimeDb(value=None))
+    out = canvas_service.decorate([_canvas_row()], "alpha")
+    assert out[0]["agent_last_run_at"] is None
+
+
+def test_a_failing_run_time_read_never_fails_the_render_and_never_fabricates_one(monkeypatch):
+    """The honesty test. A read failure degrades to None — which the header
+    renders as OMISSION — never to a timestamp nobody read and never to "the
+    agent has not run yet", which would turn "we could not read it" into a claim
+    about the agent."""
+
+    class _Db:
+        def last_completed_execution_at(self, agent):
+            raise RuntimeError("db down")
+
+    monkeypatch.setattr(canvas_service, "db", _Db())
+    out = canvas_service.decorate([_canvas_row()], "alpha")
+    assert out[0]["agent_last_run_at"] is None
+
+
+def test_the_run_time_is_the_read_value_not_a_constant(monkeypatch):
+    """Non-vacuity: two different reads must produce two different answers."""
+    first = _RunTimeDb(value="2026-09-02T10:05:00.000000Z")
+    monkeypatch.setattr(canvas_service, "db", first)
+    a = canvas_service.decorate([_canvas_row()], "alpha")[0]["agent_last_run_at"]
+    second = _RunTimeDb(value="2026-09-03T08:00:00.000000Z")
+    monkeypatch.setattr(canvas_service, "db", second)
+    b = canvas_service.decorate([_canvas_row()], "alpha")[0]["agent_last_run_at"]
+    assert a == "2026-09-02T10:05:00.000000Z"
+    assert b == "2026-09-03T08:00:00.000000Z"
+
+
+def test_a_naive_stored_timestamp_is_normalised_to_Z(monkeypatch):
+    """`last_completed_execution_at` is a raw `MAX(completed_at)` — not one of
+    the read boundaries #1474 normalised. A naive row used to fail QUIET (the
+    lexicographic compare just lost); rendered, `Date.parse` reads it as LOCAL
+    time and the fact is silently offset by the viewer's UTC offset. So the
+    normalisation happens in the service, beside the read.
+
+    `stale` keeps receiving the RAW value, and this fixture proves it: the raw
+    naive string loses the lexicographic compare (`' '` sorts below `'T'`), so
+    `stale` is False here, while the NORMALISED value would have made it True.
+    `is_stale` is retired in place and its comparison is not this change's to
+    alter — a normalised input would be a silent behaviour change to it."""
+    monkeypatch.setattr(canvas_service, "db", _RunTimeDb(value="2026-09-02 10:05:00"))
+    out = canvas_service.decorate([_canvas_row()], "alpha")
+    assert out[0]["agent_last_run_at"] == "2026-09-02T10:05:00.000000Z"
+    assert out[0]["stale"] is False
+
+
+def test_the_empty_canvas_placeholder_declares_the_field_and_claims_nothing():
+    """The voice panel's pre-first-write response is built by hand and bypasses
+    `decorate`, so the two constructors of the same response shape drift unless
+    something pins them together. None, not a read: a placeholder for a canvas
+    that does not exist makes no claims, and that route polls every ~3s."""
+    placeholder = canvas_service.empty_canvas("alpha")
+    assert "agent_last_run_at" in placeholder
+    assert placeholder["agent_last_run_at"] is None
+
+
+def test_the_response_model_carries_the_run_time_through_pydantic(monkeypatch):
+    """The seam no other test crosses: `decorate` writes a string KEY and
+    `models` declares a FIELD NAME, and nothing binds the two spellings. Every
+    canvas read route declares `response_model=`, and FastAPI filters a dict
+    through it — an undeclared key is dropped SILENTLY, so a misspelling would
+    lose the fact on Agent Detail while the voice route (no response_model) and
+    the portal payload (plain dict) kept it. That is a per-surface failure that
+    looks like a frontend bug.
+
+    So this starts from `decorate`'s own output rather than a hand-built dict; a
+    hand-built dict re-opens the hole it exists to close."""
+    monkeypatch.setattr(canvas_service, "db", _RunTimeDb())
+    row = canvas_service.decorate([_canvas_row()], "alpha")[0]
+
+    assert models.CanvasSummary(**row).model_dump()["agent_last_run_at"] == "2026-09-02T10:05:00.000000Z"
+    detail = models.Canvas(**{**row, "blocks": []})
+    assert detail.model_dump()["agent_last_run_at"] == "2026-09-02T10:05:00.000000Z"
+    assert models.CanvasSummary.model_fields["agent_last_run_at"].description
 
 
 # ---------------------------------------------------------------------------

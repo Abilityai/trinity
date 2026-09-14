@@ -2,8 +2,9 @@
 
 The decidable half of the canvas: what a canvas id may look like, how big a
 block list may be, how a write and a partial write are validated and stored,
-and — the part worth reading — how "this may be out of date" is derived rather
-than guessed.
+and — the part worth reading — how the two freshness facts a reader sees are
+read once per agent and normalised, rather than compressed into a verdict
+Trinity would have to guess (#2734).
 
 HTTP-free by design (Invariant #1): every failure is a ``CanvasError`` the thin
 router maps 1:1, the shape ``chat_execution_service`` established in #1483.
@@ -40,6 +41,7 @@ from services.canvas_blocks import (  # noqa: F401 — re-exported for callers
     validate_blocks,
 )
 from services.idempotency_service import resolve_and_validate_execution
+from utils.helpers import parse_iso_timestamp, to_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +111,59 @@ def resolve_execution_id(execution_id: Optional[str], agent_name: str) -> Option
         return None
     execution = resolve_and_validate_execution(execution_id, agent_name)
     return execution_id if execution else None
+
+
+# ---------------------------------------------------------------------------
+# The open canvas as shared context (ent#555)
+# ---------------------------------------------------------------------------
+
+
+def open_canvas_for_execution(execution_id: Optional[str], agent_name: str) -> Optional[str]:
+    """The canvas the user had open when they sent this turn, or None.
+
+    CONTEXT, NEVER AUTHORITY (ent#555 AC #6). This answers "what is the user
+    looking at", and it is deliberately incapable of answering "may the agent
+    touch it": the id was validated against THIS agent's own canvases at the
+    boundary that stamped it, and every read and write still goes through the
+    same audience and ownership gates it always did. A canvas the caller could
+    not otherwise reach does not become reachable by being named as open.
+
+    Fail-open to None, matching `resolve_execution_id` directly above: an agent
+    on an old image sends no execution_id, and a turn with no open canvas is
+    the ordinary case rather than an error. None means "fall back to the
+    default", never "refuse".
+    """
+    execution = resolve_and_validate_execution(execution_id, agent_name)
+    if execution is None:
+        return None
+    canvas_id = getattr(execution, "open_canvas_id", None)
+    if not canvas_id:
+        return None
+    # Re-checked at READ time, not trusted from the stamp: the canvas may have
+    # been deleted since the turn started (ent#553 made that a one-click act),
+    # and pointing the agent at a row that is gone would have it create a NEW
+    # canvas under that id — silently resurrecting something a person deleted.
+    return canvas_id if db.get_agent_canvas(agent_name, canvas_id) else None
+
+
+def effective_canvas_id(canvas_id: Optional[str], execution_id: Optional[str],
+                        agent_name: str) -> tuple[str, str]:
+    """Which canvas a tool call acts on, and WHY — `(canvas_id, source)`.
+
+    The precedence the issue asks for, in one place so all three tools agree:
+
+        explicit id  >  the canvas the user has open  >  the default canvas
+
+    `source` is returned because the agent has to be able to SAY which canvas
+    it wrote to when nobody named one (AC #7). "I updated the canvas" is not
+    good enough when there are eight of them and the user is looking at one.
+    """
+    if canvas_id:
+        return canvas_id, "explicit"
+    open_id = open_canvas_for_execution(execution_id, agent_name)
+    if open_id:
+        return open_id, "open"
+    return DEFAULT_CANVAS_ID, "default"
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +421,11 @@ def empty_canvas(agent_name: str, canvas_id: str = DEFAULT_CANVAS_ID) -> Dict:
         # rather than omitted because the shape is contractually the Canvas
         # model's, and the voice poll deserializes it.
         "pinned": False,
+        # None, never a read: a placeholder for a canvas that does not exist yet
+        # makes no claims, and this route is polled every ~3s during a live voice
+        # session. Declared so the two constructors of this response shape carry
+        # the same keys (#2734).
+        "agent_last_run_at": None,
         "blocks": [],
     }
 
@@ -400,12 +460,46 @@ def is_stale(canvas: Dict, last_completed_at: Optional[str]) -> bool:
     return str(last_completed_at) > str(updated_at)
 
 
+def _normalized_run_time(last_completed: Optional[str]) -> Optional[str]:
+    """The agent's last completion, as a Z-suffixed UTC string — or nothing.
+
+    `last_completed_execution_at` is a raw `MAX(completed_at)`, and is NOT one of
+    the read boundaries #1474 normalised. Under the retired verdict a naive
+    stored string (`2026-09-02 10:05:00`, the pre-`2ce62c6b` shape) failed QUIET,
+    because `' '` sorts below `'T'` and the comparison simply lost. Since #2734
+    the value is RENDERED, and `Date.parse` reads a naive string as LOCAL time —
+    so the same row would silently offset the fact by the viewer's UTC offset.
+
+    A value we cannot parse degrades to None, which the header omits. Never a
+    passthrough of something unrenderable, and never a fabricated time.
+    """
+    if not last_completed:
+        return None
+    try:
+        return to_utc_iso(parse_iso_timestamp(str(last_completed)))
+    except (ValueError, TypeError) as e:  # a malformed stored row, not a fault
+        logger.warning("canvas: unparseable last-run timestamp %r: %s", last_completed, e)
+        return None
+
+
 def decorate(canvases: List[Dict], agent_name: str) -> List[Dict]:
-    """Attach the derived `stale` flag to each canvas.
+    """Attach the two derived freshness values to each canvas (#2734).
+
+    `agent_last_run_at` is what the header renders beside `updated_at`; `stale`
+    is the retired verdict, still computed and rendered in no header (the
+    ent#553 Manage row still draws its own pill from the flag).
 
     One `last_completed_execution_at` read for the whole list, not one per
     canvas — the input is a property of the AGENT, and an agent with eight
-    canvases should not pay eight identical queries to render its page.
+    canvases should not pay eight identical queries to render its page. The
+    `try` therefore stays OUTSIDE the loop and the normalisation happens beside
+    it, once, since it is one value for the whole list.
+
+    A failed read yields None, which the header renders as OMISSION. The field
+    cannot distinguish "never ran" from "could not read", so it must not narrate
+    either: turning a read failure into "the agent has not run yet" would be a
+    claim about the agent we did not observe. The failure is logged, so an
+    operator can see what a reader cannot.
     """
     if not canvases:
         return canvases
@@ -414,6 +508,10 @@ def decorate(canvases: List[Dict], agent_name: str) -> List[Dict]:
     except Exception as e:  # noqa: BLE001 — a staleness read never fails a render
         logger.warning("canvas: staleness read failed for %s: %s", agent_name, e)
         last_completed = None
+    last_run_at = _normalized_run_time(last_completed)
     for canvas in canvases:
+        canvas["agent_last_run_at"] = last_run_at
+        # The RAW value, deliberately: `is_stale` is retired in place and its
+        # comparison is not this change's to alter.
         canvas["stale"] = is_stale(canvas, last_completed)
     return canvases

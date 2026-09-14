@@ -145,16 +145,6 @@
           <h3 class="min-w-0 flex-1 truncate text-sm font-semibold">
             {{ selected?.title || selectedId }}
           </h3>
-          <!-- The timestamp is ALWAYS shown; the staleness mark is an addition
-               to it, never a replacement (AC 7). A reader who disagrees with
-               our heuristic can still judge for themselves. -->
-          <span class="text-xs text-gray-500 dark:text-gray-400">{{ fresh.label }}</span>
-          <span
-            v-if="fresh.stale"
-            :title="fresh.note"
-            class="rounded-full bg-status-warning-100 px-2 py-0.5 text-[11px] font-medium text-status-warning-700 dark:bg-status-warning-500/16 dark:text-status-warning-300"
-          >may be out of date</span>
-
           <!-- ent#554 — available from EVERY canvas surface (AC #7), because
                they all render this component. `print:hidden`: chrome is never
                part of the document. -->
@@ -169,6 +159,15 @@
             data-testid="canvas-share-open"
             @click="openShare"
           >Share</button>
+          <!-- Two facts, never a verdict (#2734): when this canvas was written
+               and when the agent last finished a run, both measured against one
+               clock. Trinity draws no conclusion from them — a derived
+               staleness verdict fired on the writing run's own output and
+               taught the reader to ignore it. One span, so the sentence stays
+               atomic and never strands the separator on its own line;
+               `basis-full` gives it its own row, because the sibling h3 is
+               `flex: 1 1 0%` and would otherwise truncate to make space. -->
+          <span class="basis-full text-xs text-gray-500 dark:text-gray-400">{{ fresh.line }}</span>
         </header>
 
         <p v-if="pdfNote" class="border-b border-gray-200 px-4 py-2 text-xs text-status-warning-700 dark:border-gray-800 dark:text-status-warning-300 print:hidden"
@@ -215,11 +214,6 @@
             <CanvasDocument :canvas="detail || selected" :agent-name="agentName" />
           </div>
         </Teleport>
-
-        <p
-          v-if="fresh.stale"
-          class="border-b border-gray-200 dark:border-gray-800 px-4 py-2 text-xs text-gray-600 dark:text-gray-400"
-        >{{ fresh.note }}</p>
 
         <!-- ent#537 — every block renders inside the design kit, so an agent's
              `ck-*` markup looks the same on Agent Detail, the Workspace page
@@ -268,7 +262,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import CanvasBlock from './CanvasBlock.vue'
 import CanvasKit from './CanvasKit.vue'
 import { placeBlocks } from './canvasLayouts'
@@ -320,7 +314,7 @@ const props = defineProps({
   listShares: { type: Function, default: null },       // (id) => Promise<share[]>
   revokeCanvasShare: { type: Function, default: null }, // (shareId) => Promise
 })
-const emit = defineEmits(['start-chat', 'changed'])
+const emit = defineEmits(['start-chat', 'changed', 'canvas-selected'])
 
 // ent#553 — a searchable, bounded list once the pile is real.
 const SEARCH_THRESHOLD = 6
@@ -498,7 +492,18 @@ const empty = computed(() => emptyState(props.viewer))
 const selected = computed(
   () => detail.value || props.canvases.find((c) => c.canvas_id === selectedId.value) || null,
 )
-const fresh = computed(() => freshness(selected.value || {}))
+// Both facts are relative, so a frozen clock would keep claiming the agent
+// "just ran" on a tab left open for hours — and Agent Detail does not poll at
+// all. One 60s tick, the display's own granularity, cleared on unmount: this
+// component mounts in three places and a leaked interval per mount is the real
+// cost, not the assignment. The tick refreshes the STRING, not the payload, so
+// it can only make the agent look less recently active than it is — the
+// fail-quiet direction (#2734).
+const nowMs = ref(Date.now())
+const tick = setInterval(() => { nowMs.value = Date.now() }, 60_000)
+onBeforeUnmount(() => clearInterval(tick))
+
+const fresh = computed(() => freshness(selected.value || {}, nowMs.value))
 const blocks = computed(() => renderableBlocks(detail.value?.blocks))
 // null → stacked (no template, an unknown one, or nothing slotted).
 const placement = computed(() => placeBlocks(detail.value?.template, blocks.value))
@@ -513,6 +518,10 @@ async function select(id) {
   if (!id) return
   const seq = ++selectSeq
   selectedId.value = id
+  // ent#555 — announce what the user is now looking at, so a turn sent from
+  // the conversation can carry it. Emitted on the auto-select too (the watch
+  // below calls this), or the FIRST turn of a session would carry nothing.
+  emit('canvas-selected', id)
   detail.value = null
   detailError.value = ''
   try {

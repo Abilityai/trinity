@@ -97,7 +97,12 @@ _ALLOWED_CALLERS = {
     ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
         "platform-only: assignment-driven, quasi-idempotent id (ent#236)",
     ("services/skill_service.py", "SkillService._record_adoption_failure"):
-        "platform-only: admin-driven sync cadence (ent#346)",
+        "platform-only: the only input is `skills_library_url`, blocked on the "
+        "generic settings PUT by routers/settings.py LEGACY_SKILLS_LIBRARY_KEYS "
+        "(ent#346), so no agent can drive volume; the steady-state branch is "
+        "additionally idempotent by a URL-derived id ⇒ ≤1 row per refused URL. "
+        "NOT admin-driven — ent#236's auto-sync calls the same sync_library() "
+        "unattended on a 300s-86400s timer (#2744)",
     ("services/skills_sync_service.py",
      "SkillsLibrarySyncService._announce_fleet_failures"):
         "platform-only: leader-locked, one per sync run (ent#236)",

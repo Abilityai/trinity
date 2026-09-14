@@ -520,7 +520,7 @@
     },
     "src/frontend/src/components/canvas/CanvasPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 62,
+      "raw_gray": 58,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/canvas/CanvasPieChart.vue": {
