@@ -177,6 +177,17 @@ _RESERVED_ID_PREFIXES = (
     "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
     "log-archive-",      # archive_storage unwritable-directory alarm (#2205)
     "sub-headroom-",     # subscription_headroom_alerts weekly-window alarm (ent#434)
+    # skills legacy-adoption refusal (#2744). The family prefix, so it covers
+    # BOTH the steady-state `…-refused-<sha256(url)[:12]>` id and the two
+    # actionable branches' timestamped ids (and the historical rows). The
+    # steady-state id is derived from an admin-visible URL and is therefore
+    # GUESSABLE, and `_skills-sync` is uncreatable at agent CREATE but NOT on
+    # the rename path (`routers/agent_rename.py` keeps a leading `_`), so an
+    # owner-hijacked host could pre-create the id and suppress the alarm.
+    # `is_platform_minted` is keyed on this tuple too — it gates the ent#499
+    # responded write-back and the ent#329 respond→resume dispatch, and this
+    # item is one an operator is now EXPECTED to click through on.
+    "skills-legacy-adoption-",
     "workspace-problem-",  # client_portal report-a-problem (ent#499) — reserved
                            # so an agent cannot pre-create the id of a complaint
                            # ABOUT ITSELF and silence it through ON CONFLICT
