@@ -18,24 +18,22 @@
           </p>
         </div>
 
-        <!-- Tab strip (#302) -->
-        <div class="mb-6 border-b border-gray-200 dark:border-gray-700" role="tablist" aria-label="Settings sections">
-          <nav class="-mb-px flex space-x-6" aria-label="Tabs">
-            <button
-              v-for="tab in visibleTabs"
-              :key="tab.id"
-              role="tab"
-              :aria-selected="activeTab === tab.id"
-              :class="[
-                'whitespace-nowrap py-2 px-1 border-b-2 text-sm font-medium',
-                activeTab === tab.id
-                  ? 'border-action-primary-500 text-action-primary-600 dark:text-action-primary-400'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-200'
-              ]"
-              type="button"
-              @click="selectTab(tab.id)"
-            >{{ tab.label }}</button>
-          </nav>
+        <!-- Tab strip (#302, #1925). OverflowTabs measures and collapses what
+             does not fit into a counted "More" menu. The hand-rolled strip this
+             replaces was a plain flex row: below 7xl the ten tabs overflowed
+             silently, which #1862 mitigated by widening the page rather than
+             adopting the primitive.
+
+             `:model-value` + `@update:modelValue` rather than `v-model`, on
+             purpose — `selectTab` carries the valid-id guard, the same-tab
+             no-op and the `router.push` that keeps `?tab=` in step. v-model
+             would assign `activeTab` directly and skip all three. -->
+        <div class="mb-6">
+          <OverflowTabs
+            :tabs="visibleTabs"
+            :model-value="activeTab"
+            @update:modelValue="selectTab"
+          />
         </div>
 
         <!-- Loading State -->
@@ -2211,6 +2209,7 @@ import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
+import OverflowTabs from '../components/OverflowTabs.vue'
 import CredentialVaultPanel from '../components/settings/CredentialVaultPanel.vue'
 import SkillRunnerPanel from '../components/settings/SkillRunnerPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
