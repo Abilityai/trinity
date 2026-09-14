@@ -193,7 +193,7 @@ export function keyFormatError(provider, raw) {
   return ''
 }
 
-// `Name <addr@domain>` or a bare address — the backend's `_FROM_RE`.
+// `Name <addr@domain>` or a bare address — the backend's `from_address_domain`.
 const FROM_RE = /^(?:[^<>]*<)?\s*[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+\s*>?$/
 
 /** The Resend sender address; '' when it passes. */

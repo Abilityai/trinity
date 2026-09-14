@@ -299,6 +299,32 @@ def _domains(*pairs):
     return {"data": [{"name": n, "status": s} for n, s in pairs]}
 
 
+@pytest.mark.parametrize("address,domain", [
+    ("noreply@Acme.test", "acme.test"),
+    ("Trinity <codes@acme.test>", "acme.test"),
+    ("  < codes@acme.test >  ", "acme.test"),
+    ("codes@a.b.", "a.b."),
+    ("not an address", None),
+    ("codes@acme", None),
+    ("codes@.test", None),
+    ("a@b@acme.test", None),
+    ("a>b <codes@acme.test>", None),
+    ("<codes@acme.test>>", None),
+    ("", None),
+])
+def test_from_address_domain(address, domain):
+    assert pks.from_address_domain(address) == domain
+
+
+def test_from_address_domain_is_linear_on_a_hostile_paste():
+    # CodeQL py/polynomial-redos: the former single regex backtracked on these.
+    import time
+    t = time.monotonic()
+    assert pks.from_address_domain("!@!." + "!." * 50_000 + "@") is None
+    assert pks.from_address_domain("a@" + "\x7f" * 100_000 + "@") is None
+    assert time.monotonic() - t < 1.0
+
+
 def test_resend_check_passes_a_verified_sender(monkeypatch):
     calls = []
     _fake_httpx(monkeypatch, _Resp(200, _domains(("acme.test", "verified"))), calls)

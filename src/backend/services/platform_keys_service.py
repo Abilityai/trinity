@@ -47,8 +47,9 @@ def anthropic_api_key_error(key: str) -> Optional[str]:
 
 # `Name <addr@domain>` or a bare address. Deliberately loose — Resend is the
 # judge of what it will send from; this only catches a paste that is not an
-# address at all.
-_FROM_RE = re.compile(r"^(?:[^<>]*<)?\s*([^@\s<>]+@([^@\s<>]+\.[^@\s<>]+))\s*>?$")
+# address at all. Parsed by partition, not one regex: the single-pattern form
+# backtracks polynomially on a pasted `a.a.a.…` (CodeQL py/polynomial-redos).
+_ADDR_PART_RE = re.compile(r"[^@\s<>]+")
 
 # Resend's shared test domain: sends only to the account owner's own address.
 RESEND_TEST_DOMAIN = "resend.dev"
@@ -65,8 +66,17 @@ def resend_key_error(key: str) -> Optional[str]:
 
 def from_address_domain(address: str) -> Optional[str]:
     """The domain an address sends from, lower-cased; None if not an address."""
-    m = _FROM_RE.match((address or "").strip())
-    return m.group(2).lower() if m else None
+    s = (address or "").strip()
+    name, lt, rest = s.partition("<")
+    if lt:
+        if ">" in name:
+            return None
+        s = rest
+    local, _, domain = s.removesuffix(">").strip().partition("@")
+    if not (_ADDR_PART_RE.fullmatch(local) and _ADDR_PART_RE.fullmatch(domain)
+            and "." in domain[1:-1]):
+        return None
+    return domain.lower()
 
 
 def from_address_error(address: str) -> Optional[str]:
