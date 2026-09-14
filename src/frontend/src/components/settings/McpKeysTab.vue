@@ -56,15 +56,52 @@
         <p class="mt-4 text-gray-500 dark:text-gray-400">Loading API keys...</p>
       </div>
 
-      <div v-else-if="displayedKeys.length === 0" class="text-center py-12">
+      <!-- #2202 — the filter bar, built from the Base* primitives (#2122)
+           rather than another hand-rolled class string. That is the design
+           contract's rule, and it is also what keeps this panel's raw-colour
+           ratchet entry from growing: the tokens live in the primitive, so a
+           new control adds behaviour here and no palette classes. -->
+      <div
+        v-else-if="counts.total > 0"
+        class="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-gray-200 dark:border-gray-700"
+      >
+        <div class="min-w-0 flex-1">
+          <BaseInput
+            v-model="keyQuery"
+            type="search"
+            size="sm"
+            placeholder="Search by name, prefix or agent"
+            aria-label="Search API keys"
+          />
+        </div>
+        <BaseToggle
+          v-if="counts.revoked > 0"
+          v-model="showRevoked"
+          :label="`Show revoked (${counts.revoked.toLocaleString()})`"
+        />
+        <BaseBadge variant="neutral">{{ counts.active.toLocaleString() }} active</BaseBadge>
+      </div>
+
+      <!-- Three empties, three next actions — but ONE piece of chrome. The
+           panel used to render a single dead "No API keys" for all three, which
+           told an operator holding 294 revoked keys that they had none; three
+           copies of the markup would have fixed the copy and tripled this
+           file's palette-class count, so the wording is computed and only the
+           action row branches. -->
+      <div v-if="!loading && listEmptyReason" class="text-center py-12 px-6">
         <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
         </svg>
-        <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">No API keys</h3>
-        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Create an API key to start using the MCP server.</p>
+        <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">{{ emptyCopy.title }}</h3>
+        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ emptyCopy.body }}</p>
+        <div class="mt-4 flex items-center justify-center gap-3">
+          <BaseButton v-if="listEmptyReason !== 'no-match'" @click="showCreateForm = true">Create API Key</BaseButton>
+          <BaseButton v-if="listEmptyReason === 'all-revoked'" variant="secondary" @click="showRevoked = true">Show revoked</BaseButton>
+          <BaseButton v-if="listEmptyReason === 'no-match'" variant="secondary" @click="keyQuery = ''">Clear search</BaseButton>
+        </div>
       </div>
 
-      <ul v-else class="divide-y divide-gray-200 dark:divide-gray-700">
+      <ul v-else-if="displayedKeys.length" class="divide-y divide-gray-200 dark:divide-gray-700">
         <!-- #1848: the dark hover surface is the chrome shade gray-750, not
              gray-700 (which is border-strong). On gray-700 the row's tertiary
              meta ink sits at 4.06:1 — below AA — whenever the cursor is on the
@@ -170,6 +207,21 @@
           </div>
         </li>
       </ul>
+
+      <!-- #2202 — bounded rendering. The fetch is unchanged (the route returns
+           the caller's whole set), but the DOM is not: page weight no longer
+           scales with how long the instance has been running. Client-side by
+           the issue's own note — the API may paginate later without this
+           changing. -->
+      <div
+        v-if="page.hasMore"
+        class="flex items-center justify-center gap-3 px-6 py-3 border-t border-gray-200 dark:border-gray-700"
+      >
+        <BaseBadge variant="neutral">
+          Showing {{ page.shown.toLocaleString() }} of {{ page.total.toLocaleString() }}
+        </BaseBadge>
+        <BaseButton variant="secondary" size="sm" @click="showMoreKeys">Show more</BaseButton>
+      </div>
     </div>
 
     <!-- Create API Key Modal -->
@@ -182,25 +234,24 @@
             <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Create MCP API Key</h3>
 
             <div class="space-y-4">
-              <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Name</label>
-                <input
-                  v-model="newKey.name"
-                  type="text"
-                  class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
-                  placeholder="My Claude Code Key"
-                />
-              </div>
+              <!-- #2202 — the create form's two fields move onto the
+                   primitives (#2122). Paydown, not drive-by: this panel's
+                   ratchet entry may only shrink, and the filter bar above needs
+                   two container borders it did not have. Converting two
+                   hand-rolled controls in the same component pays for them and
+                   leaves the entry below where it started. -->
+              <BaseInput
+                v-model="newKey.name"
+                label="Name"
+                placeholder="My Claude Code Key"
+              />
 
-              <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Description (optional)</label>
-                <textarea
-                  v-model="newKey.description"
-                  rows="2"
-                  class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
-                  placeholder="Used for..."
-                ></textarea>
-              </div>
+              <BaseTextarea
+                v-model="newKey.description"
+                label="Description (optional)"
+                :rows="2"
+                placeholder="Used for..."
+              />
 
               <!-- ent#163 / #2323. Admin-only, and deliberately an explicit
                    choice rather than a default: both non-standard scopes are
@@ -396,12 +447,20 @@
 </template>
 
 <script setup>
+import {
+  PAGE_SIZE, keyCounts, filterKeys, pageOf, emptyReason,
+} from '../../utils/mcpKeyList'
+import BaseButton from '../base/BaseButton.vue'
+import BaseInput from '../base/BaseInput.vue'
+import BaseToggle from '../base/BaseToggle.vue'
+import BaseBadge from '../base/BaseBadge.vue'
+import BaseTextarea from '../base/BaseTextarea.vue'
 // MCP Keys settings tab — extracted from views/ApiKeys.vue (#302).
 // Lives at /settings?tab=mcp-keys; the old /api-keys route now redirects
 // here. Visible to ALL authenticated users (non-admin too); other tabs
 // in Settings.vue are admin-only.
 
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import axios from 'axios'
 import ConfirmDialog from '../ConfirmDialog.vue'
 import { useAuthStore } from '../../stores/auth'
@@ -462,13 +521,64 @@ const fetchMcpUrl = async () => {
   }
 }
 
-// Filter out agent-scoped keys for non-admin users
-const displayedKeys = computed(() => {
-  if (isAdmin.value) {
-    return apiKeys.value
+// #2202 — the list rules are pure (`utils/mcpKeyList.js`) and unit-tested; this
+// component keeps only the wiring. Revoked keys are hidden by default: on a
+// long-lived instance they are the overwhelming majority (measured 294 of 306)
+// and none of them is a thing you can act on.
+const showRevoked = ref(false)
+const keyQuery = ref('')
+const keyLimit = ref(PAGE_SIZE)
+
+const counts = computed(() => keyCounts(apiKeys.value, { isAdmin: isAdmin.value }))
+
+const filteredKeys = computed(() =>
+  filterKeys(apiKeys.value, {
+    isAdmin: isAdmin.value,
+    showRevoked: showRevoked.value,
+    query: keyQuery.value,
+  })
+)
+
+const page = computed(() => pageOf(filteredKeys.value, { limit: keyLimit.value }))
+const displayedKeys = computed(() => page.value.rows)
+
+const listEmptyReason = computed(() =>
+  emptyReason({
+    total: counts.value.total,
+    filtered: filteredKeys.value.length,
+    query: keyQuery.value.trim(),
+    showRevoked: showRevoked.value,
+  })
+)
+
+// A narrowed view must not silently keep a stale page size from a wider one.
+watch([showRevoked, keyQuery], () => { keyLimit.value = PAGE_SIZE })
+
+// One place the three empty states are worded, so the markup stays single.
+const emptyCopy = computed(() => {
+  const reason = listEmptyReason.value
+  if (reason === 'all-revoked') {
+    return {
+      title: 'No active API keys',
+      body: `All ${counts.value.revoked.toLocaleString()} keys here have been revoked.`,
+    }
   }
-  return apiKeys.value.filter(k => k.scope !== 'agent')
+  if (reason === 'no-match') {
+    const scope = showRevoked.value ? counts.value.total : counts.value.active
+    return {
+      title: `No keys match \u201C${keyQuery.value.trim()}\u201D`,
+      body: `Searching ${scope.toLocaleString()} ${showRevoked.value ? 'keys' : 'active keys'}.`,
+    }
+  }
+  return {
+    title: 'No API keys',
+    body: 'Create an API key to start using the MCP server.',
+  }
 })
+
+function showMoreKeys() {
+  keyLimit.value += PAGE_SIZE
+}
 
 const getMcpConfig = (apiKey) => {
   return JSON.stringify({
