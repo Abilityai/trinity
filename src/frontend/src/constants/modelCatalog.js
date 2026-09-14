@@ -19,9 +19,19 @@ export const MODEL_CATALOG = [
     "workspaceTier": "Most capable"
   },
   {
+    "id": "claude-fable-5-1",
+    "label": "Claude Fable 5.1",
+    "note": "Most capable — longest tasks (latest)",
+    "publicChannel": true,
+    "adminDefaultSelectable": true,
+    "recommended": false,
+    "workspace": false,
+    "workspaceTier": ""
+  },
+  {
     "id": "claude-fable-5",
     "label": "Claude Fable 5",
-    "note": "Most capable — longest tasks (latest)",
+    "note": "Most capable — longest tasks",
     "publicChannel": true,
     "adminDefaultSelectable": true,
     "recommended": false,

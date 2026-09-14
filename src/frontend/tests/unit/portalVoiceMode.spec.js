@@ -40,6 +40,14 @@ import {
   voiceCallLabelFromTurns,
   voiceEntryState,
   voiceHeaderLine,
+  threadChangeEndsCall,
+  isMuteHotkey,
+  leaveCallCopy,
+  taskItemLabel,
+  applyTaskFrame,
+  backgroundTasksLabel,
+  voiceTaskCaption,
+  VOICE_TASK_CAPTION,
   voicePreflight,
 } from '../../src/components/portal/portalVoiceMode'
 
@@ -408,7 +416,10 @@ describe('leaving mid-call ends it gracefully — the transcript is kept', () =>
   it('unmount, agent switch and a route-driven thread change all stop the call', () => {
     expect(CODE).toMatch(/function cleanupVoice\(\) \{[\s\S]{0,200}if \(voice\.isActive\.value\) void voice\.stop\(\)/)
     expect(CODE).toMatch(/watch\(\(\) => props\.agent\?\.name, \(\) => \{[\s\S]{0,400}if \(voiceCallActive\.value\) void voice\.stop\(\)/)
-    expect(CODE).toMatch(/watch\(\(\) => \[props\.agent\.name, props\.sessionId\][\s\S]{0,300}if \(voiceCallActive\.value\) await voice\.stop\(\)/)
+    // ent#551: the thread-change watcher asks the RULE, so a call's own new
+    // thread being adopted (route replace → sessionId null → id) does not end it.
+    expect(CODE).toMatch(/watch\(\(\) => \[props\.agent\.name, props\.sessionId\][\s\S]{0,700}if \(threadChangeEndsCall\(\{[\s\S]{0,400}\}\)\) await voice\.stop\(\)/)
+    expect(CODE).toContain('boundSessionId: voice.portalSessionId.value || currentSessionId.value,')
   })
   it('reloads the thread on the falling edge of the call, so the persisted block is the truth', () => {
     expect(CODE).toMatch(/watch\(voiceCallActive, async \(on, was\) => \{\s*if \(!was \|\| on\) return[\s\S]{0,500}await loadThread\(currentSessionId\.value\)/)
@@ -456,10 +467,13 @@ describe('the shell: the canvas takes the right column, and navigation waits', (
     expect(SHELL_CODE).toMatch(/voiceCall\.active \? 'flex-1 sm:flex-\[2_1_0%\]' : 'flex-1'/)
     expect(SHELL_CODE).toContain('@voice-call="onVoiceCall"')
   })
-  it('refuses New chat, ⌘J and opening another thread while the call is on', () => {
-    expect(SHELL_CODE).toMatch(/function newChatWithAgent\(name\) \{\s*if \(voiceCall\.value\.active\) return/)
-    expect(SHELL_CODE).toMatch(/function openThread\(t\) \{\s*if \(voiceCall\.value\.active\) return/)
-    expect(SHELL_CODE).toMatch(/function onGlobalKeydown\(e\) \{[\s\S]{0,200}if \(voiceCall\.value\.active\) return/)
+  it('holds New chat, ⌘J and opening another thread behind the leave-call guard while the call is on', () => {
+    // ent#551 QA: these used to `return` silently; they now ASK through the one
+    // guard (see "leaving the stage mid-call asks first"). Same protection, in
+    // words, and nothing else may run before the guard.
+    expect(SHELL_CODE).toMatch(/function newChatWithAgent\(name\) \{\s*if \(guardLeaveCall\(\(\) => newChatWithAgent\(name\)\)\) return/)
+    expect(SHELL_CODE).toMatch(/function openThread\(t\) \{\s*if \(guardLeaveCall\(\(\) => openThread\(t\)\)\) return/)
+    expect(SHELL_CODE).toMatch(/function onGlobalKeydown\(e\) \{[\s\S]{0,260}if \(voiceCall\.value\.active\) \{[\s\S]{0,120}guardLeaveCall\(\(\) => onGlobalKeydown\(e\)\)/)
   })
   it('clears the call state when the conversation remounts', () => {
     expect(SHELL_CODE).toMatch(/watch\(\[convKey, activeRoomIdFromRoute\], \(\) => \{\s*onVoiceCall\(null\)/)
@@ -616,5 +630,218 @@ describe('the door and the hand-off are wired (source, since there is no mount h
       // The rationale lives in comments; no CODE path may consult it.
       expect(stripComments(src)).not.toContain('userActivation')
     }
+  })
+})
+
+// ---- ent#551 — background tasks: a long task runs while the conversation continues ----
+describe('ent#551 — background tasks', () => {
+  it('a task frame adds by id, is idempotent on started, and clears on finished or failed', () => {
+    let tasks = applyTaskFrame([], { state: 'started', task_id: 't1', label: 'the deck' })
+    expect(tasks).toEqual([{ taskId: 't1', label: 'the deck', status: 'running' }])
+    tasks = applyTaskFrame(tasks, { state: 'started', task_id: 't1', label: 'the deck' })
+    expect(tasks).toHaveLength(1)
+    tasks = applyTaskFrame(tasks, { state: 'started', task_id: 't2', label: 'the numbers', status: 'queued' })
+    expect(tasks.map((t) => t.taskId)).toEqual(['t1', 't2'])
+    // The first to land must not clear the other — a list by id, never a count.
+    tasks = applyTaskFrame(tasks, { state: 'finished', task_id: 't1' })
+    expect(tasks).toEqual([{ taskId: 't2', label: 'the numbers', status: 'queued' }])
+    tasks = applyTaskFrame(tasks, { state: 'failed', task_id: 't2' })
+    expect(tasks).toEqual([])
+    // Unknown ids and frames without one are no-ops.
+    expect(applyTaskFrame(tasks, { state: 'finished', task_id: 't9' })).toEqual([])
+    expect(applyTaskFrame([{ taskId: 't1', label: '' }], {})).toEqual([{ taskId: 't1', label: '' }])
+  })
+
+  it('the badge says WHAT is running, in one line; a bare count only when that is all it has', () => {
+    expect(backgroundTasksLabel([])).toBe('')
+    expect(backgroundTasksLabel(0)).toBe('')
+    // One task: its own one-liner — "a task" told the person nothing.
+    expect(backgroundTasksLabel([{ taskId: 't1', label: 'Count files in home directory' }])).toBe('Count files in home directory')
+    expect(backgroundTasksLabel([{ taskId: 't1', label: '' }])).toBe('1 task running')
+    // Several: the count, then the labels.
+    expect(backgroundTasksLabel([{ taskId: 't1', label: 'Count files' }, { taskId: 't2', label: 'Write the audit note' }]))
+      .toBe('2 tasks · Count files · Write the audit note')
+    // Long labels are clipped, and the whole line is bounded.
+    const long = 'x'.repeat(200)
+    expect(backgroundTasksLabel([{ taskId: 't1', label: long }]).length).toBeLessThanOrEqual(48)
+    expect(backgroundTasksLabel([{ taskId: 't1', label: long }, { taskId: 't2', label: long }, { taskId: 't3', label: long }]).length)
+      .toBeLessThanOrEqual(96)
+    // A count alone.
+    expect(backgroundTasksLabel(1)).toBe('1 task running')
+    expect(backgroundTasksLabel(2)).toBe('2 tasks running')
+  })
+
+  it('the header line carries the running count and never drops the state', () => {
+    const one = [{ taskId: 't1', label: 'Counting files' }]
+    expect(voiceHeaderLine({ status: 'listening', backgroundTasks: one })).toBe('Listening · Counting files')
+    expect(voiceHeaderLine({ status: 'speaking', backgroundTasks: 2 })).toBe('Speaking · 2 tasks running')
+    expect(voiceHeaderLine({ status: 'listening', muted: true, backgroundTasks: one })).toBe('Muted · Counting files')
+    expect(voiceHeaderLine({ status: 'tool_calling', toolName: 'show_markdown', backgroundTasks: one }))
+      .toBe('Working: show markdown · Counting files')
+    // Nothing running: the line is exactly what it was before ent#551.
+    expect(voiceHeaderLine({ status: 'listening' })).toBe('Listening')
+    // An error still wins the whole line.
+    expect(voiceHeaderLine({ status: 'listening', error: 'Mic lost', backgroundTasks: 3 })).toBe('Mic lost')
+  })
+
+  it('a typed row from a voice-call task gets the caption; a spoken row and a reply do not', () => {
+    expect(voiceTaskCaption({ role: 'user', voiceCallId: 'vs_1', source: null })).toBe(VOICE_TASK_CAPTION)
+    expect(voiceTaskCaption({ role: 'assistant', voiceCallId: 'vs_1', source: null })).toBe('')
+    expect(voiceTaskCaption({ role: 'user', voiceCallId: 'vs_1', source: 'voice' })).toBe('')
+    expect(voiceTaskCaption({ role: 'user', voiceCallId: null })).toBe('')
+    expect(voiceTaskCaption(undefined)).toBe('')
+    // …and such a row stays OUT of the spoken block: it was not spoken.
+    const items = groupVoiceBlocks([
+      { id: 'a', role: 'user', content: 'hi', source: 'voice', voiceCallId: 'vs_1' },
+      { id: 'b', role: 'user', content: 'count the PRs', source: null, voiceCallId: 'vs_1' },
+    ])
+    expect(items.map((i) => i.kind)).toEqual(['voice-call', 'message'])
+  })
+
+  it('the composable keeps the tasks from the task frame and refetches the canvas when one lands', () => {
+    const src = read('../../src/composables/useVoiceSession.js')
+    expect(src).toContain("msg.type === 'task'")
+    expect(src).toContain('applyTaskFrame(backgroundTasks.value, msg)')
+    const branch = src.split("msg.type === 'task'")[1].split('} else if')[0]
+    expect(branch).toContain("if (msg.state !== 'started') panelVersion.value += 1")
+    expect(src).toContain('backgroundTasks, hasBackgroundTasks,')
+  })
+
+  it('the orb shows work in flight as its own badge, and the conversation captions the ask', () => {
+    const orb = read('../../src/components/chat/VoiceOverlay.vue')
+    expect(orb).toContain('data-testid="voice-background-tasks"')
+    // ent#551 QA: one pill PER task, never bunched into one line.
+    expect(orb).toMatch(/v-for="t in voice\.backgroundTasks\.value"[\s\S]{0,400}data-testid="voice-background-task"[\s\S]{0,120}taskItemLabel\(t\)/)
+    const conv = read('../../src/components/portal/PortalConversation.vue')
+    expect(conv).toContain('backgroundTasks: voice.backgroundTasks.value,')
+    // While the call is on, what lands in the thread is read, not unread: the
+    // read cursor advances on spoken turns and task landings (no list refresh).
+    const marker = conv.split("watch([() => voice.transcriptEntries.value.length, () => voice.panelVersion.value]")[1] || ''
+    expect(marker).toContain("store.markChatRead('thread', currentSessionId.value)")
+    expect(marker.slice(0, 700)).not.toContain("emit('sessions-changed'")
+    expect(conv).toContain('data-testid="portal-voice-task-caption"')
+    expect(conv).toContain('voiceTaskCaption(item.message)')
+  })
+})
+
+// ---- ent#551 QA — a call started from a new chat must survive its own thread being adopted ----
+describe('a call started from a new chat is not ended by its own thread arriving', () => {
+  it('the rule: only a real thread change, or an agent change, ends the call', () => {
+    // No call: nothing to end.
+    expect(threadChangeEndsCall({ callActive: false, newSessionId: 'b', boundSessionId: 'a' })).toBe(false)
+    // The call's own thread being adopted (null → id, same id the call is bound to).
+    expect(threadChangeEndsCall({ callActive: true, newSessionId: 't1', boundSessionId: 't1' })).toBe(false)
+    // A route-driven switch to another thread.
+    expect(threadChangeEndsCall({ callActive: true, newSessionId: 't2', boundSessionId: 't1' })).toBe(true)
+    // The thread going away under the call.
+    expect(threadChangeEndsCall({ callActive: true, newSessionId: null, boundSessionId: 't1' })).toBe(true)
+    // An agent switch always ends it, whatever the thread.
+    expect(threadChangeEndsCall({ callActive: true, agentChanged: true, newSessionId: 't1', boundSessionId: 't1' })).toBe(true)
+  })
+
+  it('the mic worklet is a same-origin file, not a blob: script the CSP blocks', () => {
+    const audio = read('../../src/utils/audio.js')
+    expect(audio).toContain("export const MIC_WORKLET_URL = '/mic-capture.worklet.js'")
+    expect(audio).toContain('audioContext.audioWorklet.addModule(MIC_WORKLET_URL)')
+    expect(audio).not.toContain('createObjectURL')
+    const worklet = read('../../public/mic-capture.worklet.js')
+    expect(worklet).toContain("registerProcessor('trinity-mic-capture', MicCapture)")
+    // Both CSPs allow it as 'self'; neither needs (or gets) blob: in script-src.
+    const devCsp = read('../../vite.config.js')
+    const prodCsp = read('../../security-headers.conf')
+    // The policy LITERALS, not the comment above them that also says "script-src".
+    expect(devCsp.match(/"script-src ([^;"]*);/)[1]).toBe("'self' 'unsafe-inline' 'unsafe-eval'")
+    expect(prodCsp.match(/script-src ([^;]*);/)[1]).not.toContain('blob:')
+  })
+})
+
+// ---- ent#551 QA — the overlay's bottom stack, and M to mute ----
+describe('the status line never sits on the buttons, and M mutes', () => {
+  it('the rule: plain M during a call, not in a field, not a claimed key, no modifier', () => {
+    const ev = (over = {}) => ({ key: 'm', metaKey: false, ctrlKey: false, altKey: false, defaultPrevented: false, target: { tagName: 'DIV' }, ...over })
+    expect(isMuteHotkey(ev(), { callActive: true })).toBe(true)
+    expect(isMuteHotkey(ev({ key: 'M' }), { callActive: true })).toBe(true)
+    expect(isMuteHotkey(ev(), { callActive: false })).toBe(false)
+    expect(isMuteHotkey(ev({ key: 'n' }), { callActive: true })).toBe(false)
+    expect(isMuteHotkey(ev({ metaKey: true }), { callActive: true })).toBe(false)       // ⌘M is the window's
+    expect(isMuteHotkey(ev({ ctrlKey: true }), { callActive: true })).toBe(false)
+    expect(isMuteHotkey(ev({ defaultPrevented: true }), { callActive: true })).toBe(false) // an overlay claimed it
+    expect(isMuteHotkey(ev({ target: { tagName: 'INPUT' } }), { callActive: true })).toBe(false)
+    expect(isMuteHotkey(ev({ target: { tagName: 'TEXTAREA' } }), { callActive: true })).toBe(false)
+    expect(isMuteHotkey(ev({ target: { tagName: 'DIV', isContentEditable: true } }), { callActive: true })).toBe(false)
+    expect(isMuteHotkey(null, { callActive: true })).toBe(false)
+  })
+
+  it('the keydown handler mutes on the rule, after Escape and before the turn-cancel rule', () => {
+    const esc = CODE.slice(CODE.indexOf('function onEscapeKeydown(event)'), CODE.indexOf('async function cancelTurn()'))
+    const end = esc.indexOf('shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })')
+    const mute = esc.indexOf('isMuteHotkey(event, { callActive: voiceCallActive.value })')
+    expect(mute).toBeGreaterThan(end)
+    expect(mute).toBeLessThan(esc.indexOf('shouldCancelOnEscape(event'))
+    expect(esc.slice(mute, mute + 200)).toContain('voice.toggleMute()')
+  })
+
+  it('status text and controls are one bottom-anchored column (no overlap at any height)', () => {
+    const orb = read('../../src/components/chat/VoiceOverlay.vue')
+    expect(orb).toContain('data-testid="voice-bottom-stack"')
+    expect(orb).toMatch(/voice-bottom-stack"[\s\S]{0,40}/)
+    expect(orb).not.toContain('bottom-16')
+    const stack = orb.slice(orb.indexOf('voice-bottom-stack'))
+    expect(stack.indexOf('statusLabel')).toBeLessThan(stack.indexOf('voice.toggleMute()'))
+    expect(orb).toContain("'Unmute (M)' : 'Mute (M)'")
+  })
+})
+
+// ---- ent#551 QA — leaving the stage mid-call asks first; End call never does ----
+describe('leaving the stage mid-call asks first', () => {
+  it('the copy names the agent, what happens, and what is kept', () => {
+    const c = leaveCallCopy('acme-scout')
+    expect(c.title).toBe('End the call?')
+    expect(c.message).toBe("You're on a voice call with acme-scout. Leaving here ends it. What was said stays in the chat.")
+    expect(c.confirmText).toBe('End call and leave')
+    expect(c.cancelText).toBe('Stay on the call')
+    expect(c.variant).toBe('warning')
+    expect(leaveCallCopy().message).toBe("You're on a voice call. Leaving here ends it. What was said stays in the chat.")
+  })
+
+  it('every exit from the stage routes through the one guard, and the guard ends the call through the conversation', () => {
+    for (const fn of ['function newChatWithAgent(name)', 'function openThread(t)', 'function newChat()', 'function openRoom(roomId)', 'function openAgentPage(name)']) {
+      const at = SHELL.indexOf(fn)
+      expect(at, fn).toBeGreaterThan(-1)
+      expect(SHELL.slice(at, at + 420), fn).toContain('guardLeaveCall(')
+    }
+    // ⌘J too — a keyboard exit is still an exit.
+    const kd = SHELL.slice(SHELL.indexOf('function onGlobalKeydown(e)'))
+    expect(kd.slice(0, 600)).toContain('guardLeaveCall(() => onGlobalKeydown(e))')
+    // The guard holds the action and asks; confirm ends the call via the
+    // conversation's own exposed action, then runs it.
+    expect(SHELL).toContain("await conversationRef.value?.endVoiceCall?.()")
+    expect(SHELL).toMatch(/<ConfirmDialog[\s\S]{0,400}v-model:visible="leaveCall\.open"[\s\S]{0,400}@confirm="onLeaveCallConfirm"/)
+    expect(CODE).toContain('defineExpose({ focusComposer, startVoiceCall, endVoiceCall })')
+    // The End button itself is unchanged: immediate, no dialog.
+    expect(CODE).toMatch(/data-testid="portal-voice-end"[\s\S]{0,40}@click="endVoiceCall\(\)"/)
+  })
+})
+
+// ---- ent#551 QA — tasks run one at a time per call, and the list shows each one ----
+describe('background tasks are separate items, queued behind one another', () => {
+  it('a started frame carries the status, a running frame promotes it, finished removes it', () => {
+    let tasks = applyTaskFrame([], { state: 'started', task_id: 't1', label: 'Research OpenAI', status: 'running' })
+    tasks = applyTaskFrame(tasks, { state: 'started', task_id: 't2', label: 'Chart the table', status: 'queued' })
+    expect(tasks).toEqual([
+      { taskId: 't1', label: 'Research OpenAI', status: 'running' },
+      { taskId: 't2', label: 'Chart the table', status: 'queued' },
+    ])
+    tasks = applyTaskFrame(tasks, { state: 'finished', task_id: 't1' })
+    tasks = applyTaskFrame(tasks, { state: 'running', task_id: 't2' })
+    expect(tasks).toEqual([{ taskId: 't2', label: 'Chart the table', status: 'running' }])
+    // An older frame without a status reads as running.
+    expect(applyTaskFrame([], { state: 'started', task_id: 't3', label: 'x' })[0].status).toBe('running')
+  })
+  it('each item says what it is and whether it is waiting its turn', () => {
+    expect(taskItemLabel({ label: 'Chart the table', status: 'queued' })).toBe('Chart the table · queued')
+    expect(taskItemLabel({ label: 'Research OpenAI', status: 'running' })).toBe('Research OpenAI')
+    expect(taskItemLabel({ label: '' })).toBe('task')
+    expect(taskItemLabel({ label: 'x'.repeat(100), status: 'queued' }).length).toBeLessThanOrEqual(48 + ' · queued'.length)
   })
 })

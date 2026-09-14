@@ -755,6 +755,14 @@ simply not offered rather than offered-and-refused. `portal_file_dismissals` is 
 storage because `agent_shared_files` has no audience column and `user_ui_preferences` is
 FK'd to `users.id`, which a portal principal has no row in.
 
+**Every `/api/files/` share URL is previewed same-origin (#2733).**
+`portalFiles.js::sharePreviewPath` takes the path from that route onward and drops whatever
+origin `get_portal_base_url()` put on `download_url`, because `connect-src` is a build
+artefact while the portal base URL is a runtime setting — a portal base URL on a different
+host is a supported topology (ent#79), and no static header can carry it (CORS would refuse
+it a second time). The scope word is load-bearing: only that one route is rewritten, and
+`download_url` itself stays absolute and shareable for the anchor-click Download.
+
 ## The compact header — Info as a rail tab, one paperclip, voice at the composer (ent#547, #2580)
 
 The band is **compact**, and the three controls that were not about the conversation have

@@ -202,7 +202,7 @@ async def start_workspace_voice(
 
     from config import WORKSPACE_VOICE_MAX_DURATION
     from database import db as core_db
-    from services.gemini_voice import WORKSPACE_PANEL_INSTRUCTIONS, voice_service
+    from services.gemini_voice import WORKSPACE_PANEL_INSTRUCTIONS, canvas_context_section, voice_service
     from services.voice_prompt_service import get_voice_system_prompt
 
     prompt = await get_voice_system_prompt(agent_name)
@@ -210,6 +210,9 @@ async def start_workspace_voice(
     if context:
         prompt += f"\n\n## Conversation so far:\n{context}"
     prompt += WORKSPACE_PANEL_INSTRUCTIONS
+    # ent#551 QA: the model is told what the person is looking at — it said
+    # "I don't have a current table on the canvas" with the table on screen.
+    prompt += canvas_context_section(agent_name)
 
     session = await voice_service.create_session(
         agent_name=agent_name,

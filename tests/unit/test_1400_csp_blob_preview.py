@@ -1,4 +1,11 @@
-"""CSP must allow blob: for Files-tab preview/download (#1400).
+"""The CSP<->preview-loader contract for the Files tab (#1400, #2733).
+
+One bug class, two halves, kept in one file because the person who next edits
+``connect-src`` needs to meet both: *a CSP directive silently breaks Files-tab
+preview*. #1400 was a missing source (``blob:``); #2733 was a source that can
+never be added (the portal base URL's origin, a per-deployment runtime setting),
+whose only real fix is to stop needing it — the preview fetch is rewritten
+same-origin in ``portalFiles.js::sharePreviewPath``.
 
 Regression guard for the bug class where a CSP fetch/media/object directive
 omits ``blob:`` and silently breaks agent file preview. The Files tab renders
@@ -21,6 +28,20 @@ listed it, so images previewed but text/media did not.
 Both CSP sources — the production nginx ``security-headers.conf`` and the dev
 ``vite.config.js`` (which explicitly mirrors it) — must list ``blob:`` in
 connect-src, media-src and object-src, and stay in sync.
+
+The #2733 half guards the *contract*, never JavaScript syntax (a regex over a
+function body rejects a functionally identical edit and accepts a dead branch):
+
+  - ``connect-src`` is a FROZEN SET in both sources. Adding a host to make
+    portal file preview work is the move #2733 rejects, and it defeats every
+    weaker guard: a literal origin carries no wildcard and no placeholder, and
+    adding it to both files keeps the in-sync test green.
+  - the share-route literal in ``portalFiles.js`` must equal the one
+    ``client_portal/service.py`` builds ``download_url`` from. This is what makes
+    a backend route living in the frontend safe: version it to ``/api/v1/files/``
+    and CI fails instead of preview silently re-breaking.
+  - the loader carries a stable ``@csp-coupled:`` marker comment, so the reason
+    sits where the next editor reads it.
 """
 from __future__ import annotations
 
@@ -29,9 +50,23 @@ from pathlib import Path
 
 import pytest
 
-_FRONTEND = Path(__file__).resolve().parent.parent.parent / "src" / "frontend"
+_SRC = Path(__file__).resolve().parent.parent.parent / "src"
+_FRONTEND = _SRC / "frontend"
 _NGINX_CONF = _FRONTEND / "security-headers.conf"
 _VITE_CONF = _FRONTEND / "vite.config.js"
+_PORTAL_FILES_JS = _FRONTEND / "src" / "components" / "portal" / "portalFiles.js"
+_PORTAL_SERVICE_PY = _SRC / "backend" / "client_portal" / "service.py"
+
+# #2733 — the connect-src sources, frozen. A new entry here is a deliberate,
+# reviewed decision in its own commit, never a silent one inside a bug fix.
+_CONNECT_SRC_FROZEN = frozenset({
+    "'self'",
+    "blob:",
+    "ws:",
+    "wss:",
+    "https://us-central1-mcp-server-project-455215.cloudfunctions.net",
+    "https://intake.abilityai.dev",
+})
 
 # Directives that MUST include blob: so blob: URLs render / are fetchable.
 # frame-src is required because Chrome renders an <embed> PDF in an internal
@@ -95,3 +130,69 @@ def test_csp_sources_in_sync_for_blob_directives():
             f"— they must mirror each other. nginx={sorted(nginx.get(directive) or [])} "
             f"vite={sorted(vite.get(directive) or [])}"
         )
+
+
+# ---------------------------------------------------------------------------
+# #2733 — the CSP cannot carry a runtime origin, so the loader must not need one
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("loader", [_nginx_csp, _vite_csp], ids=["nginx", "vite"])
+def test_connect_src_is_a_frozen_set(loader):
+    """connect-src must equal the frozen set exactly — additions are reviewed.
+
+    Set equality rather than a shape check ("no wildcard, no placeholder"),
+    because the lever a developer actually pulls is a literal host, which has
+    neither and would sail through.
+    """
+    sources = _parse_csp(loader())["connect-src"]
+    assert sources == set(_CONNECT_SRC_FROZEN), (
+        "connect-src changed in "
+        f"{loader.__name__}: added={sorted(sources - _CONNECT_SRC_FROZEN)} "
+        f"removed={sorted(_CONNECT_SRC_FROZEN - sources)}. If you are adding an "
+        "origin here to make portal file preview work, that is #2733 — the portal "
+        "base URL is a per-deployment runtime setting that no static header can "
+        "carry (and CORS would refuse it a second time). Make the fetch "
+        "same-origin in portalFiles.js::sharePreviewPath instead. A legitimate "
+        "new host is added to _CONNECT_SRC_FROZEN in its own commit."
+    )
+
+
+def test_share_route_literal_matches_the_backend():
+    """The frontend's share-route constant must equal the backend's own f-string.
+
+    `sharePreviewPath` slices the path from `/api/files/` onward, which is the
+    exact inverse of the url `portal_documents` composes. Nothing else couples
+    the two, so version the route and preview re-breaks silently — unless this
+    fails first.
+    """
+    backend = re.search(r'f"(/api/files/)\{', _PORTAL_SERVICE_PY.read_text())
+    assert backend, (
+        "client_portal/service.py no longer builds a download_url from an "
+        'f"/api/files/{...}" literal — #2733\'s same-origin preview rewrite in '
+        "portalFiles.js slices on that exact route. Re-point both sides together."
+    )
+    # Whole file, not a function-body slice: the constant is module-level.
+    frontend = re.search(
+        r"const SHARED_FILE_ROUTE\s*=\s*'(/api/files/)'", _PORTAL_FILES_JS.read_text()
+    )
+    assert frontend, (
+        "portalFiles.js must declare `const SHARED_FILE_ROUTE = "
+        f"'{backend.group(1)}'` — the route the backend builds download_url from "
+        "(#2733). The preview fetch is rewritten onto the portal page's own "
+        "origin by slicing from it."
+    )
+    assert frontend.group(1) == backend.group(1)
+
+
+def test_preview_loader_declares_the_csp_coupling():
+    """The loader carries the marker comment that names this coupling.
+
+    A comment token, not an AST assertion: it pins the REASON where the next
+    editor reads it, and reformatting cannot break it.
+    """
+    assert "@csp-coupled:" in _PORTAL_FILES_JS.read_text(), (
+        "portalFiles.js lost its `@csp-coupled:` marker — the note saying "
+        "connect-src cannot carry portal_base_url's origin, which is why the "
+        "preview fetch must be same-origin (#2733)."
+    )

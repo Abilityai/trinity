@@ -282,7 +282,7 @@
           <summary class="cursor-pointer select-none flex items-center gap-2 px-3 py-2 text-xs text-gray-600 dark:text-gray-300">
             <svg class="w-3.5 h-3.5 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
             <span class="font-medium">{{ item.label }}</span>
-            <span class="text-gray-400 dark:text-gray-500">· spoken</span>
+            <span :class="META_INK_CLASS">· spoken</span>
           </summary>
           <div class="px-3 pb-3 space-y-3">
             <div
@@ -315,6 +315,15 @@
               class="rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap"
               :class="item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
             >{{ item.message.content }}</div>
+            <!-- ent#551: a task the agent ran during a voice call lands as an
+                 ordinary turn (it was not spoken, so it is not in the block);
+                 the caption is the attribution. -->
+            <p
+              v-if="voiceTaskCaption(item.message)"
+              class="text-[11px]"
+              :class="META_INK_CLASS"
+              data-testid="portal-voice-task-caption"
+            >{{ voiceTaskCaption(item.message) }}</p>
             <p
               v-if="item.message.failed && item.message.error"
               class="text-xs text-status-danger-700 dark:text-status-danger-300 text-right max-w-[32ch]"
@@ -796,10 +805,13 @@ import {
   VOICE_UNAVAILABLE_FALLBACK,
   endedNotice,
   groupVoiceBlocks,
+  isMuteHotkey,
   startFailureReason,
+  threadChangeEndsCall,
   voiceEntryState,
   voiceHeaderLine,
   voicePreflight,
+  voiceTaskCaption,
 } from './portalVoiceMode'
 // ent#403: the model choice's rules, in their own pure module for the same
 // reason voice mode's are — nothing rendered is reachable from vitest here.
@@ -916,6 +928,10 @@ const historyTruncated = ref(false)
 // read as something the agent said. Dark meta text stops at gray-400 (the
 // contract's ink floor).
 const PLATFORM_LINE_CLASS = 'my-3 text-center text-xs text-gray-400 dark:text-gray-400'
+// Meta ink for a label beside a message (the block's "· spoken", a task's
+// "asked during a voice call"): tertiary in light, and gray-400 in dark — the
+// dark ink ladder's floor for meta text is gray-400, never gray-500.
+const META_INK_CLASS = 'text-gray-400 dark:text-gray-400'
 const input = ref('')
 const sending = ref(false)
 // ent#523 — Reset, offered on Main only.
@@ -1270,7 +1286,15 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
 watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   // ent#534: a route-driven thread change (browser back, a deep link) cannot
   // be refused the way a click can — the call ends first, its transcript kept.
-  if (voiceCallActive.value) await voice.stop()
+  // ent#551: unless the "change" is the call's own new thread being adopted —
+  // `startVoiceCall` creates the thread and adopts it BEFORE the call starts,
+  // and the shell's route replace lands here a moment later with that same id.
+  if (threadChangeEndsCall({
+    callActive: voiceCallActive.value,
+    agentChanged: props.agent.name !== oldName,
+    newSessionId: sid,
+    boundSessionId: voice.portalSessionId.value || currentSessionId.value,
+  })) await voice.stop()
   currentSessionId.value = sid
   resetTypeahead()
   // #2624: the outgoing thread's element is about to be replaced, so re-arm
@@ -1793,6 +1817,13 @@ function onEscapeKeydown(event) {
   if (shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })) {
     event.preventDefault()
     void endVoiceCall()
+    return
+  }
+  // ent#551 QA: M mutes and unmutes the mic during a call (the overlay's mute
+  // button says so). Same shared-rule shape as Escape, for the same reason.
+  if (isMuteHotkey(event, { callActive: voiceCallActive.value })) {
+    event.preventDefault()
+    voice.toggleMute()
     return
   }
   if (!shouldCancelOnEscape(event, {
@@ -2418,6 +2449,7 @@ const voiceHeaderText = computed(() => voiceHeaderLine({
   toolName: voice.toolName.value,
   muted: voice.muted.value,
   error: voice.error.value,
+  backgroundTasks: voice.backgroundTasks.value,
 }))
 // The thread, with each voice call's rows folded into one block.
 const threadItems = computed(() => groupVoiceBlocks(messages.value))
@@ -2432,6 +2464,20 @@ watch([voiceCallActive, () => voice.voiceSessionId.value], ([on, sid]) => {
   emit('voice-call', { active: on, agentName: props.agent?.name, voiceSessionId: on ? sid : null })
 })
 watch(() => voice.panelVersion.value, (v) => emit('voice-panel', v))
+// ent#551: the thread is on screen for the whole call, so nothing that lands in
+// it during the call is unread — a spoken turn, or a background task's reply.
+// Without this the sidebar badge counted up while the person was talking to the
+// agent. The read cursor is advanced directly (no list refresh, no title-settle
+// cycle); the next chat-state fetch then reads zero. Debounced: turns land in
+// bursts.
+let voiceReadTimer = null
+watch([() => voice.transcriptEntries.value.length, () => voice.panelVersion.value], () => {
+  if (!voiceCallActive.value || !currentSessionId.value) return
+  clearTimeout(voiceReadTimer)
+  voiceReadTimer = setTimeout(() => {
+    if (voiceCallActive.value && currentSessionId.value) void store.markChatRead('thread', currentSessionId.value)
+  }, 800)
+})
 // The call ended — by End, by the cap, by the provider — and the bridge has
 // confirmed (or given up on) the write: reload the thread so the persisted
 // block replaces nothing local, and say why when it did not end by choice.
@@ -2496,7 +2542,9 @@ async function endVoiceCall() {
 // armed `?voice=1`. Both tokens are live — `focusComposer` gained its own
 // consumer in #2579 (`nextTick(focusComposer)` on a new chat) — so dropping
 // either is a break, not dead-code cleanup.
-defineExpose({ focusComposer, startVoiceCall })
+// ent#551 QA: the shell ends the call through this when the person confirms
+// leaving the stage — the one path that ends a call from outside this component.
+defineExpose({ focusComposer, startVoiceCall, endVoiceCall })
 
 // ent#474 — the rail's Work signal for a 1:1, DERIVED from the in-flight flag
 // on every change and never latched: it clears in the same `finally` that ends
