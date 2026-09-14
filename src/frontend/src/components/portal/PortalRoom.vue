@@ -317,7 +317,7 @@ import { budgetNotice } from '@/utils/roomBudgets'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
-import { liveElapsedSeconds } from './portalWork'
+import { liveElapsedSeconds, liveItemsForRoom } from './portalWork'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
@@ -446,11 +446,16 @@ const {
 // marked working yet.
 const workingAgents = computed(() => room.value?.working || [])
 
-// ent#525: the feed's live rows for the agents the SERVER says are working —
-// the card needs both facts, so a stale feed row on an idle agent never
-// draws a card the room's own poll contradicts.
+// ent#525 / #2792: the feed's live rows for THIS room — joined on the chat id
+// the room turn stamps on its execution, never on the agent name alone. The
+// feed is agent-scoped in a room (the rail's Work tab wants everything the
+// participants are doing), so by name every schedule run, loop turn, 1:1
+// thread or other room on a working participant rendered here as this room's
+// work. The SERVER's `working` list stays in the join so a row the room's own
+// poll has already retired never draws a card under the posted reply, and it
+// stays the "thinking…" fallback below for the rows the feed has not read yet.
 const workStore = usePortalWorkStore()
-const roomLiveItems = computed(() => workStore.live.filter((it) => it.agent_name && workingAgents.value.includes(it.agent_name)))
+const roomLiveItems = computed(() => liveItemsForRoom(workStore.live, props.roomId, workingAgents.value))
 const clockMs = ref(Date.now())
 let clockTimer = null
 watch(() => roomLiveItems.value.length > 0, (on) => {

@@ -190,6 +190,26 @@ export function childrenForChat(items, chatId, excludeId = null) {
   return liveItems(items).filter((it) => it.chat_id === chatId && it.id !== excludeId)
 }
 
+/**
+ * A room's OWN live work (#2792): the in-flight rows stamped with `roomId`, and
+ * nothing else the participants happen to be doing. The feed is agent-scoped
+ * in a room by design (the rail's Work tab shows everything), so this is where
+ * the join happens — on the chat id, never on the agent name, which is how a
+ * schedule run, a loop turn, a 1:1 thread or another room used to render as
+ * this room's card. When `workingAgents` (the server's list) is given, the row's
+ * agent must also be in it: the room polls at 3 s and the feed at 12 s, so a
+ * row the server has already retired would otherwise sit under the posted
+ * reply. A masked (off-roster) agent has no name to draw, so no card.
+ */
+export function liveItemsForRoom(items, roomId, workingAgents = null) {
+  if (!roomId) return []
+  const working = Array.isArray(workingAgents) ? new Set(workingAgents) : null
+  return liveItems(items).filter((it) =>
+    it.chat_id === roomId
+    && typeof it.agent_name === 'string' && it.agent_name
+    && (working === null || working.has(it.agent_name)))
+}
+
 /** The feed's row for the turn on screen, by execution id — never "latest running" (review E5). */
 export function itemById(items, id) {
   if (!id) return null

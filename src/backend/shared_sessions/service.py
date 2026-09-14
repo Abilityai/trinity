@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from config import ROOM_SOURCE_CHANNEL
 from services.platform_prompt_service import build_user_facing_room_prompt
 from utils.helpers import utc_now_iso
 
@@ -1111,6 +1112,18 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
             triggered_by="room",
             system_prompt=room_prompt,
             source_user_email=getattr(current_user, "email", None),
+            # #2792: WHICH room. Without a chat on the row, the room could only
+            # pick its live cards from the Work feed by agent name, and so
+            # inlined every execution of a working participant — a schedule
+            # run, a loop turn, a 1:1 thread, another room — as this room's
+            # work. Same shape as the 1:1 thread's stamp (`source_channel_chat_id
+            # = session_id`), under the room's OWN channel value: see
+            # `config.ROOM_SOURCE_CHANNEL` for why it is not `portal`. A child
+            # this turn delegates inherits it (ent#265 D0), so the Work tab can
+            # group it under its parent by the same key.
+            source_channel=ROOM_SOURCE_CHANNEL,
+            source_channel_chat_id=room_id,
+            source_channel_client=getattr(current_user, "email", None),
             timeout_seconds=ROOM_TURN_TIMEOUT_SECONDS,
             resume_session_id=cached,
             persist_session=True,

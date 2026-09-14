@@ -29,7 +29,7 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
-from config import PORTAL_SOURCE_CHANNEL
+from config import PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL
 from database import db as core_db
 from utils.helpers import parse_iso_timestamp
 
@@ -85,11 +85,11 @@ def work_kind(row: dict) -> WorkKind:
         return "room"
     if trigger in ("schedule", "scheduled"):
         return "schedule"
-    if channel == PORTAL_SOURCE_CHANNEL:
-        if trigger == "public":
-            return "turn"
-        if trigger in ("mcp", "agent", "fan_out", "a2a"):
-            return "delegated"
+    if channel == PORTAL_SOURCE_CHANNEL and trigger == "public":
+        return "turn"
+    # #2792: a room turn (stamped `room`) delegates the same way a 1:1 turn does.
+    if channel in (PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL) and trigger in ("mcp", "agent", "fan_out", "a2a"):
+        return "delegated"
     return "other"
 
 
@@ -210,9 +210,11 @@ def _project(row: dict, *, email: str, roster: set, turn_timeout: int,
         duration_ms=row.get("duration_ms"),
         elapsed_seconds=None if stale else elapsed,
         stale=stale,
-        # Only a PORTAL stamp is a chat id the client can open; a Telegram or
-        # Slack destination is not the client's business.
-        chat_id=row.get("source_channel_chat_id") if channel == PORTAL_SOURCE_CHANNEL else None,
+        # Only a Workspace stamp — a 1:1 thread (`portal`) or a room (`room`,
+        # #2792) — is a chat id the client can open; a Telegram or Slack
+        # destination is not the client's business.
+        chat_id=(row.get("source_channel_chat_id")
+                 if channel in (PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL) else None),
         mine=mine,
         can_stop=can_stop(kind, status, mine=mine, on_roster=on_roster, stale=stale),
         delegated_by=mask(row.get("source_agent_name"), roster),
