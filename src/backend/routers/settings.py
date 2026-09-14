@@ -2024,6 +2024,7 @@ async def delete_template_registry(
 # ============================================================================
 
 MCP_URL_SETTING_KEY = "mcp_external_url"
+PUBLIC_CHAT_URL_SETTING_KEY = "public_chat_url"
 
 
 def _get_default_mcp_url(request: Request) -> str:
@@ -2066,6 +2067,37 @@ def _validate_mcp_url(url: str) -> str:
         )
 
     return url
+
+
+@router.get("/public-chat-url")
+async def get_public_chat_url(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    The instance's public chat URL, or `None` when none is configured (#2202).
+
+    A dedicated route because *unset* is the normal state for this key, not an
+    error. The Settings page read it through the generic `GET /api/settings/{key}`,
+    which answers 404 for a key that was never written — so every visit to every
+    Settings tab logged a failed request in the browser console, and a genuine
+    failure on that call was indistinguishable from the ordinary case. The store
+    already treated 404 as "unset", so nothing was broken; what was lost was the
+    signal, and no client-side handling can suppress the browser's own network
+    log.
+
+    Deliberately NOT a widening of the generic route: its 404 is the documented
+    contract for every other key and is depended on outside this repo (the ops
+    agent, scripts, the MCP surface). This follows the `/mcp-url` precedent
+    instead — a named route for a named setting.
+
+    Admin-gated to match the generic getter it replaces for this key; no caller
+    outside Settings reads it. Declared ABOVE `/{key}` (Invariant #4), or
+    "public-chat-url" routes as a setting key named exactly that.
+    """
+    assert_admin(current_user)
+
+    return {"key": PUBLIC_CHAT_URL_SETTING_KEY, "value": db.get_setting_value(PUBLIC_CHAT_URL_SETTING_KEY)}
 
 
 @router.get("/mcp-url")
