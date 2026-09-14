@@ -1,10 +1,13 @@
 <template>
-  <div
-    v-if="isOpen"
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-    @click.self="close"
+  <!-- #1923: BaseModal owns the overlay, Esc-to-close, the focus trap and
+       focus return. The panel markup below is unchanged. -->
+  <BaseModal
+    :model-value="isOpen"
+    panel-class="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md mx-4"
+    :aria-label="isEditing ? 'Edit System View' : 'Create System View'"
+    @close="close"
   >
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md mx-4">
+    <div>
       <!-- Header -->
       <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700">
         <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100">
@@ -240,10 +243,11 @@
         </div>
       </form>
     </div>
-  </div>
+  </BaseModal>
 </template>
 
 <script setup>
+import BaseModal from './base/BaseModal.vue'
 import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useSystemViewsStore } from '@/stores/systemViews'
 import { isOrgTag } from '@/utils/gridOrg'
