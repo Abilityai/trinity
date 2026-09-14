@@ -39,3 +39,32 @@ export function describeSttCapability(state) {
       }
   }
 }
+
+const FAILURE_CATEGORY_TEXT = Object.freeze({
+  permission: 'the key is missing the speech-to-text permission',
+  auth: 'the key was rejected',
+  quota: 'out of credits, or the plan does not allow speech-to-text',
+  rate_limit: 'the provider rate-limited the request',
+  audio: 'the recording was rejected by the provider',
+  provider: 'the provider failed',
+  unknown: 'the provider answered with an unrecognised error',
+})
+
+/**
+ * #2696 — the last live `/stt` failure, in operator words. `null` when there is
+ * none to report. The client got a category sentence at the time; this is the
+ * half with the provider's status word, which only the admin panel carries.
+ * @param {{ category?: string, provider_status?: number, detail?: string|null, at?: number|null }|null|undefined} failure
+ * @returns {{ text: string, at: number|null }|null}
+ */
+export function describeSttLastFailure(failure) {
+  if (!failure || !failure.category) return null
+  const why = FAILURE_CATEGORY_TEXT[failure.category] || FAILURE_CATEGORY_TEXT.unknown
+  const status = failure.provider_status ? `HTTP ${failure.provider_status}` : ''
+  const word = failure.detail ? `${failure.detail}` : ''
+  const provider = [status, word].filter(Boolean).join(' ')
+  return {
+    text: `Last voice-input failure: ${why}${provider ? ` (${provider})` : ''}.`,
+    at: typeof failure.at === 'number' ? failure.at : null,
+  }
+}
