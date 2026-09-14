@@ -136,7 +136,7 @@
       ></textarea>
 
       <div class="mt-2 flex items-center justify-between">
-        <span class="text-xs text-gray-400 dark:text-gray-500">{{ (publicPrompt || '').length }} / {{ PUBLIC_PROMPT_MAX }}</span>
+        <span class="text-xs text-gray-500 dark:text-gray-400">{{ (publicPrompt || '').length }} / {{ PUBLIC_PROMPT_MAX }}</span>
         <div class="flex items-center gap-2">
           <button
             type="button"

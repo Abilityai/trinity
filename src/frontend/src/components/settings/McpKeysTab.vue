@@ -89,7 +89,7 @@
            file's palette-class count, so the wording is computed and only the
            action row branches. -->
       <div v-if="!loading && listEmptyReason" class="text-center py-12 px-6">
-        <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
         </svg>
         <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">{{ emptyCopy.title }}</h3>
@@ -113,7 +113,7 @@
               <div class="flex-shrink-0">
                 <div class="h-10 w-10 rounded-full flex items-center justify-center"
                      :class="key.is_active ? 'bg-status-success-100 dark:bg-status-success-900/50' : 'bg-status-danger-100 dark:bg-status-danger-900/50'">
-                  <svg class="h-6 w-6" :class="key.is_active ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <svg class="h-6 w-6" :class="key.is_active ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
                   </svg>
                 </div>
@@ -334,7 +334,7 @@
           <div class="bg-white dark:bg-gray-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
             <div class="flex items-center mb-4">
               <div class="flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full bg-status-success-100 dark:bg-status-success-900/50">
-                <svg class="h-6 w-6 text-status-success-600 dark:text-status-success-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <svg class="h-6 w-6 text-status-success-700 dark:text-status-success-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                 </svg>
               </div>
