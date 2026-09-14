@@ -73,7 +73,10 @@ const SEMANTIC_RE = new RegExp(
   `(?<![\\w-])(${VARIANT})${UTIL}-(${SEMANTIC_TOKENS.join('|')})-${SHADE}(?:\\/\\d{1,3})?(?![\\w-])`, 'g')
 
 // Hex literal (not an HTML entity like &#160;) and rgb()/rgba() with a numeric body.
-const HEX_RE = /(?<!&)#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\b/g
+// The (?<![\\w&]) guard refuses an HTML entity (&#160;) and a `#` glued to a word,
+// which is what an issue reference looks like in copy: `(ent#184)` is not a colour
+// (#2718). A hex literal is never preceded by a word character.
+const HEX_RE = /(?<![\w&])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\b/g
 const RGB_RE = /\brgba?\(\s*\d[^)]*\)/g
 
 // ---------------------------------------------------------------- helpers
@@ -107,15 +110,77 @@ function lineOf(content, index) {
   return line
 }
 
-/** Extract [start, end) offset ranges of <template> and <style> blocks of a .vue file. */
+/** Extract [start, end, kind) offset ranges of <template> and <style> blocks of a .vue file. */
 function vueTemplateStyleRanges(content) {
   const ranges = []
   const t = content.match(/<template[^>]*>[\s\S]*<\/template>/) // greedy: nested </template> safe
-  if (t) ranges.push([t.index, t.index + t[0].length])
+  if (t) ranges.push([t.index, t.index + t[0].length, 'template'])
   for (const s of content.matchAll(/<style[^>]*>[\s\S]*?<\/style>/g)) {
-    ranges.push([s.index, s.index + s[0].length])
+    ranges.push([s.index, s.index + s[0].length, 'style'])
   }
   return ranges
+}
+
+/** Blank a text run but keep `{{ }}` interpolations, which are expressions, not copy. */
+function blankProse(text) {
+  let out = '', i = 0
+  while (i < text.length) {
+    const open = text.indexOf('{{', i)
+    if (open < 0) { out += blank(text.slice(i)); break }
+    out += blank(text.slice(i, open))
+    const close = text.indexOf('}}', open)
+    if (close < 0) { out += text.slice(open); break }
+    out += text.slice(open, close + 2)
+    i = close + 2
+  }
+  return out
+}
+
+/** Blank the rendered copy of a <template> block, preserving offsets (#2718).
+ *
+ * `#190` is a valid three-digit hex and also what an issue reference looks like,
+ * and rendered text is the one place in a .vue file where a colour cannot appear.
+ * Tags, attribute values and interpolations are code and stay scanned; the copy
+ * between them does not. Offsets are preserved, so sample line numbers hold.
+ *
+ * Quote aware on purpose: `v-if="nowX >= 0"` would otherwise end the tag early
+ * and blank the stroke="#10b981" that follows it.
+ */
+function blankTemplateProse(block) {
+  let out = '', i = 0
+  while (i < block.length) {
+    const lt = block.indexOf('<', i)
+    out += blankProse(block.slice(i, lt < 0 ? block.length : lt))
+    if (lt < 0) break
+    let j = lt + 1, quote = null
+    while (j < block.length) {
+      const ch = block[j]
+      if (quote) { if (ch === quote) quote = null }
+      else if (ch === '"' || ch === "'") quote = ch
+      else if (ch === '>') break
+      j++
+    }
+    out += block.slice(lt, Math.min(j + 1, block.length))
+    i = j + 1
+  }
+  return out
+}
+
+/** Hardcoded colours in the template/style blocks of one .vue source. */
+export function countHardcodedColors(source, onSample) {
+  const content = stripComments(source)
+  let n = 0
+  for (const [start, end, kind] of vueTemplateStyleRanges(content)) {
+    const span = content.slice(start, end)
+    const block = kind === 'template' ? blankTemplateProse(span) : span
+    for (const re of [HEX_RE, RGB_RE]) {
+      for (const m of block.matchAll(re)) {
+        n++
+        onSample?.({ line: lineOf(content, start + m.index), text: m[0], kind: 'hardcoded' })
+      }
+    }
+  }
+  return n
 }
 
 function collect(content, re, file, samples, kind) {
@@ -172,18 +237,9 @@ export function scanRawColors(rootArg) {
     const semantic = collect(content, SEMANTIC_RE)
 
     // 2. hardcoded colors — .vue template/style blocks only
-    let hardcoded = 0
-    if (file.endsWith('.vue')) {
-      for (const [start, end] of vueTemplateStyleRanges(content)) {
-        const block = content.slice(start, end)
-        for (const re of [HEX_RE, RGB_RE]) {
-          for (const m of block.matchAll(re)) {
-            hardcoded++
-            fileSamples.push({ line: lineOf(content, start + m.index), text: m[0], kind: 'hardcoded' })
-          }
-        }
-      }
-    }
+    const hardcoded = file.endsWith('.vue')
+      ? countHardcodedColors(raw, (sample) => fileSamples.push(sample))
+      : 0
 
     // 3. spot-checks
     for (const m of content.matchAll(/overflow-x-auto/g)) {
