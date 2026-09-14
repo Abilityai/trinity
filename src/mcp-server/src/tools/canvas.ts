@@ -97,7 +97,7 @@ const KIND_GUIDE =
   "points:[{ts, value}]}]} — one series per line, stack segment or slice; ts is a date/time " +
   "or a category name (a bar per series) · " +
   "kpi = {tiles:[{label, value, unit?}]} · " +
-  "table = {columns:[...], rows:[[...]]} · " +
+  "table = {columns:[...], rows:[[...]]} — cells and headers render INLINE markdown (bold, italic, `code`, [links](url), ~~strike~~); block markdown in a cell degrades to text · " +
   "timeline = {events:[{ts, label, detail?}]} · " +
   "markdown = {markdown} — may embed ```chart / ```kpi / ```table fences (JSON inside) and " +
   "```mermaid fences, rendered as figures · " +
