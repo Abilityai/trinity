@@ -188,7 +188,7 @@ The loop mechanics — modes, template variables, stop signals, capacity, costs 
 
 Analyzes the agent's purpose and data sources, proposes a set of metrics, and — after your approval — scaffolds an agent-specific `/update-dashboard` skill that keeps `dashboard.yaml` current. Declare that skill's cron in `template.yaml` `schedules:` to keep the agent's dashboard live.
 
-The generated skill writes only widget types Trinity renders — `metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer`; anything else is stripped by the agent. There is no `chart` type: trend lines and sparklines come from the platform, which records each `metric` and `progress` widget's value on every fetch, keyed by the widget's stable `id:` — so the skill gives those widgets an `id` (reordering unkeyed widgets orphans their history) and never emits YAML anchors, which Trinity's hardened loader rejects. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md).
+The generated skill writes only widget types Trinity renders — `metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer`; anything else is stripped by the agent. There is no chart type: trend lines and sparklines come from the platform, which records each `metric` and `progress` widget's value on every fetch, keyed by the widget's stable `id:` — so the skill gives those widgets an `id` (reordering unkeyed widgets orphans their history) and never emits YAML anchors, which Trinity's hardened loader rejects. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md).
 
 ## Instance Provisioning: `/trinity:deploy-new-instance`
 
