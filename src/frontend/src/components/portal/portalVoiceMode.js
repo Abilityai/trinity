@@ -339,9 +339,18 @@ export const CANVAS_SAFETY_POLL_MS = 3000
 export function isPanelTool(name) { return PANEL_TOOL_NAMES.includes(name) }
 
 // `true` when a fetched canvas should replace what is on screen: a newer
-// `updated_at`, or the first read. Equal stamps are the same board.
+// `updated_at`, a newer `agent_last_run_at`, or the first read. Equal stamps
+// are the same board.
+//
+// The run time is checked too (#2734) because the header renders it. It is a
+// property of the WORLD, not of the loaded object: `updated_at` is current by
+// construction whenever the payload swaps, while a run can complete without
+// anything touching the canvas. Comparing `updated_at` alone discarded every
+// poll that carried only a fresher run time, so on the one surface that polls
+// every ~3s that fact was pinned to the last canvas write.
 export function canvasChanged(previous, next) {
   if (!next) return false
   if (!previous) return true
   return (previous.updated_at || '') !== (next.updated_at || '')
+    || (previous.agent_last_run_at || '') !== (next.agent_last_run_at || '')
 }

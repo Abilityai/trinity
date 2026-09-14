@@ -270,6 +270,22 @@ describe('layout and refresh rules', () => {
     expect(canvasChanged({ updated_at: 'a' }, { updated_at: 'b' })).toBe(true)
     expect(canvasChanged({ updated_at: 'a' }, null)).toBe(false)
   })
+  it('adopts a poll that only carries a fresher last-run time (#2734)', () => {
+    // The header renders when the agent last finished a run beside the canvas's
+    // own write time. `updated_at` is a property of the loaded object and is
+    // current whenever the payload swaps; the run time is a property of the
+    // WORLD and is not. Comparing `updated_at` alone threw away every poll that
+    // carried a fresher run time, pinning that fact to the last canvas write on
+    // the one surface that polls every ~3s.
+    expect(canvasChanged(
+      { updated_at: 'a', agent_last_run_at: '2026-09-14T10:00:00Z' },
+      { updated_at: 'a', agent_last_run_at: '2026-09-14T11:00:00Z' },
+    )).toBe(true)
+    expect(canvasChanged(
+      { updated_at: 'a', agent_last_run_at: '2026-09-14T10:00:00Z' },
+      { updated_at: 'a', agent_last_run_at: '2026-09-14T10:00:00Z' },
+    )).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------
