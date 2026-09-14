@@ -69,10 +69,22 @@
       <h4 class="font-semibold text-status-warning-900 dark:text-status-warning-100 flex items-center gap-2">
         <span aria-hidden="true">⚠️</span> These agents already exist
       </h4>
+      <!-- ent#454: the second sentence tracks the CAPABILITY, not the build.
+           Teardown is an entitlement-gated module, so "there is no un-deploy"
+           is still exactly true where the module is absent, and retiring the
+           warning everywhere because one edition gained the verb would be the
+           dishonest fix. -->
       <p class="mt-1 text-sm text-status-warning-800 dark:text-status-warning-200">
         Deploying creates <strong>separate, suffixed copies</strong> rather than updating the
-        existing agents. There is no un-deploy: removing them afterwards is manual, one agent
-        at a time.
+        existing agents.
+        <template v-if="teardownAvailable">
+          You can remove a whole system afterwards from the Remove panel below — but
+          it removes the copies and the originals alike, so you choose which to keep.
+        </template>
+        <template v-else>
+          There is no un-deploy: removing them afterwards is manual, one agent
+          at a time.
+        </template>
       </p>
       <ul class="mt-2 space-y-1">
         <li
@@ -253,11 +265,18 @@
  * Failure reasons are credential-sanitized server-side but not HTML-sanitized.
  */
 import { computed } from 'vue'
+import { useEnterpriseStore } from '../../stores/enterprise'
+import { TEARDOWN_FEATURE_ID } from '../../stores/systems'
 
 const props = defineProps({
   preview: { type: Object, required: true },
   acknowledged: { type: Boolean, default: false }
 })
+
+const enterpriseStore = useEnterpriseStore()
+const teardownAvailable = computed(
+  () => enterpriseStore.enterpriseFeatures.includes(TEARDOWN_FEATURE_ID)
+)
 
 defineEmits(['update:acknowledged'])
 
