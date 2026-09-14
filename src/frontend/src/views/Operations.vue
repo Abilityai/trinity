@@ -18,84 +18,22 @@
         </p>
       </div>
 
-      <!-- Tabs: Needs Response / Notifications / Health (admin) / Executions / Resolved + Refresh -->
-      <div class="flex items-center gap-1 mb-6 border-b border-gray-200 dark:border-gray-700 overflow-x-auto">
-        <button
-          @click="switchTab('needs-response')"
-          class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px whitespace-nowrap"
-          :class="activeTab === 'needs-response'
-            ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-            : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'"
-        >
-          Needs Response
-          <span
-            v-if="operatorQueueStore.pendingCount > 0"
-            class="ml-1.5 px-1.5 py-0.5 text-xs font-medium rounded-full"
-            :class="activeTab === 'needs-response'
-              ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
-              : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'"
-          >
-            {{ operatorQueueStore.pendingCount }}
-          </span>
-        </button>
-        <button
-          @click="switchTab('notifications')"
-          class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px whitespace-nowrap"
-          :class="activeTab === 'notifications'
-            ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-            : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'"
-        >
-          Notifications
-          <span
-            v-if="notificationsStore.pendingCount > 0"
-            class="ml-1.5 px-1.5 py-0.5 text-xs font-medium rounded-full"
-            :class="activeTab === 'notifications'
-              ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
-              : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'"
-          >
-            {{ notificationsStore.pendingCount }}
-          </span>
-        </button>
-        <!-- Health tab is admin-only, gated at the tab level (#1109). The
-             panel render below is independently gated on isAdmin so a
-             non-admin deep-linking ?tab=health never mounts the panel. -->
-        <button
-          v-if="isAdmin"
-          @click="switchTab('health')"
-          class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px whitespace-nowrap"
-          :class="activeTab === 'health'
-            ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-            : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'"
-        >
-          Health
-        </button>
-        <button
-          @click="switchTab('executions')"
-          class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px whitespace-nowrap"
-          :class="activeTab === 'executions'
-            ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-            : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'"
-        >
-          Executions
-        </button>
-        <button
-          @click="switchTab('reports')"
-          class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px whitespace-nowrap"
-          :class="activeTab === 'reports'
-            ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-            : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'"
-        >
-          Reports
-        </button>
-        <button
-          @click="switchTab('resolved')"
-          class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px whitespace-nowrap"
-          :class="activeTab === 'resolved'
-            ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-            : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'"
-        >
-          Resolved
-        </button>
+      <!-- Tabs (#1109, #1925). OverflowTabs measures and collapses what does
+           not fit into a counted "More" menu; the hand-rolled strip this
+           replaces was `overflow-x-auto` with no scrollbar affordance, so a
+           narrow viewport hid tabs with no signal that more existed.
+
+           `:model-value` + `@update:modelValue` rather than `v-model`:
+           `switchTab` also does the `router.replace` that keeps `?tab=` in
+           step, and v-model would assign `activeTab` and skip it. -->
+      <div class="flex items-center gap-1 mb-6 border-b border-gray-200 dark:border-gray-700">
+        <div class="min-w-0 flex-1">
+          <OverflowTabs
+            :tabs="visibleTabs"
+            :model-value="activeTab"
+            @update:modelValue="switchTab"
+          />
+        </div>
 
         <!-- Spacer + Clear All / Refresh buttons (operator tabs only —
              Health/Executions panels carry their own refresh controls) -->
@@ -265,6 +203,7 @@
 </template>
 
 <script setup>
+import OverflowTabs from '../components/OverflowTabs.vue'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import NavBar from '../components/NavBar.vue'
@@ -344,6 +283,20 @@ const subtitle = computed(() => {
   if (notifCount > 0) parts.push(`${notifCount} ${notifCount === 1 ? 'notification' : 'notifications'}`)
   return parts.join(', ')
 })
+
+// #1925: the tab set, as data. Health stays admin-gated exactly as the old
+// strip's `v-if="isAdmin"` did — the panel render below is independently gated
+// too, so a non-admin deep-linking ?tab=health still never mounts it.
+// Badges are the live pending counts; OverflowTabs measures them, so a count
+// appearing does not make the strip overflow one tab too late.
+const visibleTabs = computed(() => [
+  { id: 'needs-response', label: 'Needs Response', badge: operatorQueueStore.pendingCount || undefined },
+  { id: 'notifications', label: 'Notifications', badge: notificationsStore.pendingCount || undefined },
+  ...(isAdmin.value ? [{ id: 'health', label: 'Health' }] : []),
+  { id: 'executions', label: 'Executions' },
+  { id: 'reports', label: 'Reports' },
+  { id: 'resolved', label: 'Resolved' },
+])
 
 function switchTab(tab) {
   activeTab.value = tab
