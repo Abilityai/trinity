@@ -71,12 +71,11 @@ journeys:
     # first-turn half is credential-bound and skips with an allowlisted reason.
     # `built` stays false because the promise is "a useful ANSWER", and the half
     # that asserts an answer is the half that does not run.
-    # No path yet ON THIS BRANCH: the harness lands with #2403 (Rails R1+R2),
-    # which is open. Recording a path that resolves nowhere is the same lie as
-    # an invented invariant id, and the validator caught exactly that on its
-    # first run — so the field stays null until the file is here, and gains the
-    # path in the commit that merges it.
-    harness: null
+    # The harness landed with #2403 (2026-08-28); the create/stop/start half is
+    # `tests/journeys/test_agent_lifecycle_journey.py` (see the note at the end
+    # of this file). Recording a path that resolves nowhere would be the same
+    # lie as an invented invariant id — the validator checks the file exists.
+    harness: tests/journeys/test_first_turn_journey.py
     built: false
     owner: operator
     invariants: [E-05]
@@ -170,7 +169,7 @@ journeys:
     actor: user
     lanes: [local]
     tier: live-stack
-    harness: null
+    harness: tests/journeys/test_j11_brief_delivery_journey.py
     built: false
     owner: trinity
     # E-01/E-05 are the terminal-closure and dispatched-rows-have-a-session

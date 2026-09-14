@@ -7,7 +7,7 @@ Trinity has two conversation surfaces, and the difference is memory.
 | **Chat tab** on Agent Detail | `/agents/{name}?tab=chat` | Nothing. Each message starts fresh. |
 | **[Workspace](../sharing-and-access/workspace.md)** | `/workspace` | Everything — tool results, mid-task state, reasoning — carried across turns. |
 
-> **The Session tab is retired.** It was folded into the Chat tab as a mode, and that mode has now been removed in favour of the Workspace. Old `?tab=session` links redirect to `/workspace?agent=<name>`, and the Chat tab carries a **Continue in Workspace →** link. The underlying session API still exists (see [For Agents](#for-agents)); what went away is the second UI for it.
+> **The Session tab is retired.** It was folded into the Chat tab as a mode, and that mode has now been removed in favour of the Workspace. Old `?tab=session` links redirect to `/workspace?agent=<name>`, and the Chat tab carries a **Continue in Workspace →** link, which opens the Workspace in its own browser tab. The underlying session API still exists (see [For Agents](#for-agents)); what went away is the second UI for it.
 
 This page covers the behavior of a resuming conversation — what carries over, what compaction does to it, and the limits a long task can hit. For the Workspace UI itself, see [Workspace](../sharing-and-access/workspace.md).
 
@@ -28,6 +28,12 @@ A resumed turn keeps the agent's working memory. A stateless turn keeps only the
 Turns on one chat are **serialized**. Two simultaneous resumes of the same session could corrupt it, so a second message while one is in flight is refused rather than queued. Start another chat if you need parallel work against the same agent.
 
 If the underlying session file has gone missing, the platform recovers automatically: it retries once as a cold turn, re-attaching the conversation history. You get an answer; the agent has the transcript but not its prior working state.
+
+A turn is bounded by the agent's own [execution timeout](agent-configuration.md#execution-timeout) (default one hour, range 1 minute to 2 hours). A turn that hits it fails naming the agent's limit rather than hanging.
+
+### Spoken turns join the same memory
+
+A [voice call](../advanced/voice-chat.md) in a Workspace chat runs on the voice provider, not in the agent's session, so the agent's live session never heard it. Trinity closes that gap on the next typed turn: the spoken rows since the agent's last reply are prefixed to the message, so the agent knows what was said before it answers. The two cannot overlap — a call cannot start while a reply is being written, and a typed turn is refused while a call is live in that chat — so a reply never lands in the middle of a call.
 
 ### Auto-compact
 
@@ -69,11 +75,11 @@ Default is 50, allowed range 1–500. Higher values reduce false failures on hea
 
 ### Clearing working memory
 
-Starting a new chat gives you a fresh conversation and a fresh cost bucket. Clearing an existing conversation's working memory — keeping the visible log while the agent starts cold — drops the cached session and best-effort deletes the underlying session file in the container; the next turn is a cold turn.
+Starting a new chat gives you a fresh conversation. On an agent's **Main** chat, **Reset** archives the conversation and starts the agent cold: the archived chat stays in your list and remains resumable as an ordinary chat, and the new Main has no memory of it. Through the session API, `reset` clears an existing session's cached memory while keeping its visible log — the next turn is a cold turn.
 
 Reach for a clean slate when the agent is going in circles, when you're switching topic and don't want bleed-over, or when repeated compaction has degraded its answers.
 
-Conversations survive container restarts, cost tracking is cumulative across a conversation, and scope is per person: an agent's owner cannot read another user's conversations with it.
+Conversations survive container restarts, and scope is per person: an agent's owner cannot read another user's conversations with it.
 
 ## Known limitations
 
@@ -83,6 +89,7 @@ Conversations survive container restarts, cost tracking is cumulative across a c
 | **Restore from backup forces one cold turn** | Platform backups cover the database (conversations and messages) but not the Docker volumes holding the agent's session files. After a restore, each conversation's first turn falls back to a cold turn. The visible log is preserved. |
 | **Long turns survive a severed connection** | If the browser sleeps mid-turn, the turn keeps running server-side and the reply appears when the tab reconnects — no false failure. Very long turns may take a moment to reconcile. |
 | **Recovered turns lose their metrics** | When a subprocess swallows the final result event, the platform recovers the reply but records no cost or duration for that turn. The answer is correct; the numbers are missing. |
+| **Long chats are windowed** | The Workspace shows the newest turns of a very long chat (a 30-minute voice call alone is ~180 rows) and says *Earlier messages in this chat aren't shown* when older ones were cut. The agent's own memory is unaffected. |
 
 ## For Agents
 
@@ -94,11 +101,11 @@ The session API is unchanged and remains available; it simply has no dedicated U
 | `/api/agents/{name}/sessions` | GET | List sessions (caller-scoped) |
 | `/api/agents/{name}/sessions/{id}` | GET | Get session with messages |
 | `/api/agents/{name}/sessions/{id}/message` | POST | Send a turn (synchronous) |
-| `/api/agents/{name}/sessions/{id}/reset` | POST | Clear the cached session so the next turn is cold |
+| `/api/agents/{name}/sessions/{id}/reset` | POST | Clear the cached session so the next turn is cold (the visible log stays) |
 | `/api/agents/{name}/sessions/{id}` | DELETE | Delete the session |
 | `/api/agents/{name}/guardrails` | GET / PUT | Read or change `max_turns_task`, `max_turns_chat`, `execution_timeout_sec` |
 
-All session endpoints return 404 when the `session_tab_enabled` feature flag is off. The Workspace does **not** consult that flag — it has its own chat surface.
+All session endpoints return 404 when the `session_tab_enabled` feature flag is off. The Workspace does **not** consult that flag — it has its own chat surface and its own routes (see [Workspace → For Agents](../sharing-and-access/workspace.md#for-agents)); its **Reset** is `POST /api/enterprise/client-portal/agents/{name}/sessions/main/reset`.
 
 ## See Also
 

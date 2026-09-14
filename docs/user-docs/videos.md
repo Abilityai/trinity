@@ -6,6 +6,7 @@ Workshops, demos, and deep-dives on building and running autonomous agents with 
 
 ## Start Here — Platform Overview
 
+- [Trinity v0.9.0 — Release Review](https://youtu.be/fia2qa4YcLg) — *Aug 2026* · everything new in v0.9.0 reviewed live — Workspace, provisioning from zero, the skills library, A2A — from the "How to Build a Second Brain for Your AI Agents" workshop
 - [Trinity Architecture Explained](https://youtu.be/XDLOq1crF9w) — *Jul 2026* · animated explainer (4:44): one scheduled task end to end — container, gate, delegation, approval, audit, breakers
 - [Trinity v0.8.0 — Release Tour](https://youtu.be/wxCC6QGtLMA) — *Jul 2026* · voice replies across channels, Brain Orb, Grid dashboard, enterprise identity
 - [Trinity Platform Demo](https://youtu.be/ivljtZqsxeo) — *May 2026* · full UI walkthrough, end to end

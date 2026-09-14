@@ -725,6 +725,16 @@
   (`tests/journeys/catalog.yaml`) resolve their `invariants:` against the
   catalog's `**X-NN**` definitions through the same parser
   (`tests/unit/_invariant_catalog.py`), never against a summary table.
+- **Testing method — one document (Rail R5, #2339)**: the method these guards
+  serve — promises (journeys) and invariants (this catalog) asserted against a
+  live stack, the CI lanes as built, and the acceptance bar for a harness — is
+  written once in `docs/testing/STRATEGY.md`. `docs/testing/` is held to that
+  file plus the catalog and the generated `JOURNEYS.md`, with `phases/` (the
+  click-through scenarios `/ui-sweep` runs) and `ui-sweep/` (its dated reports)
+  as the only subdirectories, by `tests/unit/test_2339_testing_docs_consolidated.py`,
+  which also pins STRATEGY's tier and workflow claims to `tests/run-full.sh` and
+  `.github/workflows/`. Retired material is archived under `docs/archive/testing/`
+  and indexed in `docs/archive/README.md`; nothing is deleted.
 
 ### 31.2 Canary Run-State Observability (#2217)
 - **Status**: ✅ Implemented (2026-08-16)

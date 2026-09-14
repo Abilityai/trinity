@@ -151,7 +151,7 @@ Copy this into each feature flow:
 - [ ] Backend running at http://localhost:8000
 - [ ] Frontend running at http://localhost
 - [ ] Docker daemon running
-- [ ] Logged in as test@ability.ai
+- [ ] Logged in as user@example.com
 
 ### 1. Create Agent
 **Action**:
