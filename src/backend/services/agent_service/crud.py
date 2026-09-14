@@ -2077,21 +2077,35 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
     file from being served verbatim on the unauthenticated avatar route."""
     if not config.template or not config.template.startswith("local:"):
         return
-    template_dir = _resolve_local_template_dir(config.template[6:])
+    # Both paths come from request fields. `_resolve_local_template_dir` and
+    # agent-name validation already contain them, but CodeQL's
+    # `py/path-injection` can't follow those callees — so each final path is
+    # normalized and prefix-checked right here (the `routers/avatar.py
+    # _avatar_path` barrier), as plain strings with no Path rebuild after it.
+    template_roots = tuple(os.path.join(str(r.resolve()), "") for r in _LOCAL_TEMPLATE_ROOTS)
+    avatar_root = os.path.join(str(_AVATAR_DIR), "")
+    dest = os.path.normpath(os.path.join(avatar_root, f"{config.name}.webp"))
+    if not dest.startswith(avatar_root):
+        return
+    template_dir = str(_resolve_local_template_dir(config.template[6:]))
     for filename in _BUNDLED_AVATAR_NAMES:
-        source = template_dir / filename
-        if not source.is_file() or source.stat().st_size > _BUNDLED_AVATAR_MAX_BYTES:
+        source = os.path.normpath(os.path.join(template_dir, filename))
+        if not source.startswith(template_roots):
+            return
+        if not os.path.isfile(source) or os.path.getsize(source) > _BUNDLED_AVATAR_MAX_BYTES:
             continue
         from PIL import Image
         from utils.image_optimize import optimize_avatar
 
-        data = source.read_bytes()
+        with open(source, "rb") as f:
+            data = f.read()
         # A 2 MB PNG can still declare a gigapixel canvas; read the header only.
         with Image.open(io.BytesIO(data)) as img:
             if img.width * img.height > 4096 * 4096:
                 raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
-        _AVATAR_DIR.mkdir(parents=True, exist_ok=True)
-        (_AVATAR_DIR / f"{config.name}.webp").write_bytes(optimize_avatar(data))
+        os.makedirs(avatar_root, exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(optimize_avatar(data))
         logger.info(f"[AVATAR-003] Installed bundled avatar from {config.template} for {config.name}")
         return
 
