@@ -2959,6 +2959,18 @@
         "integration"
       ],
       "description": "Journey J11 (brief delivery): a schedule that names one Workspace user lands its output as a turn in that person's Main chat without them asking. A deliberate strict=True xfail skeleton asserting the journey's invariants (E-01, E-05, L-03) until the delivery half ships; the shape #2350's Journey Impact gate accepts as a declared promise."
+    },
+    {
+      "file": "unit/test_2744_skills_adoption_alert_idempotency.py",
+      "feature": "#2744",
+      "added": "2026-09-14",
+      "categories": [
+        "backend",
+        "skills",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "Legacy skills-library adoption alert idempotency (#2744): the terminal 'already has sources' refusal mints a STABLE URL-derived request_id (sha256[:12], reserved family prefix) at priority low + logger.info, so N syncs collapse to one operator-queue row and an operator's dismissal sticks; a different refused URL still gets its own item; the validation-reject and adoption-exception branches keep priority high and timestamped repeat-visible ids; the echoed URL is credential-scrubbed so a PAT-bearing setting never reaches the log or operator_queue.context."
     }
   ]
 }
