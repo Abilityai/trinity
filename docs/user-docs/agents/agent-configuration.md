@@ -8,7 +8,17 @@ Each agent has independent configuration options that control its behavior, reso
 
 ### The Settings Tab
 
-The Agent Detail page has a **Settings** tab (visible to owners only) -- a sectioned home for per-agent configuration. Current sections: **Guardrails** (see [Agent Guardrails](agent-guardrails.md)), **Parallel Capacity** (below), and **Expose via MCP** (publish the agent as a dedicated MCP tool — see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp)). The remaining settings below are managed from the agent header controls, toggles on the Dashboard and Agents pages, or the API.
+The Agent Detail page has a **Settings** tab (visible to owners only) -- a sectioned home for per-agent configuration. Current sections:
+
+- **Guardrails** — see [Agent Guardrails](agent-guardrails.md)
+- **Parallel Capacity** — below
+- **Expose via MCP** — publish the agent as a dedicated MCP tool; see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp)
+- **Trinity access key** — the agent-scoped key the agent uses to call Trinity's own MCP tools, with health status and a **Regenerate** action (the running container is replaced to pick the new key up)
+- **Reliability** — the dispatch circuit breaker (below) and **Wake this agent when an operator answers** (below)
+- **Voice** — let the agent reply with spoken voice notes on messaging channels; see [Voice Replies](../advanced/voice-replies.md)
+- **Cross-model validation** — appears only on entitled installations
+
+The remaining settings below are managed from the agent header controls, the Running/Autonomy toggles on the Dashboard, or the API.
 
 ### Parallel Capacity
 
@@ -22,7 +32,7 @@ How many tasks the agent may run concurrently (`max_parallel_tasks`, default 3).
 
 Master gate for the agent's scheduled operations.
 
-- Toggle from the Dashboard, Agents page, or Agent Detail view
+- Toggle from the Dashboard (Grid tile or List row) or the Agent Detail header
 - When disabled, none of the agent's schedules fire
 - The toggle does **not** change each schedule's own on/off switch: a schedule you disabled stays disabled when you turn autonomy back on, and one you left enabled resumes automatically
 - API: `GET /api/agents/{name}/autonomy` and `PUT /api/agents/{name}/autonomy`
@@ -72,13 +82,20 @@ How it behaves when enabled:
 
 Two switches must both be on for the breaker to engage: the per-agent toggle (owner-only) and the platform-wide `DISPATCH_BREAKER_ENABLED` environment variable (also off by default).
 
-When a breaker is open, the agent header and the Dashboard network graph show a "⚡ circuit open" badge, and the Overview tab's health panel shows a "Circuit open" chip. Enabling or disabling the breaker is done via the API:
+When a breaker is open, the agent header and the agent's Dashboard tile show a "⚡ circuit open" badge, and the Overview tab's health panel shows a "Circuit open" chip. Switch the breaker on or off in **Settings → Reliability**, or via the API:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/circuit-breaker` | GET | Current state of both breakers (dispatch + transport), plus config flags |
 | `/api/agents/{name}/circuit-breaker` | PUT | Enable or disable the per-agent breaker (`{"enabled": true}`, owner-only) |
 | `/api/agents/{name}/circuit-breaker/reset` | POST | Force both breakers closed without waiting for cooldown (admin-only) |
+
+### Wake on Operator Answer
+
+An answer to one of the agent's parked requests (an approval, a question) always reaches the agent, but by default it is only read on the agent's *next* turn. An agent with no schedule has no next turn, so an approved action would wait indefinitely. Turn on **Wake this agent when an operator answers** in **Settings → Reliability** and answering starts one turn so the agent acts on it right away. Off by default.
+
+- API: `GET /api/agents/{name}/operator-resume` and `PUT /api/agents/{name}/operator-resume` (`{"enabled": true}`)
+- See [Approvals](../automation/approvals.md) for the operator side.
 
 ### Per-Agent API Key
 

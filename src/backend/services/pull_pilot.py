@@ -212,7 +212,7 @@ def note_unreachable_pull_trigger(agent_name: str, triggered_by: Optional[str]) 
             "regardless of PULL_MODE_PILOT_AGENTS. The flag is applied and correct; "
             "the dispatch topology is the limit. Reachable triggers today: %s. "
             "Cron/webhook/reminder work IS pullable since #2391, and loops "
-            "since #2523 — see docs/testing/PULL_MIGRATION_TESTING.md §9.",
+            "since #2523 — see docs/planning/PULL_MIGRATION_TESTING.md §9.",
             agent_name, triggered_by, sorted(PULL_REACHABLE_TRIGGERS),
         )
         return True

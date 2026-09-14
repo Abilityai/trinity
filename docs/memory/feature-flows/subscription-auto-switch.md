@@ -128,9 +128,14 @@ enforced by `tests/unit/test_904_sigkill_no_false_auth.py::TestBackendSchedulerP
 | Classifier | `src/scheduler/failure_classifier.py` | Byte-identical vendored mirror for the separate scheduler container (#1088) |
 | Router | `src/backend/routers/subscriptions.py` | Setting GET/PUT endpoints |
 | Service | `src/backend/services/task_execution_service.py` | 429 interception for all execution paths (schedules, MCP, agent-to-agent) |
+| Service | `src/backend/services/subscription_headroom_service.py` | `cached_headroom_readings` (#2409 ranker input), `recovery_verdict` (#2638 per-candidate skip-list override on positive evidence) |
+| Envelope | `src/backend/services/execution_envelope.py` | `TaskExecutionResult.subscription_switch` — the switch dict stamped on every terminal return (#2638) |
+| Portal | `src/backend/client_portal/service.py` | AUTH/BILLING branch consults `subscription_switch` before refusing: `auth_switched`/503/retryable vs `_usage_limit_detail` naming `earliest_known_reset` (#2638) |
 | Router | `src/backend/routers/chat.py` | 429 interception in chat proxy + background tasks |
-| Frontend | `src/frontend/src/views/Settings.vue` | Toggle in Subscriptions section |
+| Frontend | `src/frontend/src/components/settings/SubscriptionsPanel.vue` | Auto-switch, headroom and (#2638) API-key-fallback toggles in Settings → Subscriptions (moved out of `views/Settings.vue` in #471) |
+| Frontend | `src/frontend/src/stores/subscriptions.js` | `fetchApiKeyFallback` / `setApiKeyFallback` (#2638) beside the auto-switch setting calls |
 | Tests | `tests/test_subscription_auto_switch.py` | Smoke tests |
+| Tests | `tests/unit/test_2638_subscription_switch_on_turn.py` | #2638 — `recovery_verdict` table, readmission through the real selector, pre-dispatch switch contracts, API-key-fallback setting semantics, `_with_switch` AST guard, four end-to-end 429 turns |
 | Tests | `tests/unit/test_904_sigkill_no_false_auth.py` | #904 SIGKILL/OOM no-false-AUTH coverage + `TestBackendSchedulerParity` byte-identity guard on the canonical↔mirror classifier (#1088) |
 | Tests | `tests/unit/test_subscription_auto_switch_pingpong.py` | Unit regression for #444 ping-pong prevention; `TestRateLimitAging` (#476) pins 2h-window correctness; `TestHotReloadSwitch` + `TestKeyRolloverFanOut` (#1089) pin the hot-reload helper, auto-switch wire-in, and key-rollover fan-out |
 | Tests | `tests/unit/test_subscription_reassign_hotreload.py` | #1089 — manual sub→sub hot-reload under the lock (no `container_stop`), mode-change still recreates, register/upsert key-rollover fan-out, and the admin-only gate on `register_subscription` (non-admin → 403 before any create or fan-out) |
@@ -159,6 +164,7 @@ enforced by `tests/unit/test_904_sigkill_no_false_auth.py::TestBackendSchedulerP
 | Key | Default | Description |
 |-----|---------|-------------|
 | `auto_switch_subscriptions` | `"true"` (#441) | Enable/disable auto-switch |
+| `subscription_api_key_fallback` | `"true"` (#2638) | Last-resort fallback to the platform API key when the switcher declines; inert without a stored key |
 
 ## API Endpoints
 
@@ -166,6 +172,8 @@ enforced by `tests/unit/test_904_sigkill_no_false_auth.py::TestBackendSchedulerP
 |--------|------|-------------|
 | GET | `/api/subscriptions/settings/auto-switch` | Get setting state |
 | PUT | `/api/subscriptions/settings/auto-switch?enabled=true` | Toggle setting |
+| GET | `/api/subscriptions/settings/api-key-fallback` | `{enabled, key_configured}` — fails open to enabled (#2638) |
+| PUT | `/api/subscriptions/settings/api-key-fallback?enabled=true` | Toggle the API-key fallback (#2638) |
 
 ## Selection Strategy (#2409)
 

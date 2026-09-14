@@ -689,7 +689,7 @@ class TestClaimConcurrencyC1:
     ``FOR UPDATE SKIP LOCKED``, so the race cannot be constructed there — the
     test skips on SQLite (and whenever ``TEST_POSTGRES_URL`` is unset). This is
     the committed replacement for the scratch multi-process harness that first
-    surfaced C1 (``docs/testing/PULL_MIGRATION_TESTING.md`` §5); the previous
+    surfaced C1 (``docs/planning/PULL_MIGRATION_TESTING.md`` §5); the previous
     suite proved only sequential no-double-claim, which passes with OR without
     the fix (the inner subquery's ``status='queued'`` filter already no-ops a
     *sequential* second claim).

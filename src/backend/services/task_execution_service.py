@@ -984,6 +984,46 @@ def _with_switch(
         result.subscription_switch = state.subscription_switch
     return result
 
+# #2106: a transport timeout raised long before the configured limit is an
+# upstream cutoff (connection reset / read stall / pool starvation), not a
+# schedule timeout. A 30s attribution grace mirrors the issue's evidence:
+# every genuine timeout sat within 30s of the configured value.
+_TIMEOUT_ATTRIBUTION_GRACE_S = 30
+
+
+def _classify_timeout_failure(
+    elapsed_s: int,
+    timeout_seconds: Optional[int],
+    *,
+    exc: Optional[BaseException] = None,
+) -> tuple[str, Optional[TaskExecutionErrorCode]]:
+    """#2106: label a failed run as a timeout only when it actually
+    approached the configured limit.
+
+    Returns ``(error_msg, error_code)``. A genuine timeout keeps the
+    historical message shape ("Task execution timed out after N seconds")
+    and the ``TIMEOUT`` code so existing consumers keep matching; anything
+    else is recorded as a network/upstream failure with the run's real
+    duration and the limit kept as context, so operators are not misled
+    into raising a limit that was never reached.
+    """
+    if (
+        timeout_seconds is not None
+        and elapsed_s >= timeout_seconds - _TIMEOUT_ATTRIBUTION_GRACE_S
+    ):
+        return (
+            f"Task execution timed out after {timeout_seconds} seconds",
+            TaskExecutionErrorCode.TIMEOUT,
+        )
+    limit_desc = (
+        f"{timeout_seconds} seconds" if timeout_seconds is not None else "unset"
+    )
+    detail = f" ({type(exc).__name__}: {exc})" if exc is not None else ""
+    return (
+        f"Task execution aborted after {elapsed_s}s of {limit_desc} allowed{detail}",
+        TaskExecutionErrorCode.NETWORK,
+    )
+
 
 class TaskExecutionService:
     """
@@ -1286,13 +1326,14 @@ class TaskExecutionService:
                 state=state,
             ), state)
 
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as e:
             return _with_switch(await self._handle_timeout(
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
                 timeout_seconds=timeout_seconds,
                 state=state,
+                exc=e,
             ), state)
 
         except BackendAgentCallBudgetExhausted as e:
@@ -2140,12 +2181,19 @@ class TaskExecutionService:
         activity_id: Optional[str],
         timeout_seconds: Optional[int],
         state: "_AttemptState",
+        exc: Optional[BaseException] = None,
     ) -> TaskExecutionResult:
         """execute_task's httpx.TimeoutException terminal (#61 orphan kill
-        + #671/H4 CAS-gated FAILED write)."""
+        + #671/H4 CAS-gated FAILED write).
+
+        #2106: the label comes from `_classify_timeout_failure` — a timeout
+        raised long before the configured limit is an upstream cutoff, not a
+        schedule timeout, and must not be recorded as one."""
         elapsed = int((datetime.utcnow() - state.start_time).total_seconds())
-        error_msg = f"Task execution timed out after {timeout_seconds} seconds"
-        logger.error(f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s (limit={timeout_seconds}s)")
+        error_msg, error_code = _classify_timeout_failure(
+            elapsed, timeout_seconds, exc=exc
+        )
+        logger.error(f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s (limit={timeout_seconds}s): {error_msg}")
 
         # Issue #61: Terminate the execution on the agent to prevent orphaned
         # Claude processes from accumulating. Best-effort — watchdog is safety net.
@@ -2165,7 +2213,7 @@ class TaskExecutionService:
             status=TaskExecutionStatus.FAILED,
             response="",
             error=error_msg,
-            error_code=TaskExecutionErrorCode.TIMEOUT,
+            error_code=error_code,
         )
 
 
