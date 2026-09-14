@@ -2903,7 +2903,8 @@
         "voice",
         "unit"
       ],
-      "description": "#2694 turn side: a RESUMED Workspace turn is prefixed with what the live session never heard (spoken rows labelled as spoken, the call's label as a bracketed marker, never `You:`); the cold replay carries the same rows in the same form and the delta is not added on top (no double-send on a cold retry); one total spoken-char budget across calls trimmed oldest-first with every cut named; newlines inside a replayed row cannot forge a labelled line; the delta is read before the user row persists and a read failure never blocks the turn; a voice call is refused (409) while a typed reply is in flight, after the uniform 404, and a typed turn is refused (409) while a call is on."
+      "description": "#2694 turn side: a RESUMED Workspace turn is prefixed with what the live session never heard (spoken rows labelled as spoken, the call's label as a bracketed marker, never `You:`); the cold replay carries the same rows in the same form and the delta is not added on top (no double-send on a cold retry); one total spoken-char budget across calls trimmed oldest-first with every cut named; newlines inside a replayed row cannot forge a labelled line; the delta is read before the user row persists and a read failure never blocks the turn; a voice call is refused (409) while a typed reply is in flight, after the uniform 404, and a typed turn is refused (409) while a call is on. #2700: the live-call marker is an OWNED LEASE — `owner` is keyword-only and required on both primitives, a release from a different call does not free a live thread, the pre-#2700 `\"1\"` value is releasable, the real lease/tick/slack constants and the >=4x TTL:tick ratio are pinned here, the renewer ticks and stops at the call's own cap, `start_workspace_voice` no longer arms the thread before a socket exists, and a start whose socket never opens leaves the thread writable (the orphan shape, with the armed-lease positive control).",
+      "updated": "2026-09-14"
     },
     {
       "file": "unit/test_2703_skill_assign_delivery.py",
@@ -2971,6 +2972,17 @@
         "unit"
       ],
       "description": "Legacy skills-library adoption alert idempotency (#2744): the terminal 'already has sources' refusal mints a STABLE URL-derived request_id (sha256[:12], reserved family prefix) at priority low + logger.info, so N syncs collapse to one operator-queue row and an operator's dismissal sticks; a different refused URL still gets its own item; the validation-reject and adoption-exception branches keep priority high and timestamped repeat-visible ids; the echoed URL is credential-scrubbed so a PAT-bearing setting never reaches the log or operator_queue.context."
+    },
+    {
+      "file": "unit/test_voice_auth.py",
+      "feature": "#600 / #2700",
+      "added": "2026-09-14",
+      "categories": [
+        "backend",
+        "voice",
+        "unit"
+      ],
+      "description": "The voice WebSocket + REST ownership gates (#600): `/ws/voice/{id}` and `POST .../voice/stop` reject a JWT user who does not own the session (4001 no/invalid token, 4004 unknown session, 4003 wrong user, admin bypass, JWT verified before the session lookup), the `/panel` read gate (ent#536), and the #705 audit-attribution kwargs. Plus the Workspace live-call lease (#2700, `TestWorkspaceLiveCallMarker`): the bridge arms a 60 s owned lease at connect and releases it on EVERY exit — normal close, `end_session` returning None, a raising close-out (which no longer skips the gemini cancel, the `saved` frame or the socket close), and task cancellation — the renewer is bounded at the call's `max_duration` + slack and does not outlive the bridge, an Agent Detail call never arms a thread marker, and the REST `/stop` release is owner-matched."
     }
   ]
 }
