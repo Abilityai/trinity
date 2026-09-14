@@ -126,6 +126,14 @@ async def register_subscription(
         # stored. Only Phase A (decide + persist) is awaited — the container
         # apply is backgrounded by the service — so the panel's immediate
         # `GET /api/subscriptions` refetch already sees the adopted agents.
+        # ent#582 runs FIRST, and the order is load-bearing. It carries the
+        # narrowing the #2572 sweep does not — it skips an agent that has ever
+        # executed successfully (that agent authenticates some other way) and
+        # never restarts one mid-execution. Run second, it would find nothing
+        # left to assign, report `connected_agents: 0` to the first-run step,
+        # and leave the restarts to the broader phase below.
+        connected = connect_agents_to_first_credential(subscription.id) if first_credential else 0
+
         try:
             from services.subscription_service import adopt_for_credentialless_agents
             await adopt_for_credentialless_agents(
@@ -139,11 +147,6 @@ async def register_subscription(
                 f"[#2572] credential-less adoption sweep failed after registering "
                 f"subscription '{payload.name}': {e}"
             )
-
-        # ent#582: the first credential reaches the agents created without one
-        # (the seeded fleet) — assigned now, running ones restarted in the
-        # background. Never fails the registration.
-        connected = connect_agents_to_first_credential(subscription.id) if first_credential else 0
 
         return SubscriptionRegistration(**subscription.model_dump(), connected_agents=connected)
 
