@@ -1,0 +1,102 @@
+{
+  "version": "1.1",
+  "date": "2026-09-13",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/2339-testing-docs-strategy",
+  "issue": "abilityai/trinity#2339",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "new_endpoints": [],
+    "changed_endpoints": [],
+    "new_db_reads": [],
+    "new_redis_keys": [],
+    "new_prompt_surfaces": [],
+    "widened_prompt_surfaces": [],
+    "dev_server_config_changes": [],
+    "new_dev_scripts": [],
+    "new_test_files": [
+      "tests/unit/_markdown_links.py",
+      "tests/unit/test_2339_testing_docs_consolidated.py"
+    ],
+    "doc_files": [
+      "docs/testing/STRATEGY.md (new)",
+      "docs/testing/JOURNEYS.md (regenerated)",
+      "docs/archive/README.md",
+      "docs/memory/requirements/infrastructure.md",
+      "docs/memory/requirements/security.md",
+      "docs/memory/feature-flows.md",
+      "docs/memory/feature-flows/testing-agents.md",
+      "docs/memory/learnings.md",
+      "docs/planning/PULL_MIGRATION_STATUS.md",
+      "AGENTS.md",
+      "README.md",
+      "tests/README.md",
+      "src/frontend/e2e/README.md",
+      "16 renames: 15 into docs/archive/testing/, 1 into docs/planning/ (content unchanged except two relative links, one placeholder path and one placeholder email)"
+    ],
+    "code_hunks": [
+      "src/backend/services/pull_pilot.py (a documentation path inside an existing log string; no control flow, no new data in the log line)",
+      "src/backend/canary/invariants/e01_terminal_state_closure.py (docstring only)",
+      "tests/unit/test_1081_pull_endpoints.py (docstring only)",
+      "tests/unit/test_2008_dead_credentials_update.py (one parametrize entry removed; the archived doc is out of that test's stated scope)",
+      "tests/journeys/catalog.yaml (two harness: paths; no status field)",
+      "tests/registry.json (three text-inserted entries)"
+    ],
+    "private_submodule": ".claude pointer moved in the working tree only (three pointer-line edits in skills/tidy, skills/read-docs, skills/ui-sweep, pushed to trinity-dev main as e56401b); NOT staged in this PR"
+  },
+  "findings": [],
+  "appendix": [
+    {
+      "id": "A1",
+      "scope": "PRE-EXISTING content inside a renamed file (public since 2026-06-01); documentation is hard-excluded (#12) so this is hygiene, not a finding",
+      "status": "VERIFIED in-context (grep); fixed in this PR",
+      "severity": "LOW",
+      "confidence": 10,
+      "category": "public-repo hygiene / absolute host path (#2091 class)",
+      "summary": "docs/archive/testing/302-settings-tabbed-layout-manual-test-plan.md carried a developer's home-directory path in a shell example. Substituted with a placeholder path; no technical content changed.",
+      "disposition": "substituted with /path/to/... in this PR"
+    },
+    {
+      "id": "A2",
+      "scope": "PRE-EXISTING content inside a renamed file (public since 2025-12-10); documentation is hard-excluded (#12) so this is hygiene, not a finding",
+      "status": "VERIFIED in-context (grep); fixed in this PR",
+      "severity": "LOW",
+      "confidence": 10,
+      "category": "public-repo hygiene / company-domain address in an example",
+      "summary": "docs/archive/testing/TESTING_GUIDE.md carried a company-domain test address in a login example. Substituted with user@example.com per the CLAUDE.md placeholder rule.",
+      "disposition": "substituted in this PR"
+    }
+  ],
+  "supply_chain_summary": {
+    "python_deps_changed": false,
+    "node_deps_changed": false,
+    "lockfiles_changed": false,
+    "note": "no dependency, workflow, Dockerfile, compose, webhook or LLM-surface files changed on the branch; the only skill-file changes are three pointer lines in the private submodule, scanned in P8 (0 suspicious patterns)"
+  },
+  "filter_stats": {
+    "candidates": 8,
+    "reported": 0,
+    "refuted_or_appendix": 8,
+    "detail": [
+      "3x email-regex hits on '+@pytest.mark.parametrize' lines (the diff '+' prefix is a valid local part) — false positive",
+      "1x enterprise-docs-guard pattern hit at README.md:780 — pre-existing line, not in the diff, outside the guard's scope (docs/ + seam files) — out of scope",
+      "1x absolute host path in a renamed archived doc — pre-existing, hygiene fix (A1)",
+      "1x company-domain test address in a renamed archived doc — pre-existing, hygiene fix (A2)",
+      "3x 'password=${ADMIN_PASSWORD}' in a renamed archived doc — an env-var reference, the pattern CLAUDE.md itself recommends — cleared",
+      "1x subprocess in the new guard — fixed argv ['git','ls-files','--',...], no shell, cwd=repo, check=True, reads bytes and executes nothing — cleared",
+      "1x fifteen docs leave the enterprise-docs-guard's live scope by moving under docs/archive/ — the exact PCRE replayed over every moved file: 0 hits, and over every new/changed live doc: 0 hits — cleared",
+      "1x .claude skill edits (SKILL.md is executable prompt code) — curl/wget/fetch/credential-env/prompt-injection scan over the added lines: 0 — cleared"
+    ]
+  },
+  "totals": { "critical": 0, "high": 0, "medium": 0, "low": 0 },
+  "trend": {
+    "prior": "docs/security-reports/cso-diff-2026-09-12-2337-journey-invariants.json",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0,
+    "direction": "flat",
+    "note": "the prior report's appendix A1 (audit-log actor attribution) is tracked privately as abilityai/trinity-enterprise#614 and is untouched by this branch"
+  }
+}

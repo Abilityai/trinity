@@ -2928,6 +2928,37 @@
         "unit"
       ],
       "description": "One invariant namespace (Rail R3): the catalog's **X-NN** definitions, the canary registry (INVARIANTS keys + every module's INVARIANT_ID) and the catalog's Canary mapping table agree — read via ast/regex through tests/unit/_invariant_catalog.py, never imported; exact per-family pins; Signal: mandatory on the new families with a shrink-only allowlist for the 54 legacy prose-only entries; synthetic-markdown self-tests prove a bold prose mention, a dagger row and a table row are not definitions."
+    },
+    {
+      "file": "unit/test_2339_testing_docs_consolidated.py",
+      "feature": "#2339",
+      "added": "2026-09-13",
+      "categories": [
+        "docs",
+        "guard",
+        "unit"
+      ],
+      "description": "Testing docs consolidation (Rail R5): the git-tracked top level of docs/testing is exactly STRATEGY.md + the orchestration invariant catalog + the generated JOURNEYS.md, with phases/ and ui-sweep/ the only subdirectories; STRATEGY carries the required sections, every relative link in the live set and the four entry points resolves, STRATEGY links its pointer targets and is linked from AGENTS.md, README.md and both test READMEs, copies no 4-line run from the READMEs or the catalog, defines no invariant and cites only resolvable ids, names every run-full.sh tier and every test-running workflow; every archived file is indexed in docs/archive/README.md; no live tracked file references a retired testing path (bytes scan over git ls-files, both link forms, self-match-proof)."
+    },
+    {
+      "file": "journeys/test_first_turn_journey.py",
+      "feature": "#2336",
+      "added": "2026-08-28",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J03 (first turn): a person's first turn with a freshly created agent produces real model output. Credential-bound by design, so it runs on a developer's stack and in the nightly, never in the per-PR smoke; polls against a deadline, never sleeps; fails rather than skips when the stack or the agent is not there."
+    },
+    {
+      "file": "journeys/test_j11_brief_delivery_journey.py",
+      "feature": "#2565",
+      "added": "2026-09-07",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J11 (brief delivery): a schedule that names one Workspace user lands its output as a turn in that person's Main chat without them asking. A deliberate strict=True xfail skeleton asserting the journey's invariants (E-01, E-05, L-03) until the delivery half ships; the shape #2350's Journey Impact gate accepts as a declared promise."
     }
   ]
 }
