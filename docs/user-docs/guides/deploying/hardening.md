@@ -1,60 +1,76 @@
 # Hardening a Marketplace Install
 
-A one-click Trinity droplet answers the public internet from the moment it boots. No provider in this channel can attach a private network at create time, so that is the starting posture by construction, not an oversight — and it is fine for evaluation, which is what the marketplace listing is for. This page is the path from there to an instance you would leave running.
+Take a one-click Trinity droplet from a bare public IP to an instance you would leave running: a real domain, then either a Cloudflare Tunnel or a private network, with the public ports closed behind you.
 
-Three stages, in order. Each one stands on its own, and each one is verifiable before you move to the next.
+## When to Run This
 
-| Stage | What it changes | Who should do it |
-|---|---|---|
-| 1. Add a domain | A memorable name and an ordinary certificate instead of a bare IP | Anyone past the first evaluation |
-| 2. Cloudflare Tunnel | The server stops listening on the public internet; inbound integrations keep working | Any instance that matters |
-| 3. Tailscale (instead of stage 2) | Only you can reach it, over a private network; inbound integrations stop working | An instance nobody else needs to reach |
+- You created a Trinity instance from a cloud marketplace listing, or with the DigitalOcean install script, and it answers at a bare IP address.
+- The instance is about to hold real work, real credentials, or other people's data.
+- You want a memorable address instead of an IP, and an ordinary long-lived certificate instead of the short-lived IP one.
 
-Stage 3 is an alternative to stage 2, not a step after it. Pick one, and the choice is decided by whether anything on the internet has to call your instance — see [Tailscale, and what it costs you](#tailscale-and-what-it-costs-you).
-
-> **Before anything else:** a fresh droplet has no admin account until someone claims it in a browser, and whoever opens it first becomes the admin. If you have not claimed yours yet, do that now — the claim window and how to close it are covered in [DEPLOYMENT.md → Security Recommendations](https://github.com/abilityai/trinity/blob/main/docs/DEPLOYMENT.md#security-recommendations).
+Not for you if Trinity already runs on a private network — the managed fleet's own shape — or behind a reverse proxy you operate. Those are finished postures, not compromises.
 
 ## What You Start With
 
-A 1-Click droplet boots with:
+| Component | State on first boot |
+|---|---|
+| Caddy on ports 80 and 443 | A browser-trusted Let's Encrypt certificate for the droplet's **IP address**, so there is no warning and no domain required. Certificates on this profile last about six days and renew while the server runs — an instance switched off for longer comes back to a browser warning until renewal catches up |
+| Host firewall | Inbound 22, 80 and 443 only |
+| Container ports | Not reachable from off-box. Docker publishes past ordinary firewall rules, so Trinity installs its own rules that drop anything arriving at a container from outside. The backend, MCP server and log collector are reachable only through Caddy, or from the droplet itself |
+| Admin account | None until someone claims it in a browser — **whoever opens it first becomes the admin** |
 
-- **Caddy on ports 80 and 443**, holding a browser-trusted Let's Encrypt certificate issued for the droplet's IP address. It works, and it needs no domain — but certificates on that profile last about six days, so an instance left switched off for longer comes back to a browser warning until renewal catches up.
-- **A host firewall** allowing only 22, 80 and 443 inbound.
-- **Container ports that are not reachable from outside**, enforced separately from the host firewall. Docker publishes past ordinary firewall rules, so Trinity installs its own rules that drop anything arriving at a container from off-box. The backend, the MCP server and the log collector are reachable only through Caddy, or from the droplet itself.
+So the exposure is not "everything is open". It is that the web UI and the API answer anyone on the internet who finds the address, protected by your login alone.
 
-So the exposure is not "everything is open". It is that the web UI and the API answer anyone on the internet who finds the address, and they are protected by your login alone.
+## Pre-flight
 
-## Stage 1 — Add a Domain
+- [ ] **The instance is claimed** — if nobody has created the admin account yet, do that first.
+- [ ] **You own a domain** and can edit its DNS records.
+- [ ] **For the tunnel path:** that domain's DNS is hosted by Cloudflare, and you can sign in to the Cloudflare Zero Trust dashboard.
+- [ ] **For the private-network path:** you have confirmed nothing outside needs to call your instance — see the comparison in [Step 2](#step-2-choose-how-it-is-reached).
+- [ ] **Shell access to the droplet** for Step 2 — over SSH, or the provider's web console.
 
-**Prerequisite: point the domain at this server first.** Create an `A` record for the name you want, with the droplet's IPv4 address as its value. Wait until it resolves before moving on — `dig +short your-domain.com` from your own machine should print the droplet's address.
+## Procedure
 
-Then, in Trinity: **Settings → General → Public URL**, enter the full address including `https://`, and save. That is the entire stage — there is no terminal step and no certificate to install.
+### Step 1: Give it a real name
+
+Create an `A` record for the name you want, pointing at the droplet's IPv4 address, and confirm it resolves:
+
+```bash
+dig +short your-domain.com
+# Expected: the droplet's IP address
+```
+
+Then, in Trinity: **Settings → General → Public URL**, enter the full address including `https://`, and save. No terminal step, no certificate to install.
 
 What saving it does:
 
-- Trinity hands out that name instead of the IP everywhere it publishes an address: Telegram, WhatsApp and VoIP callbacks, Slack's OAuth return, public chat links, workspace links, file downloads.
-- It authorises the web server in front to obtain a certificate **for that one name**. Caddy asks Trinity whether a name is allowed before requesting a certificate, and Trinity answers yes only for the name you saved. Nobody else can point a domain at your droplet and have certificates issued on your account.
-- It re-registers existing Telegram webhooks and rewrites WhatsApp binding URLs to the new base, immediately. If the domain is not live yet, working bots move to an address that answers nothing — which is why the DNS record comes first.
+- Trinity hands out that name instead of the IP everywhere it publishes an address — Telegram, WhatsApp and VoIP callbacks, Slack's OAuth return, public chat links, workspace links, file downloads.
+- It authorises the web server in front to obtain a certificate **for that one name**. Caddy asks Trinity whether a name is allowed before requesting a certificate, and Trinity answers yes only for the saved name — so nobody else can point a domain at your droplet and have certificates issued on your account.
+- It re-registers existing Telegram webhooks and rewrites WhatsApp binding URLs to the new base **immediately**. On a name that is not live yet, working bots move to an address that answers nothing, which is why the DNS record comes first.
 
-**Clearing it later.** Emptying the Public URL field stops Trinity handing the name out, but if the address was also baked into the server's environment at install time, the web server keeps serving certificates for it. Settings will read "not configured" while that is still true — change the environment value and restart if you need it genuinely gone.
+The certificate is obtained on the first request that arrives for the name, so **visiting the site is what completes this step**. Until someone does, Trinity says so: Settings reads *saved, waiting for the first visit*, and the first-run setup step stays open.
 
-**How to verify it worked.** Open `https://your-domain.com` in a browser. You should get the Trinity login or dashboard with a valid padlock and no warning. The certificate is obtained on that first request, so this visit is what completes the stage — until someone makes it, nothing has been proven, and Trinity says so: the Public URL in Settings reads *saved, waiting for the first visit* until a request for the name actually arrives.
+### Step 2: Choose how it is reached
 
-If the browser shows a certificate error instead, the request is not reaching this droplet. Check the `A` record, then that ports 80 and 443 are open to the internet (a cloud firewall you added during the claim window is the usual cause).
+Both options reach the same outcome — nothing listening on the public interface — and differ in one way that decides it for you.
 
-## Stage 2 — Cloudflare Tunnel
+| | Cloudflare Tunnel | Private network (Tailscale) |
+|---|---|---|
+| Web UI, Workspace, MCP | Anyone you give the address to | Your devices only |
+| Telegram, WhatsApp, VoIP | Work | **Broken** |
+| Public chat links, agent websites, webhook triggers, paid chat, inbound agent-to-agent | Work | **Broken** |
+| Slack | Works | Works — Trinity connects outward over a WebSocket |
+| Needs | A domain on Cloudflare | A Tailscale account and a device to connect from |
 
-A tunnel is the step that actually takes the server off the public internet. `cloudflared` runs beside Trinity and dials **outward** to Cloudflare; traffic arrives back down that connection. Nothing needs to listen publicly, so you can close 80 and 443 entirely afterwards.
+Everything in the broken column is a third party making a request **to** your instance, and a private network is precisely what prevents that. Choose the tunnel unless nothing outside needs to call in.
 
-Inbound integrations keep working, because the world still reaches a public hostname — Cloudflare's — and Cloudflare forwards to you. That is the property that makes this the recommended posture rather than a VPN.
+### Step 2a: Cloudflare Tunnel
 
-**Prerequisite:** stage 1, on a domain whose DNS is hosted by Cloudflare.
+`cloudflared` runs beside Trinity and dials **outward** to Cloudflare; traffic arrives back down that connection.
 
-### The steps
+The Cloudflare-side setup — creating the tunnel, the ingress rules, the DNS record — is identical on a marketplace droplet. Follow [Public Access → Cloudflare Tunnel Setup](public-access.md#cloudflare-tunnel-setup), then return here for the two things that differ on this install.
 
-The Cloudflare-side setup — creating the tunnel, the ingress rules, the DNS record — is the same on a marketplace droplet as anywhere else. Follow [Public Access](public-access.md#cloudflare-tunnel-setup) for those, then come back here for the two things that differ on this install.
-
-**1. Put the token in `.env`.** On the droplet:
+**1. Put the token in `.env`:**
 
 ```bash
 sudo nano /opt/trinity/.env
@@ -62,7 +78,7 @@ sudo nano /opt/trinity/.env
 # TUNNEL_TOKEN=eyJ...
 ```
 
-**2. Restart through the installer, not `docker compose`.**
+**2. Restart through the installer, not `docker compose`:**
 
 ```bash
 cd /opt/trinity
@@ -71,47 +87,60 @@ sudo ./scripts/deploy/start.sh --hosted
 
 A non-empty `TUNNEL_TOKEN` is treated as intent: the installer starts the tunnel profile and records it in `.env`, so later `docker compose ... stop` and `... logs` act on the tunnel too. This is the same command used to update the instance, so it is safe to re-run.
 
-### How to verify it worked
+> **Use `docker compose restart`, not `down/up`.** `docker compose down` removes the `trinity-agent-network`, which orphans every running agent container — they keep running but lose their network and have to be removed and recreated. `restart` preserves both the agents and the network. The only times to use `down` are: (1) intentional full teardown, (2) recovering from a corrupted compose state.
 
-```bash
-docker logs trinity-cloudflared | tail -20
-# Look for: "Registered tunnel connection"
-```
+### Step 2b: Private network (Tailscale)
 
-Then load your domain in a browser — you are now arriving through Cloudflare. To confirm the tunnel is carrying the traffic rather than the old direct path, close the door behind you: add a cloud firewall that blocks inbound 80 and 443, and load the site again. If it still works, you are on the tunnel. If it stops, the tunnel is not carrying traffic yet — re-check the ingress rules before leaving the ports closed.
+Trinity has no Tailscale integration — this is a host-level install, and Trinity neither configures nor monitors it. Install it from Tailscale's own instructions, then mind two things specific to this image:
 
-Leave 22 reachable from your own address only, or use the provider's console for shell access.
+- **Install Tailscale *after* provisioning, never before.** The installer resets the host firewall when it provisions a machine, discarding rules you added by hand. If you re-run provisioning later, re-add your rules afterwards.
+- **Reach Trinity through Caddy, not container ports.** Over the tailnet, `https://your-domain.com` and the droplet's ports 80/443 work. Direct container ports — 8000 for the API, 8080 for MCP, 8686 for the log collector — do **not**, and a firewall rule cannot open them, because Trinity's container rules are evaluated first. Point MCP clients at `https://your-domain.com/mcp`.
 
-**One cost to know about.** Closing 80 and 443 also stops Caddy renewing the certificates it holds for the droplet's IP and for your domain — renewal uses those ports. Behind a tunnel that does not matter day to day, because visitors arrive over Cloudflare's certificate rather than Caddy's, but the local ones will expire and the logs will say so. If you ever reopen the ports and reach the instance directly, expect a browser warning until renewal catches up.
+Slack is the one integration that survives this path: Trinity connects outward to Slack over a WebSocket, so channels keep working. Installing the Slack app the first time still needs a public address for the OAuth callback — do that before closing the instance off.
 
-## Tailscale, and What It Costs You
+### Step 3: Close the public ports
 
-Tailscale (or any VPN) puts the droplet on a private network only your devices can reach. It is a legitimate finished posture — it is what Trinity's own managed fleet runs — but it is **not** a substitute for the tunnel, and picking it by mistake breaks things quietly.
+Once the tunnel is connected, or you can reach the instance over the tailnet, add a cloud firewall blocking inbound 80 and 443. Leave 22 reachable from your own address only, or use the provider's console for shell access.
 
-**What stops working:** everything that calls *in*. Telegram, WhatsApp and VoIP webhooks, public chat links, agent website links, schedule webhook triggers, paid chat and inbound agent-to-agent calls. All of those are third parties making a request to your instance, and a private network is precisely what prevents that.
+**One cost to know about.** Closing 80 and 443 also stops Caddy renewing the certificates it holds for the droplet's IP and for your domain — renewal needs those ports. Behind a tunnel that does not matter day to day, because visitors arrive over Cloudflare's certificate rather than Caddy's, but the local ones expire and the logs will say so. If you later reopen the ports and connect directly, expect a browser warning until renewal catches up.
 
-**Slack is the exception** — Trinity connects outward to Slack over a WebSocket (Socket Mode), so Slack keeps working on a private network. Installing the app the first time still needs a public address for the OAuth callback; do that before you close the instance off, or temporarily reopen it.
+## Verify
 
-**Choose Tailscale if** you are the only person who uses this instance and you drive it from the UI, Claude Code or the CLI. **Choose the tunnel if** anything outside needs to reach it.
+Run these as you go. If a check fails, do not close the ports — see **Recovery**.
 
-### Installing it on a marketplace droplet
+| Check | Command | Expected |
+|---|---|---|
+| DNS points here | `dig +short your-domain.com` | The droplet's IP |
+| The domain serves Trinity | Open `https://your-domain.com` in a browser | Trinity loads, valid padlock, no warning |
+| Trinity agrees it is live | **Settings → General → Public URL** | The address with a tick, not *saved, waiting for the first visit* |
+| Tunnel connected (2a) | `docker logs trinity-cloudflared \| tail -20` | `Registered tunnel connection` |
+| Traffic is on the tunnel (2a) | Block inbound 80/443, reload the site | The site still loads |
+| Platform healthy | `curl -s http://localhost:8000/health` | `{"status":"healthy",...}` |
 
-Trinity has no Tailscale integration — this is a host-level install, and Trinity neither configures nor monitors it. Install it the standard way from Tailscale's own instructions, then two things specific to this image:
+The full six-probe check is in [Monitoring](monitoring.md) — run it if anything above looks wrong.
 
-- **Install Tailscale *after* provisioning, never before.** The installer resets the host firewall when it provisions a machine, which discards rules you added by hand. If you re-run provisioning later, re-add any Tailscale firewall rules afterwards.
-- **Reach Trinity through Caddy, not through container ports.** Over the tailnet, `https://your-domain.com` and the droplet's ports 80/443 work. Direct container ports — 8000 for the API, 8080 for MCP, 8686 for the log collector — do **not**, and cannot be opened by a firewall rule, because the container firewall rules are evaluated first. Point MCP clients at `https://your-domain.com/mcp`.
+## Recovery
 
-Once you are on the tailnet, close 80 and 443 to the internet with a cloud firewall. The instance is then reachable only from your devices.
+| Symptom | Cause | Fix |
+|---|---|---|
+| Certificate error on the domain | The request is not reaching this droplet, so no certificate was ever obtained | Re-check the `A` record, then that 80 and 443 are open to the internet (a cloud firewall added during the claim window is the usual cause) |
+| Settings still says *saved, waiting for the first visit* | Nothing has arrived at that name yet | Load the site in a browser. If it still does not flip, treat as the row above |
+| Telegram or WhatsApp stopped delivering after saving the domain | The webhooks were re-pointed at the new address before it was live | Confirm the domain loads, then re-save the Public URL to re-register them |
+| Site unreachable after closing 80/443 | The tunnel is not carrying traffic | Reopen the ports, check `docker logs trinity-cloudflared`, re-check the ingress rules, then close them again |
+| MCP client cannot connect over the tailnet | It is pointed at a container port | Point it at `https://your-domain.com/mcp` |
+
+**Clearing the Public URL** stops Trinity handing the name out, but if the address was also baked into the server's environment at install time, the web server keeps serving certificates for it. Settings then reads *not configured* while that is still true — change the environment value and restart if you need it genuinely gone.
 
 ## The Short Version
 
-- The marketplace default is for **evaluation**. It is reachable by anyone who finds the address.
+- The marketplace default is for **evaluation**. It answers anyone who finds the address.
 - Add a domain as soon as the instance is more than a test, and confirm it by loading the site.
 - Keep a real instance off the open internet: a tunnel if anything needs to call in, a private network if not.
-- Whichever you choose, close 80 and 443 with a cloud firewall afterwards — that is the step that makes it real.
+- Closing 80 and 443 afterwards is the step that makes it real.
 
 ## See Also
 
 - [Public Access](public-access.md) — the Cloudflare Tunnel setup in full, and the ingress rules
 - [Single-Server Deployment](single-server.md) — base server setup
-- [Backup and Restore](backup-and-restore.md) — what to have in place before this instance matters
+- [Backup and Restore](backup-and-restore.md) — have this in place before the instance matters
+- [Monitoring](monitoring.md) — the six health probes and resource thresholds
