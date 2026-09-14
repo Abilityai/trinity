@@ -555,7 +555,7 @@ defects live in git's own last-match-wins and dir-descent semantics):
 | Fleet kill-switch | `GIT_SYNC_AUTO` env var (if missing/false the loop never starts) | `true` if the backend set it at creation **or** `auto_sync_enabled = 1` — re-derived as the OR of both on every container rebuild (ent#109) |
 | Freeze schedules when sync failing | `PUT /api/agents/{name}/git/freeze-schedules-if-failing` | `false` (opt-in) |
 | Alert threshold | Hardcoded in `SyncHealthService.ALERT_THRESHOLD` | 3 consecutive failures |
-| Sync-health poll cadence (#2742) | `SYNC_HEALTH_POLL_INTERVAL_SECONDS` env var on the backend | 60 s (**unchanged** — the knob ships, the default does not move) |
+| Sync-health poll cadence (#2742) | `SYNC_HEALTH_POLL_INTERVAL_SECONDS` env var on the backend — read at **call** time (a property, not an import-time copy), and wired into `docker-compose.yml`, `docker-compose.prod.yml` and `.env.example` as `${VAR:-60}`. Prod compose launches standalone (no base merge, no `env_file:`), so the explicit `environment:` list is the only route in; `/validate-pr` caught all three missing on this branch (the #1056 packaging class), and `test_2742_sync_health_leader_lock.py::TestPollIntervalReachesTheContainer` now pins the form so unset and empty both land on the default | 60 s (**unchanged** — the knob ships, the default does not move) |
 | Stuck-lock report sensitivity (#2742) | `_STUCK_LOCK_MIN_SIGHTINGS` / `_STUCK_LOCK_MIN_AGE_SECONDS` module constants in `agent_server/routers/git.py` — deliberately **not** an env var: the tunable is the number of stable sightings, not a wall-clock age, because age measures the in-flight operation | 3 sightings / 900 s |
 
 ## Known Limitations

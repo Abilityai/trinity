@@ -349,3 +349,78 @@ def test_explicit_constructor_value_wins_over_env(monkeypatch):
     survive the env read, which requires an `is not None` check, not truthiness."""
     monkeypatch.setenv("SYNC_HEALTH_POLL_INTERVAL_SECONDS", "300")
     assert _svc(poll_interval=0).poll_interval == 0
+
+
+class TestPollIntervalReachesTheContainer:
+    """The cadence knob is wired into BOTH compose files and `.env.example`.
+
+    The env read above is deliberately at CALL time (a property, not an
+    import-time copy) so an operator override is honoured — but a knob the
+    container never receives is inert no matter how carefully the code reads
+    it, and `/validate-pr` caught exactly that on this branch: all three files
+    were missing the var. That is the #1056 class (`VOIP_*`), which
+    `test_ent237_skill_source_env_packaging.py` records as having recurred
+    seven times. A new backend `os.getenv` is THREE edits, not one.
+
+    Prod compose launches standalone — no base-compose merge and no `env_file:`
+    on the backend service — so the explicit `environment:` list is the ONLY
+    route in, and dev-only wiring does not carry over.
+
+    The `${VAR:-60}` form is asserted rather than mere presence. There is no
+    "disable" sentinel for a cadence: unset and empty must both land on the
+    60 s default, which is the documented promise that this issue does not
+    move the poll rate.
+    """
+
+    COMPOSE_FILES = ("docker-compose.yml", "docker-compose.prod.yml")
+    VAR = "SYNC_HEALTH_POLL_INTERVAL_SECONDS"
+
+    @staticmethod
+    def _backend_env_lines(compose: str) -> list[str]:
+        import re
+
+        repo = Path(__file__).resolve().parents[2]
+        text = (repo / compose).read_text()
+        m = re.search(r"^  backend:$(.*?)(?=^  \w)", text, re.M | re.S)
+        assert m, f"no backend service found in {compose}"
+        env = re.search(r"^    environment:$(.*?)(?=^    \w)", m.group(1), re.M | re.S)
+        assert env, f"backend has no environment: block in {compose}"
+        return [ln.strip() for ln in env.group(1).splitlines() if ln.strip().startswith("- ")]
+
+    @pytest.mark.parametrize("compose", COMPOSE_FILES)
+    def test_var_is_passed_through_with_the_default_form(self, compose):
+        expected = f"- {self.VAR}=${{{self.VAR}:-60}}"
+        lines = self._backend_env_lines(compose)
+        matching = [ln for ln in lines if ln.split("=", 1)[0] == f"- {self.VAR}"]
+        assert matching, (
+            f"{self.VAR} is read by sync_health_service but never reaches the "
+            f"backend container in {compose} — the operator's .env lever is inert "
+            f"(#1056 packaging class)"
+        )
+        assert matching[0].split("#", 1)[0].strip() == expected, (
+            f"{compose} must pass {self.VAR} through as {expected} so that both "
+            f"unset and empty land on the 60 s default; got {matching[0]!r}"
+        )
+
+    def test_env_example_documents_the_knob(self):
+        repo = Path(__file__).resolve().parents[2]
+        text = (repo / ".env.example").read_text()
+        assert f"{self.VAR}=60" in text, (
+            f"{self.VAR} must be documented in .env.example at its unchanged "
+            f"60 s default"
+        )
+
+    def test_default_form_matches_the_code_default(self):
+        """The compose default and the code default are one number.
+
+        Pinned against the module constant rather than a literal, so a future
+        change to one side fails here instead of silently giving a container a
+        different cadence from a laptop.
+        """
+        assert sync_health_service.DEFAULT_POLL_INTERVAL == 60
+        for compose in self.COMPOSE_FILES:
+            line = [
+                ln for ln in self._backend_env_lines(compose)
+                if ln.split("=", 1)[0] == f"- {self.VAR}"
+            ][0]
+            assert f":-{sync_health_service.DEFAULT_POLL_INTERVAL}}}" in line
