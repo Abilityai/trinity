@@ -341,10 +341,15 @@
                     Default Model
                   </label>
                   <div class="mt-1 flex gap-2 items-center">
+                    <!-- #2197 — `min-w-0`. A flex item defaults to
+                         `min-width: auto`, and a <select>'s min-content width is
+                         its WIDEST OPTION ("Claude Opus 5 — Most capable Opus
+                         (latest) (recommended)", ~417px), so this control alone
+                         scrolled the Settings page body at 375px. -->
                     <select
                       v-model="platformDefaultModelValue"
                       :disabled="savingPlatformDefaultModel"
-                      class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                      class="block flex-1 min-w-0 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
                     >
                       <!-- Options derive from the single source of truth
                            (src/constants/modelCatalog.js, generated from
