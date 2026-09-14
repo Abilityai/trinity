@@ -6,7 +6,7 @@ A quick tour of the web UI — dashboard, agent management, chat, and day-to-day
 
 ## Logging In
 
-- **Admin login** — Enter username `admin` and the password set via `ADMIN_PASSWORD` in `.env` before first boot (self-hosted) or the one chosen at signup (cloud). There is no first-visit password wizard.
+- **Admin login** — Enter username `admin` (or your admin email) and the password set via `ADMIN_PASSWORD` in `.env` before first boot (self-hosted), the one chosen at signup (cloud), or — on an install booted without `ADMIN_PASSWORD`, such as a marketplace one-click droplet — the one you chose on the first-visit "Create your admin account" screen.
 - **Email login** — Enter your email to receive a 6-digit code (requires email service configuration).
 
 ## Top Navigation

@@ -21,7 +21,7 @@ SIZE='s-4vcpu-8gb'      # 4 vCPU / 8 GB, $48/month — Trinity's recommended siz
 IMAGE='ubuntu-24-04-x64'
 DEFAULT_REGION='fra1'
 DEFAULT_NAME='trinity'
-TRINITY_IMAGE_TAG="${TRINITY_IMAGE_TAG:-v0.9.5-rc2}"
+TRINITY_IMAGE_TAG="${TRINITY_IMAGE_TAG:-v0.9.5-rc3}"
 
 fail() { printf '\n%s\n\n' "$1" >&2; exit 1; }
 ask()  { printf '%s' "$1" >&2; }

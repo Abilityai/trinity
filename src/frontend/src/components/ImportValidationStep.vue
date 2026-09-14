@@ -292,8 +292,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  // The OnboardingWizard unmounts CreateAgentModal on `created` (its own
-  // credential step takes over) — polling must die with the component.
+  // The first-run overlay's agent step unmounts CreateAgentModal on `created`
+  // (ent#581) — polling must die with the component.
   stopped = true
   document.removeEventListener('keydown', onKeydown)
   if (timer) clearTimeout(timer)

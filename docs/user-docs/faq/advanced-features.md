@@ -8,7 +8,7 @@ Yes. Click **Talk** in the agent's header, beside **Workspace** — Trinity open
 
 ## I clicked Talk and the call didn't start — why?
 
-**Talk** is always there; it takes you to the Workspace, and the Workspace tells you why a call cannot start rather than leaving you with a button that does nothing. The usual reasons: no `GEMINI_API_KEY` in **Settings → AI Keys**, the `VOICE_ENABLED` flag off (it defaults to on when the key is present), the browser refusing microphone permission, or a page served over plain http (a microphone needs a secure page). A call also won't start while a reply to a typed message is still being written — wait for it, then try again — and a pasted or bookmarked link with `voice=1` in it opens the chat but starts nothing; only the button starts a call. Voice is for signed-in platform users only — it does not appear on public agent links or for external clients signed in with a portal code. See [Voice Chat](../advanced/voice-chat.md#when-the-control-is-disabled).
+**Talk** is always there; it takes you to the Workspace, and the Workspace tells you why a call cannot start rather than leaving you with a button that does nothing. The usual reasons: no Gemini key in **Settings → Integrations** ([Platform Keys](../credentials/platform-keys.md#gemini)), the `VOICE_ENABLED` flag off (it defaults to on when the key is present), the browser refusing microphone permission, or a page served over plain http (a microphone needs a secure page). A call also won't start while a reply to a typed message is still being written — wait for it, then try again — and a pasted or bookmarked link with `voice=1` in it opens the chat but starts nothing; only the button starts a call. Voice is for signed-in platform users only — it does not appear on public agent links or for external clients signed in with a portal code. See [Voice Chat](../advanced/voice-chat.md#when-the-control-is-disabled).
 
 ## What can the agent do during a voice call, and can I limit it?
 
@@ -40,7 +40,7 @@ Its audience decides. `operator` (the default) shows a canvas on Agent Detail an
 
 ## Can Trinity generate images?
 
-Yes. The platform has a two-step Gemini pipeline: it first refines your prompt using best-practice templates for the use case, then generates the image from the refined prompt, returned as base64 or a URL. You call it via `POST /api/image/generate`, and it requires a Gemini API key configured in **Settings → AI Keys**. The same pipeline powers agent avatars and other platform features internally. See [Image Generation](../advanced/image-generation.md).
+Yes. The platform has a two-step Gemini pipeline: it first refines your prompt using best-practice templates for the use case, then generates the image from the refined prompt, returned as base64 or a URL. You call it via `POST /api/image/generate`, and it requires a Gemini API key configured in **Settings → Integrations** (Gemini). The same pipeline powers agent avatars and other platform features internally. See [Image Generation](../advanced/image-generation.md).
 
 ## How do agent avatars work?
 
@@ -48,7 +48,7 @@ Every agent can have an AI-generated avatar. You can generate one from an identi
 
 ## Why did my agent's avatar generation fail?
 
-The Generate dialog shows a classified reason rather than a generic error. `not_configured` means no image-generation API key is set — add `GEMINI_API_KEY` in **Settings → AI Keys**. `safety_filter` means the upstream model blocked the request — reword the identity prompt. `invalid_input` means the prompt or reference image was rejected, while `rate_limited` and `timeout` usually just need a retry. See [Agent Avatars](../advanced/agent-avatars.md#generation-failures).
+The Generate dialog shows a classified reason rather than a generic error. `not_configured` means no image-generation API key is set — add a Gemini key in **Settings → Integrations** ([Platform Keys](../credentials/platform-keys.md#gemini)). `safety_filter` means the upstream model blocked the request — reword the identity prompt. `invalid_input` means the prompt or reference image was rejected, while `rate_limited` and `timeout` usually just need a retry. See [Agent Avatars](../advanced/agent-avatars.md#generation-failures).
 
 ## Can my agent build its own dashboard?
 

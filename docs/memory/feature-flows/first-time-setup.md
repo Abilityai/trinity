@@ -11,11 +11,24 @@ First-time setup wizard for admin password and API key configuration. On an inst
 > `setup_completed` flag and the wizard is the only door in.
 >
 > It does **not** render on an install that boots with `ADMIN_PASSWORD` set
-> (mandatory in `docker-compose.prod.yml`, always present after
-> `scripts/deploy/start.sh`, baked into hosted/marketplace images).
+> (always present after `scripts/deploy/start.sh`, or given in user-data on a
+> marketplace image).
 > `_ensure_admin_user` provisions the admin during startup, and
 > `_mark_setup_completed_if_provisioned` then writes `setup_completed=true`, so
 > the operator logs straight in with the password from their deployment config.
+>
+> **Marketplace claim (trinity-enterprise#580, 2026-09-11).** A one-click
+> marketplace image boots with `ADMIN_PASSWORD` deliberately blank
+> (`ADMIN_PASSWORD_SOURCE=browser`, written by first boot and persisted by
+> `start.sh`), so the no-admin branch above is its normal first run: the first
+> visitor lands on `/setup` and creates the admin — no terminal, no password in
+> the MOTD. With a user-data password the image takes the provisioned branch
+> instead. Only `docker-compose.hosted.yml` renders a blank password (prod keeps
+> `:?`), and it forwards `ADMIN_PASSWORD_SOURCE=${…:-unset}`: the one backend
+> change is that `POST /api/setup/admin-password` refuses (403) a blank password
+> under `unset` — a hand-run hosted stack — after the existing-admin check and
+> before hashing. The accepted creation-to-first-visit risk is in
+> `docs/DEPLOYMENT.md` → Security Recommendations.
 >
 > Two consequences for the flows documented below:
 >
@@ -28,11 +41,12 @@ First-time setup wizard for admin password and API key configuration. On an inst
 >    priced the tradeoff on "there is no admin yet", which is now true exactly
 >    where the wizard still renders).
 > 2. The **admin sign-in email** is no longer captured here for most installs.
->    It moves to a dismissible post-login prompt
->    (since ent#437 section 1 of `components/onboarding/FinishSetupCard.vue`,
->    formerly `AdminEmailNudge.vue` → Settings → General). The **product-updates
+>    It moves to a skippable post-login prompt (since ent#581 the `email` step of
+>    the first-run overlay, `components/onboarding/FirstRunOverlay.vue` over
+>    `firstRunSteps.js`; formerly `FinishSetupCard.vue` section 1, before that
+>    `AdminEmailNudge.vue` → Settings → General). The **product-updates
 >    opt-in** got its Settings home in `abilityai/trinity-enterprise#463`; the
->    usage-sharing consent is section 2 of the same card
+>    usage-sharing consent is the overlay's `sharing` step
 >    ([telemetry-sharing.md](telemetry-sharing.md)).
 >
 > Canonical description: `docs/memory/architecture.md` →

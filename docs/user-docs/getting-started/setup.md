@@ -69,12 +69,18 @@ Password login is rate-limited: five failed attempts on one account within 15 mi
 
 ### Your First Dashboard
 
-The Dashboard shows at most one first-run card at a time, highest priority first, and each is dismissible:
+On a fresh install the Dashboard opens **first-run setup**: one sequence over a dashboard that does not move underneath it. A rail on the left lists the steps this install actually needs — steps that do not apply to you never appear — and marks each one done as you go. The order is fixed, and you can go back:
 
-- **Secure this instance** -- Only on an install provisioned from a marketplace image (the DigitalOcean 1-Click), for admins, until a domain is configured. See [Single Server → DigitalOcean 1-Click](../guides/deploying/single-server.md#digitalocean-marketplace-1-click).
-- **Start here** -- Shown while every agent you can see is one Trinity seeded, i.e. before you have made the install yours. Three doors: **Show me** opens the Cornelius chat so you can watch a seeded agent work; **Make me one** opens the one-question onboarding wizard (see [Quick Start](quick-start.md#guided-onboarding-first-run)); *Already run a fleet? Bring it over →* links to the docs for migrating an existing fleet. The card stands down for good once you create an agent of your own.
-- **Getting started** -- A checklist that ticks off your first milestones and hides itself when the last one is done. It appears only on instances with the matching enterprise entitlement.
-- **Finish setup** -- Admin-only post-login asks the first-run form no longer carries: **Add a sign-in email** (so you can log in with email + password; also available at **Settings → General → Admin sign-in email**) and the anonymous usage-sharing consent, whose **Not now** snoozes that ask for two weeks per browser (see [Telemetry](../operations/telemetry.md)).
+- **Secure this instance** -- Only on an install provisioned onto a cloud VM at a bare IP (the DigitalOcean 1-Click, or the `trinity-do-create.sh` installer), for admins, until a domain is configured. Set a domain here, then serve it through a Cloudflare Tunnel. See [Single Server → DigitalOcean 1-Click](../guides/deploying/single-server.md#digitalocean-marketplace-1-click).
+- **Sign-in email** -- Only when the admin account has no email yet, so you can log in with email + password. An install you claimed in the browser collected it at `/setup`, so this step does not appear. Also at **Settings → General → Admin sign-in email**.
+- **Connect Claude** -- The one required step. Paste a Claude subscription token or an Anthropic API key; it is checked with Anthropic before it is saved, and the first credential is handed to the agents that had none. Until this is done, no agent can run.
+- **Other keys** -- Optional: a GitHub token, an email-provider key (needed for email sign-in codes), and a Gemini key (voice features and generated agent avatars). Each says what skipping it costs, and all of them live at **Settings → Integrations** afterwards.
+- **Your first agent** -- Two doors: **Show me** opens the Cornelius chat so you can watch a seeded agent work, and **Make me one** creates one from a purpose you pick. Already running a fleet? A link takes you to migrating an existing one.
+- **Usage sharing** -- The anonymous usage-sharing consent, asked once inside the sequence rather than as a dialog afterwards (see [Telemetry](../operations/telemetry.md)).
+
+Every step except **Connect Claude** is skippable, and skipping tells you where to find it later. **Finish later** closes the whole sequence; nothing re-opens it on its own. To pick it up again, use **Settings → General → First-run setup**, or add `?onboarding=1` to the Dashboard URL — completed steps stay complete.
+
+The one card that still lives on the Dashboard is **Getting started**, a checklist that ticks off your first milestones over your first days and hides itself when the last one is done. It appears only on instances with the matching enterprise entitlement.
 
 ### Your Starter Fleet
 

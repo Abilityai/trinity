@@ -18,9 +18,7 @@ from config import (
     SMTP_PORT,
     SMTP_USER,
     SMTP_PASSWORD,
-    SMTP_FROM,
     SENDGRID_API_KEY,
-    RESEND_API_KEY
 )
 
 logger = logging.getLogger(__name__)
@@ -36,8 +34,24 @@ class EmailService:
     """
 
     def __init__(self):
+        # The env default only. The provider actually used is resolved per send
+        # (`_runtime_config`, ent#582) so a Resend key saved in Settings applies
+        # without a restart and in every worker.
         self.provider = EMAIL_PROVIDER.lower()
         logger.info(f"Email service initialized with provider: {self.provider}")
+
+    def _runtime_config(self):
+        """(provider, resend_key, from_address), Settings → env, read per send.
+
+        Lazy import: `services.settings_service` pulls in `database`, and this
+        module must stay importable under the stubbed-`config` unit tests.
+        """
+        from services.settings_service import settings_service
+        return (
+            settings_service.get_email_provider(),
+            settings_service.get_resend_api_key(),
+            settings_service.get_email_from_address(),
+        )
 
     async def send_verification_code(
         self,
@@ -88,16 +102,17 @@ class EmailService:
             True if email was sent successfully, False otherwise
         """
         try:
-            if self.provider == "console":
+            provider, resend_key, from_address = self._runtime_config()
+            if provider == "console":
                 return self._send_console(to_email, subject, body)
-            elif self.provider == "smtp":
-                return self._send_smtp(to_email, subject, body, html_body)
-            elif self.provider == "sendgrid":
-                return await self._send_sendgrid(to_email, subject, body, html_body)
-            elif self.provider == "resend":
-                return await self._send_resend(to_email, subject, body, html_body)
+            elif provider == "smtp":
+                return self._send_smtp(to_email, subject, body, html_body, from_address)
+            elif provider == "sendgrid":
+                return await self._send_sendgrid(to_email, subject, body, html_body, from_address)
+            elif provider == "resend":
+                return await self._send_resend(to_email, subject, body, html_body, resend_key, from_address)
             else:
-                logger.error(f"Unknown email provider: {self.provider}")
+                logger.error(f"Unknown email provider: {provider}")
                 # Fall back to console
                 return self._send_console(to_email, subject, body)
         except Exception as e:
@@ -179,7 +194,8 @@ If you didn't request this code, you can safely ignore this email.
         to_email: str,
         subject: str,
         body: str,
-        html_body: Optional[str] = None
+        html_body: Optional[str] = None,
+        from_address: str = "",
     ) -> bool:
         """Send email via SMTP."""
         if not all([SMTP_HOST, SMTP_USER, SMTP_PASSWORD]):
@@ -190,7 +206,7 @@ If you didn't request this code, you can safely ignore this email.
         try:
             msg = MIMEMultipart("alternative")
             msg["Subject"] = subject
-            msg["From"] = SMTP_FROM
+            msg["From"] = from_address
             msg["To"] = to_email
 
             # Attach plain text body
@@ -204,7 +220,7 @@ If you didn't request this code, you can safely ignore this email.
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
                 server.starttls()
                 server.login(SMTP_USER, SMTP_PASSWORD)
-                server.sendmail(SMTP_FROM, to_email, msg.as_string())
+                server.sendmail(from_address, to_email, msg.as_string())
 
             logger.info(f"Email sent via SMTP to {to_email}")
             return True
@@ -218,7 +234,8 @@ If you didn't request this code, you can safely ignore this email.
         to_email: str,
         subject: str,
         body: str,
-        html_body: Optional[str] = None
+        html_body: Optional[str] = None,
+        from_address: str = "",
     ) -> bool:
         """Send email via SendGrid API."""
         if not SENDGRID_API_KEY:
@@ -232,7 +249,7 @@ If you didn't request this code, you can safely ignore this email.
             async with httpx.AsyncClient() as client:
                 payload = {
                     "personalizations": [{"to": [{"email": to_email}]}],
-                    "from": {"email": SMTP_FROM},
+                    "from": {"email": from_address},
                     "subject": subject,
                     "content": [{"type": "text/plain", "value": body}]
                 }
@@ -268,10 +285,12 @@ If you didn't request this code, you can safely ignore this email.
         to_email: str,
         subject: str,
         body: str,
-        html_body: Optional[str] = None
+        html_body: Optional[str] = None,
+        api_key: str = "",
+        from_address: str = "",
     ) -> bool:
         """Send email via Resend API."""
-        if not RESEND_API_KEY:
+        if not api_key:
             logger.error("Resend API key not configured")
             # Fall back to console
             return self._send_console(to_email, subject, body)
@@ -281,7 +300,7 @@ If you didn't request this code, you can safely ignore this email.
 
             async with httpx.AsyncClient() as client:
                 payload = {
-                    "from": SMTP_FROM,
+                    "from": from_address,
                     "to": [to_email],
                     "subject": subject,
                     "text": body
@@ -294,7 +313,7 @@ If you didn't request this code, you can safely ignore this email.
                     "https://api.resend.com/emails",
                     json=payload,
                     headers={
-                        "Authorization": f"Bearer {RESEND_API_KEY}",
+                        "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json"
                     }
                 )

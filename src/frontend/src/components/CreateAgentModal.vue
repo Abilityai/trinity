@@ -1,5 +1,5 @@
 <template>
-  <!-- z-50: the house modal tier (SystemViewEditor / OnboardingWizard). Was
+  <!-- z-50: the house modal tier (SystemViewEditor / FirstRunOverlay). Was
        z-10, which sat UNDER the Dashboard's z-30 filter pill + z-20
        query-empty overlay (ent#261) — chassis chrome floated above the open
        modal. All full-screen modals must outrank page-level overlay chrome. -->
@@ -542,8 +542,8 @@ const createAgent = async () => {
     const agent = await agentsStore.createAgent(payload)
     forkPat.value = ''  // hygiene: don't keep the token in the reactive ref
     // `created` fires immediately, exactly as before — Dashboard/Library/
-    // OnboardingWizard consumers keep working (the wizard unmounts us on
-    // `created`, so the validation step simply never renders there).
+    // first-run overlay consumers keep working (the overlay's agent step
+    // unmounts us on `created`, so the validation step never renders there).
     emit('created', agent)
     // trinity-enterprise#15: github-sourced creates (github-custom any intent,
     // or a featured fork template) swap to the post-create validation step

@@ -376,8 +376,9 @@ skeletons by #2540 — a conversation is not a chart. Adopting a further CHART s
 ent#253 pass; adopting it on a page, list or thread is a violation, and
 `tests/unit/portalLoadingTreatment.spec.js` pins the importer set as an allowlist so a new
 non-chart adoption fails CI (the two pre-ruling holdovers, `LibrarySkillsSection` and
-`onboarding/FinishSetupCard`, are recorded on #1921's sweep and shrink that list as they
-convert).
+`onboarding/FinishSetupCard` — the latter since deleted, replaced by the ent#581 first-run
+overlay `onboarding/FirstRunOverlay.vue` — were swept to skeletons by #1921, so the
+holdover list is empty).
 
 `content-class` (#2163) is the consumer's hook on the primitive's OWN content wrapper —
 `.scan-content` is child-owned DOM and `:deep()` is forbidden here, so a zone whose

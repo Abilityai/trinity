@@ -247,36 +247,13 @@
           </div>
         </div>
 
-        <!--
-          Onboarding stack (#2380). At most ONE card renders, ever — see the
-          `.onboarding-stack` rule below. Four independent surfaces landed here
-          from four issues, none aware of the others, and on a first login all
-          four can be true at once: ~520px of chrome above the product the
-          operator installed Trinity for, with four dismiss buttons. DOM order
-          IS priority order, highest first.
-        -->
-        <div class="onboarding-stack">
-        <!-- Instance hardening guide (#2380). FIRST in the stack on purpose: a
-             security-posture prompt outranks a getting-started nudge — a
-             marketplace droplet is answering the public internet right now,
-             whereas the cards below can wait a page load. Renders only on a
-             marketplace install that has not yet been given a domain. -->
-        <HardeningGuide />
-        <!-- First-run front desk (ent#319). Shows only on a seed-only install:
-             the fleet is running and none of it is the user's, which is the
-             exact case the wizard's auto-open cannot see since ent#124. -->
-        <FrontDeskPanel @make-one="openOnboarding" />
-        <!-- Getting-started checklist (ent#238). Renders nothing unless the
-             enterprise onboarding module is entitled AND the user still has an
-             undone step — never a gate, always dismissible. -->
+        <!-- Getting-started checklist (ent#238). The ONLY first-run surface
+             left inline: it tracks first-value milestones over days, so the
+             first-run overlay (ent#581, below) deliberately does not absorb it —
+             a blocking sequence would turn a progress marker into a gate.
+             Renders nothing unless the enterprise onboarding module is entitled
+             AND the user still has an undone step. -->
         <ActivationChecklist />
-        <!-- Finish setup (ent#437): ONE card for the post-login admin asks the
-             first-run wizard can no longer carry — the sign-in email prompt
-             (#2381, section 1) and the usage-sharing consent (ent#437, section 2).
-             One chassis rather than a fifth stacked nudge. Each section decides
-             its own visibility; the card renders nothing when none applies. -->
-        <FinishSetupCard />
-        </div>
 
     <!-- Timeline View (only visible in timeline mode) -->
     <template v-if="isTimelineMode">
@@ -364,7 +341,7 @@
           <h3 class="text-sm font-medium text-gray-900 dark:text-gray-100">No agents yet</h3>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Launch your first agent in a couple of clicks.</p>
           <button
-            @click="openOnboarding"
+            @click="showCreateModal = true"
             class="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
           >
             Get started
@@ -412,7 +389,7 @@
           <h3 class="text-sm font-medium text-gray-900 dark:text-gray-100">No agents yet</h3>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Launch your first agent in a couple of clicks.</p>
           <button
-            @click="openOnboarding"
+            @click="showCreateModal = true"
             class="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
           >
             Get started
@@ -513,13 +490,11 @@
       @saved="onViewSaved"
     />
 
-    <!-- First-run onboarding wizard (trinity-enterprise#52) -->
-    <OnboardingWizard
-      v-if="showOnboarding"
-      :claude-auth-configured="sessionsStore.claudeAuthConfigured"
-      @close="closeOnboarding"
-      @deployed="onAgentDeployed"
-    />
+    <!-- First-run overlay (ent#581): one blocking, teleported setup sequence
+         that replaced the inline card ladder and the ent#52 wizard. It decides
+         for itself when to open (`firstRunSteps.js`) and honours
+         `?onboarding=1`; `firstRunOpen` only lets this view's hotkeys stand down. -->
+    <FirstRunOverlay v-model:open="firstRunOpen" />
   </div>
 </template>
 
@@ -530,12 +505,8 @@ import ReplayTimeline from '@/components/ReplayTimeline.vue'
 import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
-import OnboardingWizard from '@/components/OnboardingWizard.vue'
-import HardeningGuide from '@/components/onboarding/HardeningGuide.vue'
-import FrontDeskPanel from '@/components/onboarding/FrontDeskPanel.vue'
+import FirstRunOverlay from '@/components/onboarding/FirstRunOverlay.vue'
 import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
-import FinishSetupCard from '@/components/onboarding/FinishSetupCard.vue'
-import { useSessionsStore } from '@/stores/sessions'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -551,7 +522,6 @@ import { useNotification } from '@/composables/useNotification'
 
 const networkStore = useNetworkStore()
 const systemViewsStore = useSystemViewsStore()
-const sessionsStore = useSessionsStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -568,46 +538,8 @@ watch(() => route.query.view, (view) => {
   router.replace({ query: rest }).catch(() => {})
 }, { immediate: true })
 
-// First-run onboarding (trinity-enterprise#52). Auto-opens once for a fresh
-// install with zero agents; dismissal is remembered so it never nags.
-const ONBOARDING_DISMISSED_KEY = 'trinity_onboarding_dismissed_v1'
-const showOnboarding = ref(false)
-function openOnboarding() {
-  showOnboarding.value = true
-}
-function closeOnboarding() {
-  showOnboarding.value = false
-  try { localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1') } catch { /* ignore */ }
-}
-function onAgentDeployed() {
-  // Agent was created via the wizard's real create modal. Keep the wizard open
-  // (it advances to the credential step on its own) and refresh the fleet so
-  // the new agent appears on the graph without a manual page reload — the
-  // WebSocket agent_created event can lag while the container spins up.
-  networkStore.fetchAgents()
-}
-function maybeAutoOpenOnboarding() {
-  if (showOnboarding.value) return
-  // Explicit ?onboarding=1 re-opens the wizard any time (re-run / QA preview),
-  // regardless of fleet size or prior dismissal.
-  if (route.query.onboarding === '1') {
-    showOnboarding.value = true
-    return
-  }
-  if (isFleetLoading.value) return
-  // Count only user-created agents — `trinity-system` exists on every install,
-  // so counting it would mean a fresh fleet is never "empty" and auto-open
-  // would never fire.
-  //
-  // ent#319: since ent#124 seeds a fleet on first run, this predicate is false
-  // on an out-of-the-box install and the wizard no longer auto-opens there.
-  // That case is now served by the front-desk panel (which shows only when
-  // something WAS seeded), so this stays exactly as it is: it still fires on a
-  // genuinely empty install, and the two surfaces never appear together.
-  if (agents.value.filter(a => !a.is_system).length > 0) return
-  if (localStorage.getItem(ONBOARDING_DISMISSED_KEY) === '1') return
-  showOnboarding.value = true
-}
+// First-run overlay (ent#581) is open — the hotkey guards below stand down.
+const firstRunOpen = ref(false)
 
 // System View Editor Modal State
 const isEditorOpen = ref(false)
@@ -806,7 +738,7 @@ function handleDashboardKeydown(e) {
     // .stop's before reaching here.
     if (!(filterOpen.value || filterActive.value)) return
     // Never race a modal's own Esc handling.
-    if (showOnboarding.value || isEditorOpen.value || showCreateModal.value) return
+    if (firstRunOpen.value || isEditorOpen.value || showCreateModal.value) return
     // Layered dismissal (strategy F5): an open tag dropdown consumes this
     // Esc; the filter survives — the second Esc clears.
     if (showTagDropdown.value) {
@@ -844,7 +776,7 @@ function handleDashboardKeydown(e) {
   const t = e.target
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
   // Guard 5: open modals.
-  if (showOnboarding.value || isEditorOpen.value || showCreateModal.value) return
+  if (firstRunOpen.value || isEditorOpen.value || showCreateModal.value) return
 
   e.preventDefault() // `/`: blocks Firefox quick-find. `v`: no browser default — harmless, kept uniform.
   action()
@@ -943,11 +875,6 @@ onMounted(async () => {
     networkStore.fetchSchedules(),
     fetchAvailableTags()
   ])
-
-  // First-run onboarding: load the Claude-auth flag (for the wizard's setup
-  // hint) and auto-open the wizard if this is a fresh, empty install.
-  sessionsStore.loadFeatureFlags().catch(() => {})
-  maybeAutoOpenOnboarding()
 
   // Connect WebSocket for real-time updates
   networkStore.connectWebSocket()
@@ -1127,26 +1054,6 @@ function handleClickOutside(event) {
 </script>
 
 <style scoped>
-/*
-  One onboarding card at a time (#2380).
-
-  Every card in the stack is `v-if`'d, so a card that has nothing to say leaves
-  no element behind — which makes "the first ELEMENT child" exactly "the
-  highest-priority card that currently wants to speak". Hiding the rest in CSS
-  keeps each card's visibility predicate where it already lives (its own store,
-  its own localStorage dismissal) instead of lifting four of them into this
-  view, and dismissing the top card reveals the next one for free.
-
-  The wrapper carries no margin of its own on purpose: with every card hidden
-  it collapses to a zero-height empty div rather than a phantom gap. Each card
-  owns `mt-3 mb-3`, so whichever one shows is spaced on both sides — the pane
-  below is a full-bleed surface with no top padding of its own.
-*/
-.onboarding-stack > * ~ * {
-  display: none;
-}
-
-
 /*
  * Stats bar progressive degrade (#1830).
  *
