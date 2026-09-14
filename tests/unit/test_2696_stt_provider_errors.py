@@ -50,6 +50,21 @@ def _body(status_word: str, message: str = "provider message") -> str:
     (401, "not json at all", stt.CATEGORY_AUTH, 503),
     (401, _body("quota_exceeded"), stt.CATEGORY_QUOTA, 503),
     (401, _body("free_users_not_allowed"), stt.CATEGORY_QUOTA, 503),
+    # Review finding: a quota WORD inside the provider's PROSE is not a quota
+    # condition. Every row below is an ordinary auth failure whose sentence
+    # happens to contain "plan" / "subscription" / "credit"; classifying them as
+    # quota sent the operator to a billing page for a key that needed replacing.
+    (401, json.dumps({"detail": "Invalid API key for your plan"}), stt.CATEGORY_AUTH, 503),
+    (401, json.dumps({"detail": {"message": "not valid for this subscription"}}),
+     stt.CATEGORY_AUTH, 503),
+    (403, json.dumps({"detail": "Your credit card was fine; this key is not"}),
+     stt.CATEGORY_AUTH, 503),
+    # ...and a token still decides, whatever the prose says around it.
+    (401, json.dumps({"detail": {"status": "quota_exceeded",
+                                 "message": "the key looks fine"}}), stt.CATEGORY_QUOTA, 503),
+    (401, json.dumps({"detail": {"code": "missing_permissions",
+                                 "message": "plan and credit words here"}}),
+     stt.CATEGORY_PERMISSION, 503),
     (402, "", stt.CATEGORY_QUOTA, 503),
     (429, _body("too_many_concurrent_requests"), stt.CATEGORY_RATE_LIMIT, 429),
     (400, _body("invalid_audio", "File is corrupted"), stt.CATEGORY_AUDIO, 422),
@@ -79,6 +94,42 @@ def test_categories_are_distinguishable_by_their_client_sentence():
     assert "rejected" in auth
     assert "credits" in quota
     assert "recording" in audio
+
+
+def test_a_quota_word_in_prose_is_not_a_quota_verdict():
+    """Review finding. `provider_status_parts` keeps the provider's TOKEN apart
+    from its PROSE, and only the token may decide a category — a sentence
+    mentioning "plan" or "credit" is not evidence of a billing condition.
+
+    The failure this pins is not cosmetic: it told an operator whose key had
+    been rejected that the account was out of credits, which is a worse answer
+    than the opaque 422 this issue replaces, because it is confidently wrong in
+    a direction they will act on."""
+    prose = json.dumps({"detail": "Invalid API key for your plan"})
+    f = stt.classify_stt_failure(401, prose)
+    assert f.category == stt.CATEGORY_AUTH
+    assert f.client_message == stt._MSG_AUTH
+    # The prose is still kept for the operator panel — withheld from the
+    # matcher, not thrown away.
+    assert f.detail == "Invalid API key for your plan"
+
+
+def test_provider_status_parts_separates_token_from_prose():
+    assert stt.provider_status_parts(_body("missing_permissions")) == (
+        "missing_permissions", "provider message")
+    # A bare string detail is a sentence, even when it is one word.
+    assert stt.provider_status_parts(json.dumps({"detail": "nope"})) == (None, "nope")
+    assert stt.provider_status_parts("not json") == (None, None)
+    assert stt.provider_status_parts("") == (None, None)
+    # `code` is a token too — some provider errors carry it instead of `status`.
+    assert stt.provider_status_parts(json.dumps({"detail": {"code": "x"}}))[0] == "x"
+
+
+def test_operator_detail_still_falls_back_to_prose():
+    """The split must not cost the operator the only description there is."""
+    f = stt.classify_stt_failure(401, json.dumps({"detail": "some sentence"}))
+    assert f.detail == "some sentence"
+    assert stt.provider_status_word(json.dumps({"detail": "some sentence"})) == "some sentence"
 
 
 def test_rate_limit_maps_to_429_with_the_existing_retry_wording():

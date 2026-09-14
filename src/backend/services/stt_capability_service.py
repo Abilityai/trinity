@@ -201,23 +201,44 @@ def invalidate(api_key: str) -> None:
 
 # ---- probe ------------------------------------------------------------------
 
-def provider_status_word(body: str) -> Optional[str]:
-    """The provider's own short status token (`missing_permissions`,
-    `quota_exceeded`, `invalid_audio`, ...) out of an ElevenLabs error body,
-    or None. Bounded and never the free-text message when a token exists — the
-    token is what an operator greps the provider's docs for."""
+def provider_status_parts(body: str) -> tuple[Optional[str], Optional[str]]:
+    """`(token, prose)` out of an ElevenLabs error body — either may be None.
+
+    The two are kept APART because they answer different questions. A token
+    (`missing_permissions`, `quota_exceeded`) is a machine value the provider
+    documents and an operator can grep; prose is a sentence written for a human
+    and its words mean nothing in particular.
+
+    Collapsing them is what made `classify_stt_failure` read a rejected key as a
+    billing problem: the quota matcher ran substring tests like "plan" and
+    "credit" over whatever this returned, so `{"detail": "Invalid API key for
+    your plan"}` — an ordinary auth failure — was reported to the operator as
+    "out of credits". Any matcher must consume the TOKEN; prose is for display
+    only.
+    """
     try:
         d = json.loads(body or "{}")
     except Exception:  # noqa: BLE001
-        return None
+        return (None, None)
     det = d.get("detail") if isinstance(d, dict) else None
+    token = prose = None
     if isinstance(det, dict):
-        word = det.get("status") or det.get("code") or det.get("message")
+        token = det.get("status") or det.get("code")
+        prose = det.get("message")
     elif isinstance(det, str):
-        word = det
-    else:
-        word = None
-    return str(word)[:120] if word else None
+        # A bare string detail is a sentence, not a documented token, even when
+        # it happens to be one word.
+        prose = det
+    trim = lambda v: str(v)[:120] if v else None  # noqa: E731
+    return (trim(token), trim(prose))
+
+
+def provider_status_word(body: str) -> Optional[str]:
+    """The best OPERATOR-FACING description of a provider error: the token when
+    there is one, else the prose. Display only — never a matcher's input, which
+    is what `provider_status_parts` exists to keep separate."""
+    token, prose = provider_status_parts(body)
+    return token or prose
 
 
 def classify_response(status_code: int, body: str) -> SttCapability:
@@ -315,7 +336,8 @@ CATEGORY_PROVIDER = "provider"        # the provider itself failed
 CATEGORY_UNKNOWN = "unknown"
 
 # Provider status words that mean "the account cannot pay for this", seen on
-# 401/402 bodies. Matched as substrings of the status token, lower-cased.
+# 401/402 bodies. Matched as substrings of the status TOKEN only, lower-cased —
+# never of the provider's prose (see `provider_status_parts`).
 _QUOTA_WORDS = ("quota", "credit", "plan", "payment", "subscription", "billing",
                 "insufficient", "free_users", "entitlement", "trial")
 
@@ -362,13 +384,20 @@ def classify_stt_failure(status_code: int, body: str) -> SttFailure:
     no arm that hands back the old opaque string, so an unrecognised provider
     answer is `unknown` — still specific about who failed — never a regression
     to "Could not transcribe the audio"."""
-    word = provider_status_word(body)
-    lw = (word or "").lower()
+    token, prose = provider_status_parts(body)
+    word = token or prose          # operator-facing detail: the best we have
+    lt = (token or "").lower()     # matcher input: the TOKEN only, never prose
 
     if status_code in (401, 403):
-        if "permission" in lw:
+        # Matched on the token alone. A 401 whose body is prose is an auth
+        # failure by default — the honest reading of "the key was rejected and
+        # the provider did not say why" — because a sentence mentioning "plan"
+        # or "credit" is not evidence of a billing condition, and telling an
+        # operator to top up an account whose key simply needs replacing is
+        # worse than saying nothing specific.
+        if "permission" in lt:
             return SttFailure(CATEGORY_PERMISSION, 503, _MSG_PERMISSION, status_code, word)
-        if any(q in lw for q in _QUOTA_WORDS):
+        if any(q in lt for q in _QUOTA_WORDS):
             return SttFailure(CATEGORY_QUOTA, 503, _MSG_QUOTA, status_code, word)
         return SttFailure(CATEGORY_AUTH, 503, _MSG_AUTH, status_code, word)
     if status_code == 402:
