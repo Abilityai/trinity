@@ -35,7 +35,7 @@
               <div class="flex items-center space-x-3 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
                 <span class="flex items-center space-x-1">
                   <span class="w-1.5 h-1.5 rounded-full bg-status-success-500"></span>
-                  <span class="font-medium text-status-success-600 dark:text-status-success-400">{{ runningCount }}/{{ agents.length }}</span>
+                  <span class="font-medium text-status-success-700 dark:text-status-success-400">{{ runningCount }}/{{ agents.length }}</span>
                   <span>agents</span>
                 </span>
                 <!-- Working-now count (trinity-enterprise#47) -->
@@ -484,7 +484,7 @@
       class="absolute top-28 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 px-3 py-1.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-full shadow-lg"
       data-testid="filter-pill"
     >
-      <svg class="w-4 h-4 text-gray-400 dark:text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <svg class="w-4 h-4 text-gray-500 dark:text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
       </svg>
       <input
@@ -507,7 +507,7 @@
       <kbd class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-[10px] font-mono text-gray-500 dark:text-gray-400">Esc</kbd>
       <button
         @click="clearFilter"
-        class="p-0.5 rounded text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+        class="p-0.5 rounded text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
         aria-label="Clear filter"
         data-testid="filter-clear"
       >

@@ -56,10 +56,16 @@
                 ]"
               >
                 {{ link.label }}
+                <!-- #2201 — white ink needs a darker ground than the 500 solids:
+                     white on urgent-500 measured 2.80:1 and on danger-500
+                     3.76:1, both below AA. urgent-700 is 5.18:1 and danger-600
+                     4.83:1. The badge is small, high-salience and carries a
+                     count someone is meant to read, so AA-normal is the bar —
+                     not the 3:1 large-text allowance. -->
                 <span
                   v-if="link.badge"
                   class="ml-1 inline-flex items-center justify-center px-1.5 py-0.5 text-xs font-bold leading-none text-white rounded-full"
-                  :class="link.badgeCritical ? 'bg-status-danger-500 animate-pulse' : 'bg-status-urgent-500'"
+                  :class="link.badgeCritical ? 'bg-status-danger-600 animate-pulse' : 'bg-status-urgent-700'"
                 >{{ link.badge }}</span>
                 <span
                   v-if="link.pill"
@@ -90,7 +96,7 @@
                 <span
                   v-if="overflowNavBadgeCount > 0"
                   class="inline-flex items-center justify-center px-1.5 py-0.5 text-xs font-bold leading-none text-white rounded-full"
-                  :class="overflowNavBadgeCritical ? 'bg-status-danger-500 animate-pulse' : 'bg-status-urgent-500'"
+                  :class="overflowNavBadgeCritical ? 'bg-status-danger-600 animate-pulse' : 'bg-status-urgent-700'"
                 >{{ overflowNavBadgeCount > 99 ? '99+' : overflowNavBadgeCount }}</span>
                 <svg
                   class="w-3.5 h-3.5 transition-transform"
@@ -133,7 +139,7 @@
                 <span
                   v-if="link.badge"
                   class="inline-flex items-center justify-center px-1.5 py-0.5 text-xs font-bold leading-none text-white rounded-full"
-                  :class="link.badgeCritical ? 'bg-status-danger-500' : 'bg-status-urgent-500'"
+                  :class="link.badgeCritical ? 'bg-status-danger-600' : 'bg-status-urgent-700'"
                 >{{ link.badge }}</span>
                 <span
                   v-else-if="link.pill"

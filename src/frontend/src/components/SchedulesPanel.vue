@@ -324,11 +324,11 @@
     />
 
     <div v-else-if="schedules.length === 0" class="text-center py-12 bg-gray-50 dark:bg-gray-800 rounded-lg">
-      <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
       </svg>
       <p class="mt-2 text-gray-500 dark:text-gray-400">No schedules configured</p>
-      <p class="text-sm text-gray-400 dark:text-gray-500">A schedule is what makes this agent autonomous — it runs without you.</p>
+      <p class="text-sm text-gray-500 dark:text-gray-400">A schedule is what makes this agent autonomous — it runs without you.</p>
       <!-- ent#238: an empty view with no way out is a dead end. The primary
            action is the same one the header carries, so the user never has to
            go hunting for it from the state that needs it most. -->
@@ -388,7 +388,7 @@
                      its chip; `=== false` so a map miss can never false-warn. -->
                 <span
                   v-if="cronValidity[schedule.id] === false"
-                  class="ml-1 text-status-warning-600 dark:text-status-warning-400"
+                  class="ml-1 text-status-warning-700 dark:text-status-warning-400"
                   title="Invalid cron expression"
                   aria-label="Invalid cron expression"
                   role="img"
@@ -421,7 +421,7 @@
                 <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                 </svg>
-                <span :class="!schedule.model ? 'text-gray-400 dark:text-gray-500 italic' : ''">
+                <span :class="!schedule.model ? 'text-gray-500 dark:text-gray-400 italic' : ''">
                   {{ schedule.model || `platform default${platformDefaultModel ? ` (${platformDefaultModel})` : ''}` }}
                 </span>
               </span>
@@ -469,18 +469,18 @@
               class="flex items-center flex-wrap gap-x-3 gap-y-1 mt-2 text-xs"
             >
               <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700/60">
-                <span class="text-gray-400 dark:text-gray-500">7d success</span>
+                <span class="text-gray-500 dark:text-gray-400">7d success</span>
                 <span :class="['font-semibold', successRateClass(perfBySchedule[schedule.id].success_rate)]">
                   {{ fmtSuccessRate(perfBySchedule[schedule.id].success_rate) }}
                 </span>
               </span>
               <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700/60">
-                <span class="text-gray-400 dark:text-gray-500">avg</span>
+                <span class="text-gray-500 dark:text-gray-400">avg</span>
                 <span class="font-mono text-gray-700 dark:text-gray-200">{{ fmtPerfDuration(perfBySchedule[schedule.id].avg_duration_ms) }}</span>
               </span>
               <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700/60">
                 <span class="font-mono text-gray-700 dark:text-gray-200">{{ perfBySchedule[schedule.id].total_executions }}</span>
-                <span class="text-gray-400 dark:text-gray-500">runs</span>
+                <span class="text-gray-500 dark:text-gray-400">runs</span>
               </span>
               <span
                 v-if="perfBySchedule[schedule.id].last_run_status"
@@ -679,7 +679,7 @@
               <div class="flex items-center gap-2 pt-1">
                 <button @click="rotateWebhook(schedule)" :disabled="wh(schedule).busy" class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-300">Rotate URL</button>
                 <button @click="revokeWebhook(schedule)" :disabled="wh(schedule).busy" class="text-xs px-2 py-1 rounded border border-status-danger-300 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-400 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/20">Revoke</button>
-                <span class="text-[11px] text-gray-400 dark:text-gray-500">Rotating or revoking invalidates the old URL immediately.</span>
+                <span class="text-[11px] text-gray-500 dark:text-gray-400">Rotating or revoking invalidates the old URL immediately.</span>
               </div>
             </div>
 
@@ -717,7 +717,7 @@
             :retrying="!!executionsLoading[schedule.id]"
             @retry="loadExecutions(schedule.id)"
           />
-          <div v-else-if="execView(schedule.id).state === 'empty'" class="text-center py-4 text-xs text-gray-400 dark:text-gray-500">
+          <div v-else-if="execView(schedule.id).state === 'empty'" class="text-center py-4 text-xs text-gray-500 dark:text-gray-400">
             No executions yet
           </div>
           <div v-else class="space-y-2 max-h-60 overflow-y-auto" data-testid="executions-list">
@@ -743,7 +743,7 @@
                 >
                   {{ exec.triggered_by }}
                 </span>
-                <span v-if="exec.model_used" class="font-mono text-gray-400 dark:text-gray-500">{{ exec.model_used }}</span>
+                <span v-if="exec.model_used" class="font-mono text-gray-500 dark:text-gray-400">{{ exec.model_used }}</span>
               </div>
               <div class="flex items-center space-x-3">
                 <!-- Context usage progress bar -->
@@ -755,13 +755,13 @@
                       :style="{ width: Math.min(100, (exec.context_used / exec.context_max) * 100) + '%' }"
                     ></div>
                   </div>
-                  <span class="text-gray-400 dark:text-gray-500 w-8 text-right">{{ formatContextPercent(exec.context_used, exec.context_max) }}</span>
+                  <span class="text-gray-500 dark:text-gray-400 w-8 text-right">{{ formatContextPercent(exec.context_used, exec.context_max) }}</span>
                 </div>
                 <!-- Cost -->
                 <span v-if="exec.cost" class="text-gray-500 dark:text-gray-400 font-mono">
                   {{ formatCost(exec.cost) }}
                 </span>
-                <span v-if="exec.duration_ms" class="text-gray-400 dark:text-gray-500">{{ formatDuration(exec.duration_ms) }}</span>
+                <span v-if="exec.duration_ms" class="text-gray-500 dark:text-gray-400">{{ formatDuration(exec.duration_ms) }}</span>
                 <span
                   :class="[
                     'font-medium',
@@ -876,7 +876,7 @@
                     </span>
                   </div>
                   <div class="flex items-center space-x-2">
-                    <span v-if="tool.duration_ms" class="text-gray-400 dark:text-gray-500">{{ formatDuration(tool.duration_ms) }}</span>
+                    <span v-if="tool.duration_ms" class="text-gray-500 dark:text-gray-400">{{ formatDuration(tool.duration_ms) }}</span>
                     <span v-if="tool.success !== undefined" :class="tool.success ? 'text-status-success-600' : 'text-status-danger-600'">
                       {{ tool.success ? '✓' : '✗' }}
                     </span>
@@ -1338,9 +1338,9 @@ function fmtSuccessRate(rate) {
   return rate == null ? '—' : `${Math.round(rate * 100)}%`
 }
 function successRateClass(rate) {
-  if (rate == null) return 'text-gray-400 dark:text-gray-500'
-  if (rate >= 0.9) return 'text-status-success-600 dark:text-status-success-400'
-  if (rate >= 0.5) return 'text-status-warning-600 dark:text-status-warning-400'
+  if (rate == null) return 'text-gray-500 dark:text-gray-400'
+  if (rate >= 0.9) return 'text-status-success-700 dark:text-status-success-400'
+  if (rate >= 0.5) return 'text-status-warning-700 dark:text-status-warning-400'
   return 'text-status-danger-600 dark:text-status-danger-400'
 }
 function fmtPerfDuration(ms) {

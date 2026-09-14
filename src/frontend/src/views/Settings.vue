@@ -253,7 +253,7 @@
                   <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                   </svg>
-                  <span class="text-status-success-600 dark:text-status-success-400">Saved — you can now sign in with this email</span>
+                  <span class="text-status-success-700 dark:text-status-success-400">Saved — you can now sign in with this email</span>
                 </template>
                 <template v-else-if="adminEmailError">
                   <span class="text-status-danger-600 dark:text-status-danger-400">{{ adminEmailError }}</span>
@@ -262,7 +262,7 @@
                   <span class="text-gray-500 dark:text-gray-400">Current: {{ adminEmailCurrent }}</span>
                 </template>
                 <template v-else>
-                  <span class="text-state-autonomous-600 dark:text-state-autonomous-400">No email set — you currently sign in as <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code></span>
+                  <span class="text-state-autonomous-700 dark:text-state-autonomous-400">No email set — you currently sign in as <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code></span>
                 </template>
               </div>
             </div>
@@ -310,13 +310,13 @@
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
-                      <span class="text-status-success-600 dark:text-status-success-400">Saved</span>
+                      <span class="text-status-success-700 dark:text-status-success-400">Saved</span>
                     </template>
                     <template v-else-if="publicUrlCurrent">
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
-                      <span class="text-status-success-600 dark:text-status-success-400">
+                      <span class="text-status-success-700 dark:text-status-success-400">
                         {{ publicUrlCurrent }}
                       </span>
                     </template>
@@ -324,7 +324,7 @@
                       <svg class="h-4 w-4 text-state-autonomous-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                       </svg>
-                      <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                      <span class="text-state-autonomous-700 dark:text-state-autonomous-400">
                         Not configured — required for Telegram bots and public links
                       </span>
                     </template>
@@ -374,7 +374,7 @@
                       Save
                     </button>
                   </div>
-                  <div v-if="platformDefaultModelSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="platformDefaultModelSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -400,7 +400,7 @@
                       class="h-4 w-4 text-action-primary-600 border-gray-300 dark:border-gray-600 rounded focus:ring-action-primary-500 disabled:opacity-50"
                     />
                   </label>
-                  <div v-if="defaultAccessPolicySaveSuccess" class="mt-1 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="defaultAccessPolicySaveSuccess" class="mt-1 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -437,7 +437,7 @@
                       Save
                     </button>
                   </div>
-                  <div v-if="ceilingSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="ceilingSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -482,12 +482,12 @@
                       :disabled="savingProactive"
                       class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
                     >Save</button>
-                    <span v-if="proactiveSaveSuccess" class="inline-flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                    <span v-if="proactiveSaveSuccess" class="inline-flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                       <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
                       Saved
                     </span>
                   </div>
-                  <p v-for="w in proactiveWarnings" :key="w" class="mt-1 text-xs text-status-warning-600 dark:text-status-warning-400">⚠ {{ w }}</p>
+                  <p v-for="w in proactiveWarnings" :key="w" class="mt-1 text-xs text-status-warning-700 dark:text-status-warning-400">⚠ {{ w }}</p>
                   <p v-if="proactiveError" class="mt-1 text-sm text-status-danger-600 dark:text-status-danger-400">{{ proactiveError }}</p>
                 </div>
 
@@ -527,7 +527,7 @@
                       <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                         {{ flag.hint }}
                         <template v-if="flag.key === 'voice_enabled' && !brainOrbGeminiKey">
-                          <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                          <span class="text-state-autonomous-700 dark:text-state-autonomous-400">
                             GEMINI_API_KEY is not configured (env-only) — voice stays unavailable even when on.
                           </span>
                         </template>
@@ -540,7 +540,7 @@
                       </p>
                     </div>
                   </div>
-                  <div v-if="brainOrbSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="brainOrbSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -619,7 +619,7 @@
                     </p>
                   </div>
 
-                  <div v-if="elevenLabsSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="elevenLabsSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -717,7 +717,7 @@
                       <svg v-else class="h-4 w-4 text-status-danger-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                       </svg>
-                      <span :class="apiKeyTestResult ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
+                      <span :class="apiKeyTestResult ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
                         {{ apiKeyTestMessage }}
                       </span>
                     </template>
@@ -725,7 +725,7 @@
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
-                      <span class="text-status-success-600 dark:text-status-success-400">
+                      <span class="text-status-success-700 dark:text-status-success-400">
                         Configured
                         <span class="text-gray-500 dark:text-gray-400">
                           ({{ anthropicKeyStatus.source === 'settings' ? 'from settings' : 'from environment' }})
@@ -736,7 +736,7 @@
                       <svg class="h-4 w-4 text-state-autonomous-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                       </svg>
-                      <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                      <span class="text-state-autonomous-700 dark:text-state-autonomous-400">
                         Not configured - required for agents
                       </span>
                     </template>
@@ -822,7 +822,7 @@
                       <svg v-else class="h-4 w-4 text-status-danger-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                       </svg>
-                      <span :class="githubPatTestResult ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
+                      <span :class="githubPatTestResult ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
                         {{ githubPatTestMessage }}
                       </span>
                     </template>
@@ -830,7 +830,7 @@
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
-                      <span class="text-status-success-600 dark:text-status-success-400">
+                      <span class="text-status-success-700 dark:text-status-success-400">
                         Configured
                         <span class="text-gray-500 dark:text-gray-400">
                           ({{ githubPatStatus.source === 'settings' ? 'from settings' : 'from environment' }})
@@ -867,7 +867,7 @@
                       <div v-if="!githubPatPropagation.updated.length" class="text-status-danger-600 dark:text-status-danger-400">
                         PAT saved, but applied to <strong>0 of {{ githubPatPropagation.total_running }}</strong> running agent{{ githubPatPropagation.total_running === 1 ? '' : 's' }} — they keep using the previous token until restarted.
                       </div>
-                      <div v-else :class="githubPatPropagation.failed.length ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-status-success-600 dark:text-status-success-400'">
+                      <div v-else :class="githubPatPropagation.failed.length ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-status-success-700 dark:text-status-success-400'">
                         PAT updated and applied to {{ githubPatPropagation.updated.length }} of {{ githubPatPropagation.total_running }} running agent{{ githubPatPropagation.total_running === 1 ? '' : 's' }}.
                       </div>
                       <!-- The .env write only lands on the next restart; the
@@ -942,7 +942,7 @@
                       class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white font-mono text-sm"
                     />
                   </div>
-                  <div v-if="slackSettings.client_id?.configured" class="mt-1 text-xs text-status-success-600 dark:text-status-success-400">
+                  <div v-if="slackSettings.client_id?.configured" class="mt-1 text-xs text-status-success-700 dark:text-status-success-400">
                     ✓ Configured ({{ slackSettings.client_id.source === 'settings' ? 'from settings' : 'from environment' }})
                   </div>
                 </div>
@@ -975,7 +975,7 @@
                       </svg>
                     </button>
                   </div>
-                  <div v-if="slackSettings.client_secret?.configured" class="mt-1 text-xs text-status-success-600 dark:text-status-success-400">
+                  <div v-if="slackSettings.client_secret?.configured" class="mt-1 text-xs text-status-success-700 dark:text-status-success-400">
                     ✓ Configured ({{ slackSettings.client_secret.source === 'settings' ? 'from settings' : 'from environment' }})
                   </div>
                 </div>
@@ -1008,7 +1008,7 @@
                       </svg>
                     </button>
                   </div>
-                  <div v-if="slackSettings.signing_secret?.configured" class="mt-1 text-xs text-status-success-600 dark:text-status-success-400">
+                  <div v-if="slackSettings.signing_secret?.configured" class="mt-1 text-xs text-status-success-700 dark:text-status-success-400">
                     ✓ Configured ({{ slackSettings.signing_secret.source === 'settings' ? 'from settings' : 'from environment' }})
                   </div>
                 </div>
@@ -1038,7 +1038,7 @@
                     </svg>
                     Remove Credentials
                   </button>
-                  <span v-if="slackSaveSuccess" class="text-sm text-status-success-600 dark:text-status-success-400">
+                  <span v-if="slackSaveSuccess" class="text-sm text-status-success-700 dark:text-status-success-400">
                     ✓ Saved
                   </span>
                 </div>
@@ -1082,7 +1082,7 @@
                       </svg>
                     </button>
                   </div>
-                  <div v-if="slackTransportStatus.app_token_configured" class="mt-1 text-xs text-status-success-600 dark:text-status-success-400">
+                  <div v-if="slackTransportStatus.app_token_configured" class="mt-1 text-xs text-status-success-700 dark:text-status-success-400">
                     ✓ App token configured
                   </div>
                   <p class="mt-1 text-xs text-gray-400">
@@ -1105,7 +1105,7 @@
                     </svg>
                     {{ connectingSlack ? 'Connecting...' : 'Connect' }}
                   </button>
-                  <span v-if="slackTransportStatus.connected" class="text-sm text-status-success-600 dark:text-status-success-400">
+                  <span v-if="slackTransportStatus.connected" class="text-sm text-status-success-700 dark:text-status-success-400">
                     ✓ Socket Mode active
                   </span>
 
@@ -1121,7 +1121,7 @@
                     </svg>
                     {{ slackTransportStatus.workspaces.length > 0 ? 'Reinstall to Workspace' : 'Install to Workspace' }}
                   </button>
-                  <span v-if="slackInstallSuccess" class="text-sm text-status-success-600 dark:text-status-success-400">
+                  <span v-if="slackInstallSuccess" class="text-sm text-status-success-700 dark:text-status-success-400">
                     ✓ Workspace installed
                   </span>
                 </div>
@@ -1217,7 +1217,7 @@ Example:
                 <!-- Character Count -->
                 <div class="flex justify-between text-sm text-gray-500 dark:text-gray-400">
                   <span>{{ trinityPrompt.length }} characters</span>
-                  <span v-if="hasChanges" class="text-state-autonomous-600 dark:text-state-autonomous-400">Unsaved changes</span>
+                  <span v-if="hasChanges" class="text-state-autonomous-700 dark:text-state-autonomous-400">Unsaved changes</span>
                 </div>
 
                 <!-- Action Buttons -->
@@ -1468,7 +1468,7 @@ Example:
                     class="px-3 py-2 text-sm font-medium rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-50">Send invite</button>
                   <button type="button" @click="showInvite = false; inviteEmail = ''" :disabled="umBusy"
                     class="px-3 py-2 text-sm rounded-lg text-gray-600 dark:text-gray-300 hover:underline">Cancel</button>
-                  <span v-if="inviteMsg" class="text-xs" :class="inviteErr ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-600 dark:text-status-success-400'">{{ inviteMsg }}</span>
+                  <span v-if="inviteMsg" class="text-xs" :class="inviteErr ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-700 dark:text-status-success-400'">{{ inviteMsg }}</span>
                 </form>
               </div>
 
@@ -1534,7 +1534,7 @@ Example:
                           </span>
                           <button @click="openActivity(u)" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">Activity</button>
                           <template v-if="u.username !== currentUsername && u.username !== 'admin'">
-                            <button v-if="u.suspended_at" @click="reactivateUser(u)" :disabled="umBusy" class="text-status-success-600 dark:text-status-success-400 hover:underline disabled:opacity-50">Reactivate</button>
+                            <button v-if="u.suspended_at" @click="reactivateUser(u)" :disabled="umBusy" class="text-status-success-700 dark:text-status-success-400 hover:underline disabled:opacity-50">Reactivate</button>
                             <button v-else @click="suspendUser(u)" :disabled="umBusy" class="text-status-danger-600 dark:text-status-danger-400 hover:underline disabled:opacity-50">Deactivate</button>
                           </template>
                         </div>
@@ -1645,7 +1645,7 @@ Example:
               <p v-if="mcpUrlError" class="mt-2 text-sm text-status-danger-600 dark:text-status-danger-400">
                 {{ mcpUrlError }}
               </p>
-              <p v-if="mcpUrlSuccess" class="mt-2 text-sm text-status-success-600 dark:text-status-success-400">
+              <p v-if="mcpUrlSuccess" class="mt-2 text-sm text-status-success-700 dark:text-status-success-400">
                 {{ mcpUrlSuccess }}
               </p>
             </div>
@@ -1841,7 +1841,7 @@ Example:
                   <label class="text-sm font-medium text-gray-700 dark:text-gray-300">Admin</label>
                   <p class="text-sm text-gray-500 dark:text-gray-400">Admins can always create unlimited agents</p>
                 </div>
-                <span class="text-sm font-medium text-status-success-600 dark:text-status-success-400">Unlimited</span>
+                <span class="text-sm font-medium text-status-success-700 dark:text-status-success-400">Unlimited</span>
               </div>
 
               <!-- Creator role -->
