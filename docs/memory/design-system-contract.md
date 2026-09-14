@@ -14,8 +14,12 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 
 - `darkMode: 'class'`. Build and verify light AND dark for everything. No per-theme hardcoded color inside a component — theming lives in the token layer.
 - Surfaces: ground gray-50/gray-900 · surface white/gray-800 · chrome gray-100/gray-750 · field white/gray-900 · border gray-200/gray-750 · border-strong gray-300/gray-700.
-- Dark ink ladder: primary gray-100 · secondary gray-300 · tertiary gray-400. **gray-500 is the floor** — disabled/decoration only, never meta text (keeps ≥4.5:1 AA on gray-800).
-- Light ink: primary gray-900 · secondary gray-600 · tertiary gray-500.
+- Dark ink ladder: primary gray-100 · secondary gray-300 · tertiary gray-400. **gray-500 is the floor** — disabled/decoration only, never meta text (gray-500 measures 3.04:1 on gray-800 and 2.13:1 on gray-700; gray-400 is 5.78:1 on gray-800, 6.99 on gray-900, 5.21 on gray-750).
+- Light ink: primary gray-900 · secondary gray-600 · tertiary gray-500. **gray-400 is not text** — 2.54:1 on white.
+- **Tertiary ink is for surface and ground, not for chrome (#2201).** Measured: light tertiary gray-500 is 4.83:1 on white and 4.63 on gray-50, but **4.39 on gray-100** — below AA; dark tertiary gray-400 is 5.78/6.99/5.21 on gray-800/900/750 but **4.06 on gray-700**. On a chrome fill, step up one tier (gray-600 light / gray-300 dark). Numbers are checked, not remembered: `tests/unit/contrast.spec.js` drives `utils/contrast.js` over the real palette and fails if a prescribed pairing drops below AA.
+- **Status/state text is the 700 tier in light and the 400 tier in dark (#2201).** The 600 tier fails AA on a light surface for every warm family — success 3.30, warning 2.94, autonomous 3.19, urgent 3.56 — while the cool ones pass, so the rule is stated per tier rather than per family. The 500 tier is a solid/decoration shade and is never text on a light surface (success 2.28).
+- **White ink needs a 600–700 ground, never a 500 solid (#2201).** White on urgent-500 is 2.80:1 and on danger-500 3.76:1; the Operations count badge uses urgent-700 (5.18) and danger-600 (4.83).
+- A page's rendered contrast is ratcheted: `e2e/contrast-ratchet.spec.js` counts distinct failing text treatments per page and theme against `e2e/contrast-baseline.json` and fails when a count grows; a page with no entry is held to zero. The remaining debt is a long tail of `text-gray-400` written with no `dark:` half — fixing those needs a semantic ink token, because adding the missing half at ~1,500 sites would grow the raw-colour ratchet by ~1,500 raw classes. The two guards pull against each other; the migration is the way out, not a baseline bump.
 - Interactive accent: action-primary-600 light / 500 dark; hover 700 / 400; focus ring 500@40% / 400@42%.
 
 ## Primitives first

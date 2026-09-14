@@ -140,7 +140,7 @@
       <!-- Error message -->
       <div v-if="error" class="mx-6 mb-2 p-3 rounded-lg" :class="isRateLimitError ? 'bg-state-autonomous-100 dark:bg-state-autonomous-900/30 border border-state-autonomous-200 dark:border-state-autonomous-800' : 'bg-status-danger-100 dark:bg-status-danger-900/30 border border-status-danger-200 dark:border-status-danger-800'">
         <p v-if="isRateLimitError" class="text-sm font-medium text-state-autonomous-700 dark:text-state-autonomous-400 mb-1">Subscription Usage Limit</p>
-        <p class="text-sm" :class="isRateLimitError ? 'text-state-autonomous-600 dark:text-state-autonomous-400' : 'text-status-danger-600 dark:text-status-danger-400'">{{ error }}</p>
+        <p class="text-sm" :class="isRateLimitError ? 'text-state-autonomous-700 dark:text-state-autonomous-400' : 'text-status-danger-600 dark:text-status-danger-400'">{{ error }}</p>
       </div>
 
       <!-- Input area -->
