@@ -267,7 +267,7 @@
             </span>
           </div>
           <div class="flex items-center gap-2 flex-shrink-0">
-            <span class="text-xs text-gray-400 dark:text-gray-500 hidden sm:inline">{{ formatDate(loop.created_at) }}</span>
+            <span class="text-xs text-gray-500 dark:text-gray-400 hidden sm:inline">{{ formatDate(loop.created_at) }}</span>
             <button
               v-if="isActive(loop)"
               type="button"
@@ -491,9 +491,9 @@ function statusBadgeClass(status) {
 }
 
 function runStatusClass(status) {
-  if (status === 'completed') return 'text-status-success-600 dark:text-status-success-400'
+  if (status === 'completed') return 'text-status-success-700 dark:text-status-success-400'
   if (status === 'failed') return 'text-status-danger-600 dark:text-status-danger-400'
-  return 'text-status-warning-600 dark:text-status-warning-400'
+  return 'text-status-warning-700 dark:text-status-warning-400'
 }
 
 function formatStopReason(reason) {

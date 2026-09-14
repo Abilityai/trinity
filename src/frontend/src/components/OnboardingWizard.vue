@@ -90,7 +90,7 @@
                 <li class="flex gap-2"><span class="font-semibold text-action-primary-600 dark:text-action-primary-400">2.</span> Open <span class="font-medium">Settings → Integrations → Claude Subscriptions</span> and register it.</li>
                 <li class="flex gap-2"><span class="font-semibold text-action-primary-600 dark:text-action-primary-400">3.</span> Assign it to <span class="font-medium">{{ createdName }}</span> — then chat.</li>
               </ol>
-              <p class="mt-3 text-xs text-gray-400 dark:text-gray-500">No subscription? You can instead set a platform Anthropic API key in the same place.</p>
+              <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">No subscription? You can instead set a platform Anthropic API key in the same place.</p>
             </div>
 
             <!-- ent#12 Tier-2 — value-framed, optional, default-off sharing ask.

@@ -213,7 +213,7 @@
                 <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-300">{{ entry.credits_amount ?? '-' }}</td>
                 <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-300 font-mono">{{ truncateHash(entry.tx_hash) }}</td>
                 <td class="px-4 py-2">
-                  <span v-if="entry.success" class="text-status-success-600 dark:text-status-success-400 text-sm">OK</span>
+                  <span v-if="entry.success" class="text-status-success-700 dark:text-status-success-400 text-sm">OK</span>
                   <span v-else class="text-status-danger-600 dark:text-status-danger-400 text-sm" :title="entry.error">Failed</span>
                 </td>
               </tr>

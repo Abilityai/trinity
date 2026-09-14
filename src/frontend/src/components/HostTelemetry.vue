@@ -74,12 +74,24 @@ function formatMemory(usedGb, totalGb) {
   return `${usedGb.toFixed(1)}/${totalGb.toFixed(0)}G`
 }
 
+// #2201 — these are READ as numbers, so they are text and AA-normal applies.
+// The 500 tier is a solid/decoration shade: on white it measures 2.28:1
+// (success), 2.94 (warning) and 3.56 (urgent) — all below 4.5. The 700 tier
+// clears it for every family (4.92–6.47) and the dark 400 tier already did
+// (8.42–9.59 on gray-800), so only the light half moves.
+// #2201 — the meter separators are decoration, not content: `aria-hidden` so a
+// screen reader skips them, and one class string for the file rather than three
+// copies. WCAG exempts purely decorative text from contrast, which is the honest
+// classification for a dot between two numbers — darkening it would be styling a
+// thing nobody reads.
+const SEPARATOR = 'text-gray-300 dark:text-gray-500'
+
 function getColorClass(percent) {
-  if (percent === null || percent === undefined) return 'text-gray-400'
-  if (percent < 50) return 'text-status-success-500 dark:text-status-success-400'
-  if (percent < 75) return 'text-status-warning-500 dark:text-status-warning-400'
-  if (percent < 90) return 'text-status-urgent-500 dark:text-status-urgent-400'
-  return 'text-status-danger-500 dark:text-status-danger-400'
+  if (percent === null || percent === undefined) return 'text-gray-500 dark:text-gray-400'
+  if (percent < 50) return 'text-status-success-700 dark:text-status-success-400'
+  if (percent < 75) return 'text-status-warning-700 dark:text-status-warning-400'
+  if (percent < 90) return 'text-status-urgent-700 dark:text-status-urgent-400'
+  return 'text-status-danger-700 dark:text-status-danger-400'
 }
 
 onMounted(async () => {
@@ -98,7 +110,7 @@ onUnmounted(() => {
     <template v-if="!loading">
       <!-- Leading separator lives here (not in Dashboard.vue) so it disappears
            together with the meters when the ladder hides them (#1830). -->
-      <span class="text-gray-300 dark:text-gray-500">·</span>
+      <span :class="SEPARATOR" aria-hidden="true">·</span>
 
       <!-- CPU -->
       <span class="stat-item" data-metric="cpu" :title="`CPU ${formatPercent(hostStats?.cpu?.percent)}%`">
@@ -116,7 +128,7 @@ onUnmounted(() => {
         <span class="stat-value" :class="getColorClass(hostStats?.cpu?.percent)">{{ formatPercent(hostStats?.cpu?.percent) }}%</span>
       </span>
 
-      <span class="text-gray-300 dark:text-gray-500" data-sep="mem">·</span>
+      <span :class="SEPARATOR" data-sep="mem" aria-hidden="true">·</span>
 
       <!-- Memory -->
       <span
@@ -138,7 +150,7 @@ onUnmounted(() => {
         <span class="stat-value" :class="getColorClass(hostStats?.memory?.percent)">{{ formatMemory(hostStats?.memory?.used_gb, hostStats?.memory?.total_gb) }}</span>
       </span>
 
-      <span class="text-gray-300 dark:text-gray-500" data-sep="disk">·</span>
+      <span :class="SEPARATOR" data-sep="disk" aria-hidden="true">·</span>
 
       <!-- Disk -->
       <span class="stat-item" data-metric="disk" :title="`Disk ${formatPercent(hostStats?.disk?.percent)}%`">
