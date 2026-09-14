@@ -2,8 +2,9 @@
 
 The decidable half of the canvas: what a canvas id may look like, how big a
 block list may be, how a write and a partial write are validated and stored,
-and — the part worth reading — how "this may be out of date" is derived rather
-than guessed.
+and — the part worth reading — how the two freshness facts a reader sees are
+read once per agent and normalised, rather than compressed into a verdict
+Trinity would have to guess (#2734).
 
 HTTP-free by design (Invariant #1): every failure is a ``CanvasError`` the thin
 router maps 1:1, the shape ``chat_execution_service`` established in #1483.
@@ -40,6 +41,7 @@ from services.canvas_blocks import (  # noqa: F401 — re-exported for callers
     validate_blocks,
 )
 from services.idempotency_service import resolve_and_validate_execution
+from utils.helpers import parse_iso_timestamp, to_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -419,6 +421,11 @@ def empty_canvas(agent_name: str, canvas_id: str = DEFAULT_CANVAS_ID) -> Dict:
         # rather than omitted because the shape is contractually the Canvas
         # model's, and the voice poll deserializes it.
         "pinned": False,
+        # None, never a read: a placeholder for a canvas that does not exist yet
+        # makes no claims, and this route is polled every ~3s during a live voice
+        # session. Declared so the two constructors of this response shape carry
+        # the same keys (#2734).
+        "agent_last_run_at": None,
         "blocks": [],
     }
 
@@ -453,12 +460,46 @@ def is_stale(canvas: Dict, last_completed_at: Optional[str]) -> bool:
     return str(last_completed_at) > str(updated_at)
 
 
+def _normalized_run_time(last_completed: Optional[str]) -> Optional[str]:
+    """The agent's last completion, as a Z-suffixed UTC string — or nothing.
+
+    `last_completed_execution_at` is a raw `MAX(completed_at)`, and is NOT one of
+    the read boundaries #1474 normalised. Under the retired verdict a naive
+    stored string (`2026-09-02 10:05:00`, the pre-`2ce62c6b` shape) failed QUIET,
+    because `' '` sorts below `'T'` and the comparison simply lost. Since #2734
+    the value is RENDERED, and `Date.parse` reads a naive string as LOCAL time —
+    so the same row would silently offset the fact by the viewer's UTC offset.
+
+    A value we cannot parse degrades to None, which the header omits. Never a
+    passthrough of something unrenderable, and never a fabricated time.
+    """
+    if not last_completed:
+        return None
+    try:
+        return to_utc_iso(parse_iso_timestamp(str(last_completed)))
+    except (ValueError, TypeError) as e:  # a malformed stored row, not a fault
+        logger.warning("canvas: unparseable last-run timestamp %r: %s", last_completed, e)
+        return None
+
+
 def decorate(canvases: List[Dict], agent_name: str) -> List[Dict]:
-    """Attach the derived `stale` flag to each canvas.
+    """Attach the two derived freshness values to each canvas (#2734).
+
+    `agent_last_run_at` is what the header renders beside `updated_at`; `stale`
+    is the retired verdict, still computed and rendered in no header (the
+    ent#553 Manage row still draws its own pill from the flag).
 
     One `last_completed_execution_at` read for the whole list, not one per
     canvas — the input is a property of the AGENT, and an agent with eight
-    canvases should not pay eight identical queries to render its page.
+    canvases should not pay eight identical queries to render its page. The
+    `try` therefore stays OUTSIDE the loop and the normalisation happens beside
+    it, once, since it is one value for the whole list.
+
+    A failed read yields None, which the header renders as OMISSION. The field
+    cannot distinguish "never ran" from "could not read", so it must not narrate
+    either: turning a read failure into "the agent has not run yet" would be a
+    claim about the agent we did not observe. The failure is logged, so an
+    operator can see what a reader cannot.
     """
     if not canvases:
         return canvases
@@ -467,6 +508,10 @@ def decorate(canvases: List[Dict], agent_name: str) -> List[Dict]:
     except Exception as e:  # noqa: BLE001 — a staleness read never fails a render
         logger.warning("canvas: staleness read failed for %s: %s", agent_name, e)
         last_completed = None
+    last_run_at = _normalized_run_time(last_completed)
     for canvas in canvases:
+        canvas["agent_last_run_at"] = last_run_at
+        # The RAW value, deliberately: `is_stale` is retired in place and its
+        # comparison is not this change's to alter.
         canvas["stale"] = is_stale(canvas, last_completed)
     return canvases

@@ -1180,14 +1180,35 @@ already holds.
   unaddressed report stays operator-only. The audience is a validated column,
   never a key inside `blocks`, for the ent#364 reason: `blocks` is agent-authored
   and a prompt-injected agent must not be able to decide who reads it.
-- **FR-5 — Staleness is derived, not a clock** (AC 7): the canvas always renders
-  `updated_at`, and is marked **may be out of date** when the agent has had a
-  terminal execution *after* the canvas was last written — i.e. it did work and
-  did not refresh this surface. An arbitrary age threshold was rejected: a canvas
-  has no inherent freshness expectation, so a clock would either cry wolf on a
-  monthly report or stay silent on a minute-by-minute one, whereas "the agent has
-  run since" is a fact about *this* canvas. `updated_by_execution_id` records
-  which run wrote it, so the claim is checkable.
+- **FR-5 — Freshness is two facts, never a verdict** (AC 7, rewritten by #2734):
+  the canvas header renders **two facts, both unconditional** — when the canvas
+  was last written (`updated_at`) and when the agent last finished a run
+  (`agent_last_run_at`, from the same one-per-agent `last_completed_execution_at`
+  read) — and Trinity derives **no verdict** from them:
+  `Updated 2h ago · agent last ran 40m ago`. An arbitrary age threshold was
+  rejected: a canvas has no inherent freshness expectation, so a clock would
+  either cry wolf on a monthly report or stay silent on a minute-by-minute one,
+  whereas "the agent has run since" is a fact about *this* canvas. The same
+  argument retires the derived verdict one step further: *"the agent has run
+  since"* could not know what a given canvas is for either, and it fired on the
+  **writing run's own output** — a run completes *after* it writes, and the
+  evidence that would exclude it (`updated_by_execution_id`) is optional and
+  absent on most live canvases — so the mark contradicted the timestamp beside
+  it (*"Updated just now"* next to *"may be out of date"*) and taught the reader
+  to ignore it. Two facts measured against one clock cannot contradict each
+  other, and the reader draws the conclusion the heuristic could not.
+  `updated_by_execution_id` still records which run wrote a canvas, so the
+  provenance stays checkable (#2577 consumes it).
+  **The second fact is omissible and is never narrated**: `agent_last_run_at` is
+  null both when the agent has never finished a run and when that read failed,
+  and the payload cannot tell those apart — so the header *omits* the fact
+  rather than saying "has not run yet", because narrating a read failure as an
+  absence claim is the design-system contract's stale-banner rule read at field
+  scope. The derived `stale` boolean stays on the payload, computed exactly as
+  before, and the header renders nothing from it — retained unchanged rather
+  than endorsed,
+  because it keeps the derivation recoverable and removing it would change an
+  agent-visible MCP response shape.
 - **FR-6 — Writes are self-gated, bounded, and provenance-stamped**: the write
   routes take `AuthorizedAgentByName` **plus** the #918 self-check
   (`current_user.agent_name == name` for an agent-scoped key), so a sibling agent
