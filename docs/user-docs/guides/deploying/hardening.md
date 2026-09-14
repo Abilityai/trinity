@@ -93,7 +93,7 @@ A non-empty `TUNNEL_TOKEN` is treated as intent: the installer starts the tunnel
 
 Trinity has no Tailscale integration — this is a host-level install that Trinity neither configures nor monitors. There is no one-click or invite mechanism to lean on: neither DigitalOcean nor Vultr lists a Tailscale app, and both apply marketplace images at create time only, so nothing can be added to a droplet that is already running. The install is two commands.
 
-> **Reaching the web UI over a tailnet needs one extra step on this image, and it is not yet documented here.** The web server in front of Trinity holds a certificate for the droplet's public IP and for the domain you saved — not for a tailnet address — so `https://<tailnet-ip>` gets no certificate, and your public domain still resolves to the public IP that you are about to close off. Until this page carries a verified recipe, treat the private-network path as SSH and CLI access, and reach the UI through a tunnel or the public address. If you only need shell and agent access, the steps below are complete.
+**Reaching the web UI over a tailnet takes one extra step on this image** — see [Reaching the UI over the tailnet](#reaching-the-ui-over-the-tailnet) below, after the install.
 
 **Before you start**, in the Tailscale admin console → **Keys** → *Generate auth key*: make it **reusable**, set an expiry (90 days is the maximum Tailscale allows), tick **pre-approved** if your tailnet has device approval on, and leave **ephemeral** off — ephemeral devices are removed 30–60 minutes after they go quiet, which would evict a server.
 
@@ -126,6 +126,27 @@ Two more things specific to this image:
 
 Worth knowing: a new tailnet's default policy lets **every** device on your tailnet reach this one, not only the laptop you joined from. And Slack is the one integration that survives this path, because Trinity connects outward to Slack over a WebSocket — though installing the Slack app the first time still needs a public address for the OAuth callback.
 
+### Reaching the UI over the tailnet
+
+Once the public ports are closed, the browser has no working URL until you do one of the following. Shell, CLI and agent access over the tailnet are unaffected.
+
+**Why there is nothing to browse to.** The web server in front of Trinity picks which site to serve by the hostname in the request, not by the interface the traffic arrived on, and it has exactly two: the droplet's public IP, which it holds a certificate for, and the domain you saved, which it obtains a certificate for on demand. A tailnet address matches neither. Trinity is asked whether a certificate may be issued for it, answers no — that refusal is what stops your instance being an open certificate requester for anyone who points a name at it — and the connection fails. It could not succeed anyway: tailnet addresses are in carrier-grade NAT space, which no public certificate authority can validate.
+
+The domain does not fill the gap either. Public DNS resolves it to the public address you have just closed off, so your laptop looks up an address it can no longer reach.
+
+**What works today: an SSH tunnel over the tailnet.** From your own machine:
+
+```bash
+ssh -L 8443:127.0.0.1:8081 root@<tailnet-ip>
+# then browse http://localhost:8443
+```
+
+The tunnel exits on the droplet as a local connection, so it needs no certificate and is unaffected by the container firewall. This is the same mechanism the Trinity ops agent ships as its `tunnel.sh`.
+
+**Why you cannot just browse the container port.** Trinity's container firewall drops anything reaching a container from off-box, and that includes traffic from the tailnet — so `http://<tailnet-ip>:8081` is dropped. Ports 80 and 443 work in the public case only because the web server in front is a host process, and host ports never pass through those rules.
+
+Serving Trinity natively on a tailnet address — no tunnel, no certificate, since the network already encrypts the traffic — is a product improvement rather than something to configure by hand. Until it lands, the tunnel above is the supported path.
+
 ### Step 3: Close the public ports
 
 Once the tunnel is connected, or you can reach the instance over the tailnet, add a cloud firewall blocking inbound 80 and 443. Leave 22 reachable from your own address only, or use the provider's console for shell access.
@@ -155,7 +176,8 @@ The full six-probe check is in [Monitoring](monitoring.md) — run it if anythin
 | Settings still says *saved, waiting for the first visit* | Nothing has arrived at that name yet | Load the site in a browser. If it still does not flip, treat as the row above |
 | Telegram or WhatsApp stopped delivering after saving the domain | The webhooks were re-pointed at the new address before it was live | Confirm the domain loads, then re-save the Public URL to re-register them |
 | Site unreachable after closing 80/443 | The tunnel is not carrying traffic | Reopen the ports, check `docker logs trinity-cloudflared`, re-check the ingress rules, then close them again |
-| MCP client cannot connect over the tailnet | It is pointed at a container port | Point it at `https://your-domain.com/mcp` |
+| MCP client cannot connect over the tailnet | It is pointed at a container port, which the container firewall drops | Point it at `https://your-domain.com/mcp`, or tunnel to `127.0.0.1:8081` over SSH |
+| Browser cannot reach the UI after joining a tailnet and closing the ports | A tailnet address has no certificate and cannot get one | Use the SSH tunnel in [Reaching the UI over the tailnet](#reaching-the-ui-over-the-tailnet) |
 
 **Clearing the Public URL** stops Trinity handing the name out, but if the address was also baked into the server's environment at install time, the web server keeps serving certificates for it. Settings then reads *not configured* while that is still true — change the environment value and restart if you need it genuinely gone.
 

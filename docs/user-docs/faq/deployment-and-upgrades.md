@@ -142,6 +142,10 @@ Saving the Public URL tells Trinity which name to hand out and authorises the we
 
 Trinity issues no certificates itself — it only tells the web server in front which single name is allowed. That server obtains the certificate on the first request for the name, so if the DNS record is missing or points elsewhere, the request never arrives and no certificate is ever issued. The failure happens in the visitor's browser, where Trinity cannot see it. Check that the `A` record resolves to this server and that ports 80 and 443 are open to the internet. See [Hardening a Marketplace Install](../guides/deploying/hardening.md).
 
+## If I only reach Trinity over a VPN, do I still need the web server in front of it?
+
+Strictly it is redundant — a private network already encrypts the traffic, so terminating TLS a second time buys nothing. But turning it off does not give you a working UI, because the blocker is elsewhere: the web server is a host process, while the frontend is a container port, and Trinity's container firewall drops anything reaching a container from off-box, tailnet traffic included. Until Trinity can serve a private address natively, reach the UI by tunnelling over SSH to the local frontend port. See [Hardening a Marketplace Install](../guides/deploying/hardening.md#reaching-the-ui-over-the-tailnet).
+
 ## Why do I have to log in again after restarting the backend?
 
 JWT tokens are invalidated whenever the backend restarts, so every web UI session must log in again — this is expected after any upgrade or restart, not a bug. MCP clients such as Claude Code also need to reconnect: run `/mcp` in your session or restart the client. See [Monitoring](../guides/deploying/monitoring.md).
