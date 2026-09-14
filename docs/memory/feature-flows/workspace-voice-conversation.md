@@ -208,19 +208,40 @@ oldest-first across calls, every cut named by count and nothing pointing the
 agent at a place it cannot read. Read before `_persist_user_turn`, fail-soft,
 computed in `portal_chat` only (the streaming entry funnels through it).
 
-**No reply lands mid-call — two gates, one marker.** The tab's composer is
-inert during a call, but a reply can be in flight from another tab, a reload,
-or the headless `/chat` surface, and a reply between two spoken rows would sit
-after the cursor and hide the call's first half from the next delta. So both
-sides refuse, in words, after their uniform 404: `start_workspace_voice`
-answers **409** ("A reply is still being written — wait for it, then start the
-call.") when `get_turn_inflight` is set, and both turn entries (`portal_chat`,
-`start_portal_turn`) answer **409** (`category="voice_call_active"`, unbilled,
-retryable) through `_refuse_turn_during_voice_call` while the thread's live-call
-marker `portal_voice_active:{session}` is set — written by `start_workspace_voice`
-once the provider session exists (TTL = the cap + slack), cleared by the bridge's
-`finally` and by the REST `/stop`. Both reads are fail-open on a Redis outage:
-a call over a possibly running turn, or a turn over a possibly live call, beats
+**No reply lands mid-call once the audio bridge is up — two gates, one lease.**
+The tab's composer is inert during a call, but a reply can be in flight from
+another tab, a reload, or the headless `/chat` surface, and a reply between two
+spoken rows would sit after the cursor and hide the call's first half from the
+next delta. So both sides refuse, in words, after their uniform 404:
+`start_workspace_voice` answers **409** ("A reply is still being written — wait
+for it, then start the call.") when `get_turn_inflight` is set, and both turn
+entries (`portal_chat`, `start_portal_turn`) answer **409**
+(`category="voice_call_active"`, unbilled, retryable) through
+`_refuse_turn_during_voice_call` while the thread's live-call marker
+`portal_voice_active:{session}` is set.
+
+That marker is an **owned lease, and the audio bridge holds it** (#2700). The
+bridge arms it at connect — the first statement inside the same `try` whose
+`finally` releases it, the only placement structurally guaranteed to pair —
+stores its own `voice_session_id` as the value, renews it every 15 s on a 60 s
+TTL while it lives but never past the call's own cap, and releases it
+**unconditionally, last, and only on an owner match**, on every exit. The start
+does not arm it any more, and the rule that moved it is worth stating: *a
+marker whose only closer lives downstream of a connection that may never exist
+is an orphan generator.* `start_workspace_voice` used to write it with the cap
+as its TTL, so a start whose audio socket never opened refused every typed turn
+in that thread for ~32 minutes — from any tab and from the headless `/chat` —
+naming a call the person could not end. Three properties are load-bearing and
+none is decorative: the release must be keyed on the bridge's own pre-`try`
+local (on `ended.portal_session_id` an `ended is None` return re-strands it, the
+same defect moved); the TTL must be a renewed lease (a cap-sized TTL turns every
+crash, OOM and routine backend deploy mid-call into this same 32-minute
+symptom); and the release must be owner-matched (the key is one per **thread**,
+so an unconditional delete lets a closing bridge free the thread of a newer
+call — a reload, a second tab). The REST `/stop` still releases, idempotent and
+owner-matched, but it is an API-only path: the Workspace passes `restStop:
+false` and never calls it. Both reads are fail-open on a Redis outage: a call
+over a possibly running turn, or a turn over a possibly live call, beats
 silencing either. A client-side lock is never the second gate — it covers one
 tab (the review's finding, recorded in `docs/memory/learnings.md`).
 
@@ -456,7 +477,7 @@ firing on a sub-pixel reflow would otherwise blank the orb continuously.
 | `src/backend/client_portal/{models,db,service,agent_page}.py` | `PortalRealtimeVoice`, `PortalVoiceStart{Request,Response}`, `PortalHistoryMessage.source/voice_call_id`; `add_portal_message(source, voice_call_id)`, `get_portal_messages` selects both; `_format_history_context` labels + budgets, dedup ignores spoken rows, roster field; `canvas_audience_for` |
 | `src/backend/services/voice_prompt_service.py` | the voice prompt resolver, lifted out of the router |
 | `src/backend/services/gemini_voice.py` | `VoiceSession.portal_session_id/client_email/end_reason/end_message`, Redis metadata + reconstruction of every field, `_build_live_config` (compression + resumption), `go_away` reconnect loop, `_record_turn` → `on_turn`, the T-30 s cap notice, `claim_transcript_save` |
-| `src/backend/routers/voice.py` | JWT before session lookup; `on_turn` → portal persistence (function-local import); `finally` → `persist_voice_call_end` or the claimed `_save_transcript`; `saved` frame; `status` frames carry `reason`/`message`; `/stop` never writes for a portal-bound session |
+| `src/backend/routers/voice.py` | JWT before session lookup; `on_turn` → portal persistence (function-local import); arms the live-call lease at connect, renews it, releases it unconditionally in the `finally` (#2700); `finally` → `persist_voice_call_end` or the claimed `_save_transcript`, wrapped so a raising close-out still reaches the gemini cancel / `saved` / close; `saved` frame; `status` frames carry `reason`/`message`; `/stop` never writes for a portal-bound session |
 | `src/backend/db/{schema,tables,migrations}.py`, `migrations/versions/0057_portal_messages_voice_source.py` | `enterprise_portal_messages.source`, `.voice_call_id` (nullable), both tracks |
 | `src/backend/config.py`, `docker-compose*.yml`, `.env.example` | `WORKSPACE_VOICE_MAX_DURATION` (1800) |
 | `src/frontend/src/components/portal/portalVoiceMode.js` | the pure rules: `voiceEntryState`, `voicePreflight`, `voiceHeaderLine`, `endedNotice`, `startFailureReason`, `groupVoiceBlocks`, `voiceCallLabel*`, `VOICE_SPLIT`, `isPanelTool`, `canvasChanged` |
@@ -537,3 +558,27 @@ mechanics live in [voice-chat.md § VOICE-007](voice-chat.md); the requirement i
 - The 30-minute default is trusted only after a live call past 15 minutes on a
   real key (the reconnect path is unit-tested, not soak-tested here).
 - The JWT rides the WebSocket query string (pre-existing; debt registered).
+- **The `/start` → connect gap is unmarked.** Between the start returning and
+  the bridge arming its lease, a typed turn from a second tab or the headless
+  `/chat` can land. It posts and is answered normally — no new state, string or
+  default, and nothing is lost: spoken rows are written as they happen and the
+  post-call delta still carries everything to the agent's next typed turn. What
+  is lost is that the *voice model's opening context*, built at start time, does
+  not contain that one message — i.e. this is precisely where "a reply between
+  two spoken rows sits after the cursor and hides the call's first half" becomes
+  possible again, which is why the claim above is scoped to "once the audio
+  bridge is up". The gap is not new in kind: the start already leaves one open
+  from its `get_turn_inflight` check to the mark, spanning the prompt resolve,
+  the thread read and the provider round trip; #2700 roughly doubles it. Closing
+  it would need a grace mark at `/start` — a setter whose only release is a TTL,
+  i.e. a smaller copy of the dead end that was removed.
+- **A bridge whose peer died half-open holds the lease until the socket is torn
+  down**, bounded by the renewer's own `cap + 120 s` lifetime plus one 60 s
+  lease — today's bound plus one lease in the worst case, and ~0 s in every
+  normal one. That bound is why the renewer cannot outlive its own call. The cap
+  path is the one to watch: `useVoiceSession.js::_onEnded` neither sends
+  `{"type":"end"}` nor closes, so the socket closes only on the client's 5 s
+  `saved`-frame timeout.
+- **The marker is one key per thread**, so two deliberate concurrent calls on
+  one thread share it. The release is owner-matched, so a closing call cannot
+  free a newer one; what governs from then on is the newer call's own lease.
