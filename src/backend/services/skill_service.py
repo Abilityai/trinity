@@ -203,6 +203,38 @@ def _scrub_pat(text: str) -> str:
 RECONCILE_ALARM_AGENT_NAME = "_skills-sync"
 
 
+def _same_skills_repo(stored_url: str, normalized_url: str) -> bool:
+    """Do these two strings name the same skills repository? (#2763)
+
+    `normalized_url` has already been through `validate_skills_library_url`;
+    `stored_url` comes off a `skill_sources` row and may be in EITHER form —
+    the bundled default is seeded from a bare literal (`config.py`'s
+    `TRINITY_DEFAULT_SKILL_SOURCE`, no scheme) while a source created through
+    `POST /api/skills/sources` is stored normalized. So the stored side is
+    normalized here too rather than trusted to already be.
+
+    Fail-safe on an unusable stored value: a row whose url cannot be normalized
+    simply does not match, which lands on the refusal branch. That is the
+    conservative direction — the alternative is treating an unparseable row as
+    equal to the key and silently adopting it.
+
+    Deliberately NOT a general URL-equality helper. It collapses the
+    scheme/no-scheme split the platform itself creates, and nothing else:
+    `…/repo.git`, a trailing `/` and the bare `owner/repo` shorthand stay
+    distinct, and closing that tail is tracked separately. Widening this
+    quietly would change which strings count as "already configured", which is
+    an ent#346 decision, not a tidy-up.
+    """
+    if not stored_url or not normalized_url:
+        return False
+    if stored_url == normalized_url:
+        return True
+    try:
+        return validate_skills_library_url(stored_url) == normalized_url
+    except ValueError:
+        return False
+
+
 def _reconcile_max_removals() -> int:
     """Blast-radius cap for start-path reconciliation (ent#236).
 
@@ -731,7 +763,17 @@ class SkillService:
         # carrying a PAT would be laundered into a durable row and read back by
         # anything that lists sources (the ent#334 disclosure).
         try:
-            validate_skills_library_url(url)
+            # #2763: ASSIGN the return. `validate_skills_library_url` is a
+            # validator AND a normalizer — it turns `github.com/o/r` into
+            # `https://github.com/o/r` — and `routers/skills.py` uses it as one
+            # when it stores a source. Discarding it here meant the match below
+            # compared a NORMALIZED stored url against a RAW setting value, so
+            # the same repository written two ways never matched and this
+            # install alerted on every sync forever (#2744 is that flood).
+            #
+            # Validate the ORIGINAL for credentials — `reject_embedded_credentials`
+            # must see what was actually written, not a form we produced.
+            normalized_url = validate_skills_library_url(url)
             reject_embedded_credentials(url)
         except ValueError as e:
             # Refuse, and SAY SO. A bare `logger.warning` — what every failure
@@ -751,7 +793,21 @@ class SkillService:
             # migration for an install not yet migrated. Once any source exists
             # the install is on the source model, and the legacy key is no
             # longer a migration input — it is an unvalidated back door.
-            existing = [s for s in db.list_skill_sources() if s.url == url]
+            # #2763: normalize BOTH sides. Sources exist in both forms on a
+            # live install — the bundled default is seeded from a bare literal
+            # (`config.py`'s TRINITY_DEFAULT_SKILL_SOURCE, no scheme) while one
+            # created through `POST /api/skills/sources` is stored normalized —
+            # so normalizing only the setting would still miss half the fleet.
+            #
+            # This CANNOT weaken ent#346: a match returns an existing id and
+            # creates no row, so it is the no-op branch. The grant branch below
+            # (`count_skill_sources() == 0` -> `create_skill_source`) is
+            # untouched, and a key naming a genuinely different repo still
+            # falls through to the refusal exactly as before. Normalizing
+            # removes false positives from the detector; it does not widen what
+            # may be granted.
+            existing = [s for s in db.list_skill_sources()
+                        if _same_skills_repo(s.url, normalized_url)]
             if existing:
                 return existing[0].id
 
