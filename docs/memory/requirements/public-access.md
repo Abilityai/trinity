@@ -880,7 +880,10 @@ spoken replies (#2157) stay as composer affordances.
   in the same form. One total character budget covers a whole 30-minute call;
   anything trimmed is named by count. A call cannot start while a typed reply
   is still being written, and a typed turn cannot start while a call is on
-  (both 409, unbilled, after the uniform 404), so no reply lands mid-call.
+  (both 409, unbilled, after the uniform 404), so no reply lands mid-call once
+  the audio bridge is up — and a call whose audio socket never opens never
+  holds the thread: the live-call marker is an owned lease armed by the bridge
+  at connect, not by the start (#2700).
 - **FR-4 — Modal**: while the call is on, New chat, the picker, star, Reset, the
   tabs, attach, mic, textarea and Send are inert; the speaker toggle is hidden;
   one status line names the orb state / the tool at work and the way out;
