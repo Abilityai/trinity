@@ -90,27 +90,46 @@ export function renderableBlocks(blocks) {
 }
 
 /**
- * What the freshness line says.
+ * What the freshness line says — two facts, never a verdict (#2734).
  *
- * Two facts, never one: the timestamp is ALWAYS rendered, and the staleness
- * mark is an addition to it. That ordering is the honesty contract (AC 7) —
- * a mark that replaced the timestamp would leave a reader who disagrees with
- * our heuristic no way to judge for themselves.
+ * `Updated 2h ago · agent last ran 40m ago`. Both facts are measured against
+ * the SAME injected `now`, so whatever is wrong with that instant is wrong for
+ * both by the same amount in the same direction: the absolute readings can be
+ * off, but their RELATIONSHIP — the only thing a reader is actually judging —
+ * cannot invert.
  *
- * The `stale` flag is derived server-side ("the agent finished a run after
- * this canvas was written"), so the wording says what was observed rather
- * than asserting the content is wrong — we know the agent worked and did not
- * refresh this surface; we do not know that what is here is false.
+ * Trinity derives no staleness verdict from them any more. It used to, and the
+ * verdict fired on the writing run's own output, so a canvas could be reported
+ * as superseded in the same breath as "updated just now" — which taught the
+ * reader to ignore the mark, the failure the honesty contract exists to
+ * prevent. Two checkable facts let the reader draw the conclusion a heuristic
+ * could not.
+ *
+ * The retired copy is NOT quoted here or in CanvasPanel.vue, deliberately: the
+ * spec that guards the deletion greps those files for it.
+ *
+ * A missing `agent_last_run_at` OMITS the second fact rather than narrating it.
+ * The field is null both when the agent has never finished a run and when the
+ * staleness read failed on the server, and the payload cannot tell those apart
+ * — so "the agent has not run yet" would turn "we could not read it" into a
+ * claim about the agent, which is the design-system contract's stale-banner
+ * rule read at field scope.
  */
 export function freshness(canvas, now = Date.now()) {
   const updatedAt = canvas?.updated_at || null
+  const lastRunAt = canvas?.agent_last_run_at || null
+  // The first fact is UNCONDITIONAL — an unreadable `updated_at` still renders,
+  // degrading to relativeTime's own fallback rather than vanishing.
   const label = updatedAt ? `Updated ${relativeTime(updatedAt, now)}` : 'Never updated'
-  if (!canvas?.stale) return { label, stale: false, note: null }
-  return {
-    label,
-    stale: true,
-    note: 'The agent has run since this was written — it may be out of date.',
-  }
+  // The second is OMISSIBLE, and the gate is PARSEABILITY, not truthiness: a
+  // truthy-but-unparseable value would otherwise reach relativeTime and render
+  // "agent last ran at an unknown time" — a narrated non-fact, exactly what
+  // this function refuses to produce.
+  const runnable = lastRunAt && !Number.isNaN(Date.parse(lastRunAt))
+  const runLabel = runnable ? `agent last ran ${relativeTime(lastRunAt, now)}` : null
+  // `line` is what the panel renders; the parts are returned beside it so a
+  // test can assert each fact independently of the joining.
+  return { label, runLabel, line: runLabel ? `${label} · ${runLabel}` : label }
 }
 
 /** Compact relative time. Returns an absolute-ish fallback for a bad value. */
