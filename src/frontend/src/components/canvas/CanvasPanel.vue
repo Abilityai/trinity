@@ -320,7 +320,7 @@ const props = defineProps({
   listShares: { type: Function, default: null },       // (id) => Promise<share[]>
   revokeCanvasShare: { type: Function, default: null }, // (shareId) => Promise
 })
-const emit = defineEmits(['start-chat', 'changed'])
+const emit = defineEmits(['start-chat', 'changed', 'canvas-selected'])
 
 // ent#553 — a searchable, bounded list once the pile is real.
 const SEARCH_THRESHOLD = 6
@@ -513,6 +513,10 @@ async function select(id) {
   if (!id) return
   const seq = ++selectSeq
   selectedId.value = id
+  // ent#555 — announce what the user is now looking at, so a turn sent from
+  // the conversation can carry it. Emitted on the auto-select too (the watch
+  // below calls this), or the FIRST turn of a session would carry nothing.
+  emit('canvas-selected', id)
   detail.value = null
   detailError.value = ''
   try {
