@@ -271,12 +271,14 @@
     </div>
 
     <!-- Build Info Modal (#926) — click-out to dismiss -->
-    <div
-      v-if="showBuildInfoModal && buildInfo.info.value"
-      class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-      @click.self="showBuildInfoModal = false"
+    <!-- #1923: overlay, Esc, focus trap and focus return come from BaseModal. -->
+    <BaseModal
+      :model-value="showBuildInfoModal && !!buildInfo.info.value"
+      panel-class="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full mx-4 p-6"
+      aria-label="Build Info"
+      @close="showBuildInfoModal = false"
     >
-      <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full mx-4 p-6">
+      <div>
         <div class="flex justify-between items-start mb-2">
           <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Build Info</h2>
           <button
@@ -329,11 +331,12 @@
           </div>
         </dl>
       </div>
-    </div>
+    </BaseModal>
   </nav>
 </template>
 
 <script setup>
+import BaseModal from './base/BaseModal.vue'
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
