@@ -48,7 +48,7 @@ Click **Mute** on the orb to silence your microphone mid-session; the status lin
 
 ## Requirements
 
-- `GEMINI_API_KEY` configured in **Settings → AI Keys**.
+- A Gemini key in **Settings → Integrations** ([Platform Keys](../credentials/platform-keys.md#gemini)), or `GEMINI_API_KEY` in `.env`.
 - `VOICE_ENABLED` must be on (default: on when API key is present).
 - Browser microphone permission granted, on a secure (https) page.
 - A signed-in platform user. External clients signed in with a portal code do not get a call button.

@@ -905,6 +905,10 @@ def voip_service_mod(effect_service, monkeypatch):
     ws_ticket_stub = types.ModuleType("services.ws_ticket_service")
     ws_ticket_stub.mint_ticket = lambda **kw: "ticket"
     services_stub.ws_ticket_service = ws_ticket_stub
+    # ent#582: the Gemini key is resolved per call (Settings → env).
+    settings_stub = types.ModuleType("services.settings_service")
+    settings_stub.get_gemini_api_key = lambda: "test-key"
+    monkeypatch.setitem(sys.modules, "services.settings_service", settings_stub)
 
     monkeypatch.setitem(sys.modules, "services", services_stub)
     monkeypatch.setitem(sys.modules, "services.idempotency_service", effect_service)

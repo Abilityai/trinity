@@ -30,6 +30,7 @@ Provider-neutral on purpose: this module talks to the voice service through
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -57,38 +58,96 @@ REASON_DISABLED = "Voice is turned off on this instance."
 REASON_NO_KEY = "No voice provider key is configured on this instance."
 
 
-# ---- The live-call marker (#2694) --------------------------------------------
+# ---- The live-call lease (#2694, #2700) --------------------------------------
 #
 # The other half of "no typed reply lands mid-call". `start_workspace_voice`
 # refuses over a reply in flight; this is what lets the TURN side refuse over a
 # call in progress — the owning tab's composer is inert, but a second tab or
-# the headless `/chat` surface is not. Best-effort Redis, the TTL (the call cap
-# plus slack) is the backstop for a call the bridge never closed; the read is
-# fail-OPEN, because a Redis outage must not silence every typed turn.
+# the headless `/chat` surface is not.
+#
+# #2700: the marker is a **lease**, and the audio bridge owns it. The bridge
+# arms it at connect, inside the same `try` whose `finally` releases it
+# (`routers/voice.py::voice_websocket`), and renews it while it lives. It is
+# NOT armed by `start_workspace_voice` any more: every path able to clear it
+# lives downstream of a socket that may never open, so a start whose socket
+# never opened stranded a cap-sized (~32 min) `409 voice_call_active` on every
+# typed turn in that thread — naming a call the person could not end.
+#
+# Best-effort Redis throughout; the read stays fail-OPEN, because a Redis
+# outage must not silence every typed turn.
+
+# The TTL actually written. A lease, not the call cap: with the cap as the TTL,
+# a SIGKILL, an OOM or a routine backend deploy mid-call still strands the
+# thread for ~32 minutes, with a symptom identical to #2700's own title.
+VOICE_MARKER_LEASE_SECONDS = 60
+# The renew interval. TTL >= 4x the tick so one BGSAVE-class stall (the breaker
+# client has 1s socket timeouts) cannot expire a LIVE bridge's lease — the
+# ratio and its reason are lifted from `agent_call_limiter.py`'s
+# INFLIGHT_MARKER_TTL_SECONDS / INFLIGHT_TICK_SECONDS, copied not invented.
+VOICE_MARKER_TICK_SECONDS = 15.0
+# How far past the call's own cap the renewer may keep ticking before it stops.
+# Load-bearing: unbounded, a bridge whose peer died half-open would renew
+# forever and hold the thread PAST the old cap-sized TTL — the fix would be a
+# regression in exactly the pathological case. With it the absolute worst case
+# is cap + 120 + one lease, and every real case is <= one lease.
+VOICE_MARKER_SLACK_SECONDS = 120
+
+# What the pre-#2700 `/start` wrote. Releasable by anyone: see the compare in
+# `clear_voice_call_active`, so a marker stranded across the deploy is not
+# immortal.
+_LEGACY_MARKER_VALUE = "1"
+
 
 def _voice_active_key(portal_session_id: str) -> str:
     return f"portal_voice_active:{portal_session_id}"
 
 
-def mark_voice_call_active(portal_session_id: str, ttl_seconds: int) -> None:
+def mark_voice_call_active(portal_session_id: str, ttl_seconds: int, *, owner: str) -> None:
+    """Arm (or renew) this thread's live-call lease, held by `owner`.
+
+    `owner` is the call's `voice_session_id`, and it is keyword-only and
+    REQUIRED: an unowned lease cannot be released safely (below), so a future
+    call site must not be able to write one without saying whose it is.
+    """
     try:
         from redis_breaker_util import get_breaker_redis
         client = get_breaker_redis()
         if client is not None:
-            client.set(_voice_active_key(portal_session_id), "1", ex=int(ttl_seconds))
+            client.set(_voice_active_key(portal_session_id), str(owner), ex=int(ttl_seconds))
     except Exception as e:  # noqa: BLE001 — a marker failure must not block the call
         logger.warning("workspace voice: live-call mark failed for %s: %s", portal_session_id, e)
 
 
-def clear_voice_call_active(portal_session_id: Optional[str]) -> None:
+def clear_voice_call_active(portal_session_id: Optional[str], *, owner: str) -> None:
+    """Release the lease — but only if it is still THIS call's (#2700).
+
+    Compare-and-delete, on the `service.py::clear_turn_inflight` precedent. The
+    key is one per THREAD, so a reload or a second tab arms a NEW call's lease
+    over it; an unconditional delete would let a closing bridge free the thread
+    of a call that is still live — the #2694 defect, re-entered through #2700's
+    own fix.
+
+    Not atomic (GET then DEL), and the failure direction is the safe one: if
+    the value changed in between, the delete is skipped and the newer owner
+    keeps its lease, which its own release (or its expiry) clears. Decode
+    defensively — `client.get` returns `bytes` or `str` depending on the
+    client's `decode_responses`, and the old code only ever tested for `None`.
+    """
     if not portal_session_id:
         return
     try:
         from redis_breaker_util import get_breaker_redis
         client = get_breaker_redis()
-        if client is not None:
-            client.delete(_voice_active_key(portal_session_id))
-    except Exception as e:  # noqa: BLE001 — the TTL is the backstop
+        if client is None:
+            return
+        current = client.get(_voice_active_key(portal_session_id))
+        current = current.decode() if isinstance(current, bytes) else current
+        if current is None:
+            return
+        if current != str(owner) and current != _LEGACY_MARKER_VALUE:
+            return
+        client.delete(_voice_active_key(portal_session_id))
+    except Exception as e:  # noqa: BLE001 — the lease expiry is the backstop
         logger.warning("workspace voice: live-call clear failed for %s: %s", portal_session_id, e)
 
 
@@ -105,6 +164,43 @@ def voice_call_active(portal_session_id: str) -> bool:
         return False
 
 
+async def renew_voice_call_marker(portal_session_id: str, *, owner: str, max_seconds: float) -> None:
+    """Hold the lease for as long as the bridge that owns it lives (#2700).
+
+    A plain timer, deliberately — neither of the two event-driven shapes works:
+    re-arming on each spoken TURN expires a live-but-quiet call mid-call (the
+    person listening to a long answer fires no turn), and re-arming on inbound
+    audio FRAMES expires a MUTED call (`useVoiceSession.js` skips `ws.send`
+    while muted). Either resurrects the very #2694 defect the marker exists to
+    prevent; a timer is immune to both.
+
+    `max_seconds` is the call's own cap plus `VOICE_MARKER_SLACK_SECONDS`, and
+    it is load-bearing: past it the renewer stops even if the bridge is still
+    blocked in `receive_text()`, so a peer that died half-open cannot hold the
+    thread indefinitely.
+
+    The Redis write goes off-loop (`asyncio.to_thread`) — the breaker client
+    has 1s socket timeouts and this loop shares an event loop with a realtime
+    audio bridge. Same reason, and the same shape, as the `agent_call_limiter`
+    refresher. `mark_voice_call_active` swallows every exception, so a Redis
+    outage cannot kill this loop or the call; the lease simply expires, and the
+    read is fail-OPEN.
+    """
+    elapsed = 0.0
+    try:
+        while elapsed < max_seconds:
+            await asyncio.sleep(VOICE_MARKER_TICK_SECONDS)
+            elapsed += VOICE_MARKER_TICK_SECONDS
+            await asyncio.to_thread(
+                mark_voice_call_active,
+                portal_session_id,
+                VOICE_MARKER_LEASE_SECONDS,
+                owner=owner,
+            )
+    except asyncio.CancelledError:
+        pass
+
+
 def realtime_voice_capability(is_platform: bool) -> PortalRealtimeVoice:
     """The roster's realtime-voice capability for this principal.
 
@@ -116,10 +212,11 @@ def realtime_voice_capability(is_platform: bool) -> PortalRealtimeVoice:
     """
     if not is_platform:
         return PortalRealtimeVoice(available=False, reason=None)
-    from config import GEMINI_API_KEY, VOICE_ENABLED
+    from config import VOICE_ENABLED
+    from services.settings_service import get_gemini_api_key  # Settings → env (ent#582)
     if not VOICE_ENABLED:
         return PortalRealtimeVoice(available=False, reason=REASON_DISABLED)
-    if not GEMINI_API_KEY:
+    if not get_gemini_api_key():
         return PortalRealtimeVoice(available=False, reason=REASON_NO_KEY)
     return PortalRealtimeVoice(available=True, reason=None)
 
@@ -237,9 +334,12 @@ async def start_workspace_voice(
         # re-asserting `include_owned=True` a long way from here.
         is_platform=True,
     )
-    # #2694: the thread is on a call from here until the bridge's close clears
-    # it (`routers/voice.py`); a typed turn on this thread is refused meanwhile.
-    mark_voice_call_active(portal_session_id, WORKSPACE_VOICE_MAX_DURATION + 120)
+    # #2700: the thread is deliberately NOT marked here. Every path able to
+    # clear the live-call marker lives downstream of an audio socket that may
+    # never open, so arming it at the start stranded a cap-sized 409 on every
+    # typed turn in the thread whenever the socket failed to connect. The
+    # bridge arms its own lease at connect and releases it in the same
+    # `finally` (`routers/voice.py::voice_websocket`) — one owner, one closer.
     return {
         "voice_session_id": session.session_id,
         "websocket_url": f"/ws/voice/{session.session_id}",

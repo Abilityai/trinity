@@ -204,8 +204,9 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         ),
         execution_id: z.string().optional().describe(
           "Optional. The execution_id of the turn you are writing from. It stamps the canvas with " +
-          "which run produced it, which is what lets Trinity tell a reader honestly whether the " +
-          "canvas may be out of date.",
+          "which run produced it — checkable provenance, and what lets this result tell you " +
+          "whether the reader of the session you are writing from can actually see the canvas " +
+          "(`visible_to_requester`).",
         ),
       }),
       execute: async (
@@ -266,7 +267,8 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
           id: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).describe("The id of the block to replace."),
         })).min(1).max(50).describe("The replacement blocks, each carrying the id it replaces."),
         execution_id: z.string().optional().describe(
-          "Optional. The execution_id of the turn you are writing from (provenance for the staleness mark).",
+          "Optional. The execution_id of the turn you are writing from — provenance: which run " +
+          "produced this canvas.",
         ),
       }),
       execute: async (
@@ -307,7 +309,10 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         "Read one of your canvases back, with its blocks and their ids. Use this before updating so " +
         "you extend what is there instead of overwriting it — `set_canvas` replaces the whole canvas " +
         "and `patch_canvas` replaces the blocks you name; there is no append tool by design: read, " +
-        "change, write is the only sequence that leaves the surface in a state you chose.",
+        "change, write is the only sequence that leaves the surface in a state you chose. " +
+        "The returned `stale` is a legacy derived flag — 'a run of yours finished after this canvas " +
+        "was written', which counts the run that wrote it. The header does not render it; it shows " +
+        "`updated_at` and `agent_last_run_at` and draws no conclusion. Judge for yourself from those.",
       parameters: z.object({
         canvas_id: z.string().optional().describe(
           "The canvas to read. Omit to read the canvas the user currently has OPEN — " +
@@ -348,8 +353,10 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
     list_canvases: {
       name: "list_canvases",
       description:
-        "List your canvases — id, title, audience and when each was last updated. Metadata only; " +
-        "use get_canvas for the content.",
+        "List your canvases — id, title, audience, when each was last updated, and when you last " +
+        "finished a run (`agent_last_run_at`, the same for every row). Metadata only; use " +
+        "get_canvas for the content. The `stale` flag is a legacy derived value that counts the " +
+        "run that wrote the canvas and is not what the header shows — read the two timestamps instead.",
       parameters: z.object({}),
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;

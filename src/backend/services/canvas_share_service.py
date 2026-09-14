@@ -120,7 +120,13 @@ def public_view_payload(resolution: Dict) -> Dict:
     `live: True` is not decoration: AC #3 requires the page to say which it is,
     and a client that had to assume would eventually assume wrong.
     """
-    canvas = resolution["canvas"]
+    # #2734 — `decorate()` now carries the agent's last-run instant for the
+    # rostered canvas header. The share link is a different audience (a
+    # `public` link is readable by a stranger), and widening that fact onto it
+    # was explicitly NOT decided, so the share payload strips it here rather
+    # than at every `decorate()` call site.
+    canvas = {k: v for k, v in resolution["canvas"].items()
+              if k != "agent_last_run_at"}
     share = resolution["share"]
     return {
         "status": ShareResolution.OK,

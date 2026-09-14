@@ -12,6 +12,7 @@ from enum import Enum
 
 from utils.helpers import parse_iso_timestamp, to_utc_iso
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
+from db_models import SubscriptionCredential
 
 
 # Fork-to-own destination: "owner/name". Owner per GitHub rules (alphanumeric +
@@ -802,9 +803,23 @@ class CanvasSummary(BaseModel):
     # ent#537 — the starter layout, or None for stacked blocks.
     template: Optional[str] = None
     # Derived, never stored: the agent has run since this canvas was written.
+    # Computed but NOT rendered since #2734 — kept so the derivation stays
+    # recoverable, and still counting the writing run as a run "since".
     stale: bool = False
     # ent#553 — a human's pin. Stored, unlike `stale`, and never agent-written.
     pinned: bool = False
+    # Derived, never stored. A `Field(description=...)` and not a bare comment
+    # on purpose: a comment is invisible to `model_fields`, so nothing can
+    # assert it, and it never reaches the OpenAPI schema the MCP consumer reads.
+    agent_last_run_at: Optional[str] = Field(
+        default=None,
+        description=(
+            "When the agent last FINISHED a run (db.last_completed_execution_at). "
+            "Null both when it never has and when that read failed — the header "
+            "omits the fact rather than asserting either, because 'we could not "
+            "read it' must never render as 'it never ran'."
+        ),
+    )
 
 
 class Canvas(CanvasSummary):
@@ -3813,6 +3828,30 @@ class ApiKeyUpdate(BaseModel):
 class ApiKeyTest(BaseModel):
     """Request body for testing an API key."""
     api_key: str
+
+
+class ResendKeyRequest(BaseModel):
+    """Body for PUT and POST …/test on /api/settings/api-keys/resend (ent#582).
+
+    ``from_address`` is the sender Resend must be willing to send from (a
+    verified domain). Omitted → the address currently in force (setting →
+    ``SMTP_FROM`` env) is kept and checked.
+    """
+    api_key: str
+    from_address: Optional[str] = None
+
+
+class SubscriptionTokenTest(BaseModel):
+    """Body for POST /api/subscriptions/test (ent#582) — a token to validate
+    BEFORE it is registered. Never persisted, never echoed."""
+    token: str
+
+
+class SubscriptionRegistration(SubscriptionCredential):
+    """POST /api/subscriptions response: the subscription plus how many agents
+    it just connected as the install's FIRST Claude credential (ent#582; 0
+    otherwise). The first-run Claude step reads `connected_agents` as an int."""
+    connected_agents: int = 0
 
 
 class OpsSettingsUpdate(BaseModel):

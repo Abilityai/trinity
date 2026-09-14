@@ -32,6 +32,21 @@ class ScheduleStatsMixin:
                 {"agent_name": agent_name},
             ).scalar()
 
+    def agent_has_running_execution(self, agent_name: str) -> bool:
+        """Any execution row for the agent in ``running`` right now (ent#582).
+
+        Unwindowed on purpose: the question is "would a restart kill a turn",
+        and a long turn started hours ago is still a turn.
+        """
+        with get_engine().connect() as conn:
+            return conn.execute(
+                text(
+                    "SELECT 1 FROM schedule_executions "
+                    "WHERE agent_name = :agent_name AND status = 'running' LIMIT 1"
+                ),
+                {"agent_name": agent_name},
+            ).first() is not None
+
     def get_agent_execution_stats(self, agent_name: str, hours: int = 24) -> Dict:
         """Get execution statistics for a single agent.
 

@@ -1,25 +1,26 @@
-"""Behavioural guard: first boot's password generator survives `set -o pipefail` (#2281).
+"""Behavioural guard: where first boot's admin comes from (#2281, ent#580).
 
-Bug: the generator was
+History. This file used to execute first boot's password GENERATOR — a
+`tr -dc ... </dev/urandom | head -c 24` that died of SIGPIPE under the script's
+own `set -o pipefail` on the very first droplet ever created (#2281). ent#580
+deleted the generator outright: a one-click droplet now provisions NO admin, and
+the first person to open it in a browser creates one at /setup. Nothing is
+generated, so nothing is printed in the MOTD and nobody needs a terminal.
 
-    ADMIN_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)"
+What is pinned now, by EXECUTING the real block (a grep only knows one
+spelling, and the #2281 failure was a runtime signal `bash -n` passes):
 
-inside a script that opens with `set -euo pipefail`. `head` closes the pipe after
-24 bytes, `tr` dies of SIGPIPE against an endless source, `pipefail` surfaces that
-non-zero status out of the command substitution, and `set -e` ends the script.
-
-It killed first boot on the very first droplet ever created from the snapshot —
-three lines in, before anything but the header had been written to the log,
-leaving a box with no Trinity, no certificate and no admin password. It could
-never have worked on any droplet; nobody had run one.
-
-The guard EXECUTES the real block rather than pattern-matching it. A static rule
-would only know the one spelling that was wrong, and the failure mode is a
-runtime signal, not a syntax error — `bash -n` passes on the broken version.
+* no user-data password → nothing exported but ADMIN_PASSWORD_SOURCE=browser,
+  the claim signal start.sh persists (tests/unit/test_ent580_*);
+* a user-data password → exported as ADMIN_PASSWORD, never recorded anywhere
+  else, the one-shot file removed — the operator-supplied path, unchanged;
+* the state file the MOTD reads holds only the source, never a password;
+* all of it still runs clean under `set -euo pipefail`.
 """
 from __future__ import annotations
 
 import re
+import stat
 import subprocess
 from pathlib import Path
 
@@ -31,57 +32,99 @@ _FIRSTBOOT = (
 )
 
 _BLOCK_RE = re.compile(
-    r"# --- password-generation.*?\n(.*?)\s*# --- end password-generation ---",
+    r"# --- admin-source.*?\n(.*?)\n# --- end admin-source ---",
     re.DOTALL,
 )
 
 
 @pytest.fixture(scope="module")
-def generator_block() -> str:
+def admin_block() -> str:
     m = _BLOCK_RE.search(_FIRSTBOOT.read_text())
     assert m, (
-        "firstboot.sh no longer delimits its password generation with the "
-        "`# --- password-generation ---` markers this test executes."
+        "firstboot.sh no longer delimits its admin-source block with the "
+        "`# --- admin-source ---` markers this test executes."
     )
     return m.group(1)
 
 
-def test_generator_succeeds_under_pipefail(generator_block: str) -> None:
-    """The exact failure: a non-zero status escaping the command substitution."""
-    script = "set -euo pipefail\n" + generator_block + '\nprintf "%s" "$ADMIN_PASSWORD"\n'
-    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-    assert r.returncode == 0, (
-        "first boot's password generation exits non-zero under `set -euo pipefail`, "
-        "which ends the script before Trinity is ever started. "
-        f"stderr: {r.stderr.strip()!r}"
+def _run(block: str, tmp_path: Path, supplied: str | None) -> dict:
+    state = tmp_path / "etc-trinity"
+    state.mkdir()
+    pw_file = state / "admin-password"
+    if supplied is not None:
+        pw_file.write_text(supplied)
+    script = (
+        "set -euo pipefail\n"
+        f'CRED_FILE="{state}/admin-credentials"\n'
+        f'USER_SUPPLIED_PW="{pw_file}"\n'
+        + block
+        + '\nprintf "PW_SOURCE=%s\\n" "$PW_SOURCE"\n'
+        # What start.sh inherits: the EXPORTED environment, nothing else.
+        + 'env | grep -E "^ADMIN_PASSWORD(_SOURCE)?=" | sed "s/^/EXPORTED:/" || true\n'
     )
-    assert len(r.stdout) == 24, f"expected a 24-character password, got {len(r.stdout)}"
-    assert r.stdout.isalnum(), f"password is not alphanumeric: {r.stdout!r}"
+    r = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    assert r.returncode == 0, f"admin-source block failed under pipefail: {r.stderr!r}"
+    lines = r.stdout.splitlines()
+    cred = state / "admin-credentials"
+    return {
+        "source": next(l.split("=", 1)[1] for l in lines if l.startswith("PW_SOURCE=")),
+        "exported": dict(
+            l[len("EXPORTED:"):].split("=", 1) for l in lines if l.startswith("EXPORTED:")
+        ),
+        "cred": cred.read_text(),
+        "cred_mode": stat.S_IMODE(cred.stat().st_mode),
+        "pw_file_left": pw_file.exists(),
+    }
 
 
-def test_generator_does_not_pipe_an_endless_source_into_head(generator_block: str) -> None:
-    """Named separately so the reason survives a future rewrite.
+def test_no_user_data_means_no_admin_and_the_browser_claims_it(admin_block, tmp_path):
+    out = _run(admin_block, tmp_path, supplied=None)
+    assert out["source"] == "browser"
+    assert out["exported"] == {"ADMIN_PASSWORD_SOURCE": "browser"}, (
+        "the claimable path must export the claim signal and NO password — a "
+        "password here would pre-provision an admin and close /setup"
+    )
+    assert out["cred"] == "source=browser\n"
+    assert out["cred_mode"] == 0o600
 
-    Passing the behavioural test above is what matters, but a reader changing this
-    block should see the specific shape that must not come back.
-    """
-    # Strip comments first — the block deliberately quotes the broken form in
-    # prose so a future reader knows what must not come back.
+
+def test_a_blank_user_data_file_is_the_claim_path_not_an_empty_password(admin_block, tmp_path):
+    """`-s` is true for a file holding only a newline; the password is not."""
+    out = _run(admin_block, tmp_path, supplied="\r\n\n")
+    assert out["source"] == "browser"
+    assert out["exported"] == {"ADMIN_PASSWORD_SOURCE": "browser"}
+    assert not out["pw_file_left"]
+
+
+def test_user_data_password_is_the_pre_provisioned_path_unchanged(admin_block, tmp_path):
+    out = _run(admin_block, tmp_path, supplied="Correct-Horse-Battery-9!\n")
+    assert out["source"] == "user-data"
+    assert out["exported"] == {"ADMIN_PASSWORD": "Correct-Horse-Battery-9!"}, (
+        "the operator's password must reach start.sh (which writes it to .env), "
+        "and the claim signal must NOT ride along with it"
+    )
+    assert out["cred"] == "source=user-data\n"
+    assert "Correct-Horse" not in out["cred"], "the state file must never hold the password"
+    assert not out["pw_file_left"], "the one-shot user-data file must be removed"
+
+
+def test_first_boot_generates_nothing() -> None:
+    """The generator is gone, not merely unused: nothing may mint a password."""
     code = "\n".join(
-        line for line in generator_block.splitlines() if not line.lstrip().startswith("#")
+        line for line in _FIRSTBOOT.read_text().splitlines() if not line.lstrip().startswith("#")
     )
-    collapsed = " ".join(code.split())
-    assert not re.search(r"/dev/urandom\s*\|\s*head", collapsed), (
-        "piping /dev/urandom straight into `head` re-creates the SIGPIPE abort."
-    )
-    assert not re.search(r"tr\s+-dc[^|]*</dev/urandom\s*\|", collapsed), (
-        "`tr -dc ... </dev/urandom |` puts an endless producer upstream of a "
-        "reader that closes early — the original bug."
-    )
+    assert "/dev/urandom" not in code
+    assert "openssl rand" not in code
+    assert "password=%s" not in code, "the MOTD state file must not carry a password"
 
 
 def test_the_script_really_does_set_pipefail() -> None:
-    """Without this the guard above is vacuous."""
+    """Without this the pipefail premise of the behavioural tests is vacuous."""
     assert re.search(r"^set -euo pipefail$", _FIRSTBOOT.read_text(), re.MULTILINE), (
         "firstboot.sh no longer sets `-euo pipefail`; this test's premise is gone."
     )

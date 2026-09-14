@@ -357,6 +357,38 @@ class SubscriptionOperations:
         with get_engine().connect() as conn:
             return (conn.execute(stmt).scalar() or 0) > 0
 
+    def list_agents_awaiting_first_credential(self) -> List[str]:
+        """Agents the install's first Claude credential should reach (ent#582).
+
+        Live, durable (not ephemeral) agent rows with no subscription, platform
+        key mode on, and NO successful execution ever. A success proves the
+        agent authenticates some other way — its own `.env` key or a terminal
+        login, both invisible here while `use_platform_api_key` defaults on —
+        and a subscription would shadow that (#2114). DB rows, not containers,
+        so a Docker fault cannot empty the list.
+        """
+        succeeded = select(schedule_executions.c.id).where(
+            and_(
+                schedule_executions.c.agent_name == agent_ownership.c.agent_name,
+                schedule_executions.c.status == "success",
+            )
+        )
+        stmt = (
+            select(agent_ownership.c.agent_name)
+            .where(
+                and_(
+                    agent_ownership.c.deleted_at.is_(None),
+                    func.coalesce(agent_ownership.c.is_ephemeral, 0) == 0,
+                    agent_ownership.c.subscription_id.is_(None),
+                    func.coalesce(agent_ownership.c.use_platform_api_key, 1) == 1,
+                    ~succeeded.exists(),
+                )
+            )
+            .order_by(agent_ownership.c.agent_name)
+        )
+        with get_engine().connect() as conn:
+            return [row[0] for row in conn.execute(stmt)]
+
     def list_subscriptions_with_agents(self, owner_id: Optional[int] = None) -> List[SubscriptionWithAgents]:
         """
         List subscriptions with their assigned agents.

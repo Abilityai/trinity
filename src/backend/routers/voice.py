@@ -26,7 +26,7 @@ from models import (
 )
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin
 from database import db
-from config import GEMINI_API_KEY, VOICE_ENABLED, DEFAULT_VOICE_NAME, GEMINI_VOICE_NAMES
+from config import VOICE_ENABLED, DEFAULT_VOICE_NAME, GEMINI_VOICE_NAMES
 from services import canvas_service
 from services.gemini_voice import voice_service, WORKSPACE_PANEL_INSTRUCTIONS
 from services.agent_auth import agent_httpx_client
@@ -132,11 +132,18 @@ async def voice_stop(
         messages_saved = _save_transcript(session)
     else:
         # #2694: a `/stop` that lands BEFORE the socket closes ends the session
-        # here, so the bridge's `finally` gets None back and never clears the
-        # live-call marker — the owner's own thread would refuse typed turns
-        # until the TTL. Cleared here as well; the delete is idempotent.
+        # here, so the bridge's `finally` gets None back. The bridge releases
+        # its own lease unconditionally now (#2700), so this is not a second
+        # live clear path — the Workspace UI never calls it (`restStop: false`)
+        # — but it stays because it is idempotent, owner-matched, and reachable
+        # by a direct API client. What it is NOT is durable while that bridge is
+        # still up: the bridge's renewer re-arms the lease within a tick, so the
+        # thread reopens only once the socket is actually gone (then the
+        # bridge's own release fires). Bounded like every other live-bridge
+        # residual by the renewer's `cap + slack` lifetime.
         from client_portal.voice import clear_voice_call_active
-        clear_voice_call_active(getattr(session, "portal_session_id", None))
+        clear_voice_call_active(getattr(session, "portal_session_id", None),
+                                owner=request.voice_session_id)
 
     # Clean up
     await voice_service.remove_session(request.voice_session_id)
@@ -346,8 +353,22 @@ async def voice_websocket(
     # completes, on THIS worker (the one holding the live provider socket).
     portal_session_id = getattr(session, "portal_session_id", None)
     on_turn = None
+    marker_renew_task = None
     if portal_session_id:
         from client_portal.voice import persist_voice_turn
+        # #2700: the marker names are hoisted HERE, before the `try` — an import
+        # inside the `finally` is itself a path that can skip the release and
+        # replace the in-flight exception. Still inside the `if` so a non-portal
+        # (Agent Detail / VoIP) bridge never imports `client_portal`, and every
+        # use site below therefore sits under an `if portal_session_id:` too.
+        from client_portal.voice import (
+            VOICE_MARKER_LEASE_SECONDS,
+            VOICE_MARKER_SLACK_SECONDS,
+            clear_voice_call_active,
+            mark_voice_call_active,
+            persist_voice_call_end,
+            renew_voice_call_marker,
+        )
 
         async def on_turn(role: str, text: str):
             persist_voice_turn(session, role, text)
@@ -405,6 +426,19 @@ async def voice_websocket(
     )
 
     try:
+        # #2700: the party that opens the effect closes it. The lease is armed
+        # HERE — the first statement inside the `try` whose `finally` releases
+        # it, which is the only placement structurally guaranteed to pair — and
+        # renewed while this bridge lives, never past the call's own cap.
+        if portal_session_id:
+            mark_voice_call_active(portal_session_id, VOICE_MARKER_LEASE_SECONDS,
+                                   owner=voice_session_id)
+            marker_renew_task = asyncio.create_task(renew_voice_call_marker(
+                portal_session_id,
+                owner=voice_session_id,
+                max_seconds=int(getattr(session, "max_duration", 0) or 0) + VOICE_MARKER_SLACK_SECONDS,
+            ))
+
         # Forward audio from browser to Gemini
         while True:
             data = await websocket.receive_text()
@@ -421,49 +455,79 @@ async def voice_websocket(
     except WebSocketDisconnect:
         logger.info(f"Voice WebSocket disconnected: {voice_session_id}")
     finally:
-        # End the session and persist the transcript
-        ended = await voice_service.end_session(voice_session_id)
-        messages_saved = 0
-        if ended:
-            if getattr(ended, "portal_session_id", None):
-                # Workspace (ent#534): turns are already in the thread; close
-                # the call with its one summary row.
-                from client_portal.voice import clear_voice_call_active, persist_voice_call_end
-                messages_saved = persist_voice_call_end(
-                    ended, ended._duration_seconds, ended.end_reason, ended.end_message,
-                )
-                # #2694: the thread may take typed turns again.
-                clear_voice_call_active(getattr(ended, "portal_session_id", None))
-            elif await _claim_save(voice_session_id):
-                messages_saved = _save_transcript(ended)
-            await voice_service.remove_session(voice_session_id)
+        # #2700: stop renewing FIRST, before anything that can await, so a
+        # renewer suspended at its `asyncio.sleep` can never tick again. It is
+        # NOT a total ordering, and the honest bound is worth more than the
+        # neat claim: `asyncio.to_thread` hands the Redis write to a worker
+        # thread that cancellation does not reach, so a renewal already inside
+        # that write can land AFTER the release below — re-arming the lease for
+        # one TTL. It needs the renewer to be inside its ~1 ms `SET` at exactly
+        # this instant AND that `SET` to outlast the whole close-out, so the
+        # cost is a thread that keeps refusing typed turns for <= 60 s after a
+        # call ends, self-healing, with the read still fail-OPEN. Recorded in
+        # `workspace-voice-conversation.md` -> Known limits.
+        if marker_renew_task is not None and not marker_renew_task.done():
+            marker_renew_task.cancel()
 
-        # Cancel Gemini task
-        if not gemini_task.done():
-            gemini_task.cancel()
+        ended = None
+        messages_saved = 0
+        try:
             try:
-                await gemini_task
-            except (asyncio.CancelledError, Exception):
+                # End the session and persist the transcript
+                ended = await voice_service.end_session(voice_session_id)
+                if ended:
+                    if getattr(ended, "portal_session_id", None):
+                        # Workspace (ent#534): turns are already in the thread;
+                        # close the call with its one summary row.
+                        messages_saved = persist_voice_call_end(
+                            ended, ended._duration_seconds, ended.end_reason, ended.end_message,
+                        )
+                    elif await _claim_save(voice_session_id):
+                        messages_saved = _save_transcript(ended)
+                    await voice_service.remove_session(voice_session_id)
+            except Exception:
+                # #2700: NOT BaseException — `CancelledError` still propagates.
+                # A raising close-out used to skip the gemini cancel, the
+                # `saved` frame and the close; the tail below is always reached
+                # now, and so is the release.
+                logger.exception("voice bridge: close-out failed for %s", voice_session_id)
+
+            # Cancel Gemini task
+            if not gemini_task.done():
+                gemini_task.cancel()
+                try:
+                    await gemini_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            # ent#534: the `ended` status frame precedes this write, so a client that
+            # reloads its thread on `ended` races the DB. `saved` is the frame to
+            # reload on; it is sent after the rows exist and before the close.
+            try:
+                await websocket.send_json({
+                    "type": "saved",
+                    "messages_saved": messages_saved,
+                    "duration_seconds": ended._duration_seconds if ended else 0.0,
+                    "reason": getattr(ended, "end_reason", None) if ended else None,
+                    "message": getattr(ended, "end_message", None) if ended else None,
+                })
+            except Exception:
                 pass
 
-        # ent#534: the `ended` status frame precedes this write, so a client that
-        # reloads its thread on `ended` races the DB. `saved` is the frame to
-        # reload on; it is sent after the rows exist and before the close.
-        try:
-            await websocket.send_json({
-                "type": "saved",
-                "messages_saved": messages_saved,
-                "duration_seconds": ended._duration_seconds if ended else 0.0,
-                "reason": getattr(ended, "end_reason", None) if ended else None,
-                "message": getattr(ended, "end_message", None) if ended else None,
-            })
-        except Exception:
-            pass
-
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+        finally:
+            # #2700: the release is the LAST thing the bridge does, on every
+            # exit — unconditional, keyed on the `portal_session_id` local
+            # captured before the `try` (never on `ended.portal_session_id`: an
+            # `ended is None` return would re-strand the marker, the same
+            # defect moved), owner-matched so a closing bridge cannot free a
+            # newer call's thread, and synchronous so it also runs when this
+            # `finally` is entered by cancellation.
+            if portal_session_id:
+                clear_voice_call_active(portal_session_id, owner=voice_session_id)
 
 
 # ── Helper Functions ─────────────────────────────────────────────────────────

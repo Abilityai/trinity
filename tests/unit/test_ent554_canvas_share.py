@@ -274,6 +274,20 @@ def test_the_shared_payload_states_that_it_is_live(share_db):
     assert payload["agent_name"] == "agent-a"
 
 
+def test_the_shared_payload_does_not_carry_the_agents_last_run_time(share_db):
+    """#2734 widened `agent_last_run_at` onto the rostered canvas header, and
+    said in so many words that the share link was NOT widened. A `public`
+    link answers a stranger, so the payload must not carry the instant."""
+    from database import db
+    from services import canvas_share_service as css
+    _canvas()
+    share = db.create_canvas_share("agent-a", "main", scope="public")
+    resolution = css.resolve(share["token"], None)
+    assert "agent_last_run_at" in resolution["canvas"]  # decorate() still sets it
+    payload = css.public_view_payload(resolution)
+    assert "agent_last_run_at" not in payload["canvas"]
+
+
 def test_a_shared_canvas_shows_current_content_not_a_copy(share_db):
     """The consequence of choosing live: what the recipient sees follows the
     agent's later writes."""

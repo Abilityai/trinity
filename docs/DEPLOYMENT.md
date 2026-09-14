@@ -171,9 +171,14 @@ A provisioned DigitalOcean droplet — the Marketplace image (#2281) or one crea
 by `scripts/deploy/trinity-do-create.sh`, both through `start.sh --provision` — is
 a special case: it comes up on a bare public IP with no domain, which is why
 provisioning installs Caddy with Let's Encrypt's short-lived IP certificates, and
-why Trinity shows a first-run hardening guide there (#2380) prompting for a real
-domain, then a Cloudflare Tunnel. That guide is gated on install provenance and
-never appears on an install like this one.
+why Trinity's first-run overlay carries a **Secure this instance** step there
+(#2380, ent#581) prompting for a real domain, then a Cloudflare Tunnel. That step
+is gated on install provenance and never appears on an install like this one. A
+Marketplace droplet also boots with **no admin account**: the first person to
+open it in a browser creates one at `/setup` (ent#580) — see Security
+Recommendations below for what that means before you open it. A
+`trinity-do-create.sh` droplet does not: the installer asks for the admin
+password before it creates the droplet.
 
 Provenance is written by whatever provisions the box (in this repo,
 `start.sh --provision`) — `TRINITY_INSTALL_SOURCE` in
@@ -404,10 +409,16 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
    was a flag that said `false` while a real admin sat in the database. So an
    install that boots with `ADMIN_PASSWORD` set is **never** in the vulnerable
    window: the admin is provisioned during startup and the endpoint is closed
-   before the first request is served. `docker-compose.prod.yml` makes
-   `ADMIN_PASSWORD` mandatory and `scripts/deploy/start.sh` refuses to run
-   without one (auto-generating it under `--unattended`), so following either
-   path is sufficient.
+   before the first request is served. `scripts/deploy/start.sh` refuses to run
+   without one (auto-generating it under `--unattended`), so following it is
+   sufficient. `docker-compose.prod.yml` refuses to render with `ADMIN_PASSWORD`
+   unset **or** blank. `docker-compose.hosted.yml` alone refuses only an
+   **unset** one and renders an **explicitly blank** one (`ADMIN_PASSWORD=`, as
+   `.env.example` ships it) — that is the marketplace claim path below, which
+   `start.sh --hosted` marks with `ADMIN_PASSWORD_SOURCE=browser`. Without that
+   marker the hosted file passes `ADMIN_PASSWORD_SOURCE=unset` and `/setup`
+   refuses to create an admin, so a hand-run hosted stack with a blank password
+   is not claimable either: set the password in `.env` and restart.
 
    The window is still open on an install with **no** admin — a blank
    `ADMIN_PASSWORD`, or a hand-rolled backend — because there the wizard is the
@@ -417,6 +428,35 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
    network-restricted** until you have created the admin account. On localhost /
    a trusted LAN this is a non-issue. After setup, login is fully authenticated
    and the window is closed.
+
+   **Marketplace one-click droplets are claimed in the browser — an accepted
+   risk.** DigitalOcean's 1-Click create page has no input form, so a droplet
+   created without a password boots with **no admin account**, and the first
+   person to open `https://<droplet-ip>` creates it — email, password,
+   product-updates consent — without ever opening a terminal (ent#580). Between
+   creating the droplet and that first visit, **anyone who finds its IP can claim
+   it instead.** This was accepted on 2026-09-10: the window is the operator's
+   responsibility, the instance holds nothing at that moment, and a squatted
+   droplet can simply be destroyed and recreated. To keep the window short:
+
+   - open the droplet's URL right after creating it (first boot takes about
+     ninety seconds) and create the admin account straight away; or
+   - until you have claimed it, restrict port 443 to your own IP with a cloud
+     firewall. Leave port 80 open: Let's Encrypt validates the droplet's IP
+     certificate over it, and it serves nothing but a redirect to HTTPS; or
+   - supply the password at create time instead — `#cloud-config` `write_files`
+     to `/etc/trinity/admin-password`, see
+     [`packer/digitalocean/README.md`](../packer/digitalocean/README.md). That
+     droplet boots with the admin already provisioned and never shows the
+     wizard.
+
+   If a droplet you have never opened sends you to the login page rather than
+   the "create your admin account" screen, someone else got there first:
+   destroy it and create another. On a claimed droplet `.env` keeps
+   `ADMIN_PASSWORD` blank on purpose — the password lives only in the database,
+   and reboots and `start.sh --hosted` updates leave it alone. Forgotten it?
+   Set `ADMIN_PASSWORD` in `/opt/trinity/.env` and re-run `start.sh --hosted`;
+   the backend adopts it on the next boot.
 
    Note the corollary: after a provisioned first boot there is no wizard, so
    binding an admin **sign-in email** is a post-login step in

@@ -1,3 +1,4 @@
+# mcp: subscriptions.ts (register_subscription, list_subscriptions, assign_subscription, clear_agent_subscription, get_agent_auth, delete_subscription)
 """
 Subscription credential management routes (SUB-002).
 
@@ -15,7 +16,7 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from typing import Optional, List
 
-from models import SubscriptionHeadroomHistory, User
+from models import SubscriptionHeadroomHistory, SubscriptionRegistration, SubscriptionTokenTest, User
 from database import db
 from dependencies import get_current_user, assert_admin, assert_agent_access, assert_agent_owner
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -46,7 +47,7 @@ async def get_encryption_status(
     return {"configured": bool(key and len(key) >= 64)}
 
 
-@router.post("", response_model=SubscriptionCredential)
+@router.post("", response_model=SubscriptionRegistration)
 async def register_subscription(
     payload: SubscriptionCredentialCreate,
     http_request: Request,
@@ -84,6 +85,14 @@ async def register_subscription(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
+        # ent#582: read BEFORE the write — does this registration give the
+        # install its first Claude credential?
+        from services.subscription_service import (
+            connect_agents_to_first_credential,
+            is_claude_auth_configured,
+        )
+        first_credential = not is_claude_auth_configured()
+
         subscription = db.create_subscription(
             name=payload.name,
             token=payload.token,
@@ -117,6 +126,14 @@ async def register_subscription(
         # stored. Only Phase A (decide + persist) is awaited — the container
         # apply is backgrounded by the service — so the panel's immediate
         # `GET /api/subscriptions` refetch already sees the adopted agents.
+        # ent#582 runs FIRST, and the order is load-bearing. It carries the
+        # narrowing the #2572 sweep does not — it skips an agent that has ever
+        # executed successfully (that agent authenticates some other way) and
+        # never restarts one mid-execution. Run second, it would find nothing
+        # left to assign, report `connected_agents: 0` to the first-run step,
+        # and leave the restarts to the broader phase below.
+        connected = connect_agents_to_first_credential(subscription.id) if first_credential else 0
+
         try:
             from services.subscription_service import adopt_for_credentialless_agents
             await adopt_for_credentialless_agents(
@@ -131,7 +148,7 @@ async def register_subscription(
                 f"subscription '{payload.name}': {e}"
             )
 
-        return subscription
+        return SubscriptionRegistration(**subscription.model_dump(), connected_agents=connected)
 
     except HTTPException:
         raise  # Let HTTP exceptions propagate as-is
@@ -140,6 +157,52 @@ async def register_subscription(
     except Exception as e:
         logger.error(f"Failed to register subscription: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to register subscription: {str(e)}")
+
+
+@router.post("/test")
+async def test_subscription_token(
+    body: SubscriptionTokenTest,
+    current_user: User = Depends(get_current_user)
+):
+    """Validate a subscription token BEFORE it is registered (ent#582).
+
+    Admin-only (the registration it precedes is). One `max_tokens=1` probe
+    under the token — the #471 headroom probe's request, so it costs the same
+    ~dozen tokens of the operator's own quota. Nothing is stored; the token is
+    never echoed or logged.
+    """
+    assert_admin(current_user)
+    token = body.token.strip()
+    if token.startswith("sk-ant-api"):
+        return {"valid": False, "status": "format", "error": (
+            "That's an API key, not a subscription token. Subscription tokens start "
+            "with sk-ant-oat01- and come from 'claude setup-token'. Paste it on the "
+            "API key tab instead."
+        )}
+    if not token.startswith("sk-ant-oat01-"):
+        return {"valid": False, "status": "format", "error": (
+            "That doesn't look like a subscription token. Tokens start with "
+            "sk-ant-oat01- — run 'claude setup-token' on a computer signed in to "
+            "your Claude plan and paste what it prints."
+        )}
+
+    from services.subscription_headroom_service import check_token
+    status = await check_token(token)
+    if status == "ok":
+        return {"valid": True, "status": status}
+    if status == "rate_limited":
+        return {"valid": True, "status": status, "warning": (
+            "The token works, but this subscription is at its usage limit right "
+            "now — agents will run once the window resets."
+        )}
+    if status == "invalid_token":
+        return {"valid": False, "status": status, "error": (
+            "Anthropic rejected this token — it may be expired, revoked or cut off "
+            "when copying. Run 'claude setup-token' again and paste the whole line."
+        )}
+    return {"valid": False, "status": status, "error": (
+        "Couldn't reach Anthropic to check the token — try again in a moment."
+    )}
 
 
 @router.get("", response_model=List[SubscriptionWithAgents])
