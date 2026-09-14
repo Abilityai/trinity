@@ -54,10 +54,12 @@ deny-lists ``.gitconfig``/``.git/**`` precisely because a git-executed command
 reference there is an execution vector.
 
 **What this does not close:** a prompt-injected agent reading its own
-credential. ``GITHUB_PAT`` stays in the container env and ``.env``; root
-ownership of the script is integrity, not confidentiality. The structural
-answer is a credential broker outside the container —
-trinity-enterprise#558 (AAuth), connected and deliberately not absorbed.
+credential. ``GITHUB_PAT`` stays in the container env and ``.env``. Root
+ownership of the script is not confidentiality, and — because ``developer``
+holds ``NOPASSWD:ALL`` — it is not a boundary either; it buys only that nothing
+rewrites the script or ``/etc/gitconfig`` BY ACCIDENT. The structural answer is
+a credential broker outside the container — trinity-enterprise#558 (AAuth),
+connected and deliberately not absorbed.
 """
 
 import base64
@@ -112,10 +114,15 @@ HELPER_SCRIPT = r"""#!/bin/sh
 # ------------------------
 # A prompt-injected agent reading its own credential. `GITHUB_PAT` stays in the
 # container env and in `/home/developer/.env`; `printenv`, `cat` and invoking
-# this script directly all return it. Root ownership of this file is INTEGRITY
-# (the agent cannot rewrite what platform git executes), not confidentiality.
-# The structural fix — a credential broker outside the container — is
-# trinity-enterprise#558 and is deliberately not absorbed here.
+# this script directly all return it. Root ownership of this file is not
+# confidentiality, and it is not a boundary either: `developer` holds
+# `NOPASSWD:ALL` (Dockerfile, `usermod -aG sudo developer`), so an agent that
+# wants to rewrite this script or `/etc/gitconfig` can `sudo` and do it. What
+# root ownership buys is that nothing rewrites them BY ACCIDENT — an errant
+# `pip install`, a template's post-create hook, a skill writing to `$HOME`.
+# Treating it as a boundary would be the mistake; the structural fix — a
+# credential broker outside the container — is trinity-enterprise#558 and is
+# deliberately not absorbed here.
 #
 # RESOLUTION ORDER — `.env` FIRST, baked env second
 # -------------------------------------------------
@@ -267,6 +274,7 @@ refused=0
 gitmodules_hits=0
 helper_ok=0
 competing=0
+root_readable=0
 
 # `safe.directory=*`: this runs as root against a repo owned by `developer`.
 # Non-secret, and `-c` is protected configuration, so git honours it.
@@ -316,6 +324,7 @@ CFGS="${WORK}/cfgs"
 KEYS="${WORK}/keys"
 VALS="${WORK}/vals"
 NEWV="${WORK}/newv"
+LEFTV="${WORK}/leftv"
 
 GIT_DIR_ABS=$(g -C "${ROOT}" rev-parse --absolute-git-dir 2>/dev/null) || GIT_DIR_ABS="${ROOT}/.git"
 [ -d "${GIT_DIR_ABS}" ] || GIT_DIR_ABS="${ROOT}/.git"
@@ -324,6 +333,19 @@ GIT_DIR_ABS=$(g -C "${ROOT}" rev-parse --absolute-git-dir 2>/dev/null) || GIT_DI
 # `.git/modules/<a>/config` AND NESTED submodules at
 # `.git/modules/<a>/modules/<b>/config` — which a `.git/modules/*/config` glob
 # misses.
+# Can this exec SEE the tree at all? An all-zero report is otherwise
+# indistinguishable between "already clean" and "could not even look" — and
+# the second is the production geometry of `agent_full_capabilities=false`:
+# RESTRICTED_CAPABILITIES omits DAC_OVERRIDE, `/home/developer` is 0700
+# `developer`-owned, so root here cannot traverse it, `find` enumerates
+# nothing and `probe` fails. Without this flag that reports exit 0 and all
+# zeros, i.e. success, on exactly the hardened installs that will act on it.
+# `test -r/-x` goes through access(2), which honours the missing capability,
+# so this is the real answer and not an assumption.
+if [ -d "${GIT_DIR_ABS}" ] && [ -r "${GIT_DIR_ABS}" ] && [ -x "${GIT_DIR_ABS}" ]; then
+    root_readable=1
+fi
+
 find "${GIT_DIR_ABS}" -maxdepth 6 -name config -type f > "${CFGS}" 2>/dev/null || true
 
 : > "${KEYS}"
@@ -416,7 +438,25 @@ while IFS="${TAB}" read -r cfg key; do
     while IFS= read -r newvalue; do
         g config --file "${cfg}" --add "${key}" "${newvalue}" 2>/dev/null || true
     done < "${NEWV}"
-    scrubbed=$((scrubbed + changed))
+    # Both writes above are `|| true`, so a config this exec can READ but not
+    # WRITE keeps its token and the strip is a no-op. That is the production
+    # geometry of `agent_full_capabilities=false`: RESTRICTED_CAPABILITIES omits
+    # DAC_OVERRIDE and FOWNER, so root inside the container is subject to
+    # ordinary permission checks against `developer`-owned files. Counting
+    # `changed` unconditionally would report a scrub that did not happen — and a
+    # false `remotes_scrubbed` is strictly worse than a refusal, because the
+    # operator acts on it and stops looking. Re-read and count only what is
+    # really gone; whatever survived is a refusal, which already alarms.
+    left=0
+    g config --file "${cfg}" --get-all "${key}" 2>/dev/null > "${LEFTV}" || true
+    while IFS= read -r value; do
+        if parse_url "${value}" && in_scope && [ -n "${U_USERINFO}" ]; then
+            left=$((left + 1))
+        fi
+    done < "${LEFTV}"
+    [ "${left}" -le "${changed}" ] || left="${changed}"
+    scrubbed=$((scrubbed + changed - left))
+    refused=$((refused + left))
 done < "${KEYS}"
 
 # A token also lives in the SUBSECTION of `url.<base>.insteadOf` — the shape
@@ -455,8 +495,8 @@ fi
 competing=$(g -C "${ROOT}" config --get-all credential.helper 2>/dev/null | grep -v '^trinity$' | grep -c . || true)
 [ -n "${competing}" ] || competing=0
 
-printf 'TRINITY_SCRUB_REPORT remotes_scrubbed=%s harvested=%s seeded=%s refused=%s gitmodules_hits=%s helper_ok=%s competing_helpers=%s\n' \
-    "${scrubbed}" "${harvested}" "${seeded}" "${refused}" "${gitmodules_hits}" "${helper_ok}" "${competing}"
+printf 'TRINITY_SCRUB_REPORT remotes_scrubbed=%s harvested=%s seeded=%s refused=%s gitmodules_hits=%s helper_ok=%s competing_helpers=%s root_readable=%s\n' \
+    "${scrubbed}" "${harvested}" "${seeded}" "${refused}" "${gitmodules_hits}" "${helper_ok}" "${competing}" "${root_readable}"
 """
 
 
@@ -553,9 +593,7 @@ def scrub_command(git_dir: str) -> str:
     )
 
 
-_REPORT_RE = re.compile(
-    rf"{SCRUB_REPORT_PREFIX}\s+(?P<fields>[A-Za-z0-9_=\s]+)"
-)
+_REPORT_RE = re.compile(rf"{SCRUB_REPORT_PREFIX}\s+(?P<fields>[A-Za-z0-9_=\s]+)")
 
 _REPORT_FIELDS = (
     "remotes_scrubbed",
@@ -565,6 +603,7 @@ _REPORT_FIELDS = (
     "gitmodules_hits",
     "helper_ok",
     "competing_helpers",
+    "root_readable",
 )
 
 # The env name the sweep reads a caller-supplied credential from. It travels in

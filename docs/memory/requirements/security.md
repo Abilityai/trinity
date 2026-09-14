@@ -353,8 +353,10 @@
   agent reading its own credential. `GITHUB_PAT` remains in the container env
   and in `/home/developer/.env`, and the helper can be invoked directly. Root
   ownership of `/usr/local/bin/git-credential-trinity` and `/etc/gitconfig` is
-  **integrity** (the agent cannot rewrite what platform git executes), **not
-  confidentiality**. **Blast radius is unchanged** — the credential is still
+  **not confidentiality, and not a boundary**: `developer` holds `NOPASSWD:ALL`,
+  so an agent that wants to rewrite either can `sudo`. It buys only that nothing
+  rewrites them **by accident** — an errant `pip install`, a template hook, a
+  skill writing to `$HOME`. **Blast radius is unchanged** — the credential is still
   the fleet-wide PAT, and through a host-registered helper it is ambient
   authority for `https://github.com/*` rather than something an agent had to
   construct a URL to use (net-neutral in practice, since `GITHUB_PAT` stays

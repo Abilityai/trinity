@@ -365,9 +365,12 @@ RUN mkdir -p /var/lib/trinity && \
 # lists COMPOSE — a competing helper answering first masks everything.
 #
 # Root-owned by construction: `/usr/local/bin` and `/etc/gitconfig` are outside
-# the agent-writable home, so the agent cannot rewrite what platform git
-# executes. That is INTEGRITY, not confidentiality — the agent can still read
-# its own `GITHUB_PAT`. The structural fix is trinity-enterprise#558 (AAuth).
+# the agent-writable home. That stops ACCIDENTAL rewrites — an errant `pip
+# install`, a template hook, a skill writing to `$HOME`. It is NOT a boundary
+# against a deliberate agent: `developer` holds `NOPASSWD:ALL` (see the
+# `usermod -aG sudo` above), so `sudo` reaches both paths. And it is not
+# confidentiality either — the agent can still read its own `GITHUB_PAT`. The
+# structural fix is trinity-enterprise#558 (AAuth).
 COPY --chown=root:root ./git-credential-trinity.sh /usr/local/bin/git-credential-trinity
 RUN chmod 0755 /usr/local/bin/git-credential-trinity && \
     git config --system --replace-all credential.helper trinity

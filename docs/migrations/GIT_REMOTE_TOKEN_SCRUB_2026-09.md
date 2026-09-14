@@ -86,6 +86,7 @@ Terms used in the sweep's log line (`ent#615: remote-token sweep for …`):
 | `gitmodules_hits` | Credential-bearing URLs found in a **tracked** `.gitmodules` — see below |
 | `helper_ok` | A credential resolves in this container |
 | `competing_helpers` | Other git credential helpers registered in this container |
+| `root_readable` | The sweep could actually read the tree it swept. **`0` means its all-clear is not evidence** — see below |
 
 ---
 
@@ -94,6 +95,28 @@ Terms used in the sweep's log line (`ent#615: remote-token sweep for …`):
 `.gitmodules` is a **tracked** file. A token there was committed and pushed to
 GitHub before this change, and no local sweep can undo that. The sweep reports
 it (`gitmodules_hits`) and logs an error naming the agent.
+
+### `root_readable=0` — the sweep could not look
+
+An all-zero report is what a healthy, already-clean agent produces, so on its own
+it cannot tell you *"nothing to do"* apart from *"could not even look"*.
+`root_readable` is the discriminator.
+
+It is `0` when the platform's maintenance exec cannot traverse the agent's
+workspace. The expected cause is **reduced Linux capabilities**: with
+`agent_full_capabilities` off the container gets `RESTRICTED_CAPABILITIES`, which
+withholds `DAC_OVERRIDE`, so even root inside the container is subject to
+ordinary permission checks against the `developer`-owned, mode-0700 home.
+
+Nothing is destroyed — the token stays exactly where it already was — but the
+remediation did **not** run. Trinity files one operator-queue alert per agent per
+day for this (`ent615-git-token-scrub-unreadable-…`), separate from the refusal
+alert because the action differs. Re-run the agent with full capabilities, or
+check that agent's remotes by hand:
+
+```bash
+docker exec agent-<name> git config --get-regexp 'remote\..*\.(url|pushurl)'
+```
 
 **If any agent reports a non-zero `gitmodules_hits`, rotating the platform
 token is mandatory, not advisory** — the token is in a repository's history.

@@ -220,6 +220,12 @@ SCRUB_TIMEOUT_S = 60
 # already looking at it (the `archive_storage` precedent).
 _SCRUB_ALARM_ID_PREFIX = "ent615-git-token-scrub-"
 
+# Same daily-stable-id discipline for the "could not look" alarm. A SEPARATE
+# family, not a variant of the refusal: the two need different operator action
+# (set a token vs. re-run with full capabilities), and sharing one id would let
+# whichever fired first suppress the other for the rest of the day.
+_SCRUB_UNREADABLE_ALARM_ID_PREFIX = "ent615-git-token-scrub-unreadable-"
+
 # Upserts `GITHUB_PAT` in the workspace `.env` — the FIRST rung of the
 # credential helper's ladder, and therefore the one a rotation must reach.
 #
@@ -317,6 +323,43 @@ def _alarm_git_token_scrub_refused(agent_name: str, report: Dict[str, Any]) -> N
         logger.exception("ent#615: could not file the scrub-refused alarm for %s", agent_name)
 
 
+def _alarm_git_token_scrub_unreadable(agent_name: str) -> None:
+    """One operator alarm when the sweep could not read the tree it swept.
+
+    Distinct from a refusal: a refusal means the sweep LOOKED, found a token it
+    could not replace, and correctly left it. This means it could not look —
+    `find` enumerated nothing and the probe failed — so an all-zero report says
+    nothing about whether a token is there. Nothing is destroyed; the
+    remediation simply did not run. Fail-soft.
+    """
+    try:
+        from database import db
+        from utils.helpers import utc_now_iso
+
+        db.create_operator_queue_item(agent_name, {
+            "id": f"{_SCRUB_UNREADABLE_ALARM_ID_PREFIX}{agent_name}-{utc_now_iso()[:10]}",
+            "type": "alert",
+            "priority": "medium",
+            "title": "Trinity could not check this agent's git remotes",
+            "question": (
+                f"The ent#615 credential sweep could not read {agent_name}'s "
+                "workspace, so it cannot say whether a git remote still carries "
+                "an embedded token — its all-clear is not evidence. This is the "
+                "expected result when the agent runs with reduced Linux "
+                "capabilities (Settings \u2192 agent full capabilities off), "
+                "which withholds DAC_OVERRIDE from the platform's maintenance "
+                "exec. Re-run with full capabilities, or check the agent's git "
+                "remotes by hand."
+            ),
+            "context": {"reason": "root_readable=0"},
+            "created_at": utc_now_iso(),
+        })
+    except Exception:  # noqa: BLE001 — alarm plumbing must never break a sweep
+        logger.exception(
+            "ent#615: could not file the scrub-unreadable alarm for %s", agent_name
+        )
+
+
 async def scrub_git_remote_tokens(
     agent_name: str,
     git_dir: Optional[str] = None,
@@ -386,6 +429,18 @@ async def scrub_git_remote_tokens(
 
     if report["refused"]:
         _alarm_git_token_scrub_refused(agent_name, report)
+    elif report["success"] and not report["root_readable"]:
+        # The sweep ran, exited 0, and reported all zeros — which is ALSO what a
+        # healthy, already-clean agent reports. The discriminator is whether it
+        # could see the tree at all. It could not on `agent_full_capabilities=
+        # false`: RESTRICTED_CAPABILITIES omits DAC_OVERRIDE, so root in the
+        # container cannot traverse the 0700 `developer`-owned home, `find`
+        # enumerates nothing and the probe fails. Nothing is destroyed — the
+        # token simply stays where it already was — but the remediation silently
+        # did not happen, on exactly the hardened installs that will act on the
+        # report. Alarmed, not logged: an INFO line indistinguishable from
+        # success is how #1638 shipped.
+        _alarm_git_token_scrub_unreadable(agent_name)
     if report["gitmodules_hits"]:
         # A token in the TRACKED `.gitmodules` is already committed and pushed.
         # The sweep cannot fix that; finding one turns "rotate the platform PAT

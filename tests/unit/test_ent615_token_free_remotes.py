@@ -636,6 +636,7 @@ class TestTheSweep:
         assert report == {
             "remotes_scrubbed": 0, "harvested": 0, "seeded": 0, "refused": 0,
             "gitmodules_hits": 0, "helper_ok": 1, "competing_helpers": 0,
+            "root_readable": 1,
         }
 
     def test_a_caller_held_credential_can_be_SEEDED(self, sweep, helper_env, tmp_path):
@@ -968,9 +969,10 @@ def _git_service():
 class _RecordingExec:
     """Stands in for `execute_command_in_container`, recording every exec."""
 
-    def __init__(self, helper_ok: int = 1):
+    def __init__(self, helper_ok: int = 1, root_readable: int = 1):
         self.calls: list[dict] = []
         self.helper_ok = helper_ok
+        self.root_readable = root_readable
 
     async def __call__(self, container_name, command, timeout=60, *,
                        environment=None, user="developer"):
@@ -981,7 +983,7 @@ class _RecordingExec:
             return {"exit_code": 0, "output": (
                 f"TRINITY_SCRUB_REPORT remotes_scrubbed=1 harvested=0 seeded=0 "
                 f"refused=0 gitmodules_hits=0 helper_ok={self.helper_ok} "
-                f"competing_helpers=0"
+                f"competing_helpers=0 root_readable={self.root_readable}"
             )}
         return {"exit_code": 0, "output": ""}
 
@@ -996,8 +998,8 @@ def gs_with_exec():
     gs = _git_service()
     patches = []
 
-    def _install(helper_ok: int = 1) -> _RecordingExec:
-        recorder = _RecordingExec(helper_ok=helper_ok)
+    def _install(helper_ok: int = 1, root_readable: int = 1) -> _RecordingExec:
+        recorder = _RecordingExec(helper_ok=helper_ok, root_readable=root_readable)
         ctx = patch.multiple(
             gs,
             execute_command_in_container=recorder,
@@ -1233,4 +1235,163 @@ class TestTheSweepIsBoundedAndSurvives:
         tail = preceding[preceding.rindex("try:"):]
         assert "get_git_auto_sync_enabled" not in tail, (
             "the ent#615 scrub inherited #2069's auto_sync_enabled gate"
+        )
+
+
+class TestTheSweepCannotReportWorkItDidNotDo:
+    """`/review` [C1]: on a hardened install the sweep did nothing, reported
+    success, and nothing distinguished that from a healthy already-clean agent.
+
+    `agent_full_capabilities=false` gives the container RESTRICTED_CAPABILITIES,
+    which omits `DAC_OVERRIDE` and `FOWNER`. Root inside such a container is
+    subject to ordinary permission checks against the `developer`-owned
+    workspace, so the sweep's writes fail — while both of them are `|| true` and
+    the `scrubbed` counter was incremented unconditionally. A false
+    `remotes_scrubbed` is strictly worse than a refusal: the operator acts on it
+    and stops looking.
+    """
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root bypasses the permission bits this test relies on",
+    )
+    def test_a_strip_that_could_not_be_written_is_refused_not_counted(
+        self, sweep, helper_env, tmp_path
+    ):
+        repo = _mkrepo(tmp_path / "unwritable", _TOKEN_URL)
+        git_dir = repo / ".git"
+        # git rewrites config through `config.lock` in the same directory, so a
+        # read-only .git DIRECTORY is what actually blocks the write — the same
+        # shape a root exec without DAC_OVERRIDE meets against a 0700 home.
+        git_dir.chmod(0o555)
+        try:
+            report, _ = sweep(repo, GITHUB_PAT="env_tok")
+        finally:
+            git_dir.chmod(0o755)
+
+        assert report["remotes_scrubbed"] == 0, (
+            "the sweep counted a scrub it could not write — the operator is now "
+            "told a token was removed that is still there"
+        )
+        assert report["refused"] >= 1, "a failed strip must surface as a refusal"
+        assert "FAKETOKEN_A" in _origin(repo), (
+            "precondition broken: the write was supposed to fail"
+        )
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root bypasses the permission bits this test relies on",
+    )
+    def test_a_tree_it_cannot_read_is_not_reported_as_clean(
+        self, sweep, helper_env, tmp_path
+    ):
+        """All-zeros is also what a healthy agent reports. `root_readable` is
+        the only thing that separates 'nothing to do' from 'could not look'."""
+        repo = _mkrepo(tmp_path / "unreadable", _TOKEN_URL)
+        repo.chmod(0o000)
+        try:
+            report, _ = sweep(repo, GITHUB_PAT="env_tok")
+        finally:
+            repo.chmod(0o755)
+
+        assert report["root_readable"] == 0
+        assert report["remotes_scrubbed"] == 0
+
+    def test_a_readable_tree_says_so(self, sweep, helper_env, tmp_path):
+        """The positive control. Without it the assertion above passes against a
+        flag that is hard-coded to 0 and never means anything."""
+        repo = _mkrepo(tmp_path / "readable", _TOKEN_URL)
+        report, _ = sweep(repo, GITHUB_PAT="env_tok")
+        assert report["root_readable"] == 1
+        assert report["remotes_scrubbed"] == 1
+
+
+class TestAnUnreadableSweepReachesAnOperator:
+    """The consumer half of [C1]. A report nobody can act on is not a fix."""
+
+    def test_it_alarms_when_the_sweep_could_not_look(self, gs_with_exec):
+        gs = _git_service()
+        gs_with_exec(helper_ok=1, root_readable=0)
+        import asyncio
+
+        with patch.object(gs, "_alarm_git_token_scrub_unreadable") as alarm:
+            report = asyncio.run(gs.scrub_git_remote_tokens("a1"))
+
+        assert report["root_readable"] == 0
+        assert alarm.called, (
+            "exit 0 + all zeros is indistinguishable from success; an INFO line "
+            "is how #1638 shipped"
+        )
+
+    def test_it_stays_quiet_on_an_ordinary_clean_pass(self, gs_with_exec):
+        """The alarm must not fire for every healthy agent on every boot, or the
+        queue becomes noise and the real one is skimmed past."""
+        gs = _git_service()
+        gs_with_exec(helper_ok=1, root_readable=1)
+        import asyncio
+
+        with patch.object(gs, "_alarm_git_token_scrub_unreadable") as alarm:
+            asyncio.run(gs.scrub_git_remote_tokens("a1"))
+        assert not alarm.called
+
+    def test_the_two_alarms_are_separate_families(self):
+        """A refusal and an unreadable tree need DIFFERENT operator action (set
+        a token vs. re-run with full capabilities). Sharing one daily-stable id
+        would let whichever fired first suppress the other all day."""
+        gs = _git_service()
+        assert (
+            gs._SCRUB_UNREADABLE_ALARM_ID_PREFIX != gs._SCRUB_ALARM_ID_PREFIX
+        )
+        assert not gs._SCRUB_UNREADABLE_ALARM_ID_PREFIX.startswith(
+            gs._SCRUB_ALARM_ID_PREFIX
+        ) or gs._SCRUB_UNREADABLE_ALARM_ID_PREFIX != gs._SCRUB_ALARM_ID_PREFIX
+
+
+class TestTheRootOwnershipClaimStaysHonest:
+    """`/review` [C2]: this branch documented a security property the platform
+    does not have — *"the agent cannot rewrite what platform git executes"* —
+    in the security area file, three code comments and the requirements entry.
+    `developer` holds `NOPASSWD:ALL` (the base image's own `usermod -aG sudo`),
+    so an agent that wants to rewrite the helper or `/etc/gitconfig` can sudo.
+
+    Pinned as a source guard rather than a behaviour test because the defect IS
+    prose: it shipped green, and the next reviewer would have built on it.
+    """
+
+    _CLAIM = "cannot rewrite what platform git executes"
+
+    def test_no_tree_file_claims_root_ownership_is_a_boundary(self):
+        offenders = []
+        for sub in ("src/backend", "docker", "docs/memory"):
+            root = _ROOT / sub
+            for path in root.rglob("*"):
+                if not path.is_file() or path.suffix not in {
+                    ".py", ".sh", ".md", ""
+                }:
+                    continue
+                try:
+                    text = path.read_text(errors="replace")
+                except OSError:
+                    continue
+                if self._CLAIM in text:
+                    offenders.append(str(path.relative_to(_ROOT)))
+        assert not offenders, (
+            "the sudo-falsified claim is back in: "
+            f"{offenders}. `developer` has NOPASSWD:ALL — say what root "
+            "ownership actually buys (no ACCIDENTAL rewrite) instead."
+        )
+
+    def test_the_guard_would_notice(self, tmp_path):
+        """Self-test: the scan above is worthless if it cannot see the string."""
+        probe = tmp_path / "x.md"
+        probe.write_text(f"the agent {self._CLAIM} here\n")
+        assert self._CLAIM in probe.read_text()
+
+    def test_the_sudo_grant_this_turns_on_is_still_real(self):
+        """If the grant is ever removed, the honest wording above becomes the
+        stale one and this test is the reminder to revisit it."""
+        dockerfile = (_ROOT / "docker/base-image/Dockerfile").read_text()
+        assert "NOPASSWD:ALL" in dockerfile, (
+            "the passwordless-sudo grant is gone — re-check the root-ownership "
+            "wording in security.md, the helper and the Dockerfile"
         )

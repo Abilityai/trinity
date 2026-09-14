@@ -20,10 +20,15 @@
 # ------------------------
 # A prompt-injected agent reading its own credential. `GITHUB_PAT` stays in the
 # container env and in `/home/developer/.env`; `printenv`, `cat` and invoking
-# this script directly all return it. Root ownership of this file is INTEGRITY
-# (the agent cannot rewrite what platform git executes), not confidentiality.
-# The structural fix — a credential broker outside the container — is
-# trinity-enterprise#558 and is deliberately not absorbed here.
+# this script directly all return it. Root ownership of this file is not
+# confidentiality, and it is not a boundary either: `developer` holds
+# `NOPASSWD:ALL` (Dockerfile, `usermod -aG sudo developer`), so an agent that
+# wants to rewrite this script or `/etc/gitconfig` can `sudo` and do it. What
+# root ownership buys is that nothing rewrites them BY ACCIDENT — an errant
+# `pip install`, a template's post-create hook, a skill writing to `$HOME`.
+# Treating it as a boundary would be the mistake; the structural fix — a
+# credential broker outside the container — is trinity-enterprise#558 and is
+# deliberately not absorbed here.
 #
 # RESOLUTION ORDER — `.env` FIRST, baked env second
 # -------------------------------------------------
