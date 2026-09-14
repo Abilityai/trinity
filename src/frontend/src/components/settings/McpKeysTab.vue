@@ -31,6 +31,9 @@
           <p class="text-sm text-status-info-700 dark:text-status-info-400 mt-1">
             Add this to your <code class="bg-status-info-100 dark:bg-status-info-800 px-1 rounded">.mcp.json</code> configuration:
           </p>
+          <!-- #1925 triage — NOT a tab strip: a preformatted code block. Horizontal
+               scroll is correct here (wrapping a config snippet corrupts it). Left as-is
+               deliberately so a later audit does not re-flag it. -->
           <pre class="mt-2 bg-status-info-100 dark:bg-status-info-800 rounded p-3 text-xs overflow-x-auto text-status-info-900 dark:text-status-info-100">{
   "mcpServers": {
     "trinity": {
@@ -323,6 +326,9 @@
                     {{ copiedConfig ? 'Copied!' : 'Copy Config' }}
                   </button>
                 </div>
+                <!-- #1925 triage — NOT a tab strip: a preformatted code block. Horizontal
+                     scroll is correct here (wrapping a config snippet corrupts it). Left as-is
+                     deliberately so a later audit does not re-flag it. -->
                 <pre class="bg-gray-900 dark:bg-gray-950 rounded-lg p-4 text-xs overflow-x-auto text-status-success-400 font-mono border border-gray-700">{{ getMcpConfig(createdApiKey) }}</pre>
               </div>
 

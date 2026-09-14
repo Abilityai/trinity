@@ -21,7 +21,8 @@
     "_2718_note": "2026-09-12, #2718: hardcoded_colors 456 -> 447 in 8 files, none of it a code change. The scanner counted a `#` followed by three or six hex digits anywhere in a <template>, so issue references in rendered copy ((ent#184), (#526), >#847</a>) were read as colours; ExecutionsPanel, OverviewPanel, ScheduleAnalyticsCard, settings/OperatorIntakePanel, settings/TelemetrySharingPanel, views/Settings and views/enterprise/Index each lose their only phantom, ReliabilityPanel both of its. Nothing else moves: raw_nongray, raw_gray and semantic_tokens are untouched, and no sample changes line.",
     "_2616_note": "2026-09-10, #2616: components/portal/PortalMarkdown.vue raw_gray 13 -> 34 (+21). The Workspace transcript had no typographic treatment at all; covering tables, headings, ordered lists, blockquotes and rules costs a surface/border/ink pair per element in BOTH themes, and those are gray by definition (the contract's 'everything else is gray'). raw_nongray stays 0 and hardcoded_colors stays 0.",
     "ent554": "components/canvas/CanvasPanel.vue raw_gray 46 -> 62 (+16): the Share / Download PDF buttons, the share panel's dividers and its option detail + note text. The branch predates the #2605 freeze, so the guard first bit at the merge train. Not paid down: `gray` is the sanctioned chrome family and there is no semantic neutral to move it to; the classes copy the panel's existing header chrome verbatim. Re-frozen in its own commit as the guard prescribes, scoped to this ONE entry.",
-    "_1923_1924_note": "#1923/#1924: two entries move, scoped by hand rather than regenerated. ConfirmDialog.vue raw_gray 9 -> 7 (IMPROVED — its bespoke backdrop div and the gray-500/gray-900 overlay went away when it adopted BaseModal, and a stale ceiling fails the guard too). base/BaseModal.vue is new at 0/2/0 — the overlay ground and nothing else. Deliberately NOT regenerated: a wholesale run deleted this entire refrozen block and absorbed canvas/CanvasDocument.vue and views/SharedCanvas.vue, two files that landed on dev after this branch was cut and have nothing to do with it. Same rule the 2638 note states."
+    "_1923_1924_note": "#1923/#1924: two entries move, scoped by hand rather than regenerated. ConfirmDialog.vue raw_gray 9 -> 7 (IMPROVED — its bespoke backdrop div and the gray-500/gray-900 overlay went away when it adopted BaseModal, and a stale ceiling fails the guard too). base/BaseModal.vue is new at 0/2/0 — the overlay ground and nothing else. Deliberately NOT regenerated: a wholesale run deleted this entire refrozen block and absorbed canvas/CanvasDocument.vue and views/SharedCanvas.vue, two files that landed on dev after this branch was cut and have nothing to do with it. Same rule the 2638 note states.",
+    "_1925_note": "#1925: two entries move, both DOWN, scoped by hand. Operations.vue raw_nongray 26 -> 0 and raw_gray 60 -> 28 — adopting OverflowTabs deleted six hand-rolled tab buttons whose active/badge states were raw blue-500/600/100/900 and gray-*; the primitive carries the tokens. Settings.vue raw_gray 690 -> 683, its tab strip for the same reason (raw_nongray unchanged at 59 — the rest of that file is untouched). Not regenerated: see the _1923_1924_note above for what a wholesale run destroys. NavBar.vue raw_nongray 35 -> 19 and raw_gray 125 -> 105 in the same issue's third surface: the priority+ link row replaced six hand-written <router-link>s — each repeating border-blue-500/dark:border-blue-400 and a purple-100/700/900/200 PRO pill — with one v-for over a data-driven set whose active and pill classes are semantic (action-primary, accent-purple). The 19 that remain are the user-menu theme buttons and the avatar fallback, untouched by this issue."
   },
   "files": {
     "src/frontend/src/App.vue": {
@@ -275,8 +276,8 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/NavBar.vue": {
-      "raw_nongray": 35,
-      "raw_gray": 125,
+      "raw_nongray": 19,
+      "raw_gray": 105,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/NeverminedPanel.vue": {
@@ -985,8 +986,8 @@
       "hardcoded_colors": 130
     },
     "src/frontend/src/views/Operations.vue": {
-      "raw_nongray": 26,
-      "raw_gray": 60,
+      "raw_nongray": 0,
+      "raw_gray": 28,
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/Portal.vue": {
@@ -1001,7 +1002,7 @@
     },
     "src/frontend/src/views/Settings.vue": {
       "raw_nongray": 59,
-      "raw_gray": 690,
+      "raw_gray": 683,
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/SetupPassword.vue": {
