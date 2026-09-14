@@ -142,6 +142,7 @@ while [ "$_pi" -lt "${#_pargs[@]}" ]; do
         --provision)    PROVISION=1 ;;
         --machine-only) PROVISION_PHASE=machine ;;
         --site-only)    PROVISION_PHASE=site ;;
+        --caddy-only)   PROVISION_PHASE=caddy ;;
         --cloud)        _pi=$((_pi + 1)); PROVISION_CLOUD="${_pargs[$_pi]:-}" ;;
         --cloud=*)      PROVISION_CLOUD="${_pargs[$_pi]#*=}" ;;
         --provenance)   _pi=$((_pi + 1)); PROVISION_PROVENANCE="${_pargs[$_pi]:-}" ;;
@@ -268,25 +269,42 @@ UNIT
         || echo "⚠️  DOCKER-USER rules not applied — container ports may be public. Re-run: ${_fw}" >&2
 }
 
-provision_site() {
-    local ip provenance _tls
-    ip="$(provision_metadata_ip || true)"
-    [ -n "$ip" ] || provision_die "could not read this instance's public IP from the ${PROVISION_CLOUD} metadata service."
-    mkdir -p /etc/trinity
-    chmod 0700 /etc/trinity
-    echo "$ip" > /etc/trinity/public-ip
+# Which source addresses may reach Trinity over plain HTTP, from
+# PRIVATE_NETWORK_CIDRS in .env. Empty (the default) renders no rule at all.
+#
+# Source address, never the Host header: a header is supplied by the caller, so
+# matching on it would let anyone on the internet send `Host: 100.64.0.1` to
+# port 80 and be served the login page in cleartext, having bypassed the HTTPS
+# redirect. A source address cannot be forged into a completed TCP handshake.
+provision_private_cidrs() {
+    local raw="${1:-}" token out=()
+    for token in $raw; do
+        case "$token" in
+            0.0.0.0/0|::/0)
+                echo "⚠️  PRIVATE_NETWORK_CIDRS: refusing '${token}' — that is the whole internet, not a private network." >&2
+                return 1 ;;
+            */*) ;;
+            *)
+                echo "⚠️  PRIVATE_NETWORK_CIDRS: ignoring '${token}' — expected CIDR notation, e.g. 100.64.0.0/10." >&2
+                continue ;;
+        esac
+        case "$token" in
+            *[!0-9a-fA-F:./]*)
+                echo "⚠️  PRIVATE_NETWORK_CIDRS: ignoring '${token}' — not an address range." >&2
+                continue ;;
+        esac
+        out+=("$token")
+    done
+    printf '%s' "${out[*]-}"
+}
 
-    [ -f .env ] || cp .env.example .env
-    provenance="${PROVISION_PROVENANCE:-$(provision_default_provenance)}"
-    # FRONTEND_PORT moves the SPA off :80 so Caddy can own 80/443 in front of it.
-    set_env_key FRONTEND_PORT 8081
-    set_env_key FRONTEND_URL "https://${ip}"
-    set_env_key TRINITY_INSTALL_SOURCE "$provenance"
-    if [ -n "${TRINITY_IMAGE_TAG:-}" ]; then
-        set_env_key TRINITY_IMAGE_TAG "$TRINITY_IMAGE_TAG"
-    fi
-    chmod 0600 .env
-    echo "→ .env: FRONTEND_URL=https://${ip}, TRINITY_INSTALL_SOURCE=${provenance}"
+# Renders /etc/caddy/Caddyfile and reloads Caddy. Split out of provision_site so
+# `--caddy-only` can re-render after PRIVATE_NETWORK_CIDRS changes: the site
+# phase also rewrites FRONTEND_URL and TRINITY_INSTALL_SOURCE, so re-running it
+# to pick up one variable would silently re-stamp a marketplace droplet's
+# provenance as a doc-driven install.
+provision_caddyfile() {
+    local ip="$1" provenance="$2" _do_header="" _private="" _private_block=""
 
     # Rule 10 of DigitalOcean's 1-Click build standard specifies this header on
     # the reverse-proxy block, and their own catalog apps ship it (openclaw's
@@ -294,34 +312,36 @@ provision_site() {
     # install identifies itself to DigitalOcean — so it is keyed on the
     # marketplace provenance, not on the cloud: the doc-driven install on the
     # same cloud did not originate from the catalog.
-    local _do_header=""
     if [ "$provenance" = "do-marketplace" ]; then
         _do_header='header X-DO-MARKETPLACE "trinity"'
     fi
 
-    # Let's Encrypt issues certificates for bare IPs via the `shortlived` ACME
-    # profile (~6-day validity, renewed automatically while the machine runs), so
-    # the instance lands on browser-trusted HTTPS with no domain and no input. A
-    # domain becomes a post-login upgrade rather than a prerequisite.
-    # Two sites, and the catch-all is the point.
-    #
-    # The bare IP is what the instance answers to on day one, on the
-    # `shortlived` profile that is the only way to get a browser-trusted
-    # certificate without a domain.
-    #
-    # The catch-all takes ANY other hostname and gets a certificate for it on
-    # first request, gated by `ask`: Caddy asks the backend whether the name is
-    # allowed, and the backend answers yes only for the domain an admin actually
-    # saved. That gate is load-bearing in both directions — without it, anyone
-    # who points DNS at this address makes the instance request certificates on
-    # their behalf until Let's Encrypt rate-limits the account.
-    #
-    # This exists so that adding a domain is a Settings field and nothing else.
-    # The alternative was a shell command on the host, because Trinity runs in a
-    # container with no way to rewrite this file or reload Caddy — and a
-    # non-engineer following a deploy guide does not have a root shell in the
-    # loop. Caddy asking Trinity a question inverts that: no privilege moves,
-    # and the operator never leaves the browser.
+    # A private network already encrypts the transport, so TLS in front of it
+    # buys nothing — and cannot be obtained anyway: tailnet addresses live in
+    # carrier-grade NAT space, which no public CA will validate. Without this
+    # block an operator who moves the instance onto a VPN and closes 80/443 has
+    # shell access and no URL to browse: every site here is matched by hostname,
+    # and a private address matches neither the public IP nor the saved domain.
+    _private="$(provision_private_cidrs "$(env_value PRIVATE_NETWORK_CIDRS)")" || return 1
+    if [ -n "$_private" ]; then
+        _private_block="$(cat <<PRIVATE
+    @private remote_ip ${_private}
+    handle @private {
+        encode gzip
+        reverse_proxy 127.0.0.1:8081 {
+            flush_interval -1
+        }
+    }
+    handle {
+        redir https://{host}{uri} permanent
+    }
+PRIVATE
+)"
+        echo "→ Caddy: serving plain HTTP to ${_private} (private network)."
+    else
+        _private_block="    redir https://{host}{uri} permanent"
+    fi
+
     cat > /etc/caddy/Caddyfile <<CADDY
 {
     acme_ca https://acme-v02.api.letsencrypt.org/directory
@@ -357,11 +377,43 @@ https:// {
 }
 
 http:// {
-    redir https://{host}{uri} permanent
+${_private_block}
 }
 CADDY
+
+    # Validate before reloading. A malformed Caddyfile does not degrade the web
+    # server, it stops it — and on a box reached only over the network that is
+    # indistinguishable from bricking it.
+    if ! caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+        echo "❌ Generated Caddyfile is invalid — leaving the running config alone." >&2
+        caddy validate --config /etc/caddy/Caddyfile >&2 || true
+        return 1
+    fi
     systemctl enable caddy
     systemctl restart caddy
+}
+
+provision_site() {
+    local ip provenance _tls
+    ip="$(provision_metadata_ip || true)"
+    [ -n "$ip" ] || provision_die "could not read this instance's public IP from the ${PROVISION_CLOUD} metadata service."
+    mkdir -p /etc/trinity
+    chmod 0700 /etc/trinity
+    echo "$ip" > /etc/trinity/public-ip
+
+    [ -f .env ] || cp .env.example .env
+    provenance="${PROVISION_PROVENANCE:-$(provision_default_provenance)}"
+    # FRONTEND_PORT moves the SPA off :80 so Caddy can own 80/443 in front of it.
+    set_env_key FRONTEND_PORT 8081
+    set_env_key FRONTEND_URL "https://${ip}"
+    set_env_key TRINITY_INSTALL_SOURCE "$provenance"
+    if [ -n "${TRINITY_IMAGE_TAG:-}" ]; then
+        set_env_key TRINITY_IMAGE_TAG "$TRINITY_IMAGE_TAG"
+    fi
+    chmod 0600 .env
+    echo "→ .env: FRONTEND_URL=https://${ip}, TRINITY_INSTALL_SOURCE=${provenance}"
+
+    provision_caddyfile "$ip" "$provenance" || provision_die "could not write the Caddy configuration."
 
     # Verify the certificate was actually ISSUED. Without this the failure is
     # silent and worse than silent: Caddy serves a TLS error, this script exits
@@ -404,6 +456,18 @@ if [ "$PROVISION" = "1" ]; then
         || provision_die "no ${PROVISION_CLOUD} metadata service reachable — refusing to provision a machine that is not a ${PROVISION_CLOUD} instance."
 
     echo "Provisioning host (cloud: ${PROVISION_CLOUD}, phase: ${PROVISION_PHASE})..."
+    if [ "$PROVISION_PHASE" = "caddy" ]; then
+        # Re-render the web-server config only. Reads the instance's own IP and
+        # provenance back from where the site phase recorded them, so applying a
+        # PRIVATE_NETWORK_CIDRS change cannot re-stamp either.
+        _caddy_ip="$(cat /etc/trinity/public-ip 2>/dev/null || provision_metadata_ip || true)"
+        [ -n "$_caddy_ip" ] || provision_die "could not determine this instance's public IP — has it been provisioned?"
+        [ -f .env ] || provision_die "no .env here — run this from the Trinity install directory."
+        provision_caddyfile "$_caddy_ip" "$(env_value TRINITY_INSTALL_SOURCE)" \
+            || provision_die "could not write the Caddy configuration."
+        echo "Caddy reconfigured."
+        exit 0
+    fi
     [ "$PROVISION_PHASE" = "site" ]    || provision_machine
     [ "$PROVISION_PHASE" = "machine" ] || provision_site
     echo ""
