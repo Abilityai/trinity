@@ -37,6 +37,7 @@ because #2763 is being implemented in the same function and wants that file.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -270,6 +271,12 @@ def test_the_terminal_refusal_is_not_high_priority(monkeypatch, caplog):
     assert items[0]["priority"] != "high"
     assert items[0]["priority"] == "low"
 
+    # One `alert_type` and one title now span both `low` (this benign resting
+    # state) and `high` (a URL that failed validation — the signature of an
+    # attempted injection), so the branch carries a machine-readable
+    # discriminator rather than leaving `priority` to be read as the cause.
+    assert items[0]["context"]["reason"] == "already_migrated"
+
     ent346 = [r for r in caplog.records if "[ent#346]" in r.getMessage()]
     assert ent346, "the refusal must still be logged"
     assert [r.levelno for r in ent346] == [logging.INFO], (
@@ -384,3 +391,12 @@ def test_a_pat_bearing_url_is_never_echoed_into_the_log_or_the_queue(
     )
     assert items[0]["context"]["url"] == "https://github.com/acme/private-skills"
     assert PAT not in caplog.text, "the PAT reached the Vector-captured log"
+    # `question` is credential-free only because neither ent#346 validator
+    # echoes the URL in its `ValueError` (`validate_skills_library_url` names
+    # the hostname or the resolved IP; `reject_embedded_credentials` names
+    # neither) — the scrub covers the log line and `context`, not the message.
+    # Sweep the WHOLE item so a validator that starts echoing the URL fails
+    # here instead of persisting a PAT into `operator_queue.question`.
+    assert PAT not in json.dumps(items[0], default=str), (
+        "the PAT survived somewhere in the emitted item"
+    )
