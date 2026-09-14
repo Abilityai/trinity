@@ -120,6 +120,9 @@ export function applyBriefings(agents, briefings, requested = null, { failed = f
       searchable_playbooks: entry.searchable_playbooks || [],
       playbooks_total: entry.playbooks_total || 0,
       briefing_state: state,
+      // #2703: when this answer landed, so a re-validation can be bounded
+      // ("older than N seconds") on the surfaces that have no `/ws`.
+      briefing_hydrated_at: Date.now(),
     }
   })
 }

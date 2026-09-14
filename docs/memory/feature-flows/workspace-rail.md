@@ -348,11 +348,15 @@ serve neither an external client nor agent-shared bytes (which live at
 * Markdown goes through `PortalMarkdown` (the one sanitiser policy); other text
   renders in a `<pre>`, escaped by interpolation.
 * Text is capped at **256 KB** and fetched **whole, with no `Range` header**,
-  then sliced client-side. `main.py`'s CORS `allow_headers` does not list
-  `Range`, so a ranged preview dies silently wherever the portal base URL is
-  genuinely cross-origin. Shared-file preview reads carry `preview=1`; the
-  server audits them with `details.preview=true` without incrementing the
-  download counter. The cap is stated in the UI, not only in code.
+  then sliced client-side. A share preview is fetched same-origin (#2733 —
+  `portalFiles.js::sharePreviewPath` slices the path from `/api/files/` and drops
+  the origin `portal_base_url` put on `download_url`), so the `Range` gap in
+  `main.py`'s CORS `allow_headers` no longer reaches it: a ranged preview is
+  therefore possible, and is deliberately not taken here — the whole-blob read
+  stays because the 256 KB cap is applied by client-side slicing. Shared-file
+  preview reads carry `preview=1`; the server audits them with
+  `details.preview=true` without incrementing the download counter. The cap is
+  stated in the UI, not only in code.
 * Non-previewable types, and a **failed byte fetch**, both land on the same
   name/size/type + Download card. "Never a blank modal" has to cover a failure,
   not only an unknown type.
@@ -454,7 +458,59 @@ reviewer clicks.
 * `src/frontend/tests/unit/portalFiles.spec.js` — `previewKind`, `neighbour`,
   `flattenFiles` order equalling render order, the `fileActions` matrix, and the
   component's own source guards (an `<img>`, no `v-html`, capture + preventDefault,
-  `revokeObjectURL`, no `Range`, zero raw palette classes).
+  `revokeObjectURL`, no `Range`, zero raw palette classes). It also pins the
+  same-origin preview rewrite (#2733): a cross-origin `download_url` yields a path
+  under `/api/files/`, a path-prefixed portal base URL resolves to the same path,
+  and a URL at any other route falls through untouched.
+* `tests/unit/test_1400_csp_blob_preview.py` — the CSP↔loader contract. Beyond
+  #1400's `blob:` guard it freezes the `connect-src` source SET in both CSP
+  sources (adding an origin there to make preview work is the move #2733 rejects)
+  and asserts the share-route literal in `portalFiles.js` still matches the
+  f-string `client_portal/service.py` builds `download_url` from.
+
+## The body's scrollbar — thin, hidden at rest (trinity-enterprise#608)
+
+The rail's single scroll axis (`data-testid="portal-rail-body"`, principle 8)
+used to show a stock scrollbar: the global `.dark ::-webkit-scrollbar` 8px bar
+in dark mode, the browser default in light — and because *any*
+`::-webkit-scrollbar` rule opts an element out of macOS overlay scrollbars, a
+dark-mode Mac saw an always-on bar where the light rail hid its bar when idle.
+The two themes disagreed about scrollbar weight.
+
+`rail-scroll`, a scoped style on that one container, makes both behave like the
+good case and thinner: `scrollbar-width: thin` with `scrollbar-color:
+transparent transparent` at rest, the tertiary ink (`theme('colors.gray.500 /
+0.55')` light, `gray.400 / 0.5` dark — resolved at build, hence an explicit
+`.dark` override, the ScanlineReveal precedent) on `:hover` / `:focus-within`,
+with a 150ms `scrollbar-color` transition — and on `.is-scrolling`, a class the
+body's passive `scroll` listener holds for ~800ms past the last event. That
+third arm was found in the capture, not designed in: Chromium on a Mac in the
+default "show scroll bars: automatically" mode renders the standard-property
+bar as a native overlay, which shows during scrolling only and never on hover,
+so with the rest colour transparent the first cut showed no bar at all, in
+either theme, in any state. A parallel `::-webkit-scrollbar*`
+block gives Safari the same 6px rounded thumb on a transparent track with the
+same two states; in Chromium the standard pair wins and the WebKit rules are
+ignored, which is why the two blocks must stay visually identical rather than
+being two designs.
+
+**What reveal may change: colour, nothing else.** Toggling `display: none`,
+`width`, `scrollbar-width` or `overflow` on hover reflows the whole tab body
+(every line re-wraps as the gutter comes and goes) — the anti-pattern the issue
+excludes. The proof is mechanical: the feel-check capture reads every
+descendant's `getBoundingClientRect` at rest and hovered and asserts the two
+serialisations are equal, in both themes. The thin bar therefore keeps its
+gutter in classic-scrollbar mode (Windows/Linux defaults, macOS "Show scroll
+bars: Always"); it is the rest-state *visibility* that changes, not the
+geometry. Under `prefers-reduced-motion` the transition is off.
+
+The rule is wrapped in `@media (min-width: 640px)` (Tailwind `sm`): the
+below-`sm` sheet is the same component, but touch platforms already overlay
+their scrollbars natively and are left native. The global dark rule in
+`style.css` is untouched — the sidebar list (`PortalSidebar.vue`) and the
+transcript (`PortalConversation.vue` `scrollEl`) are a follow-up if the feel
+lands, not this change. Guard: `portalRail.spec.js` pins the body's class
+string with `rail-scroll` on it.
 
 ## Residuals (stated)
 

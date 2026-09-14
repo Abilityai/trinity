@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 
-from utils.helpers import utc_now_iso
+from utils.helpers import parse_iso_timestamp, utc_now_iso
 from services.chat_title import (
     chat_title_problem,
     is_greeting,
@@ -144,6 +144,28 @@ PORTAL_FAILURE_CATEGORIES = (
     # every retry and every reload. `agent_error` must not carry that side
     # effect — it fires for every turn that ran and did not come back.
     "invalid_model",
+    # #2638 — the turn hit a usage limit AND SUB-003 moved the agent onto a
+    # different subscription (or the platform API key) while it failed.
+    #
+    # A TENTH token rather than reusing `auth`, because the two disagree on the
+    # only thing this taxonomy is consulted about: `auth` means retrying
+    # re-fails, and that is true exactly while nothing changed underneath. A
+    # switch is something changing underneath, so the same word would have to
+    # carry both "do not bother" and "try again" — and the client reads
+    # `retryable` off the outcome, so one token with two answers is a coin toss
+    # over whether the Retry button appears.
+    #
+    # It needs no client branch: `cancelled` and `invalid_model` are the only
+    # categories the client acts on, and everything else renders its message and
+    # its `retryable` flag. Declaring it is not optional bookkeeping —
+    # `record_turn_outcome` coerces an undeclared category to `internal`, so
+    # without this line the switch outcome would have been recorded as an
+    # uncategorised crash, not retryable, with the fixed internal copy in place
+    # of the sentence naming the new subscription. Caught by
+    # `test_every_declared_category_is_actually_raised_somewhere`, which is a
+    # closed taxonomy in BOTH directions precisely so a new raise site cannot
+    # silently degrade like that.
+    "auth_switched",
     "internal",            # anything uncategorised; copy is fixed, never raw
 )
 
@@ -459,6 +481,44 @@ def _refusal_detail(availability: str) -> str:
     )
 
 
+def _usage_limit_detail(agent_name: str) -> str:
+    """The 502 body when NO subscription can serve and nothing was switched.
+
+    Names the earliest reset instant the headroom sampler already knows (#2638
+    AC#4). "Please try again later" is true and nearly useless: the person has
+    no way to know whether later means ten minutes or two days, so they either
+    give up or re-send in a loop that cannot succeed.
+
+    Degrades to the original sentence whenever the instant is unknown or
+    unreadable — a fabricated time would be worse than a vague one, and this
+    runs on the path where things are already going wrong, so it must not be
+    able to raise.
+    """
+    fallback = (
+        "The agent has reached its usage limit and can't respond right now. "
+        "Please try again later."
+    )
+    try:
+        from database import db as _db
+        from services.subscription_auto_switch import earliest_known_reset
+
+        sub_id = _db.get_agent_subscription_id(agent_name)
+        if not sub_id:
+            return fallback
+        resets_at = earliest_known_reset([sub_id])
+        if not resets_at:
+            return fallback
+        when = parse_iso_timestamp(resets_at).strftime("%H:%M UTC on %-d %b")
+        return (
+            "The agent has reached its usage limit and can't respond right now. "
+            f"Its quota resets at {when}."
+        )
+    except Exception:  # noqa: BLE001 — a nicer message is never worth a 500
+        logger.debug("[#2638] could not resolve a reset time for %s", agent_name,
+                     exc_info=True)
+        return fallback
+
+
 def _turn_failed_detail(availability: str) -> str:
     """The 502 body for a turn that RAN and did not come back.
 
@@ -627,7 +687,8 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
                  availability: str = "unknown", *,
                  is_platform: bool, runtime: str,
                  model_context: ModelContext,
-                 stt_ready: bool | None = None) -> PortalAgentCard:
+                 stt_ready: bool | None = None,
+                 can_manage_canvases: bool = False) -> PortalAgentCard:
     """One roster row → one card. Shared by the roster and the single-agent
     lookup (#2160) so the two cannot disagree about how a card is built.
 
@@ -696,6 +757,10 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
         # client sees and the endpoint it would call still cannot disagree.
         stt_available=bool(tts_ready and (stt_ready if stt_ready is not None else True)),
         availability=availability,
+        # ent#553 — threaded in like `availability`, never computed here: the
+        # caller knows its own principal kind and this builder is shared with
+        # the single-agent lookup.
+        can_manage_canvases=can_manage_canvases,
         # ent#403: `None` — no control at all — for every non-platform principal.
         # The roster payload is the ONLY capability channel an external client
         # has (#2128): a UI gate written against `GET /api/settings/feature-flags`
@@ -799,7 +864,20 @@ async def get_agent_card(email: str | None, agent_name: str,
                         # (ent#357), which is the same door ent#403 gates on.
                         is_platform=include_owned,
                         runtime=runtime,
-                        model_context=_model_context())
+                        model_context=_model_context(),
+                        # ent#553 (review): the roster resolves this per row and
+                        # this path did not, so the SAME owner saw
+                        # `can_manage_canvases: true` in the sidebar and `false`
+                        # on the agent's own page — two representations of one
+                        # card answering differently, which is precisely the
+                        # defect #2160's docstring above says this function
+                        # exists to prevent. It failed CLOSED (a control hidden,
+                        # never one that 403s), which is why it was latent.
+                        # Resolved through `may_manage_canvases`, the predicate
+                        # the write routes enforce with, for the reason stated
+                        # at the roster's own call site.
+                        can_manage_canvases=may_manage_canvases(
+                            agent_name, email, is_platform=include_owned))
     # #2163: exactly one briefing (not N), and now a BOUNDED one — this page's
     # floor was the agent's own 5s-per-phase HTTP, so a wedged agent made its
     # own page hang. `ok` is what makes an unreachable agent legible: without it
@@ -896,7 +974,18 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
                      is_platform=include_owned,
                      runtime=runtimes.get(r["agent_name"], _DEFAULT_RUNTIME),
                      model_context=model_context,
-                     stt_ready=stt_ready)
+                     stt_ready=stt_ready,
+                     # ent#553 — resolved through `may_manage_canvases`, the SAME
+                     # predicate the write routes enforce with, rather than a
+                     # faster per-row comparison against `r["owner"]`. That
+                     # shortcut would be two ownership answers that merely agree
+                     # today, and this file already carries the scar of a display
+                     # rule drifting from the rule it displays. The cost is a
+                     # couple of indexed lookups per agent on a load that already
+                     # makes a Docker call; if it ever matters, memoize INSIDE
+                     # the predicate so both callers benefit.
+                     can_manage_canvases=may_manage_canvases(
+                         r["agent_name"], email, is_platform=include_owned))
         for r in rows
     ]
     # #2163: the briefing is DEFERRED, not dropped. Saying so on the card is
@@ -1535,6 +1624,82 @@ def agent_on_roster(agent_name: str, email: str | None,
     return agent_name in roster_agent_names(email, include_owned)
 
 
+def validated_open_canvas(agent_name: str, canvas_id, *, is_platform: bool):
+    """The open-canvas id to stamp on a turn, or None (ent#555).
+
+    The client tells us which canvas it has on screen. That is a CLIENT-SUPPLIED
+    id landing in a column an agent later reads, so it is validated here rather
+    than trusted, and every failure degrades to None — an unrecognised
+    selection means "no canvas open", never an error and never a wider reach.
+
+    Three checks, and the middle one is the one that matters:
+
+    * it is a string of the shape a canvas id can have;
+    * it names a canvas OF THIS AGENT — so the field cannot be used to point an
+      agent at another agent's surface;
+    * the caller can actually SEE it under the audience rules (`operator` is
+      invisible to an external client), so a client cannot learn that an
+      operator-only canvas exists by having it echoed back at them.
+
+    What this deliberately does NOT do is grant anything. Being named as open
+    is not permission: the agent's own read and write paths re-check ownership
+    and audience exactly as before (AC #6).
+    """
+    from database import db as core_db
+    from services import canvas_service
+
+    from . import agent_page
+
+    if not canvas_id or not isinstance(canvas_id, str):
+        return None
+    try:
+        canvas_service.validate_canvas_id(canvas_id)
+    except Exception:  # noqa: BLE001 — a malformed selection is just "none open"
+        return None
+
+    audience = agent_page.canvas_audience_for(is_platform)
+    try:
+        canvas = core_db.get_agent_canvas(agent_name, canvas_id, audience)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("open-canvas validation failed for %s/%s: %s",
+                       agent_name, canvas_id, e)
+        return None
+    return canvas_id if canvas else None
+
+
+def may_manage_canvases(agent_name: str, email: str | None, *,
+                        is_platform: bool) -> bool:
+    """May this Workspace caller delete or pin ``agent_name``'s canvases (ent#553)?
+
+    Owner-or-admin, and platform-only. Two consequences worth stating:
+
+    * an **external client never can**, whatever their roster says. A canvas is
+      one shared surface with no per-user copy, so there is no "hide it from my
+      list" they could be given instead — the ent#548 answer for files, where a
+      non-owner unshares their own copy, has no equivalent here.
+    * the predicate is `db.can_user_share_agent`, the SAME one
+      `dependencies.assert_agent_owner` reaches on the operator surface. Not a
+      second implementation that agrees today: the Workspace and Agent Detail
+      must never disagree about who owns an agent, and the cheapest way to
+      guarantee that is to have one answer.
+
+    Fails closed on every unknown: no email, no `users` row (a client), or a
+    lookup that returns nothing.
+    """
+    # `db` in this module is `client_portal.db`, the portal's OWN tables — the
+    # platform facade is imported locally as `core_db`, the convention every
+    # other cross-table read here follows. Reaching for the wrong one raises
+    # AttributeError on a path that runs for every roster load.
+    from database import db as core_db
+
+    if not is_platform or not email:
+        return False
+    user = core_db.get_user_by_email(email)
+    if not user or not user.get("username"):
+        return False
+    return bool(core_db.can_user_share_agent(user["username"], agent_name))
+
+
 def roster_agent_names(email: str | None, include_owned: bool) -> set[str]:
     """The set of agent names on the caller's roster — THE access boundary.
 
@@ -1789,34 +1954,107 @@ def _sanitize_title(raw: str | None) -> str | None:
     return line or None
 
 
+def _title_failure_detail(status_code: int, body: str) -> str:
+    """Turn an upstream non-200 into a bounded, credential-free phrase (#2766).
+
+    `HTTP 400` on its own reads like a transport fault and sent the operator
+    looking at the wrong thing; the actionable half is always in the body —
+    "credit balance is too low" is a billing problem, "invalid x-api-key" is a
+    credential problem, and neither is a bug in Trinity.
+
+    Only the API's own `error.type` (a fixed enum) and `error.message` are
+    used, never the raw body, and the result is truncated by the caller's
+    `_TITLE_HEALTH_DETAIL_CHARS` bound. `_scrub` is applied because this string
+    reaches an operator-visible health record, and a credential echoed back in
+    an upstream error message must not be the way it gets there.
+    """
+    base = f"HTTP {status_code}"
+    try:
+        err = (json.loads(body) or {}).get("error") or {}
+        etype = err.get("type")
+        message = err.get("message")
+    except Exception:  # noqa: BLE001 — an unparseable body is just the status
+        return base
+    parts = [base]
+    if isinstance(etype, str) and etype:
+        parts.append(etype[:40])
+    if isinstance(message, str) and message:
+        parts.append(_scrub_title_detail(message)[:80])
+    return " · ".join(parts)
+
+
+def _scrub_title_detail(text: str) -> str:
+    """Remove anything credential-shaped from an upstream message before it
+    reaches the health record (#2766). Belt: these messages come from Anthropic,
+    not from a user, but the record is operator-visible and cheap to protect."""
+    return re.sub(r"(sk-[A-Za-z0-9_\-]{8,}|sk-ant-[A-Za-z0-9_\-]{8,})", "[redacted]", text)
+
+
 def _resolve_title_auth(agent_name: str) -> dict | None:
-    """Pick the credential the title call authenticates with. Prefer an explicit
-    ``ANTHROPIC_API_KEY`` (deployments that have one); otherwise fall back to the
-    agent's OWN subscription OAuth token — the same credential it chats on, billed
-    to the same subscription — via the Messages-API OAuth beta header. Returns the
-    request headers, or None when neither credential is available (the caller then
-    keeps the derived fallback title). (ent#186 follow-up: subscription-only.)"""
+    """Pick the credential the title call authenticates with — **the one the
+    agent's own chat runs on** (#2766).
+
+    The credential FOLLOWS THE AGENT. `derive_auth_mode` is the platform's one
+    auth-mode derivation (#471), so this path speaks the same vocabulary as
+    `AgentAuthStatus` and the subscription-pressure batch rather than inventing
+    a second answer to "what is this agent authenticated as":
+
+    * ``subscription`` — the agent's OWN subscription OAuth token, via the
+      Messages-API OAuth beta header. Same credential, same bill as its chat.
+    * ``api_key`` — only then the instance key.
+    * ``not_configured`` — no credential; the caller keeps the derived title.
+
+    This precedence is INVERTED from the original, and the inversion is the
+    fix. The instance key used to win outright, so on a fleet where every agent
+    runs on a subscription, thread titles were billed to — and gated on — a
+    console account no agent was assigned. An unfunded or revoked instance key
+    then broke titles for agents that were otherwise completely healthy, which
+    is #2114's "a stale key shadows subscription auth" one layer up, on the
+    backend side.
+
+    A ``subscription``-mode agent whose token cannot be read returns **None**
+    rather than falling through to the instance key. Falling through is exactly
+    the shadowing this fixes: an instance key the agent was never assigned is
+    not a credential it holds, so a missing token is "no credential for this
+    agent", not "use someone else's".
+    """
     from services.settings_service import get_anthropic_api_key
+    from services.subscription_service import derive_auth_mode
     import database
 
     base = {"anthropic-version": "2023-06-01", "content-type": "application/json"}
 
-    api_key = get_anthropic_api_key()
-    if api_key:
-        return {**base, "x-api-key": api_key}
-
     try:
         db = database.db if hasattr(database, "db") else database.get_db()
         sub_id = db.get_agent_subscription_id(agent_name)
-        token = db.get_subscription_token(sub_id) if sub_id else None
     except Exception as e:  # noqa: BLE001 — fail-soft, keep the derived title
         logger.warning("portal title: subscription lookup failed for %s: %s", agent_name, e)
         return None
-    if token:
-        return {**base, "authorization": f"Bearer {token}", "anthropic-beta": _OAUTH_BETA}
+
+    api_key = get_anthropic_api_key()
+    mode = derive_auth_mode(bool(sub_id), bool(api_key))
+
+    if mode == "subscription":
+        try:
+            token = db.get_subscription_token(sub_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("portal title: subscription token unreadable for %s: %s", agent_name, e)
+            return None
+        if token:
+            return {**base, "authorization": f"Bearer {token}", "anthropic-beta": _OAUTH_BETA}
+        # Deliberately NOT the instance key — see the docstring.
+        logger.debug(
+            "portal title: %s is subscription-mode but its token is unreadable — "
+            "keeping derived title rather than billing an unassigned instance key",
+            agent_name,
+        )
+        return None
+
+    if mode == "api_key":
+        return {**base, "x-api-key": api_key}
 
     logger.debug(
-        "portal title: no ANTHROPIC_API_KEY and no subscription for %s — keeping derived title",
+        "portal title: no subscription and no ANTHROPIC_API_KEY for %s — keeping derived title",
         agent_name,
     )
     return None
@@ -1867,7 +2105,10 @@ async def _generate_thread_title(agent_name: str, client_message: str, reply: st
 
     if resp.status_code != 200:
         logger.warning("portal title generation: API %s: %s", resp.status_code, resp.text[:200])
-        _record_title_outcome("failed", f"HTTP {resp.status_code}")
+        # #2766: carry the upstream reason, not just the status — the Settings
+        # alert should point at billing or credentials, not read as a transport
+        # fault.
+        _record_title_outcome("failed", _title_failure_detail(resp.status_code, resp.text))
         return None
     try:
         text_out = (resp.json().get("content") or [{}])[0].get("text", "")
@@ -1958,7 +2199,7 @@ def _resolve_session_id(agent_name: str, email: str, session_id: str | None,
     return ensure_main_session(agent_name, email)
 
 
-def _refuse_turn_during_voice_call(session_id: str) -> None:
+def _refuse_turn_during_voice_call(session_id: str, *, voice_call_id: str | None = None) -> None:
     """#2694: no typed reply may land mid-call — the turn side of the rule
     whose call side is `start_workspace_voice`'s 409. A reply that lands
     between two spoken rows sits after the cursor the next typed turn uses to
@@ -1967,7 +2208,16 @@ def _refuse_turn_during_voice_call(session_id: str) -> None:
     `/chat` surface are not, so the server refuses — in both turn entries,
     BEFORE any row is created. Unbilled and retryable: nothing was dispatched,
     and sending again after the call is exactly right.
+
+    ent#551: a turn that IS the call's — a `run_task` the voice dispatcher
+    started, which is the only writer of `voice_call_id` — passes. #2694
+    landed after ent#535 and refused every such turn ("A voice call is on in
+    this chat"), so the call could not run a single task. Its rows carry the
+    call id, and `get_platform_rows_since_last_reply` skips them as a cursor,
+    so the delta the guard protects stays whole.
     """
+    if voice_call_id:
+        return
     from .voice import voice_call_active
     if voice_call_active(session_id):
         raise ClientPortalError(409, "A voice call is on in this chat — end it, then send.",
@@ -2325,6 +2575,7 @@ async def _run_sync_turn_and_clear_marker(owns_marker: bool, marker_session_id: 
 def _precreate_sync_execution(
     agent_name: str, message: str, email: str, session_id: str,
     resolved_model: str | None,
+    open_canvas_id: str | None = None,
 ) -> str | None:
     """Create the execution row for a synchronous portal turn (ent#365 review).
 
@@ -2388,6 +2639,8 @@ def _precreate_sync_execution(
             # row is MADE. See the docstring: there is no UPDATE path for this
             # column anywhere in the repo.
             model_used=resolved_model,
+            # ent#555 — what the user was looking at when they sent this.
+            open_canvas_id=open_canvas_id,
         )
         return execution.id if execution else None
     except Exception:  # noqa: BLE001
@@ -2409,7 +2662,14 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       model: str | None = None,
                       # ent#403 — the fully-resolved model, passed by a caller
                       # that has ALREADY stamped it on a pre-created row.
-                      resolved_model: str | None = None) -> dict:
+                      resolved_model: str | None = None,
+                      # ent#551 — a turn dispatched from a voice call carries the
+                      # call's id on both its rows (typed rows, `source` NULL):
+                      # the attribution, and nothing else. Never from a request.
+                      voice_call_id: str | None = None,
+                      # ent#555 — the canvas on screen, validated at the router.
+                      # Stamped on the execution so the agent's tools default to it.
+                      open_canvas_id: str | None = None) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -2506,7 +2766,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
 
     session_id = _resolve_session_id(agent_name, email, session_id,
                                      new_thread=new_thread)
-    _refuse_turn_during_voice_call(session_id)
+    _refuse_turn_during_voice_call(session_id, voice_call_id=voice_call_id)
     client_message = message  # what the client typed — persisted verbatim (no context/manifest)
 
     # ent#186: a thread is titled from its OPENING exchange. Read the row here
@@ -2594,7 +2854,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # the thread's title before this writes the derived one, and the history
     # context below must not contain the very message it is context FOR. Both
     # reads happen first, deliberately.
-    _persist_user_turn(agent_name, email, session_id, client_message)
+    _persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id)
 
     # ent#186 / #2579: title the thread NOW, concurrently with the turn.
     #
@@ -2667,8 +2927,33 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # already holds the same rows — so a cold retry cannot double-send them.
     delta_prefix = (voice_delta + "\n\n") if voice_delta else ""
 
-    cold_message = history_prefix + manifest_prefix + message
-    message = (delta_prefix + manifest_prefix + message) if resuming else cold_message
+    # ent#555 — the canvas on screen, named in the turn itself.
+    #
+    # This is what makes "add a column to this" resolvable. The tool default
+    # (ent#555 AC #3) covers a call that omits an id, but an agent has to READ
+    # the canvas before it can edit it, and it cannot read what it does not
+    # know the name of — so the id has to be in the prompt, not only in the
+    # tool's fallback.
+    #
+    # It rides the SAME prefix as the file manifest, which means it is present
+    # on a resumed turn too: the open canvas changes between turns while the
+    # session's memory of it does not, so replaying it only on a cold turn
+    # would leave a resumed conversation editing whatever was open first.
+    canvas_prefix = ""
+    if open_canvas_id:
+        canvas_prefix = (
+            f"[Client Portal] The user has the canvas '{open_canvas_id}' open on screen. "
+            "When they say \"this\", \"that chart\" or similar, they mean that canvas — "
+            "read it before editing so you change what they can see, and patch by "
+            "block id rather than rewriting the whole surface.\n\n"
+        )
+
+    # #2694 × ent#555 on a resumed turn: the voice delta comes first (it is
+    # conversation the session never heard, so it reads as history), then the
+    # canvas on screen, then the file manifest, then what the client said.
+    # The cold message carries the replay in place of the delta.
+    cold_message = history_prefix + canvas_prefix + manifest_prefix + message
+    message = (delta_prefix + canvas_prefix + manifest_prefix + message) if resuming else cold_message
 
     # ent#212: inject the client's durable per-user memory (MEM-001) + the #1205
     # public-channel custom instructions into the turn, so a delegated end user
@@ -2714,8 +2999,9 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # than this one growing its own turn machinery.
         owns_marker = False
         if not execution_id:
-            execution_id = _precreate_sync_execution(agent_name, message, email,
-                                                     session_id, resolved_model)
+            execution_id = _precreate_sync_execution(
+                agent_name, message, email, session_id, resolved_model,
+                open_canvas_id=open_canvas_id)
             if execution_id:
                 mark_turn_inflight(session_id, execution_id, turn_timeout + 60)
                 owns_marker = True
@@ -2808,14 +3094,31 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # additive — nothing that classified before stops classifying now.
         code = _error_code_name(result)
         if code in ("AUTH", "BILLING"):
-            # The pool is exhausted, not momentarily busy — re-sending re-fails.
-            # Remediation ("add an API key", "register a subscription") is
-            # OPERATOR guidance and stays on the Executions surface; a client can
-            # only be told to come back later.
+            # #2638: "re-sending re-fails" is only true while nothing changed
+            # underneath. SUB-003 may have MOVED the agent onto a different
+            # subscription during this very turn (pre-dispatch, or after the
+            # first refusal), in which case the sentence below was telling a
+            # person their message could not be retried while the agent sat on
+            # a fresh subscription that would have served it.
+            switch = getattr(result, "subscription_switch", None)
+            if isinstance(switch, dict) and switch.get("switched"):
+                where = switch.get("new_subscription")
+                moved = (
+                    f"moved onto '{where}'" if where
+                    else "moved onto the platform API key"
+                )
+                raise ClientPortalError(
+                    503,
+                    f"The agent hit its usage limit, so it was {moved}. "
+                    "Send that again and it should go through.",
+                    category="auth_switched", retryable=True)
+            # Nothing changed: the pool really is exhausted. Say WHEN, if the
+            # provider told us — the headroom sampler already caches the reset
+            # instants, and "try again later" is the least useful true thing
+            # the platform can say when it knows the hour.
             raise ClientPortalError(
                 502,
-                "The agent has reached its usage limit and can't respond right now. "
-                "Please try again later.",
+                _usage_limit_detail(agent_name),
                 category="auth", retryable=False)
         if code == "CAPACITY" or "at capacity" in err:
             # Admission refused before any agent work — unbilled, and the queue
@@ -2898,7 +3201,8 @@ async def portal_chat(agent_name: str, message: str, email: str,
     try:
         now = utc_now_iso()
         new_message_id = uuid.uuid4().hex
-        db.add_portal_message(new_message_id, agent_name, email, "assistant", reply, cost, now, session_id=session_id)
+        db.add_portal_message(new_message_id, agent_name, email, "assistant", reply, cost, now,
+                              session_id=session_id, **_voice_attribution(voice_call_id))
         message_id = new_message_id
         db.touch_portal_session(session_id, now, added=1)
     except Exception as e:  # noqa: BLE001
@@ -2917,7 +3221,16 @@ async def portal_chat(agent_name: str, message: str, email: str,
             "message_id": message_id}
 
 
-def _persist_user_turn(agent_name: str, email: str, session_id: str, content: str) -> None:
+def _voice_attribution(voice_call_id: str | None) -> dict:
+    """ent#551: the `add_portal_message` kwargs that attribute a row to the
+    voice call whose `run_task` produced it — and NOTHING for a typed turn, so
+    the ordinary write is byte-identical to before (the `source` column stays
+    untouched either way: these rows were not spoken)."""
+    return {"voice_call_id": voice_call_id} if voice_call_id else {}
+
+
+def _persist_user_turn(agent_name: str, email: str, session_id: str, content: str,
+                       voice_call_id: str | None = None) -> None:
     """Write the client's own message, before the turn runs. Best-effort.
 
     Idempotent against a RETRY. The message is written before the turn so a
@@ -2945,7 +3258,7 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
     try:
         now = utc_now_iso()
         db.add_portal_message(uuid.uuid4().hex, agent_name, email, "user", content,
-                              None, now, session_id=session_id)
+                              None, now, session_id=session_id, **_voice_attribution(voice_call_id))
         db.touch_portal_session(session_id, now, added=1,
                                 title_if_empty=_derive_title(content))
     except Exception as e:  # noqa: BLE001 — never block a turn on bookkeeping
@@ -3365,7 +3678,10 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             # by only one route brings the bug back exactly when
                             # streaming fails. Already normalised and
                             # allow-listed at the router; None = inherit.
-                            model: str | None = None) -> dict:
+                            model: str | None = None,
+                            # ent#555 — the canvas on screen, validated at the router.
+                            # Stamped on the execution so the agent's tools default to it.
+                            open_canvas_id: str | None = None) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -3432,6 +3748,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         # anywhere in the repo — so a model passed as a turn kwarg alone would
         # never reach the row a client can see.
         model_used=resolved_model,
+        # ent#555 — both creation sites carry it, for the reason stated above
+        # about the stamp otherwise being a coin flip.
+        open_canvas_id=open_canvas_id,
     )
     execution_id = execution.id if execution else None
     if not execution_id:
@@ -3464,7 +3783,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               # ladder can name it) AND the trusted resolution
                               # already stamped on the row above, so `portal_chat`
                               # never re-resolves and the two cannot disagree.
-                              model=model, resolved_model=resolved_model)
+                              model=model, resolved_model=resolved_model,
+                              open_canvas_id=open_canvas_id)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
             # — so the ONLY way this reaches the client is the record written
@@ -3990,7 +4310,15 @@ def portal_documents(agent_name: str, email: str, include_owned: bool = False) -
     emits private links; when no base is configured they're relative (same-origin
     as the portal page). The `?sig=` token is the download credential — the OSS
     `/api/files/{id}` route is public and token-gated, so no portal auth rides on
-    the link."""
+    the link.
+
+    `download_url` may therefore be CROSS-ORIGIN to the page that reads it, and
+    that is a supported topology (ent#79), so do not `fetch()` it from the portal
+    page: `connect-src` cannot carry a per-deployment origin and CORS would
+    refuse it a second time (#2733). The rail's preview loader slices the path
+    from `/api/files/` and asks its own origin instead
+    (`components/portal/portalFiles.js::sharePreviewPath`); the absolute url here
+    stays the user-shareable link the anchor-click Download uses."""
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
 

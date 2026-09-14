@@ -21,6 +21,8 @@ test('Agent Detail shows a Canvas tab that renders every block kind', async ({ p
   await expect(page.getByText('Stations reporting')).toBeVisible()   // kpi tile
   await expect(page.getByText('Kyiv-3')).toBeVisible()               // table row
   await expect(page.locator('text=Updated')).toBeVisible()           // freshness line
+  // The verdict is gone (#2734): the header states two facts and marks nothing.
+  await expect(page.getByText('may be out of date')).toHaveCount(0)
 
   await page.screenshot({ path: 'e2e/test-results/ent438-agent-detail-canvas.png', fullPage: true })
 })

@@ -376,8 +376,9 @@ skeletons by #2540 — a conversation is not a chart. Adopting a further CHART s
 ent#253 pass; adopting it on a page, list or thread is a violation, and
 `tests/unit/portalLoadingTreatment.spec.js` pins the importer set as an allowlist so a new
 non-chart adoption fails CI (the two pre-ruling holdovers, `LibrarySkillsSection` and
-`onboarding/FinishSetupCard`, are recorded on #1921's sweep and shrink that list as they
-convert).
+`onboarding/FinishSetupCard` — the latter since deleted, replaced by the ent#581 first-run
+overlay `onboarding/FirstRunOverlay.vue` — were swept to skeletons by #1921, so the
+holdover list is empty).
 
 `content-class` (#2163) is the consumer's hook on the primitive's OWN content wrapper —
 `.scan-content` is child-owned DOM and `:deep()` is forbidden here, so a zone whose
@@ -438,6 +439,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 6. Dimensions never oscillate as async data trickles in — size to the stable state.
 7. Panels flex to available width; no overlap at narrow widths; wide content scrolls in its own container, never the page.
 8. Scrolling is axis-locked — one axis at a time.
+29. **Recommendation, verified by eye: enabling something should not shove the rest of the panel (#954, #1563, #1939, #2640).** A user-driven state change — a toggle switched on, a checkbox that reveals dependent fields, a mode that swaps a column, a tab switch — deserves the same care as data arrival (principle 4), but this is guidance, not a hard rule: some reveals are genuinely better as an instant snap, and the judgement is the reviewer's. Preferred shapes, chosen by size: a **reserved footprint** for small dependents (the block already occupies its space, disabled or dimmed, and enabling fills it in place — the natural default for settings forms), or a **height/flex transition** for a whole section or column (150–300ms ease-out, `motion-reduce:transition-none`, via `<Transition>` or an animatable property such as `grid-template-rows` / `flex-grow`) rather than a bare `v-if` that lands the new layout in one paint. Aim for: the activated control stays under the pointer, new content opens below or beside its trigger rather than above it, and what the user was reading stays in view. A swap that must remount should let the leaving element finish before the entering one takes its width — a mid-transition third column is a worse jump than the one being fixed (#2647). **No scanner can see this** — it is confirmed only by a human toggling the control in the browser, in both themes, and watching what moves; record that you did in the PR.
 
 ### C. Density & progressive disclosure
 
@@ -481,6 +483,7 @@ The recurring failure modes, in one place:
 | A scanline beam over a page, list or thread | A skeleton placeholder keyed on `hasLoaded` (§6, #2540) |
 | A "Loading…" line or an `animate-spin` on a page | The skeleton recipe (§6), keyed on a verdict |
 | Skeleton re-flash on a 30s poll | Stale-while-revalidate, in-place swap |
+| A toggle whose `v-if` pops a block open and shoves the form below it, unreviewed | Prefer a reserved footprint or a height transition; either way, a human toggles it and watches what moves (principle 29, a recommendation) |
 | Tabs wrapping to two rows | OverflowTabs with "+N more" |
 | A table that grows the page unbounded | Bounded viewport + sticky header + stated total |
 | Red border as the whole error | Named error + fix + example |

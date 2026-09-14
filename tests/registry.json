@@ -2692,7 +2692,7 @@
         "telemetry",
         "security"
       ],
-      "description": "Opt-in instance telemetry (ent#437, the second cut of the ent#12 Tier-2 channel). Service level, db + httpx mocked: the schema-v2 aggregate validates and carries install_source + release version; it NEVER carries installation_id and the builder never reads it (a preview mints nothing, shows the placeholder id); outcome mix projects the timeline shaper's rows to telemetry-owned wire keys with an `other` catch-all and drops cost/context_used; by_status folds unknown statuses; provider_failures sums rate_limit/auth across subscriptions and asks the unconditional-cutoff reader for a WIDE window at window_days=0 (never 0 = since-now); a fully stubbed db degrades every field to a valid payload. Validator rejects unknown keys, wrong types, installation_id, non-UUID ids, out-of-vocabulary buckets, missing keys and a stale schema_version; parity tests pin every db trigger bucket to a wire key and derive the funnel schema from _FUNNEL_STEPS. share_now refuses + records a schema violation without constructing an HTTP client, records a 404 with receiver_hint receiver_not_live (default URL) vs receiver_404 (override), stamps last_shared_at + backfill_delivered_at on 2xx and posts the minted share id, logs transport errors by class only; the send log is bounded at 5 and a corrupt row reads as []. Backfill is re-sent until first delivery then windows are cumulative. Share-id lifecycle (mint / keep / delete on revoke / re-mint different / self-heal after manual DELETE), dismissed marker first-wins and stamped by consent, first-value memo derived once, public_flags fail hidden-direction, tick marker dedupes a second worker for half the interval via fakeredis and fails open without Redis. Router: dismiss + status GET 403 an agent-scoped principal; ?preview=0 skips the aggregate; dismiss is idempotent + audited; the consent audit carries sharing_id_rotated as a bool and never the id; feature-flags carry the four booleans."
+      "description": "Opt-in instance telemetry (ent#437, the second cut of the ent#12 Tier-2 channel). Service level, db + httpx mocked: the schema-v2 aggregate validates and carries install_source + release version; it NEVER carries installation_id and the builder never reads it (a preview mints nothing, shows the placeholder id); outcome mix projects the timeline shaper's rows to telemetry-owned wire keys with an `other` catch-all and drops cost/context_used; by_status folds unknown statuses; provider_failures sums rate_limit/auth across subscriptions and asks the unconditional-cutoff reader for a WIDE window at window_days=0 (never 0 = since-now); a fully stubbed db degrades every field to a valid payload. Validator rejects unknown keys, wrong types, installation_id, non-UUID ids, out-of-vocabulary buckets, missing keys and a stale schema_version; parity tests pin every db trigger bucket to a wire key and derive the funnel schema from _FUNNEL_STEPS. share_now refuses + records a schema violation without constructing an HTTP client, records a 404 with receiver_hint receiver_not_live (recorded against the default origin) vs receiver_404 (any other or unrecorded origin), decided from the entry's recorded destination and never from the URL configured at read time (#2571: every entry and the last-shared stamp carry the origin they went to, scheme+host+port after credential stripping, total over every URL shape; a credential never reaches the store; the sink-200-then-default-restored scenario reads as a mismatch; a legacy or corrupt host is unknown and never a mismatch; share_url is scrubbed), stamps last_shared_at + backfill_delivered_at on 2xx and posts the minted share id, logs transport errors by class only; the send log is bounded at 5 and a corrupt row reads as []. Backfill is re-sent until first delivery then windows are cumulative. Share-id lifecycle (mint / keep / delete on revoke / re-mint different / self-heal after manual DELETE), dismissed marker first-wins and stamped by consent, first-value memo derived once, public_flags fail hidden-direction, tick marker dedupes a second worker for half the interval via fakeredis and fails open without Redis. Router: dismiss + status GET 403 an agent-scoped principal; ?preview=0 skips the aggregate; dismiss is idempotent + audited; the consent audit carries sharing_id_rotated as a bool and never the id; feature-flags carry the four booleans."
     },
     {
       "file": "unit/test_ent438_agent_canvas.py",
@@ -2903,7 +2903,86 @@
         "voice",
         "unit"
       ],
-      "description": "#2694 turn side: a RESUMED Workspace turn is prefixed with what the live session never heard (spoken rows labelled as spoken, the call's label as a bracketed marker, never `You:`); the cold replay carries the same rows in the same form and the delta is not added on top (no double-send on a cold retry); one total spoken-char budget across calls trimmed oldest-first with every cut named; newlines inside a replayed row cannot forge a labelled line; the delta is read before the user row persists and a read failure never blocks the turn; a voice call is refused (409) while a typed reply is in flight, after the uniform 404, and a typed turn is refused (409) while a call is on."
+      "description": "#2694 turn side: a RESUMED Workspace turn is prefixed with what the live session never heard (spoken rows labelled as spoken, the call's label as a bracketed marker, never `You:`); the cold replay carries the same rows in the same form and the delta is not added on top (no double-send on a cold retry); one total spoken-char budget across calls trimmed oldest-first with every cut named; newlines inside a replayed row cannot forge a labelled line; the delta is read before the user row persists and a read failure never blocks the turn; a voice call is refused (409) while a typed reply is in flight, after the uniform 404, and a typed turn is refused (409) while a call is on. #2700: the live-call marker is an OWNED LEASE — `owner` is keyword-only and required on both primitives, a release from a different call does not free a live thread, the pre-#2700 `\"1\"` value is releasable, the real lease/tick/slack constants and the >=4x TTL:tick ratio are pinned here, the renewer ticks and stops at the call's own cap, `start_workspace_voice` no longer arms the thread before a socket exists, and a start whose socket never opens leaves the thread writable (the orphan shape, with the armed-lease positive control).",
+      "updated": "2026-09-14"
+    },
+    {
+      "file": "unit/test_2703_skill_assign_delivery.py",
+      "feature": "#2703",
+      "added": "2026-09-11",
+      "categories": [
+        "backend",
+        "skills",
+        "websocket",
+        "unit"
+      ],
+      "description": "Skill assignment delivers (#2703): deliver_assigned runs the start-path injection (all assigned, force=False - a subset rewrites CLAUDE.md), stopped -> pending_start, Docker unreadable -> not_delivered/docker_unavailable, busy -> one retry, over budget -> in_progress with the work kept + WS on completion; under-lock re-read is opt-in; routes stay 200 with `delivery` in the body and fire the thin agent_skills_changed trigger; 404/422 fire before any write."
+    },
+    {
+      "file": "unit/test_2337_invariant_namespace.py",
+      "feature": "#2337",
+      "added": "2026-09-12",
+      "categories": [
+        "backend",
+        "reliability",
+        "guard",
+        "unit"
+      ],
+      "description": "One invariant namespace (Rail R3): the catalog's **X-NN** definitions, the canary registry (INVARIANTS keys + every module's INVARIANT_ID) and the catalog's Canary mapping table agree — read via ast/regex through tests/unit/_invariant_catalog.py, never imported; exact per-family pins; Signal: mandatory on the new families with a shrink-only allowlist for the 54 legacy prose-only entries; synthetic-markdown self-tests prove a bold prose mention, a dagger row and a table row are not definitions."
+    },
+    {
+      "file": "unit/test_2339_testing_docs_consolidated.py",
+      "feature": "#2339",
+      "added": "2026-09-13",
+      "categories": [
+        "docs",
+        "guard",
+        "unit"
+      ],
+      "description": "Testing docs consolidation (Rail R5): the git-tracked top level of docs/testing is exactly STRATEGY.md + the orchestration invariant catalog + the generated JOURNEYS.md, with phases/ and ui-sweep/ the only subdirectories; STRATEGY carries the required sections, every relative link in the live set and the four entry points resolves, STRATEGY links its pointer targets and is linked from AGENTS.md, README.md and both test READMEs, copies no 4-line run from the READMEs or the catalog, defines no invariant and cites only resolvable ids, names every run-full.sh tier and every test-running workflow; every archived file is indexed in docs/archive/README.md; no live tracked file references a retired testing path (bytes scan over git ls-files, both link forms, self-match-proof)."
+    },
+    {
+      "file": "journeys/test_first_turn_journey.py",
+      "feature": "#2336",
+      "added": "2026-08-28",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J03 (first turn): a person's first turn with a freshly created agent produces real model output. Credential-bound by design, so it runs on a developer's stack and in the nightly, never in the per-PR smoke; polls against a deadline, never sleeps; fails rather than skips when the stack or the agent is not there."
+    },
+    {
+      "file": "journeys/test_j11_brief_delivery_journey.py",
+      "feature": "#2565",
+      "added": "2026-09-07",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J11 (brief delivery): a schedule that names one Workspace user lands its output as a turn in that person's Main chat without them asking. A deliberate strict=True xfail skeleton asserting the journey's invariants (E-01, E-05, L-03) until the delivery half ships; the shape #2350's Journey Impact gate accepts as a declared promise."
+    },
+    {
+      "file": "unit/test_voice_auth.py",
+      "feature": "#600 / #2700",
+      "added": "2026-09-14",
+      "categories": [
+        "backend",
+        "voice",
+        "unit"
+      ],
+      "description": "The voice WebSocket + REST ownership gates (#600): `/ws/voice/{id}` and `POST .../voice/stop` reject a JWT user who does not own the session (4001 no/invalid token, 4004 unknown session, 4003 wrong user, admin bypass, JWT verified before the session lookup), the `/panel` read gate (ent#536), and the #705 audit-attribution kwargs. Plus the Workspace live-call lease (#2700, `TestWorkspaceLiveCallMarker`): the bridge arms a 60 s owned lease at connect and releases it on EVERY exit — normal close, `end_session` returning None, a raising close-out (which no longer skips the gemini cancel, the `saved` frame or the socket close), and task cancellation — the renewer is bounded at the call's `max_duration` + slack and does not outlive the bridge, an Agent Detail call never arms a thread marker, and the REST `/stop` release is owner-matched."
+    },
+    {
+      "file": "unit/test_2744_skills_adoption_alert_idempotency.py",
+      "feature": "#2744",
+      "added": "2026-09-14",
+      "categories": [
+        "backend",
+        "skills",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "Legacy skills-library adoption alert idempotency (#2744): the terminal 'already has sources' refusal mints a STABLE URL-derived request_id (sha256[:12], reserved family prefix) at priority low + logger.info, so N syncs collapse to one operator-queue row and an operator's dismissal sticks; a different refused URL still gets its own item; the validation-reject and adoption-exception branches keep priority high and timestamped repeat-visible ids; the echoed URL is credential-scrubbed so a PAT-bearing setting never reaches the log or operator_queue.context."
     }
   ]
 }

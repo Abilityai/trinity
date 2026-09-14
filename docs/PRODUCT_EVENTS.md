@@ -130,7 +130,8 @@ credentials or tokens, no emails, no user identities, **no agent names**, no
 per-agent cost — only coarse counts and enums. The exact payload for your
 instance is **inspectable before you consent** in the Settings → Usage sharing
 panel (expand "Exactly what would be shared") and the **last 5 send attempts** —
-successes and failures, with the HTTP status or error class — are kept locally
+successes and failures, with the HTTP status or error class and the receiver each
+one went to — are kept locally
 and shown under **Recent sends**, so you can see afterwards precisely what left.
 
 **Enforced, not just documented:** the payload is validated against this schema

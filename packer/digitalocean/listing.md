@@ -65,27 +65,22 @@ running Droplet, never decreased.
 ### 1. Create the Droplet
 
 Choose a plan of at least 4 GB RAM (8 GB recommended) and create it. First boot
-takes about ninety seconds: it generates your admin password, obtains a
-certificate for the Droplet's IP, and starts Trinity.
+takes about ninety seconds: it obtains a certificate for the Droplet's IP and
+starts Trinity.
 
-### 2. Get your admin password
+### 2. Open it and create your admin account
 
-Your password is generated on first boot and printed in the login banner. How you
-reach that banner depends on the authentication you chose when creating the
-Droplet:
+Open `https://<your-droplet-ip>` in your browser. There is no password to look
+up and no terminal to open: Trinity asks you to create the admin account — your
+email, a password, and whether you want product updates — and you are in.
 
-- **If you chose a password**, open **Droplet → Console** in the DigitalOcean
-  control panel and log in as `root`. The Console is a browser terminal, so no
-  SSH client is needed.
-- **If you chose an SSH key**, DigitalOcean leaves the root account locked and the
-  Console cannot accept a login. Connect with your key instead:
-  `ssh root@your_droplet_public_ipv4`
-
-Either way the banner prints your Trinity password, the URL to open, and whether
-HTTPS came up. You can re-read it at any time with `cat /etc/trinity/admin-credentials`.
-
-To choose the password yourself instead, paste this into **Additional Options →
-Startup scripts** when creating the Droplet:
+**Do this as soon as the Droplet is up.** Until an admin account exists, whoever
+opens the address first creates it. The Droplet holds nothing at that point, so
+if a Droplet you have never opened shows you a login page instead, destroy it and
+create another. To close the window entirely, restrict port 443 to your own IP
+with a cloud firewall until you have signed in (leave port 80 open — the
+certificate is validated over it), or choose the password up front by pasting
+this into **Additional Options → Startup scripts** when creating the Droplet:
 
 ```yaml
 #cloud-config
@@ -96,12 +91,13 @@ write_files:
 ```
 
 It must be `#cloud-config` with `write_files`, not a shell script — a shell
-script runs too late in cloud-init to be seen.
+script runs too late in cloud-init to be seen. A Droplet created this way skips
+the create-your-account screen: sign in as `admin` with that password.
 
 ### 3. Sign in
 
-Open `https://<your-droplet-ip>`, sign in as `admin` with that password, and
-change it. The certificate is a real Let's Encrypt certificate issued for the IP
+From then on, open `https://<your-droplet-ip>` and sign in with the account you
+created. The certificate is a real Let's Encrypt certificate issued for the IP
 address, so there is no browser warning and nothing to accept.
 
 ### 4. Add a model credential and create your first agent

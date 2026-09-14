@@ -285,7 +285,7 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 | GET | `/a2a/{agent}/.well-known/agent-card.json` | none | Discovery card |
 | POST | `/a2a/{agent}` | Bearer MCP key | JSON-RPC task endpoint |
 
-### Outbound routes (calling out, #736)
+### Outbound routes (calling out)
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|

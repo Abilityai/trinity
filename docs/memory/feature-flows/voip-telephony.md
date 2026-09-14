@@ -54,10 +54,13 @@ what we discussed (updates memory, creates tasks, sends follow-ups)."
 the transport (above), but two non-codec session knobs are now threaded through
 `gemini_voice.py` and benefit both transports: a per-session `max_duration`
 (the watchdog honors `VOIP_MAX_CALL_DURATION` for phone calls — see Config) and
-a shared `_TOOL_ETIQUETTE_INSTRUCTION` appended to `system_instruction` so the
+the shared spoken-etiquette block (`spoken_etiquette_instruction`, ent#576 —
+formerly `_TOOL_ETIQUETTE_INSTRUCTION`) appended to `system_instruction` so the
 agent says a brief filler ("let me check that") before a slow `run_task` call
-instead of going silent. Both are described in [voice-chat.md](voice-chat.md)
-(VOICE-007, VOICE-009).
+instead of going silent, and reports the result once when it returns. A phone
+call has no thread to run a turn in, so it keeps the synchronous container path
+(the ent#551 background dispatch is Workspace-only). Both are described in
+[voice-chat.md](voice-chat.md) (VOICE-007, VOICE-009).
 
 ### Outbound call flow
 

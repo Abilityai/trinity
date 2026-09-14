@@ -729,7 +729,7 @@ docker compose --profile postgres up -d
 - [Trinity Compatible Agent Guide](docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md) — Creating Trinity-compatible agents
 - [Multi-Agent System Guide](docs/MULTI_AGENT_SYSTEM_GUIDE.md) — Building multi-agent systems with coordinated workflows
 - [Use Cases & Evaluation](docs/use-cases-evaluation.md) — Categorized autonomous multi-agent use cases with comparative analysis
-- [Testing Guide](docs/TESTING_GUIDE.md) — Testing approach and standards
+- [Testing Strategy](docs/testing/STRATEGY.md) — How Trinity is tested: the method, the CI lanes, and the bar a harness must meet
 - [Contributing Guide](CONTRIBUTING.md) — How to contribute (PRs, code standards)
 - [Known Issues](docs/KNOWN_ISSUES.md) — Current limitations and workarounds
 - [Security Attestation](docs/security/UnderDefense-Web-Pentest-Attestation-Apr-2026.pdf) — Web pentest by UnderDefense (Apr 2026, Grade A — Excellent)

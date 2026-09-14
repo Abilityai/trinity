@@ -24,14 +24,16 @@ from database import (
     PublicChatResponse,
     PublicChatMessage
 )
-from dependencies import get_current_user, assert_owns
+from dependencies import get_current_user, get_optional_user, assert_owns
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
+from services import canvas_share_service
 from services.agent_auth import agent_httpx_client
 from services.chat_execution_service import terminate_execution as _terminate_execution
 from services.chat_signals import ChatDispatchError
 from services.docker_service import get_agent_container
 from services.email_service import email_service
+from services.settings_service import settings_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_prompt_service import (
     build_public_channel_caller_prompt,
@@ -44,6 +46,61 @@ from services.upload_service import process_file_uploads, decode_web_file, WEB_M
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/public", tags=["public"])
+
+
+@router.get("/tls-allowed")
+async def tls_allowed(domain: str = ""):
+    """Caddy's on-demand-TLS gate: may a certificate be issued for `domain`? (#2380)
+
+    Caddy calls this with `?domain=<hostname>` before obtaining a certificate for
+    a name it has never seen. A 2xx authorises issuance; anything else refuses.
+
+    This is what makes "add a domain" a Settings field instead of a root shell on
+    the host. Trinity runs in a container and cannot rewrite a Caddyfile or reload
+    a web server, so the previous shape was: the operator sets Public URL, that
+    reconfigures nothing, and the domain serves a certificate error while the UI
+    reports success. Inverting the direction fixes it without moving any
+    privilege — Caddy asks, Trinity answers, and nothing in the container gains
+    access to the host.
+
+    STRICTLY ONE NAME, and that is the whole security model. An `ask` endpoint
+    that answers yes broadly turns the instance into an open certificate
+    requester: anyone who points a DNS record at this address makes it ask Let's
+    Encrypt on their behalf, until the account hits a rate limit and the
+    operator's OWN renewals start failing. So the allowlist is exactly the host
+    of the URL an admin saved, and an unset Public URL allows nothing.
+
+    Unauthenticated by necessity — Caddy holds no Trinity credential and calls
+    this during a TLS handshake. It discloses only whether a guessed hostname
+    matches this instance's configured one, which a DNS lookup answers anyway.
+
+    Fails CLOSED: any error refuses issuance rather than authorising a name it
+    could not verify. A 404 body is what Caddy documents as "not authorised", and
+    the response must be fast — it runs inside a handshake — so this is one
+    settings read and a string compare, never a network call.
+    """
+    from urllib.parse import urlparse
+
+    requested = (domain or "").strip().strip(".").lower()
+    if not requested:
+        raise HTTPException(status_code=404, detail="No domain supplied")
+
+    try:
+        configured = (settings_service.get_public_chat_url() or "").strip()
+    except Exception:
+        # A settings read that fails must not authorise anything.
+        raise HTTPException(status_code=404, detail="Not authorised")
+
+    if not configured:
+        raise HTTPException(status_code=404, detail="No public URL configured")
+
+    # Parse rather than substring-match: `evil-example.com` contains
+    # `example.com`, and a naive check would issue for the attacker's name.
+    allowed = (urlparse(configured).hostname or "").strip(".").lower()
+    if not allowed or requested != allowed:
+        raise HTTPException(status_code=404, detail="Not authorised")
+
+    return {"authorized": True, "domain": allowed}
 
 # Rate limiting constants
 MAX_VERIFICATION_REQUESTS_PER_EMAIL = 3  # per 10 minutes
@@ -1237,3 +1294,78 @@ async def get_public_link_session_detail(
         "message_count": len(messages),
         "messages": [m.model_dump() for m in messages],
     }
+
+# ---------------------------------------------------------------------------
+# Canvas share view (ent#554)
+# ---------------------------------------------------------------------------
+
+@router.get("/canvas/{token}")
+async def get_shared_canvas(
+    token: str,
+    request: Request,
+    user=Depends(get_optional_user),
+):
+    """Render one shared canvas (ent#554).
+
+    Optional auth, because the two scopes need different things: a `public`
+    link must render for a stranger with no credential, while an `authorized`
+    link is a DEEP link — it points at a canvas the viewer could already see,
+    and the server re-checks that rather than trusting the URL.
+
+    The status vocabulary is deliberate. `revoked` and `expired` are only ever
+    returned for a token that MATCHED a row: whoever holds such a link was
+    already told the canvas exists, so naming the state discloses nothing new
+    and is what AC #2 asks for. Everything else — an unknown token, a canvas
+    deleted out from under the link — collapses into the same `not_found`, so
+    a stranger guessing tokens cannot tell a real one from a fabricated one.
+
+    Rate-limited on the shared public-token counter: this route resolves an
+    attacker-suppliable token, so it belongs to the same budget the other
+    token endpoints share rather than getting its own generous one.
+    """
+    check_public_link_rate_limit(_get_client_ip(request))
+
+    resolution = canvas_share_service.resolve(token, user)
+    status_value = resolution["status"]
+
+    if status_value == canvas_share_service.ShareResolution.OK:
+        return canvas_share_service.public_view_payload(resolution)
+
+    if status_value == canvas_share_service.ShareResolution.SIGN_IN_REQUIRED:
+        # 401 with a NAMED reason, not the uniform 404: the page has to be able
+        # to offer a sign-in rather than a dead end, and this state is only
+        # reachable for a token that already matched a live row.
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "status": status_value,
+                "message": "Sign in to view this canvas — it was shared with the people who already have access.",
+            },
+        )
+
+    if status_value == canvas_share_service.ShareResolution.NOT_AUTHORIZED:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "status": status_value,
+                "message": "This canvas was shared with the people who already have access to its agent, and this account does not.",
+            },
+        )
+
+    if status_value in (
+        canvas_share_service.ShareResolution.REVOKED,
+        canvas_share_service.ShareResolution.EXPIRED,
+    ):
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "status": status_value,
+                "message": (
+                    "This share link was turned off by its owner."
+                    if status_value == canvas_share_service.ShareResolution.REVOKED
+                    else "This share link has expired."
+                ),
+            },
+        )
+
+    raise HTTPException(status_code=404, detail=INVALID_LINK_MESSAGE)

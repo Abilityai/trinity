@@ -13,7 +13,7 @@ import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from services.task_execution_service import (
     TaskExecutionResult,
@@ -82,6 +82,8 @@ class FanOutService:
         source_agent_name: Optional[str] = None,
         source_mcp_key_id: Optional[str] = None,
         source_mcp_key_name: Optional[str] = None,
+        # #2670: called once with the batch id, before the first dispatch.
+        on_started: Optional[Callable[[str], None]] = None,
     ) -> FanOutResult:
         """
         Dispatch tasks in parallel and collect results.
@@ -103,6 +105,21 @@ class FanOutService:
             FanOutResult with per-task results and aggregate counts.
         """
         fan_out_id = f"fo_{secrets.token_urlsafe(12)}"
+        # #2670: hand the id to the caller the moment it exists, BEFORE any
+        # subtask is dispatched. The router uses it to attach the batch id to
+        # its idempotency claim, so a concurrent duplicate's 409 carries
+        # something pollable instead of a null — and so a caller whose own HTTP
+        # call dies mid-batch has an id recorded somewhere durable. Best-effort
+        # by construction: a raising hook must not be able to fail a dispatch
+        # that is otherwise fine.
+        if on_started is not None:
+            try:
+                on_started(fan_out_id)
+            except Exception:  # noqa: BLE001 — bookkeeping, never the batch
+                logger.warning(
+                    "[FanOut] %s on_started hook raised; continuing", fan_out_id,
+                    exc_info=True,
+                )
         task_service = get_task_execution_service()
         semaphore = asyncio.Semaphore(max_concurrency)
         # Safe for concurrent writes: asyncio is single-threaded, no preemption between awaits.
@@ -228,6 +245,91 @@ class FanOutService:
             failed=failed_count,
             results=ordered_results,
         )
+
+
+# ---------------------------------------------------------------------------
+# #2670 — reading a batch back out of its execution rows
+# ---------------------------------------------------------------------------
+
+# The three states an execution can still leave. `pending_retry` is the one that
+# is easy to miss and the one that matters most here: a subtask awaiting a #271
+# retry is neither done nor lost, and counting it as failed would tell a polling
+# caller the batch is finished while a row is about to run again.
+_NON_TERMINAL = frozenset({"queued", "running", "pending_retry"})
+
+
+def build_fan_out_batch_status(
+    agent_name: str, fan_out_id: str, rows: List[dict]
+) -> "FanOutBatchStatus":
+    """Fold a batch's execution rows into an aggregate (#2670).
+
+    Pure — every input is already resolved by the caller, so the rule is
+    testable without a database. It lives here rather than in the router because
+    "what does this batch add up to" is a business question (Invariant #1).
+
+    Per-task `status` is the EXECUTION status verbatim (`queued`, `running`,
+    `success`, …), NOT the dispatch response's `completed`/`failed` pair. The
+    dispatch response is written once a subtask has finished, so two values are
+    all it can ever need; a poll of a live batch has to distinguish "waiting for
+    a slot" from "running", and translating them into `failed` — which is what
+    a two-value vocabulary forces — would report a healthy queued subtask as a
+    failure. Same reason `FanOutBatchStatus` is a separate model.
+
+    Batch `status` has four values and their ORDER is the rule: `running` while
+    anything can still change, and only then a verdict. `completed` /
+    `failed` / `partial` are the three ways a finished batch can land, and
+    `partial` exists because "best-effort" is the fan-out's default policy — a
+    batch where four of five succeeded is neither a success nor a failure, and
+    calling it either loses the fact the caller needs.
+
+    `deadline_exceeded` is deliberately absent. That is the DISPATCHER's verdict
+    on its own outer deadline, held in memory by the call that timed out; it is
+    not a property of any row, so this surface cannot observe it and does not
+    invent it.
+    """
+    from models import FanOutBatchStatus, FanOutBatchTask
+
+    tasks = [
+        FanOutBatchTask(
+            execution_id=r.get("id"),
+            status=r.get("status") or "unknown",
+            message=r.get("message"),
+            response=r.get("response"),
+            error=r.get("error"),
+            cost=r.get("cost"),
+            context_used=r.get("context_used"),
+            duration_ms=r.get("duration_ms"),
+            model_used=r.get("model_used"),
+            started_at=r.get("started_at"),
+            completed_at=r.get("completed_at"),
+        )
+        for r in rows
+        if r.get("id")
+    ]
+
+    running = sum(1 for t in tasks if t.status in _NON_TERMINAL)
+    completed = sum(1 for t in tasks if t.status == "success")
+    failed = len(tasks) - running - completed
+
+    if running:
+        status = "running"
+    elif failed == 0:
+        status = "completed"
+    elif completed == 0:
+        status = "failed"
+    else:
+        status = "partial"
+
+    return FanOutBatchStatus(
+        agent_name=agent_name,
+        fan_out_id=fan_out_id,
+        status=status,
+        total=len(tasks),
+        completed=completed,
+        failed=failed,
+        running=running,
+        results=tasks,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 Let a running agent schedule a **one-shot future re-invocation of itself** with a message it writes — "check this PR in 2 hours", "review the deploy tomorrow at 9am". When the timer fires, Trinity dispatches a normal execution of that same agent carrying the reminder message. Nothing is held open in between; the reminder is a durable row that fires once, later.
 
-Reminders are the **time-deferred sibling** of [Agent Loops](agent-loops.md). A loop runs iterations back-to-back *now*; a reminder fires *once, at a chosen time*. Unlike a loop — which lives in memory and does not survive a restart — a reminder is durable: it is persisted and re-armed automatically, so it still fires after a backend or scheduler restart.
+Reminders are the **time-deferred sibling** of [Agent Loops](agent-loops.md). A loop runs iterations back-to-back *now*; a reminder fires *once, at a chosen time*. Both are durable: a reminder is persisted and re-armed automatically, so it still fires after a backend or scheduler restart.
 
 There is no web UI for reminders. They are a backend and MCP primitive that agents drive themselves. Fired reminders show up in the standard [Executions](../operations/executions.md) list and the agent's Overview timeline under a distinct **Reminders** category.
 
@@ -20,7 +20,7 @@ Pick by *when* and *how often* the work should run:
 | Tool | Cardinality | Timing | Durable across restart |
 |------|-------------|--------|------------------------|
 | **Reminder** | Once | A future instant you choose | Yes |
-| **[Loop](agent-loops.md)** | Up to `max_runs` times | Back-to-back, starting now | No (marked `interrupted`) |
+| **[Loop](agent-loops.md)** | Up to `max_runs` times | Back-to-back, starting now | Yes |
 | **[Schedule](scheduling.md)** | Recurring | A cron cadence | Yes |
 
 Reminders are the agent-initiated, one-shot, durable counterpart to cron [schedules](scheduling.md) — use a reminder for a single deferred follow-up, a schedule for a recurring cadence.

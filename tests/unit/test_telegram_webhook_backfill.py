@@ -121,6 +121,7 @@ def _load_settings_module():
     _stub(
         "services.settings_service",
         get_anthropic_api_key=MagicMock(),
+        get_gemini_api_key=MagicMock(),  # ent#582
         get_github_pat=MagicMock(),
         get_google_api_key=MagicMock(),
         get_ops_setting=MagicMock(),

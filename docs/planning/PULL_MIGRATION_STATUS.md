@@ -135,7 +135,7 @@ git retains them). These six remain:
 |---|---|
 | `PULL_MIGRATION_STATUS.md` | **this file** — where the migration is |
 | `TARGET_ARCHITECTURE.md` | the destination design (v2 / Direction B) |
-| `../testing/PULL_MIGRATION_TESTING.md` | tiers, confirmed defects, and the §9 soak measurement set |
+| `PULL_MIGRATION_TESTING.md` | tiers, confirmed defects, and the §9 soak measurement set |
 | `PULL_MIGRATION_ROLLBACK.md` | rollback runbook — flag off-switch, code/DB tiers, detection signals |
 | `MESSAGE_ENVELOPE_SCHEMA.md` | the wire contract (#945) |
 | `ACTOR_MODEL_POSTCARD.md` | the pinned status / `error_code` taxonomy |

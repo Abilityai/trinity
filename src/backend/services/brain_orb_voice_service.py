@@ -33,7 +33,8 @@ from typing import Optional
 from google import genai
 from google.genai import types as genai_types
 
-from config import GEMINI_API_KEY, VOICE_MODEL, VOICE_MAX_DURATION, DEFAULT_VOICE_NAME
+from config import VOICE_MODEL, VOICE_MAX_DURATION, DEFAULT_VOICE_NAME
+from services.settings_service import get_gemini_api_key  # ent#582: Settings → env, per call
 
 logger = logging.getLogger(__name__)
 
@@ -184,19 +185,22 @@ _ORB_VOICE_WRITE_CLAUSE = (
 )
 
 _client: Optional[genai.Client] = None
+_client_key: Optional[str] = None
 
 
 def _get_v1alpha_client() -> genai.Client:
     """Own v1alpha client — never the cached ``gemini_voice`` singleton (which is
     built without v1alpha, so an ephemeral mint through it would fail)."""
-    global _client
-    if not GEMINI_API_KEY:
+    global _client, _client_key
+    key = get_gemini_api_key()
+    if not key:
         raise ValueError("GEMINI_API_KEY not configured")
-    if _client is None:
+    if _client is None or _client_key != key:  # rebuilt on a key saved/rotated in Settings
         _client = genai.Client(
-            api_key=GEMINI_API_KEY,
+            api_key=key,
             http_options=genai_types.HttpOptions(api_version="v1alpha"),
         )
+        _client_key = key
     return _client
 
 

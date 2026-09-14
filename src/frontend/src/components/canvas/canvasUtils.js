@@ -90,27 +90,46 @@ export function renderableBlocks(blocks) {
 }
 
 /**
- * What the freshness line says.
+ * What the freshness line says — two facts, never a verdict (#2734).
  *
- * Two facts, never one: the timestamp is ALWAYS rendered, and the staleness
- * mark is an addition to it. That ordering is the honesty contract (AC 7) —
- * a mark that replaced the timestamp would leave a reader who disagrees with
- * our heuristic no way to judge for themselves.
+ * `Updated 2h ago · agent last ran 40m ago`. Both facts are measured against
+ * the SAME injected `now`, so whatever is wrong with that instant is wrong for
+ * both by the same amount in the same direction: the absolute readings can be
+ * off, but their RELATIONSHIP — the only thing a reader is actually judging —
+ * cannot invert.
  *
- * The `stale` flag is derived server-side ("the agent finished a run after
- * this canvas was written"), so the wording says what was observed rather
- * than asserting the content is wrong — we know the agent worked and did not
- * refresh this surface; we do not know that what is here is false.
+ * Trinity derives no staleness verdict from them any more. It used to, and the
+ * verdict fired on the writing run's own output, so a canvas could be reported
+ * as superseded in the same breath as "updated just now" — which taught the
+ * reader to ignore the mark, the failure the honesty contract exists to
+ * prevent. Two checkable facts let the reader draw the conclusion a heuristic
+ * could not.
+ *
+ * The retired copy is NOT quoted here or in CanvasPanel.vue, deliberately: the
+ * spec that guards the deletion greps those files for it.
+ *
+ * A missing `agent_last_run_at` OMITS the second fact rather than narrating it.
+ * The field is null both when the agent has never finished a run and when the
+ * staleness read failed on the server, and the payload cannot tell those apart
+ * — so "the agent has not run yet" would turn "we could not read it" into a
+ * claim about the agent, which is the design-system contract's stale-banner
+ * rule read at field scope.
  */
 export function freshness(canvas, now = Date.now()) {
   const updatedAt = canvas?.updated_at || null
+  const lastRunAt = canvas?.agent_last_run_at || null
+  // The first fact is UNCONDITIONAL — an unreadable `updated_at` still renders,
+  // degrading to relativeTime's own fallback rather than vanishing.
   const label = updatedAt ? `Updated ${relativeTime(updatedAt, now)}` : 'Never updated'
-  if (!canvas?.stale) return { label, stale: false, note: null }
-  return {
-    label,
-    stale: true,
-    note: 'The agent has run since this was written — it may be out of date.',
-  }
+  // The second is OMISSIBLE, and the gate is PARSEABILITY, not truthiness: a
+  // truthy-but-unparseable value would otherwise reach relativeTime and render
+  // "agent last ran at an unknown time" — a narrated non-fact, exactly what
+  // this function refuses to produce.
+  const runnable = lastRunAt && !Number.isNaN(Date.parse(lastRunAt))
+  const runLabel = runnable ? `agent last ran ${relativeTime(lastRunAt, now)}` : null
+  // `line` is what the panel renders; the parts are returned beside it so a
+  // test can assert each fact independently of the joining.
+  return { label, runLabel, line: runLabel ? `${label} · ${runLabel}` : label }
 }
 
 /** Compact relative time. Returns an absolute-ish fallback for a bad value. */
@@ -149,6 +168,180 @@ export function emptyState(viewer) {
     body: 'A canvas is a surface your agent keeps current — a status board, a running tally, a chart, the latest version of an analysis. Ask it in chat to "put it on your canvas", or have it call set_canvas.',
     action: null,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Living with a lot of canvases (ent#553)
+// ---------------------------------------------------------------------------
+
+/**
+ * Order a canvas list: pinned first, then most-recently-updated.
+ *
+ * The backend already returns this order. Re-deriving it here is deliberate,
+ * not redundant: the list is mutated in place by an optimistic pin or delete,
+ * and a client that only re-sorted on refetch would show a just-pinned canvas
+ * still sitting in the middle. Same two keys, so the two cannot disagree.
+ *
+ * Sorts a COPY — sorting props in place mutates the store's array.
+ */
+export function sortCanvases(list) {
+  return (Array.isArray(list) ? [...list] : []).sort((a, b) => {
+    const pinned = Number(!!b?.pinned) - Number(!!a?.pinned)
+    if (pinned) return pinned
+    return String(b?.updated_at || '').localeCompare(String(a?.updated_at || ''))
+  })
+}
+
+/**
+ * Filter by title (AC 4). Matches the id too, because an agent may never set a
+ * title and the id is then the only thing the person can see to search for.
+ *
+ * An empty query returns everything rather than nothing — the filter is a
+ * narrowing of a list that is already correct, never a search that must be
+ * satisfied before anything renders.
+ */
+export function filterCanvases(list, query) {
+  const needle = String(query || '').trim().toLowerCase()
+  const rows = Array.isArray(list) ? list : []
+  if (!needle) return rows
+  return rows.filter((c) => {
+    const title = String(c?.title || '').toLowerCase()
+    const id = String(c?.canvas_id || '').toLowerCase()
+    return title.includes(needle) || id.includes(needle)
+  })
+}
+
+/**
+ * Should the chip strip render? (ent#553 review — the search-narrowing gap.)
+ *
+ * The strip exists "only when there is a choice to make", and the first cut
+ * gated that on the FILTERED list: `visible.length > 1`. At exactly one match
+ * that hides the strip, the no-match line (`!visible.length`) does not render
+ * either, and the auto-select watcher keyed off the UNFILTERED list never
+ * selects the match — so the user searched, hit one result, and the chips
+ * vanished with the previous canvas still on screen. A query with a hit
+ * always shows its hit; the "no choice" collapse applies only when NOT
+ * searching.
+ *
+ * @param {{ visible: number, manage: boolean, query: string }} s
+ */
+export function canvasSelectorVisible({ visible, manage, query }) {
+  if (manage) return true
+  if (String(query || '').trim()) return visible > 0
+  return visible > 1
+}
+
+/**
+ * Should the search box render? (ent#553 review — the stale-query wedge.)
+ *
+ * The box appears once the pile is real (`count > threshold`) — but `query`
+ * has exactly one writer, that box's `v-model`, so a box gated on the count
+ * ALONE unmounts the moment a delete (or the agent's own `clear_canvas` plus
+ * a rail refresh) drops the pile to the threshold while a query is typed:
+ * `visible` keeps filtering on text nobody can see or clear, the strip
+ * collapses, and the panel says "No canvas matches" with no control left.
+ * So an active query keeps its box regardless of the count: the typed
+ * intent survives the shrink, and the no-match line keeps the one control
+ * that clears it. Resetting `query` instead was rejected — it would erase a
+ * search the user was mid-way through because a sibling canvas went away.
+ *
+ * @param {number} count   canvases in the (unfiltered) list
+ * @param {number} threshold
+ * @param {string} query
+ */
+export function canvasSearchVisible(count, threshold, query) {
+  if (String(query || '').trim()) return true
+  return count > threshold
+}
+
+/**
+ * Which canvas the strip should select after the visible set changed.
+ *
+ * `null` = leave the selection alone. While a query is active the selection
+ * must be one of the MATCHES: if it is not, the first match is selected (the
+ * one-match case above needs this, or the strip shows a chip the panel is
+ * not displaying). With no query the caller's own list-watcher already
+ * handles "the selected canvas disappeared".
+ *
+ * @param {Array<{canvas_id: string}>} visible
+ * @param {string|null} selectedId
+ * @param {string} query
+ * @returns {string|null}
+ */
+export function canvasAutoSelect(visible, selectedId, query) {
+  if (!String(query || '').trim()) return null
+  const rows = Array.isArray(visible) ? visible : []
+  if (!rows.length) return null
+  if (rows.some((c) => c && c.canvas_id === selectedId)) return null
+  return rows[0].canvas_id
+}
+
+/**
+ * The one confirmation a bulk delete shows, naming the count (AC 3).
+ *
+ * Singular and plural are spelled out rather than pluralised with an "(s)":
+ * this is the last thing a person reads before destroying work.
+ */
+export function bulkDeletePrompt(count) {
+  const n = Number(count) || 0
+  if (n <= 0) return null
+  if (n === 1) return 'Delete this canvas? The agent can create it again, but its current contents will be gone.'
+  return `Delete ${n} canvases? The agent can create them again, but their current contents will be gone.`
+}
+
+/**
+ * How full an agent's canvas allowance is, for the header line (AC 6).
+ *
+ * `atLimit` drives a message BEFORE the agent hits the refusal, because the
+ * person who can act on it (retire one) is not the one who receives the error
+ * (the agent, mid-run).
+ */
+export function canvasHeadroom(count, max) {
+  const used = Number(count) || 0
+  const limit = Number(max) || 0
+  if (!limit) return { used, limit: 0, atLimit: false, label: null }
+  const atLimit = used >= limit
+  const near = used >= Math.floor(limit * 0.9)
+  return {
+    used,
+    limit,
+    atLimit,
+    label: atLimit
+      ? `${used} of ${limit} canvases — the agent cannot create another until one is removed`
+      : near
+        ? `${used} of ${limit} canvases`
+        : null,
+  }
+}
+
+/**
+ * Selection state for the bulk bar, derived rather than stored.
+ *
+ * `selected` is filtered against the VISIBLE list, so ids left over from a
+ * previous filter or a canvas someone else deleted cannot inflate the count
+ * the confirmation names — the number a person is shown is the number that
+ * will actually be sent.
+ */
+export function selectionState(selectedIds, visible) {
+  const rows = Array.isArray(visible) ? visible : []
+  const ids = new Set(Array.isArray(selectedIds) ? selectedIds : [])
+  const present = rows.filter((c) => ids.has(c?.canvas_id)).map((c) => c.canvas_id)
+  return {
+    ids: present,
+    count: present.length,
+    all: rows.length > 0 && present.length === rows.length,
+    any: present.length > 0,
+  }
+}
+
+/** What a bulk delete actually did, said honestly (never "5 removed" for 3). */
+export function bulkDeleteOutcome(requested, deleted) {
+  const asked = Number(requested) || 0
+  const got = Array.isArray(deleted) ? deleted.length : Number(deleted) || 0
+  if (!asked) return null
+  if (got === asked) return got === 1 ? 'Canvas deleted' : `${got} canvases deleted`
+  if (got === 0) return 'Nothing was deleted — those canvases were already gone'
+  return `${got} of ${asked} deleted — the rest were already gone`
 }
 
 // ---------------------------------------------------------------------------

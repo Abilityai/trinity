@@ -21,7 +21,7 @@ When avatar generation fails, the **Generate** dialog shows an actionable reason
 
 | Reason | Meaning | What to do |
 |--------|---------|------------|
-| `not_configured` | No image-generation API key is set | Add `GEMINI_API_KEY` in **Settings → AI Keys** |
+| `not_configured` | No image-generation API key is set | Add a Gemini key in **Settings → Integrations** ([Platform Keys](../credentials/platform-keys.md#gemini)) |
 | `invalid_input` | The reference image or prompt was rejected | Adjust the prompt or upload a different reference image |
 | `safety_filter` | The upstream model blocked the request on safety grounds | Reword the identity prompt |
 | `rate_limited` | The image provider is throttling requests | Wait and retry |

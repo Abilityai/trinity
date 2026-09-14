@@ -23,7 +23,6 @@ from typing import Optional
 from fastapi import HTTPException
 
 from config import (
-    GEMINI_API_KEY,
     REDIS_URL,
     VOIP_CALL_RATE_LIMIT,
     VOIP_CALL_RATE_WINDOW,
@@ -80,8 +79,10 @@ class VoipService:
         return self._redis
 
     def is_available(self) -> bool:
-        """Feature-flag gate (default OFF). Mirrors voice_available shape."""
-        return VOIP_ENABLED and bool(GEMINI_API_KEY)
+        """Feature-flag gate (default OFF). Mirrors voice_available shape.
+        The Gemini key resolves per call — Settings → env (ent#582)."""
+        from services.settings_service import get_gemini_api_key
+        return VOIP_ENABLED and bool(get_gemini_api_key())
 
     # =========================================================================
     # Stream URL + TwiML

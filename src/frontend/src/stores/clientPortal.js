@@ -215,9 +215,16 @@ installRotationInterceptor()
 const briefingsInFlight = new Set()
 const briefingAttempts = new Map()
 let briefingsBatchInFlight = false
+// #2703: agents whose briefing changed WHILE a hydration for them was in
+// flight. `ensureBriefing`/`revalidateBriefing` return early on an in-flight
+// name; without this a WS trigger landing mid-hydration would be lost and the
+// stale answer would win. `hydrateBriefings` re-runs once for a dirty name.
+const briefingsDirty = new Set()
 
 export const useClientPortalStore = defineStore('clientPortal', {
   state: () => ({
+    // ent#555 — agent name → the canvas id the rail currently shows.
+    openCanvasByAgent: {},
     clientEmail: null,
     agents: [],
     loading: false,
@@ -554,13 +561,36 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // not "I don't know which". The backend cannot tell those apart from the
     // absence alone — which is why New chat used to land in the existing
     // conversation — and it ignores the flag when a session IS named.
+    /**
+     * ent#555 — which canvas the rail has open, per agent.
+     *
+     * Kept in the store rather than passed down because the two ends are in
+     * different subtrees: the selection happens in the rail's CanvasPanel and
+     * is needed by the composer in the conversation. Per-agent, so switching
+     * chats cannot carry one agent's selection into another's turn.
+     */
+    setOpenCanvas(agentName, canvasId) {
+      if (!agentName) return
+      this.openCanvasByAgent = { ...this.openCanvasByAgent, [agentName]: canvasId || null }
+    },
+
     // ent#403: `model` is the user's explicit pick, or null/'' to inherit. Sent
     // on BOTH turn actions — a field honoured by only one brings the bug back
     // exactly when streaming fails and this fallback runs.
-    async sendPortalChat(agentName, message, sessionId = null, { newThread = false, model = null } = {}) {
+    async sendPortalChat(agentName, message, sessionId = null,
+                    { newThread = false, openCanvasId = null, model = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat`,
-        { message, session_id: sessionId, new_thread: newThread, model: model || null },
+        {
+          message,
+          session_id: sessionId,
+          new_thread: newThread,
+          model: model || null,
+          // ent#555 — the canvas on screen, so "add a column to this" resolves.
+          // Server-validated: an id the caller cannot see is discarded there,
+          // so sending it is never a way to reach a canvas they could not open.
+          open_canvas_id: openCanvasId,
+        },
         { headers: this.authHeader }
       )
       return data
@@ -571,10 +601,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // `sendPortalChat` above is untouched — it stays the documented API surface
     // for headless clients (ent#83), and is still the fallback when streaming
     // is unavailable.
-    async startPortalChat(agentName, message, sessionId = null, { newThread = false, model = null } = {}) {
+    async startPortalChat(agentName, message, sessionId = null,
+                    { newThread = false, openCanvasId = null, model = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
-        { message, session_id: sessionId, new_thread: newThread, model: model || null },
+        {
+          message,
+          session_id: sessionId,
+          new_thread: newThread,
+          model: model || null,
+          // ent#555 — the canvas on screen, so "add a column to this" resolves.
+          // Server-validated: an id the caller cannot see is discarded there,
+          // so sending it is never a way to reach a canvas they could not open.
+          open_canvas_id: openCanvasId,
+        },
         { headers: this.authHeader }
       )
       return data   // {execution_id, session_id}
@@ -1216,6 +1256,35 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // ent#553 — the lifecycle writes. Roster-scoped and owner-gated server
+    // side; the card's `can_manage_canvases` only decides whether the control
+    // is rendered, so these never need to guess at permission themselves.
+    async deleteAgentCanvas(agentName, canvasId) {
+      await portalHttp.delete(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/${encodeURIComponent(canvasId)}`,
+        { headers: this.authHeader }
+      )
+      return true
+    },
+
+    async bulkDeleteAgentCanvases(agentName, canvasIds) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/bulk-delete`,
+        { canvas_ids: canvasIds },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    async pinAgentCanvas(agentName, canvasId, pinned) {
+      await portalHttp.put(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/${encodeURIComponent(canvasId)}/pin`,
+        { pinned },
+        { headers: this.authHeader }
+      )
+      return true
+    },
+
     async fetchDocuments(agentName) {
       const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/documents`,
@@ -1681,7 +1750,42 @@ export const useClientPortalStore = defineStore('clientPortal', {
       } finally {
         if (requested) requested.forEach((n) => briefingsInFlight.delete(n))
         else briefingsBatchInFlight = false
+        // #2703: an invalidation that arrived mid-flight re-runs ONCE, so the
+        // listing the user sees is never the one fetched before the change.
+        const redo = (requested || this.agents.map((a) => a && a.name)).filter((n) => briefingsDirty.has(n))
+        redo.forEach((n) => briefingsDirty.delete(n))
+        if (redo.length) void this.revalidateBriefing(redo)
       }
+    },
+
+    /**
+     * Re-hydrate one agent's (or a few agents') briefing after its skill set
+     * changed (#2703) — stale-while-revalidate: the card keeps its hint cards
+     * and `/` entries until the new answer lands; `briefing_state` is NEVER
+     * flipped back to `pending`, because that re-enters the loading skeleton
+     * on a zone that has data (the p13 rule `mergeRosterBriefings` guards).
+     *
+     * Deliberately outside `shouldRequestBriefing`, whose job is the one-retry
+     * rule for a card that never hydrated; this is a card that did.
+     *
+     * `maxAge` (ms) bounds the call for the surfaces with no `/ws` — an
+     * external client's Workspace re-validates the active agent when the `/`
+     * popup opens, at most once per minute per agent.
+     */
+    async revalidateBriefing(names, { maxAge = 0 } = {}) {
+      const list = (Array.isArray(names) ? names : [names]).filter(Boolean)
+      const wanted = []
+      for (const name of list) {
+        const card = this.agents.find((a) => a && a.name === name)
+        if (!card) continue                               // not on this roster — nothing to show
+        if (maxAge > 0 && typeof card.briefing_hydrated_at === 'number'
+            && Date.now() - card.briefing_hydrated_at < maxAge) continue
+        if (briefingsInFlight.has(name)) { briefingsDirty.add(name); continue }
+        wanted.push(name)
+      }
+      if (!wanted.length) return
+      wanted.forEach((n) => briefingsInFlight.add(n))
+      await this.hydrateBriefings(wanted)
     },
 
     /**
