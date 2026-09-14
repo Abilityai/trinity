@@ -231,8 +231,8 @@ boundary in the other direction, because the first attempt at this fix swept
 both delete routes into the human-only gate with one over-broad replace.
 
 **A shared canvas is LIVE, and says so** (AC #3, operator ruling 2026-09-08).
-The link renders the canvas as it is now, carrying its `updated_at` and stale
-mark, and the page states that it is not a copy taken at share time. This
+The link renders the canvas as it is now, carrying its `updated_at`, and the
+page states that it is not a copy taken at share time. This
 follows ent#438's model — a canvas is a surface an agent keeps *current* — and
 means a share stores nothing. The cost is that content can change after you
 share it; the mitigation is revocation, not freezing.
@@ -677,25 +677,59 @@ same thing about the blanket case; this is the same objection surviving the
 narrowing. The agent widens explicitly, told exactly why — which keeps a real
 visibility change a decision someone makes rather than a default that happens.
 
-## Staleness — derived, not a clock (ent#438 AC 7)
+## Freshness — two facts, no verdict (ent#438 AC 7, #2734)
 
-`stale` is `last_completed_execution_at(agent) > canvas.updated_at` — the agent
-finished a run and did not refresh this surface.
+The header renders two facts and draws no conclusion from them:
+
+```
+Updated 2h ago · agent last ran 40m ago
+```
+
+`updated_at` is the canvas row's own write time. `agent_last_run_at` is
+`db.last_completed_execution_at(agent)` — when the agent last *finished* a run —
+attached by `canvas_service.decorate`, **once per agent, not once per canvas**,
+and normalised to Z-suffixed UTC there (the #1474 read-boundary rule) because a
+raw `MAX(completed_at)` is not one of the boundaries that pass was applied to,
+and this value is now *rendered* rather than only compared.
 
 An age threshold was rejected: a canvas has no inherent freshness expectation,
 so a clock either cries wolf on a monthly summary or stays silent on a
 minute-by-minute one. "The agent has run since" is a fact about *this* canvas,
 needs no configuration, and is checkable against `updated_by_execution_id`.
+#2734 carried that same argument one step further and retired the **derived
+verdict** as well: "the agent has run since" could not know what a given canvas
+is for either, and it fired on the writing run's own output — a run completes
+*after* it writes, and `updated_by_execution_id`, the only evidence that would
+exclude it, is optional and absent on most live canvases. So the mark
+contradicted the timestamp beside it and taught the reader to ignore it. Two
+facts measured against one clock cannot contradict each other.
 
 `db.last_completed_execution_at` is a `MAX` over the whole column rather than a
 bounded scan of recent rows, deliberately: a head full of `queued`/`running`
 rows would push the newest COMPLETED row out of a window and report a stale
 canvas as current — the failure this AC exists to prevent.
 
-**Fail-quiet is available here and only here.** Missing evidence reads as "not
-stale", because the mark is an *addition* to an always-rendered `updated_at`,
-never a replacement for it. Marking on no evidence would train the reader to
-ignore the mark. It is derived once per agent, not once per canvas.
+**Missing evidence omits the second fact; it is never narrated.**
+`agent_last_run_at` is null both when the agent has never finished a run and
+when the read failed (`decorate`'s `except` arm — logged, so an operator sees
+what a reader cannot), and the payload cannot tell those apart. Saying "the
+agent has not run yet" would turn *"we could not read it"* into a claim about
+the agent, which is the stale-banner rule of `design-system-contract.md` read at
+field scope. `canvasUtils.freshness()` therefore gates the second fact on
+`Date.parse`, not on truthiness — a truthy-but-unparseable value would otherwise
+render "agent last ran at an unknown time", a narrated non-fact.
+
+The derived `stale` boolean is still computed (`canvas_service.is_stale`,
+unchanged) and still ships on the payload; **the header renders nothing from
+it**. It is kept so the derivation stays recoverable, not because it is endorsed
+— it still counts the writing run as a run "since". Two other consumers on this
+base are stated rather than swept in: the Manage row's per-canvas pill
+(`CanvasPanel.vue`, ent#553) still reads the payload flag and still renders the
+word, and `SharedCanvas.vue`'s `v-if="fresh.stale"` (ent#554) is now inert,
+because `freshness()` no longer returns that key — so the share page shows the
+first fact only. Both arrived after this design was accepted; widening the
+second fact onto a sign-in-optional share link is a disclosure decision, not a
+rebase.
 
 ## Write path — one, for both writers (ent#536)
 
@@ -916,3 +950,4 @@ rail's Canvas tab outside a call still refreshes on its own triggers.
 | 2026-09-06 | claude | Conversation-side placement in the Workspace rail; `CanvasPanel` re-reads blocks when the selected canvas's `updated_at` moves (ent#475) |
 | 2026-09-07 | claude | The render bar (#2583): the canvas gallery e2e (17 canvases, Agent Detail + rail + voice column, both themes, measured), the flex-share call columns, per-block containers, the per-block error boundary, bounded table/timeline/diagram-error viewports, container-keyed KPI grid, long-token wrapping, `min(px, 100%)` inline widths, chart legend/flat-range/isolated-point/axis-spacing fixes, the stale-fetch guard on canvas switching, and the `<script setup>` module-state fix that made diagrams vanish |
 | 2026-09-07 | claude | One rich block vocabulary: `image` + `diagram` kinds, `chart` widened to six types on the metric series shape, rich fences in markdown, block ids + `patch_canvas`, the `main` default canvas, voice tools as block edits through the one write path with the write-side audience rule, `### Your Canvas` prompt guidance (ent#536) |
+| 2026-09-14 | claude | Freshness is two facts, never a verdict (#2734): the header renders `updated_at` and the new `agent_last_run_at` and derives nothing; the `may be out of date` badge and its note are deleted; `stale` stays computed and unrendered in the header |

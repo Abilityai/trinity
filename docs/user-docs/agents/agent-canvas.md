@@ -6,7 +6,7 @@ Every agent has a **Canvas** tab on its detail page. In the Workspace the same c
 
 ## Concepts
 
-- **Canvas** — A named surface the agent writes with `set_canvas` and updates with `patch_canvas`. The default canvas is **`main`** — the one the tools write when no id is given, and the one the agent's voice mode draws on — so an agent and its call share one board. Named canvases keep separate surfaces. The header always shows when a canvas was last updated, and adds **may be out of date** when the agent has finished work since without refreshing it.
+- **Canvas** — A named surface the agent writes with `set_canvas` and updates with `patch_canvas`. The default canvas is **`main`** — the one the tools write when no id is given, and the one the agent's voice mode draws on — so an agent and its call share one board. Named canvases keep separate surfaces. The header shows when it was last updated and when the agent last finished a run, so you can see for yourself whether it has worked since.
 - **Blocks** — A canvas is an ordered list of blocks, each with an id: `kpi`, `table`, `chart`, `timeline`, `markdown`, `html`, `image`, `diagram`, `json`. Ids the agent leaves out are assigned (`b1`, `b2`, …) so every block is addressable later. A chart is one of `bar`, `stacked_bar`, `line`, `area`, `pie` or `donut` over one or more series of points; a diagram is Mermaid source; an image is a web URL, a small inline image, or a file in the agent's workspace. A `markdown` block may carry ```chart, ```kpi, ```table and ```mermaid fences, which render as figures inside the prose.
 - **Design kit** — A small set of platform-owned styles (`ck-card`, `ck-grid-2/3/4`, `ck-section`, `ck-callout`, `ck-chip`, `ck-kpi`, `ck-table`, `ck-figure`) that make an agent's own `html` and `markdown` blocks look designed in light and dark without the agent touching CSS. Anything outside the kit — other classes, inline styles beyond a bounded width, `<style>` tags — is dropped before it renders.
 - **Starter layouts** — A canvas can declare a `template`: **dashboard**, **report**, **brief** or **status-board**. Each has named slots (a dashboard has `header`, `kpis`, `main`, `side`, `footer`) that blocks fill through their `slot`. A layout never hides a block: anything not slotted renders after the layout, and with no template blocks simply stack.
@@ -50,7 +50,7 @@ narrower option is preselected:
 
 A shared canvas **stays current**: whoever opens the link sees it as the agent
 updates it, not a copy from when you shared it. The page says this, and shows
-the last-updated time and the "may be out of date" mark. **Revoke** turns a link
+the last-updated time. **Revoke** turns a link
 off; anyone holding it is told it was turned off rather than getting a broken
 page. Creating and revoking links is recorded in the audit log.
 
