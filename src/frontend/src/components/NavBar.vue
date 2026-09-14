@@ -11,7 +11,7 @@
              exceed the `max-w-7xl` cap the two clusters stop compressing and
              overflow INTO each other, which `justify-between` parks in the
              middle of the bar (Connected landing on top of Enterprise PRO). -->
-        <div class="flex min-w-0">
+        <div class="flex min-w-0 flex-1">
           <router-link to="/" class="flex-shrink-0 flex items-center hover:opacity-80 transition-opacity">
             <img src="../assets/trinity-logo.svg" alt="Trinity Logo" class="h-8 w-8 mr-2 dark:hidden" />
             <img src="../assets/trinity-logo-white.svg" alt="Trinity Logo" class="h-8 w-8 mr-2 hidden dark:block" />
@@ -33,8 +33,14 @@
                `min-w-0` stays load-bearing for the same reason as #1789 — a
                flex item defaults to `min-width: auto`, so without it the
                cluster cannot shrink and overflows INTO the right-hand
-               controls. -->
-          <div ref="linksEl" class="hidden sm:ml-6 sm:flex min-w-0 relative">
+               controls. `flex-1` here and on the parent cluster is what this
+               strip adds, and it decides the measurement: the old row sized
+               itself to its content and simply scrolled, whereas a row that
+               COLLAPSES has to be told how much space it actually has. Without
+               it `clientWidth` reports the row's own min-content — the inner
+               nav is `overflow-hidden`, so that is near zero — and the strip
+               hides four links on a 1440px display. -->
+          <div ref="linksEl" class="hidden sm:ml-6 sm:flex min-w-0 flex-1 relative">
             <nav class="flex items-stretch gap-3 xl:gap-6 min-w-0 overflow-hidden">
               <router-link
                 v-for="link in inlineLinks"
