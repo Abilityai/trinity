@@ -34,6 +34,7 @@ from dependencies import (
     AuthorizedAgent,
     get_current_user,
     _reject_connector_principal,
+    resolve_source_agent,
 )
 from models import Reminder, ReminderCreate, ReminderSummary, User
 from services import idempotency_service, rate_limiter, reminder_service
@@ -143,13 +144,22 @@ async def create_reminder_endpoint(
         # no-op a cancel-then-recreate-identical).
         terminal_replay_fresh = True
 
+    # ent#614: resolve unconditionally (an `or` short-circuit would silently
+    # ignore a mismatched header from an agent principal), then prefer the
+    # VALIDATED key — the MCP client sends no header on this path, so a
+    # header-only resolution would wipe every agent-created reminder's origin.
+    _resolved_source = resolve_source_agent(
+        current_user, x_source_agent, endpoint=f"/api/agents/{name}/reminders"
+    )
+    _source_agent = current_user.agent_name or _resolved_source
+
     try:
         reminder = reminder_service.create_reminder(
             name,
             data,
             owner_id=current_user.id,
             created_by_email=current_user.email,
-            source_agent_name=current_user.agent_name or x_source_agent,
+            source_agent_name=_source_agent,
             # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
         )

@@ -62,6 +62,13 @@ async def _audit_idempotent_replay(
         source="mcp" if x_via_mcp else "api",
         actor_user=current_user if not x_source_agent else None,
         actor_agent_name=x_source_agent,
+        # ent#614: `x_source_agent` arrives RESOLVED by the router
+        # (`dependencies.resolve_source_agent`) — an agent key naming itself or
+        # the event loopback's vouched value, never a raw client header — so the
+        # agent branch is now reachable only by an actual agent. On that branch
+        # the resolver yields no email, so the key OWNER is carried explicitly:
+        # the join back to the human that an agent row otherwise lacks.
+        actor_email=getattr(current_user, "email", None),
         mcp_key_id=getattr(current_user, "mcp_key_id", None),
         mcp_key_name=getattr(current_user, "mcp_key_name", None),
         mcp_scope=getattr(current_user, "mcp_scope", None),
@@ -98,6 +105,13 @@ async def _audit_chat_started(
         source="mcp" if x_via_mcp else "api",
         actor_user=current_user if not x_source_agent else None,
         actor_agent_name=x_source_agent,
+        # ent#614: `x_source_agent` arrives RESOLVED by the router
+        # (`dependencies.resolve_source_agent`) — an agent key naming itself or
+        # the event loopback's vouched value, never a raw client header — so the
+        # agent branch is now reachable only by an actual agent. On that branch
+        # the resolver yields no email, so the key OWNER is carried explicitly:
+        # the join back to the human that an agent row otherwise lacks.
+        actor_email=getattr(current_user, "email", None),
         mcp_key_id=getattr(current_user, "mcp_key_id", None),
         mcp_key_name=getattr(current_user, "mcp_key_name", None),
         # Was `"agent" if x_source_agent else ("user" if x_via_mcp else None)` —

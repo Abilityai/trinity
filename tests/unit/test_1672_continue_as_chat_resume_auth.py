@@ -172,6 +172,9 @@ class TestTaskEndpointResumeGate:
             user.agent_name = (
                 x_source_agent if user_agent_name == "__from_source__" else user_agent_name
             )
+            # ent#614: a real principal carries this (None unless minted by the
+            # event loopback); a bare MagicMock would invent a truthy child.
+            user.vouched_source_agent = None
 
             running = MagicMock()
             running.status = "running"
@@ -237,27 +240,32 @@ class TestTaskEndpointResumeGate:
 
     def test_spoofed_x_source_agent_does_not_bypass_gate(self, call_endpoint):
         """CRITICAL (adversarial-review finding): a REGULAR user has agent_name=None,
-        so the SELF-EXEC-001 spoof-guard never fires for them. If the gate were keyed
+        so the SELF-EXEC-001 spoof-guard never fired for them. If the gate were keyed
         on `not x_source_agent`, that user could set X-Source-Agent to ANY value and
-        skip authorization entirely — resuming a peer's session on a shared agent. The
-        gate ignores the header, so a foreign unowned id still 404s."""
+        skip authorization entirely — resuming a peer's session on a shared agent.
+        Since ent#614 the spoof is refused OUTRIGHT: `resolve_source_agent` at the top
+        of the handler 403s a non-agent principal's header before the resume gate
+        (or anything else) runs — a strictly stronger refusal than the 404 the gate
+        used to answer, and one that names the rule instead of hiding it."""
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as ei:
             call_endpoint(
                 resume_id=str(uuid.uuid4()), owns=False,
                 x_source_agent="agent-a", user_agent_name=None,  # regular user + spoof
             )
-        assert ei.value.status_code == 404
+        assert ei.value.status_code == 403
+        assert "agent-scoped" in ei.value.detail
 
-    def test_spoofed_x_source_agent_sentinel_still_400(self, call_endpoint):
-        """The sentinel reject also survives a spoofed X-Source-Agent header."""
+    def test_spoofed_x_source_agent_sentinel_still_rejected(self, call_endpoint):
+        """A spoofed header cannot smuggle a sentinel past the gate either: ent#614
+        refuses the header first (403), so the sentinel never reaches `--resume`."""
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as ei:
             call_endpoint(
                 resume_id="dispatched_async", owns=True,
                 x_source_agent="agent-a", user_agent_name=None,
             )
-        assert ei.value.status_code == 400
+        assert ei.value.status_code == 403
 
     def test_agent_key_owned_resume_passes(self, call_endpoint):
         """A legit agent-scoped self-call (agent_name == x_source_agent, SELF-EXEC-001
