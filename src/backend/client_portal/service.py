@@ -1873,34 +1873,107 @@ def _sanitize_title(raw: str | None) -> str | None:
     return line or None
 
 
+def _title_failure_detail(status_code: int, body: str) -> str:
+    """Turn an upstream non-200 into a bounded, credential-free phrase (#2766).
+
+    `HTTP 400` on its own reads like a transport fault and sent the operator
+    looking at the wrong thing; the actionable half is always in the body —
+    "credit balance is too low" is a billing problem, "invalid x-api-key" is a
+    credential problem, and neither is a bug in Trinity.
+
+    Only the API's own `error.type` (a fixed enum) and `error.message` are
+    used, never the raw body, and the result is truncated by the caller's
+    `_TITLE_HEALTH_DETAIL_CHARS` bound. `_scrub` is applied because this string
+    reaches an operator-visible health record, and a credential echoed back in
+    an upstream error message must not be the way it gets there.
+    """
+    base = f"HTTP {status_code}"
+    try:
+        err = (json.loads(body) or {}).get("error") or {}
+        etype = err.get("type")
+        message = err.get("message")
+    except Exception:  # noqa: BLE001 — an unparseable body is just the status
+        return base
+    parts = [base]
+    if isinstance(etype, str) and etype:
+        parts.append(etype[:40])
+    if isinstance(message, str) and message:
+        parts.append(_scrub_title_detail(message)[:80])
+    return " · ".join(parts)
+
+
+def _scrub_title_detail(text: str) -> str:
+    """Remove anything credential-shaped from an upstream message before it
+    reaches the health record (#2766). Belt: these messages come from Anthropic,
+    not from a user, but the record is operator-visible and cheap to protect."""
+    return re.sub(r"(sk-[A-Za-z0-9_\-]{8,}|sk-ant-[A-Za-z0-9_\-]{8,})", "[redacted]", text)
+
+
 def _resolve_title_auth(agent_name: str) -> dict | None:
-    """Pick the credential the title call authenticates with. Prefer an explicit
-    ``ANTHROPIC_API_KEY`` (deployments that have one); otherwise fall back to the
-    agent's OWN subscription OAuth token — the same credential it chats on, billed
-    to the same subscription — via the Messages-API OAuth beta header. Returns the
-    request headers, or None when neither credential is available (the caller then
-    keeps the derived fallback title). (ent#186 follow-up: subscription-only.)"""
+    """Pick the credential the title call authenticates with — **the one the
+    agent's own chat runs on** (#2766).
+
+    The credential FOLLOWS THE AGENT. `derive_auth_mode` is the platform's one
+    auth-mode derivation (#471), so this path speaks the same vocabulary as
+    `AgentAuthStatus` and the subscription-pressure batch rather than inventing
+    a second answer to "what is this agent authenticated as":
+
+    * ``subscription`` — the agent's OWN subscription OAuth token, via the
+      Messages-API OAuth beta header. Same credential, same bill as its chat.
+    * ``api_key`` — only then the instance key.
+    * ``not_configured`` — no credential; the caller keeps the derived title.
+
+    This precedence is INVERTED from the original, and the inversion is the
+    fix. The instance key used to win outright, so on a fleet where every agent
+    runs on a subscription, thread titles were billed to — and gated on — a
+    console account no agent was assigned. An unfunded or revoked instance key
+    then broke titles for agents that were otherwise completely healthy, which
+    is #2114's "a stale key shadows subscription auth" one layer up, on the
+    backend side.
+
+    A ``subscription``-mode agent whose token cannot be read returns **None**
+    rather than falling through to the instance key. Falling through is exactly
+    the shadowing this fixes: an instance key the agent was never assigned is
+    not a credential it holds, so a missing token is "no credential for this
+    agent", not "use someone else's".
+    """
     from services.settings_service import get_anthropic_api_key
+    from services.subscription_service import derive_auth_mode
     import database
 
     base = {"anthropic-version": "2023-06-01", "content-type": "application/json"}
 
-    api_key = get_anthropic_api_key()
-    if api_key:
-        return {**base, "x-api-key": api_key}
-
     try:
         db = database.db if hasattr(database, "db") else database.get_db()
         sub_id = db.get_agent_subscription_id(agent_name)
-        token = db.get_subscription_token(sub_id) if sub_id else None
     except Exception as e:  # noqa: BLE001 — fail-soft, keep the derived title
         logger.warning("portal title: subscription lookup failed for %s: %s", agent_name, e)
         return None
-    if token:
-        return {**base, "authorization": f"Bearer {token}", "anthropic-beta": _OAUTH_BETA}
+
+    api_key = get_anthropic_api_key()
+    mode = derive_auth_mode(bool(sub_id), bool(api_key))
+
+    if mode == "subscription":
+        try:
+            token = db.get_subscription_token(sub_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("portal title: subscription token unreadable for %s: %s", agent_name, e)
+            return None
+        if token:
+            return {**base, "authorization": f"Bearer {token}", "anthropic-beta": _OAUTH_BETA}
+        # Deliberately NOT the instance key — see the docstring.
+        logger.debug(
+            "portal title: %s is subscription-mode but its token is unreadable — "
+            "keeping derived title rather than billing an unassigned instance key",
+            agent_name,
+        )
+        return None
+
+    if mode == "api_key":
+        return {**base, "x-api-key": api_key}
 
     logger.debug(
-        "portal title: no ANTHROPIC_API_KEY and no subscription for %s — keeping derived title",
+        "portal title: no subscription and no ANTHROPIC_API_KEY for %s — keeping derived title",
         agent_name,
     )
     return None
@@ -1951,7 +2024,10 @@ async def _generate_thread_title(agent_name: str, client_message: str, reply: st
 
     if resp.status_code != 200:
         logger.warning("portal title generation: API %s: %s", resp.status_code, resp.text[:200])
-        _record_title_outcome("failed", f"HTTP {resp.status_code}")
+        # #2766: carry the upstream reason, not just the status — the Settings
+        # alert should point at billing or credentials, not read as a transport
+        # fault.
+        _record_title_outcome("failed", _title_failure_detail(resp.status_code, resp.text))
         return None
     try:
         text_out = (resp.json().get("content") or [{}])[0].get("text", "")
