@@ -2882,6 +2882,19 @@
       "description": "Static AST guard (#2669): every use of an identity-minting accessor -- get_or_create_installation_id, get_or_mint_sharing_id, get_instance_label -- sits at a (path, enclosing qualname, name) listed with the reason that site needs the identity to exist; a read-shaped path must use the non-minting twin. An import is a binding that feeds a per-file alias map, so an aliased or re-bound call is a hit at the CALL. The identity keys (installation_id, telemetry_sharing_id) are written only by their home modules. The read twin get_installation_id is pinned to exist. OSS tree only (the private twin is trinity-enterprise#575); token-prefiltered on case-folded bytes so unrelated files never trip an interpreter-skew parse failure, while a token-bearing file that cannot be parsed fails closed naming the interpreter. Self-tests drive every spelling family, the scope attribution (nested/async/class/lambda/decorator), the key-write detector and the judge in both directions through the same scan the live tree uses."
     },
     {
+      "file": "unit/test_ent614_source_agent_attribution.py",
+      "feature": "abilityai/trinity-enterprise#614",
+      "added": "2026-09-14",
+      "categories": [
+        "backend",
+        "security",
+        "audit",
+        "static-guard",
+        "unit"
+      ],
+      "description": "ent#614: X-Source-Agent is honoured only for a principal that can prove it names itself. The resolve_source_agent matrix (agent key naming itself / mismatch 403 / event-loopback vouched name / every non-agent principal refused with a named 403 / falsy header before any getattr); the /task, /chat and /fan-out routers rebind the header before any consumer so a human cannot forge an actor_type=agent audit row, a triggered_by=agent execution or an AGENT_COLLABORATION activity on a foreign agent; the attribution-only routers (loops, reminders, schedules) record the validated key first; the loopback JWT round-trips its scope and vouched claim through get_current_user and is fenced to POST /api/agents/{name}/task; trigger_subscription carries the header and claim only for agent_originated events and every caller states the flag; the MCP schedules tool gates the header on agent scope like chat.ts; and an AST guard over the OSS tree fails any function that reads x_source_agent without routing every use through the helper, plus a literal scan for the header name."
+    },
+    {
       "file": "unit/test_2694_voice_thread_window.py",
       "feature": "#2694",
       "added": "2026-09-10",

@@ -1225,7 +1225,14 @@ def derive_source_and_trigger(
 ) -> "_TaskDerivation":
     """SELF-EXEC-001 spoof guard (403), self-task detection, triggered_by
     derivation, and the #1578 reserved-event tag (internal-secret gated, C-003).
-    HTTP-free — the spoof guard raises ChatDispatchError(403)."""
+    HTTP-free — the spoof guard raises ChatDispatchError(403).
+
+    ent#614: the router now resolves ``x_source_agent`` through
+    ``dependencies.resolve_source_agent`` before this runs, so the value here is
+    an agent key's own name, the event loopback's vouched name, or None — and a
+    non-agent principal's header was already refused with a 403. The guard
+    below is kept as belt-and-braces for a caller that bypasses the router
+    (the same shape as ``reject_agent_principal`` under ``require_admin``)."""
     # SELF-EXEC-001: verify X-Source-Agent matches the MCP key's agent scope.
     if x_source_agent and current_user.agent_name:
         if x_source_agent != current_user.agent_name:

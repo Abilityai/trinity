@@ -12,7 +12,13 @@ from datetime import datetime
 from typing import NoReturn, Optional
 
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, TaskExecutionStatus
-from dependencies import get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin
+from dependencies import (
+    get_current_user,
+    get_authorized_agent,
+    get_owned_agent,
+    assert_owns_or_admin,
+    resolve_source_agent,
+)
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.capacity_manager import (
@@ -143,9 +149,18 @@ async def chat_with_agent(
     in the capacity meter.
 
     Headers:
-    - X-Source-Agent: Set when one agent calls another (agent-to-agent)
+    - X-Source-Agent: Set when one agent calls another (agent-to-agent). Honoured
+      only for an agent-scoped key naming its own agent or the event loopback
+      (ent#614, `dependencies.resolve_source_agent`); any other principal → 403.
     - X-Via-MCP: Set for all MCP calls (both user and agent-scoped)
     """
+    # ent#614: resolve the raw X-Source-Agent header BEFORE anything reads it —
+    # the admission audit row, the capacity source, triggered_by, the
+    # collaboration activity/broadcast and the execution row all consume the
+    # value below. Rebinding makes the raw header unreachable past this line.
+    x_source_agent = resolve_source_agent(
+        current_user, x_source_agent, endpoint=f"/api/agents/{name}/chat"
+    )
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -298,6 +313,12 @@ async def execute_parallel_task(
     Note: Does NOT update conversation history or session state.
     Executions are saved to the database for history tracking.
     """
+    # ent#614: resolve the raw X-Source-Agent header first (rebind — see
+    # chat_with_agent). `derive_source_and_trigger`'s SELF-EXEC-001 check stays
+    # as belt-and-braces; it can no longer fire for a resolved value.
+    x_source_agent = resolve_source_agent(
+        current_user, x_source_agent, endpoint=f"/api/agents/{name}/task"
+    )
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -329,6 +350,8 @@ async def execute_parallel_task(
     # against their own user id; an agent-scoped key resolves to its owner and is
     # checked against the owner's id; admin bypasses (mirrors the Session tab). No
     # legitimate agent-to-agent path carries a resume id, so gating them costs nothing.
+    # (ent#614: `resolve_source_agent` at the top of this handler now refuses a
+    # human's header outright, so the value never reaches here — the keying stays.)
     #
     # Ownership is the real guard, so NO id-shape check is needed: a value that
     # matches a real row's claude_session_id is a system-generated id (a Claude

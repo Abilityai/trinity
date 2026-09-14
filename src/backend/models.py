@@ -443,6 +443,16 @@ class User(BaseModel):
     # None on the JWT branch, which is the honest "no credential" answer.
     mcp_key_id: Optional[str] = None
     mcp_key_name: Optional[str] = None
+    # ent#614: the source agent the BACKEND vouches for. Set only on an EVT-001
+    # loopback JWT (`scope == dependencies.EVENT_LOOPBACK_SCOPE`, minted by
+    # `event_dispatch_service._get_internal_token`), and only when the event
+    # was agent-originated — `emit_event` writes a JWT caller's USERNAME into
+    # `agent_events.source_agent`, and that must never be certified as an agent.
+    # `dependencies.resolve_source_agent` treats it as the principal's identity,
+    # exactly like `agent_name` for an agent-scoped key, so the loopback's
+    # `X-Source-Agent` header is honoured for this one value and nothing else.
+    # None on every other branch, JWT humans included.
+    vouched_source_agent: Optional[str] = None
 
 
 class Token(BaseModel):
