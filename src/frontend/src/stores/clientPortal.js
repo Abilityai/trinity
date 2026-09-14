@@ -1221,6 +1221,35 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // ent#553 — the lifecycle writes. Roster-scoped and owner-gated server
+    // side; the card's `can_manage_canvases` only decides whether the control
+    // is rendered, so these never need to guess at permission themselves.
+    async deleteAgentCanvas(agentName, canvasId) {
+      await portalHttp.delete(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/${encodeURIComponent(canvasId)}`,
+        { headers: this.authHeader }
+      )
+      return true
+    },
+
+    async bulkDeleteAgentCanvases(agentName, canvasIds) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/bulk-delete`,
+        { canvas_ids: canvasIds },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    async pinAgentCanvas(agentName, canvasId, pinned) {
+      await portalHttp.put(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/${encodeURIComponent(canvasId)}/pin`,
+        { pinned },
+        { headers: this.authHeader }
+      )
+      return true
+    },
+
     async fetchDocuments(agentName) {
       const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/documents`,
