@@ -61,6 +61,10 @@ export const useSessionsStore = defineStore('sessions', {
     // honest reading `canvasHeadroom` already gives a missing limit: the panel
     // says nothing rather than inventing a bound.
     canvasMaxPerAgent: 0,
+    // #2202: the platform default model, already on the flags payload. Held
+    // here so Settings can render it without a second request for a key that
+    // may never have been written — see the read below.
+    platformDefaultModel: '',
 
     // #2380 — install provenance + the URL posture this instance ADVERTISES.
     // `hardeningGuideEligible` is THE gate for the first-run hardening guide and
@@ -149,6 +153,11 @@ export const useSessionsStore = defineStore('sessions', {
         // surface. Coerced through the same safe default the catch below uses,
         // so a null/absent field lands on the closed value rather than
         // undefined — which reads as falsy but prints as "undefined".
+        // #2202 — the backend RESOLVES this (row → code default), so it is
+        // never absent, which is exactly why Settings must not read it through
+        // `GET /api/settings/{key}`: that route answers 404 for a key nobody
+        // has written, and Settings was firing it eight times per page load.
+        this.platformDefaultModel = r.data?.platform_default_model || ''
         this.installSource = r.data?.install_source || 'unknown'
         this.hardeningGuideEligible = !!r.data?.hardening_guide_eligible
         this.installTlsPosture = r.data?.install_tls_posture || 'unconfigured'
