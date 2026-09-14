@@ -609,18 +609,32 @@ defects live in git's own last-match-wins and dir-descent semantics):
   snapshot up to one leader-run old; `computed_at` makes it legible rather
   than denied. TTL caching was rejected — it would reintroduce the
   overlapping `git fetch`.
-- **`--no-optional-locks` is not free (#2742).** The index writeback the
-  flag suppresses is also what caches the stat results, so a stat-dirty
-  tree re-hashes on every poll instead of once. Measured on a 300 MB tree:
-  plain `status --porcelain` 0.41 s first call then 0.01 s; flagged 0.42 s
-  **every** time — a 29× steady-state penalty, worst for exactly the
-  auto-sync-off agents whose index nothing else ever refreshes. The obvious
-  mitigation (`git update-index --refresh` on a low cadence) did **not**
-  restore the fast path in measurement — git's racily-clean rule means a
-  refresh taken immediately does not settle — so it is deliberately *not*
-  in the code. AC1 is not negotiable and the flag is the only thing that
-  satisfies it; the cost is open, quantified and owned, not silently
-  accepted.
+- **`--no-optional-locks` is not free, and the cost is governed by content
+  bytes, not file count (#2742).** The index writeback the flag suppresses
+  is also what caches the stat results, so a stat-dirty tree re-hashes on
+  every poll instead of once. Re-measured inside a real agent container
+  (ext4 workspace volume, git 2.39.5), each tree made stat-dirty then run
+  eight times back-to-back:
+
+  | tree | plain, steady | flagged | ratio |
+  |---|---|---|---|
+  | 42 491 files / ~1 MB content | 0.08 s | 0.08 s | **~1×** |
+  | 1 500 files / 294 MB content | 0.001 s | 0.389 s | **~390×** |
+
+  So the penalty is driven by how many **bytes** git must re-hash, not by
+  index size: a big-but-light tree pays essentially nothing, while a
+  byte-heavy one pays ~0.39 s of CPU on **every** poll where plain would
+  settle to ~0.001 s. The absolute number is the one to reason about —
+  ~0.39 s per agent per 60 s poll, worst for exactly the auto-sync-off
+  agents whose index nothing else ever refreshes. (An earlier single "29×"
+  figure, taken outside the fleet, sat between these two regimes and
+  described neither.) The settling is visible in the raw series: plain runs
+  0.395 / 0.390 / 0.392 s and only then drops to 0.001 s — git's
+  racily-clean rule, which is also why the obvious mitigation
+  (`git update-index --refresh` on a low cadence) did **not** restore the
+  fast path in measurement, so it is deliberately *not* in the code. AC1 is
+  not negotiable and the flag is the only thing that satisfies it; the cost
+  is open, quantified and owned, not silently accepted.
 - **Older base images keep the old handler until recreate (#2742).** The
   agent-server half ships in the base image, so the fleet converges via
   `build-base-image.sh` + agent recreate — which is also what clears every
