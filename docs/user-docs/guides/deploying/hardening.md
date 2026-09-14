@@ -88,7 +88,9 @@ Leave 22 reachable from your own address only, or use the provider's console for
 
 Tailscale (or any VPN) puts the droplet on a private network only your devices can reach. It is a legitimate finished posture — it is what Trinity's own managed fleet runs — but it is **not** a substitute for the tunnel, and picking it by mistake breaks things quietly.
 
-**What stops working:** everything that calls *in*. Telegram, WhatsApp and VoIP webhooks, Slack events, public chat links, agent website links, schedule webhook triggers, inbound agent-to-agent calls. All of those are third parties making a request to your instance, and a private network is precisely what prevents that.
+**What stops working:** everything that calls *in*. Telegram, WhatsApp and VoIP webhooks, public chat links, agent website links, schedule webhook triggers, paid chat and inbound agent-to-agent calls. All of those are third parties making a request to your instance, and a private network is precisely what prevents that.
+
+**Slack is the exception** — Trinity connects outward to Slack over a WebSocket (Socket Mode), so Slack keeps working on a private network. Installing the app the first time still needs a public address for the OAuth callback; do that before you close the instance off, or temporarily reopen it.
 
 **Choose Tailscale if** you are the only person who uses this instance and you drive it from the UI, Claude Code or the CLI. **Choose the tunnel if** anything outside needs to reach it.
 
