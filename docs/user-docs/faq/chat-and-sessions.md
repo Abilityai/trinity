@@ -80,7 +80,7 @@ Yes, on both surfaces, though the pickers differ. In the **Workspace**, platform
 
 ## What are the Fable 5 and Sonnet 5 models?
 
-Fable 5 is the most capable model — reach for it on the longest, hardest, most involved tasks where quality matters more than speed. Sonnet 5 is the fast, smart everyday model, and it carries a 1M-token context window, so it holds far more of a long conversation or large codebase before compaction. Both appear by name in the Chat tab's model picker, in the agent's Model Selection setting, and in the per-schedule and per-loop overrides. The Workspace dropdown speaks in tiers instead: **Balanced — fast and smart** is Sonnet 5, **Most capable** is Opus 5, and **Fastest** is Haiku. See [Agent Configuration](../agents/agent-configuration.md#model-selection).
+Fable is the most capable tier — reach for it on the longest, hardest, most involved tasks where quality matters more than speed. **Fable 5.1** is the current one; Fable 5 is still offered and still supported, just no longer the latest in its tier. Sonnet 5 is the fast, smart everyday model, and it carries a 1M-token context window, so it holds far more of a long conversation or large codebase before compaction. Both appear by name in the Chat tab's model picker, in the agent's Model Selection setting, and in the per-schedule and per-loop overrides. The Workspace dropdown speaks in tiers instead: **Balanced — fast and smart** is Sonnet 5, **Most capable** is Opus 5, and **Fastest** is Haiku. See [Agent Configuration](../agents/agent-configuration.md#model-selection).
 
 ## Does chat render markdown, and can I attach files?
 

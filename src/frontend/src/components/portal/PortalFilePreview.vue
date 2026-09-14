@@ -25,10 +25,13 @@
   uploaded SVG is a script host; `<img>` never executes it.
 
   **No `Range` header.** The text cap is applied by fetching the whole blob and
-  slicing client-side. `main.py`'s CORS `allow_headers` does not list `Range`,
-  so a ranged preview dies silently on any deployment whose portal base URL is
-  genuinely cross-origin. The blob loader marks shared-file reads with
-  `preview=1` so these full transfers do not count as downloads.
+  slicing client-side. A share preview is fetched same-origin (#2733 —
+  `portalFiles.js::sharePreviewPath` drops whatever origin `portal_base_url` put
+  on `download_url`), so the missing `Range` in `main.py`'s CORS `allow_headers`
+  no longer bounds this: a ranged read is possible and is deliberately not taken,
+  because the cap is a client-side slice either way. The blob loader marks
+  shared-file reads with `preview=1` so these full transfers do not count as
+  downloads.
 -->
 <template>
   <Teleport to="body">

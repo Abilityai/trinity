@@ -2916,6 +2916,18 @@
         "unit"
       ],
       "description": "Skill assignment delivers (#2703): deliver_assigned runs the start-path injection (all assigned, force=False - a subset rewrites CLAUDE.md), stopped -> pending_start, Docker unreadable -> not_delivered/docker_unavailable, busy -> one retry, over budget -> in_progress with the work kept + WS on completion; under-lock re-read is opt-in; routes stay 200 with `delivery` in the body and fire the thin agent_skills_changed trigger; 404/422 fire before any write."
+    },
+    {
+      "file": "unit/test_2337_invariant_namespace.py",
+      "feature": "#2337",
+      "added": "2026-09-12",
+      "categories": [
+        "backend",
+        "reliability",
+        "guard",
+        "unit"
+      ],
+      "description": "One invariant namespace (Rail R3): the catalog's **X-NN** definitions, the canary registry (INVARIANTS keys + every module's INVARIANT_ID) and the catalog's Canary mapping table agree — read via ast/regex through tests/unit/_invariant_catalog.py, never imported; exact per-family pins; Signal: mandatory on the new families with a shrink-only allowlist for the 54 legacy prose-only entries; synthetic-markdown self-tests prove a bold prose mention, a dagger row and a table row are not definitions."
     }
   ]
 }

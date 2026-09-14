@@ -48,16 +48,18 @@ export function dismissKeyForStage(stage) {
  *
  * `featureFlagsLoaded` is a required term, not a convenience: without it the
  * card flashes in on every page load before the answer arrives, because
- * `marketplaceInstall` starts false and a false→true flip after the fetch is
+ * `hardeningGuideEligible` starts false and a false→true flip after the fetch is
  * indistinguishable from a real one (the `stores/firstRun.js` `loaded`
  * rationale). On an established fleet the honest render during the fetch is
  * nothing at all.
  *
- * `marketplaceInstall` is resolved SERVER-side — the browser never decides
- * which install sources count as a marketplace. Every non-marketplace install,
- * including the entire managed fleet whose plain-HTTP-over-Tailscale shape is
- * indistinguishable from an unhardened droplet by any other signal, is false
- * here.
+ * `hardeningGuideEligible` is resolved SERVER-side — the browser never decides
+ * which provenances qualify. It is PROVENANCE, never TLS state: the marketplace
+ * images plus a droplet installed by following the DigitalOcean deploy doc
+ * (`do-script`), and nothing else. A gate on "no TLS configured" would instead
+ * fire permanently on the entire managed fleet, which runs plain HTTP behind a
+ * WireGuard/Tailscale tunnel with no domain and a 100.x address —
+ * indistinguishable from an unhardened droplet by every signal except this one.
  *
  * `isAdmin` is a REAL GATE, not cosmetics, for two independent reasons. (1) The
  * only remediation this card offers is admin-only: `general` is `adminOnly` in
@@ -76,13 +78,13 @@ export function dismissKeyForStage(stage) {
 export function isHardeningGuideVisible({
   featureFlagsLoaded = false,
   isAdmin = false,
-  marketplaceInstall = false,
+  hardeningGuideEligible = false,
   installTlsPosture = 'unconfigured',
   dismissed = false,
 } = {}) {
   if (!featureFlagsLoaded) return false
   if (!isAdmin) return false
-  if (!marketplaceInstall) return false
+  if (!hardeningGuideEligible) return false
   if (dismissed) return false
   // `installTlsPosture` no longer gates visibility — it selects the STAGE (and
   // therefore which copy speaks). An unknown posture has no copy, and the
@@ -102,11 +104,15 @@ export function isHardeningGuideVisible({
  * anyone in particular, and not that anything "works today" or is "not broken".
  * All three are claims about a wire this code has never touched.
  *
- * `https-ip` therefore says what it can see (an address) and what a marketplace
- * image is KNOWN to install (a short-lived IP-bound certificate, hedged as an
- * expectation), then argues the upgrade from properties of the ADDRESS — that
- * it is awkward to share and answers to the whole public internet — which are
- * readable from the string itself.
+ * `https-ip` therefore says what it can see (an address) and what an install of
+ * this shape is KNOWN to set up (a short-lived IP-bound certificate, hedged as
+ * an expectation), then argues the upgrade from properties of the ADDRESS —
+ * that it is awkward to share and answers to the whole public internet — which
+ * are readable from the string itself. The renewal caveat is worded the same way
+ * and for the same reason: a ~6-day certificate renewed only while the machine
+ * runs is a property of that certificate PROFILE, so it is stated as what such a
+ * setup does after a long shutdown, never as a claim about this instance's
+ * current certificate or its expiry.
  *
  * `http` is the one posture that names an exposure, and it still hedges: a
  * proxy in front of Trinity may already terminate TLS, in which case the
@@ -140,7 +146,7 @@ export const POSTURE_COPY = {
     badgeVariant: 'info',
     headline: 'This instance advertises HTTPS at a bare IP address.',
     detail:
-      'Trinity cannot inspect the certificate from here — it only knows the address it was told to advertise. If a marketplace image set this up, expect a short-lived certificate tied to the IP and renewed every few days. Either way, an IP address is awkward to share and answers to the whole public internet, so a real name is worth adding.',
+      'Trinity cannot inspect the certificate from here — it only knows the address it was told to advertise. If a marketplace image or the DigitalOcean install script set this up, expect a short-lived certificate tied to the IP, renewed automatically while the server is running. Certificates on that profile last about six days, so a server left switched off for longer than that comes back to a browser warning until renewal catches up. Either way, an IP address is awkward to share and answers to the whole public internet, so a real name is worth adding.',
   },
   'https-domain': {
     badge: 'Domain set',

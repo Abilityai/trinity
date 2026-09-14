@@ -65,7 +65,7 @@ keyword**:
 | `workspace` | offered in the Workspace composer |
 | `workspace_tier` | the plain-language primary text the option renders |
 
-⚠️ `ModelEntry` is a **positional frozen dataclass** — all ten entries pass their three
+⚠️ `ModelEntry` is a **positional frozen dataclass** — every entry passes its three
 booleans positionally. A field inserted anywhere but last silently reassigns
 `public_channel` / `admin_default_selectable` / `recommended` on every entry, with no error.
 
@@ -465,6 +465,15 @@ keyed by container name and not by the stale `trinity.agent-name` label, `{}` vs
 a label-less legacy container reading `claude-code`, and `_runtime_map`'s
 narrow/validate/never-raise guards. Twin of
 `test_2196_roster_availability.py::test_the_batch_read_uses_the_sparse_attrs_shape`.
+
+**#2572 gave that sparse-label read a sibling, deliberately not a parameter.**
+`docker_service.agent_container_runtime_labels()` makes the same one-shot call but
+returns the RAW label with absence preserved (`{name: label_or_None}`), because the
+credential-less subscription sweep must be label-STRICT: this flow's `or "claude-code"`
+default is right for a model control (deny a working affordance on a hiccup and you have
+the #2196 inversion) and wrong for handing an agent a Claude OAuth token — `trinity-system`
+carries no runtime label at all. Same trap, two call sites, opposite correct answers; if
+the sparse shape ever changes, both must move.
 
 **Status: ⚠️ — verified as far as this machine can go, and no further.**
 
