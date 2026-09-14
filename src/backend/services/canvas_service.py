@@ -19,7 +19,12 @@ from typing import Dict, List, Optional
 
 from database import db
 from config import PORTAL_SOURCE_CHANNEL
-from db.canvas import AUDIENCE_OPERATOR, AUDIENCE_ROSTER, normalize_audience
+from db.canvas import (
+    AUDIENCE_OPERATOR,
+    AUDIENCE_ROSTER,
+    CanvasLimitExceeded,
+    normalize_audience,
+)
 from models import (
     CANVAS_BLOCKS_MAX_BYTES,
     CANVAS_ID_RE,
@@ -104,6 +109,59 @@ def resolve_execution_id(execution_id: Optional[str], agent_name: str) -> Option
         return None
     execution = resolve_and_validate_execution(execution_id, agent_name)
     return execution_id if execution else None
+
+
+# ---------------------------------------------------------------------------
+# The open canvas as shared context (ent#555)
+# ---------------------------------------------------------------------------
+
+
+def open_canvas_for_execution(execution_id: Optional[str], agent_name: str) -> Optional[str]:
+    """The canvas the user had open when they sent this turn, or None.
+
+    CONTEXT, NEVER AUTHORITY (ent#555 AC #6). This answers "what is the user
+    looking at", and it is deliberately incapable of answering "may the agent
+    touch it": the id was validated against THIS agent's own canvases at the
+    boundary that stamped it, and every read and write still goes through the
+    same audience and ownership gates it always did. A canvas the caller could
+    not otherwise reach does not become reachable by being named as open.
+
+    Fail-open to None, matching `resolve_execution_id` directly above: an agent
+    on an old image sends no execution_id, and a turn with no open canvas is
+    the ordinary case rather than an error. None means "fall back to the
+    default", never "refuse".
+    """
+    execution = resolve_and_validate_execution(execution_id, agent_name)
+    if execution is None:
+        return None
+    canvas_id = getattr(execution, "open_canvas_id", None)
+    if not canvas_id:
+        return None
+    # Re-checked at READ time, not trusted from the stamp: the canvas may have
+    # been deleted since the turn started (ent#553 made that a one-click act),
+    # and pointing the agent at a row that is gone would have it create a NEW
+    # canvas under that id — silently resurrecting something a person deleted.
+    return canvas_id if db.get_agent_canvas(agent_name, canvas_id) else None
+
+
+def effective_canvas_id(canvas_id: Optional[str], execution_id: Optional[str],
+                        agent_name: str) -> tuple[str, str]:
+    """Which canvas a tool call acts on, and WHY — `(canvas_id, source)`.
+
+    The precedence the issue asks for, in one place so all three tools agree:
+
+        explicit id  >  the canvas the user has open  >  the default canvas
+
+    `source` is returned because the agent has to be able to SAY which canvas
+    it wrote to when nobody named one (AC #7). "I updated the canvas" is not
+    good enough when there are eight of them and the user is looking at one.
+    """
+    if canvas_id:
+        return canvas_id, "explicit"
+    open_id = open_canvas_for_execution(execution_id, agent_name)
+    if open_id:
+        return open_id, "open"
+    return DEFAULT_CANVAS_ID, "default"
 
 
 # ---------------------------------------------------------------------------
@@ -289,15 +347,22 @@ def write_canvas(
     # future caller reaches through.
     serialize_blocks(validated)
     resolved = resolve_execution_id(execution_id, agent_name)
-    return db.upsert_agent_canvas(
-        agent_name,
-        canvas_id,
-        blocks=validated,
-        title=title,
-        audience=normalize_audience(audience),
-        execution_id=resolved,
-        template=template,
-    )
+    try:
+        return db.upsert_agent_canvas(
+            agent_name,
+            canvas_id,
+            blocks=validated,
+            title=title,
+            audience=normalize_audience(audience),
+            execution_id=resolved,
+            template=template,
+        )
+    except CanvasLimitExceeded as e:
+        # ent#553 — the cap is enforced in the db layer (it needs the count and
+        # the insert in one transaction), and translated here so the router
+        # keeps one error vocabulary. 409, not 413: nothing about this payload
+        # is too large, the agent is out of room and must retire a canvas.
+        raise CanvasError(409, str(e))
 
 
 def patch_canvas(
@@ -350,6 +415,10 @@ def empty_canvas(agent_name: str, canvas_id: str = DEFAULT_CANVAS_ID) -> Dict:
         "updated_by_execution_id": None,
         "template": None,
         "stale": False,
+        # ent#553 — a canvas that does not exist yet is not pinned. Present
+        # rather than omitted because the shape is contractually the Canvas
+        # model's, and the voice poll deserializes it.
+        "pinned": False,
         "blocks": [],
     }
 

@@ -118,6 +118,7 @@ from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
 from db.canvas import CanvasOperations
+from db.canvas_shares import CanvasShareOperations
 from db.user_preferences import UserPreferenceOperations
 from db.product_events import ProductEventOperations
 from db.evaluations import EvaluationOperations
@@ -967,6 +968,7 @@ class DatabaseManager:
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
         self._canvas_ops = CanvasOperations()
+        self._canvas_share_ops = CanvasShareOperations()
         self._user_preference_ops = UserPreferenceOperations()
         self._product_event_ops = ProductEventOperations()
         self._evaluation_ops = EvaluationOperations()
@@ -1786,6 +1788,7 @@ class DatabaseManager:
         source_channel_thread: str = None,
         source_channel_agent: str = None,
         source_channel_client: str = None,
+        open_canvas_id: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -1806,6 +1809,7 @@ class DatabaseManager:
             # /task inheritance point; None for direct rows).
             source_channel_agent=source_channel_agent,
             source_channel_client=source_channel_client,
+            open_canvas_id=open_canvas_id,
         )
 
     def create_schedule_execution(
@@ -2215,6 +2219,33 @@ class DatabaseManager:
 
     def delete_agent_canvas(self, agent_name: str, canvas_id: str) -> bool:
         return self._canvas_ops.delete_canvas(agent_name, canvas_id)
+
+    def delete_agent_canvases(self, agent_name: str, canvas_ids):
+        return self._canvas_ops.delete_canvases(agent_name, canvas_ids)
+
+    def count_agent_canvases(self, agent_name: str) -> int:
+        return self._canvas_ops.count_canvases(agent_name)
+
+    def set_agent_canvas_pinned(self, agent_name: str, canvas_id: str, pinned: bool) -> bool:
+        return self._canvas_ops.set_canvas_pinned(agent_name, canvas_id, pinned)
+
+    # --- canvas share links (ent#554) ---------------------------------------
+
+    def create_canvas_share(self, agent_name: str, canvas_id: str, **kwargs):
+        return self._canvas_share_ops.create_share(agent_name, canvas_id, **kwargs)
+
+    def get_canvas_share_by_token(self, token: str):
+        return self._canvas_share_ops.get_share_by_token(token)
+
+    def list_canvas_shares(self, agent_name: str, canvas_id: str = None,
+                           include_revoked: bool = False):
+        return self._canvas_share_ops.list_shares(agent_name, canvas_id, include_revoked)
+
+    def revoke_canvas_share(self, agent_name: str, share_id: str) -> bool:
+        return self._canvas_share_ops.revoke_share(agent_name, share_id)
+
+    def record_canvas_share_view(self, share_id: str) -> None:
+        return self._canvas_share_ops.record_view(share_id)
 
     def last_completed_execution_at(self, agent_name: str):
         return self._canvas_ops.last_completed_execution_at(agent_name)

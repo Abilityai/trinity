@@ -686,7 +686,8 @@ async def _agent_runtime(agent_name: str) -> str:
 def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
                  availability: str = "unknown", *,
                  is_platform: bool, runtime: str,
-                 model_context: ModelContext) -> PortalAgentCard:
+                 model_context: ModelContext,
+                 can_manage_canvases: bool = False) -> PortalAgentCard:
     """One roster row → one card. Shared by the roster and the single-agent
     lookup (#2160) so the two cannot disagree about how a card is built.
 
@@ -747,6 +748,10 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
         # endpoint it would call cannot disagree.
         stt_available=bool(tts_ready),
         availability=availability,
+        # ent#553 — threaded in like `availability`, never computed here: the
+        # caller knows its own principal kind and this builder is shared with
+        # the single-agent lookup.
+        can_manage_canvases=can_manage_canvases,
         # ent#403: `None` — no control at all — for every non-platform principal.
         # The roster payload is the ONLY capability channel an external client
         # has (#2128): a UI gate written against `GET /api/settings/feature-flags`
@@ -846,7 +851,20 @@ async def get_agent_card(email: str | None, agent_name: str,
                         # (ent#357), which is the same door ent#403 gates on.
                         is_platform=include_owned,
                         runtime=runtime,
-                        model_context=_model_context())
+                        model_context=_model_context(),
+                        # ent#553 (review): the roster resolves this per row and
+                        # this path did not, so the SAME owner saw
+                        # `can_manage_canvases: true` in the sidebar and `false`
+                        # on the agent's own page — two representations of one
+                        # card answering differently, which is precisely the
+                        # defect #2160's docstring above says this function
+                        # exists to prevent. It failed CLOSED (a control hidden,
+                        # never one that 403s), which is why it was latent.
+                        # Resolved through `may_manage_canvases`, the predicate
+                        # the write routes enforce with, for the reason stated
+                        # at the roster's own call site.
+                        can_manage_canvases=may_manage_canvases(
+                            agent_name, email, is_platform=include_owned))
     # #2163: exactly one briefing (not N), and now a BOUNDED one — this page's
     # floor was the agent's own 5s-per-phase HTTP, so a wedged agent made its
     # own page hang. `ok` is what makes an unreachable agent legible: without it
@@ -937,7 +955,18 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
                      availability=availability.get(r["agent_name"], "unknown"),
                      is_platform=include_owned,
                      runtime=runtimes.get(r["agent_name"], _DEFAULT_RUNTIME),
-                     model_context=model_context)
+                     model_context=model_context,
+                     # ent#553 — resolved through `may_manage_canvases`, the SAME
+                     # predicate the write routes enforce with, rather than a
+                     # faster per-row comparison against `r["owner"]`. That
+                     # shortcut would be two ownership answers that merely agree
+                     # today, and this file already carries the scar of a display
+                     # rule drifting from the rule it displays. The cost is a
+                     # couple of indexed lookups per agent on a load that already
+                     # makes a Docker call; if it ever matters, memoize INSIDE
+                     # the predicate so both callers benefit.
+                     can_manage_canvases=may_manage_canvases(
+                         r["agent_name"], email, is_platform=include_owned))
         for r in rows
     ]
     # #2163: the briefing is DEFERRED, not dropped. Saying so on the card is
@@ -1555,6 +1584,82 @@ def agent_on_roster(agent_name: str, email: str | None,
     secondary surface; fatal once it is the only one.
     """
     return agent_name in roster_agent_names(email, include_owned)
+
+
+def validated_open_canvas(agent_name: str, canvas_id, *, is_platform: bool):
+    """The open-canvas id to stamp on a turn, or None (ent#555).
+
+    The client tells us which canvas it has on screen. That is a CLIENT-SUPPLIED
+    id landing in a column an agent later reads, so it is validated here rather
+    than trusted, and every failure degrades to None — an unrecognised
+    selection means "no canvas open", never an error and never a wider reach.
+
+    Three checks, and the middle one is the one that matters:
+
+    * it is a string of the shape a canvas id can have;
+    * it names a canvas OF THIS AGENT — so the field cannot be used to point an
+      agent at another agent's surface;
+    * the caller can actually SEE it under the audience rules (`operator` is
+      invisible to an external client), so a client cannot learn that an
+      operator-only canvas exists by having it echoed back at them.
+
+    What this deliberately does NOT do is grant anything. Being named as open
+    is not permission: the agent's own read and write paths re-check ownership
+    and audience exactly as before (AC #6).
+    """
+    from database import db as core_db
+    from services import canvas_service
+
+    from . import agent_page
+
+    if not canvas_id or not isinstance(canvas_id, str):
+        return None
+    try:
+        canvas_service.validate_canvas_id(canvas_id)
+    except Exception:  # noqa: BLE001 — a malformed selection is just "none open"
+        return None
+
+    audience = agent_page.canvas_audience_for(is_platform)
+    try:
+        canvas = core_db.get_agent_canvas(agent_name, canvas_id, audience)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("open-canvas validation failed for %s/%s: %s",
+                       agent_name, canvas_id, e)
+        return None
+    return canvas_id if canvas else None
+
+
+def may_manage_canvases(agent_name: str, email: str | None, *,
+                        is_platform: bool) -> bool:
+    """May this Workspace caller delete or pin ``agent_name``'s canvases (ent#553)?
+
+    Owner-or-admin, and platform-only. Two consequences worth stating:
+
+    * an **external client never can**, whatever their roster says. A canvas is
+      one shared surface with no per-user copy, so there is no "hide it from my
+      list" they could be given instead — the ent#548 answer for files, where a
+      non-owner unshares their own copy, has no equivalent here.
+    * the predicate is `db.can_user_share_agent`, the SAME one
+      `dependencies.assert_agent_owner` reaches on the operator surface. Not a
+      second implementation that agrees today: the Workspace and Agent Detail
+      must never disagree about who owns an agent, and the cheapest way to
+      guarantee that is to have one answer.
+
+    Fails closed on every unknown: no email, no `users` row (a client), or a
+    lookup that returns nothing.
+    """
+    # `db` in this module is `client_portal.db`, the portal's OWN tables — the
+    # platform facade is imported locally as `core_db`, the convention every
+    # other cross-table read here follows. Reaching for the wrong one raises
+    # AttributeError on a path that runs for every roster load.
+    from database import db as core_db
+
+    if not is_platform or not email:
+        return False
+    user = core_db.get_user_by_email(email)
+    if not user or not user.get("username"):
+        return False
+    return bool(core_db.can_user_share_agent(user["username"], agent_name))
 
 
 def roster_agent_names(email: str | None, include_owned: bool) -> set[str]:
@@ -2356,6 +2461,7 @@ async def _run_sync_turn_and_clear_marker(owns_marker: bool, marker_session_id: 
 def _precreate_sync_execution(
     agent_name: str, message: str, email: str, session_id: str,
     resolved_model: str | None,
+    open_canvas_id: str | None = None,
 ) -> str | None:
     """Create the execution row for a synchronous portal turn (ent#365 review).
 
@@ -2419,6 +2525,8 @@ def _precreate_sync_execution(
             # row is MADE. See the docstring: there is no UPDATE path for this
             # column anywhere in the repo.
             model_used=resolved_model,
+            # ent#555 — what the user was looking at when they sent this.
+            open_canvas_id=open_canvas_id,
         )
         return execution.id if execution else None
     except Exception:  # noqa: BLE001
@@ -2444,7 +2552,10 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       # ent#551 — a turn dispatched from a voice call carries the
                       # call's id on both its rows (typed rows, `source` NULL):
                       # the attribution, and nothing else. Never from a request.
-                      voice_call_id: str | None = None) -> dict:
+                      voice_call_id: str | None = None,
+                      # ent#555 — the canvas on screen, validated at the router.
+                      # Stamped on the execution so the agent's tools default to it.
+                      open_canvas_id: str | None = None) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -2702,8 +2813,33 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # already holds the same rows — so a cold retry cannot double-send them.
     delta_prefix = (voice_delta + "\n\n") if voice_delta else ""
 
-    cold_message = history_prefix + manifest_prefix + message
-    message = (delta_prefix + manifest_prefix + message) if resuming else cold_message
+    # ent#555 — the canvas on screen, named in the turn itself.
+    #
+    # This is what makes "add a column to this" resolvable. The tool default
+    # (ent#555 AC #3) covers a call that omits an id, but an agent has to READ
+    # the canvas before it can edit it, and it cannot read what it does not
+    # know the name of — so the id has to be in the prompt, not only in the
+    # tool's fallback.
+    #
+    # It rides the SAME prefix as the file manifest, which means it is present
+    # on a resumed turn too: the open canvas changes between turns while the
+    # session's memory of it does not, so replaying it only on a cold turn
+    # would leave a resumed conversation editing whatever was open first.
+    canvas_prefix = ""
+    if open_canvas_id:
+        canvas_prefix = (
+            f"[Client Portal] The user has the canvas '{open_canvas_id}' open on screen. "
+            "When they say \"this\", \"that chart\" or similar, they mean that canvas — "
+            "read it before editing so you change what they can see, and patch by "
+            "block id rather than rewriting the whole surface.\n\n"
+        )
+
+    # #2694 × ent#555 on a resumed turn: the voice delta comes first (it is
+    # conversation the session never heard, so it reads as history), then the
+    # canvas on screen, then the file manifest, then what the client said.
+    # The cold message carries the replay in place of the delta.
+    cold_message = history_prefix + canvas_prefix + manifest_prefix + message
+    message = (delta_prefix + canvas_prefix + manifest_prefix + message) if resuming else cold_message
 
     # ent#212: inject the client's durable per-user memory (MEM-001) + the #1205
     # public-channel custom instructions into the turn, so a delegated end user
@@ -2749,8 +2885,9 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # than this one growing its own turn machinery.
         owns_marker = False
         if not execution_id:
-            execution_id = _precreate_sync_execution(agent_name, message, email,
-                                                     session_id, resolved_model)
+            execution_id = _precreate_sync_execution(
+                agent_name, message, email, session_id, resolved_model,
+                open_canvas_id=open_canvas_id)
             if execution_id:
                 mark_turn_inflight(session_id, execution_id, turn_timeout + 60)
                 owns_marker = True
@@ -3427,7 +3564,10 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             # by only one route brings the bug back exactly when
                             # streaming fails. Already normalised and
                             # allow-listed at the router; None = inherit.
-                            model: str | None = None) -> dict:
+                            model: str | None = None,
+                            # ent#555 — the canvas on screen, validated at the router.
+                            # Stamped on the execution so the agent's tools default to it.
+                            open_canvas_id: str | None = None) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -3494,6 +3634,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         # anywhere in the repo — so a model passed as a turn kwarg alone would
         # never reach the row a client can see.
         model_used=resolved_model,
+        # ent#555 — both creation sites carry it, for the reason stated above
+        # about the stamp otherwise being a coin flip.
+        open_canvas_id=open_canvas_id,
     )
     execution_id = execution.id if execution else None
     if not execution_id:
@@ -3526,7 +3669,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               # ladder can name it) AND the trusted resolution
                               # already stamped on the row above, so `portal_chat`
                               # never re-resolves and the two cannot disagree.
-                              model=model, resolved_model=resolved_model)
+                              model=model, resolved_model=resolved_model,
+                              open_canvas_id=open_canvas_id)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
             # — so the ONLY way this reaches the client is the record written

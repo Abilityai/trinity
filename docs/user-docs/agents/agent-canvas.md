@@ -31,8 +31,68 @@ Every agent has a **Canvas** tab on its detail page. A canvas the agent marks as
 
 - **Prefer data blocks.** Ask for "a KPI row" or "a table of open items" and the agent uses the `kpi` / `table` kinds, which render with the same look as the kit and stay live-updatable.
 - **Shared or private.** A canvas is private to the operator unless the agent publishes it to its roster. Ask the agent to "share this canvas with the team" and it appears on the Workspace page.
-- **The `canvas` skill.** Agents with the `canvas` skill from the skills library have the full reference and worked examples; any agent gets the essentials from its platform prompt.
+- **The `canvas` skill.** Agents with the `canvas` skill from the skills library have the full reference and worked examples; any agent gets the essentials from its platform prompt — including when to *retire* a canvas rather than add another.
 - **Markdown and raw HTML.** In a `markdown` block, kit markup must not contain blank lines (Markdown treats a blank line as the end of the HTML). For a fully custom layout the agent uses an `html` block.
+
+## Sharing a canvas, and saving it as a PDF
+
+**Share** produces a link to the canvas. You choose who it reaches, and the
+narrower option is preselected:
+
+- **People who already have access** (the default) — opening the link requires
+  signing in, and only people who can already see the agent will see the canvas.
+- **Anyone with the link** — no sign-in at all. The dialog says so plainly,
+  because it is the option that reaches further than the canvas did before.
+
+A shared canvas **stays current**: whoever opens the link sees it as the agent
+updates it, not a copy from when you shared it. The page says this, and shows
+the last-updated time and the "may be out of date" mark. **Revoke** turns a link
+off; anyone holding it is told it was turned off rather than getting a broken
+page. Creating and revoking links is recorded in the audit log.
+
+**PDF** is available from every canvas surface. It uses your browser's own
+print-to-PDF, so what you get matches what you see: the same typography, charts
+and diagrams, one clean column, and no block split across a page break. The PDF
+carries the canvas title, the agent and the date, and is always the light
+rendering even if you work in dark mode. If your browser cannot do it, the
+button says so and tells you to use Print → Save as PDF.
+
+## Removing canvases
+
+An agent that uses its canvas well accumulates them — one per report, per topic,
+per run. You can clear the pile from either the **Canvas tab** on Agent Detail or
+the **Canvas tab in the Workspace rail**.
+
+- **Delete one**, or switch on **Manage** to select several and delete them in
+  one action. You are asked to confirm once, and the confirmation names how many
+  will go. Deleting is recorded in the audit log — from the Workspace as well as
+  from Agent Detail, attributed to the person who did it either way.
+- **Only the agent's owner (or an admin) can delete, pin or share.** If you can
+  see an agent's canvases but do not own the agent, there are no delete controls —
+  rather than buttons that would refuse.
+- **Sharing is yours alone, never the agent's.** An agent can write a canvas and
+  mark it for its roster, but it cannot create, list or revoke a share link —
+  the share routes refuse an agent's own key outright, the same way the pin
+  route does. Deciding who *outside* the platform may read a canvas is a
+  person's call, and a link that reaches the open internet is not something an
+  agent should be able to mint for itself.
+- **Pin** the ones you use daily and they stay at the top as the list grows. A
+  pin is yours, not the agent's: the agent cannot pin its own canvas — the pin
+  route refuses an agent's own key outright — and rewriting a canvas does not
+  un-pin it. Pinning is recorded in the audit log too, from either surface,
+  because a pin decides what everyone who can see the agent sees first.
+- **Search** appears once there are more than six, matching the title or the id.
+  Each row in Manage shows how old it is and whether it may be out of date.
+- **Deleting the default canvas is fine.** The agent recreates it the next time
+  it writes; you lose the contents, not the surface.
+
+**There is a limit.** Each agent can hold 100 canvases, and the Canvas tab tells
+you the count as you approach it rather than only when the agent is refused. At the limit the agent
+can still *update* everything it has, but creating a *new* one is refused with a
+message telling it to retire one first — nothing is ever deleted automatically to
+make room. If you see an agent bumping into this, it is usually writing a new
+canvas per run instead of keeping one per topic current; asking it to reuse a
+canvas, or clearing the finished ones, fixes it.
 
 ## Security
 
