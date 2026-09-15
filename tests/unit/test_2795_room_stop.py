@@ -181,11 +181,12 @@ class _WakeHarness:
     is the assertion.
     """
 
-    def __init__(self, monkeypatch, rooms, result):
+    def __init__(self, monkeypatch, rooms, result, persisted_status=None):
         self.system_lines = []
         self.cleared_sessions = []
         self.advanced = []
         self.posted = []
+        self.reread = []
 
         monkeypatch.setattr(rooms.db, "get_participant",
                             lambda *a, **k: {"last_read_seq": 0, "cached_session_id": "sess-cached"})
@@ -219,6 +220,26 @@ class _WakeHarness:
         import services.task_execution_service as tes
         monkeypatch.setattr(tes, "get_task_execution_service",
                             lambda: SimpleNamespace(execute_task=_execute_task))
+
+        # The #2795 label re-read. `persisted_status=None` models a row that
+        # cannot be read at all, which must leave the returned status in force.
+        harness = self
+
+        class _CoreDB:
+            def get_execution(self, eid):
+                harness.reread.append(eid)
+                if persisted_status is _UNREADABLE:
+                    raise RuntimeError("db down")
+                if persisted_status is None:
+                    return None
+                return SimpleNamespace(status=persisted_status)
+
+        import database
+        monkeypatch.setattr(database, "db", _CoreDB())
+
+
+#: Distinguishes "the row read as nothing" from "the read raised".
+_UNREADABLE = object()
 
 
 def _result(status, response="", error=""):
@@ -287,3 +308,82 @@ def test_the_wake_stamps_the_poster_so_only_they_can_stop_it(monkeypatch, rooms)
 
     assert h.kwargs["source_user_email"] == EMAIL
     assert h.kwargs["triggered_by"] == "room"
+
+
+# ---------------------------------------------------------------------------
+# 3. the label that actually stands (old agent images)
+# ---------------------------------------------------------------------------
+
+def test_a_failed_label_over_a_cancelled_row_reads_as_stopped(monkeypatch, rooms):
+    """The old-image path. The agent re-raises instead of relabelling, so
+    `execute_task` writes FAILED, that write LOSES the CAS to the CANCELLED the
+    terminate route already wrote — and returns FAILED anyway. Without the
+    re-read the room blames the agent for a stop the reader asked for."""
+    h = _WakeHarness(monkeypatch, rooms, _result("failed", error="Timeout"),
+                     persisted_status="cancelled")
+    asyncio.run(rooms._wake_agent(SimpleNamespace(email=EMAIL), ROOM, AGENT, 1))
+
+    assert h.reread == ["exec-room-1"]
+    assert h.system_lines == [f"{AGENT}'s turn was stopped."]
+    # And the resume handle survives: a cancel is no evidence of a dead one.
+    assert h.cleared_sessions == []
+
+
+def test_a_genuine_failure_is_still_a_failure(monkeypatch, rooms):
+    """The re-read must not turn every failure into a cancel."""
+    h = _WakeHarness(monkeypatch, rooms, _result("failed", error="boom"),
+                     persisted_status="failed")
+    asyncio.run(rooms._wake_agent(SimpleNamespace(email=EMAIL), ROOM, AGENT, 1))
+
+    assert h.system_lines == [f"{AGENT} could not respond: boom"]
+    assert h.cleared_sessions == [(ROOM, AGENT)]
+
+
+def test_an_already_cancelled_label_is_not_re_read(monkeypatch, rooms):
+    """No read on the path that is already exact — the common case pays nothing."""
+    h = _WakeHarness(monkeypatch, rooms, _result("cancelled"), persisted_status="cancelled")
+    asyncio.run(rooms._wake_agent(SimpleNamespace(email=EMAIL), ROOM, AGENT, 1))
+
+    assert h.reread == []
+    assert h.system_lines == [f"{AGENT}'s turn was stopped."]
+
+
+def test_a_success_with_a_reply_is_not_re_read(monkeypatch, rooms):
+    """The hot path pays nothing. The first draft re-read on EVERY turn — one
+    extra DB read per successful room reply, for a label that could not change."""
+    h = _WakeHarness(monkeypatch, rooms, _result("success", response="ok"),
+                     persisted_status="cancelled")
+    asyncio.run(rooms._wake_agent(SimpleNamespace(email=EMAIL), ROOM, AGENT, 1))
+
+    assert h.reread == []
+    assert h.system_lines == []
+    assert h.posted
+
+
+def test_a_success_with_no_reply_IS_re_read(monkeypatch, rooms):
+    """An empty reply takes the failure branch, so it is a place the label can
+    still be wrong — a SIGKILL'd turn on an old image can land here."""
+    h = _WakeHarness(monkeypatch, rooms, _result("success", response="  "),
+                     persisted_status="cancelled")
+    asyncio.run(rooms._wake_agent(SimpleNamespace(email=EMAIL), ROOM, AGENT, 1))
+
+    assert h.reread == ["exec-room-1"]
+    assert h.system_lines == [f"{AGENT}'s turn was stopped."]
+    assert h.cleared_sessions == []
+
+
+def test_an_unreadable_row_leaves_the_returned_status_in_force(monkeypatch, rooms):
+    """Fail-OPEN: a label read must never be able to break the turn."""
+    h = _WakeHarness(monkeypatch, rooms, _result("failed", error="boom"),
+                     persisted_status=_UNREADABLE)
+    asyncio.run(rooms._wake_agent(SimpleNamespace(email=EMAIL), ROOM, AGENT, 1))
+
+    assert h.system_lines == [f"{AGENT} could not respond: boom"]
+
+
+def test_a_missing_row_leaves_the_returned_status_in_force(monkeypatch, rooms):
+    h = _WakeHarness(monkeypatch, rooms, _result("failed", error="boom"),
+                     persisted_status=None)
+    asyncio.run(rooms._wake_agent(SimpleNamespace(email=EMAIL), ROOM, AGENT, 1))
+
+    assert h.system_lines == [f"{AGENT} could not respond: boom"]
