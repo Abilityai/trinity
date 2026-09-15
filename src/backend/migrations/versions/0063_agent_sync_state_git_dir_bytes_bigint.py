@@ -11,22 +11,25 @@ SQLite never showed it (its INTEGER is 64-bit), which is how it shipped.
 ``ALTER COLUMN ... TYPE BIGINT`` is a metadata-plus-rewrite of one small table
 (one row per agent); int4 -> int8 needs no ``USING`` and loses nothing.
 
-Mirrors the SQLite ``agent_sync_state_git_dir_bytes_bigint`` migration in
-``db/migrations.py`` (a declared-type rebuild there, since SQLite has no ALTER
-COLUMN TYPE) and the DDL in ``db/schema.py`` / MetaData in ``db/tables.py``.
+Mirrors the DDL in ``db/schema.py`` and the MetaData in ``db/tables.py``. The
+SQLite track deliberately carries NO migration: INTEGER and BIGINT are the
+same 64-bit affinity there, so nothing changes for an upgraded file, and the
+schema-parity suite cannot observe the declared type of this column (both of
+its fixtures build from empty). See the note beside
+``_migrate_agent_sync_state_git_dir_bytes`` in ``db/migrations.py``.
 
 Fresh PG builds already get BIGINT via ``0001_baseline`` (it reuses the
 ``schema.py`` DDL); the ALTER is then a no-op.
 
-Revision ID: 0062_agent_sync_state_git_dir_bytes_bigint
-Revises: 0061_execution_open_canvas
+Revision ID: 0063_agent_sync_state_git_dir_bytes_bigint
+Revises: 0062_execution_fan_out_task_id
 Create Date: 2026-09-15
 """
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0062_agent_sync_state_git_dir_bytes_bigint"
-down_revision = "0061_execution_open_canvas"
+revision = "0063_agent_sync_state_git_dir_bytes_bigint"
+down_revision = "0062_execution_fan_out_task_id"
 branch_labels = None
 depends_on = None
 

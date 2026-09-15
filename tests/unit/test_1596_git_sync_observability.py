@@ -8,7 +8,6 @@ by the image build / live sync, not here.
 """
 from __future__ import annotations
 
-import importlib.util
 import sqlite3
 import sys
 from pathlib import Path
@@ -95,104 +94,34 @@ class TestDefaultGitignoreConventions:
             assert pat in _GITIGNORE_PATTERNS
 
 
-class TestGitDirBytesSqliteDeclaredTypeMigration:
-    """#2800: the SQLite half is a declared-type rebuild, and it must keep the rows.
+class TestGitDirBytesNeedsNoSqliteMigration:
+    """#2800 on the SQLite track is deliberately NOTHING.
 
-    SQLite has no ALTER COLUMN TYPE, so the migration re-creates
-    `agent_sync_state` via the #1160 rename-swap. Three things must hold on a
-    pre-#2800 file: the column now reads BIGINT (schema-parity compares declared
-    types), every row survives verbatim, and the one index is back.
+    INTEGER and BIGINT are the same 64-bit INTEGER affinity in SQLite, so an
+    upgraded file that still declares INTEGER stores the same values as a fresh
+    file declaring BIGINT. The first version of this fix shipped a rename-swap
+    rebuild of the live table at boot on the claim that the schema-parity suite
+    would otherwise go red — a negative control (registration removed) showed
+    it stays green, because both parity fixtures build from empty and never see
+    a pre-#2800 file. A boot-time DROP TABLE for a CI benefit that does not
+    exist is the wrong trade, so the migration was dropped and this pins that it
+    stays dropped for a REASON rather than being re-added by the next reader of
+    the Alembic revision's "mirrors" sentence.
     """
 
-    @staticmethod
-    def _migrations():
-        spec = importlib.util.spec_from_file_location(
-            "migrations_for_2800", _BACKEND / "db" / "migrations.py"
+    def test_no_sqlite_migration_is_registered_for_the_widening(self):
+        src = (_BACKEND / "db" / "migrations.py").read_text(encoding="utf-8")
+        assert "agent_sync_state_git_dir_bytes_bigint" not in src.split("MIGRATIONS = [")[1], (
+            "a SQLite migration for #2800 was re-registered — read the note beside "
+            "_migrate_agent_sync_state_git_dir_bytes before keeping it"
         )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
 
-    def test_rebuild_redeclares_bigint_and_preserves_rows(self):
+    def test_a_pre_2800_sqlite_file_stores_a_64_bit_value_unchanged(self):
+        """The property the dropped rebuild was NOT needed for: INTEGER affinity
+        already holds the value that overflows int4 on PostgreSQL."""
         conn = sqlite3.connect(":memory:")
         cur = conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE agent_sync_state (
-                agent_name TEXT PRIMARY KEY,
-                last_sync_at TEXT,
-                last_sync_status TEXT,
-                consecutive_failures INTEGER DEFAULT 0,
-                last_error_summary TEXT,
-                last_remote_sha_main TEXT,
-                last_remote_sha_working TEXT,
-                ahead_main INTEGER DEFAULT 0,
-                behind_main INTEGER DEFAULT 0,
-                ahead_working INTEGER DEFAULT 0,
-                behind_working INTEGER DEFAULT 0,
-                git_dir_bytes INTEGER,
-                pack_count INTEGER,
-                loose_objects INTEGER,
-                maintenance_failures INTEGER DEFAULT 0,
-                last_check_at TEXT,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sync_state_status "
-            "ON agent_sync_state(last_sync_status, consecutive_failures)"
-        )
-        cur.execute(
-            "INSERT INTO agent_sync_state (agent_name, last_sync_status, consecutive_failures, "
-            "git_dir_bytes, pack_count, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            ("a1", "failed", 3, 47244640256, 21, "2026-09-15T00:00:00Z"),
-        )
-        conn.commit()
-
-        mig = self._migrations()
-        mig._migrate_agent_sync_state_git_dir_bytes_bigint(cur, conn)
-
-        declared = {row[1]: row[2].upper() for row in cur.execute("PRAGMA table_info(agent_sync_state)")}
-        assert declared["git_dir_bytes"] == "BIGINT"
-        assert declared["pack_count"] == "INTEGER"  # only the byte column moved
-        row = cur.execute(
-            "SELECT agent_name, last_sync_status, consecutive_failures, git_dir_bytes, pack_count, updated_at "
-            "FROM agent_sync_state"
-        ).fetchall()
-        assert row == [("a1", "failed", 3, 47244640256, 21, "2026-09-15T00:00:00Z")]
-        indexes = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='index'")}
-        assert "idx_sync_state_status" in indexes
-        assert not cur.execute(
-            "SELECT name FROM sqlite_master WHERE name='agent_sync_state_new'"
-        ).fetchone()
-
-        # Idempotent: a second run sees BIGINT and touches nothing.
-        mig._migrate_agent_sync_state_git_dir_bytes_bigint(cur, conn)
-        assert cur.execute("SELECT COUNT(*) FROM agent_sync_state").fetchone()[0] == 1
-
-    def test_refuses_to_drop_an_unknown_column(self):
-        """A rename-swap copies only the columns it names; an unknown one must stop it, not vanish."""
-        conn = sqlite3.connect(":memory:")
-        cur = conn.cursor()
-        cur.execute(
-            "CREATE TABLE agent_sync_state (agent_name TEXT PRIMARY KEY, git_dir_bytes INTEGER, "
-            "updated_at TEXT NOT NULL, future_col TEXT)"
-        )
-        cur.execute("INSERT INTO agent_sync_state VALUES ('a1', 1, 'now', 'keep me')")
-        conn.commit()
-        with pytest.raises(RuntimeError, match="future_col"):
-            self._migrations()._migrate_agent_sync_state_git_dir_bytes_bigint(cur, conn)
-        # Nothing touched: column and row both still there, no orphan _new table.
-        assert cur.execute("SELECT future_col FROM agent_sync_state").fetchone() == ("keep me",)
-        assert not cur.execute("SELECT 1 FROM sqlite_master WHERE name='agent_sync_state_new'").fetchone()
-
-    def test_noop_before_the_column_exists(self):
-        """Pre-#1596 file: the add-column migration runs first; this one must not rebuild a table it cannot describe."""
-        conn = sqlite3.connect(":memory:")
-        cur = conn.cursor()
-        cur.execute("CREATE TABLE agent_sync_state (agent_name TEXT PRIMARY KEY, updated_at TEXT NOT NULL)")
-        conn.commit()
-        self._migrations()._migrate_agent_sync_state_git_dir_bytes_bigint(cur, conn)
-        assert "git_dir_bytes" not in {row[1] for row in cur.execute("PRAGMA table_info(agent_sync_state)")}
+        cur.execute("CREATE TABLE agent_sync_state (agent_name TEXT PRIMARY KEY, git_dir_bytes INTEGER, updated_at TEXT NOT NULL)")
+        big = 44 * 1024 ** 3   # the 44 GiB repo from the report; > 2**31
+        cur.execute("INSERT INTO agent_sync_state VALUES ('a', ?, 'now')", (big,))
+        assert cur.execute("SELECT git_dir_bytes FROM agent_sync_state").fetchone()[0] == big
