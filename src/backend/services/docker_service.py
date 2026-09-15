@@ -682,13 +682,35 @@ def get_next_available_port(exclude: Optional[Set[int]] = None) -> int:
     return port
 
 
-async def execute_command_in_container(container_name: str, command: str, timeout: int = 60) -> dict:
+async def execute_command_in_container(
+    container_name: str,
+    command: str,
+    timeout: int = 60,
+    *,
+    environment: Optional[Dict[str, str]] = None,
+    user: str = "developer",
+) -> dict:
     """Execute a command in a Docker container.
 
     Args:
         container_name: Name of the container (e.g., "agent-myagent")
         command: Command to execute
-        timeout: Timeout in seconds
+        timeout: ACCEPTED AND NOT FORWARDED. Pre-existing (`container_exec_run`
+            has no timeout parameter and docker-py's exec has none either);
+            named here so a caller does not read it as a bound it is not. A
+            call that can hang must bound ITSELF — `asyncio.wait_for` frees the
+            caller, and an in-container `timeout N` prefix frees the pool
+            thread, which `wait_for` alone does not.
+        environment: Per-exec env, sent in the Exec Create body — NOT argv
+            (ent#615). This is how a credential reaches an in-container git
+            without appearing in the process table.
+        user: Container user to exec as. Defaults to the agent's own uid.
+            ``user="root"`` is for the two cases that need it: installing
+            root-owned platform files, and an exec whose ``environment``
+            carries a credential the AGENT must not read — a same-uid process
+            can read `/proc/<pid>/environ` for the life of the exec, a
+            different-uid one cannot (`ssh_service.py` is the existing
+            root-exec precedent).
 
     Returns:
         Dictionary with 'exit_code' and 'output' keys
@@ -703,7 +725,8 @@ async def execute_command_in_container(container_name: str, command: str, timeou
         result = await container_exec_run(
             container,
             command,
-            user="developer"
+            user=user,
+            environment=environment,
         )
 
         # result.exit_code is the exit code

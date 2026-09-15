@@ -121,19 +121,72 @@ if [ -n "${GITHUB_REPO}" ]; then
     GIT_BASE_URL="${GIT_BASE_URL%/}"
     GIT_HOST_PATH="${GIT_BASE_URL#*://}"
     GIT_SCHEME="${GIT_BASE_URL%%://*}"
-    if [ -n "${GITHUB_PAT}" ]; then
-        CLONE_URL="${GIT_SCHEME}://oauth2:${GITHUB_PAT}@${GIT_HOST_PATH}/${GITHUB_REPO}.git"
-    else
-        CLONE_URL="${GIT_SCHEME}://${GIT_HOST_PATH}/${GITHUB_REPO}.git"
-    fi
+    # ent#615: ONE form, and it carries no credential. The PAT-bearing userinfo
+    # branch that used to sit here is what put the platform token in
+    # `.git/config` on the workspace volume and — because git expands the
+    # stored URL into `git-remote-https`'s argv — in the process table on every
+    # fetch and push, from where `ps` -> the orphan sweep's reaped-cmdline log
+    # -> Vector -> the logs API carried it into another agent's context.
+    # The credential now arrives per operation from the `trinity` credential
+    # helper, which git speaks to over stdin (see
+    # /usr/local/bin/git-credential-trinity).
+    CLONE_URL="${GIT_SCHEME}://${GIT_HOST_PATH}/${GITHUB_REPO}.git"
+    GIT_HOSTPORT="${GIT_HOST_PATH%%/*}"
+
+    # Does anything resolve a credential for our origin? EXIT CODE only:
+    # `git credential fill` PRINTS the credential on stdout, and this script's
+    # output is the container log.
+    credential_resolves() {
+        [ -x /usr/local/bin/git-credential-trinity ] || return 1
+        printf 'protocol=%s\nhost=%s\n\n' "${GIT_SCHEME}" "${GIT_HOSTPORT}" \
+            | git credential fill >/dev/null 2>&1
+    }
+
+    # ent#615/CRIT-2: NEVER strip a credential we have not already replaced.
+    #
+    # This rewrite used to be unconditional, which was safe only while the
+    # replacement URL also carried a token. It no longer does, and one class of
+    # agent has its ONLY credential inside that URL: `POST /{agent}/git/initialize`
+    # writes an `agent_git_config` row and pushes with the resolved — often
+    # global — platform PAT, but bakes no git env, persists no per-agent row and
+    # writes no `.env`. For that agent an unconditional rewrite is not a scrub,
+    # it is destruction of its last credential, at container start, before any
+    # backend sweep could harvest it.
+    retemplate_origin() {
+        _current=$(git remote get-url origin 2>/dev/null || echo "")
+        case "${_current}" in
+            *://*@*)
+                if [ -n "${GITHUB_PAT}" ] || credential_resolves; then
+                    git remote set-url origin "${CLONE_URL}"
+                else
+                    echo "TRINITY_GIT_CREDENTIAL_PRESERVED: origin carries the only credential this agent has - leaving the URL in place (ent#615)"
+                fi
+                ;;
+            *)
+                # No userinfo to lose: always safe, and this is the ent#123
+                # tokenless path unchanged.
+                git remote set-url origin "${CLONE_URL}" 2>/dev/null || \
+                    git remote add origin "${CLONE_URL}" 2>/dev/null || true
+                ;;
+        esac
+    }
 
     # ent#123: tokenless agents are pull-only. Blackhole the push URL so ANY
     # in-container `git push` (Claude turns, gh, skills) fails immediately
     # with a self-describing error instead of a cryptic anonymous-auth
     # failure an LLM will retry-loop on. With a PAT, clear any leftover
     # blackhole so a token added later restores pushes.
+    # ent#615 widened the gate from `GITHUB_PAT` to "a credential resolves".
+    # Deliberate and narrow: `credential_resolves` is true for exactly the
+    # sources the helper reads — `.env`, baked env, and the ent#615 harvest
+    # file, which only ever exists for an agent whose own remote URL already
+    # carried a push credential. An ent#123 tokenless agent resolves nothing
+    # and stays blackholed, which is the behaviour this function exists for.
+    # Writing `GITHUB_PAT` itself would have been a GRANT (startup.sh exports
+    # it as GH_TOKEN/GITHUB_TOKEN, authenticating the whole `gh` CLI and REST
+    # API) — which is why the harvest does not.
     configure_push_remote() {
-        if [ -n "${GITHUB_PAT}" ]; then
+        if [ -n "${GITHUB_PAT}" ] || credential_resolves; then
             git config --unset remote.origin.pushurl 2>/dev/null || true
         else
             git remote set-url --push origin \
@@ -154,13 +207,11 @@ if [ -n "${GITHUB_REPO}" ]; then
             cd /home/developer || exit 1
             CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
             echo "Current branch: ${CURRENT_BRANCH} (preserved from previous run)"
-            # Update remote URL with the current credentials (PAT may have
-            # rotated since last start). ent#123: unconditional — with no PAT
-            # the rewrite installs the credential-less URL, scrubbing a stale
-            # embedded token (the live-injected-PAT case is covered by the
-            # workspace .env fallback above, so a working credential is never
-            # clobbered).
-            git remote set-url origin "${CLONE_URL}"
+            # ent#615: conditional, per `retemplate_origin` above. A stale
+            # embedded token IS scrubbed on every restart — but only once
+            # something else can authenticate, so an agent whose origin URL is
+            # its only credential is never stranded.
+            retemplate_origin
             configure_push_remote
             # trinity-enterprise#93: keep the credential-less upstream remote
             # (template source) in place across restarts — self-healing if it
@@ -256,9 +307,10 @@ if [ -n "${GITHUB_REPO}" ]; then
                 echo "Working branch '${GIT_WORKING_BRANCH}' ready"
             fi
 
-            # Store git remote URL (with credentials when a PAT exists;
-            # credential-less + blackholed push for tokenless agents, ent#123)
-            git remote set-url origin "${CLONE_URL}"
+            # Store the git remote URL. ent#615: credential-less for every
+            # agent; blackholed push for tokenless ones (ent#123). A fresh
+            # clone has no userinfo to lose, so this is a no-op rewrite.
+            retemplate_origin
             configure_push_remote
 
             # trinity-enterprise#93: fork-to-own agents track the template

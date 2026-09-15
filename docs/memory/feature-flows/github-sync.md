@@ -79,7 +79,7 @@ create_agent(name="my-agent", template="github:owner/repo@develop", source_branc
 | 3. URL Parsing | `src/backend/services/agent_service/crud.py` | 102-113 | Parse `@branch` from template URL, validate alphanumeric + `-_/` |
 | 4. Template Lookup | `src/backend/services/agent_service/crud.py` | 115-117 | Reconstruct URL without branch for template lookup |
 | 5. Env Var Set | `src/backend/services/agent_service/crud.py` | 328 | `GIT_SOURCE_BRANCH` set from `config.source_branch` |
-| 6. Template Clone | `src/backend/services/template_service.py` | 22-41 | `clone_github_repo()` accepts optional `branch` param, adds `-b branch` flag |
+| 6. Template Clone | — | — | `clone_github_repo()` was **deleted** by ent#615: it built `https://oauth2:<pat>@github.com/…` and passed it as **argv** to `subprocess.run` on the backend host, and it had no production callers. Branch selection reaches the container as `GIT_SOURCE_BRANCH` (step 7). |
 | 7. Container Clone | `docker/base-image/startup.sh` | 38-45 | Uses `GIT_SOURCE_BRANCH` in `git clone -b` command |
 | 8. Branch Checkout | `docker/base-image/startup.sh` | 57-67 | Source mode checks out and tracks the specified branch |
 
@@ -126,12 +126,15 @@ GIT_SOURCE_BRANCH=main         # Branch to track (default: main)
 ### Startup Behavior (`docker/base-image/startup.sh`)
 
 The clone gate is `[ -n "${GITHUB_REPO}" ]` only (ent#123 — previously the
-block also required a PAT). `CLONE_URL` is built conditionally: with a PAT it
-embeds `oauth2:${GITHUB_PAT}@` as before; without one it is the plain
-credential-less URL (mirroring the fork-to-own `UPSTREAM_URL`), and
+block also required a PAT). `CLONE_URL` has **one** form and it is
+credential-less (ent#615 — see [Credential-free remotes](#credential-free-remotes-ent615)
+below; the PAT-bearing branch is gone, and the credential arrives per
+operation from the `trinity` git credential helper), and
 `GIT_TERMINAL_PROMPT=0` is exported so any auth challenge fails fast instead
-of hanging on a prompt. After clone/restart, `configure_push_remote()` sets or
-clears the tokenless push blackhole (see the ent#123 section below).
+of hanging on a prompt. After clone/restart, `retemplate_origin()` rewrites
+the remote — **conditionally**, never stripping userinfo it has not already
+replaced — and `configure_push_remote()` sets or clears the tokenless push
+blackhole (see the ent#123 section below).
 
 ```bash
 # SOURCE MODE (lines 41-54): Track the source branch directly (unidirectional pull only)
@@ -486,8 +489,7 @@ writer for both, over the `_GIT_ENV_KEYS` set (`GITHUB_REPO`, `GITHUB_PAT`,
 ### Container start — `docker/base-image/startup.sh`
 
 - **Clone gate is `[ -n "${GITHUB_REPO}" ]` only** (was PAT-gated).
-  `CLONE_URL`: PAT → `oauth2:${GITHUB_PAT}@…` as before; no PAT →
-  credential-less URL, mirroring the fork-to-own `UPSTREAM_URL`.
+  `CLONE_URL`: one credential-less form for every agent (ent#615).
 - `export GIT_TERMINAL_PROMPT=0` in the git block — an auth challenge (repo
   goes private later, PAT revoked) is a deterministic fail-fast "could not
   read Username" instead of a hang on a prompt.
@@ -499,28 +501,43 @@ writer for both, over the `_GIT_ENV_KEYS` set (`GITHUB_REPO`, `GITHUB_PAT`,
   with readable text instead of a cryptic anonymous-auth failure an LLM will
   retry-loop on; with a PAT it clears any leftover blackhole
   (`git config --unset remote.origin.pushurl`) so a token added later
-  restores pushes.
+  restores pushes. **ent#615 widened the gate** from `GITHUB_PAT` to "a
+  credential resolves" — narrowly: the helper reads `.env`, baked env, and the
+  ent#615 harvest file, which only ever exists for an agent whose own remote
+  URL already carried a push credential. An ent#123 tokenless agent resolves
+  nothing and stays blackholed, which is what this function is for.
 - **Workspace `.env` PAT fallback** (top of file): when the baked env lacks
   `GITHUB_PAT`, it is read from `/home/developer/.env` — a per-agent PAT
   configured AFTER creation is live-injected there (#1264) while the baked env
   stays tokenless until the next recreate, and an ops-path raw restart re-runs
   startup.sh with the tokenless baked env. Baked env wins when both are set.
-- **Restart-path `git remote set-url origin` is now unconditional** — with no
-  PAT the rewrite installs the credential-less URL, scrubbing a stale embedded
-  token (safe: the `.env` fallback above means a working live-injected
-  credential is never clobbered).
+- **Restart-path `git remote set-url origin` is CONDITIONAL (ent#615)** — it
+  still scrubs a stale embedded token on every restart, but only once
+  something else can authenticate. Unconditional was safe while the
+  replacement URL also carried a token; it no longer does, and one class of
+  agent has its only credential inside that URL (`POST /{agent}/git/initialize`
+  — see the `per_agent_only` row above, which describes exactly this row
+  shape). For that agent an unconditional rewrite is not a scrub, it is
+  destruction of its last credential — at container start, before any backend
+  sweep could harvest it. When it declines, it says so:
+  `TRINITY_GIT_CREDENTIAL_PRESERVED`.
 - Clone-failure causes text gains "Repository is private and no GitHub token
   is configured".
 
 ### Push-path guards — `git_service.py`
 
-`_agent_has_write_credentials(agent_name, container)` — predicate = the
-container's baked `GITHUB_PAT` env **OR** `db.get_agent_github_pat` (per-agent
-tier only, never global — a global PAT never reaches a tokenless container's
-remote; the OR covers the #1264 live-injection window where the PAT reaches
-the workspace `.env` + origin remote before any recreate). **Fail-open**: any
-error reading either source returns `True`, so the guard can only ever produce
-a clearer message, never block a working push.
+`_agent_can_push(agent_name, container)` — the CHEAP tiers first
+(`_agent_has_write_credentials`: the container's baked `GITHUB_PAT` env **OR**
+`db.get_agent_github_pat`; the OR covers the #1264 live-injection window where
+the PAT reaches the workspace `.env` before any recreate), then the credential
+helper's own ladder, asked in the container **by exit code** and only for an
+agent the cheap tiers call tokenless. **ent#615 is why the second tier
+exists**: that predicate's stated premise — "never global, a global PAT never
+reaches a tokenless container's remote" — became false when the helper started
+resolving `.env` and the harvest file, neither of which the cheap tiers can
+see, and answering `no_write_credentials` to an agent that CAN push is a lie.
+**Fail-open** throughout: any error returns `True`, so the guard can only ever
+produce a clearer message, never block a working push.
 
 - `sync_to_github` returns a named failure **before contacting the agent**:
   `conflict_type: "no_write_credentials"`, `conflict_class: "AUTH_FAILURE"`,
@@ -1389,9 +1406,114 @@ Push is the right answer:
 
 ---
 
+## Credential-free remotes (ent#615)
+
+**The defect.** Trinity persisted every agent's remote as
+`<scheme>://oauth2:<PAT>@<host>/<org>/<repo>.git`. That put the fleet-wide
+GitHub token in `.git/config` on the workspace volume — at rest, readable by
+the agent's own `Bash` tool for the life of the container — *and*, because git
+expands the stored URL into `git-remote-https`'s argv on every fetch and push,
+in the container's process table roughly twice a minute from the 60 s
+sync-health poll alone. From argv: `ps` → the agent server's orphan-sweep
+reaped-cmdline logging → Vector → the host log files → `get_agent_logs` / MCP
+→ **another agent's LLM context**. ent#292 closed the last hop of that chain
+and was rated P0.
+
+**The mechanism.** A git **credential helper**. Git speaks the credential
+protocol to it over stdin/stdout, which never reaches argv and is never
+persisted, so remote URLs become credential-less and all four producers stop
+building one. The helper needs **zero** changes at the ~42 raw
+`subprocess.run(["git", …])` sites in `agent_server/routers/git.py`, and it
+covers platform-, agent- and `docker exec`-initiated git identically.
+
+| Piece | Where |
+|---|---|
+| The helper | `docker/base-image/git-credential-trinity.sh` → `/usr/local/bin/git-credential-trinity` (root:root 0755) |
+| Its registration | `/etc/gitconfig`: `credential.helper = trinity` (Dockerfile; re-applied by the sweep for old-image containers) |
+| Byte-identical backend mirror + string builders + the sweep | `services/git_credential_helper.py` (Invariant #5; parity test walks **both** trees) |
+| The sweep | `git_service.scrub_git_remote_tokens` / `sweep_fleet_git_remote_tokens` / `spawn_git_remote_token_scrub` |
+
+**Three things that each cost a design iteration**, recorded so they are not
+re-litigated:
+
+1. **Registered as `trinity`, not as the filename.** Git prepends
+   `git-credential-` to any helper value that is not an absolute path, so
+   registering `git-credential-trinity` resolves to
+   `git-credential-git-credential-trinity` — a command that does not exist.
+   The helper silently never runs, and with credential-less URLs that is a
+   fleet-wide fetch/push outage no source-only CI can see.
+2. **Registered unscoped, host-checked inside.** `TRINITY_GIT_BASE_URL` is a
+   *runtime* value, so a `credential.<base>.helper` baked at image-build time
+   could only ever name github.com and a self-hosted install would get no
+   helper at all. The helper resolves the allowed origin at request time and
+   matches protocol + host **exactly, port-inclusive** (git feeds
+   `host=trinity-gitea-dev:3000` for the self-hosted harness, so a
+   bare-hostname compare silently refuses it — and a suffix compare would be
+   an exfiltration primitive).
+3. **`.env` → baked env → harvest file**, the INVERSE of `startup.sh`'s
+   ladder. `startup.sh` runs at **boot**, where baked `Config.Env` is the
+   freshly-recreated truth; the helper runs in **steady state**, where
+   `Config.Env` is immutable without a recreate and `.env` carries the token a
+   no-restart change (#1264, #1967) just injected. Baked-env-first would make
+   a global rotation a silent no-op until the old token is revoked.
+
+**Never strip a credential you have not already replaced.** One class of agent
+has its only credential inside its own origin URL — `POST /{agent}/git/initialize`
+writes an `agent_git_config` row and pushes with the resolved (often global)
+platform PAT, but bakes no git env, persists no per-agent row and writes no
+`.env`. So every path that rewrites a remote proves a replacement first:
+
+- the sweep installs the helper, probes it **by exit code** (`git credential
+  fill` prints the credential on stdout, and the sweep's output crosses the
+  `docker exec` boundary into the platform log and `GitInitResult.error`),
+  harvests only when nothing else resolves, and **refuses and reports** —
+  raising an operator-queue alert — rather than stripping what it could not
+  replace;
+- `startup.sh`'s per-restart rewrite is conditional, logging
+  `TRINITY_GIT_CREDENTIAL_PRESERVED` when it declines;
+- `update_remote_pat` writes `.env` over `docker exec` (which works while the
+  agent server is wedged, restarting or OOM — the HTTP write it belts does
+  not) before it re-points anything;
+- `initialize_git_in_container` **seeds** the credential it already holds
+  before any remote is written, which is what stops it creating new orphans.
+
+**The harvest is a relocation, never a grant.** The rescued credential lands
+in `/home/developer/.trinity/git-credential` (0600, ignored contents-only by
+`.trinity/*` per #2070) — the helper's **last** rung, so it only ever serves an
+agent with nothing else. Deliberately **not** `.env` as `GITHUB_PAT`, which
+`startup.sh` exports as `GH_TOKEN`/`GITHUB_TOKEN` (authenticating the whole
+`gh` CLI and REST API) and which gates the ent#123 push blackhole — writing
+that name would be the ent#162 class applied fleet-wide. And not the per-agent
+DB row either, which `_apply_git_env_from_db` would bake into `GITHUB_PAT` on
+the next recreate, arriving at the same grant one step later.
+
+**Reaching the fleet** — three reachers, no new recurring service (after this
+change nothing produces a token URL, so there is no recurring producer to
+chase): a leader-locked boot-time one-shot, the `start_agent_internal` hook
+(**without** #2069's `auto_sync_enabled` gate — whether an agent auto-syncs
+has nothing to do with whether its `.git/config` holds a token), and
+`startup.sh`'s conditional per-restart rewrite. The one-shot is the reacher
+that covers a `restart: unless-stopped` container the Docker daemon brings
+back after a **host reboot**, which never passes through `start_agent_internal`.
+Runbook: [`docs/migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md`](../../migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md).
+
+**The scrubbers stay.** `startup.sh`'s clone-log `sed`, `orphan_sweep.py`'s
+reaped-cmdline scrub and both `credential_sanitizer` copies are NOT deleted
+because their cause was removed: every volume created before this change still
+holds a token in `.git/config`, and the sweep only reaches a container it can
+exec into.
+
+**Not closed.** An agent reading its own credential. `GITHUB_PAT` stays in the
+container env and `.env`; root ownership of the helper is **integrity**, not
+confidentiality. Blast radius is unchanged — the credential is still
+fleet-wide. Structural fix: **ent#558 (AAuth)**. Cheapest existing lever:
+per-agent, repo-scoped PATs via `agent_git_config.github_pat_encrypted`.
+
+---
+
 ## Security Considerations
 
-1. **GitHub PAT**: Passed as environment variable, never exposed in logs or API responses. Not required for public source-mode templates — a tokenless agent (ent#123) bakes no `GITHUB_PAT`/`GH_TOKEN`/`GITHUB_TOKEN` at all, clones anonymously, and gets a blackholed push URL (`startup.sh::configure_push_remote`) so it is read-only toward GitHub by construction
+1. **GitHub PAT**: Passed as environment variable, never exposed in logs or API responses, and since ent#615 **never embedded in a remote URL** — see [Credential-free remotes](#credential-free-remotes-ent615). Not required for public source-mode templates — a tokenless agent (ent#123) bakes no `GITHUB_PAT`/`GH_TOKEN`/`GITHUB_TOKEN` at all, clones anonymously, and gets a blackholed push URL (`startup.sh::configure_push_remote`) so it is read-only toward GitHub by construction
 2. **Remote URL Sanitization**: Credentials stripped before display
 3. **Force Push Protection**: All pushes (normal AND `force_push` strategy) use `--force-with-lease`. `force_push` parameterizes the lease with the persisted last-observed remote SHA so a stale binding cannot clobber a peer (S7 Layer 3, #382). See "Branch-Ownership Collision Handling" above.
 4. **Force Operations Warning**: UI shows red destructive warnings for force operations
@@ -1402,7 +1524,7 @@ Push is the right answer:
 
 ## Status
 
-Working - PAT-free public-template clone (trinity-enterprise#123, 2026-07-23)
+Working - credential-free remotes + git credential helper (trinity-enterprise#615, 2026-09-13)
 
 ---
 
@@ -1422,6 +1544,7 @@ Working - PAT-free public-template clone (trinity-enterprise#123, 2026-07-23)
 
 | Date | Changes |
 |------|---------|
+| 2026-09-13 | ent#615: remote URLs carry no credential; the `trinity` git credential helper resolves it per operation; conditional restart rewrite + fleet remediation sweep. |
 | 2026-07-23 | **PAT-free clone of public `github:` templates** (trinity-enterprise#123): a tokenless create is admitted in source mode (`crud.py::_gate_tokenless_request` normalizes `resolve_github_pat`'s `("", "none")` to None; working-branch mode → named 400) and validated via a credential-less `git ls-remote` probe (`git_service.probe_anonymous_repo_access`; unavailable → combined 400, transient → FAIL-CLOSED 502; source branch checked anonymously). `_parse_github_ref` gains the `_GITHUB_REPO_PATH_RE` owner/repo charset guard (400). Env baking (`_apply_github_env`) and the #1559 rebuild recovery (`lifecycle.py::_apply_persisted_auth_env`) gate on repo only — token vars/`GIT_SYNC_AUTO`/auto-sync opt-in still require a PAT. startup.sh (base-image rebuild): repo-only clone gate, conditional CLONE_URL, `GIT_TERMINAL_PROMPT=0`, `configure_push_remote()` push-URL blackhole for tokenless agents, workspace-`.env` PAT fallback for the #1264 live-injection window, unconditional restart-path origin rewrite. Push paths refuse honestly: `git_service._agent_has_write_credentials` (fail-open; baked env OR per-agent PAT, never global) → `sync_to_github` 409 `no_write_credentials`/`AUTH_FAILURE`; `reset_to_main_preserve_state` → 409 `X-Conflict-Type: no_write_credentials`. Tests: `tests/unit/test_ent123_tokenless_clone.py` (50). Requirements §11.11. |
 | 2026-04-19 | **S7 Layer 3 push-time guard** (#382, PR #396): `sync_to_github()` `force_push` strategy now uses `git push --force-with-lease=<branch>:<expected-sha>` instead of plain `--force` (`docker/base-image/agent_server/routers/git.py`). The expected-sha is the remote value last observed at fetch, persisted to `~/.trinity/last-remote-sha/<branch>` via `_persist_last_remote_sha()` after every successful fetch. Stale-lease rejection returns HTTP 409 with header `X-Conflict-Type: branch_ownership_collision` and appends a structured alert to `~/.trinity/operator-queue.json` (`_record_push_collision()`), which the backend's `OperatorQueueSyncService` surfaces in the Operating Room on its next 5s poll. Persistence/append failures are logged, never raised. Response to the 2026-04-17 alpaca-vybe-live silent clobber; Tier-1 regression at `tests/git_sync/test_p5_branch_ownership.sh`. Layers 0 and 2 (reservation helper + partial UNIQUE index) are documented in `github-repo-initialization.md`. |
 | 2026-04-19 | **S5 — operator-readable conflict diagnosis** (#386, PR #397): Added `ConflictClass` enum + pure `classify_conflict()` in `src/backend/services/git_service.py`, mirrored in new `docker/base-image/agent_server/utils/git_conflict.py`. New `conflict_class` field on `GitSyncResult` and `X-Conflict-Class` response header on 409s. Agent-server collapsed 5 `HTTPException` sites behind a shared `_conflict_response()` helper. `GitConflictModal.vue` picks per-class title/body/recommendation from a `COPY` lookup; raw stderr in an expandable `<details>`; pre-S5 fallback preserves old strings. Composable `useGitSync.js` reads the header into the existing `gitConflict` ref. Regression coverage in `tests/git_sync/test_s5_conflict_classifier.py` (11 pytest cases) and `tests/git_sync/test_s5_modal.spec.js` (5 Vitest snapshots). |
