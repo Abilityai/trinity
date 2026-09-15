@@ -22,7 +22,7 @@ Schedules take any IANA zone name — including legacy aliases like `US/Eastern`
 
 A template can ship the recurring work its agent is designed to do in a `schedules:` block, and Trinity creates those schedules when the agent is created — through the UI, the API, and MCP alike. They appear here like any other schedule and are yours to edit, disable, or delete. See [Creating Agents](../agents/creating-agents.md).
 
-**Keep the message to a bare playbook call.** The recommended shape for any schedule message — declared or hand-created — is a single line that invokes one of the agent's skills by name, e.g. `/daily-briefing`, with no inline instructions. The logic then lives in the versioned playbook, so changing what a scheduled run does is an edit to the skill, never to the schedule. A skill that normally asks questions at its decision points needs a headless mode (the abilities convention is a `--autonomous` argument) before it goes on a cron; otherwise every run blocks on a prompt nobody sees and burns its whole timeout. See [Abilities Marketplace](abilities-marketplace.md#playbook-calls-the-unit-of-inter-agent-work).
+**Keep the message to a bare playbook call.** The recommended shape for any schedule message — declared or hand-created — is a single line that invokes one of the agent's skills by name, e.g. `/daily-briefing`, with no inline instructions. The logic then lives in the versioned playbook, so changing what a scheduled run does is an edit to the skill, never to the schedule. A skill that normally asks questions at its decision points needs a headless mode (the abilities convention is a `--autonomous` argument) before it goes on a cron; otherwise every run blocks on a prompt nobody sees and burns its whole timeout. See [Abilities Marketplace](abilities-marketplace.md#playbook-calls--the-unit-of-inter-agent-work).
 
 ## How It Works
 
@@ -34,7 +34,7 @@ A template can ship the recurring work its agent is designed to do in a `schedul
 4. Optionally select a model override (Fable 5.1, Sonnet 5, Opus, Haiku, or custom). Fable 5.1 is the most capable model, for the longest and hardest tasks; Sonnet 5 is fast with a 1M-token context window.
 5. Enable or disable individual schedules with the toggle.
 6. View execution history with status, duration, and cost.
-7. Click **Run Now** to trigger a schedule immediately.
+7. Click **Run now** to trigger a schedule immediately.
 8. Use the autonomy toggle to pause or resume all of the agent's scheduled work at once. Individual schedules keep their own enabled/disabled state across the toggle -- while autonomy is off, an enabled schedule shows a "Will not fire -- autonomy off" warning instead of being switched off.
 
 ### Cron expressions are checked as you type
@@ -232,7 +232,7 @@ An optional executable shipped by an agent template that gates each cron tick be
 ### Key Behaviors
 
 - **Language-agnostic** — the hook is exec'd directly by Trinity; the interpreter is chosen by the file's shebang. Any language that produces a binary or has a system interpreter works.
-- **Manual triggers bypass the hook entirely** — clicking "Run Now" always fires, regardless of what the hook would return.
+- **Manual triggers bypass the hook entirely** — clicking **Run now** always fires, regardless of what the hook would return.
 - **Skipped executions appear in the execution list** with status `skipped`, zero cost, and a reason string. They do not count against retry limits.
 - **Fail-open** — a broken or slow hook never suppresses a scheduled invocation. The schedule fires as usual and the error is logged.
 

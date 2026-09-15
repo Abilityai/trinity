@@ -615,8 +615,10 @@ def get_name_from_template(path: Path) -> Optional[str]:
 
 **GitHub Template - Git Sync Enabled** (lines 6-125):
 ```bash
-if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
-    CLONE_URL="https://oauth2:${GITHUB_PAT}@github.com/${GITHUB_REPO}.git"
+# ent#123: the gate is REPO-only. ent#615: CLONE_URL carries NO credential —
+# git gets one per operation from the `trinity` credential helper over stdin.
+if [ -n "${GITHUB_REPO}" ]; then
+    CLONE_URL="https://github.com/${GITHUB_REPO}.git"
 
     if [ "${GIT_SYNC_ENABLED}" = "true" ]; then
         # Check if repo already exists on persistent volume (lines 16-22)

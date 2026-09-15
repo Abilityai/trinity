@@ -148,7 +148,22 @@
         <div v-if="roomLiveItems.length" class="space-y-2" data-testid="portal-room-work">
           <div v-for="it in roomLiveItems" :key="it.id" class="flex items-start gap-2.5">
             <PortalAvatar :name="it.agent_name" :size="28" class="mt-0.5" />
-            <PortalWorkCard :item="it" show-agent :elapsed-seconds="elapsedOf(it)" show-open-in-work @open-work="emit('open-work')" />
+            <!-- #2795: the card has always RENDERED a Stop button — it was
+                 simply never handed the two props that turn it on, so a room
+                 was the one surface where live work could not be interrupted.
+                 `can_stop` is the server's verdict (it mirrors what the
+                 terminate route will accept), never a local guess, and the
+                 store action is the Work tab's own. -->
+            <PortalWorkCard
+              :item="it"
+              show-agent
+              :elapsed-seconds="elapsedOf(it)"
+              :can-stop="it.can_stop"
+              :stopping="workStore.stoppingIds.includes(it.id)"
+              show-open-in-work
+              @stop="onStopWork"
+              @open-work="emit('open-work')"
+            />
           </div>
         </div>
         <div v-else-if="workingAgents.length" class="flex items-start gap-2.5">
@@ -172,6 +187,22 @@
             <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:300ms"></span>
           </span>
         </div>
+        <!-- A refused cancel is the one outcome the person must be told about:
+             the turn is still running and still spending. A SUCCESSFUL stop
+             needs no line here — the room posts its own "…turn was stopped."
+             into the transcript.
+
+             Placed AFTER the live-work chain closes, not between its arms:
+             `v-else-if` binds to the immediately preceding element, so a
+             conditional dropped inside the chain steals it and the fallbacks
+             below render on the wrong condition. That is the #2794 defect, and
+             the first draft of THIS change committed it. -->
+        <InlineError
+          v-if="stopError"
+          :message="stopError"
+          data-testid="portal-room-stop-error"
+          @dismiss="stopError = ''"
+        />
       </div>
     </div>
     <PortalJumpToLatest :show="showJumpToLatest" :count="unreadBelow" @jump="scrollToLatest" />
@@ -193,14 +224,7 @@
              recipients named — a room's upload is a fan-out and the person
              should see who received it. -->
         <p v-if="batchNotice" class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300">{{ batchNotice }}</p>
-        <!-- #2620 — the proactive half. Placed ABOVE the attachments
-             block on purpose: the composer below is a `v-else` chained to that
-             block's `v-if`, and `v-else` binds to the immediately preceding
-             element — so a conditional dropped between them silently steals
-             the chain and the composer vanishes exactly when this banner
-             appears. Pinned by `roomComposerChain.spec.js`.
-
-             The header line is ambient; this is
+        <!-- #2620 — the proactive half. The header line is ambient; this is
              where the person is about to SPEND one, so the last few messages
              say so in full, once, right above the box. Only at `critical`: a
              banner that is always there is a banner nobody reads. -->
@@ -214,7 +238,11 @@
           {{ notice.detail }}
         </div>
 
-        <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
+        <!-- ent#524: one chip per file, with its own outcome, and the
+             recipients named. Sits ABOVE the composer and does not replace it
+             (#2794) — the 1:1's shape, which this composer is otherwise a copy
+             of (#2662). -->
+        <div v-if="attachments.length && !isClosed" class="mb-2 flex flex-wrap gap-1.5">
           <span
             v-for="(f, i) in attachments"
             :key="i"
@@ -232,7 +260,22 @@
             <span v-else class="opacity-70">· to {{ recipientLabel }}</span>
           </span>
         </div>
-        <form v-else @submit.prevent="send">
+        <!-- #2794: `v-if="!isClosed"`, NOT a `v-else`.
+             The composer shipped as `<form v-else>` chained to the "this
+             conversation has ended" line above (ent#358) — the right rule. It
+             is no longer that rule: `v-else` binds to the immediately
+             preceding ELEMENT, and three separate changes since have each
+             inserted a conditional in between (the batch notice and the
+             attachment chips in ent#524, the budget banner in #2620), so the
+             chain now ends on `attachments.length`. That is two live defects
+             in one expression: attaching a file to a room REPLACES the
+             composer (and the room never clears its chips, so it does not come
+             back), and a closed room renders a live composer under the line
+             saying it has ended.
+             The condition is therefore stated rather than inherited. A `v-else`
+             is a promise about the neighbour above it, and this neighbourhood
+             has broken that promise three times. -->
+        <form v-if="!isClosed" @submit.prevent="send">
           <!-- #2662: the same composer shell as the 1:1 thread — field on top,
                controls in a row inside it. The two composers are the same
                markup in two files (the #2211 lesson recorded in
@@ -269,6 +312,7 @@
                 @input="onComposerInput"
                 @click="onComposerCaret"
                 @select="onComposerCaret"
+                @paste="dropHandlers.onPaste"
               ></textarea>
             </div>
             <div class="mt-1 flex items-center gap-1">
@@ -286,6 +330,31 @@
           </div>
         </form>
         <p v-if="sendError" class="mt-1.5 text-xs text-status-danger-600 dark:text-status-danger-400">{{ sendError }}</p>
+        <!-- #2794: what came with the message that created this room. The room
+             is otherwise silent about attachments, so without this the person
+             who escalated has no way to tell a carried file from a dropped one
+             — which is half of what they reported.
+             A plain `v-if` on its own, deliberately NOT chained to anything
+             above: see the composer's comment. -->
+        <div
+          v-if="carryNotice && carryNotice.text"
+          class="mt-1.5 flex items-start gap-2 text-xs"
+          :class="carryNotice.problem
+            ? 'text-status-warning-700 dark:text-status-warning-300'
+            : 'text-status-info-700 dark:text-status-info-300'"
+          :role="carryNotice.problem ? 'alert' : 'status'"
+          data-testid="portal-room-carry-notice"
+        >
+          <svg class="w-3.5 h-3.5 mt-px shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+          <span class="min-w-0">{{ carryNotice.text }}</span>
+          <BaseButton
+            size="sm"
+            variant="ghost"
+            class="ml-auto shrink-0"
+            data-testid="portal-room-carry-notice-dismiss"
+            @click="emit('dismiss-carry-notice')"
+          >Dismiss</BaseButton>
+        </div>
       </div>
     </div>
   </div>
@@ -314,17 +383,20 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { budgetNotice } from '@/utils/roomBudgets'
+import InlineError from '@/components/InlineError.vue'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
-import { liveElapsedSeconds } from './portalWork'
+import { liveElapsedSeconds, soleStoppableItem } from './portalWork'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
+import BaseButton from '@/components/base/BaseButton.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import { workSignalFromRoom } from './portalRail'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import { shouldCancelOnEscape, cancelOutcome } from '@/utils/turnCancel'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import {
   applyTypeaheadInsert,
@@ -356,8 +428,13 @@ const props = defineProps({
   // ent#475: text to seed the composer with — the rail's "Ask for a canvas"
   // pre-fills, never sends. Same contract as `PortalConversation`'s.
   prefill: { type: String, default: '' },
+  // #2794: `{ roomId, text, problem }` — what the shell carried into this room
+  // when a 1:1 escalated into it, or null. Owned by the shell because the
+  // carry happens while this component is still mounting, and scoped to a
+  // room id there so it cannot follow the reader into another conversation.
+  carryNotice: { type: Object, default: null },
 })
-const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work'])
+const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice'])
 
 const store = useClientPortalStore()
 
@@ -431,6 +508,7 @@ const {
   dragging: fileDragging,
   entries: attachments,
   batchNotice,
+  clear: clearAttachments,
   handlers: dropHandlers,
 } = usePortalFileDrop(
   async (file) => {
@@ -459,6 +537,32 @@ watch(() => roomLiveItems.value.length > 0, (on) => {
 }, { immediate: true })
 onBeforeUnmount(() => { if (clockTimer) clearInterval(clockTimer) })
 function elapsedOf(it) { return liveElapsedSeconds(it, { fetchedAtMs: workStore.fetchedAt, nowMs: clockMs.value }) }
+
+// #2795 — stopping a room turn.
+//
+// The store action is the Work tab's, unchanged: it re-checks `can_stop`, calls
+// the same portal terminate route, treats a 404 as the lost race rather than a
+// refusal, and refetches so CANCELLED comes back from the server instead of
+// being written optimistically here. Two surfaces, one cancel path.
+//
+// Only a FAILURE is reported. A successful stop already says so where the
+// reader is looking — `_wake_agent` posts "<agent>'s turn was stopped." into
+// the transcript — so a banner would be the same news twice.
+const stopError = ref('')
+
+async function onStopWork(item) {
+  stopError.value = ''
+  const res = await workStore.stopItem(item)
+  if (!res.success) stopError.value = cancelOutcome({ ok: false }).message
+}
+
+// Escape stops the turn ONLY when there is exactly one to stop (see
+// `soleStoppableItem`). A room fans out to several agents, and a keystroke that
+// picks one of them by position would destroy work somebody is still waiting
+// for. In practice the fan-out is sequential, so a room normally has one live
+// row and Escape behaves exactly as it does in a 1:1; when it does not, the
+// tile's own Stop button is the unambiguous control.
+const escapeStoppable = computed(() => soleStoppableItem(roomLiveItems.value, workStore.stoppingIds))
 
 // ent#474 — the shell scopes the rail to the room's participants and derives
 // its Work signal from the SERVER's `working` list (never a local flag), so
@@ -640,6 +744,20 @@ function focusComposerFromShell(event) {
 }
 
 function onComposerKeydown(e) {
+  // Asked BEFORE `resolveComposerKey`, and gated on the typeahead/add-agent
+  // popups via `overlays`, so a press that belongs to something nearer the
+  // keystroke never reaches the turn (ent#155's rule, unchanged).
+  const target = escapeStoppable.value
+  if (target && shouldCancelOnEscape(e, {
+    inFlight: true,
+    cancelling: workStore.stoppingIds.includes(target.id),
+    overlays: [typeaheadOpen.value, addOpen.value],
+  })) {
+    e.preventDefault()
+    onStopWork(target)
+    return
+  }
+
   const length = typeaheadBound.value.visible.length
   switch (resolveComposerKey({
     key: e.key,
@@ -735,6 +853,18 @@ async function send() {
   resetTypeahead()
   try {
     await store.postRoomMessage(props.roomId, text)
+    // #2794: the chips describe what is going out with THIS message, so they
+    // clear once it has gone — the 1:1's rule, which this composer never had.
+    // Without it a room accumulated every chip it had ever drawn, describing
+    // files that had been delivered several messages ago as though they were
+    // still pending.
+    clearAttachments()
+    // The carry notice describes the message that CREATED this room. Once a
+    // newer message exists it is describing history while sitting under the
+    // composer, so a send retires it — same reason as the chips above. The
+    // escalation's own first post is made by the shell, not here, so this
+    // cannot retire the notice before it has been read.
+    if (props.carryNotice) emit('dismiss-carry-notice')
     // The post returns once the mentioned agents have been woken; their replies
     // land as further messages, which the poll picks up.
     await load()

@@ -23,6 +23,8 @@ cp .env.example .env
 
 Then open the directory in Claude Code. The repo ships with its own `.claude/skills/` so all the ops commands shown below work out of the box.
 
+If you have the [abilities](https://github.com/abilityai/abilities) `trinity` plugin installed, `/trinity:deploy` does this for you: it walks through deploying Trinity (cloud, remote SSH server, or localhost) or connecting to an existing instance, then clones this repo into a per-instance directory with `.env` already filled in.
+
 ## Configuration
 
 The ops agent connects to a Trinity instance via a `.env` file in its workspace.
@@ -35,10 +37,12 @@ The ops agent connects to a Trinity instance via a `.env` file in its workspace.
 | `SSH_PASSWORD` | Optional | — | Password fallback if no key |
 | `SSH_PORT` | Optional | `22` | SSH port |
 | `TRINITY_PATH` | Optional | `~/trinity` (`.env.example` ships `/home/ubuntu/trinity`) | Trinity install directory on the server |
-| `COMPOSE_FILE` | Optional | `docker-compose.prod.yml` | The compose file the instance runs on |
+| `COMPOSE_FILE` | Optional | `docker-compose.prod.yml` | The compose file the instance runs on (`docker-compose.hosted.yml` on a hosted install) |
+| `FRONTEND_PORT` / `BACKEND_PORT` / `MCP_PORT` / `SCHEDULER_PORT` | Optional | `80` / `8000` / `8080` / `8001` | Service ports on the instance, as the scripts probe them |
 | `ADMIN_PASSWORD` | Required | — | Trinity admin password for API calls |
 | `MCP_API_KEY` | Optional | — | MCP API key for agent queries |
 | `ANTHROPIC_API_KEY` | Optional | — | Passed through for agent containers |
+| `TUNNEL_FRONTEND` / `TUNNEL_BACKEND` / `TUNNEL_MCP` | Optional | `13000` / `18000` / `18080` | Local ports `tunnel.sh` forwards to on a remote instance |
 
 **Local mode:** Leave `SSH_HOST` empty. All commands run directly against the local Docker daemon.
 
@@ -54,7 +58,7 @@ The ops agent connects to a Trinity instance via a `.env` file in its workspace.
 ./scripts/status.sh
 ```
 
-Checks all six Trinity services: backend (`8000`), frontend (`80`), MCP server (`8080`), scheduler (`8001`), Redis, and Vector (`8686`). Reports container status, HTTP endpoint responses, and the current git version.
+Lists every `trinity-*` and `agent-*` container with its status, then probes the backend (`/health` on `BACKEND_PORT`), the frontend (HTTP code on `FRONTEND_PORT`), Redis (`redis-cli ping`) and the scheduler (its Docker health status), and prints the checkout's current git commit. It does not probe the MCP server or Vector — use the six-probe list in [Monitoring](monitoring.md) for those.
 
 ### View and diagnose logs
 
@@ -116,7 +120,7 @@ Takes an on-demand copy into `~/backups/` on the host: for SQLite an online back
 ./scripts/tunnel.sh
 ```
 
-Opens SSH port-forwarding so you can access the Trinity UI (`http://localhost`) and API locally while the instance runs on a remote server.
+Opens SSH port-forwarding so you can reach the Trinity UI and API locally while the instance runs on a remote server — the UI at `http://localhost:13000` by default (`TUNNEL_FRONTEND`), the API at `http://localhost:18000` (`TUNNEL_BACKEND`). With `SSH_HOST` empty it prints the direct local address instead.
 
 ## Rollback
 
@@ -142,7 +146,7 @@ Open the repo in Claude Code and use the slash commands it ships with:
 | `/status` | Health check — backend, scheduler, containers, version |
 | `/logs <service> [lines] [errors]` | View logs for any service or agent |
 | `/restart [service\|all]` | Restart services with health verification |
-| `/update` | Pull latest, rebuild containers, restart, verify (source-built installs) |
+| `/update [--wait\|--force]` | Back up the DB, pull latest, rebuild containers, restart, verify (source-built installs); `--wait` waits for running executions, `--force` skips that check |
 | `/agents [list\|start\|stop\|logs\|exec]` | Manage agent containers |
 | `/rebuild-agent <name\|--all>` | Rebuild agent containers from the latest base image |
 | `/diagnose` | Full error scan — logs, restarts, disk, DB integrity |

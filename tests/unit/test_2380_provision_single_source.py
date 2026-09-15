@@ -266,9 +266,16 @@ def test_the_ask_endpoint_allows_exactly_the_configured_host() -> None:
     their own name from someone else's server."""
     src = (_ROOT / "src" / "backend" / "routers" / "public.py").read_text()
     assert "/tls-allowed" in src, "the ask endpoint Caddy calls does not exist"
-    section = src[src.index("async def tls_allowed") : src.index("async def tls_allowed") + 3000]
+    _start = src.index("async def tls_allowed")
+    # To the end of the handler, not a byte count: a fixed window silently
+    # reaches into whatever is declared next, and these assertions are about
+    # this function.
+    section = src[_start : src.index("\n\n\n", _start)]
     assert "urlparse" in section, "the configured URL must be parsed, not substring-matched"
+    # #2691: both sides now go through `canonical_host` first, so the compare
+    # is between canonicalised names — still exact, never a substring.
     assert "requested != allowed" in section, "the comparison is not an exact match"
+    assert section.count("canonical_host(") >= 2, "one side is compared uncanonicalised"
     # Fails closed on every branch that cannot prove the name.
     assert section.count("404") >= 4, "a refusal path is missing"
 
@@ -304,13 +311,20 @@ def _load_ask_gate(configured: str, raises: bool = False):
     ns: dict = {
         "HTTPException": _HTTPException,
         "settings_service": types.SimpleNamespace(get_public_chat_url=_get_url),
+        # #2691: an authorised handshake records that the saved name was really
+        # reached, and only when the caller is Caddy's local `ask`. Both are
+        # stubbed here — this slice is about the allowlist, and they have their
+        # own tests in test_2691_public_url_reachability.py.
+        "asyncio": asyncio,
+        "_is_caddy_ask": lambda _request: False,
+        "_latch_public_url_reached": lambda _host: None,
     }
     exec(snippet, ns)
     fn = ns["tls_allowed"]
 
     def call(domain: str):
         try:
-            return asyncio.run(fn(domain=domain)), None
+            return asyncio.run(fn(None, domain=domain)), None
         except _HTTPException as e:
             return None, e.status_code
 

@@ -129,6 +129,8 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 ## Testing
 **Prerequisites**: backend running; an agent the caller can access.
 
+**Automated**: journey J10 (`tests/journeys/test_j10_agent_calls_agent_journey.py`, #2349) starts a loop through the MCP `run_agent_loop` tool with an agent-scoped key (`max_runs=3`, `on_failure="continue"`, `no_progress_threshold=0`) and reads `stop_reason="max_runs_reached"`, `runs_completed=3` back from `GET /api/loops/{loop_id}`; a strict xfail records that the tool does not run `checkAgentAccess` (trinity-enterprise#628).
+
 **Test Steps**:
 1. `POST /api/agents/{name}/loops` with `{"message": "step {{run}}", "max_runs": 3}` — returns 202 + `loop_id`.
 2. `GET /api/loops/{loop_id}` immediately — `status="running"` or `"queued"`.

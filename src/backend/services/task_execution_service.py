@@ -664,6 +664,97 @@ def build_pull_queue_payload(
     )
 
 
+async def dispatch_and_await_terminal(
+    *,
+    agent_name: str,
+    message: str,
+    triggered_by: str,
+    wait_timeout: Optional[float] = None,
+    **execute_kwargs,
+) -> TaskExecutionResult:
+    """``execute_task`` for a caller that genuinely needs the answer in-line.
+
+    The sync edge adapter #1081 Phase 4 asks for, in its smallest useful form.
+    On the push path this is exactly ``execute_task`` — the turn runs inside the
+    await and the result is the result. Under pull the dispatch returns
+    ``QUEUED`` the moment the row is on the durable queue and the turn runs later
+    in the agent's worker, so this waits for that row's terminal
+    (``sync_waiter.wait_for_sync_terminal``) and rebuilds the result from it.
+
+    That is the whole reason a trigger like ``a2a`` was stranded: its caller
+    consumes ``result.response`` to build a JSON-RPC artifact, and a queued
+    dispatch gave it nothing. It does not need a receipt to poll — it needs to
+    block correctly while the work happens somewhere else, which is a different
+    thing and one the adapter already does.
+
+    ⚠️ Under pull, nothing signals the waiter directly (the pull sink writes the
+    terminal through the CAS, it does not know about this registry), so the wake
+    comes from ``sync_waiter``'s DB-poll fallback and latency is bounded by
+    ``SYNC_WAITER_POLL_INTERVAL``. For a turn measured in seconds-to-minutes that
+    is noise, and it is deliberately not worth a second signalling path.
+
+    A wait that times out returns a FAILED result with ``TIMEOUT`` rather than
+    raising — the execution keeps running and its real terminal still lands on
+    the row, exactly as for a fan-out deadline (#2524).
+    """
+    result = await get_task_execution_service().execute_task(
+        agent_name=agent_name,
+        message=message,
+        triggered_by=triggered_by,
+        **execute_kwargs,
+    )
+    if result.status != TaskExecutionStatus.QUEUED or not result.execution_id:
+        return result
+
+    from services.sync_waiter import wait_for_sync_terminal
+
+    if wait_timeout is None:
+        try:
+            wait_timeout = float(db.get_execution_timeout(agent_name)) + 120.0
+        except Exception:  # noqa: BLE001 — a config read must not break dispatch
+            wait_timeout = 7320.0
+
+    logger.info(
+        "[TaskExecService] %s dispatch for %s queued as %s; awaiting its terminal",
+        triggered_by, agent_name, result.execution_id,
+    )
+    try:
+        await wait_for_sync_terminal(result.execution_id, wait_timeout)
+    except asyncio.TimeoutError:
+        return TaskExecutionResult(
+            execution_id=result.execution_id,
+            status=TaskExecutionStatus.FAILED,
+            response="",
+            error=f"Timed out after {int(wait_timeout)}s waiting for the queued execution",
+            error_code=TaskExecutionErrorCode.TIMEOUT,
+        )
+    return result_from_execution_row(result.execution_id) or result
+
+
+def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult]:
+    """Rebuild a ``TaskExecutionResult`` from a terminal execution row.
+
+    The row is the authority once a turn has run somewhere other than inside the
+    caller's await — under pull that is every turn. Returns None when the row is
+    gone, so the caller can fall back to whatever it already had.
+    """
+    execution = db.get_execution(execution_id)
+    if execution is None:
+        return None
+    status = getattr(execution, "status", None)
+    status = status.value if hasattr(status, "value") else str(status)
+    return TaskExecutionResult(
+        execution_id=execution_id,
+        status=status,
+        response=getattr(execution, "response", None) or "",
+        cost=getattr(execution, "cost", None),
+        context_used=getattr(execution, "context_used", None),
+        context_max=getattr(execution, "context_max", None),
+        session_id=getattr(execution, "claude_session_id", None),
+        error=getattr(execution, "error", None),
+    )
+
+
 # Strong references to fire-and-forget breaker tasks. asyncio's event loop holds
 # only a WEAK reference to a bare ``create_task`` result, so an un-referenced task
 # can be garbage-collected mid-flight (the backlog drain would silently vanish).
