@@ -16,7 +16,7 @@
  * function, so the destination can move to the ent#484/#486 working folder
  * without the gesture changing.
  */
-import { ref } from 'vue'
+import { markRaw, ref } from 'vue'
 
 // Mirrors the server's per-file ceiling (`MAX_UPLOAD_BYTES`, 25 MiB). Checked
 // client-side so a rejection names the file BEFORE 25 MiB crosses the wire; the
@@ -128,6 +128,9 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
   const batchNotice = ref('')
 
   let dragDepth = 0
+  // The in-flight batch, so a caller can ASK whether the gesture has landed
+  // (#2794). Without this the only way to know was to poll `entry.uploading`.
+  let inFlight = null
 
   // dragenter/dragleave fire for every child element the pointer crosses, so a
   // boolean toggled on leave flickers the affordance off while the pointer is
@@ -184,6 +187,17 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
         uploading: !rejection,
         error: rejection || '',
         done: false,
+        // #2794: the handle, kept so the SAME bytes can reach a SECOND
+        // destination without asking the person to pick the file again —
+        // which is what escalating a 1:1 into a room needs (the file has
+        // reached one agent's inbox; the room's other participants still need
+        // it, and a room-native drop is `one upload per participant`).
+        //
+        // `markRaw` is belt-and-braces: Vue's `reactive` already declines to
+        // proxy a `File` (it is not a plain object), but that is a fact about
+        // an internal type table rather than a promise, and a proxied `File`
+        // fails deep inside `FormData.append` where the cause is invisible.
+        file: markRaw(file),
       }
       entries.value.push(entry)
       return { file, entry, rejection }
@@ -193,15 +207,52 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
     // requests, and firing twenty at once is the surest way to trip it on a
     // gesture that would have succeeded spread over a second. A batch that does
     // trip it still reports per file, which is the AC.
-    for (const { file, entry, rejection } of mine) {
-      if (rejection) continue
+    //
+    // Chained onto whatever is already running rather than started beside it:
+    // two overlapping drops would otherwise interleave their requests, which is
+    // the burst the sequencing exists to avoid, and `settled()` could then
+    // resolve while the earlier batch was still going.
+    const run = Promise.resolve(inFlight).then(async () => {
+      for (const { file, entry, rejection } of mine) {
+        if (rejection) continue
+        try {
+          await upload(file)
+          entry.done = true
+        } catch (err) {
+          entry.error = uploadFailureReason(err)
+        } finally {
+          entry.uploading = false
+        }
+      }
+    })
+    inFlight = run
+    await run
+    // Only the LAST batch clears the marker; an earlier one finishing must not
+    // report a later one as settled.
+    if (inFlight === run) inFlight = null
+    return entries.value
+  }
+
+  /**
+   * Resolves once nothing is uploading (#2794).
+   *
+   * A send that happens while a chip is still spinning must not simply leave
+   * the file behind — "never silently dropped" is the rule. Waiting is the
+   * honest option and the cheap one: uploads are seconds, and the alternative
+   * (send now, tell them afterwards what did not make it) asks the person to
+   * fix something they cannot see the state of.
+   *
+   * Never rejects: a failed upload is recorded on its own entry, and a caller
+   * asking "has the gesture landed?" wants that answer, not an exception.
+   */
+  async function settled() {
+    // A batch can chain another onto itself, so loop rather than await once.
+    while (inFlight) {
       try {
-        await upload(file)
-        entry.done = true
-      } catch (err) {
-        entry.error = uploadFailureReason(err)
-      } finally {
-        entry.uploading = false
+        await inFlight
+      } catch {
+        // Per-file failures already live on their entries.
+        break
       }
     }
     return entries.value
@@ -223,6 +274,7 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
     entries,
     batchNotice,
     addFiles,
+    settled,
     clear,
     removeAt,
     handlers: { onDragEnter, onDragOver, onDragLeave, onDrop },

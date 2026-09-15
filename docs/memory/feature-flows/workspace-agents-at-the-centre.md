@@ -246,6 +246,7 @@ pending SET rather than a scalar.
 | `PortalConversation.vue` | the agent's inbox |
 | `PortalRoom.vue` | **every participating agent's** inbox; the chip names the recipients (operator decision 13) |
 | `PortalRailFiles.vue` | the target agent's inbox |
+| `Portal.vue::onEscalateToRoom` (#2794) | the **new** participants' inboxes — see below |
 
 - the whole conversation is the target, with an affordance naming what will
   happen; `isFileDrag` keeps a dragged link or text selection from lighting it
@@ -264,6 +265,58 @@ pending SET rather than a scalar.
 **Deferred by design**: the working-folder destination (ent#484/#486). This
 ships against the existing upload path, and when they land the gesture does not
 change — only the caller's `upload`.
+
+### The file follows an escalation (#2794)
+
+A 1:1 uploads each file to the CURRENT agent as it is attached, so @mentioning
+a second agent used to move the conversation to a room and leave the file
+behind — the person had watched a chip confirm the upload and believed both
+agents had it. Only the original one ever did, and the room showed no trace of
+a file at all.
+
+The rule is the issue's own: *whatever a user could do inside a room,
+escalating into one must produce the same result.* So the escalation owes the
+room's fan-out to exactly the participants that do not already hold the file.
+
+- the composable **keeps the `File` handle** on each entry (`markRaw`, so a
+  proxy can never reach `FormData.append`) — the same bytes reach a second
+  destination without asking the person to pick the file again;
+- it exposes **`settled()`**, and `send()` awaits it before escalating: an
+  upload still in flight is waited for, never silently left behind. Two
+  overlapping drops now **chain** rather than run beside each other — that is
+  the same "sequential, or the per-email limiter trips" rule one level up, and
+  without it `settled()` could resolve while an earlier batch was still going;
+- `send()` does **not** clear the chips. On success the component unmounts as
+  the room opens; on failure the shell hands the text back and the chips are
+  still standing beside it — the recovery path with no extra plumbing. It does
+  guard re-entry while it waits, because the composer is emptied *before* the
+  await and a second Enter in that window would emit a second escalation for
+  `Portal.vue`'s `escalating` flag to drop on the floor;
+- the fan-out runs **before** the message is posted. The message is what wakes
+  the mentioned agent, and a turn that starts before the file is in its inbox
+  cannot see the thing it was asked about. The order is the feature;
+- the origin agent is excluded **by name, not by position**: the shell builds
+  `agents` as `[origin, ...mentioned]`, and a plan trusting that order would
+  double-send the day it changes;
+- the room then **says what happened** — what arrived and for whom, a file that
+  missed a participant named per file *and* per agent, and a file that never
+  finished uploading in the 1:1 named too. The notice is retired by the next
+  message in the room, because by then it describes history.
+
+Decidable rules live in `components/portal/portalAttachments.js`; the SFCs are
+dispatchers over it (`vitest.config.js` pins `environment: 'node'` with no
+mount harness, so a rule inside an SFC is one no test can reach).
+
+**Two adjacent defects fixed with it.** The room composer had shipped as
+`<form v-else>` chained to the "this conversation has ended" line (ent#358) —
+the right rule — but `v-else` binds to the immediately preceding *element*, and
+the batch notice, the chips (ent#524) and the budget banner (#2620) were each
+inserted in between, so the chain ended on `attachments.length`: **attaching a
+file to a room replaced the composer**, and a **closed room rendered a live
+one**. `roomComposerChain.spec.js` had by then pinned the broken state as the
+contract. The composer now states its own condition (`v-if="!isClosed"`), the
+spec pins the outcome instead, and the room clears its chips after a successful
+send the way the 1:1 always has.
 
 ---
 

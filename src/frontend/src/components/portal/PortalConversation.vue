@@ -1101,6 +1101,7 @@ const {
   batchNotice,
   addFiles,
   clear: clearAttachments,
+  settled: attachmentsSettled,
   handlers: dropHandlers,
 } = usePortalFileDrop((file) => store.uploadDocument(props.agent.name, file))
 const offline = ref(typeof navigator !== 'undefined' && navigator.onLine === false)
@@ -1319,6 +1320,23 @@ watch(() => props.prefill, (v) => {
 })
 
 onMounted(async () => {
+  // #2794 follow-up: there is deliberately NO carry boundary here.
+  //
+  // The first version drew one — "files sent before this conversation opened
+  // belong to a previous visit" — and it was wrong twice over. Mounting is not
+  // evidence that anything was SENT: the rail is a SIBLING of the stage and
+  // survives every navigation, so the ordinary gesture is to attach from
+  // wherever you are and then open the chat you want to escalate from. That
+  // mount consumed the upload the person had just made, and the escalation
+  // carried nothing and said nothing (reproduced: upload to A from B's rail,
+  // open A, @mention — no carry, no notice). A thread switch or ⌘J remounts
+  // this component too, so the same gesture failed several ways.
+  //
+  // The two things that genuinely consume a pending upload are a message going
+  // out and an escalation taking it, and both mark it themselves. "A previous
+  // visit" is already covered twice over: the log is bounded by
+  // `CARRY_MAX_AGE_MS`, and it is plain Pinia state, so a page load starts it
+  // empty regardless.
   window.addEventListener('online', onNet)
   window.addEventListener('offline', onNet)
   document.addEventListener('click', onDocClick)
@@ -1779,6 +1797,9 @@ async function deliver(text) {
     // refresh on a conversation nobody is talking in.
     deliverableTick.value += 1
     clearAttachments()
+    // …and the rail's half of the same set (#2794 follow-up): this turn has
+    // gone out, so nothing sent before it is still pending.
+    store.markUploadsCarried(props.agent?.name)
     return true
   } catch (err) {
     return { error: deliveryFailureReason(err) }
@@ -2054,9 +2075,19 @@ function markFailed(index, content, error, { retryable = true } = {}) {
   row.retryable = retryable
 }
 
+// #2794: an escalation now AWAITS the in-flight uploads, so the composer is
+// clearable-and-emptied for as long as that takes — seconds, not a microtask.
+// Without a guard a second Enter in that window re-enters `send()`, clears the
+// new text, and emits a second escalation that `Portal.vue`'s own `escalating`
+// flag then drops on the floor: the message is gone with no error and no
+// composer to recover it from. Held here rather than reusing `sending`, which
+// means "a turn is running" and is read by the header, the Stop control and
+// the reattach poller.
+const escalatingNow = ref(false)
+
 async function send() {
   const text = input.value.trim()
-  if (!text || sending.value) return
+  if (!text || sending.value || escalatingNow.value) return
   // The composer is about to be cleared programmatically, which fires no input
   // event — so the popup and its Esc sentinel are cleared here rather than left
   // armed against a message that no longer exists.
@@ -2075,7 +2106,37 @@ async function send() {
     if (others.length) {
       input.value = ''
       autoGrowAfterUpdate()
-      emit('escalate-to-room', { agents: [props.agent.name, ...others], message: text })
+      // #2794: the attachments go WITH the message. Until now the event
+      // carried only text, so a file the person had watched a chip confirm
+      // reached the original agent and nobody else, and the room showed no
+      // trace of it — they believed both agents had it.
+      //
+      // Awaited first, because "never silently dropped" is the rule and this
+      // is the only moment at which waiting is still possible. Uploads are
+      // seconds; sending now and explaining afterwards asks the person to fix
+      // something whose state they can no longer see. `settled()` never
+      // rejects — a failed upload is recorded on its own chip, and the shell
+      // reports it from there.
+      escalatingNow.value = true
+      try {
+        await attachmentsSettled()
+        // NOT cleared: on success this component unmounts as the room opens and
+        // the chips go with it; on failure the shell hands the text back and the
+        // chips are still standing beside it, which is the recovery AC without
+        // any new plumbing. Handing over a COPY so a later gesture in this
+        // composer cannot mutate what the shell is carrying.
+        emit('escalate-to-room', {
+          agents: [props.agent.name, ...others],
+          message: text,
+          attachments: attachments.value.slice(),
+        })
+      } finally {
+        // Released even on the success path: the emit is synchronous and this
+        // component is not unmounted until the route change renders, so a flag
+        // left set would outlive a FAILED escalation and leave the composer
+        // the shell just restored permanently dead.
+        escalatingNow.value = false
+      }
       return
     }
   }
