@@ -97,7 +97,10 @@ _ADOPTED_MUST_BE_CLEAN = {
 
 def _iter_backend_py():
     for path in _BACKEND.rglob("*.py"):
-        if "/tests/" in path.as_posix():
+        rel = path.relative_to(_BACKEND).as_posix()
+        # OSS tree only: the enterprise submodule is optional, never mounted on
+        # public CI, and owns its own twin of this guard (#1677 convention).
+        if "/tests/" in path.as_posix() or rel.startswith(("enterprise/", "tests/", "__pycache__/")):
             continue
         yield path
 
