@@ -1049,30 +1049,52 @@ def _classify_timeout_failure(
     )
 
 
-def _warn_if_retry_budget_clamped(
+def _log_retry_budget(
     agent_name: str,
     reason: str,
     applied_timeout: int,
     original_timeout: Optional[int],
+    *,
+    elapsed_s: float = 0.0,
 ) -> None:
-    """#2789: say out loud when an inline retry gets less than the turn did.
+    """#2789: state an inline retry's budget where it is decided.
 
     The #2789 report had to infer a self-inflicted 300s cap from the phrase
     "aborted after 300s of 3600 seconds allowed" — the applied budget appeared
-    in no log line at all. A clamp is now stated where it is decided, so the
-    reader-race ceiling (which is still deliberate) is visible rather than
-    mistaken for an upstream cutoff, and a SUB-003 retry that is short only
-    because the first attempt ate the budget says so.
+    in no log line at all. Two causes, two sentences, because they call for
+    different reactions:
+
+    * the #678 reader-race retry is CLAMPED by a deliberate ceiling — WARNING,
+      so a timeout at that point is read as the ceiling, not as an upstream
+      cutoff or the configured limit;
+    * the SUB-003 re-run is shorter only by what the first attempt already
+      SPENT — INFO with the breakdown, since that is arithmetic, not a clamp
+      (the first version of this helper called a 30s first attempt a "clamp"
+      on every seat switch). It escalates to WARNING only when what is left is
+      under the reader-race ceiling: a re-run with under five minutes is the
+      one an operator would want to know about, because it is likely hopeless
+      and is still billed.
 
     Silent when nothing was taken away, so a healthy turn adds no noise.
     """
     if original_timeout is None or applied_timeout >= int(original_timeout):
         return
-    logger.warning(
-        f"[TaskExecService] {agent_name}: {reason} retry budget clamped to "
-        f"{applied_timeout}s of the turn's {int(original_timeout)}s — a timeout "
-        f"at that point is this ceiling, not the configured limit"
+    if elapsed_s <= 0.0:
+        logger.warning(
+            f"[TaskExecService] {agent_name}: {reason} retry budget clamped to "
+            f"{applied_timeout}s of the turn's {int(original_timeout)}s — a timeout "
+            f"at that point is this ceiling, not the configured limit"
+        )
+        return
+    line = (
+        f"[TaskExecService] {agent_name}: {reason} retry budget {applied_timeout}s — "
+        f"the turn's {int(original_timeout)}s less the {int(elapsed_s)}s the first "
+        f"attempt already spent"
     )
+    if applied_timeout < _AUTO_RETRY_MAX_TIMEOUT_S:
+        logger.warning(line + " (under the reader-race ceiling; a re-run this short is likely hopeless and is still billed)")
+    else:
+        logger.info(line)
 
 
 class TaskExecutionService:
@@ -1921,7 +1943,7 @@ class TaskExecutionService:
                     # would misattribute whatever terminal the original response
                     # produces.
                     state.applied_timeout_seconds = retry_agent_timeout
-                    _warn_if_retry_budget_clamped(
+                    _log_retry_budget(
                         agent_name, "reader-race", retry_agent_timeout, timeout_seconds
                     )
                     state.retry_count = 1
@@ -2069,8 +2091,9 @@ class TaskExecutionService:
                     # #2789: attribute a terminal timeout against the budget
                     # that was actually in force for THIS attempt.
                     state.applied_timeout_seconds = retry_agent_timeout
-                    _warn_if_retry_budget_clamped(
-                        agent_name, "subscription-switch", retry_agent_timeout, timeout_seconds
+                    _log_retry_budget(
+                        agent_name, "subscription-switch", retry_agent_timeout, timeout_seconds,
+                        elapsed_s=elapsed_s,
                     )
                     # #2638: the destination name is deliberately NOT
                     # interpolated. `_perform_auto_switch` logs "Auto-switching

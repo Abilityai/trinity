@@ -363,25 +363,46 @@ def test_terminal_reports_the_retrys_limit_end_to_end():
     assert "3600 seconds allowed" not in result.error
 
 
-def test_clamped_retry_budget_is_logged(caplog):
+def test_retry_budget_is_logged_with_its_cause(caplog):
     """The report had to INFER the 300s cap from "aborted after 300s of 3600
-    seconds allowed" — the applied budget appeared in no log line. A clamp is
-    now stated where it is decided.
+    seconds allowed" — the applied budget appeared in no log line. It is now
+    stated where it is decided, and the two causes read differently:
+
+    * a reader-race CEILING is a WARNING ("clamped");
+    * a SUB-003 re-run shorter only by what the first attempt spent is INFO
+      with the breakdown — the first version of this helper warned "clamped
+      to 3570s of 3600s" on every seat switch, calling a 30s first attempt a
+      ceiling — and becomes a WARNING only once less than the reader-race
+      ceiling is left, the likely-hopeless-and-still-billed case.
     """
     import logging
 
-    from services.task_execution_service import _warn_if_retry_budget_clamped
+    from services.task_execution_service import _log_retry_budget
 
-    with caplog.at_level(logging.WARNING):
-        _warn_if_retry_budget_clamped("agent-x", "reader-race", 300, 3600)
-    assert any("clamped to 300s" in r.message for r in caplog.records)
+    with caplog.at_level(logging.INFO):
+        _log_retry_budget("agent-x", "reader-race", 300, 3600)
+    assert [r.levelname for r in caplog.records] == ["WARNING"]
+    assert "clamped to 300s" in caplog.records[0].message
 
     caplog.clear()
-    with caplog.at_level(logging.WARNING):
-        _warn_if_retry_budget_clamped("agent-x", "subscription-switch", 3600, 3600)
+    with caplog.at_level(logging.INFO):
+        _log_retry_budget("agent-x", "subscription-switch", 3570, 3600, elapsed_s=30)
+    assert [r.levelname for r in caplog.records] == ["INFO"], "elapsed time is not a clamp"
+    assert "clamped" not in caplog.records[0].message
+    assert "30s the first attempt already spent" in caplog.records[0].message
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        _log_retry_budget("agent-x", "subscription-switch", 120, 3600, elapsed_s=3480)
+    assert [r.levelname for r in caplog.records] == ["WARNING"], "under the ceiling is worth a look"
+    assert "likely hopeless" in caplog.records[0].message
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        _log_retry_budget("agent-x", "subscription-switch", 3600, 3600, elapsed_s=0)
     assert not caplog.records, "a retry that lost nothing must stay quiet"
 
     caplog.clear()
-    with caplog.at_level(logging.WARNING):
-        _warn_if_retry_budget_clamped("agent-x", "subscription-switch", 600, None)
+    with caplog.at_level(logging.INFO):
+        _log_retry_budget("agent-x", "subscription-switch", 600, None, elapsed_s=30)
     assert not caplog.records, "no configured limit means nothing was taken away"

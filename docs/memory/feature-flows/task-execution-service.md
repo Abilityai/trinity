@@ -118,8 +118,10 @@
 > because `state.start_time` is reset before it), so a retry that ran its full allowance is no
 > longer labelled #2106 `NETWORK` against an original limit it was never given — the old reading
 > was "aborted after 300s of 3600 seconds allowed", which sent operators to raise a limit that
-> was never reached. `_warn_if_retry_budget_clamped` states any shrink at WARNING where it is
-> decided, so the #678 ceiling (still deliberate) is visible in the log rather than inferred.
+> was never reached. `_log_retry_budget` states the retry's budget where it is decided — the #678 ceiling
+> as a WARNING ("clamped"), the SUB-003 re-run's first-attempt spend as INFO with the
+> breakdown, escalating to WARNING only when under the reader-race ceiling is left (a re-run
+> that short is likely hopeless and still billed) — so neither is inferred from a terminal.
 > Same `execution_id` ⇒ #1084 `effect_guard`
 > dedups wired sinks. Boundaries (follow-ups): the #1083 `DISPATCH_ASYNC` path routes 429s through
 > the result-callback (bypasses this sync path); a concurrent switch-lock *loser* (gets `None`)
