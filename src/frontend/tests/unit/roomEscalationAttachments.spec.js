@@ -22,8 +22,11 @@ import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { stripComments } from './helpers/stripComments'
 import {
-  partitionAttachments, fanOutPlan, nameList, carriedNotice, noticeIsProblem,
+  partitionAttachments, fanOutPlan, nameList, carriedNotice, noticeIsProblem, mergeCarrySources,
 } from '@/components/portal/portalAttachments'
+import {
+  pruneCarryLog, CARRY_MAX_ENTRIES, CARRY_MAX_AGE_MS, CARRY_MAX_BYTES,
+} from '@/stores/clientPortal'
 import { usePortalFileDrop } from '@/composables/usePortalFileDrop'
 
 const read = (rel) => stripComments(
@@ -349,5 +352,135 @@ describe('#2794 the room shows what came with the message', () => {
     const send = ROOM.slice(ROOM.indexOf('async function send()'), ROOM.indexOf('async function addAgent'))
     expect(send).toMatch(/clearAttachments\(\)/)
     expect(send.indexOf('clearAttachments()')).toBeGreaterThan(send.indexOf('postRoomMessage'))
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// 4. the OTHER upload surface (#2794 follow-up)
+// ---------------------------------------------------------------------------
+
+const railEntry = (name, over = {}) => ({
+  agent: 'scout', name, size: 10, file: { name }, at: Date.now(), ...over,
+})
+
+describe('#2794 mergeCarrySources — the composer is not the only way to attach', () => {
+  it('carries a file that only the rail knows about', () => {
+    // THE defect this closes: the rail's Files panel sends straight to its
+    // "Send to" target and keeps no pending state, so the escalation saw
+    // nothing — no carry, and not even a notice saying so.
+    const merged = mergeCarrySources([], [railEntry('deck.pdf')])
+    expect(merged.map((e) => e.name)).toEqual(['deck.pdf'])
+    const { carried } = partitionAttachments(merged)
+    expect(carried).toHaveLength(1)
+  })
+
+  it('does not double-carry a file both surfaces saw', () => {
+    // A composer upload goes through the same funnel, so it is in BOTH views.
+    const chip = sent('a.pdf')
+    chip.size = 10
+    const merged = mergeCarrySources([chip], [railEntry('a.pdf')])
+    expect(merged).toHaveLength(1)
+    expect(merged[0]).toBe(chip)      // the composer entry wins — it holds the live outcome
+  })
+
+  it('treats same-name-different-size as two files', () => {
+    const chip = sent('a.pdf'); chip.size = 10
+    const merged = mergeCarrySources([chip], [railEntry('a.pdf', { size: 999 })])
+    expect(merged).toHaveLength(2)
+  })
+
+  it('keeps a failed composer chip failed — the rail must not mask it', () => {
+    // Otherwise a file that failed in the composer would be reported as
+    // carried because a same-named rail entry sat behind it.
+    const bad = failed('a.pdf'); bad.size = 10
+    const merged = mergeCarrySources([bad], [railEntry('a.pdf')])
+    const { carried, dropped } = partitionAttachments(merged)
+    expect(carried).toEqual([])
+    expect(dropped.map((e) => e.name)).toEqual(['a.pdf'])
+  })
+
+  it('normalises rail entries into the shape the rest of the module reads', () => {
+    const [e] = mergeCarrySources([], [railEntry('deck.pdf')])
+    // `uploadDocument` logs only AFTER the server took the file, so these are
+    // landed by construction.
+    expect(e.done).toBe(true)
+    expect(e.uploading).toBe(false)
+    expect(e.error).toBe('')
+    expect(e.file).toBeTruthy()
+  })
+
+  it('survives junk from either side', () => {
+    expect(mergeCarrySources(null, null)).toEqual([])
+    expect(mergeCarrySources([null], [null, {}, { name: 'x' }])).toEqual([])  // no file → not carryable
+  })
+})
+
+describe('#2794 pruneCarryLog — the log retains File objects, so it is bounded', () => {
+  it('drops entries past the age window', () => {
+    const now = Date.now()
+    const kept = pruneCarryLog([
+      railEntry('old.pdf', { at: now - CARRY_MAX_AGE_MS - 1 }),
+      railEntry('new.pdf', { at: now }),
+    ], now)
+    expect(kept.map((e) => e.name)).toEqual(['new.pdf'])
+  })
+
+  it('caps the entry count, keeping the newest', () => {
+    const now = Date.now()
+    const many = Array.from({ length: CARRY_MAX_ENTRIES + 5 }, (_, i) =>
+      railEntry(`f${i}.pdf`, { at: now - (CARRY_MAX_ENTRIES + 5 - i) }))
+    const kept = pruneCarryLog(many, now)
+    expect(kept).toHaveLength(CARRY_MAX_ENTRIES)
+    expect(kept[kept.length - 1].name).toBe(`f${CARRY_MAX_ENTRIES + 4}.pdf`)
+  })
+
+  it('caps retained bytes, evicting oldest first', () => {
+    const now = Date.now()
+    const big = CARRY_MAX_BYTES / 2 + 1
+    const kept = pruneCarryLog([
+      railEntry('old.bin', { at: now - 3, size: big }),
+      railEntry('mid.bin', { at: now - 2, size: big }),
+      railEntry('new.bin', { at: now - 1, size: big }),
+    ], now)
+    expect(kept.map((e) => e.name)).toEqual(['new.bin'])
+  })
+
+  it('keeps a single over-cap file rather than refusing to carry it', () => {
+    // Evicting it would silently drop the one file the person cares about.
+    const now = Date.now()
+    const kept = pruneCarryLog([railEntry('huge.bin', { at: now, size: CARRY_MAX_BYTES * 4 })], now)
+    expect(kept).toHaveLength(1)
+  })
+
+  it('drops an entry whose File is gone', () => {
+    expect(pruneCarryLog([railEntry('x.pdf', { file: null })])).toEqual([])
+  })
+})
+
+describe('#2794 the carry boundary is drawn where the chips clear', () => {
+  const CONV = CONVERSATION
+  it('opening a conversation consumes anything sent before it', () => {
+    // Files from a previous visit must not ride along on an escalation.
+    const mounted = CONV.slice(CONV.indexOf('onMounted(async () => {'), CONV.indexOf('onMounted(async () => {') + 600)
+    expect(mounted).toMatch(/store\.markUploadsCarried\(props\.agent\?\.name\)/)
+  })
+
+  it('a sent turn consumes them too', () => {
+    const i = CONV.indexOf('clearAttachments()')
+    expect(CONV.slice(i, i + 300)).toMatch(/store\.markUploadsCarried\(props\.agent\?\.name\)/)
+  })
+
+  it('the escalation consumes them, so a second one cannot re-carry', () => {
+    const body = PORTAL.slice(PORTAL.indexOf('async function onEscalateToRoom'),
+                              PORTAL.indexOf('async function onEscalateToRoom') + 3000)
+    expect(body).toMatch(/mergeCarrySources\(attachments, store\.carryableUploadsFor\(agents\[0\]\)\)/)
+    expect(body).toMatch(/store\.markUploadsCarried\(agents\[0\]\)/)
+  })
+
+  it('the funnel every surface shares is what records them', () => {
+    const STORE = readFileSync(fileURLToPath(new URL('../../src/stores/clientPortal.js', import.meta.url)), 'utf8')
+    const fn = STORE.slice(STORE.indexOf('async uploadDocument'), STORE.indexOf('async uploadDocument') + 700)
+    expect(fn).toMatch(/this\.noteUploadForCarry\(agentName, file\)/)
   })
 })
