@@ -46,6 +46,45 @@ export function isFileDrag(dataTransfer) {
 }
 
 /**
+ * The files carried by a paste, or `[]` (#2794).
+ *
+ * Pasting a screenshot is how most people attach one — no file on disk, no
+ * Finder, just Cmd-Shift-4 and Cmd-V — and the Workspace composer simply ate it:
+ * there was no paste handler anywhere, on either chat surface, so the gesture
+ * did nothing and gave no reason. The reported session shows the cost: the
+ * client's file was named "Pasted image (3).png", i.e. they had already been
+ * driven out to a file manager to get it in at all.
+ *
+ * `clipboardData.files` is the answer where it exists; `items` is the fallback
+ * for the browsers that only populate that. Both are host objects, so both are
+ * normalised through `Array.from` rather than indexed.
+ */
+export function filesFromClipboard(clipboardData) {
+  if (!clipboardData) return []
+  const direct = Array.from(clipboardData.files || [])
+  if (direct.length) return direct
+  const items = Array.from(clipboardData.items || [])
+  return items
+    .filter((it) => it && it.kind === 'file')
+    .map((it) => (typeof it.getAsFile === 'function' ? it.getAsFile() : null))
+    .filter(Boolean)
+}
+
+/**
+ * Does this paste also carry text that the person expects to be typed?
+ *
+ * Copying out of a rich editor puts BOTH an image and its text on the clipboard,
+ * and swallowing the paste there would silently delete what they meant to paste.
+ * So the file is attached either way and the default is only suppressed when
+ * there is no text to lose — which is exactly the screenshot case.
+ */
+export function clipboardHasText(clipboardData) {
+  const types = clipboardData?.types
+  if (!types) return false
+  return Array.from(types).includes('text/plain')
+}
+
+/**
  * Why this file cannot be sent, or null when it can. Returns the sentence the
  * chip shows — it names the file and the limit, never "upload failed".
  */
@@ -163,6 +202,20 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
   }
 
   /**
+   * Paste-to-attach (#2794). Same batch, same per-file outcome, same chips as a
+   * drop — a second path into `addFiles`, never a second implementation of it.
+   */
+  function onPaste(e) {
+    if (disabled()) return
+    const files = filesFromClipboard(e.clipboardData)
+    if (!files.length) return
+    // Suppress the default ONLY when nothing else is on the clipboard; see
+    // `clipboardHasText`. A paste that carries both still types its text.
+    if (!clipboardHasText(e.clipboardData)) e.preventDefault()
+    return addFiles(files)
+  }
+
+  /**
    * The batch. Every file gets an entry before any upload starts, so the person
    * sees the whole gesture land at once rather than watching it appear one file
    * at a time; each then resolves independently.
@@ -277,6 +330,6 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
     settled,
     clear,
     removeAt,
-    handlers: { onDragEnter, onDragOver, onDragLeave, onDrop },
+    handlers: { onDragEnter, onDragOver, onDragLeave, onDrop, onPaste },
   }
 }

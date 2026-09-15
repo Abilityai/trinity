@@ -621,6 +621,7 @@
                 @keydown="onComposerKeydown"
                 @click="onComposerCaret"
                 @select="onComposerCaret"
+                @paste="dropHandlers.onPaste"
               ></textarea>
             </div>
             <!-- ent#547: the call toggle stays LIVE while everything else goes

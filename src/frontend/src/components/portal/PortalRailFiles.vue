@@ -44,10 +44,10 @@
   >
     <!-- Send -->
     <div>
-      <label v-if="participants.length > 1" class="block text-[11px] text-gray-500 dark:text-gray-400 mb-2">
+      <label v-if="targets.length > 1" class="block text-[11px] text-gray-500 dark:text-gray-400 mb-2">
         Send to
         <select v-model="target" class="mt-0.5 w-full text-xs rounded border-gray-300 dark:border-gray-600 dark:bg-gray-800" data-testid="portal-rail-files-target">
-          <option v-for="p in participants" :key="p" :value="p">{{ p }}</option>
+          <option v-for="t in targets" :key="t.value" :value="t.value">{{ t.label }}</option>
         </select>
       </label>
       <label
@@ -194,11 +194,16 @@ import PortalFilePreview from './PortalFilePreview.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import { feedView } from './portalRail'
 import {
+  defaultUploadTarget,
   errorDetail,
   fileActions,
   flattenFiles,
   humanSize,
+  resolveRecipients,
   sharePreviewPath,
+  uploadReceipt,
+  uploadTargetLabel,
+  uploadTargets,
 } from './portalFiles'
 
 const props = defineProps({
@@ -223,7 +228,12 @@ const uploadOk = ref('')
 const target = ref(null)
 
 const participants = computed(() => props.participants)
-const targetName = computed(() => target.value || participants.value[0] || 'the agent')
+// #2794: the options, the default and the label are all rules, not template
+// logic — a room defaults to every agent in it, and that claim has to be
+// reachable from a node-env test. See `portalFiles.js`.
+const targets = computed(() => uploadTargets(participants.value))
+const targetName = computed(() => uploadTargetLabel(target.value, participants.value))
+const recipients = computed(() => resolveRecipients(target.value, participants.value))
 
 // Lists are always rendered around the send zone — the two "Nothing … yet."
 // lines ARE the empty copy — so the verdict only decides loading / failed /
@@ -270,9 +280,15 @@ function actionsFor(row) {
 }
 
 // The recipient follows the participant SET (joined key, not array identity).
+//
+// #2794: `null` and a name that has left are both "no longer a valid choice",
+// and both fall back to the DEFAULT — which in a room is everyone, not the
+// first name in the list. The old fallback (`participants[0]`) is how a
+// two-agent room silently aimed every rail upload at one agent.
 const participantsKey = computed(() => participants.value.join(' '))
 watch(participantsKey, () => {
-  if (!participants.value.includes(target.value)) target.value = participants.value[0] || null
+  const valid = targets.value.some((t) => t.value === target.value)
+  if (!valid) target.value = defaultUploadTarget(participants.value)
 }, { immediate: true })
 
 // Small inline SVG file icon (picks a hue by type — one fact, shape + hue).
@@ -302,30 +318,45 @@ function onPick(e) {
 async function uploadBatch(fileList) {
   const files = Array.from(fileList || [])
   if (!files.length) return
-  const agent = targetName.value
+  // #2794: one gesture, N inboxes. The room's own drop zone already fanned out;
+  // this one did not, and the gap was invisible because a single-recipient
+  // receipt reads exactly like a successful fan-out.
+  const to = recipients.value
+  if (!to.length) { uploadError.value = 'This chat has no agent to send to.'; return }
   uploading.value = true
   uploadError.value = ''
   uploadOk.value = ''
   const sent = []
   const failed = []
+  let lastReason = "Couldn't upload."
   for (const file of files) {
     const rejection = rejectionFor(file)
     if (rejection) { failed.push(`${file.name}: ${rejection}`); continue }
-    try {
-      const res = await feeds.upload(agent, file)
-      sent.push(res?.filename || file.name)
-    } catch (err) {
-      failed.push(`${file.name}: ${uploadFailureReason(err)}`)
+    // Per RECIPIENT, not per file: one agent refusing (offline, over quota)
+    // must not decide the file failed for the others.
+    //
+    // A file counts as SENT only when it reached every recipient. Counting a
+    // partial delivery as a success would reproduce the reported bug inside its
+    // own fix — "Sent shot.png to analyst-demo and sidekick" while sidekick got
+    // nothing is precisely the reassurance that made the original gap invisible.
+    // A partial lands in the failure line instead, naming the agents it missed,
+    // which says both what happened and what to do about it.
+    const missed = []
+    for (const agent of to) {
+      try {
+        await feeds.upload(agent, file)
+      } catch (err) {
+        missed.push(agent)
+        lastReason = uploadFailureReason(err)
+      }
     }
+    if (missed.length) failed.push(`${file.name} → ${missed.join(', ')}: ${lastReason}`)
+    else sent.push(file.name)
   }
   uploading.value = false
   // Both halves are stated. A batch that half-succeeded used to report only the
   // success, which is exactly how four dropped files became one with no notice.
-  if (sent.length) {
-    uploadOk.value = sent.length === 1
-      ? `Sent “${sent[0]}” to ${agent}.`
-      : `Sent ${sent.length} files to ${agent}.`
-  }
+  uploadOk.value = uploadReceipt({ files: sent, recipients: to })
   if (failed.length) uploadError.value = failed.join(' · ')
 }
 

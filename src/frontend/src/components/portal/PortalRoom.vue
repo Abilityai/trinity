@@ -281,6 +281,7 @@
                 @input="onComposerInput"
                 @click="onComposerCaret"
                 @select="onComposerCaret"
+                @paste="dropHandlers.onPaste"
               ></textarea>
             </div>
             <div class="mt-1 flex items-center gap-1">

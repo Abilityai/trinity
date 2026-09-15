@@ -245,7 +245,7 @@ pending SET rather than a scalar.
 |---|---|
 | `PortalConversation.vue` | the agent's inbox |
 | `PortalRoom.vue` | **every participating agent's** inbox; the chip names the recipients (operator decision 13) |
-| `PortalRailFiles.vue` | the target agent's inbox |
+| `PortalRailFiles.vue` | the chosen target — in a room, **every participating agent** by default (#2794) |
 | `Portal.vue::onEscalateToRoom` (#2794) | the **new** participants' inboxes — see below |
 
 - the whole conversation is the target, with an affordance naming what will
@@ -317,6 +317,85 @@ one**. `roomComposerChain.spec.js` had by then pinned the broken state as the
 contract. The composer now states its own condition (`v-if="!isClosed"`), the
 spec pins the outcome instead, and the room clears its chips after a successful
 send the way the 1:1 always has.
+
+### A file reaches every agent in the room, and every agent is told (#2794)
+
+Testing the escalation above against a live instance turned up the rest of the
+path, and it was worse than the original report. In a room holding
+`analyst-demo` and `sidekick`, a client sent a screenshot and asked *"@sidekick
+what is displayed on the pasted image?"*. sidekick answered *"I don't see any
+image attached to your message."* — truthfully. Three independent gaps, each
+invisible on its own, and each of which alone is enough to produce that reply.
+
+**1. The rail aimed at one agent.** `PortalRailFiles`' `Send to` select defaulted
+to `participants[0]` while `PortalRoom`'s own drop zone fanned out to all of
+them. Two surfaces in the same chat, two meanings for *send a file here*, and the
+one with the visible control was the wrong one — so the file reached the agent
+that was not being asked about it. A room now defaults to **everyone in it**, with
+the individual agents still selectable underneath.
+
+The rules are in `portalFiles.js` (`uploadTargets`, `defaultUploadTarget`,
+`resolveRecipients`, `uploadTargetLabel`, `uploadReceipt`), not in the SFC, for
+the reason this document keeps giving: `environment: 'node'`, no mount harness,
+so a rule in a `.vue` file is a rule no test can reach. Two of them encode a
+direction rather than a value:
+
+- `resolveRecipients` fails **toward the fan-out** — a target that has left the
+  room resolves to everyone, because a file sent to one agent too many is
+  recoverable from the rail's own delete and a file sent to nobody is the silent
+  loss this issue is about;
+- a file counts as sent only when it reached **every** recipient. A partial
+  delivery is a failure line naming the agents it missed — counting it as a
+  success would rebuild the reported bug inside its own fix, since *"Sent
+  shot.png to analyst-demo and sidekick"* while sidekick got nothing is exactly
+  the reassurance that made the gap invisible the first time.
+
+**2. Pasting did nothing.** There was no paste handler on either composer, so the
+most common way anyone attaches a screenshot was inert *and silent*. The reported
+session shows what that costs: the client's file was called
+`Pasted image (3).png`, i.e. they had already been driven out to a file manager.
+`usePortalFileDrop` now exposes `onPaste`, bound on both composers, feeding the
+same `addFiles` batch as a drop — a second path in, never a second
+implementation. It suppresses the default **only** when the clipboard carries no
+`text/plain`, so pasting out of a rich editor still types the text it came with.
+
+**3. No agent was ever told — the core of it.** A room turn was built from
+`_build_turn_prompt`, which is a header plus the transcript, and from nothing
+else. The sentence that makes a file visible to an agent, and the vision blocks
+that make *"what is in this picture"* answerable at all, were written **inline in
+`portal_chat`** — so the 1:1 conversation was the only surface in the product
+that had them. Delivery had never been the problem; the *telling* did not exist.
+
+That composition now lives in one place,
+`client_portal/service.py::collect_inbox_context`, returning
+`(manifest_prefix, images)`; `portal_chat` and
+`shared_sessions/service.py::_wake_agent` both call it. The room prepends the
+prefix to the turn prompt and passes `images=` to `execute_task`. Three
+decisions, none obvious from the diff:
+
+- **the manifest is a PREFIX.** An agent that meets *"what is in the image?"*
+  before it has been told an image exists is the agent that answers "I don't see
+  any image attached";
+- **whose inbox** — the posting principal's, because a portal inbox is keyed by
+  the client's email and in a Workspace room that principal is the person who put
+  the file there. *Residual:* a room with two humans surfaces only the email of
+  whoever's message triggered this wake. Reading every human's inbox costs one
+  `docker exec` per human per wake, and the shape rooms actually have is one
+  person and N agents;
+- **the image-intent test reads the whole delta, agent lines included.**
+  *"@sidekick can you look at the screenshot the client sent?"* is an ordinary
+  room move, and scoping the test to human text would make exactly that relay
+  arrive image-less — this bug, one hop along.
+
+Fail-safe throughout: no client email, an unreadable inbox or a raising collector
+each yield `("", [])` and the turn runs unchanged. `images` is `None` rather than
+`[]` when there is nothing, so a room without files is a byte-for-byte no-op.
+
+The one-composer property is the one worth guarding, because the failure being
+fixed *is* a surface that quietly composes nothing:
+`test_2794_room_file_awareness.py` counts the manifest sentence across the whole
+backend and fails if it appears anywhere but `client_portal/service.py` — so a
+third surface inventing its own is caught, not just a second one.
 
 ---
 
