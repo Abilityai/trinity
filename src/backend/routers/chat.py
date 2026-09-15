@@ -21,6 +21,7 @@ from dependencies import (
 )
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
+from services.model_catalog import InvalidModelError, validate_dispatch_model
 from services.capacity_manager import (
     CapacityFull,
     CircuitOpen,
@@ -167,6 +168,16 @@ async def chat_with_agent(
 
     if container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
+
+    # #2796: shape-check the caller-supplied model BEFORE the admission gate —
+    # `admit_chat_request` begins the idempotency claim, and a request refused
+    # after that point would burn the key (the RD11 upload-path quirk this
+    # deliberately does not repeat). Normalised in place so the execution row
+    # and the dispatch payload cannot disagree about the value.
+    try:
+        request.model = validate_dispatch_model(request.model)
+    except InvalidModelError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     # Admission gate (#1026 slice 1): idempotency (#525) + dispatch breaker
     # (#526) + capacity acquire (#428) live in dispatch_admission_service now
@@ -368,6 +379,15 @@ async def execute_parallel_task(
             name, rid, current_user.id
         ):
             raise HTTPException(status_code=404, detail="Session not found.")
+
+    # #2796: same gate as /chat, and it has to be here too — this is the route
+    # the Chat tab actually posts to, and its `model` reaches the runtime as a
+    # `--model` argv element by the same path. Normalised in place, exactly like
+    # the timeout below.
+    try:
+        request.model = validate_dispatch_model(request.model)
+    except InvalidModelError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     # #1068 (demotion PR 1): normalize the deprecated per-task timeout override once
     # here — in place, so every downstream site (acquire, execute_task, backlog
