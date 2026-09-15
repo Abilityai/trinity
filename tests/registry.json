@@ -2975,6 +2975,16 @@
       "description": "Journey J11 (brief delivery): a schedule that names one Workspace user lands its output as a turn in that person's Main chat without them asking. A deliberate strict=True xfail skeleton asserting the journey's invariants (E-01, E-05, L-03) until the delivery half ships; the shape #2350's Journey Impact gate accepts as a declared promise."
     },
     {
+      "file": "journeys/test_j10_agent_calls_agent_journey.py",
+      "feature": "#2349",
+      "added": "2026-09-15",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J10 (agent calls agent): agent A drives the MCP server with its own agent-scoped key against agent B. Credential-free on every PR: the permission boundary (P-02) denies without an edge and admits with one, the platform records who called whom (IA-01, AC-01), a stopped callee fails fast with 'Agent is not running' and leaves no row (IA-03), a fan-out is capped at 50 and lands as one batch on one agent (IA-02), a loop stops at its budget, and deleting the callee leaves no dangling edge (L-03, P-01). Keyed stacks also assert B's real answer. Three strict=True xfails carry the findings (no chain-depth guard; denials audited as success; run_agent_loop skips the permission gate)."
+    },
+    {
       "file": "unit/test_voice_auth.py",
       "feature": "#600 / #2700",
       "added": "2026-09-14",
