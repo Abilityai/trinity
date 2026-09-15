@@ -96,8 +96,11 @@ DEFAULT_BRANCH_REGISTERED_EVENTS: frozenset[str] = frozenset({
 # (workflow file, event) pairs whose divergence from `main` is a DECISION,
 # with the reason — the delay is accepted and will close at the next release
 # cut. An entry here is what turns "silent for as long as the release cycle"
-# into "recorded"; remove it once `main` carries the trigger (the guard then
-# passes without it, and a stale entry is not harmful, only untidy).
+# into "recorded"; remove it once `main` carries the trigger. A stale entry
+# is a HARD failure, not untidiness — `test_every_accepted_entry_names_a_real
+# _divergence` asserts every row still names a live gap, so the record prunes
+# itself at the release cut instead of rotting. Expect that test to go red on
+# `main`'s push CI once the release lands: that is the prune order, by design.
 ACCEPTED_UNTIL_RELEASE: dict[tuple[str, str], str] = {
     ("issue-status-on-merge.yml", "pull_request_target"): (
         "#2814 / #2769: the fork-safe trigger. Decided 2026-09-15 to let it land "
@@ -138,9 +141,22 @@ ACCEPTED_UNTIL_RELEASE: dict[tuple[str, str], str] = {
 # ---------------------------------------------------------------------------
 
 def _git(*args: str, timeout: int = 90) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", *args], cwd=REPO, capture_output=True, text=True, timeout=timeout,
-    )
+    """Run git, degrading to a non-zero result rather than raising.
+
+    The #2019 fail-soft contract has to cover BOTH network failure modes. A
+    *refusing* network returns non-zero and the caller skips; a *hanging* one
+    trips `timeout=` and, uncaught, would raise `TimeoutExpired` out of the
+    test — reddening the PR for an offline runner, which is exactly what this
+    helper exists to avoid. `OSError` covers a missing git binary.
+    """
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=REPO, capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return subprocess.CompletedProcess(
+            args=["git", *args], returncode=1, stdout="", stderr=str(exc),
+        )
 
 
 @functools.lru_cache(maxsize=1)

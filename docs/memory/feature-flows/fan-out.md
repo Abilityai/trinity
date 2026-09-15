@@ -1,10 +1,13 @@
 # Feature: Fan-Out Parallel Task Dispatch (FANOUT-001)
 
 ## Overview
-Dispatches N independent tasks to an agent in parallel (throttled by asyncio semaphore), collects results with an optional overall deadline, and returns aggregated per-task results. Each subtask follows the standard TaskExecutionService path for full dashboard observability.
+Dispatches N independent tasks to an agent in parallel (throttled by an asyncio semaphore) and returns aggregated per-task results — or, with `async_mode`, a receipt to poll. Each subtask follows the standard TaskExecutionService path for full dashboard observability.
+
+**Since #2524 the aggregate is a QUERY over `fan_out_id`, not a dict of `execute_task` return values.** That is what lets a fan-out run on the durable pull queue (a pull-claimed subtask returns no `TaskExecutionResult` to collect) and what lets a batch be read after the request that started it is gone.
 
 ## Recent Changes
-- **Issue #2670 (fan_out answers with a fan_out_id, and a batch can be polled)**: a batch is now resolvable after the fact. `POST /fan-out` still builds its aggregate in memory and returns it exactly once; the new `GET /api/agents/{name}/fan-out/{fan_out_id}` rebuilds the aggregate from the `schedule_executions` rows stamped with `fan_out_id` at dispatch, and answers while the batch is still running. MCP `fan_out` is now bounded by `MCP_CHAT_TIMEOUT_MS` (not `(timeout_seconds ?? 7200) + 60`) and on gateway abort returns a `{status: "fan_out_timeout", fan_out_id, ...}` receipt; the new `get_fan_out_result` tool polls it. The batch id is attached to the idempotency claim the moment it is minted (`on_started` hook), so an in-flight duplicate 409 now carries something pollable.
+- **#2524 (async fan-out join)**: the sync aggregate is rebuilt from the batch's rows. Every subtask row carries `fan_out_id` plus the caller's own `fan_out_task_id` (new column, surfaced as `task_id` on the #2670 GET), rows are created at slot grant (never up front — see "Row lifecycle"), and a queued subtask is waited on through `sync_waiter.wait_for_fan_out_batch`, woken by the terminal fan-out. Adds `async_mode` (backend + MCP). The outer deadline bounds the wait, not the work; with no deadline the wait covers `ceil(N / concurrency)` waves. `fan_out` joins `pull_pilot.PULL_REACHABLE_TRIGGERS`.
+- **Issue #2670 (fan_out answers with a fan_out_id, and a batch can be polled)**: a batch is now resolvable after the fact. The new `GET /api/agents/{name}/fan-out/{fan_out_id}` rebuilds the aggregate from the `schedule_executions` rows stamped with `fan_out_id` at dispatch, and answers while the batch is still running. MCP `fan_out` is now bounded by `MCP_CHAT_TIMEOUT_MS` (not `(timeout_seconds ?? 7200) + 60`) and on gateway abort returns a `{status: "fan_out_timeout", fan_out_id, ...}` receipt; the new `get_fan_out_result` tool polls it. The batch id is attached to the idempotency claim the moment it is minted (`on_started` hook), so an in-flight duplicate 409 now carries something pollable.
 - **Issue #418 (feature/418-inter-agent-timeout)**: `timeout_seconds` is now optional and governs only the outer fan-out-wide deadline. Individual subtasks are always bounded by the target agent's configured `execution_timeout_seconds` (TIMEOUT-001). Previously a hardcoded 600s default capped every subtask regardless of per-agent configuration.
 
 ## User Story
@@ -24,9 +27,9 @@ No frontend UI entry point exists; this is an API/MCP-only feature.
 
 ### Tool Definition — `fan_out`
 - `src/mcp-server/src/tools/chat.ts:602-732` -- `fan_out` tool
-- Parameters: `agent_name`, `tasks[]`, `timeout_seconds` (optional; no default — when omitted, no outer deadline is applied and each sub-task is bounded by the target agent's configured `execution_timeout_seconds`), `max_concurrency`, `model`, `system_prompt`, `allowed_tools`
+- Parameters: `agent_name`, `tasks[]`, `timeout_seconds` (optional; bounds the wait, not the subtasks — when omitted the backend waits out the whole batch), `max_concurrency`, `model`, `system_prompt`, `allowed_tools`, `async_mode` (#2524 — return `{fan_out_id, status: "accepted"}` immediately; poll with `get_fan_out_result`)
 - Access control: calls `checkAgentAccess()` (same rules as `chat_with_agent`)
-- Derives a deterministic `Idempotency-Key` over `[caller, agent_name, "fan_out", model, JSON.stringify(tasks)]` (`deriveMcpIdempotencyKey`, RELIABILITY-006) — an *identical* re-send replays the same batch, a *reworded* one derives a new key and dispatches all N tasks again. The tool description now spells this out together with the `fan_out_timeout` receipt shape (#2670).
+- Derives a deterministic `Idempotency-Key` over `[caller, agent_name, "fan_out", model, JSON.stringify(tasks)]` (plus `"async"` when `async_mode` is set, so a sync call never replays an async receipt) (`deriveMcpIdempotencyKey`, RELIABILITY-006) — an *identical* re-send replays the same batch, a *reworded* one derives a new key and dispatches all N tasks again. The tool description now spells this out together with the `fan_out_timeout` receipt shape (#2670).
 - Delegates to `TrinityClient.fanOut()`; returns `FanOutDispatchResult` **or** `FanOutTimeoutReceipt` as JSON
 
 ### Tool Definition — `get_fan_out_result` (#2670)
@@ -70,6 +73,7 @@ class FanOutRequest(BaseModel):
     model: Optional[str]
     system_prompt: Optional[str]
     allowed_tools: Optional[List[str]]
+    async_mode: Optional[bool] = False         # #2524: accept + poll instead of blocking
 ```
 
 - Task IDs: regex `^[a-zA-Z0-9_-]{1,64}$`, must be unique
@@ -124,21 +128,35 @@ A replayed `Idempotency-Key` whose original is still running now raises `409` wi
 - `src/backend/services/fan_out_service.py:67` -- `FanOutService` class
 - Singleton via `get_fan_out_service()` (module-level `_fan_out_service`)
 
-#### `execute()` method (line 70)
+#### `execute()` method (#2524 shape)
 1. Generate `fan_out_id` = `fo_{secrets.token_urlsafe(12)}`, then fire `on_started(fan_out_id)` if supplied (#2670 — best-effort, see above; nothing has been dispatched yet)
-2. Get `TaskExecutionService` singleton
-3. Create `asyncio.Semaphore(max_concurrency)` for throttling
-4. Define `run_subtask()` coroutine for each task:
-   - Acquires semaphore
-   - Calls `task_service.execute_task()` with `triggered_by="fan_out"`, `fan_out_id=fan_out_id`, and **`timeout_seconds=None`** so TaskExecutionService resolves the target agent's configured `execution_timeout_seconds` (TIMEOUT-001, #418)
-   - Maps result to `FanOutTaskResult` (completed or failed)
-   - Catches `CancelledError` (deadline exceeded) and general exceptions
-5. Dispatch all coroutines via `asyncio.gather(*coroutines, return_exceptions=True)`. The gather is **conditionally wrapped** in `asyncio.timeout(timeout_seconds)` only when the caller supplied an outer deadline (#418). Without a deadline, the gather runs unwrapped — each subtask is still individually bounded by per-agent `execution_timeout_seconds`.
-6. On `TimeoutError`: mark unfinished tasks as failed with `error_code="timeout"` (only reachable when outer deadline was set)
-7. Build ordered results matching input task order
-8. Return `FanOutResult` with aggregate counts
+2. **Spawn** `_dispatch_all` — the batch is not owned by the request. It snapshots the agent's subscription once (SUB-004), then for each task: acquire `asyncio.Semaphore(max_concurrency)` → `db.create_task_execution(..., fan_out_id, fan_out_task_id=task.id, subscription_id)` → `task_service.execute_task()` with `triggered_by="fan_out"`, that `execution_id`, and **`timeout_seconds=None`** so TaskExecutionService resolves the agent's `execution_timeout_seconds` (TIMEOUT-001, #418). A returned `error_code` is kept in-process (the row has no column for it).
+3. `async_mode=True` → return `{fan_out_id, status="accepted", total}` now.
+4. Otherwise, within one budget (`_wait_budget`): wait for the dispatch task (shielded — the deadline never cancels it), **then** `sync_waiter.wait_for_fan_out_batch(...)` for rows that came back `queued`. On timeout the batch status is `deadline_exceeded`.
+5. `build_aggregate(agent_name, fan_out_id, order=[t.id ...])` — read from the rows, in the caller's input order. A task with no row is `running` while the dispatch is still going (waiting for a slot), `failed` once it has finished (row creation failed).
 
-Log line format: `[FanOut] Starting {fan_out_id}: {N} tasks on '{agent}' (concurrency={max_concurrency}, deadline={deadline_desc})` where `deadline_desc` is either `"{N}s"` or `"per-agent"`.
+#### Row lifecycle: created at slot grant, never up front (#2524 review)
+A row created up front and left waiting behind the semaphore is a hidden queue every recovery path misreads. As `RUNNING` (what `create_task_execution` writes) it matches the #106 no-session sweep (`NO_SESSION_TIMEOUT_SECONDS = 60`), the watchdog's orphan reconcile (absent from the agent, no live-dispatcher marker) and the stale sweep — all anchored at `started_at`, i.e. admission (#2433/#2435) — so the undispatched tail was bulk-FAILed, the join woke the sync caller with a fabricated aggregate, and the turns still ran and billed. As `QUEUED` it is claimable by `claim_next_queued` (backlog drain, pull workers) while `_dispatch_all` also dispatches it — a double run. Creating the row at grant (as pre-#2524 code did via `execute_task`) avoids both and keeps `duration_ms` a measure of the run, not of the wait.
+
+The cost: a batch is fully visible only once its last subtask has a slot. A GET mid-batch sees the rows dispatched so far (the #2670 receipt already treats `execution_ids` as evidence, not a manifest), and a backend restart loses the not-yet-dispatched tail — `_dispatch_all` is in-process with no startup recovery, for `async_mode` exactly as for a sync call. Under pull the semaphore self-releases in milliseconds, so every row exists almost immediately.
+
+**`max_concurrency` keeps its meaning, and needed no branch.** The semaphore still wraps the `execute_task` call. On push that call spans the whole turn, so it paces dispatch exactly as before — deleting it would fire N concurrent dispatches at an agent whose `max_parallel_tasks` is 3 and turn the excess into `CapacityFull` failures. Under pull the same call returns in milliseconds (the row is queued, not run), so the semaphore self-releases and real concurrency becomes the agent's worker pool — #1081 Phase 5's "capacity becomes physical", arrived at by construction.
+
+⚠️ **The outer deadline bounds the WAIT, not the work (#2524, contract change).** It used to wrap the `gather` in `asyncio.timeout`, cancelling in-flight subtasks and reporting them `failed`/`timeout`. A queued or claimed row is not the backend's to cancel, and on push that cancellation was always half-illusory — it abandoned the HTTP call while the agent kept running (and billing for) the turn. A still-open subtask — including one still waiting for a slot — now reports **`status="running"`** with no `error_code`; the batch still reports `deadline_exceeded`. A caller that branches on the batch status is unaffected; one that treats every non-`completed` subtask as failed sees a third value. **After a deadline the GET is the source of truth**, not the returned aggregate.
+
+**Default wait budget.** An explicit `timeout_seconds` is honoured verbatim. Without one the wait is `ceil(N / min(max_concurrency, max_parallel_tasks)) × execution_timeout_seconds + 120s` — the worst case for a batch of individually-bounded subtasks at that parallelism (previously an unbounded `gather`), so a batch that used to return complete results still does.
+
+**`error_code`.** Populated on the sync response from `execute_task`'s return value (push path). `schedule_executions` has no column for it, so a pull-claimed subtask and every GET result carry none.
+
+#### The join
+- `join_fan_out_on_terminal(execution_id)` — called from `event_dispatch_service.spawn_task_terminal_event`, the wrapper every CAS-won terminal writer already goes through (push applier, pull sink, lease reaper, cleanup), beside #2523's loop advance. Deliberately NOT inside `emit_task_terminal_event`, which returns early when no event subscription matches — the common case.
+- One PK read on every terminal in the fleet to ask "does this row carry a `fan_out_id`?"; a batch COUNT (`idx_executions_fan_out_status`) only when it does.
+- It fires on "no open row", which is not "batch complete" while later subtasks have no row yet. Safe because the sync caller registers its waiter only after the dispatch has finished; an earlier signal finds no waiter and is a no-op.
+- Idempotent by construction: it only *signals*, and signalling an absent or already-resolved waiter is a no-op.
+- `_dispatch_all` also calls it directly on a non-QUEUED return, because `execute_task`'s fast-fail paths (capacity, circuit-open, ephemeral budget) write a FAILED row without reaching a CAS-won terminal writer, so no terminal event fires for them.
+- `_fail_subtask` (a raised `execute_task`) is a terminal writer: on a won CAS it closes the dispatch activity (#1804) and calls `spawn_task_terminal_event` (#1578 emit + join).
+
+Log line format: `[FanOut] Starting {fan_out_id}: {N} tasks on '{agent}' (concurrency={max_concurrency}, deadline={deadline_desc}, async={async_mode})` where `deadline_desc` is either `"{N}s"` or `"per-batch"`.
 
 ### Data Models
 ```python
@@ -150,7 +168,7 @@ class FanOutTaskInput:
 @dataclass
 class FanOutTaskResult:
     id: str
-    status: str           # "completed" | "failed"
+    status: str           # "completed" | "failed" | "running" (open at a deadline)
     response: Optional[str]
     error: Optional[str]
     error_code: Optional[str]
@@ -162,7 +180,7 @@ class FanOutTaskResult:
 @dataclass
 class FanOutResult:
     fan_out_id: str
-    status: str           # "completed" | "deadline_exceeded"
+    status: str           # "completed" | "deadline_exceeded" | "accepted"
     total: int
     completed: int
     failed: int
@@ -174,9 +192,9 @@ Deliberately **not** a reuse of `FanOutResponse`: the aggregate has a state the 
 ```python
 class FanOutBatchTask(BaseModel):
     execution_id: str
+    task_id: Optional[str]         # the caller's FanOutTask.id (row column fan_out_task_id, #2524); NULL on older rows
     status: str                    # execution status verbatim: queued|running|pending_retry|success|failed|cancelled|skipped|...
-    message: Optional[str]         # the dispatched message — the ONLY tie back to the caller's task;
-                                   # FanOutTask.id is a request-local label and is never persisted on the row
+    message: Optional[str]         # the dispatched message — the only tie back on rows that predate task_id
     response: Optional[str]
     error: Optional[str]
     cost: Optional[float]
@@ -194,7 +212,7 @@ class FanOutBatchStatus(BaseModel):
     completed: int                 # rows with status == "success"
     failed: int                    # terminal rows that are not "success"
     running: int                   # rows in {queued, running, pending_retry}
-    results: List[FanOutBatchTask] # dispatch order (started_at ASC)
+    results: List[FanOutBatchTask] # started_at ASC — not a contract; match by task_id
 ```
 An empty batch is unreachable here — the route 404s rather than reporting a batch of zero.
 
@@ -202,9 +220,10 @@ An empty batch is unreachable here — the route 404s rather than reporting a ba
 
 ### Database Migration
 - `src/backend/db/migrations.py:1152` -- `_migrate_execution_fan_out_id()`
-- Migration #33 (`execution_fan_out_id`) in the `MIGRATIONS` list (`migrations.py:4193`)
+- Migration #33 (`execution_fan_out_id`) in the `MIGRATIONS` list
 - Adds `fan_out_id TEXT` column to `schedule_executions` table
 - Creates index: `idx_executions_fan_out ON schedule_executions(fan_out_id)` — the index the #2670 batch read walks
+- **#2524, dual-track (Invariant #9)**: `_migrate_execution_fan_out_task_id()` in `db/migrations.py` **and** Alembic `0062_execution_fan_out_task_id` (chained after `0061_execution_open_canvas`). Adds `fan_out_task_id TEXT` plus a composite `idx_executions_fan_out_status ON schedule_executions(fan_out_id, status)` — the join COUNTs non-terminal rows for one batch on every fan-out terminal, which the single-column index cannot serve without reading the whole batch.
 
 ### Model
 - `src/backend/db_models.py:266` -- `fan_out_id: Optional[str]` on `ScheduleExecution` dataclass
@@ -217,11 +236,12 @@ The former monolithic `db/schedules.py` was split into the `db/schedules/` mixin
 - `src/backend/db/schedules/executions.py:667` -- `get_agent_executions_summary()` projects `fan_out_id` onto list rows (`ExecutionSummary.fan_out_id`) — the field the MCP recovery lookup groups on
 
 ### Batch Read (#2670)
-- `src/backend/db/schedules/executions.py:693-743` -- `get_fan_out_executions(agent_name, fan_out_id, limit=200) -> List[dict]`
+- `count_fan_out_open(fan_out_id)` (#2524) — COUNT of `{queued, running, pending_retry}` rows; the join and `wait_for_fan_out_batch` run it
+- `src/backend/db/schedules/executions.py` -- `get_fan_out_executions(agent_name, fan_out_id, limit=200) -> List[dict]`
 - `src/backend/database.py:1884` -- facade method delegating to `self._schedule_ops.get_fan_out_executions(...)`
-- Projects only what the aggregate needs: `id, status, started_at, completed_at, duration_ms, message, response, error, cost, context_used, model_used`
+- Projects only what the aggregate needs: `id, fan_out_task_id, status, started_at, completed_at, duration_ms, message, response, error, cost, context_used, model_used`. Also the source of `FanOutService`'s sync aggregate (#2524)
 - Scoped by **both** `agent_name` and `fan_out_id`: the id is server-minted and unguessable, but the route that exposes this is agent-gated, so the query must not be able to return another agent's rows even if an id were somehow reused (`test_the_read_is_scoped_by_agent_as_well_as_by_batch_id`)
-- Ordered `started_at ASC` — dispatch order, which is the order the caller listed its tasks in
+- Ordered `started_at ASC`. Not a contract: a row claimed by a pull worker or re-queued has `started_at` re-stamped, so callers match by `task_id`
 - `limit=200` is a belt: `MAX_TASKS` bounds a batch at 50 at creation, but a re-queued subtask can add a row, so it is not exact
 - `started_at`/`completed_at` normalised through `_norm_ts` so this surface can never serialise a naive timestamp (#1474)
 
@@ -252,7 +272,7 @@ The former monolithic `db/schedules.py` was split into the `db/schedules/` mixin
 | Cross-agent target | 400 | "Fan-out target must be 'self' or '{name}'" |
 | Agent not found | 404 | From `get_authorized_agent` dependency |
 | Auth failure | 401 | From `get_current_user` dependency |
-| Overall deadline exceeded | 200 | `status: "deadline_exceeded"`, unfinished tasks get `error_code: "timeout"` (only reachable when `timeout_seconds` was explicitly set) |
+| Wait deadline exceeded | 200 | `status: "deadline_exceeded"`; still-open subtasks (including ones not yet dispatched) report `status: "running"` and keep running — poll the GET (#2524) |
 | Per-subtask timeout (per-agent config) | 200 | Per-task `status: "failed"` with `error_code: "timeout"` from TaskExecutionService; other subtasks continue |
 | Individual subtask failure | 200 | Per-task `status: "failed"` with `error` and `error_code` |
 | In-flight duplicate `Idempotency-Key` (POST) | 409 | `{"error": "request_in_progress", "message": "...", "execution_id": "<fan_out_id>"}` — same shape as `/chat`/`/task`; the id is the batch id (#2670) |
@@ -324,9 +344,11 @@ Mid-run (null optional fields elided):
   ]
 }
 ```
-Once every row is terminal, `status` becomes `completed` (all `success`), `partial` (some), or `failed` (none). Note `results[].message` is the only link back to the caller's `tasks[].id` — that label is never persisted.
+Once every row is terminal, `status` becomes `completed` (all `success`), `partial` (some), or `failed` (none). Match results to the caller's `tasks[].id` by `results[].task_id` (#2524).
 
 ## Testing
+
+**Automated**: journey J10 (`tests/journeys/test_j10_agent_calls_agent_journey.py`, #2349) drives `fan_out` through the MCP server with an agent-scoped key — 51 tasks refused at the tool and `422` at the backend, a 12-task batch read back from `GET /api/agents/{name}/fan-out/{fan_out_id}` as one batch on one agent (IA-02), and, on a keyed stack, every subtask completed.
 
 ### Prerequisites
 - Backend running at `http://localhost:8000`
@@ -342,7 +364,8 @@ Once every row is terminal, `status` becomes `completed` (all `success`), `parti
    **Verify**: Execution timestamps show sequential pattern
 
 3. **Action**: Send fan-out with very short `timeout_seconds: 10` and complex tasks
-   **Expected**: `status: "deadline_exceeded"`, unfinished tasks have `error_code: "timeout"`
+   **Expected**: `status: "deadline_exceeded"`, unfinished tasks report `status: "running"`
+   **Verify**: the GET later shows them terminal on their rows
 
 4. **Action**: Send fan-out with `agent: "other-agent"`
    **Expected**: 400 error "Cross-agent fan-out is not yet supported"
@@ -359,15 +382,17 @@ Once every row is terminal, `status` becomes `completed` (all `success`), `parti
    **Verify**: `get_fan_out_result(agent_name, fan_out_id)` resolves the same batch; `npx tsx src/mcp-server/scripts/verify_914.ts <agent> fanout` drives this end-to-end
 
 ### Automated
+- `tests/unit/test_2524_fanout_async_join.py` — the join (wakes only on the last open row, idempotent, cheap on non-fan-out terminals, reached from `spawn_task_terminal_event` with independent guards), rows created at slot grant (never up front, never swept while waiting), the queued path leaving the batch open, `max_concurrency` pacing push, a raised dispatch closing its row as a proper terminal writer, the batch-sized wait budget, `error_code` carried from push results, the sync edge adapter
+- `tests/unit/test_2524_fanout_real_schema.py` — `fan_out_task_id`, `get_fan_out_executions` and `count_fan_out_open` against the real schema
 - `tests/unit/test_2670_fan_out_receipt.py` — the aggregate rule (`running` outranks verdicts, `pending_retry` is live, `cancelled`/`skipped` are failures, `deadline_exceeded` never reported, per-task status verbatim, id-less rows dropped, the fold is pure), the read surface (malformed id is the same 404 as unknown and never reaches the DB, empty batch is 404 not an empty aggregate, query scoped by agent, `get_authorized_agent` gate, rows-not-snapshot), and the two backend contracts the MCP client depends on (409 shape, batch id attached before dispatch, hook cannot fail the batch)
 - `src/mcp-server/src/client.test.ts` — `pickRecentFanOut` (`describe("#2670 pickRecentFanOut")`): N rows of one batch is the expected shape, two distinct `fan_out_id`s is ambiguity → `undefined`, filters on trigger / `fan_out_id` presence / key / message / window, and the per-call-site trigger sets stay disjoint (`FAN_OUT_RECOVERY_TRIGGERS` is `["fan_out"]` and neither the chat nor the task set includes it)
 
 ## Architecture Notes
 - Concurrency is managed by `asyncio.Semaphore` -- safe because asyncio is single-threaded (no preemption between awaits)
-- `asyncio.gather(return_exceptions=True)` ensures all coroutines complete even if one raises
-- `asyncio.timeout()` wraps the entire gather for the overall deadline **only when `timeout_seconds` is set**; otherwise the gather runs unwrapped and each subtask is bounded by per-agent `execution_timeout_seconds` (#418)
-- Results dict is safe for concurrent writes in asyncio's cooperative model
-- The batch's execution rows are its **only durable record** (#2670): the POST aggregate lives in memory until returned, and the idempotency snapshot exists only after the batch finishes. Anything that needs to observe a batch after the fact — the GET, the MCP receipt recovery — resolves through `fan_out_id` on `schedule_executions`, never through a fan-out table (there is none)
+- `asyncio.gather(return_exceptions=True)` in the spawned `_dispatch_all` ensures all subtasks are dispatched even if one raises; the spawned task is strongly referenced (`_inflight_batches`) so it cannot be collected mid-batch
+- The deadline never cancels dispatch: the sync caller waits on `asyncio.shield(dispatch)`
+- `sync_waiter`'s fan-out registry is in-process: multi-worker, a terminal on another worker is found by the 5s DB poll, which bounds latency there
+- The batch's execution rows are its **only durable record** (#2670): the POST aggregate is assembled from them when returned, and the idempotency snapshot exists only after the batch finishes. Anything that needs to observe a batch after the fact — the GET, the MCP receipt recovery — resolves through `fan_out_id` on `schedule_executions`, never through a fan-out table (there is none)
 - v1 is self-only (agent fans out to itself); cross-agent fan-out is a future extension
 
 ## Related Flows

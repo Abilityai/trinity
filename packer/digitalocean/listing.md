@@ -105,7 +105,8 @@ address, so there is no browser warning and nothing to accept.
 Trinity ships no model credentials — you supply your own. Add one in the
 browser, then create an agent from a template. The first-run guide walks through
 attaching a domain and serving it through a Cloudflare Tunnel when you are ready
-to move off the bare IP.
+to move off the bare IP, and the full walkthrough — including a private-network
+option — is at https://docs.ability.ai/getting-started/deploying/hardening.
 
 ## Managing Trinity
 
