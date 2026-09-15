@@ -147,7 +147,7 @@ one of these before putting an instance on a public address:
 | Path | What it gives you | When to use it |
 |---|---|---|
 | **Tunnel** (Cloudflare Tunnel — set `TUNNEL_TOKEN` in `.env`) | HTTPS at a real hostname, no inbound ports open at all | The default for a public instance. Nothing to renew. |
-| **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport, instance not on the public internet | What the managed fleet runs. HTTP over a WireGuard tunnel is encrypted — this is a finished posture, not a compromise. |
+| **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport, instance not on the public internet | What the managed fleet runs. HTTP over a WireGuard tunnel is encrypted — this is a finished posture, not a compromise. On a provisioned host, set `PRIVATE_NETWORK_CIDRS` so the web server serves those sources rather than redirecting them to an HTTPS address a private IP can never hold. Inbound channels (Telegram, WhatsApp, VoIP, public links, webhooks) need a public URL and stop working — pair with a tunnel if you use them. |
 | **Reverse proxy you run** (Caddy / nginx + Let's Encrypt) | HTTPS at your own domain | You already operate a proxy, or you need a domain the tunnel can't serve. |
 
 Plain HTTP on a public IPv4 with none of the above is the one combination to
@@ -167,15 +167,23 @@ Check it actually came up — `docker ps | grep cloudflared`. A missing tunnel
 container is silent, and leaves the instance in exactly the plain-HTTP state
 this table says to avoid.
 
-A marketplace droplet (#2281) is a special case — it comes up on a bare public IP
-with no domain, which is why that channel provisions a Caddy sidecar using
-Let's Encrypt's short-lived IP certificates, and why Trinity shows a first-run
-hardening guide there (#2380) prompting for a real domain or a VPN. That guide is
-gated on install provenance and never appears on an install like this one.
+A provisioned DigitalOcean droplet — the Marketplace image (#2281) or one created
+by `scripts/deploy/trinity-do-create.sh`, both through `start.sh --provision` — is
+a special case: it comes up on a bare public IP with no domain, which is why
+provisioning installs Caddy with Let's Encrypt's short-lived IP certificates, and
+why Trinity's first-run overlay carries a **Secure this instance** step there
+(#2380, ent#581) prompting for a real domain, then a Cloudflare Tunnel. That step
+is gated on install provenance and never appears on an install like this one. A
+Marketplace droplet also boots with **no admin account**: the first person to
+open it in a browser creates one at `/setup` (ent#580) — see Security
+Recommendations below for what that means before you open it. A
+`trinity-do-create.sh` droplet does not: the installer asks for the admin
+password before it creates the droplet.
 
-Provenance is set by whatever builds the image — `TRINITY_INSTALL_SOURCE` in
-`.env` (`do-marketplace` / `vultr-marketplace` / `script`), read once at first
-boot and recorded permanently. Setting it by hand afterwards does nothing: the
+Provenance is written by whatever provisions the box (in this repo,
+`start.sh --provision`) — `TRINITY_INSTALL_SOURCE` in
+`.env` (`do-marketplace` / `vultr-marketplace` / `do-script` / `script`), read once
+at first boot and recorded permanently. Setting it by hand afterwards does nothing: the
 recorder never overwrites an existing value and the API refuses to write or
 clear it, because a gate that can be self-asserted is not a gate. Leave it unset
 on an ordinary install — the guide then renders nowhere, which is the intent.
@@ -401,10 +409,16 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
    was a flag that said `false` while a real admin sat in the database. So an
    install that boots with `ADMIN_PASSWORD` set is **never** in the vulnerable
    window: the admin is provisioned during startup and the endpoint is closed
-   before the first request is served. `docker-compose.prod.yml` makes
-   `ADMIN_PASSWORD` mandatory and `scripts/deploy/start.sh` refuses to run
-   without one (auto-generating it under `--unattended`), so following either
-   path is sufficient.
+   before the first request is served. `scripts/deploy/start.sh` refuses to run
+   without one (auto-generating it under `--unattended`), so following it is
+   sufficient. `docker-compose.prod.yml` refuses to render with `ADMIN_PASSWORD`
+   unset **or** blank. `docker-compose.hosted.yml` alone refuses only an
+   **unset** one and renders an **explicitly blank** one (`ADMIN_PASSWORD=`, as
+   `.env.example` ships it) — that is the marketplace claim path below, which
+   `start.sh --hosted` marks with `ADMIN_PASSWORD_SOURCE=browser`. Without that
+   marker the hosted file passes `ADMIN_PASSWORD_SOURCE=unset` and `/setup`
+   refuses to create an admin, so a hand-run hosted stack with a blank password
+   is not claimable either: set the password in `.env` and restart.
 
    The window is still open on an install with **no** admin — a blank
    `ADMIN_PASSWORD`, or a hand-rolled backend — because there the wizard is the
@@ -415,11 +429,48 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
    a trusted LAN this is a non-issue. After setup, login is fully authenticated
    and the window is closed.
 
+   **Marketplace one-click droplets are claimed in the browser — an accepted
+   risk.** DigitalOcean's 1-Click create page has no input form, so a droplet
+   created without a password boots with **no admin account**, and the first
+   person to open `https://<droplet-ip>` creates it — email, password,
+   product-updates consent — without ever opening a terminal (ent#580). Between
+   creating the droplet and that first visit, **anyone who finds its IP can claim
+   it instead.** This was accepted on 2026-09-10: the window is the operator's
+   responsibility, the instance holds nothing at that moment, and a squatted
+   droplet can simply be destroyed and recreated. To keep the window short:
+
+   - open the droplet's URL right after creating it (first boot takes about
+     ninety seconds) and create the admin account straight away; or
+   - until you have claimed it, restrict port 443 to your own IP with a cloud
+     firewall. Leave port 80 open: Let's Encrypt validates the droplet's IP
+     certificate over it, and it serves nothing but a redirect to HTTPS; or
+   - supply the password at create time instead — `#cloud-config` `write_files`
+     to `/etc/trinity/admin-password`, see
+     [`packer/digitalocean/README.md`](../packer/digitalocean/README.md). That
+     droplet boots with the admin already provisioned and never shows the
+     wizard.
+
+   If a droplet you have never opened sends you to the login page rather than
+   the "create your admin account" screen, someone else got there first:
+   destroy it and create another. On a claimed droplet `.env` keeps
+   `ADMIN_PASSWORD` blank on purpose — the password lives only in the database,
+   and reboots and `start.sh --hosted` updates leave it alone. Forgotten it?
+   Set `ADMIN_PASSWORD` in `/opt/trinity/.env` and re-run `start.sh --hosted`;
+   the backend adopts it on the next boot.
+
    Note the corollary: after a provisioned first boot there is no wizard, so
    binding an admin **sign-in email** is a post-login step in
    Settings → General — the dashboard prompts for it.
-2. **Never expose Redis externally** - Keep it internal only
-3. **Use strong SECRET_KEY** - Generate with `openssl rand -hex 32`
-4. **Use email whitelist** - Restrict access to approved email addresses only
-5. **Regular backups** - Automate database backups
-6. **Keep Docker updated** - Regular security patches
+2. **Get a marketplace install off the open internet.** A one-click droplet is
+   reachable from the moment it boots — acceptable for evaluation, which is what
+   the listing is for, and not a posture to leave a working instance in. The
+   step-by-step path (bare IP → domain → Cloudflare Tunnel, or a private network
+   instead, with a verification step for each) is
+   [Hardening a Marketplace Install](user-docs/guides/deploying/hardening.md).
+   The TLS choices themselves are summarised under
+   [TLS on a bare VM](#tls-on-a-bare-vm) above.
+3. **Never expose Redis externally** - Keep it internal only
+4. **Use strong SECRET_KEY** - Generate with `openssl rand -hex 32`
+5. **Use email whitelist** - Restrict access to approved email addresses only
+6. **Regular backups** - Automate database backups
+7. **Keep Docker updated** - Regular security patches

@@ -50,6 +50,7 @@ from services.platform_audit_service import platform_audit_service, AuditEventTy
 from services import operator_intake_service, telemetry_sharing_service
 
 # Import from settings_service (these are re-exported for backward compatibility)
+from . import credentials
 from services.settings_service import (
     get_anthropic_api_key,
     get_github_pat,
@@ -442,6 +443,34 @@ async def update_setting(
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
 
+    # #2691: `public_chat_url` is the one generic-PUT key whose write has
+    # immediate side effects on live integrations — every Telegram webhook is
+    # re-registered and every WhatsApp binding rewritten a few lines below. It
+    # had no validation at all, so `htp://typo.com` stored cleanly and took the
+    # bots with it to an address that answers nothing. Refuse only what cannot
+    # take effect: a value that does not parse as a URL with a host. Plain
+    # `http://` stays legal — the managed fleet advertises exactly that behind a
+    # tunnel — and clearing the setting stays legal.
+    if key == "public_chat_url":
+        from services.settings_service import classify_advertised_url
+
+        body.value = (body.value or "").strip().rstrip("/")
+        if body.value and classify_advertised_url(body.value) == "unconfigured":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "That is not a URL Trinity can hand out. Enter the full "
+                    "address including the scheme, for example "
+                    "https://trinity.example.com."
+                ),
+            )
+        # Nothing to do about the reachability stamp here: it records the host
+        # it was written for, and `is_public_url_reached` compares that to the
+        # host in force. Clearing it from this handler would add a race (a
+        # handshake landing between the write and the clear is wiped by the save
+        # that provoked it) and would still miss every writer that is not this
+        # route.
+
     try:
         setting = db.set_setting(key, body.value)
 
@@ -573,6 +602,14 @@ async def delete_setting(
                 request_id=getattr(request.state, "request_id", None),
                 details={"setting": key, "action": "delete"},
             )
+
+            # #2572 Trigger A2, second clear path. `db.delete_setting` has no
+            # delete-side twin of ent#435's sink guard, so this route reaches
+            # the instance Anthropic key without ever touching
+            # `clear_secret_setting` — leaving it unhooked would reopen exactly
+            # the hole the dedicated route's hook closes.
+            if key in credentials._ANTHROPIC_KEY_ALIASES:
+                await credentials._adopt_after_instance_key_removed(current_user, request)
 
         return {"success": True, "deleted": deleted}
     except Exception as e:

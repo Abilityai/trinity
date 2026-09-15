@@ -81,8 +81,8 @@ class ModelEntry:
 
     ⚠️ **This is a positional frozen dataclass** — every entry below passes its
     booleans positionally. A field inserted anywhere but LAST silently reassigns
-    ``public_channel`` / ``admin_default_selectable`` / ``recommended`` on all ten
-    entries, with no error. Append; set the new ones by keyword.
+    ``public_channel`` / ``admin_default_selectable`` / ``recommended`` on every
+    entry, with no error. Append; set the new ones by keyword.
     """
 
     id: str
@@ -100,6 +100,10 @@ class ModelEntry:
 # memory): ``claude-opus-5`` is the current Opus tier; the ``-5`` family and
 # ``claude-sonnet-4-6`` are current; ``opus-4-8/4-7/4-6`` are the prior Opus
 # generation (legacy). The date-suffixed ids are kept verbatim.
+#
+# Canonical lineup (keep this comment as the bump-anchor):
+#     https://platform.claude.com/docs/en/about-claude/models/overview
+# Last synced: 2026-09-12 (#2726 — Claude Fable 5.1)
 MODEL_CATALOG: tuple[ModelEntry, ...] = (
     # Current generation.
     ModelEntry(
@@ -113,9 +117,17 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         workspace_tier="Most capable",
     ),
     ModelEntry(
+        "claude-fable-5-1",
+        "Claude Fable 5.1",
+        "Most capable \u2014 longest tasks (latest)",
+        True,
+        True,
+        False,
+    ),
+    ModelEntry(
         "claude-fable-5",
         "Claude Fable 5",
-        "Most capable \u2014 longest tasks (latest)",
+        "Most capable \u2014 longest tasks",
         True,
         True,
         False,
@@ -201,6 +213,88 @@ PUBLIC_CHANNEL_MODELS = frozenset(m.id for m in MODEL_CATALOG if m.public_channe
 # never a regex and never a prefix check. Asserted above to be a subset of
 # PUBLIC_CHANNEL_MODELS.
 WORKSPACE_MODELS = frozenset(m.id for m in MODEL_CATALOG if m.workspace)
+
+
+# #2796: the OPERATOR-surface gate. Same destination as WORKSPACE_MODELS above —
+# the value ends up as a `--model` argv element — but a different principal and
+# therefore a different rule, so read the two together.
+#
+# This is NOT a second catalog and NOT a second policy invented here: it is the
+# rule the agent runtime already applies to its own `PUT /api/model`
+# (docker/base-image/agent_server/routers/chat.py: a short alias, or a
+# vendor-prefixed id), lifted to the request boundary. Until #2796 the operator
+# routes applied it NOWHERE, so `model="admin"` travelled from the request body
+# to the runtime and came back as `unrecognized_model` with exit code 1 and no
+# output — a total failure whose message names no field.
+#
+# Why not the closed set used for the Workspace: that set is 3 of the 11 ids in
+# this file, and the operator picker documents free-text passthrough (see
+# _GENERATED_HEADER below and ModelSelector.vue) — the `[1m]` extended-context
+# suffix and any newly-shipped id must keep working without a catalog bump.
+# A closed set here would refuse ids this very file ships. The shape gate keeps
+# that open door while still refusing a value that cannot name a model, and it
+# closes argv smuggling in passing: a leading `-` matches no family.
+#
+# The families are MIRRORED from `services/model_context.py`'s
+# `_FAMILY_PREFIX_WINDOWS`, which is already the platform's answer to "is this id
+# one we recognise?" — a miss there logs `unrecognized model id`. Mirrored and
+# not imported, for two reasons the codebase already states: `model_context` is
+# vendored byte-identically into the agent image (Invariant #5), and this module
+# is a stdlib-only leaf whose docstring keeps that registry deliberately out of
+# scope. Drift is a build failure, not a silent divergence —
+# `test_2796_gate_covers_every_family_model_context_knows` asserts the two agree,
+# so a newly supported runtime is one edit here away from being dispatchable.
+#
+# Matching follows `model_context`: case-folded, prefix (not exact), so
+# `gpt-5.1-codex`, `claude-sonnet-4-6[1m]` and a bare `sonnet` all pass.
+_MODEL_FAMILY_PREFIXES: tuple[str, ...] = (
+    "claude", "gemini", "gpt-", "codex", "opus", "sonnet", "haiku", "fable",
+)
+
+
+class InvalidModelError(ValueError):
+    """A caller-supplied model id that cannot name a model (#2796).
+
+    A ``ValueError`` subclass, not an ``HTTPException``: this module is a
+    stdlib-only leaf (see the module docstring) and the router owns the mapping
+    onto HTTP.
+    """
+
+
+def validate_dispatch_model(raw: str | None) -> str | None:
+    """Normalise and shape-check a caller-supplied model id for a dispatch.
+
+    Order matches ``client_portal.service.validate_requested_model`` and is
+    load-bearing for the same reason: **normalise blank FIRST**, because the
+    picker's default option submits ``""``, so ``""``, whitespace and an omitted
+    field all mean *inherit the platform default* rather than *invalid*.
+
+    Args:
+        raw: The model id as the caller sent it, or ``None``.
+
+    Returns:
+        The stripped id, or ``None`` to inherit. The value is never rewritten
+        beyond stripping — an id is passed to the runtime as the caller typed it.
+
+    Raises:
+        InvalidModelError: The value cannot name a model. The caller answers 422
+            naming it, which is the whole point: an unrecognised model must be a
+            legible refusal at the boundary, not an opaque agent-side death.
+    """
+    model = (raw or "").strip() or None
+    if model is None:
+        return None
+    if model.lower().startswith(_MODEL_FAMILY_PREFIXES):
+        return model
+    # Bounded before it is echoed. The field is deliberately unbounded at the
+    # payload layer, so without this an authenticated caller could have a
+    # megabyte-long value reflected verbatim into the error body — the same
+    # reasoning, and the same 64-char cut, as the ent#403 Workspace refusal.
+    shown = model if len(model) <= 64 else model[:64] + "…"
+    raise InvalidModelError(
+        f"'{shown}' is not a model id. Use a short alias (sonnet, opus, haiku, "
+        f"fable) or a full id such as '{_recommended[0].id}'."
+    )
 
 
 # snake_case source field -> camelCase JS key. Applied when building the emitted

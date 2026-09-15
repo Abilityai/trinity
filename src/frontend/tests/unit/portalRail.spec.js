@@ -409,8 +409,21 @@ describe('ent#474 — shell wiring (source guards)', () => {
     // every remount, still keyless, and still visibility-gated on `railVisible`
     // — which is what the assertion below reads, now without pinning which arm
     // of the chain it sits on.
-    expect(el).toMatch(/v-(else-)?if="railVisible"/)
+    //
+    // #2640 broke the chain itself: the voice canvas is inside a <Transition>
+    // now (so the swap animates), and a `v-else-if` needs an adjacent sibling.
+    // The gate is written out instead.
+    //
+    // #2676 moved the gate one element out: the rail column is a WRAPPER this
+    // view owns, carrying the animatable width, and `PortalRail` sits inside it
+    // unconditionally. `railHasColumn` is that gate and it still reads
+    // `railVisible` — asserted below at its definition rather than on the
+    // element, because the element no longer carries a condition at all. What
+    // this guard is about is unchanged: the rail is a sibling of <main>,
+    // outside every remount, keyless, and visibility-gated.
     expect(el).toContain(':tabs="railTabs"')
+    expect(el).not.toMatch(/\bkey=/)
+    expect(portal).toMatch(/const railHasColumn = computed\([\s\S]{0,200}railVisible\.value/)
   })
 
   it('gives Agent details a rail TAB, reversing the ent#523 arrangement (ent#547)', () => {
@@ -439,8 +452,21 @@ describe('ent#474 — shell wiring (source guards)', () => {
 
     // ent#534: the voice canvas still takes the column first; the rail is now
     // the only other arm.
-    expect(portal).toMatch(/<PortalVoiceCanvas[\s\S]{0,160}v-if="voiceCall\.active && voiceCall\.voiceSessionId && activeAgent"/)
-    expect(portal).toMatch(/<PortalRail[\s\S]{0,80}v-else-if="railVisible"/)
+    //
+    // #2640: both arms read ONE named condition rather than a `v-if` /
+    // `v-else-if` chain — the canvas is wrapped in a <Transition> so the swap
+    // animates, and that wrapper breaks the adjacency a chain needs. What this
+    // assertion is about is EXCLUSIVITY, which the shared computed still gives
+    // by construction; the construct that expresses it is not the property.
+    //
+    // #2676: the rail's half of that condition moved onto the column wrapper,
+    // where the width it animates lives. Exclusivity is still ONE shared
+    // computed read by both arms — `voiceCanvasHasColumn` — which is the
+    // property; which element carries the `v-if` is not.
+    expect(portal).toMatch(/<PortalVoiceCanvas[\s\S]{0,240}v-if="voiceCanvasHasColumn"/)
+    expect(portal).toMatch(/v-if="railHasColumn"/)
+    expect(portal).toMatch(/const railHasColumn = computed\([\s\S]{0,200}!voiceCanvasHasColumn\.value/)
+    expect(portal).toMatch(/const voiceCanvasHasColumn = computed\(/)
 
     // BOTH rail mounts must dock the body. The column and the mobile sheet are
     // separate `<PortalRail>` instances, and a slot given to one alone leaves
@@ -490,8 +516,47 @@ describe('ent#474 — the rail component (source guards)', () => {
   })
 
   it('mounts a body for exactly the active visible tab', () => {
-    expect(rail).toContain('<div v-if="active" class="flex-1 min-h-0 overflow-y-auto p-4"')
+    // ent#608: `rail-scroll` is the body's scrollbar chrome — thin, hidden at
+    // rest, revealed on hover — and rides the same class string.
+    expect(rail).toMatch(/<div\n\s+v-if="active"\n\s+class="flex-1 min-h-0 overflow-y-auto p-4 rail-scroll"/)
     expect(rail).toContain(':name="`tab-${active.id}`"')
+  })
+
+  // ent#608 — the body's scrollbar: thin, hidden at rest, revealed on hover /
+  // focus-within / while scrolling, and the reveal changes colour ONLY.
+  describe('ent#608 — the body scrollbar chrome', () => {
+    const style = rail.slice(rail.indexOf('<style scoped>'))
+
+    it('hides the thumb at rest on both engines and reveals it on hover, focus-within and scroll', () => {
+      expect(style).toMatch(/\.rail-scroll \{[^}]*scrollbar-width: thin;[^}]*scrollbar-color: transparent transparent;/)
+      expect(style).toMatch(/\.rail-scroll::-webkit-scrollbar-thumb \{[^}]*background-color: transparent;/)
+      expect(style).toMatch(/\.rail-scroll:hover,\n\s+\.rail-scroll:focus-within,\n\s+\.rail-scroll\.is-scrolling \{\n\s+scrollbar-color: var\(--rail-thumb\) transparent;/)
+      expect(style).toMatch(/\.rail-scroll:hover::-webkit-scrollbar-thumb,\n\s+\.rail-scroll:focus-within::-webkit-scrollbar-thumb,\n\s+\.rail-scroll\.is-scrolling::-webkit-scrollbar-thumb \{\n\s+background-color: var\(--rail-thumb\);/)
+      expect(rail).toContain(':class="{ \'is-scrolling\': scrolling }"')
+      expect(rail).toContain('@scroll.passive="onBodyScroll"')
+      expect(rail).toContain('clearTimeout(scrollTimer)')
+    })
+
+    it('never reflows on reveal: the revealed states set colour only, and the WebKit width is fixed', () => {
+      // Every rule whose selector carries a reveal state may set colour and nothing else.
+      const revealRules = [...style.matchAll(/((?:\.rail-scroll[^{]*(?::hover|:focus-within|\.is-scrolling)[^{]*)\{([^}]*)\})/g)]
+      expect(revealRules.length).toBeGreaterThanOrEqual(3)
+      for (const [, , body] of revealRules) {
+        const props = body.split(';').map((l) => l.trim().split(':')[0]).filter(Boolean)
+        expect(props.every((p) => p === 'scrollbar-color' || p === 'background-color')).toBe(true)
+      }
+      expect(style).toMatch(/\.rail-scroll::-webkit-scrollbar \{\n\s+width: 6px;\n\s+\}/)
+      expect(style).not.toMatch(/display:\s*none/)
+      expect(style).not.toMatch(/scrollbar-gutter/)
+    })
+
+    it('is tokens on both themes, sm-and-up only, and still under prefers-reduced-motion', () => {
+      expect(style).toMatch(/\.rail-scroll \{[^}]*--rail-thumb: theme\('colors\.gray\.500 \/ [\d.]+'\)/)
+      expect(style).toMatch(/\.dark \.rail-scroll \{[^}]*--rail-thumb: theme\('colors\.gray\.400 \/ [\d.]+'\)/)
+      expect(style).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
+      expect(style).toContain('@media (min-width: 640px)')
+      expect(style).toMatch(/@media \(prefers-reduced-motion: reduce\) \{[^}]*\.rail-scroll[^}]*transition: none/)
+    })
   })
 
   it('is the approved width in each form, with the sheet on the files-panel pattern', () => {

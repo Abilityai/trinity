@@ -29,7 +29,7 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
-from config import PORTAL_SOURCE_CHANNEL
+from config import PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL
 from database import db as core_db
 from utils.helpers import parse_iso_timestamp
 
@@ -85,11 +85,11 @@ def work_kind(row: dict) -> WorkKind:
         return "room"
     if trigger in ("schedule", "scheduled"):
         return "schedule"
-    if channel == PORTAL_SOURCE_CHANNEL:
-        if trigger == "public":
-            return "turn"
-        if trigger in ("mcp", "agent", "fan_out", "a2a"):
-            return "delegated"
+    if channel == PORTAL_SOURCE_CHANNEL and trigger == "public":
+        return "turn"
+    # #2792: a room turn (stamped `room`) delegates the same way a 1:1 turn does.
+    if channel in (PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL) and trigger in ("mcp", "agent", "fan_out", "a2a"):
+        return "delegated"
     return "other"
 
 
@@ -158,6 +158,27 @@ def is_stale(elapsed: Optional[int], turn_timeout_seconds: int) -> bool:
     return elapsed is not None and elapsed > stale_bound_seconds(turn_timeout_seconds)
 
 
+#: Kinds the terminate route will accept. An ALLOWLIST, never a blocklist of
+#: kinds we happen to have thought of: an unrecognised trigger projects as
+#: `other`, and offering Stop on a row whose cancel semantics nobody has read
+#: is how the button becomes a lie.
+#:
+#: `room` (#2795) is here because the route genuinely accepts it, not because a
+#: tile wanted a button. `shared_sessions.service._wake_agent` runs every room
+#: turn through `execute_task(..., source_user_email=current_user.email)`, and
+#: the agent is a room participant, which on the Workspace can only be an agent
+#: already on the poster's roster — so both gates the route actually applies
+#: (`_require_roster`, then `execution_belongs_to_caller`'s
+#: `source_user_email` match) are satisfied by construction. Its absence was
+#: the whole of the server-side half of #2795: the Work tab listed the run and
+#: hid the only control that would have ended it.
+#:
+#: `loop` stays out deliberately — a loop is stopped from the Loops tab, where
+#: stopping the LOOP is what the person means; cancelling one iteration leaves
+#: the runner to start the next one.
+STOPPABLE_KINDS = frozenset({"turn", "delegated", "room"})
+
+
 def can_stop(item_kind: WorkKind, status: str, *, mine: bool, on_roster: bool, stale: bool) -> bool:
     """What `POST .../executions/{id}/terminate` will accept, decided once here
     so the button is never a lie: the route requires the agent on the roster
@@ -165,7 +186,7 @@ def can_stop(item_kind: WorkKind, status: str, *, mine: bool, on_roster: bool, s
     a person can see."""
     return (mine and on_roster and not stale
             and status in ("running", "queued")
-            and item_kind in ("turn", "delegated"))
+            and item_kind in STOPPABLE_KINDS)
 
 
 def mask(name: Optional[str], roster: Iterable[str]) -> Optional[str]:
@@ -210,9 +231,11 @@ def _project(row: dict, *, email: str, roster: set, turn_timeout: int,
         duration_ms=row.get("duration_ms"),
         elapsed_seconds=None if stale else elapsed,
         stale=stale,
-        # Only a PORTAL stamp is a chat id the client can open; a Telegram or
-        # Slack destination is not the client's business.
-        chat_id=row.get("source_channel_chat_id") if channel == PORTAL_SOURCE_CHANNEL else None,
+        # Only a Workspace stamp — a 1:1 thread (`portal`) or a room (`room`,
+        # #2792) — is a chat id the client can open; a Telegram or Slack
+        # destination is not the client's business.
+        chat_id=(row.get("source_channel_chat_id")
+                 if channel in (PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL) else None),
         mine=mine,
         can_stop=can_stop(kind, status, mine=mine, on_roster=on_roster, stale=stale),
         delegated_by=mask(row.get("source_agent_name"), roster),

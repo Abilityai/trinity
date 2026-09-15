@@ -46,7 +46,19 @@ journeys:
     harness: null
     built: false
     owner: operator
-    invariants: []
+    # P-05: the login half — a first-login role that respects the whitelist.
+    # The install half has no invariant yet (#2337 left it in Gaps).
+    invariants: [P-05]
+    # ent#580: on the digitalocean lane a cold install has two shapes, and J01
+    # holds only if it holds on both — the harness (#2340) must drive each. Until
+    # it exists, the image and installer halves are pinned by
+    # tests/unit/test_ent580_marketplace_admin_claim.py and
+    # tests/unit/test_2281_firstboot_password.py.
+    variants:
+      - name: claimable
+        promise: "I open my new one-click droplet in a browser and create the admin account there, without ever opening a terminal."
+      - name: pre-provisioned
+        promise: "I gave a password when I created the droplet, so it has an admin from the start and nobody else can claim it."
 
   - id: J02
     issue: 2341
@@ -69,12 +81,11 @@ journeys:
     # first-turn half is credential-bound and skips with an allowlisted reason.
     # `built` stays false because the promise is "a useful ANSWER", and the half
     # that asserts an answer is the half that does not run.
-    # No path yet ON THIS BRANCH: the harness lands with #2403 (Rails R1+R2),
-    # which is open. Recording a path that resolves nowhere is the same lie as
-    # an invented invariant id, and the validator caught exactly that on its
-    # first run — so the field stays null until the file is here, and gains the
-    # path in the commit that merges it.
-    harness: null
+    # The harness landed with #2403 (2026-08-28); the create/stop/start half is
+    # `tests/journeys/test_agent_lifecycle_journey.py` (see the note at the end
+    # of this file). Recording a path that resolves nowhere would be the same
+    # lie as an invented invariant id — the validator checks the file exists.
+    harness: tests/journeys/test_first_turn_journey.py
     built: false
     owner: operator
     invariants: [E-05]
@@ -110,7 +121,9 @@ journeys:
     harness: null
     built: false
     owner: trinity
-    invariants: []
+    # L-06: injection precedes the first turn; G-04: the credential never
+    # leaks into backlog metadata on the way.
+    invariants: [L-06, G-04]
 
   - id: J07
     issue: 2346
@@ -121,7 +134,7 @@ journeys:
     harness: null
     built: false
     owner: trinity
-    invariants: []
+    invariants: [SK-01, SK-02, SK-03]
 
   - id: J08
     issue: 2347
@@ -132,7 +145,7 @@ journeys:
     harness: null
     built: false
     owner: trinity
-    invariants: []
+    invariants: [PLG-01]
 
   - id: J09
     issue: 2348
@@ -143,18 +156,33 @@ journeys:
     harness: null
     built: false
     owner: trinity
-    invariants: []
+    invariants: [RD-01, RD-02, RD-03]
 
   - id: J10
     issue: 2349
     promise: "My agents can call each other, and I can see what they said."
     actor: user
     lanes: [local]
-    tier: live-stack
-    harness: null
+    # journey-smoke, not live-stack: `journey-smoke.yml` runs `tests/journeys/`
+    # wholesale on every PR, so this file gates PRs whatever the field says, and
+    # the field has to tell the truth. The credential-free half (the permission
+    # boundary, attribution, the stopped callee, the fan-out and loop bounds,
+    # the delete cascade) runs there; the half that needs B's real answer skips
+    # with the allowlisted "journey needs a real provider key" reason and runs
+    # on a keyed stack, exactly like J03 — which is also why `built` stays
+    # false: the promise is "I can see what they SAID", and the words are the
+    # half the gate never sees. Reading the caller's own MCP key needs the
+    # Docker socket of the host running the stack (the harness FAILS without
+    # it, never skips), so the lane stays `local`.
+    tier: journey-smoke
+    harness: tests/journeys/test_j10_agent_calls_agent_journey.py
     built: false
     owner: trinity
-    invariants: [L-03]
+    # P-01/P-02: the permission edge and the MCP gate that consults it;
+    # AC-01: every call leaves an activity ("I can see what they said");
+    # L-03: a deleted callee cascades; IA-01..03: the recorded call had an
+    # edge, a fan-out batch is bounded, a stopped callee fails fast (#2337).
+    invariants: [P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03]
 
   - id: J11
     issue: 2565
@@ -162,7 +190,7 @@ journeys:
     actor: user
     lanes: [local]
     tier: live-stack
-    harness: null
+    harness: tests/journeys/test_j11_brief_delivery_journey.py
     built: false
     owner: trinity
     # E-01/E-05 are the terminal-closure and dispatched-rows-have-a-session

@@ -30,7 +30,12 @@ path and survive restarts by construction.
 Each event carries:
 
 - a stable, random **installation id** (the same anonymous per-install id used by
-  the operator-intake correlation key — not tied to any user account),
+  the operator-intake correlation key — not tied to any user account; minted
+  write-once by the first recorded event or the operator-updates opt-in. The
+  Activation panel only *reads* it and says "no install id yet" until then — the
+  read side of that rule ships with the enterprise module,
+  trinity-enterprise#570, so an install ahead of that pointer still mints it on
+  the first open of the tab),
 - a **UTC timestamp**, and
 - optionally a tiny, non-sensitive context blob (e.g. which starter intent was
   picked). No message contents, credentials, emails, or PII are recorded.
@@ -125,7 +130,8 @@ credentials or tokens, no emails, no user identities, **no agent names**, no
 per-agent cost — only coarse counts and enums. The exact payload for your
 instance is **inspectable before you consent** in the Settings → Usage sharing
 panel (expand "Exactly what would be shared") and the **last 5 send attempts** —
-successes and failures, with the HTTP status or error class — are kept locally
+successes and failures, with the HTTP status or error class and the receiver each
+one went to — are kept locally
 and shown under **Recent sends**, so you can see afterwards precisely what left.
 
 **Enforced, not just documented:** the payload is validated against this schema

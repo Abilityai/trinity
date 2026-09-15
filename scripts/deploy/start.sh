@@ -61,6 +61,11 @@ compose_project_name() {
         | tr -cd 'a-z0-9_-' \
         | sed 's/^[_-]*//'
 }
+
+# `set_env_key` lives in env-file.sh so every `.env` writer shares one copy,
+# because a `.env` writer that disagrees with itself corrupts credentials
+# silently.
+. ./scripts/deploy/env-file.sh
 # -----------------------------------------------------------------------------
 
 echo "====================================="
@@ -100,6 +105,383 @@ fi
 # resolve_image_tag() below. Resolving it here would be too early to read the
 # file, which is the only place an --unattended or marketplace install can
 # persist it.
+
+# --- Provision a bare cloud VM (--provision, #2380) ---------------------------
+# Bring a BARE Ubuntu VM to the state the install below already assumes: Docker,
+# a pinned Caddy terminating TLS on the machine's own public IP, a host
+# firewall, and the handful of `.env` keys only the machine itself knows.
+#
+# It is a switch on this script for the same reason --hosted is one. This logic
+# existed in THREE places — the Packer bakery (build time), the Packer first
+# boot (per droplet), and a hand-written script pasted into the DigitalOcean
+# deploy doc — and the copies had already drifted: the doc's port list and the
+# image's disagreed, leaving the login page answering plain HTTP past the
+# certificate (#2281 review C1). All three now enter here.
+#
+# Two phases, because a snapshot-based image splits them:
+#   --machine-only  IP-independent, safe to bake into a disk image (packages,
+#                   firewall unit). The Packer bakery calls this, and it exits
+#                   without installing Trinity.
+#   --site-only     what only a real instance knows: its own address — hence the
+#                   Caddyfile, the certificate and the .env keys. Packer's first
+#                   boot calls this, once per droplet, and continues into the
+#                   normal install.
+#   (neither)       both, in order: a doc-driven install on a fresh droplet.
+#
+# OFF by default, and it must stay inert on a developer laptop — it installs
+# system packages, resets ufw and claims :80/:443. The guard is root + Linux + a
+# reachable cloud metadata service, which no laptop satisfies.
+PROVISION=0
+PROVISION_PHASE=both
+PROVISION_CLOUD=""
+PROVISION_PROVENANCE=""
+_pargs=("$@")
+_pi=0
+while [ "$_pi" -lt "${#_pargs[@]}" ]; do
+    case "${_pargs[$_pi]}" in
+        --provision)    PROVISION=1 ;;
+        --machine-only) PROVISION_PHASE=machine ;;
+        --site-only)    PROVISION_PHASE=site ;;
+        --caddy-only)   PROVISION_PHASE=caddy ;;
+        --cloud)        _pi=$((_pi + 1)); PROVISION_CLOUD="${_pargs[$_pi]:-}" ;;
+        --cloud=*)      PROVISION_CLOUD="${_pargs[$_pi]#*=}" ;;
+        --provenance)   _pi=$((_pi + 1)); PROVISION_PROVENANCE="${_pargs[$_pi]:-}" ;;
+        --provenance=*) PROVISION_PROVENANCE="${_pargs[$_pi]#*=}" ;;
+    esac
+    _pi=$((_pi + 1))
+done
+
+# Caddy is PINNED and the floor is load-bearing rather than hygiene: the whole
+# no-domain HTTPS story rests on a Let's Encrypt certificate for a BARE IP, and
+# Caddy could not issue one until v2.11.3 (caddyserver/caddy#7399 — v2.10.0
+# fails outright with "subject '<ip>' cannot have public IP certificate").
+# Deliberately NOT `apt-mark hold`: forward versions carry the fix, and a hold
+# would block security updates for the life of the machine.
+PROVISION_CADDY_VERSION="2.11.4"
+PROVISION_CADDY_MIN_VERSION="2.11.3"
+
+provision_die() { echo "❌ --provision: $1" >&2; exit 1; }
+
+# The only thing that actually differs between clouds is where the instance's
+# own public address is published — one line per cloud, not a provider
+# abstraction for a single string.
+provision_metadata_ip() {
+    case "$PROVISION_CLOUD" in
+        digitalocean)
+            curl -fsS --max-time 10 \
+                http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address 2>/dev/null
+            ;;
+    esac
+}
+
+# Default provenance per cloud (#2380). The card that teaches an operator to put
+# a domain in front of a bare-IP instance is gated on WHERE the install came
+# from, never on TLS state — the managed fleet runs plain HTTP behind a tunnel
+# and must never see it. A doc-driven DigitalOcean install honestly IS a
+# DigitalOcean install, so it records its own value rather than a generic one.
+provision_default_provenance() {
+    case "$PROVISION_CLOUD" in
+        digitalocean) echo "do-script" ;;
+        *)            echo "script" ;;
+    esac
+}
+
+provision_machine() {
+    echo "→ Installing Docker, Caddy ${PROVISION_CADDY_VERSION} and the host firewall..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q
+    # NOT iptables-persistent: ufw declares `Breaks: iptables-persistent`, so apt
+    # resolves that install by silently REMOVING ufw. The DOCKER-USER rules are
+    # persisted by trinity-docker-firewall.service instead, which is the better
+    # mechanism anyway — DOCKER-USER does not exist until Docker creates it, so
+    # restoring saved rules at boot is racy.
+    apt-get install -y -q ca-certificates curl gnupg git jq ufw
+
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list
+
+    # Cloudsmith's own list line already carries a signed-by=, so do not add a
+    # second one.
+    curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+        | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+        > /etc/apt/sources.list.d/caddy-stable.list
+
+    apt-get update -q
+    apt-get install -y -q docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin "caddy=${PROVISION_CADDY_VERSION}"
+    systemctl enable --now docker
+
+    # Assert the floor rather than trusting the pin: the pin can be edited, the
+    # repo can drop a version, and `caddy upgrade` can move it on a live box.
+    local _caddy
+    _caddy="$(caddy version | head -1 | sed 's/^v//' | cut -d' ' -f1)"
+    if [ "$(printf '%s\n%s\n' "$PROVISION_CADDY_MIN_VERSION" "$_caddy" | sort -V | head -1)" \
+         != "$PROVISION_CADDY_MIN_VERSION" ]; then
+        provision_die "caddy ${_caddy} is below ${PROVISION_CADDY_MIN_VERSION}, which cannot issue Let's Encrypt IP certificates (caddyserver/caddy#7399)."
+    fi
+    echo "   Caddy ${_caddy} (floor ${PROVISION_CADDY_MIN_VERSION}) — IP certificates supported."
+    # Caddy owns :80/:443 but is configured by the SITE phase, which needs the
+    # instance's own IP. A Caddy started now with the packaged default would race
+    # that and take a certificate for the wrong name.
+    systemctl stop caddy || true
+
+    # ufw governs HOST ports only. It does NOT govern Docker-published ports —
+    # Docker inserts its rules ahead of ufw's chain, so `ufw deny 8000` on a box
+    # publishing 8000:8000 is silently inert. That gap is closed separately, by
+    # docker-firewall.sh.
+    ufw --force reset >/dev/null
+    ufw default deny incoming >/dev/null
+    ufw default allow outgoing >/dev/null
+    ufw allow 22/tcp >/dev/null
+    ufw allow 80/tcp >/dev/null
+    ufw allow 443/tcp >/dev/null
+    ufw --force enable
+
+    # The unit runs the script from wherever this checkout lives, so a doc
+    # install and a Packer image share one copy of the rules rather than the
+    # image carrying its own.
+    local _fw="${PWD}/scripts/deploy/docker-firewall.sh"
+    [ -x "$_fw" ] || provision_die "missing ${_fw} — is this a Trinity checkout?"
+    cat > /etc/systemd/system/trinity-docker-firewall.service <<UNIT
+[Unit]
+Description=Trinity: drop internet access to Docker-published container ports
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${_fw}
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    # Never fatal: a machine that boots without the rule and SAYS so beats one
+    # that refuses to finish installing.
+    systemctl enable --now trinity-docker-firewall.service \
+        || echo "⚠️  DOCKER-USER rules not applied — container ports may be public. Re-run: ${_fw}" >&2
+}
+
+# Which source addresses may reach Trinity over plain HTTP, from
+# PRIVATE_NETWORK_CIDRS in .env. Empty (the default) renders no rule at all.
+#
+# Source address, never the Host header: a header is supplied by the caller, so
+# matching on it would let anyone on the internet send `Host: 100.64.0.1` to
+# port 80 and be served the login page in cleartext, having bypassed the HTTPS
+# redirect. A source address cannot be forged into a completed TCP handshake.
+provision_private_cidrs() {
+    local raw="${1:-}" token out=()
+    for token in $raw; do
+        case "$token" in
+            0.0.0.0/0|::/0)
+                echo "⚠️  PRIVATE_NETWORK_CIDRS: refusing '${token}' — that is the whole internet, not a private network." >&2
+                return 1 ;;
+            */*) ;;
+            *)
+                echo "⚠️  PRIVATE_NETWORK_CIDRS: ignoring '${token}' — expected CIDR notation, e.g. 100.64.0.0/10." >&2
+                continue ;;
+        esac
+        case "$token" in
+            *[!0-9a-fA-F:./]*)
+                echo "⚠️  PRIVATE_NETWORK_CIDRS: ignoring '${token}' — not an address range." >&2
+                continue ;;
+        esac
+        out+=("$token")
+    done
+    printf '%s' "${out[*]-}"
+}
+
+# Renders /etc/caddy/Caddyfile and reloads Caddy. Split out of provision_site so
+# `--caddy-only` can re-render after PRIVATE_NETWORK_CIDRS changes: the site
+# phase also rewrites FRONTEND_URL and TRINITY_INSTALL_SOURCE, so re-running it
+# to pick up one variable would silently re-stamp a marketplace droplet's
+# provenance as a doc-driven install.
+provision_caddyfile() {
+    local ip="$1" provenance="$2" _do_header="" _private="" _private_block=""
+
+    # Rule 10 of DigitalOcean's 1-Click build standard specifies this header on
+    # the reverse-proxy block, and their own catalog apps ship it (openclaw's
+    # Caddyfile sets it to "openclaw"). It is how a marketplace-originated
+    # install identifies itself to DigitalOcean — so it is keyed on the
+    # marketplace provenance, not on the cloud: the doc-driven install on the
+    # same cloud did not originate from the catalog.
+    if [ "$provenance" = "do-marketplace" ]; then
+        _do_header='header X-DO-MARKETPLACE "trinity"'
+    fi
+
+    # A private network already encrypts the transport, so TLS in front of it
+    # buys nothing — and cannot be obtained anyway: tailnet addresses live in
+    # carrier-grade NAT space, which no public CA will validate. Without this
+    # block an operator who moves the instance onto a VPN and closes 80/443 has
+    # shell access and no URL to browse: every site here is matched by hostname,
+    # and a private address matches neither the public IP nor the saved domain.
+    _private="$(provision_private_cidrs "$(env_value PRIVATE_NETWORK_CIDRS)")" || return 1
+    if [ -n "$_private" ]; then
+        _private_block="$(cat <<PRIVATE
+    @private remote_ip ${_private}
+    handle @private {
+        encode gzip
+        reverse_proxy 127.0.0.1:8081 {
+            flush_interval -1
+        }
+    }
+    handle {
+        redir https://{host}{uri} permanent
+    }
+PRIVATE
+)"
+        echo "→ Caddy: serving plain HTTP to ${_private} (private network)."
+    else
+        _private_block="    redir https://{host}{uri} permanent"
+    fi
+
+    # Render beside the live file, never over it. Caddy keeps a bad config
+    # only in memory until the next restart; an invalid file on disk with the
+    # unit enabled takes the site down on the next reboot.
+    cat > /etc/caddy/Caddyfile.new <<CADDY
+{
+    acme_ca https://acme-v02.api.letsencrypt.org/directory
+    on_demand_tls {
+        ask http://127.0.0.1:8000/api/public/tls-allowed
+    }
+}
+
+https://${ip} {
+    tls {
+        issuer acme {
+            profile shortlived
+        }
+    }
+    encode gzip
+
+    # Streaming endpoints must not be buffered: the Workspace reads execution
+    # logs over SSE (GET /api/executions/{id}/stream).
+    reverse_proxy 127.0.0.1:8081 {
+        flush_interval -1
+    }
+    ${_do_header}
+}
+
+https:// {
+    tls {
+        on_demand
+    }
+    encode gzip
+    reverse_proxy 127.0.0.1:8081 {
+        flush_interval -1
+    }
+}
+
+http:// {
+${_private_block}
+}
+CADDY
+
+    # Validate before reloading. A malformed Caddyfile does not degrade the web
+    # server, it stops it — and on a box reached only over the network that is
+    # indistinguishable from bricking it.
+    if ! caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile.new >/dev/null 2>&1; then
+        echo "❌ Generated Caddyfile is invalid — leaving the running config alone." >&2
+        caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile.new >&2 || true
+        rm -f /etc/caddy/Caddyfile.new
+        return 1
+    fi
+    mv -f /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
+    systemctl enable caddy
+    systemctl restart caddy
+}
+
+provision_site() {
+    local ip provenance _tls
+    ip="$(provision_metadata_ip || true)"
+    [ -n "$ip" ] || provision_die "could not read this instance's public IP from the ${PROVISION_CLOUD} metadata service."
+    mkdir -p /etc/trinity
+    chmod 0700 /etc/trinity
+    echo "$ip" > /etc/trinity/public-ip
+
+    [ -f .env ] || cp .env.example .env
+    provenance="${PROVISION_PROVENANCE:-$(provision_default_provenance)}"
+    # FRONTEND_PORT moves the SPA off :80 so Caddy can own 80/443 in front of it.
+    set_env_key FRONTEND_PORT 8081
+    set_env_key FRONTEND_URL "https://${ip}"
+    set_env_key TRINITY_INSTALL_SOURCE "$provenance"
+    if [ -n "${TRINITY_IMAGE_TAG:-}" ]; then
+        set_env_key TRINITY_IMAGE_TAG "$TRINITY_IMAGE_TAG"
+    fi
+    chmod 0600 .env
+    echo "→ .env: FRONTEND_URL=https://${ip}, TRINITY_INSTALL_SOURCE=${provenance}"
+
+    provision_caddyfile "$ip" "$provenance" || provision_die "could not write the Caddy configuration."
+
+    # Verify the certificate was actually ISSUED. Without this the failure is
+    # silent and worse than silent: Caddy serves a TLS error, this script exits
+    # 0, and the summary prints a confident https:// URL. Trinity is not up yet,
+    # so Caddy answers 502 — which is the point: curl without -f treats an HTTP
+    # error as success, so a zero exit means the handshake completed and the
+    # chain validated against the system trust store. Nothing weaker separates a
+    # real Let's Encrypt certificate from Caddy's internal-CA fallback.
+    _tls=failed
+    for _try in $(seq 1 30); do
+        if curl -sS -o /dev/null --max-time 10 "https://${ip}/" 2>/dev/null; then
+            _tls=ok
+            break
+        fi
+        sleep 5
+    done
+    printf '%s\n' "$_tls" > /etc/trinity/tls-status
+    if [ "$_tls" = "ok" ]; then
+        echo "→ TLS: certificate issued for ${ip}."
+    else
+        # Never fatal: an instance serving over HTTP with an honest banner beats
+        # one that refuses to finish booting.
+        echo "⚠️  TLS: no valid certificate for ${ip} after ~150s. Trinity will still start." >&2
+        echo "    Check: journalctl -u caddy -n 100" >&2
+    fi
+}
+
+if [ "$PROVISION" = "1" ]; then
+    [ "$(uname -s)" = "Linux" ] || provision_die "only runs on Linux — it installs system packages, resets the firewall and claims :80/:443."
+    [ "$(id -u)" = "0" ] || provision_die "must run as root."
+    case "$PROVISION_CLOUD" in
+        digitalocean) ;;
+        "") provision_die "--cloud is required (supported: digitalocean)." ;;
+        *)  provision_die "unsupported --cloud '${PROVISION_CLOUD}' (supported: digitalocean)." ;;
+    esac
+    # The metadata service is the "this is a fresh cloud VM, not somebody's
+    # laptop" guard, and it costs one request: nothing on a laptop answers on
+    # 169.254.169.254.
+    [ -n "$(provision_metadata_ip || true)" ] \
+        || provision_die "no ${PROVISION_CLOUD} metadata service reachable — refusing to provision a machine that is not a ${PROVISION_CLOUD} instance."
+
+    echo "Provisioning host (cloud: ${PROVISION_CLOUD}, phase: ${PROVISION_PHASE})..."
+    if [ "$PROVISION_PHASE" = "caddy" ]; then
+        # Re-render the web-server config only. Reads the instance's own IP and
+        # provenance back from where the site phase recorded them, so applying a
+        # PRIVATE_NETWORK_CIDRS change cannot re-stamp either.
+        _caddy_ip="$(cat /etc/trinity/public-ip 2>/dev/null || provision_metadata_ip || true)"
+        [ -n "$_caddy_ip" ] || provision_die "could not determine this instance's public IP — has it been provisioned?"
+        [ -f .env ] || provision_die "no .env here — run this from the Trinity install directory."
+        provision_caddyfile "$_caddy_ip" "$(env_value TRINITY_INSTALL_SOURCE)" \
+            || provision_die "could not write the Caddy configuration."
+        echo "Caddy reconfigured."
+        exit 0
+    fi
+    [ "$PROVISION_PHASE" = "site" ]    || provision_machine
+    [ "$PROVISION_PHASE" = "machine" ] || provision_site
+    echo ""
+    if [ "$PROVISION_PHASE" = "machine" ]; then
+        echo "Host provisioned (machine phase) — Trinity itself is NOT installed by this phase."
+        exit 0
+    fi
+fi
+# -----------------------------------------------------------------------------
 
 # Fail fast with ONE consolidated, actionable message rather than crashing
 # mid-run. Docker daemon + Compose v2 are hard requirements. `docker info` also
@@ -179,19 +561,51 @@ ensure_hex32_secret INTERNAL_API_SECRET
 # shift and the running fleet would 401 until recreated.
 ensure_hex32_secret AGENT_AUTH_SECRET
 
+# An operator-supplied ADMIN_PASSWORD in the ENVIRONMENT is written through to
+# `.env` (#2380). The deploy docs ask the reader to put their own password at
+# the top of a one-screen install script; without this, every such script has to
+# hand-roll its own `.env` writer — which is exactly the duplication --provision
+# exists to remove. `.env` wins if it already has one: this never overwrites a
+# password an install has already committed to. "Has one" is decided by
+# `env_value`, i.e. the way compose reads it: `ADMIN_PASSWORD=""`, `=''` and a
+# trailing space are all blank, not set (a raw `=.+` grep called them set).
+if [ -n "${ADMIN_PASSWORD:-}" ] && [ -z "$(env_value ADMIN_PASSWORD)" ]; then
+    set_env_key ADMIN_PASSWORD "$ADMIN_PASSWORD"
+    echo "Wrote ADMIN_PASSWORD from the environment to .env."
+fi
+
 # ADMIN_PASSWORD has no sensible default. Interactively we fail fast rather than
 # boot into a state the operator can't log into (#443). Unattended (#39), we
 # generate a strong one and surface it in the final summary so an agent-run
 # install never hard-stops on a TTY.
+#
+# One deliberate exception (ent#580): ADMIN_PASSWORD_SOURCE=browser, which only
+# a marketplace first boot sets. There the blank IS the point — no admin is
+# provisioned, and the first person to open the instance creates it at /setup,
+# no terminal involved. The marker is persisted to `.env` because this script is
+# also the documented UPDATE path (`start.sh --hosted`, often --unattended): a
+# later run that had forgotten why the password is blank would generate one, and
+# the backend re-syncs `.env`'s password over the one the operator chose in the
+# browser on the very next boot. A real ADMIN_PASSWORD in `.env` still wins over
+# the marker, which is also the recovery path for a forgotten browser password.
 GENERATED_ADMIN_PASSWORD=""
-if ! grep -qE '^ADMIN_PASSWORD=.+' .env 2>/dev/null; then
-    if [ "$UNATTENDED" = "1" ]; then
+ADMIN_IN_BROWSER=0
+ensure_admin_password() {
+    # Blank vs set is compose's reading (`env_value`), not a raw grep: `=""`,
+    # `=''` and `= ` render EMPTY in the hosted compose, so they are blank here.
+    [ -n "$(env_value ADMIN_PASSWORD)" ] && return 0
+    local src="${ADMIN_PASSWORD_SOURCE:-$(env_value ADMIN_PASSWORD_SOURCE)}"
+    if [ "$src" = "browser" ]; then
+        # Explicitly blank, not absent: the hosted compose file renders an empty
+        # ADMIN_PASSWORD (`${ADMIN_PASSWORD?}`) but still refuses an unset one.
+        # Any `ADMIN_PASSWORD=` line already reads blank (checked above).
+        grep -qE '^ADMIN_PASSWORD=' .env 2>/dev/null || set_env_key ADMIN_PASSWORD ""
+        [ "$(env_value ADMIN_PASSWORD_SOURCE)" = "browser" ] || set_env_key ADMIN_PASSWORD_SOURCE browser
+        ADMIN_IN_BROWSER=1
+        echo "ADMIN_PASSWORD left blank (ADMIN_PASSWORD_SOURCE=browser): the first visitor creates the admin at /setup."
+    elif [ "$UNATTENDED" = "1" ]; then
         GENERATED_ADMIN_PASSWORD=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 24)
-        if grep -qE '^ADMIN_PASSWORD=$' .env 2>/dev/null; then
-            sed -i.bak "s|^ADMIN_PASSWORD=$|ADMIN_PASSWORD=${GENERATED_ADMIN_PASSWORD}|" .env && rm -f .env.bak
-        else
-            echo "ADMIN_PASSWORD=${GENERATED_ADMIN_PASSWORD}" >> .env
-        fi
+        set_env_key ADMIN_PASSWORD "$GENERATED_ADMIN_PASSWORD"
         echo "Auto-generated ADMIN_PASSWORD (unattended) — shown in the summary below."
     else
         cat >&2 <<EOF
@@ -205,7 +619,8 @@ ERROR: ADMIN_PASSWORD is blank in .env.
 EOF
         exit 1
     fi
-fi
+}
+ensure_admin_password
 
 # A model API key isn't required to BOOT (the stack starts fine), but agents
 # can't run without one. Warn now and surface it in the summary rather than let
@@ -737,6 +1152,11 @@ if [ -n "$GENERATED_ADMIN_PASSWORD" ]; then
     echo ""
     echo "         admin / ${GENERATED_ADMIN_PASSWORD}"
     echo ""
+elif [ "$ADMIN_IN_BROWSER" = "1" ]; then
+    # ent#580: there is no password to show. The browser is the only way in.
+    echo "     No admin account exists yet: the first person to open it creates one"
+    echo "     (email + password). Do that now — until then, anyone who can reach"
+    echo "     this instance can. Already done? Sign in with that password."
 else
     # #2381: this used to say "then complete the first-run setup wizard". The
     # wizard only appears on an install with no admin account; setting

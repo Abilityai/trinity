@@ -27,7 +27,8 @@ Portal.vue (shell)
 │               live 1→0 → rail.refresh()               (a turn ended)
 ├─ <PortalConversation>  sending → <PortalWorkCard :item="liveCardItem" …/>   @open-work → openRailOn('work')
 │                        terminalCardItem → <PortalWorkCard> (from the durable verdict)  @ask-about-it → prefill
-├─ <PortalRoom>          server `working` ∩ feed live rows → <PortalWorkCard show-agent …/>
+├─ <PortalRoom>          feed live rows with `chat_id` == the room (∩ server `working`) → <PortalWorkCard show-agent …/>
+│                        no row for the room yet → the server-derived "X is thinking…" line (#2792)
 └─ <PortalRail> #tab-work → <PortalWork>  Waiting on you (PortalAsks over store.asks) · Now · Earlier
 stores/portalWork.js ──► GET /api/enterprise/client-portal/work?agents=a,b&chat_id=…
 utils/websocket.js: agent_activity (started + terminal) / loop_* for a participant → portalWork (debounced 2 s)
@@ -66,6 +67,40 @@ source_channel_chat_id = ?` — `idx_executions_status` drives it, a handful of
 rows on any install, so no migration. A child on an agent outside the roster
 is still a step — rendered "held by another agent" — but never a name (the
 ent#467 disclosure class: every name that leaves the module is roster-masked).
+
+### A room's cards are its own, joined by the chat id (#2792)
+
+The feed is agent-scoped in a room on purpose — `railChatId` is null there, so
+the rail's Work tab shows everything the participants are doing. The room
+itself used to pick its cards from that feed by **agent name** (server
+`working` ∩ feed rows), which is every live execution of a working participant:
+a schedule run, a loop turn, a 1:1 thread, another room, an MCP task, all
+rendered as this room's work. It could not do better, because the room turn
+stamped no chat: `_wake_agent` passed `triggered_by="room"` and nothing else.
+
+Now the room turn stamps `source_channel_chat_id = room_id` — the 1:1 thread's
+shape — under the room's **own** channel value, `config.ROOM_SOURCE_CHANNEL =
+"room"`, and `PortalRoom.vue` selects `liveItemsForRoom(feed, roomId, working)`:
+`chat_id === roomId`, still ∩ the server's `working` list (the room polls at
+3 s and the feed at 12 s, so a row the server has already retired must not sit
+under the posted reply), a masked agent excluded (no name to draw). With no row
+for the room yet — a reload mid-turn, feed lag — the fallback is the
+server-derived "thinking…" line, never unrelated cards.
+
+Why `room` and not `portal` (the plan review's finding): every reader of
+`portal` branches on "this is a 1:1 thread". Reusing it would have routed every
+room terminal into `_resolve_portal` (a session lookup that can only fail), and
+the voice-reply route would have told a room's **delegated child** — an `mcp`
+trigger carrying the inherited stamp — that the client "hears your reply when
+they switch on the speaker control", which a room does not have (the #2157
+false-claim class). `room` is in neither map, so parent and child are suppressed
+by construction; the projection is the one reader that accepts it (`chat_id`,
+and `work_kind` classifies a room's child `delegated`, so the Work tab groups it
+under its parent through `childrenForChat`).
+
+Stated asymmetry: a room's delegated child on an agent that is **not** a
+participant is outside the feed's scope (`_chat_is_callers` has no room arm),
+so it draws no card in the room. A room-membership arm is a follow-up.
 
 ### Three steps states, not two
 
@@ -163,3 +198,5 @@ shell, both conversations, the tab body, the card and the WebSocket consumer.
 - The roster scope is today's; ent#367's profile scope inherits when it lands.
 - A step-level restart is a platform capability (#919 territory), ruled out of
   this surface; the card's lesser control is the honest one.
+- A room's delegated child on a non-participant agent is not in the room's feed
+  scope, so no card there (#2792; the Work tab of a 1:1 with that agent has it).

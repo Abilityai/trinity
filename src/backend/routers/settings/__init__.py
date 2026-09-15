@@ -6,7 +6,7 @@ access for all authenticated users.
 
 #1028: this was one 3,529-line module — the largest file in the backend and
 more than four times the 800-line critical threshold. It is now a package of
-ten domain modules composed onto **one** router here, so the mounted API is
+eleven domain modules composed onto **one** router here, so the mounted API is
 byte-identical to the single-module version and `from routers.settings import
 router` is unchanged.
 
@@ -27,6 +27,7 @@ from database import SystemSetting
 from . import (
     agent_defaults,
     credentials,
+    provider_keys,
     flags,
     generic,
     integrations,
@@ -63,6 +64,7 @@ router.add_api_route(
 router.include_router(flags.router)
 router.include_router(retention.router)
 router.include_router(credentials.router)
+router.include_router(provider_keys.router)  # #2715 resend/gemini keys, split out of credentials
 router.include_router(whitelist.router)
 router.include_router(templates.router)
 router.include_router(mcp_url.router)

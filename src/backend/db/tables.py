@@ -267,6 +267,11 @@ schedule_executions = Table(
     Column("queued_at", Text),
     Column("backlog_metadata", Text),
     Column("fan_out_id", Text),
+    # #2524: the CALLER's subtask id within a fan-out batch. The aggregate
+    # is a query over `fan_out_id` now, so the id the caller keyed its tasks
+    # by has to live on the row — it used to be a dict key in the service's
+    # process, which no async batch or status endpoint can reach.
+    Column("fan_out_task_id", Text),
     Column("retry_count", Integer),
     Column("loop_id", Text),
     Column("claim_token", Text),  # #1081 Phase 0 — dark pull-coordination columns
@@ -285,6 +290,8 @@ schedule_executions = Table(
     # ent#457 review: WHICH human the channel context belongs to. Only the
     # portal leg reads it today — see `_resolve_portal`'s recipient check.
     Column("source_channel_client", Text),
+    # ent#555 — the canvas the user had open for this turn (context, not authority).
+    Column("open_canvas_id", Text),
 )
 
 agent_loops = Table(
@@ -591,6 +598,24 @@ enterprise_room_messages = Table(
 )
 
 
+agent_canvas_shares = Table(
+    # ent#554 — one share link for one canvas. Separate from
+    # `agent_public_links` on purpose; see the DDL comment in db/schema.py.
+    "agent_canvas_shares",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("canvas_id", Text),
+    Column("token", Text),
+    Column("scope", Text),
+    Column("created_by", Text),
+    Column("created_at", Text),
+    Column("expires_at", Text),
+    Column("revoked_at", Text),
+    Column("last_viewed_at", Text),
+    Column("view_count", Integer),
+)
+
 agent_canvases = Table(
     # ent#438 — a durable, addressable surface an agent renders onto and
     # UPDATES. Composite PK (agent_name, canvas_id): the write is an upsert,
@@ -610,6 +635,8 @@ agent_canvases = Table(
     Column("updated_by_execution_id", Text),
     # ent#537 — starter layout by name; NULL = stacked.
     Column("template", Text),
+    # ent#553 — a human's pin, so the pile stays navigable. Never agent-written.
+    Column("pinned", Integer),
 )
 
 user_ui_preferences = Table(

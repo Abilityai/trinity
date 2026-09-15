@@ -1,5 +1,9 @@
 /**
- * The first-run hardening guide's contract (#2380).
+ * The first-run hardening guide's contract (#2380) — since ent#581 the
+ * `secure` step of the first-run overlay (`steps/StepSecure.vue`). Its
+ * visibility now comes from the registry (`firstRunSteps.spec.js` pins the
+ * provenance, admin and flags-loaded terms there); this file keeps the copy,
+ * the stage logic, the store's fail-closed read and the step's structure.
  *
  * Three rules carry this surface, and none of them is visible to a structural
  * check:
@@ -9,7 +13,7 @@
  *      missed nudge is a non-event; a "secure this instance" card sitting over
  *      a managed instance that is already behind Tailscale is an accusation
  *      nobody can act on.
- *   2. **Never before the answer arrives.** `marketplaceInstall` starts false,
+ *   2. **Never before the answer arrives.** `hardeningGuideEligible` starts false,
  *      so a false→true flip after the fetch is indistinguishable from a real
  *      one — without the `featureFlagsLoaded` term the card flashes in on every
  *      page load.
@@ -49,19 +53,19 @@ import { useSessionsStore } from '@/stores/sessions'
 import { resetInFlight } from '@/utils/inflight'
 import {
   HARDENING_GUIDE_DISMISSED_KEY,
+  DOMAIN_BENEFIT,
   DOMAIN_POSTURE,
-  HARDENING_GUIDE_TUNNEL_DISMISSED_KEY,
+  DOMAIN_PREREQUISITE,
+  DOMAIN_SIDE_EFFECT,
+  HARDENING_DOCS_URL,
   POSTURE_COPY,
-  dismissKeyForStage,
   hardeningStage,
-  isHardeningGuideVisible,
-  persistHardeningGuideDismissed,
   postureCopy,
-  readHardeningGuideDismissed,
 } from '@/components/onboarding/hardeningGuide'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
-const GUIDE_SFC = read('../../src/components/onboarding/HardeningGuide.vue')
+const GUIDE_SFC = read('../../src/components/onboarding/steps/StepSecure.vue')
+const OVERLAY_SFC = read('../../src/components/onboarding/FirstRunOverlay.vue')
 const SETTINGS_SFC = read('../../src/views/Settings.vue')
 
 /**
@@ -89,15 +93,6 @@ const withoutComments = (source) => {
   return out
 }
 
-/** A marketplace droplet still advertising HTTPS at its bare IP, seen by an admin. */
-const marketplaceIp = {
-  featureFlagsLoaded: true,
-  isAdmin: true,
-  marketplaceInstall: true,
-  installTlsPosture: 'https-ip',
-  dismissed: false,
-}
-
 let store
 
 beforeEach(() => {
@@ -108,102 +103,37 @@ beforeEach(() => {
   store = useSessionsStore()
 })
 
-describe('visibility', () => {
-  it('shows on a marketplace install advertising HTTPS at a bare IP', () => {
-    expect(isHardeningGuideVisible(marketplaceIp)).toBe(true)
+describe('stage', () => {
+  it('builds the admin term once, in the overlay, from the getter that exists', () => {
+    // `authStore.role` answers 'user' until /api/users/me lands, so the term
+    // ANDs `profileVerified` in — otherwise the step flashes for a non-admin on
+    // every page load (#2198). The getter is `role`: an older spec pinned
+    // `userRole`, which the store never defined, so the card it guarded had
+    // been permanently hidden (ent#437; `authRoleGetterContract.spec.js`).
+    expect(OVERLAY_SFC).toMatch(/isAdmin:\s*auth\.profileVerified && auth\.role === 'admin'/)
+    expect(OVERLAY_SFC).not.toMatch(/userRole/)
+    expect(GUIDE_SFC).not.toMatch(/userRole/)
   })
 
-  it('shows on a marketplace install with no public URL, and on plain HTTP', () => {
-    expect(isHardeningGuideVisible({ ...marketplaceIp, installTlsPosture: 'unconfigured' })).toBe(true)
-    expect(isHardeningGuideVisible({ ...marketplaceIp, installTlsPosture: 'http' })).toBe(true)
-  })
-
-  it('stays hidden when the install is not a marketplace one', () => {
-    // The whole managed fleet lands here: plain HTTP behind Tailscale is
-    // indistinguishable from an unhardened droplet by every other signal, so
-    // provenance is the only gate that can tell them apart.
-    expect(isHardeningGuideVisible({ ...marketplaceIp, marketplaceInstall: false })).toBe(false)
-    expect(
-      isHardeningGuideVisible({ ...marketplaceIp, marketplaceInstall: false, installTlsPosture: 'http' })
-    ).toBe(false)
-  })
-
-  it('renders nothing before the flags load', () => {
-    expect(isHardeningGuideVisible({ ...marketplaceIp, featureFlagsLoaded: false })).toBe(false)
-  })
-
-  it('stays hidden for a non-admin on a marketplace install', () => {
-    // Not cosmetics. `general` is `adminOnly`, so `resolveTabFromQuery` drops a
-    // non-admin on the default tab — the card's only action dead-ends for the
-    // person reading it, under a headline about this box being unencrypted.
-    expect(isHardeningGuideVisible({ ...marketplaceIp, isAdmin: false })).toBe(false)
-    expect(
-      isHardeningGuideVisible({ ...marketplaceIp, isAdmin: false, installTlsPosture: 'http' })
-    ).toBe(false)
-  })
-
-  it('stays hidden while the profile is still unverified', () => {
-    // `authStore.role` answers 'user' until /api/users/me lands, so the SFC
-    // ANDs `profileVerified` in before asking the predicate — otherwise the card
-    // flashes for a non-admin on every page load (#2198). The getter is `role`:
-    // this spec used to pin `userRole`, which the store never defined, so the
-    // card it guards had been permanently hidden (ent#437 eyeball finding;
-    // `authRoleGetterContract.spec.js` now pins the name repo-wide).
-    const unverifiedAdmin = false // profileVerified && role === 'admin'
-    expect(isHardeningGuideVisible({ ...marketplaceIp, isAdmin: unverifiedAdmin })).toBe(false)
-    expect(GUIDE_SFC).toContain('authStore.profileVerified')
-    expect(GUIDE_SFC).toMatch(/authStore\.role === 'admin'/)
-    expect(GUIDE_SFC).not.toMatch(/authStore\.userRole/)
-    // The gate lives in the pure module, not in Dashboard.vue, so it is testable.
-    expect(GUIDE_SFC).toMatch(/isAdmin:\s*authStore\.profileVerified/)
-  })
-
-  it('shows for a verified admin on a marketplace install', () => {
-    expect(isHardeningGuideVisible({ ...marketplaceIp, isAdmin: true })).toBe(true)
-  })
-
-  it('predicate: a configured domain ADVANCES the card, it does not retire it', () => {
-    // The guide advises two steps. Retiring on step one meant step two was
-    // mentioned once and then never again, on the only surface that raises it —
-    // so `https-domain` now selects the tunnel stage instead of hiding.
+  it('a configured domain ADVANCES to the tunnel stage; everything short of one is step one', () => {
     expect(DOMAIN_POSTURE).toBe('https-domain')
-    expect(isHardeningGuideVisible({ ...marketplaceIp, installTlsPosture: DOMAIN_POSTURE })).toBe(true)
     expect(hardeningStage(DOMAIN_POSTURE)).toBe('tunnel')
-    // Everything short of a domain is still step one.
     for (const posture of ['unconfigured', 'http', 'https-ip']) {
       expect(hardeningStage(posture)).toBe('address')
     }
-    // A dismissal is now the only thing that ends the guide.
-    expect(
-      isHardeningGuideVisible({ ...marketplaceIp, installTlsPosture: DOMAIN_POSTURE, dismissed: true })
-    ).toBe(false)
   })
 
-  it('scopes dismissal per stage, so step one cannot silently spend step two', () => {
-    // One key would let "you are on a bare IP, go away" also consume tunnel
-    // advice the operator has never been shown — the same shape as the ent#437
-    // warm ask being spent behind another card.
-    expect(dismissKeyForStage('address')).toBe(HARDENING_GUIDE_DISMISSED_KEY)
-    expect(dismissKeyForStage('tunnel')).toBe(HARDENING_GUIDE_TUNNEL_DISMISSED_KEY)
-    expect(dismissKeyForStage('address')).not.toBe(dismissKeyForStage('tunnel'))
-
-    // Dismissing the address stage leaves the tunnel stage unread.
-    persistHardeningGuideDismissed('address')
-    expect(readHardeningGuideDismissed('address')).toBe(true)
-    expect(readHardeningGuideDismissed('tunnel')).toBe(false)
-
-    // The address key keeps its original name, so an existing dismissal holds
-    // with nothing to migrate.
+  it('keeps the retired card\'s dismissal key name, so the upgrade skip still finds it', () => {
     expect(HARDENING_GUIDE_DISMISSED_KEY).toBe('trinity_hardening_guide_dismissed')
   })
 
-  it('the component resolves dismissal against the stage on screen', () => {
-    expect(GUIDE_SFC).toMatch(/hardeningStage\(store\.installTlsPosture\)/)
-    expect(GUIDE_SFC).toContain('dismissed: dismissed.value[stage.value]')
-    expect(GUIDE_SFC).toContain("persistHardeningGuideDismissed(stage.value)")
-    // Step one's action cannot render once the domain exists — there is nothing
-    // left to collect in-app, and a button that leads nowhere is the defect.
-    expect(GUIDE_SFC).toMatch(/v-if="stage === 'address'"[\s\S]{0,400}Add a domain/)
+  it('the step derives its stage from the posture on screen', () => {
+    // ent#581: dismissal is the overlay's per-step Skip now; the step itself
+    // only picks which copy speaks.
+    expect(GUIDE_SFC).toMatch(/hardeningStage\(props\.ctx\.tlsPosture\)/)
+    // Step one's field cannot render once the domain exists — there is nothing
+    // left to collect in-app, and a control that leads nowhere is the defect.
+    expect(GUIDE_SFC).toMatch(/<form v-if="stage === 'address'"[\s\S]{0,1600}Save domain/)
   })
 
   it('advances in-session on the save that configures the domain', () => {
@@ -216,55 +146,6 @@ describe('visibility', () => {
     // Before the catch, i.e. on the success path only.
     expect(body.indexOf('loadFeatureFlags(true)')).toBeLessThan(body.indexOf('} catch'))
   })
-
-  it('stays hidden once dismissed', () => {
-    expect(isHardeningGuideVisible({ ...marketplaceIp, dismissed: true })).toBe(false)
-  })
-
-  it('defaults every term to hidden when called with nothing', () => {
-    expect(isHardeningGuideVisible()).toBe(false)
-    expect(isHardeningGuideVisible({})).toBe(false)
-  })
-})
-
-describe('dismissal', () => {
-  it('writes the documented key and is honoured on the next read', () => {
-    expect(readHardeningGuideDismissed()).toBe(false)
-
-    expect(persistHardeningGuideDismissed()).toBe(true)
-
-    expect(localStorage.getItem(HARDENING_GUIDE_DISMISSED_KEY)).toBe('1')
-    expect(HARDENING_GUIDE_DISMISSED_KEY).toBe('trinity_hardening_guide_dismissed')
-    expect(readHardeningGuideDismissed()).toBe(true)
-    expect(isHardeningGuideVisible({ ...marketplaceIp, dismissed: readHardeningGuideDismissed() })).toBe(false)
-  })
-
-  it('reports the refusal without throwing when storage rejects the write', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const setItem = localStorage.setItem
-    localStorage.setItem = () => { throw new Error('quota') }
-
-    expect(persistHardeningGuideDismissed()).toBe(false)
-
-    localStorage.setItem = setItem
-    expect(warn).toHaveBeenCalled()
-    warn.mockRestore()
-  })
-
-  it('reads as not-dismissed when storage cannot be read at all', () => {
-    const getItem = localStorage.getItem
-    localStorage.getItem = () => { throw new Error('private mode') }
-
-    // Safe direction for a security nudge: show it again, it is one click away.
-    expect(readHardeningGuideDismissed()).toBe(false)
-
-    localStorage.getItem = getItem
-  })
-
-  it('does not reach the network — dismissal is per-browser only', () => {
-    persistHardeningGuideDismissed()
-    expect(axios.get).not.toHaveBeenCalled()
-  })
 })
 
 describe('honest copy', () => {
@@ -274,25 +155,55 @@ describe('honest copy', () => {
     expect(Object.keys(POSTURE_COPY).sort()).toEqual([
       'http',
       'https-domain',
+      'https-domain-reached',
       'https-ip',
       'unconfigured',
     ])
+    // #2691: `https-domain-reached` is not a fifth posture — it is the same
+    // posture once the name has actually been reached. The posture is parsed
+    // from a string an admin typed, so it can only ever say "saved"; claiming
+    // the domain WORKS takes evidence, and `reached` carries it.
+    expect(postureCopy(DOMAIN_POSTURE, true)).toBe(POSTURE_COPY['https-domain-reached'])
+    expect(postureCopy(DOMAIN_POSTURE, false)).toBe(POSTURE_COPY['https-domain'])
+    expect(postureCopy(DOMAIN_POSTURE)).toBe(POSTURE_COPY['https-domain'])
+    // `reached` is meaningless on every other posture: there is no domain yet.
+    expect(postureCopy('https-ip', true)).toBe(POSTURE_COPY['https-ip'])
     // An unrecognised posture still has nothing to say, and the component's own
     // belt hides the card rather than rendering an empty shell.
     expect(postureCopy('something-new')).toBeNull()
   })
 
+  it('a saved domain is reported as saved, not as working (#2691)', () => {
+    // The state every domain is in the moment it is entered, and where a typo
+    // or a missing DNS record stays forever. It must not read as an achievement.
+    const { headline, detail, badgeVariant } = POSTURE_COPY['https-domain']
+    expect(badgeVariant).not.toBe('success')
+    expect(headline.toLowerCase()).toMatch(/saved/)
+    expect(headline.toLowerCase()).toMatch(/first visit/)
+    // And it says who obtains the certificate and when, so "nothing happened
+    // yet" is a state the operator can act on rather than a mystery.
+    expect(detail.toLowerCase()).toMatch(/first request that actually arrives/)
+    expect(detail.toLowerCase()).toMatch(/does not point at this server/)
+  })
+
   it('the tunnel stage names the remaining step on the card FACE', () => {
     // At this stage there is no button — the last move happens on the host — so
     // a reader who dismisses without expanding must still have met the point.
-    const { headline, detail, badgeVariant } = POSTURE_COPY['https-domain']
+    const { headline, detail, badgeVariant } = POSTURE_COPY['https-domain-reached']
     expect(headline).toMatch(/Cloudflare Tunnel/)
-    expect(headline.toLowerCase()).toMatch(/optional/)
     expect(badgeVariant).toBe('success')
     // Honest about reach: it hedges rather than asserting what is in front of
     // this server, exactly as the `http` copy does.
-    expect(detail.toLowerCase()).toMatch(/unless something in front of/)
-    expect(detail.toLowerCase()).toMatch(/dismissing it here is a fine answer/)
+    expect(detail.toLowerCase()).toMatch(/still answers anyone who finds the address/)
+    // #2691/#2692: the stance the docs page takes and the card must match —
+    // optional, but not a shrug. The retired wording ("dismissing it here is a
+    // fine answer") undercut the guide it links to, which says to keep a real
+    // instance off the open internet. Skippable stays skippable: that is the
+    // overlay's Skip control and the step's `required: false`, not the copy's
+    // job to soften further.
+    expect(detail.toLowerCase()).not.toMatch(/a fine answer/)
+    expect(detail.toLowerCase()).toMatch(/optional/)
+    expect(detail.toLowerCase()).toMatch(/before this instance matters/)
   })
 
   // `install_tls_posture` is derived by PURE STRING PARSING of the URL this
@@ -387,8 +298,11 @@ describe('honest copy', () => {
       expect(copy.badgeVariant, `${posture} must not read as broken`).not.toBe('urgent')
     }
     // And `success` is reserved for the one posture that completed a step.
+    // #2691: reserved for the one state resting on something OBSERVED — a
+    // request for the saved name arrived and a certificate followed. A saved
+    // but never-reached domain is `info`, not a green tick.
     const successes = ALL.filter(([, c]) => c.badgeVariant === 'success').map(([k]) => k)
-    expect(successes).toEqual(['https-domain'])
+    expect(successes).toEqual(['https-domain-reached'])
   })
 })
 
@@ -403,8 +317,9 @@ describe('the two paths are complementary, not alternatives', () => {
     expect(GUIDE_SFC).toMatch(/Give it a real name/)
     expect(GUIDE_SFC).toMatch(/Serve it without exposing it/)
     expect(GUIDE_SFC).toMatch(/A record/)
-    // Deep-links at the field that actually writes `public_chat_url`.
-    expect(GUIDE_SFC).toContain("/settings?tab=general")
+    // Writes the field that actually drives the posture, in place — leaving
+    // the Dashboard would leave the setup sequence (ent#581).
+    expect(GUIDE_SFC).toContain("updateSetting('public_chat_url'")
   })
 
   it('offers a Cloudflare Tunnel, not a VPN (#2380, decided 2026-09-01)', () => {
@@ -431,15 +346,19 @@ describe('the two paths are complementary, not alternatives', () => {
     expect(prose).toMatch(/happens on the host rather than from this page/)
   })
 
-  it('keeps one action on the card face and the reasoning behind a disclosure', () => {
-    // The card is a first-login nudge on a droplet that is answering the public
-    // internet; it must be actionable at a glance, not two columns of prose.
+  it('keeps one action on the step face and the reasoning behind a disclosure', () => {
+    // The step answers a droplet that is on the public internet right now; it
+    // must be actionable at a glance, not two columns of prose.
     expect(GUIDE_SFC).toContain('<details')
-    expect(GUIDE_SFC).toContain('data-testid="hardening-guide-why"')
-    // Exactly one non-dismiss button, and it is the one collectable-in-app step.
-    expect(GUIDE_SFC).toMatch(/variant="primary"[\s\S]{0,200}Add a domain/)
+    expect(GUIDE_SFC).toContain('data-testid="first-run-secure-why"')
+    // Exactly one button, and it is the one collectable-in-app step. Secondary:
+    // the overlay footer's Continue is the view's one primary (contract p.11).
+    expect(GUIDE_SFC).toMatch(/variant="secondary"[\s\S]{0,200}Save domain/)
     const buttons = GUIDE_SFC.match(/<BaseButton/g) || []
-    expect(buttons.length, 'one action + one dismiss').toBe(2)
+    expect(buttons.length, 'one action; Skip belongs to the chassis').toBe(1)
+    // No host command on this card. Saving the field is the whole step; a shell
+    // instruction reappearing here means that stopped being true.
+    expect(GUIDE_SFC).not.toMatch(/sudo /)
   })
 
   it('does not promise a certificate change Trinity does not perform', () => {
@@ -454,6 +373,13 @@ describe('the two paths are complementary, not alternatives', () => {
     expect(prose).toContain('Trinity does not issue certificates itself')
     expect(prose).toMatch(/whatever terminates TLS in front of it/)
     expect(prose).toMatch(/hands out the name instead of the IP/)
+    // What CHANGED (#2380 follow-up): the sentence used to end "...picks up the
+    // name", implying the proxy reconfigures itself from a Trinity setting. It
+    // does not, on any install this card is shown to — so the copy now names
+    // the command that reconfigures it. All three claims above stay true and
+    // stay asserted; only the actor moved from "whatever is out there,
+    // somehow" to a command the operator runs.
+    expect(prose).not.toMatch(/picks up the name/)
   })
 
   it('does not phrase them as an either/or', () => {
@@ -461,17 +387,70 @@ describe('the two paths are complementary, not alternatives', () => {
     expect(prose.toLowerCase()).not.toMatch(/\beither\b|\bor instead\b|\balternatively\b/)
   })
 
-  it('carries the documented test hooks and an aria-label on dismiss', () => {
-    expect(GUIDE_SFC).toContain('data-testid="hardening-guide"')
-    expect(GUIDE_SFC).toContain('data-testid="hardening-guide-dismiss"')
-    expect(GUIDE_SFC).toMatch(/aria-label="Dismiss the instance hardening guide"/)
+  it('carries the documented test hooks', () => {
+    expect(GUIDE_SFC).toContain('data-testid="first-run-step-secure"')
+    expect(GUIDE_SFC).toContain('data-testid="first-run-public-url"')
   })
 
-  it('composes the primitives instead of hand-rolling a card, badge, or button', () => {
-    // The two neighbouring onboarding cards hand-roll their shell and are
-    // pre-ratchet; this one must not copy them (design-system-contract §Primitives).
-    for (const p of ['BaseCard', 'BaseBadge', 'BaseButton']) {
+  it('composes the primitives instead of hand-rolling a field, badge, or button', () => {
+    for (const p of ['BaseInput', 'BaseBadge', 'BaseButton', 'InlineError']) {
       expect(GUIDE_SFC, `${p} must be composed`).toContain(`import ${p} from`)
+    }
+  })
+})
+
+describe('step one is finishable from the browser (#2380, on-demand TLS)', () => {
+  it('writes the Public URL setting and nothing else', () => {
+    // Saving the Public URL completes step one only because Caddy obtains the
+    // certificate on demand, asking the backend whether the name is allowed.
+    // Before that, saving reconfigured nothing: the domain served a certificate
+    // error, this card advanced to step two on the strength of the operator's
+    // own input, and the address section that would have explained the fix was
+    // `v-if`'d away with it.
+    expect(GUIDE_SFC).toContain("updateSetting('public_chat_url'")
+    expect(GUIDE_SFC).not.toMatch(/sudo /)
+    expect(GUIDE_SFC).not.toMatch(/set-domain\.sh/)
+  })
+
+  it('says the certificate is obtained for the saved name, without claiming to do it', () => {
+    const prose = withoutComments(GUIDE_SFC).replace(/\s+/g, ' ')
+    expect(prose).toContain('Trinity does not issue certificates itself')
+    expect(prose).toMatch(/obtain one for the name you save/)
+    // The allowlist IS the security model, and it answers the question an
+    // operator would otherwise have to ask: can somebody else point a domain
+    // here and have this server request certificates for it?
+    expect(prose).toMatch(/Only the name you save is allowed/)
+    // DNS first: on-demand issuance fails until the record resolves here, and it
+    // fails on somebody's page load rather than announcing itself — which is
+    // exactly why Trinity cannot report it, and now says so.
+    expect(prose).toMatch(/Point the domain at this server before you save/)
+    expect(prose).toMatch(/the visitor sees a certificate error/)
+  })
+})
+
+describe('the certificate-renewal caveat (#2380 item 7)', () => {
+  const ip = POSTURE_COPY['https-ip']
+
+  it('warns that a long shutdown outlives a short-lived certificate', () => {
+    expect(ip.detail).toMatch(/six days/i)
+    expect(ip.detail).toMatch(/switched off|shut down|shutdown/i)
+    expect(ip.detail).toMatch(/renew/i)
+  })
+
+  it('states it as a property of the profile, never of THIS connection', () => {
+    // The binding AC on POSTURE_COPY: nothing here may assert a property of the
+    // actual connection, because TLS terminates outside the backend and no
+    // socket is ever probed. The renewal sentence is hedged the same way the
+    // certificate sentence already is — "expect", "if ... set this up".
+    expect(ip.detail).toMatch(/If a marketplace image or the DigitalOcean install script set this up/)
+    expect(ip.detail).toMatch(/\bexpect\b/)
+    for (const forbidden of [
+      /your certificate expires/i,
+      /this certificate is/i,
+      /is secure\b/i,
+      /is valid\b/i,
+    ]) {
+      expect(ip.detail).not.toMatch(forbidden)
     }
   })
 })
@@ -479,33 +458,32 @@ describe('the two paths are complementary, not alternatives', () => {
 describe('the store fails closed', () => {
   const flagPayload = {
     install_source: 'do-marketplace',
-    marketplace_install: true,
+    hardening_guide_eligible: true,
     install_tls_posture: 'https-ip',
+    public_url_reached: true,
   }
 
   it('starts closed before anything is fetched', () => {
     expect(store.featureFlagsLoaded).toBe(false)
     expect(store.installSource).toBe('unknown')
-    expect(store.marketplaceInstall).toBe(false)
+    expect(store.hardeningGuideEligible).toBe(false)
     expect(store.installTlsPosture).toBe('unconfigured')
+    expect(store.publicUrlReached).toBe(false)
   })
 
-  it('carries the three fields through on a successful read', async () => {
+  it('carries the four fields through on a successful read', async () => {
     axios.get.mockResolvedValueOnce({ data: flagPayload })
     await store.loadFeatureFlags()
 
     expect(store.installSource).toBe('do-marketplace')
-    expect(store.marketplaceInstall).toBe(true)
+    expect(store.hardeningGuideEligible).toBe(true)
     expect(store.installTlsPosture).toBe('https-ip')
-    expect(
-      isHardeningGuideVisible({
-        featureFlagsLoaded: store.featureFlagsLoaded,
-        isAdmin: true, // held constant: these cases exercise the flag path
-        marketplaceInstall: store.marketplaceInstall,
-        installTlsPosture: store.installTlsPosture,
-        dismissed: false,
-      })
-    ).toBe(true)
+    // #2691: the tick is EARNED, so this field is the one that has to survive the
+    // round trip — it is what flips the badge to Done and swaps the copy to the
+    // reached variant. Asserted on the store rather than only in the SFC text,
+    // because a dropped assignment here leaves both of those dead with the rest
+    // of this file still green.
+    expect(store.publicUrlReached).toBe(true)
   })
 
   it('falls back to the closed values when the payload omits them', async () => {
@@ -514,27 +492,121 @@ describe('the store fails closed', () => {
 
     // Not `undefined` — that reads as falsy but prints as "undefined".
     expect(store.installSource).toBe('unknown')
-    expect(store.marketplaceInstall).toBe(false)
+    expect(store.hardeningGuideEligible).toBe(false)
     expect(store.installTlsPosture).toBe('unconfigured')
+    expect(store.publicUrlReached).toBe(false)
   })
 
-  it('fails CLOSED when the flag read fails, so the card stays hidden', async () => {
+  it('fails CLOSED when the flag read fails, so the step stays out', async () => {
     axios.get.mockRejectedValueOnce(new Error('boom'))
     await store.loadFeatureFlags()
 
     expect(store.installSource).toBe('unknown')
-    expect(store.marketplaceInstall).toBe(false)
+    expect(store.hardeningGuideEligible).toBe(false)
     expect(store.installTlsPosture).toBe('unconfigured')
+    // An unreachable backend must not award the tick.
+    expect(store.publicUrlReached).toBe(false)
     expect(store.featureFlagsLoaded).toBe(true) // resolved, just not to a gate
+  })
 
-    expect(
-      isHardeningGuideVisible({
-        featureFlagsLoaded: store.featureFlagsLoaded,
-        isAdmin: true, // held constant: these cases exercise the flag path
-        marketplaceInstall: store.marketplaceInstall,
-        installTlsPosture: store.installTlsPosture,
-        dismissed: false,
-      })
-    ).toBe(false)
+  it('REVOKES a tick it already awarded when a later read fails', async () => {
+    // The tests above start from a fresh store, where every closed value equals
+    // the state default — so they pass even with the `catch` block's resets
+    // deleted, and cannot tell a reset from an initial value. This one earns the
+    // tick first and then fails the read, which is the only shape that pins the
+    // fail-closed branch itself. An instance whose backend has gone unreachable
+    // must stop claiming its public URL was reached.
+    //
+    // `force` + `resetInFlight()` is the real second-read path, not a contrivance:
+    // `FirstRunOverlay.vue:378` and the three `Settings.vue` save handlers all
+    // re-read with `force` — which is exactly when a just-saved domain's tick is
+    // resolved, so it is also exactly when a failing backend must revoke it.
+    axios.get.mockResolvedValueOnce({ data: flagPayload })
+    await store.loadFeatureFlags()
+    expect(store.publicUrlReached).toBe(true)
+
+    resetInFlight()
+    axios.get.mockRejectedValueOnce(new Error('boom'))
+    await store.loadFeatureFlags(true)
+
+    expect(store.publicUrlReached).toBe(false)
+    expect(store.hardeningGuideEligible).toBe(false)
+    expect(store.installSource).toBe('unknown')
+    expect(store.installTlsPosture).toBe('unconfigured')
+  })
+})
+
+
+describe('the domain step says why, and what has to be true first (#2691)', () => {
+  it('states the benefit and the prerequisite without opening the disclosure', () => {
+    // The defect this issue was filed for: walked live on a fresh droplet,
+    // nobody could say why an operator would add a domain or what it changes.
+    // The field's help text said only "the address people will use to reach
+    // this instance", and the A-record prerequisite was four sentences deep
+    // inside <details>.
+    expect(DOMAIN_BENEFIT).toMatch(/certificate/i)
+    expect(DOMAIN_PREREQUISITE.toLowerCase()).toMatch(/point the domain at this server/)
+
+    const face = withoutComments(GUIDE_SFC).split('<details')[0]
+    expect(face).toContain(':help="DOMAIN_BENEFIT"')
+    expect(face).toContain('{{ DOMAIN_PREREQUISITE }}')
+  })
+
+  it('names the side effect where the setting is owned, not in the first-run flow', () => {
+    // Saving re-registers every Telegram webhook and rewrites every WhatsApp
+    // binding immediately. That matters to an operator who already has
+    // channels — which a first-run visitor does not — so it is stated in
+    // Settings and left out of the overlay.
+    expect(DOMAIN_SIDE_EFFECT.toLowerCase()).toMatch(/telegram and whatsapp/)
+    expect(SETTINGS_SFC).toContain('{{ DOMAIN_SIDE_EFFECT }}')
+    expect(withoutComments(GUIDE_SFC)).not.toContain('DOMAIN_SIDE_EFFECT')
+  })
+
+  it('gives Settings the same explanation, from the same module', () => {
+    // Two writers, one meaning: the explanation cannot depend on which surface
+    // the operator arrived through, and shared constants are what stop the two
+    // drifting apart.
+    expect(SETTINGS_SFC).toMatch(/import \{[\s\S]{0,200}DOMAIN_BENEFIT[\s\S]{0,200}\} from '..\/components\/onboarding\/hardeningGuide'/)
+    expect(SETTINGS_SFC).toContain('{{ DOMAIN_BENEFIT }}')
+    expect(SETTINGS_SFC).toContain('{{ DOMAIN_PREREQUISITE }}')
+    // And the corrected consumer list: the old text named three of a dozen and
+    // omitted the one that fails outright without it.
+    expect(SETTINGS_SFC).toMatch(/voice calls fail outright without it/)
+  })
+
+  it('refuses a plain-HTTP address instead of congratulating the operator for it', () => {
+    // The pattern was `https?`, so `http://…` passed, the step emitted
+    // `complete` and advanced, and the badge then read "Advertises HTTP" — the
+    // step celebrating the posture it exists to move people off.
+    expect(GUIDE_SFC).toMatch(/\^https:\\\/\\\//)
+    expect(GUIDE_SFC).not.toMatch(/\^https\?:/)
+  })
+
+  it('waits for a real visit before showing a tick', () => {
+    // The tick rests on the one thing observed rather than typed. A DNS lookup
+    // at save time could not do this job: a Cloudflare-proxied domain, a load
+    // balancer or a reserved IP all resolve somewhere other than this server by
+    // design, and the card's own step two is "put your domain on Cloudflare".
+    expect(GUIDE_SFC).toContain('props.ctx.publicUrlReached')
+    expect(GUIDE_SFC).toMatch(/stage === 'tunnel' && reached \? 'Done' : 'Recommended'/)
+    expect(GUIDE_SFC).toMatch(/postureCopy\(props\.ctx\.tlsPosture, reached\.value\)/)
+  })
+
+  it('only makes Settings wait where something can end the wait', () => {
+    // The latch is written by the provisioned Caddyfile's TLS ask alone. An
+    // install behind its own proxy, a tunnel or a tailnet never calls it, so an
+    // ungated wait there would never end and the sentence would be false.
+    expect(SETTINGS_SFC).toContain(
+      'publicUrlCurrent && (sessionsStore.publicUrlReached || !sessionsStore.hardeningGuideEligible)'
+    )
+  })
+
+  it('links the full walkthrough at the published docs site', () => {
+    // The only other docs link in the first-run flow points at a github blob
+    // path on `main` and 404s between release cuts.
+    expect(HARDENING_DOCS_URL).toMatch(/^https:\/\/docs\.ability\.ai\//)
+    expect(HARDENING_DOCS_URL).not.toMatch(/github\.com/)
+    expect(GUIDE_SFC).toContain(':href="HARDENING_DOCS_URL"')
+    expect(GUIDE_SFC).toContain('data-testid="first-run-secure-docs"')
   })
 })

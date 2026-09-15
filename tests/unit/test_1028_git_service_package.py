@@ -46,7 +46,11 @@ def test_the_import_surface_still_resolves():
         "merge_gitignore_after_clone", "spawn_gitignore_merge_after_clone",
         "DEFAULT_PERSISTENT_STATE", "DEFAULT_DATA_PATHS",
         "_GITIGNORE_PATTERNS", "_TRINITY_AUTHORED_PATHS",
-        "_detect_git_dir", "_git_auto_sync_baked", "_git_remote_url",
+        "_detect_git_dir", "_git_auto_sync_baked",
+        # `_git_remote_url` is deliberately GONE since ent#615 (#2757): remotes are
+        # credential-less; `_credentialless_remote_url` is its replacement.
+        "_credentialless_remote_url", "scrub_git_remote_tokens",
+        "write_container_github_pat", "spawn_git_remote_token_scrub",
         "NO_WRITE_CREDENTIALS_MESSAGE",
     ):
         assert hasattr(g, name), f"services.git_service.{name} no longer resolves"

@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from database import db, AgentGitConfig, GitSyncResult
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, execute_command_in_container
+from services import git_credential_helper
 from utils.credential_sanitizer import scrub_secret_and_urls
 from utils.safe_yaml import (  # ent#314
     AliasPolicy as _AliasPolicy,
@@ -69,14 +70,21 @@ async def get_git_status(agent_name: str) -> Optional[Dict[str, Any]]:
 
 
 def _agent_has_write_credentials(agent_name: str, container) -> bool:
-    """True if the agent can plausibly push (ent#123 tokenless guard).
+    """The CHEAP tier of "can this agent plausibly push" (ent#123 guard).
 
-    Predicate = the container's baked ``GITHUB_PAT`` env **or** a per-agent
-    PAT row. The OR matters: ``set_agent_github_pat`` live-injects the token
-    into the workspace ``.env`` and rewrites origin (``update_remote_pat``,
-    #1264) BEFORE any recreate, so baked env alone would block the user who
-    just fixed the problem. The global tier is deliberately excluded — a
-    global PAT never reaches a tokenless container's remote.
+    Baked ``GITHUB_PAT`` env **or** a per-agent PAT row. The OR matters:
+    ``set_agent_github_pat`` live-injects the token into the workspace ``.env``
+    and re-points origin (``update_remote_pat``, #1264) BEFORE any recreate, so
+    baked env alone would block the user who just fixed the problem.
+
+    ⚠️ This is NOT the whole predicate any more. It used to be, on the strength
+    of "the global tier is deliberately excluded — a global PAT never reaches a
+    tokenless container's remote", and ent#615 made that sentence false: a
+    credential the helper resolves DOES reach the remote, from `.env` or from
+    the ent#615 harvest file, neither of which is visible from here. Answering
+    on this tier alone would return ``no_write_credentials`` to agents that can
+    push. Use ``_agent_can_push``, which consults this first and the helper's
+    own ladder second.
 
     Fail-open: any error reading either source returns True so this guard
     can only ever produce a clearer message, never block a working push.
@@ -93,6 +101,35 @@ def _agent_has_write_credentials(agent_name: str, container) -> bool:
             "failing open", agent_name, exc,
         )
         return True
+
+
+async def _agent_can_push(agent_name: str, container) -> bool:
+    """Full "can this agent push" predicate (ent#615).
+
+    The cheap tiers first (`Config.Env`, the per-agent row — no I/O beyond a DB
+    read), then the credential helper's own ladder, asked in the container by
+    EXIT CODE. The extra exec only ever runs for an agent that already looks
+    tokenless, which is the small population where the cheap answer is now
+    wrong, so the Push hot path is unchanged for everyone else.
+
+    Fail-open, like the tier it wraps: this guard exists to produce a clearer
+    message, never to block a push that would have worked.
+    """
+    if _agent_has_write_credentials(agent_name, container):
+        return True
+    try:
+        result = await execute_command_in_container(
+            container_name=f"agent-{agent_name}",
+            command=f"bash -c {shlex.quote(git_credential_helper.probe_command())}",
+            timeout=15,
+        )
+    except Exception as exc:  # noqa: BLE001 — guard must never break push
+        logger.warning(
+            "_agent_can_push: helper probe failed for %s: %s — failing open",
+            agent_name, exc,
+        )
+        return True
+    return result.get("exit_code", 1) == 0
 
 
 async def sync_to_github(
@@ -131,7 +168,7 @@ async def sync_to_github(
     # ent#123: a tokenless (anonymous public-template) agent has no push
     # credentials — fail with an honest, actionable message instead of
     # letting the in-container push die on a cryptic auth prompt.
-    if not _agent_has_write_credentials(agent_name, container):
+    if not await _agent_can_push(agent_name, container):
         return GitSyncResult(
             success=False,
             message=conflicts.NO_WRITE_CREDENTIALS_MESSAGE,
@@ -326,7 +363,7 @@ async def reset_to_main_preserve_state(agent_name: str) -> Dict[str, Any]:
     # ent#123: the recovery ends in a force-with-lease PUSH — refuse up front
     # for a tokenless agent with the same honest message as sync.
     container = get_agent_container(agent_name)
-    if container and not _agent_has_write_credentials(agent_name, container):
+    if container and not await _agent_can_push(agent_name, container):
         return {
             "error": "no_write_credentials",
             "message": conflicts.NO_WRITE_CREDENTIALS_MESSAGE,

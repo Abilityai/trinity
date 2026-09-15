@@ -384,6 +384,42 @@ every fact it carries, and two sibling PRs restructure this header band next).
   answer `unknown`, which shows nothing. Honest under-reporting; making it
   cross-worker means new Redis-shared state for a diagnostic.
 
+## The BROWSER tab, not the chat tab (ent#557)
+
+The tab strip above names the chats inside the Workspace. The browser's own tab
+is a different surface with a different job, and until ent#557 it carried
+nothing about state: `router.afterEach` set `Trinity — <label>` on every
+navigation (#1418) and that was the whole of it.
+
+While anything is unread the title carries a compact count prefix —
+`(3) Trinity — Workspace` — and returns to the plain title once everything is
+read. That is the only channel a **backgrounded** tab has: the sidebar badge is
+correct and invisible when the Workspace is not the tab you are looking at,
+which is precisely the case the feature is for. It is a marker that PERSISTS
+while unread, not a flash: a transient one would be worse than nothing for
+someone in another tab, who is by definition not watching when it fires.
+
+`utils/tabTitle.js` owns the string because `document.title` now has **two**
+writers on independent schedules — the router's label and the Workspace's count.
+With both assigning directly, the last one to fire would erase the other's half:
+a navigation would drop the count, a count update would drop the label. Neither
+assigns now. Both call in (`setBaseTitle`, `setUnreadCount`), the module renders
+the whole string, and the count is a **prefix on whatever the router computed**
+rather than a replacement — which is what lets ent#556 change what the label
+says without touching any of this.
+
+Two details are deliberate rather than incidental: the marker LEADS, because a
+browser truncates a tab from the right and a suffix would be the first thing to
+disappear on the tab that most needs it; and it is cleared on unmount, because a
+count that outlives the Workspace leaves a tab reading `(3)` on a page with
+nothing to click. The count itself is the sidebar's own total through the same
+`totalUnread` helper, so the tab and the rows cannot disagree — which is what
+"a total never shows a number you cannot reach by clicking" actually rests on.
+
+See [workspace-sidebar-ia.md](workspace-sidebar-ia.md) § *What "unread" means*
+for the counting rule this displays, including the account baseline that makes a
+never-opened chat count at all.
+
 ## Tests
 
 - `tests/unit/test_ent473_chat_titles.py` — the validator table, the greeting

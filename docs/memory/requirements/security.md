@@ -58,13 +58,13 @@
   - `AUTHENTICATION`: login_success, login_failed (logout / token_refresh — no endpoints in Trinity)
   - `AUTHORIZATION`: share, unshare, permission_grant, permission_revoke, permissions_set
   - `CONFIGURATION`: settings_change, resource_limits, autonomy_toggle
-  - `CREDENTIALS`: inject, export, import, oauth_complete (CRED-002 replaced spec's create/delete/reload)
+  - `CREDENTIALS`: inject, export, import, oauth_complete (CRED-002 replaced spec's create/delete/reload), subscription_assign, subscription_clear, subscription_auto_adopt, subscription_auto_adopt_sweep (#2572 — the manual and automatic halves of subscription assignment; #2421 still owns register / delete / auto-switch-settings)
   - `MCP_OPERATION`: tool_call, key_create, key_revoke, key_delete
   - `GIT_OPERATION`: sync, pull, init (commit — folded into sync)
   - `SYSTEM`: startup, shutdown, emergency_stop
 - **Architecture**: `docs/requirements/AUDIT_TRAIL_ARCHITECTURE.md`
 - **Flow**: `docs/memory/feature-flows/audit-trail.md`
-- **Test plan**: `docs/testing/audit-trail-manual-test-plan.md` (19 acceptance checks; 18/19 passed live, hash-chain verify bug fixed in-flight and re-verified)
+- **Test plan**: `docs/archive/testing/audit-trail-manual-test-plan.md` (19 acceptance checks; 18/19 passed live, hash-chain verify bug fixed in-flight and re-verified)
 - **Follow-up (optional)**: admin UI (no requirement in spec — API export satisfies compliance criterion); forward `schedule_id` / `schedule_name` from scheduler to `/api/internal/execute-task` so `schedule_triggered` audit carries that context.
 
 ### 20.2 Execution Origin Tracking (AUDIT-001)
@@ -107,8 +107,8 @@
   - Fleet auth report at `/api/ops/auth-report`
 - **Workflow**:
   1. User runs `claude setup-token` locally to generate long-lived token
-  2. Registers subscription via MCP: `register_subscription("name", "sk-ant-oat01-...")`
-  3. Assigns to agents: `assign_subscription("agent-name", "subscription-name")`
+  2. Registers subscription via MCP: `register_subscription("name", "sk-ant-oat01-...")` or `POST /api/subscriptions` (the Settings form and the MCP tool are the same endpoint, so step 3 fires for both)
+  3. **Automatic (#2572)**: on registration, every agent whose active auth mode resolves to *no usable credential* adopts an available subscription — see 20.3a. Manual assignment remains for every other case: `assign_subscription("agent-name", "subscription-name")`
   4. Agent container is (re)created with `CLAUDE_CODE_OAUTH_TOKEN` env var; `ANTHROPIC_API_KEY` removed
 - **Database**: `subscription_credentials` table, `subscription_id` FK on `agent_ownership`
 - **Files**:
@@ -117,16 +117,35 @@
   - `src/backend/services/subscription_service.py` - Auth mode detection
   - `src/mcp-server/src/tools/subscriptions.ts` - MCP tools
 
-### 20.3a Subscription Auto-Assign on Agent Creation (#74)
-- **Status**: ✅ Implemented (2026-03-25)
-- **GitHub Issue**: #74
+### 20.3a Subscription Auto-Assign — at Creation (#74) and to a Credential-less Fleet (#2572)
+- **Status**: ✅ Implemented (creation 2026-03-25, #74; credential-less adoption 2026-09-12, #2572)
+- **GitHub Issue**: #74, #2572
 - **Extends**: SUB-002
-- **Description**: When a new agent is created, automatically assign a subscription — since #2409 the one with the most cached provider headroom (furthest from the nearest wall, the auto-switch ranker); candidates with no usable reading fall back to fewest assigned agents (round-robin), tie-break alphabetical by name
+- **Description**: A Claude-runtime agent is put on a subscription automatically — at creation, and (#2572) whenever the platform stops being able to authenticate it any other way. The target is chosen by one ranker for all three triggers: since #2409 the subscription with the most cached provider headroom (furthest from the nearest wall); candidates with no usable reading fall back to fewest assigned agents (round-robin), tie-break alphabetical by name.
+- **The three triggers, and deliberately no periodic sweep** (operator decision, 2026-09-12):
+  1. **Agent creation** (#74) — gates only on `is_claude_runtime`, with no instance-key check, so it already covers a keyless instance. Unchanged by #2572; pinned by test.
+  2. **Subscription registration** (#2572) — `POST /api/subscriptions`, which the Settings form and the MCP `register_subscription` tool both reach. An upsert re-registration re-runs it; the sweep is idempotent.
+  3. **Instance Anthropic key deletion** (#2572) — the canonical migration off a metered key is *register, then delete the key*, and in that order trigger 2 correctly adopts nobody. **Two** entry points are hooked, because `db.delete_setting` carries no delete-side twin of ent#435's write sink guard: `DELETE /api/settings/api-keys/anthropic` and the generic `DELETE /api/settings/{key}` for either Anthropic key alias. Both fire only when the deletion actually removed a row.
+- **The predicate — "no usable credential"** (all five must hold):
+  1. the platform resolves **no** Anthropic key via `settings_service.get_anthropic_api_key()` — encrypted row → legacy row → `ANTHROPIC_API_KEY` **env fallback**. This short-circuits the whole sweep on any normal install and is the structural guarantee that no agent with a working key is ever moved. It must never become `has_secret_setting()` (DB-only, presence-only), which would adopt a fleet off a working env key;
+  2. `agent_ownership.subscription_id IS NULL` — an agent already on a subscription is never moved;
+  3. `use_platform_api_key IS TRUE` — `False` means the operator asserted through `PUT /api/agents/{name}/api-key-setting` that this agent brings its own `.env` credential, which the backend structurally cannot see and which the agent-side `arm_subscription_auth_guard()` (#2114) would force-unset on adoption;
+  4. the container's `trinity.agent-runtime` label is **present and Claude** (#1187 decision 7). Label-strict: `is_claude_runtime(None)` is `True` by design and the batch runtime map defaults a missing label to `claude-code`, so absence is read as *no evidence*, not as Claude;
+  5. the agent is **not ephemeral**.
+- **Two never-move guards, stated as such**: an agent with a working API key (condition 1, fleet-wide) and an agent already on another subscription (condition 2). Moving either is a billing decision the operator has not made.
+- **Phase split**: the decide-and-persist phase is awaited inside the triggering request (every blocking call off the event loop), so `GET /api/subscriptions` and the agent auth badge are correct the moment it returns; the container apply is backgrounded, per-agent, under the #799 switch lock, and re-verifies the assignment before restarting (SUB-003 may legitimately have moved the agent in between). Credential-less → subscription is an auth-**mode** change, so the apply recreates rather than hot-reloading.
+- **Two Phase-B exclusions, both verified destructive if included**: `trinity-system` is adopted in the DB but never restarted by the sweep (`_restart_agent` stops first, so #1816's "never recreate a running trinity-system" guard is bypassed by construction); ephemeral ghosts are excluded from the sweep entirely (volume-less by invariant, and the auth recreate predicate has no ghost exemption, so a restart destroys the workspace mid-budget).
+- **Known bound, accepted**: a Claude agent with a live ownership row and **no container** is skipped — its runtime is unverifiable — and with no periodic sweep nothing returns for it until it has a container at the next trigger. It is not running, so it is not the reported failure; recovery is one click in the agent-header subscription switcher.
+- **Fail-closed on an unreadable Docker**: if the daemon cannot be asked at all, the sweep adopts nobody. Deliberately the opposite resolution to `agent_container_runtimes`' documented fail-open, because that call site decides a UI affordance while this one writes a persisted credential assignment. The aborted sweep still writes its summary audit row (`skipped.docker_unreadable`), so "adopted 0 of 40 because Docker was unreadable" is distinguishable in the record from "nothing to do".
+- **Owner-blind**, following #74 and `list_assignable_subscriptions`' own lack of an owner filter: on a multi-user install an admin's subscription can acquire another user's credential-less agents.
+- **Audit**: one `subscription_auto_adopt` row per adopted agent plus one `subscription_auto_adopt_sweep` summary row, and (#2572) the previously-unaudited manual `subscription_assign` / `subscription_clear`. Subscription id and name only — never a token.
 - **Key Features**:
   - `db.list_assignable_subscriptions()` (SQL: COUNT + ORDER BY, 2h failure filter — filter only) → `services.subscription_service.select_subscription_for_new_agent()` (rank by cached headroom, then the first candidate whose token decrypts) — #2409 replaced the first-match `get_least_used_subscription()`
   - Auto-assign logic in `create_agent_internal()` — token injected before container creation, DB assignment after `register_agent_owner()`
-  - Graceful fallback: no subs → API key, decrypt fail → API key, exception → API key
-- **Files**: `db/subscriptions.py`, `database.py`, `services/agent_service/crud.py`
+  - `services.subscription_service.adopt_for_credentialless_agents()` — the #2572 sweep; one fleet-wide DB read, ONE batch Docker read (`docker_service.agent_container_runtime_labels`), per-agent select/assign under the #799 lock
+  - Graceful fallback: no subs → API key, decrypt fail → API key, exception → API key; the sweep never fails the request that triggered it
+  - SUB-003's preconditions are **unchanged** — this is a second, event-driven trigger, not a relaxation of failure-driven switching
+- **Files**: `db/subscriptions.py`, `database.py`, `services/agent_service/crud.py`, `services/subscription_service.py`, `routers/subscriptions.py`, `routers/settings.py`, `services/docker_service.py`
 
 ### 20.4 Subscription Auto-Switch on Rate Limit (SUB-003)
 - **Status**: ✅ Implemented (2026-03-21)
@@ -163,6 +182,13 @@
 
 - **Headroom-ranked alternative selection (#2409, 2026-08-27)**: `select_best_alternative_subscription` used to return the FIRST survivor of the 2h failure filter in `agent_count ASC` order and read no headroom — so auto-switch could relocate an agent onto a subscription at 99% of its weekly window, and an *unused dead-token* subscription (no agents ⇒ no failure rows) sorted first. Selection now lives in `services/subscription_auto_switch.py`; the db layer only lists filtered survivors (`list_viable_alternative_subscriptions`, `agent_count ASC, name ASC` — filter, never ranking). Survivors are ranked by the cached provider snapshot (`subscription:headroom:{id}`, ONE `MGET`, **never a probe**) through `subscription_headroom_service.rank_subscriptions`: primary key = the **fuller of the two windows** (the nearest wall — the #792 retry re-issues the turn on the destination immediately, so a 7d 20% / 5h 98% subscription fails within the minute), banded to 10 points so `agent_count` still spreads a storm within a band; then the other window; then name. Readings pass the same usability gate the ent#434 classifier uses (`headroom_reading` — extracted from `classify_headroom`, so the two cannot drift): the weekly figure is trusted ≤2h (`MAX_READING_AGE_SECONDS`, moved into the headroom service), the 5h figure and any refusal ≤30 min (`FRESHNESS_SECONDS`, the LIMIT-badge bound). A **fresh provider refusal** (probe 429, blocking window status, rejected token) is filtered out — the one case that now yields no target where it previously did is "every survivor is currently refused by the provider"; a stale refusal is merely unknown. Missing / stale / unreadable readings never block a switch: such candidates sort after measured ones in today's order, and any ranking failure (Redis down, import failure) falls back to today's order with a WARNING — the ranking only ever improves a choice, never prevents one. The recent-failure filter is unchanged and still runs first; failed candidates are never even read. `get_least_used_subscription` (new-agent auto-assign, #74) became `select_subscription_for_new_agent` in `services/subscription_service.py` over the same ranker (rank first, then the first candidate with a decryptable token — ≤1 decrypt when the top pick is valid). The switch notification/activity now carries `destination_headroom` (tier, both windows' utilization + reset, reading age, candidate count) and one clause saying why the destination was chosen — or that no fresh reading existed (and that ambient headroom refresh is off, when it is). Tests: `tests/unit/test_2409_headroom_ranked_switch.py`.
 
+- **The turn completes on another subscription (#2638, 2026-09-09)**: SUB-003 switched and #792 re-issued, yet a Workspace message on a rate-limited subscription still failed outright and was reported to the client as not retryable. Four gaps, closed together:
+  - **Readmission on evidence (gaps 1+2)**: `list_viable_alternative_subscriptions` drops every subscription with ANY failure event in a flat 2h window, so on a two-subscription install one stale event means "no viable alternative" while an alternative the provider would serve sits there — #2320's own evidence. The exclusion is now overridden **per candidate**, on POSITIVE evidence only: `subscription_headroom_service.recovery_verdict` readmits when a FRESH reading says the provider is not refusing (`serving_now` — the #447 rule that a probe beats an inference from past failures), or when a blocked window's own reset instant has ELAPSED **and predates the failure** (`window_reset`). The ordering is load-bearing: without it a subscription that 429'd a minute *after* its rollover would be readmitted on a reset it had already consumed. Instants are read from an AGED snapshot (`RECOVERY_INSTANT_MAX_AGE_SECONDS`, bounded by the snapshot's own 7-day TTL) on the #447/#2396 asymmetry — a utilisation *number* decays, an *instant* does not. Absence of evidence readmits nothing, so #444's ping-pong (caused by FORGETTING a failure) stays closed, and the fail-open ranking path readmits nobody by construction — it is precisely the branch where the evidence could not be read. A `window_reset` candidate's reading is passed to the ranker as UNKNOWN, because its `blocked` flag describes the window that just rolled over and `rank_subscriptions` would otherwise drop it as refused — the readmission would be inert in exactly the case it exists for. The db layer gains the complement (`list_recently_failed_alternatives`) and the failure instant (`last_failure_at_by_subscription`, kind-blind like the predicate it sits beside); both share `_list_all_alternatives` with the filter so the two lists cannot disagree about which subscriptions exist.
+  - **Pre-dispatch switch (gap 3)**: `ensure_serviceable_subscription` moves the agent BEFORE the first attempt when the assigned subscription is already known-refused — a fresh provider refusal, or a 429 in the platform's own 2h window (the DISPLAY predicate `is_subscription_rate_limited`, 429-only: an auth failure is a credential problem a different subscription may share). Called from `_call_agent_with_retries`, best-effort and never raising, so a turn that would have run still runs and #792 stays the backstop. It records **no** failure event — nothing failed, and a synthetic one would poison the skip-list that decides where the agent may move next. With no alternative it dispatches anyway: the provider's answer is better evidence than ours. It performs the SAME `_perform_auto_switch` (AC#6), so one activity, one notification and one hot-reload happen whichever path fired; `pre_dispatch=True` changes only the WORDING (`_failure_phrase`), because "switched after a rate-limit error" for a turn that never ran sends an operator looking for an execution that does not exist.
+  - **API-key fallback (gap 1, last resort)**: when the switcher declines and a platform API key is configured, `fallback_to_api_key` clears the subscription assignment, turns `use_platform_api_key` on and RESTARTS (the reload endpoint pushes an OAuth token; the change needed here is the opposite one, which `lifecycle`'s auth block already derives from DB state). It CLEARS rather than remembering-and-restoring — a hidden "go back at reset" would be a second invisible scheduler competing with the operator's assignment. Setting `subscription_api_key_fallback` (default ON, `GET`/`PUT /api/subscriptions/settings/api-key-fallback`, Settings → Subscriptions); the GET also reports `key_configured`, because a toggle reading only "on" with no key stored describes a remedy that cannot run. Fail-OPEN on a settings read error — the failure it guards is a user's turn dying with a usable key sitting in settings.
+  - **The client is told what changed (gap 4)**: `TaskExecutionResult.subscription_switch` carries the switch dict (in-memory, like `dispatched_async`), stamped at `execute_task`'s return sites by `_with_switch`. The portal's AUTH/BILLING branch consults it first: a turn that failed AFTER a switch answers **503 `auth_switched` retryable=True** naming the new subscription, instead of #2320's `retryable=False` — which was true only while nothing changed underneath, and a switch is exactly something changing underneath. With no switch it still refuses, but names the earliest reset instant the sampler already caches (`earliest_known_reset` → `_usage_limit_detail`), degrading to the original sentence whenever the instant is unknown — a fabricated time is worse than a vague one.
+  - **Pull terminals (#2643)**: `pull_coordination_service.apply_task_result` carries the SUB-003 hook on its CAS-won branch, so a pull-dispatched 429/401 triggers the same switch as a push one — inert until an agent is piloted onto the pull path. Files: `services/subscription_auto_switch.py`, `services/subscription_headroom_service.py`, `db/subscriptions.py`, `services/task_execution_service.py`, `services/execution_envelope.py`, `client_portal/service.py`, `routers/subscriptions.py`, `components/settings/SubscriptionsPanel.vue`, `stores/subscriptions.js`; tests `tests/unit/test_2638_subscription_switch_on_turn.py`.
+
 ### 20.5 Per-Subscription Usage Tracking (SUB-004)
 - **Status**: ✅ Implemented (2026-04-01)
 - **Requirement ID**: SUB-004
@@ -193,7 +219,7 @@
 - **Headroom probe contract**: click-to-refresh (Settings, ≥60s apart per subscription) always available; **ambient refresh default-ON** behind the `subscription_headroom_auto_refresh` system-setting toggle (15-min floor, demand-driven — an unwatched instance probes nothing; **fail-CLOSED to observed-only when Redis is unavailable**, so a probe storm is structurally impossible). Probe = `max_tokens=1` Haiku message (~a dozen tokens of subscription quota per refresh, disclosed on the toggle; operators will see tiny platform-initiated entries in the Anthropic console — release-noted). Probe 429s update the snapshot only, never `subscription_rate_limit_events` (platform-caused, not agent work). Every reading carries `source: "anthropic"|"observed"` + snapshot age; the DB-derived observed block is ALWAYS populated (the load-bearing arm — the #2170 inversion).
 - **Data-layer fixes shipped with it**: failure events recorded BEFORE the auto-switch enabled gate (previously an opted-out operator got permanently-zero observability); `failure_kind` column on `subscription_rate_limit_events` (the table conflates auth-class failures with 429s — writer had the param, never persisted); ONE `rate_limited_now` derivation (2h `is_subscription_rate_limited` OR fresh provider status) consumed by every surface.
 - **Key surfaces**: extended `GET /api/subscriptions/{id}/usage` (+`failure_events_24h`, per-kind counts, `rate_limited_now`, `headroom` block); `GET /api/subscriptions/{id}/usage/breakdown` (per-agent, both windows, **ranked by `cost_usd` desc** — cost is model-weighted by construction, resolving the 2026-07-28 model-mix research item); `POST /api/subscriptions/{id}/usage/refresh` (click probe); `GET/PUT /api/subscriptions/settings/headroom-auto-refresh`; batch `GET /api/agents/subscription-pressure` (pure-DB accessible set — owned ∪ shared via the shared ent#384 helper; `auth_mode` reuses the `AgentAuthStatus` vocabulary). Tier 0 relabel: subscription-funded agents present cost as `≈ $X API-equivalent` (AgentHeader + fleet surfaces; per-execution cells stay metered `$`).
-- **Cut**: Tier 4 bulk auto-assign (out of the operator's 2026-08-17 scope; SUB-003 covers the reactive per-agent case; bulk proactive migration filed separately). MCP tools + `~/.trinity/usage.json` stay in trinity-enterprise#351.
+- **Cut**: Tier 4 bulk auto-assign (out of the operator's 2026-08-17 scope; SUB-003 covers the reactive per-agent case; bulk proactive migration filed separately). **Partially revived by #2572 (2026-09-12)**: the *credential-less* subset — agents the platform can no longer authenticate at all — is now assigned in bulk at subscription-registration and instance-key-deletion time (20.3a). Bulk migration of agents that already have a **working** credential remains cut, and is the one thing that sweep's condition 1 structurally forbids. MCP tools + `~/.trinity/usage.json` stay in trinity-enterprise#351.
 
 ### 20.5b Subscription Headroom History + Failure-Event Retention (ent#433)
 - **Status**: 🔨 In progress (2026-08-20)
@@ -307,6 +333,41 @@
   `docs/memory/requirements/github.md` §11.10 — this section is the
   security-surface pointer; the resolution mechanics and the recreate-vs-create
   ladder distinction live there.
+
+### 20.9b Credential-Free Git Remotes (trinity-enterprise#615)
+- **Status**: ✅ Implemented.
+- **Standing requirement**: a git remote Trinity persists **carries no
+  userinfo**, and platform git authentication is **credential-helper-borne**.
+  A remote URL is read by `ps`, by git's own stderr (which reaches API
+  responses, `agent_sync_state` rows, operator-queue entries and chat
+  transcripts), and is at rest on the workspace volume for the life of the
+  container — so a credential in one is a credential in all of them.
+- **The chain this closes** (the actual win, stated because it is not obvious
+  from the acceptance criteria): git expanded the stored URL into
+  `git-remote-https`'s argv on every fetch — including the 60s sync-health
+  poll — from where `ps` → the agent server's reaped-cmdline logging
+  (ent#292, rated **P0**) → Vector → the host log files → `get_agent_logs` /
+  MCP → **another agent's LLM context**. ent#292 sanitized the last hop; this
+  removes the cause.
+- **What it does NOT close, recorded so it is not assumed**: a prompt-injected
+  agent reading its own credential. `GITHUB_PAT` remains in the container env
+  and in `/home/developer/.env`, and the helper can be invoked directly. Root
+  ownership of `/usr/local/bin/git-credential-trinity` and `/etc/gitconfig` is
+  **not confidentiality, and not a boundary**: `developer` holds `NOPASSWD:ALL`,
+  so an agent that wants to rewrite either can `sudo`. It buys only that nothing
+  rewrites them **by accident** — an errant `pip install`, a template hook, a
+  skill writing to `$HOME`. **Blast radius is unchanged** — the credential is still
+  the fleet-wide PAT, and through a host-registered helper it is ambient
+  authority for `https://github.com/*` rather than something an agent had to
+  construct a URL to use (net-neutral in practice, since `GITHUB_PAT` stays
+  env-readable, but stated rather than discovered). The structural answer is
+  **ent#558 (AAuth)**; the cheapest existing lever is per-agent, repo-scoped
+  PATs via `agent_git_config.github_pat_encrypted`.
+- **Never strip a credential you have not already replaced** — a platform
+  rule, not an implementation detail. It binds `startup.sh`'s per-restart
+  rewrite, `git_service.update_remote_pat` and the remediation sweep alike; a
+  refusal is queued to the operator rather than logged and forgotten.
+- **Full requirement**: `docs/memory/requirements/github.md` §11.16.
 
 ### 20.10 Machine Identities for Admin/Ops APIs (#2323)
 - **Status**: ✅ Implemented.
@@ -475,7 +536,7 @@
   - **Depth cap (primary, DB-measured ⇒ Redis-independent)**: `db.count_operator_queue_pending_for_agent(agent)` is computed once per cycle; new items are admitted only while `pending + admitted < OPERATOR_QUEUE_MAX_PENDING_PER_AGENT` (default **25**). At the cap, ingestion **stops** (`break`, not drip — avoids the C1 per-cycle DoS of re-scanning a growing file) and the surplus is held behind **one aggregated summary alert**. Bounds per-agent pending rows to `MAX_PENDING (+ platform items)` regardless of Redis.
   - **Rate cap (burst smoothing, Redis, fail-open)**: per-agent `rate_limiter.check("operator_queue_create:{agent}", OPERATOR_QUEUE_CREATE_RATE_LIMIT=60, OPERATOR_QUEUE_CREATE_RATE_WINDOW=60)` + fleet-level `check("operator_queue_create:_fleet", OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT=300, 60)` at the real create point only. Denied → item held this cycle, `break` the new-item scan. The fleet cap bounds a colluding / shared-upstream-injected fleet in aggregate (#1402 threat model, #1085 governor precedent).
   - **Field hygiene (`_clamp_ingested_item`, total helper, run INSIDE the #1525 create try/except)**: `title` truncated to `OPERATOR_QUEUE_TITLE_MAX` (300), `question` to `OPERATOR_QUEUE_QUESTION_MAX` (4000) — **truncate-with-marker** (losing a real approval is worse than a clamped one); `context` serialized >`OPERATOR_QUEUE_CONTEXT_MAX_BYTES` (8192) → replaced by a `{"_truncated":true,"_original_bytes":N,"execution_id":<validated ≤128 or dropped>}` marker (so the context cap can't be defeated by a verbatim `execution_id`); non-dict `context` → `{}` (fixes the pre-existing `create_item` `.get` crash class); `options` serialized >`OPERATOR_QUEUE_OPTIONS_MAX_BYTES` (4096) → dropped-with-marker; agent-supplied `created_at` **normalized to ingest time** (defeats future-date sort-pinning; `expires_at` still honored); `priority` validate-only (unknown → `medium`; legit `critical` untouched — the depth cap already bounds critical *volume*).
-  - **Reserved-id guard + malformed-id reject**: an agent item whose `id` starts with a platform-reserved prefix (`queue-flood-`, `poison-`, `cb-dormant-`, `sync-failing-`, `git-bloat-`, `skill-not-found-`, `val_`, `system-seed-`, `base-image-stale-`, `alert-budget-` (#1677)) is **rejected** so an agent can't pre-create (and thereby self-suppress via `on_conflict_do_nothing`) its own flood alarm or the #1402 poison alert; an `id` longer than `OPERATOR_QUEUE_ID_MAX` (256) or not matching `^[A-Za-z0-9._:-]+$` is rejected (a PK can't be safely rewritten).
+  - **Reserved-id guard + malformed-id reject**: an agent item whose `id` starts with a platform-reserved prefix (`queue-flood-`, `poison-`, `cb-dormant-`, `sync-failing-`, `git-bloat-`, `skill-not-found-`, `val_`, `system-seed-`, `base-image-stale-`, `alert-budget-` (#1677), `skills-legacy-adoption-` (#2744)) is **rejected** so an agent can't pre-create (and thereby self-suppress via `on_conflict_do_nothing`) its own flood alarm or the #1402 poison alert; an `id` longer than `OPERATOR_QUEUE_ID_MAX` (256) or not matching `^[A-Za-z0-9._:-]+$` is rejected (a PK can't be safely rewritten).
   - **Leader lock** (`opqueue:leader`, mirror monitoring #1464): only the lease-holding uvicorn worker runs `_poll_cycle`, so `--workers 2` no longer double-charges the limiter, double-broadcasts the alert, or double-scans the file. Fail-open to leader on Redis down.
   - **Summary/flood alert**: when depth-held or rate-skipped items occur, **one** `type:"alert"` operator-queue item is emitted via a platform **direct-DB create** (exempt), with an un-guessable `queue-flood-{agent}-{utc_now_iso()}` id, priority `high`, softened wording, and an in-memory `FLOOD_ALERT_COOLDOWN_SECONDS` (300) cooldown so it fires once per episode; wrapped so an emit failure never kills the sync.
   - **Generous DB belt** (`create_item`): rejects (`ValueError`) `title`>4 KiB, `question`>16 KiB, serialized `context`>64 KiB, `id`>512 — an order of magnitude above the service caps so platform items never trip it, but the "platform bypasses the boundary" invariant stops being solely load-bearing (#1525 two-layer philosophy: validate at the boundary AND at the sink).

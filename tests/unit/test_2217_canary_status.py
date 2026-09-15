@@ -402,7 +402,10 @@ def test_feature_flags_carries_canary_enabled(monkeypatch):
         # owns their contract.
         get_install_source=lambda: "unknown",
         is_marketplace_install=lambda: False,
+        is_hardening_guide_eligible=lambda: False,
         get_install_tls_posture=lambda: "unconfigured",
+        # #2691 — whether the saved Public URL has been reached over TLS.
+        is_public_url_reached=lambda: False,
     )
     monkeypatch.setattr(settings_module, "settings_service", stub_settings)
     monkeypatch.setattr(

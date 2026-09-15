@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from database import db, AgentGitConfig, GitSyncResult
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, execute_command_in_container
+from services import git_credential_helper
 from utils.credential_sanitizer import scrub_secret_and_urls
 from utils.safe_yaml import (  # ent#314
     AliasPolicy as _AliasPolicy,
@@ -39,29 +40,33 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 
 
-from . import gitignore
+from . import gitignore, token_scrub
 
 
 REBIND_PUSH_TIMEOUT_S = 120
 
-def _git_remote_url(github_pat: str, github_repo: str) -> str:
-    """Build an authenticated git remote URL.
-
-    Defaults to GitHub. Dev/self-host deployments can override the base via
-    TRINITY_GIT_BASE_URL (e.g., "http://trinity-gitea-dev:3000" for a local
-    gitea in the test harness). The base URL must include the scheme.
-    """
-    base = os.getenv("TRINITY_GIT_BASE_URL", "https://github.com").rstrip("/")
-    scheme, _, host_path = base.partition("://")
-    return f"{scheme}://oauth2:{github_pat}@{host_path}/{github_repo}.git"
+# ent#615: `_git_remote_url(pat, repo)` — which built
+# `<scheme>://oauth2:<pat>@<host>/<repo>.git` — is GONE. It was the chokepoint
+# every persisted remote came through, and a persisted remote is read by `ps`,
+# by the orphan sweep's reaped-cmdline logging and by git's own stderr. The one
+# remaining URL builder is `_credentialless_remote_url` below; the credential
+# arrives per-operation through the `trinity` credential helper
+# (`services/git_credential_helper.py`), which git speaks to over stdin.
 
 
 def _remote_seturl_subcommand(url: str) -> str:
-    """Idempotent `origin` set-url/add shell subcommand, with the (token-bearing)
-    URL shell-quoted (#1264 review). Shared by ``initialize_github_sync`` and
-    ``update_remote_pat`` so the templating logic lives in one place; the
-    ``shlex.quote`` is defense-in-depth (canonical PATs are ``[A-Za-z0-9_]``,
-    but ``set_agent_github_pat`` accepts arbitrary input)."""
+    """Idempotent `origin` set-url/add shell subcommand (#1264 review).
+
+    Shared by ``initialize_github_sync`` and ``update_remote_pat`` so the
+    templating logic lives in one place.
+
+    Post-ent#615 the URL is credential-less, so the ``shlex.quote`` is no longer
+    protecting a secret — keep it anyway, because it is protecting the SHELL,
+    and note what it is NOT: docker-py ``split_command``s a string command
+    (``docker/api/exec_api.py:47``), consuming one level of quoting, so this
+    quote does not survive into the container as a second layer. It is the only
+    layer, and it is load-bearing for a repo name, not for a token.
+    """
     q = shlex.quote(url)
     return (
         f"git remote get-url origin >/dev/null 2>&1 && "
@@ -70,26 +75,55 @@ def _remote_seturl_subcommand(url: str) -> str:
 
 
 async def update_remote_pat(agent_name: str, github_pat: str, github_repo: str) -> bool:
-    """Re-template a running agent's ``origin`` remote to embed ``github_pat`` (#1264).
+    """Make a running agent authenticate with ``github_pat``, no restart (#1264).
 
-    A per-agent PAT configured *after* the container/git was set up never reaches
-    the live remote — it stays frozen with an empty password (e.g.
-    ``https://x-access-token:@github.com/...``) in the persisted workspace
-    volume, so every fetch/push fails. This rewrites ``remote.origin.url`` to the
-    authenticated ``oauth2:<pat>@`` URL (``_git_remote_url``, same scheme
-    startup.sh uses), idempotently (set-url if origin exists, else add). The
-    startup.sh self-heal does the same on restart; this is the no-restart path
-    used by ``set_agent_github_pat``.
+    **Semantics flipped by ent#615, signature unchanged.** This used to rewrite
+    ``remote.origin.url`` to embed the token — the "now fix" a rotation needs,
+    because the live git process authenticated from that URL and not from
+    `.env`. It now does the opposite: it puts the credential where the
+    credential helper reads it and makes the URL credential-LESS.
+
+    Three steps, in this order, because **no path may strip a credential it has
+    not already replaced**:
+
+    1. write the token into the container's `.env` over ``docker exec`` — the
+       helper's first rung, and the rung a rotation must reach (``Config.Env``
+       is immutable without a recreate, so a baked-env-first ladder would keep
+       authenticating with the revoked token);
+    2. run the sweep, which installs the helper, PROVES it resolves, and only
+       then strips legacy userinfo — including the frozen empty-password
+       ``https://x-access-token:@github.com/...`` shape #1264 exists for;
+    3. ensure ``origin`` exists and is credential-less (the sweep only rewrites
+       remotes that are already there; #1264's case includes one that is not).
 
     Returns True on success. Best-effort: returns False (never raises) if the
-    container isn't running, has no git dir, or the command fails.
+    container isn't running, has no git dir, or a step fails.
     """
     if not github_pat or not github_repo:
         return False
     container_name = f"agent-{agent_name}"
     try:
         git_dir = await gitignore._detect_git_dir(container_name)
-        cmd = _remote_seturl_subcommand(_git_remote_url(github_pat, github_repo))
+
+        env_written = await token_scrub.write_container_github_pat(agent_name, github_pat)
+
+        # The seed is the belt to the `.env` write: if that write failed AND the
+        # container has no other source, the sweep still has a credential to
+        # place before it strips anything.
+        report = await token_scrub.scrub_git_remote_tokens(
+            agent_name, git_dir=git_dir, seed_pat=github_pat
+        )
+        if not report.get("helper_ok"):
+            # Nothing resolves, so step 3 would install a credential-less origin
+            # over a URL that may be the agent's only credential. Leave it.
+            logger.warning(
+                "ent#615/#1264: no credential resolves in %s after the .env "
+                "write (written=%s) — origin left as it was",
+                agent_name, env_written,
+            )
+            return False
+
+        cmd = _remote_seturl_subcommand(_credentialless_remote_url(github_repo))
         result = await execute_command_in_container(
             container_name=container_name,
             command=f'bash -c "cd {git_dir} && {cmd}"',
@@ -107,15 +141,26 @@ async def update_remote_pat(agent_name: str, github_pat: str, github_repo: str) 
         return False
 
 
+# ============================================================================
+# Post-creation repo binding (trinity-enterprise#109)
+# ============================================================================
+
+
+
 def _credentialless_remote_url(github_repo: str) -> str:
     """A remote URL with no userinfo, honouring ``TRINITY_GIT_BASE_URL``.
 
-    Mirrors ``startup.sh``'s ``UPSTREAM_URL`` construction
-    (``${GIT_SCHEME}://${GIT_HOST_PATH}/${repo}.git``) so the ``upstream``
-    remote this module writes and the one startup.sh self-heals are the same
-    string. Distinct from ``_git_remote_url``, which always embeds
-    ``oauth2:<pat>@`` — passing an empty PAT there yields ``oauth2:@host``,
-    which is NOT credential-less and defeats anonymous fetch.
+    Since ent#615 this is the ONLY remote-URL builder — every persisted remote
+    Trinity writes comes through here, and the credential arrives separately,
+    per operation, through the ``trinity`` git credential helper. It was
+    already the shape ``startup.sh``'s ``UPSTREAM_URL`` used
+    (``${GIT_SCHEME}://${GIT_HOST_PATH}/${repo}.git``), which is why the two
+    agree with no further work.
+
+    It replaced ``_git_remote_url(pat, repo)``, which always embedded
+    ``oauth2:<pat>@``. Note why that one could not simply be called with an
+    empty PAT: it yielded ``oauth2:@host``, which is not credential-less and
+    defeats anonymous fetch.
     """
     base = os.getenv("TRINITY_GIT_BASE_URL", "https://github.com").rstrip("/")
     return f"{base}/{github_repo}.git"
@@ -189,29 +234,62 @@ async def rebind_origin_and_push(
     Never raises; the caller maps ``stage`` to a structured 502.
     """
     container_name = f"agent-{agent_name}"
-    dest_url = _git_remote_url(user_pat, destination_repo)
+    # ent#615: credential-LESS. The push below carries the user's PAT
+    # per-operation through the exec environment instead.
+    dest_url = _credentialless_remote_url(destination_repo)
 
     try:
         git_dir = await gitignore._detect_git_dir(container_name)
     except Exception as e:  # noqa: BLE001 — container may be down mid-op
         return RebindResult(False, "detect", error=f"Could not reach the agent container: {e}")
 
-    async def _run(cmd: str, timeout: int = 120) -> tuple:
+    async def _run(
+        cmd: str,
+        timeout: int = 120,
+        *,
+        environment: Optional[Dict[str, str]] = None,
+        user: str = "developer",
+    ) -> tuple:
         result = await execute_command_in_container(
             container_name=container_name,
             command=f"bash -c {shlex.quote(f'cd {shlex.quote(git_dir)} && {cmd}')}",
             timeout=timeout,
+            environment=environment,
+            user=user,
         )
         return (
             result.get("exit_code", 1),
             _scrub_git_output(result.get("output", ""), user_pat),
         )
 
-    # 1. Push committed history to the destination by explicit URL.
+    # 1. Push committed history to the destination by explicit — and now
+    #    credential-less — URL.
+    #
+    #    ent#615/CRIT-7: the credential travels in the exec ENVIRONMENT
+    #    (`http.extraHeader` via GIT_CONFIG_*), so it is in neither the argv nor
+    #    `.git/config`. But env is readable through `/proc/<pid>/environ` by a
+    #    SAME-UID process, and this is the USER's PAT — a credential the
+    #    container is not supposed to hold at all — exposed for the whole
+    #    `REBIND_PUSH_TIMEOUT_S` window to an agent that runs as `developer`
+    #    and has `Bash`. So the push runs as ROOT, whose `environ` `developer`
+    #    cannot read.
+    #
+    #    It cannot move to the backend host (the recommended shape, and the one
+    #    fork_to_own uses): the history being pushed lives ONLY on the
+    #    container's workspace volume, and the backend has no copy of it.
+    #
+    #    `safe.directory`: git refuses to operate as root on a repo owned by
+    #    another user. Non-secret, and `-c` is protected configuration, so this
+    #    is the one thing that legitimately belongs on the argv here. `push` is
+    #    local-read-only — it writes no objects and no refs into the repo — so
+    #    running it as root leaves nothing root-owned behind.
     rc, out = await _run(
-        f"git push {shlex.quote(dest_url)} "
+        f"git -c {shlex.quote(f'safe.directory={git_dir}')} "
+        f"push {shlex.quote(dest_url)} "
         f"{shlex.quote(f'refs/heads/{branch}:refs/heads/{branch}')}",
         timeout=REBIND_PUSH_TIMEOUT_S,
+        environment=git_credential_helper.git_auth_env(user_pat),
+        user="root",
     )
     if rc != 0:
         last = out.strip().splitlines()[-1][:300] if out.strip() else "push failed"

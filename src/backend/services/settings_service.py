@@ -88,6 +88,15 @@ OPS_SETTINGS_DESCRIPTIONS = {
 
 
 # --- Remote template registry keys (TMPL-002, trinity-enterprise#14) -------
+# #2691: set the first time a real request arrives for the saved public URL and
+# a certificate is obtained for it (written by the on-demand-TLS gate in
+# `routers/public.py`, stored as `<iso>|<host>`). Never cleared: a change of host
+# makes the stamp stop matching on read (`is_public_url_reached`). It is the only
+# evidence this instance can hold that the name an operator typed actually
+# works — everything else here is what the instance ADVERTISES, not what was
+# observed.
+PUBLIC_URL_REACHED_KEY = "public_url_reached_at"
+
 TEMPLATE_REGISTRY_URL_KEY = "template_registry_url"
 TEMPLATE_REGISTRY_ENABLED_KEY = "template_registry_enabled"
 TEMPLATE_REGISTRY_GENERATION_KEY = "template_registry_generation"
@@ -144,6 +153,14 @@ class SettingsService:
 
     def _resolve_secret_setting(self, key: str, env_var: str) -> str:
         """Encrypted row → legacy cleartext row (migrated on sight) → env → ''."""
+        return self._stored_secret_setting(key) or os.getenv(env_var, '')
+
+    def _stored_secret_setting(self, key: str) -> str:
+        """The settings half of ``_resolve_secret_setting`` — no env leg.
+
+        Split out (ent#582) for the one resolver whose env fallback is not a
+        single variable: the Gemini key, which `config` coalesces from two.
+        """
         from services.secret_settings import (
             decrypt_secret_setting,
             encrypted_key_for,
@@ -152,14 +169,11 @@ class SettingsService:
 
         envelope = self.get_setting(encrypted_key_for(key))
         if envelope:
-            value = decrypt_secret_setting(key, envelope)
-            if value:
-                return value
-            # Unreadable envelope (wrong/rotated key, corrupt row). Fall through
-            # to env rather than raising — but do NOT fall through to the legacy
-            # row: a stale cleartext value silently outranking the current
-            # encrypted one is worse than being unconfigured.
-            return os.getenv(env_var, '')
+            # Unreadable envelope (wrong/rotated key, corrupt row) → '' so the
+            # caller falls through to env rather than raising — but NOT to the
+            # legacy row: a stale cleartext value silently outranking the
+            # current encrypted one is worse than being unconfigured.
+            return decrypt_secret_setting(key, envelope) or ''
 
         legacy = self.get_setting(key)
         if legacy and legacy.strip():
@@ -171,11 +185,11 @@ class SettingsService:
                 if decrypted:
                     self._migrate_legacy_secret_setting(key, decrypted)
                     return decrypted
-                return os.getenv(env_var, '')
+                return ''
             self._migrate_legacy_secret_setting(key, legacy)
             return legacy
 
-        return os.getenv(env_var, '')
+        return ''
 
     def _migrate_legacy_secret_setting(self, key: str, value: str) -> None:
         """Encrypt ``value`` onto the encrypted key and drop the cleartext row.
@@ -267,6 +281,56 @@ class SettingsService:
     def get_google_api_key(self) -> str:
         """Get Google API key: encrypted setting → legacy → env → ''."""
         return self._resolve_secret_setting('google_api_key', 'GOOGLE_API_KEY')
+
+    # =========================================================================
+    # Platform keys configurable from the first-run flow (trinity-enterprise#582)
+    # =========================================================================
+    #
+    # Resolved at CALL time, never frozen at import (the `get_elevenlabs_api_key`
+    # rule), so a key saved in the browser works without a restart and in every
+    # uvicorn worker.
+
+    def get_gemini_api_key(self) -> str:
+        """The platform Gemini key (voice, avatars, transcription).
+
+        Encrypted ``google_api_key`` setting → ``GEMINI_API_KEY`` →
+        ``GOOGLE_API_KEY`` env. The setting reuses the ent#435 ``google_api_key``
+        secret because the platform already treats a Google API key as its Gemini
+        key (``config.GEMINI_API_KEY`` coalesces the two env vars); the env leg
+        reads that coalesced value at call time.
+        """
+        import config
+        return self._stored_secret_setting('google_api_key') or config.GEMINI_API_KEY
+
+    def get_resend_api_key(self) -> str:
+        """Resend key: encrypted setting → legacy → ``RESEND_API_KEY`` env → ''."""
+        return self._resolve_secret_setting('resend_api_key', 'RESEND_API_KEY')
+
+    def get_email_provider(self) -> str:
+        """The provider email is sent through: a Resend key SAVED IN SETTINGS
+        selects Resend; otherwise ``EMAIL_PROVIDER`` env.
+
+        A fresh install copies ``.env.example`` (``EMAIL_PROVIDER=console``), so a
+        key the operator configured in the browser would otherwise be silently
+        ignored — a dead end with no terminal-free way out.
+        """
+        import config
+        if self.has_secret_setting('resend_api_key'):
+            return 'resend'
+        return (config.EMAIL_PROVIDER or 'console').lower()
+
+    _EMAIL_FROM_SETTING = 'email_from_address'
+
+    def get_email_from_address(self) -> str:
+        """Sender address: ``email_from_address`` setting → ``SMTP_FROM`` env."""
+        import config
+        return (self.get_setting(self._EMAIL_FROM_SETTING) or '').strip() or config.SMTP_FROM
+
+    def set_email_from_address(self, address: str) -> None:
+        db.set_setting(self._EMAIL_FROM_SETTING, address.strip())
+
+    def clear_email_from_address(self) -> bool:
+        return db.delete_setting(self._EMAIL_FROM_SETTING)
 
     # =========================================================================
     # ElevenLabs / outbound-voice (TTS) settings (trinity-enterprise#117)
@@ -522,6 +586,64 @@ class SettingsService:
         from config import MARKETPLACE_INSTALL_SOURCES
 
         return self.get_install_source() in MARKETPLACE_INSTALL_SOURCES
+
+    def is_hardening_guide_eligible(self) -> bool:
+        """Whether the first-run hardening guide should be offered here (#2380).
+
+        A SEPARATE question from `is_marketplace_install`, not a rename of it.
+        The guide's subject is "you are on a public cloud VM reachable at a bare
+        IP with no domain" — true of a marketplace image AND of a droplet
+        installed by following the DigitalOcean deploy doc, which records
+        `do-script`. `marketplace_install` keeps answering only what it says.
+
+        Still resolved server-side, so the browser holds no second copy of which
+        provenances qualify (the ent#386 rule), and still gated on PROVENANCE
+        rather than TLS state: the managed fleet has no domain and no HTTPS
+        flag, so a posture-based gate would fire on every paying client forever.
+        """
+        from config import HARDENING_GUIDE_INSTALL_SOURCES
+
+        return self.get_install_source() in HARDENING_GUIDE_INSTALL_SOURCES
+
+    def is_public_url_reached(self) -> bool:
+        """Has the saved public URL ever actually served a request? (#2691)
+
+        The companion to `get_install_tls_posture`, and deliberately a different
+        KIND of statement. The posture describes what this instance advertises —
+        a string an admin typed, which nothing verifies. This describes something
+        that was observed: the web server in front asked whether it could obtain
+        a certificate for that exact name, which only happens when a real request
+        for it arrives here.
+
+        So the first-run step can say "saved" the moment it is saved, and claim
+        the domain is actually serving only once this is true. A domain typed
+        with a typo, or one whose DNS record was never created, never flips it.
+
+        The row records WHICH host was reached (`<iso>|<host>`), and this
+        compares it to the host configured right now. That comparison, rather
+        than clearing the row on save, is what makes a stale row harmless: a
+        restored backup, a direct edit or a writer that never learned to clear
+        leaves a row describing a name that no longer matches, and it reads as
+        not-reached instead of showing a tick over a domain nobody has visited.
+
+        Guarded like the posture read, and for the same reason: this feeds
+        `/api/settings/feature-flags`, where a raise zeroes every flag. Boolean
+        rather than the timestamp — that surface reaches every authenticated
+        principal, and the answer to "is my setup finished" is a yes or a no.
+        """
+        try:
+            from urllib.parse import urlsplit
+
+            from utils.url_validation import canonical_host
+
+            stamped = (db.get_setting_value(PUBLIC_URL_REACHED_KEY, "") or "").strip()
+            if not stamped:
+                return False
+            reached_host = stamped.rsplit("|", 1)[-1].strip().lower()
+            configured = canonical_host(urlsplit(self.get_public_chat_url() or "").hostname or "")
+            return bool(configured) and reached_host == configured
+        except Exception:
+            return False
 
     def get_install_tls_posture(self) -> str:
         """What this instance ADVERTISES itself as reachable at (#2380).
@@ -912,6 +1034,11 @@ def resolve_github_pat(agent_name: Optional[str] = None,
 def get_google_api_key() -> str:
     """Get Google API key from settings, fallback to env var."""
     return settings_service.get_google_api_key()
+
+
+def get_gemini_api_key() -> str:
+    """Platform Gemini key, resolved per call (ent#582) — see the method."""
+    return settings_service.get_gemini_api_key()
 
 
 # Slack Integration Settings (SLACK-001)

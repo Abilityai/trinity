@@ -2857,6 +2857,34 @@ def _migrate_agent_loops_max_cost(cursor, conn):
     conn.commit()
 
 
+def _migrate_execution_fan_out_task_id(cursor, conn):
+    """#2524 — the caller's subtask id, on the row.
+
+    `FanOutService` used to hold the batch in one coroutine and key its results
+    by the caller's task id in a local dict. The aggregate is a query over
+    `fan_out_id` now — that is what lets a fan-out run on the durable queue and
+    what lets a status endpoint answer after the dispatching request is gone —
+    so the id has to be persisted next to the execution it belongs to.
+
+    Also adds a composite index: the join counts non-terminal rows for one
+    `fan_out_id` on every fan-out terminal, which the existing single-column
+    `idx_executions_fan_out` cannot serve without reading every row of the batch.
+
+    Mirrored by the Alembic revision 0062_execution_fan_out_task_id.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "fan_out_task_id",
+        "ALTER TABLE schedule_executions ADD COLUMN fan_out_task_id TEXT",
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_fan_out_status "
+        "ON schedule_executions(fan_out_id, status)"
+    )
+    conn.commit()
+
+
 def _migrate_agent_loops_terminal_driven(cursor, conn):
     """#2523 — the two columns that let a loop live without an in-process runner.
 
@@ -4012,6 +4040,87 @@ def _migrate_agent_canvases_template(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_canvases_pinned(cursor, conn):
+    """ent#553 — a human may pin a canvas so it stays at the top of the pile.
+
+    `agent_canvases.pinned` is 0/1, default 0, and is written ONLY by the
+    human-facing pin route — never by the agent write path. The distinction is
+    the point: `audience` is the agent's decision about who may read a canvas,
+    `pinned` is the reader's decision about what they want to see first, and an
+    agent that could pin itself to the top would defeat the ordering the pin
+    exists to give the person.
+
+    NOT NULL DEFAULT 0 so every pre-#553 row reads as unpinned without a
+    backfill pass.
+
+    Mirrored by the Alembic revision 0059_agent_canvases_pinned.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_canvases",
+        "pinned",
+        "ALTER TABLE agent_canvases ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+    )
+    conn.commit()
+
+
+def _migrate_execution_open_canvas(cursor, conn):
+    """ent#555 — which canvas the user had open when they sent a turn.
+
+    A per-turn CONTEXT field of exactly the shape `source_channel*` already
+    has on this table: stamped at dispatch, read by the surfaces that need to
+    know what the turn was about. It never widens what the agent may reach —
+    the boundary that stamps it validates the canvas belongs to that agent.
+
+    Mirrored by the Alembic revision 0061_execution_open_canvas.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "open_canvas_id",
+        "ALTER TABLE schedule_executions ADD COLUMN open_canvas_id TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_agent_canvas_shares_table(cursor, conn):
+    """ent#554 — share links for a canvas.
+
+    A separate table rather than a typed row in `agent_public_links`: nothing
+    in that table's read path filters on `type`, so a canvas row there would
+    also be a working public-CHAT token. See the DDL comment in db/schema.py.
+
+    Mirrored by the Alembic revision 0060_agent_canvas_shares.
+    """
+    cursor.execute("PRAGMA table_info(agent_canvas_shares)")
+    if cursor.fetchall():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_canvas_shares (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            canvas_id TEXT NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            scope TEXT NOT NULL DEFAULT 'authorized',
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT,
+            revoked_at TEXT,
+            last_viewed_at TEXT,
+            view_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_canvas_shares_token "
+        "ON agent_canvas_shares(token)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_canvas_shares_canvas "
+        "ON agent_canvas_shares(agent_name, canvas_id)"
+    )
+    conn.commit()
+
+
 def _migrate_portal_session_title_source(cursor, conn):
     """ent#473 — which hand wrote a Workspace thread's title.
 
@@ -4252,6 +4361,7 @@ MIGRATIONS = [
     ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
     ("agent_loops_failure_policy", _migrate_agent_loops_failure_policy),
     ("agent_loops_terminal_driven", _migrate_agent_loops_terminal_driven),
+    ("execution_fan_out_task_id", _migrate_execution_fan_out_task_id),
     ("agent_sync_state_gc_signals", _migrate_agent_sync_state_gc_signals),
     ("agent_ownership_volume_base_name", _migrate_agent_ownership_volume_base_name),
     ("agent_ownership_display_label", _migrate_agent_ownership_display_label),
@@ -4282,6 +4392,9 @@ MIGRATIONS = [
     ("portal_session_title_source", _migrate_portal_session_title_source),
     ("user_ui_preferences_table", _migrate_user_ui_preferences_table),
     ("agent_canvases_template", _migrate_agent_canvases_template),
+    ("agent_canvases_pinned", _migrate_agent_canvases_pinned),
+    ("agent_canvas_shares_table", _migrate_agent_canvas_shares_table),
+    ("execution_open_canvas", _migrate_execution_open_canvas),
     ("portal_session_main_chat", _migrate_portal_session_main_chat),
     ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
     ("portal_messages_voice_source", _migrate_portal_messages_voice_source),

@@ -71,7 +71,7 @@
   - `agent_sync_state` table + `auto_sync_enabled` / `freeze_schedules_if_sync_failing` flags on `agent_git_config`
   - 15-min `GIT_SYNC_AUTO` heartbeat loop in the agent container (default-on for non-source-mode GitHub-template agents)
   - Dual `ahead_main`/`ahead_working` tuples in `GET /api/git/status` (P6 fix)
-  - `SyncHealthService` emits `sync_failing` operator-queue entries at `consecutive_failures ≥ 3`
+  - `SyncHealthService` emits `sync_failing` operator-queue entries at `consecutive_failures ≥ 3` (leader-leased across uvicorn workers, #2742 — `synchealth:leader`, fail-open. Note the counter is per *poll*, not per worker, so one leader instead of two **doubles** time-to-`sync_failing` from ~90 s to ~180 s; cadence knob `SYNC_HEALTH_POLL_INTERVAL_SECONDS`, default unchanged at 60 s)
   - `GET /api/agents/sync-health` (batch) + dashboard dot
   - `GET /api/fleet/sync-audit` with `duplicate_binding` flag (§P5 query)
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`
@@ -86,11 +86,13 @@
   - Auto-sync cycle off the event loop (`asyncio.to_thread`) with a non-blocking repo lock; mutating git endpoints 409 `agent_busy` under contention
   - Trigger: packs ≥ `GIT_MAINTENANCE_PACK_THRESHOLD` (20) OR loose ≥ `GIT_MAINTENANCE_LOOSE_THRESHOLD` (6700); guards: free-disk preflight, exponential failure backoff (1h→24h), env-tunable budget (`GIT_MAINTENANCE_TIMEOUT_SECONDS`)
   - Concurrent-writer safety: `repack -A -d -l --unpack-unreachable=1.hour.ago` + `gc --prune=1.hour.ago` (never `--prune=now`); `pack.threads=1` + `pack.windowMemory=128m` RSS bound
-  - Stale-lock hygiene: startup reap (`index.lock`, `gc.pid`, `maintenance.lock`, ref/reflog locks) + per-cycle age-gated reap incl. abandoned `tmp_pack_*`
+  - Stale-lock hygiene: startup reap (`index.lock`, `gc.pid`, `maintenance.lock`, ref/reflog locks) + per-cycle age-gated reap incl. abandoned `tmp_pack_*`. **#2742 makes the startup reap speak** (it was `rm -f`, silent whether or not it removed anything): it now tests-then-removes, echoes a line naming each lock it cleared, and drops a marker the agent server converts into `sync_state.last_lock_recovery` → the `lock_recovery` field on `GET /api/git/status`, so a self-healed wedge reaches the platform instead of vanishing. It also now reaps `index.lock` under `<gitdir>/modules/*` and `<gitdir>/worktrees/*` — covered by nothing before, so a submodule or linked-worktree wedge survived every restart.
   - Signal: `pack_count`/`loose_objects`/`maintenance_failures` in sync-state → `agent_sync_state` (agent-supplied ints coerced at the boundary) → `GET /api/agents/sync-health`; edge-triggered `git_bloat` operator alerts (`GIT_DIR_ALERT_BYTES` default 10 GiB; 3 consecutive maintenance failures)
+  - **Lock-free status read (#2742)**: `GET /api/git/status` — the surface the 60 s `SyncHealthService` poll drives — runs `git --no-optional-locks status --porcelain`, so the poll no longer takes `.git/index.lock` ~2×/min in every agent workspace (the flag is scoped to THIS one call site; the auto-sync commit path and the `sync`/`pull` bodies legitimately want the index writeback and keep the plain form). Every status child now routes through `run_registered`, so a sweep tick straddling the 30 s `git fetch` can no longer orphan ref litter. The handler is computed in ONE worker thread behind a loop-level single-flight, so concurrent callers (poller + UI git panel + MCP `get_git_status`) coalesce onto one computation and one `git fetch origin` — and the response carries `computed_at`, because coalescing is bounded staleness and a follower can be served a snapshot up to one leader-run old.
+  - **Stuck-lock report, never a runtime delete (#2742)**: a currently-present `index.lock` is *observed* and surfaced as `index_lock_stuck`, never unlinked. A 0-byte lock is the signature of a **live** `git add` for ~100 % of its life (measured: 29 s at 60 000 files; 155 s under a `clean` filter), `st_mtime` is stamped at create and never advances, so neither size nor age separates *abandoned* from *busy* — and a wrong unlink promotes another git's in-flight file onto `.git/index`, a permanent 0-byte-index wedge that no Trinity path clears. Detection is therefore a **two-point inode-stability** observation (same `st_ino`/`st_mtime_ns`/`st_size` unchanged across ≥3 ticks spanning ≥15 min), which is also immune to a forward clock step; the tunable is the number of stable sightings, not a wall-clock age. The observer resolves the real gitdir (`.git` is a FILE for a worktree or submodule) and covers `<gitdir>/index.lock`, `<gitdir>/modules/*/index.lock` and `<gitdir>/worktrees/*/index.lock`. It takes no repo lock (an `lstat` needs none, and holding one would make a status poll a new source of 409 `agent_busy`) and is wrapped in its own `except OSError` — an observability path must never be able to 500 the feed it feeds.
 - **Rollout**: base-image rebuild + agent recreate required; recovery of pre-existing bloated fleets is ops-side (trinity-ops-agent#127) using the tunable budget + memory bounds
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`
-- **Related**: #1505 (general sweep-subtree seam — evidence cross-filed), #1501 (transient-pid seam), #1596 (threshold repack, superseded parameters)
+- **Related**: #1505 (general sweep-subtree seam — evidence cross-filed), #1501 (transient-pid seam), #1596 (threshold repack, superseded parameters), #2742 (the sync-health poll no longer takes or orphans `index.lock`)
 
 ### 11.10 Per-User GitHub PAT (ent#162)
 - **Status**: ✅ Implemented (v0.8.5 payload) — OSS-core half of a private feature.
@@ -183,18 +185,27 @@
   seam (`lifecycle._apply_persisted_auth_env`) so a tokenless agent rebuilt
   after container loss still clones (silent-empty-agent class, #843/#1439).
 - **FR-4 — startup.sh clones anonymously**: clone gate is `GITHUB_REPO`-only;
-  `CLONE_URL` embeds `oauth2:<PAT>@` only when a PAT is present (else the
-  credential-less form, mirroring the fork-to-own `UPSTREAM_URL`); tokenless
+  `CLONE_URL` is the **credential-less** form for every agent (ent#615 — see
+  §11.16; the PAT-bearing branch is gone, and the credential arrives per
+  operation from the `trinity` git credential helper); tokenless
   git network ops run with `GIT_TERMINAL_PROMPT=0` (deterministic fail-fast);
   on restart the baked-env PAT falls back to the workspace `.env` value
   before the origin URL is rewritten (preserves a live-injected per-agent PAT
-  across ops-path raw restarts, #1264/#1089). Tokenless agents get a
+  across ops-path raw restarts, #1264/#1089), and the rewrite itself is
+  **conditional** — it never strips userinfo it has not already replaced.
+  Tokenless agents get a
   **blackholed push remote** (self-describing invalid push URL) so any
-  in-container `git push` fails legibly.
+  in-container `git push` fails legibly; the gate is "a credential resolves",
+  which for an ent#123 agent is still false.
 - **FR-5 — Push surfaces fail honestly**: backend push paths (`sync_to_github`,
   `reset_to_main_preserve_state`) pre-check write credentials — baked env
-  `GITHUB_PAT` **or** the per-agent PAT row (never the global tier, which
-  cannot reach a tokenless container) — and return conflict_type
+  `GITHUB_PAT` **or** the per-agent PAT row **or** (ent#615) anything the
+  `trinity` credential helper resolves in the container, asked by exit code
+  and only for an agent the first two tiers call tokenless. The parenthetical
+  that used to stand here — "never the global tier, which cannot reach a
+  tokenless container" — was made FALSE by ent#615: a global PAT the helper
+  resolves does reach the remote, and answering `no_write_credentials` to an
+  agent that can push is a lie. Returns conflict_type
   `no_write_credentials` with the actionable message. MCP `git_sync` suppresses
   the "resolve via chat" hint for this conflict type.
   **Amended by §11.12 (ent#109):** the message no longer teaches the manual
@@ -699,5 +710,105 @@
   `src/frontend/src/composables/useGitSync.js`.
 - **Flow**: `docs/memory/feature-flows/github-sync.md`, `docs/memory/feature-flows/git-sync-health.md`
 - **GitHub Issue**: #2529 (continuation of #2069 / #2070)
+
+---
+
+### 11.16 Credential-Free Git Remotes (trinity-enterprise#615)
+
+- **Status**: ✅ Implemented.
+- **The defect**: every agent's remote was persisted as
+  `<scheme>://oauth2:<PAT>@<host>/<org>/<repo>.git`, putting the fleet-wide
+  GitHub token in two places — **`.git/config` on the workspace volume** (at
+  rest, readable by the agent's own `Bash` tool for the life of the container)
+  and **git child argv**, because git expands the stored URL into
+  `git-remote-https`'s argv on every fetch and push, including the 60s
+  sync-health poll. The argv half has a platform-side sink: `ps` → the agent
+  server's reaped-cmdline logging → Vector → the host log files → the logs API
+  → another agent's LLM context. ent#292 closed the last hop of that chain and
+  was rated P0; this closes the cause.
+
+- **FR-1 — No code path builds a credential-bearing remote URL.** All four
+  producers are gone: `git_service._git_remote_url` (deleted; its three call
+  sites use `_credentialless_remote_url`), `startup.sh`'s PAT-bearing
+  `CLONE_URL` branch (one credential-less form), `template_service.clone_github_repo`
+  (deleted — dead, and it passed a token URL as **argv** to `subprocess.run` on
+  the backend host) and `skill_service._authenticated_url` (split into
+  `_normalized_url` + `_auth_pat_for`; that one was LIVE, leaving the platform
+  PAT at rest in `/data/skills-library/*/.git/config` on the `~/trinity-data`
+  **host bind mount**, and so in every backup and snapshot of it). Guarded over
+  **both** trees by `tests/unit/test_ent615_token_free_remotes.py`, with **zero**
+  allowlist entries — an entry there is a review smell.
+
+- **FR-2 — The credential arrives per operation, over stdin.** A git credential
+  helper (`docker/base-image/git-credential-trinity.sh`, installed root-owned
+  at `/usr/local/bin/git-credential-trinity`) answers git's credential protocol
+  on stdin/stdout, which never reaches argv and is never persisted. Registered
+  in `/etc/gitconfig` as **`trinity`**, never as the filename — git prepends
+  `git-credential-` to any non-absolute helper value, so the filename resolves
+  to a command that does not exist and the helper silently never runs.
+  Registered **unscoped**, because `TRINITY_GIT_BASE_URL` is a runtime value a
+  build-time `credential.<base>.helper` could not know; the helper resolves the
+  allowed origin itself and matches protocol + host **exactly, port-inclusive**.
+
+- **FR-3 — Resolution order is `.env` → baked env → harvest file**, the
+  INVERSE of `startup.sh`'s, and deliberately: `startup.sh` runs at boot where
+  baked env is the freshly-recreated truth, while the helper runs in steady
+  state where `Config.Env` is immutable without a recreate and `.env` carries
+  the live-injected token. A baked-env-first ladder would make a global
+  rotation (#1967) a silent no-op until the old token is revoked. `.env` is
+  agent-writable, so it is PARSED — never sourced or eval'd.
+
+- **FR-4 — Nothing strips a credential it has not already replaced.** The
+  remediation sweep (`git_service.scrub_git_remote_tokens`) installs the
+  helper, PROVES it resolves **by exit code** (`git credential fill` prints the
+  credential on stdout, and the sweep's output crosses the `docker exec`
+  boundary into the platform log and `GitInitResult.error`), harvests only for
+  an agent with no other source, and **REFUSES and reports** rather than
+  stripping what it could not replace. `startup.sh`'s per-restart rewrite and
+  `update_remote_pat` follow the same rule. The orphan class this protects is
+  `POST /{agent}/git/initialize`'s: an agent-git-config row, a push with the
+  resolved platform PAT, no baked env, no per-agent row, no `.env`.
+
+- **FR-5 — The harvest is a relocation, never a grant.** The rescued
+  credential lands in `/home/developer/.trinity/git-credential` (0600, ignored
+  contents-only by `.trinity/*` per #2070), the helper's LAST rung — never in
+  `.env` as `GITHUB_PAT`, which `startup.sh` exports as `GH_TOKEN` and
+  `GITHUB_TOKEN` (authenticating the whole `gh` CLI and REST API) and which
+  gates the ent#123 push blackhole. That would be the ent#162 class applied
+  fleet-wide. `configure_push_remote`'s gate widens from `GITHUB_PAT` to "a
+  credential resolves" — which for an ent#123 tokenless agent is still false.
+
+- **FR-6 — Degrades with a NAMED error.** A helper that resolves nothing emits
+  `TRINITY_GIT_NO_CREDENTIAL host=<host>` on stderr (a host, never a value) and
+  nothing on stdout; git then fails with "could not read Username … terminal
+  prompts disabled", a shape `_AUTH_PATTERNS` already matched. A bare `403` is
+  deliberately NOT added: `classify_conflict` evaluates auth patterns first, so
+  it would relabel a secondary-rate-limit, a SAML-SSO-enforcement and an
+  archived-repo push as "no write credentials".
+
+- **Reaching the existing fleet**: a boot-time one-shot
+  (`sweep_fleet_git_remote_tokens`, leader-locked, **not** a recurring service —
+  there is no recurring producer left to chase), the `start_agent_internal`
+  hook, and `startup.sh`'s conditional per-restart rewrite. The one-shot is the
+  reacher that covers a `restart: unless-stopped` container the daemon brings
+  back after a host reboot. Runbook:
+  `docs/migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md`.
+
+- **Explicitly NOT closed**: a prompt-injected agent reading its own
+  credential. `GITHUB_PAT` stays in the container env and `.env`, and root
+  ownership of the helper is **integrity, not confidentiality**. Blast radius
+  is also unchanged — the credential stays fleet-wide. The structural fix is a
+  broker outside the container (**trinity-enterprise#558, AAuth**); the cheapest
+  real lever that already exists is per-agent, repo-scoped PATs via
+  `agent_git_config.github_pat_encrypted` (#1264's machinery, unused).
+
+- **Source of truth**: `docker/base-image/git-credential-trinity.sh`,
+  `services/git_credential_helper.py` (byte-identical mirror + the sweep),
+  `services/git_service.py`, `docker/base-image/startup.sh`,
+  `services/skill_service.py`, `services/skill_source_clone.py`,
+  `docker/base-image/agent_server/services/execution_env.py`.
+- **Flow**: `docs/memory/feature-flows/github-sync.md`,
+  `docs/memory/feature-flows/github-repo-initialization.md`
+- **GitHub Issue**: abilityai/trinity-enterprise#615
 
 ---

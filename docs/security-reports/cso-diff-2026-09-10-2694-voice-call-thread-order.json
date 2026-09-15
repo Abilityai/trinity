@@ -1,0 +1,81 @@
+{
+  "version": "1.1",
+  "date": "2026-09-10",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/2694-voice-call-thread-order",
+  "issue": "abilityai/trinity#2694",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": 1,
+    "new_db_reads": 2,
+    "new_redis_keys": 1,
+    "new_prompt_surfaces": 0,
+    "widened_prompt_surfaces": 1,
+    "new_409s": 2
+  },
+  "findings": [],
+  "appendix": [
+    {
+      "conf": 4,
+      "title": "Stranded live-call marker on an early REST /stop",
+      "status": "fixed_on_branch",
+      "file": "src/backend/routers/voice.py",
+      "note": "voice_stop now clears portal_voice_active for a portal-bound session"
+    },
+    {
+      "conf": 3,
+      "title": "Thread ids / emails in WARNING logs",
+      "status": "existing_pattern"
+    },
+    {
+      "conf": 3,
+      "title": "Delta re-prefixed on every resumed turn until a typed reply lands",
+      "status": "bounded_owner_only"
+    },
+    {
+      "conf": 2,
+      "title": "Mid-line You: text inside a spoken row",
+      "status": "pre_existing_property"
+    }
+  ],
+  "supply_chain_summary": {
+    "deps_changed": 0,
+    "lockfiles_changed": 0,
+    "workflows_changed": 0
+  },
+  "filter_stats": {
+    "candidates": 4,
+    "reported": 0,
+    "refuted_or_appendix": 4
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior": "docs/security-reports/cso-diff-2026-09-09-ent545-funnel-non-minting-read.md",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0,
+    "direction": "flat"
+  }
+}

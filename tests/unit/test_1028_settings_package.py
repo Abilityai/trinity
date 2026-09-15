@@ -160,6 +160,16 @@ _ADDED_SINCE_SPLIT = {
     # ent#437 — "don't ask again" marker for the Finish-setup consent card.
     ("/api/settings/telemetry-sharing/ask/dismiss", ("POST",),
      "dismiss_telemetry_ask"),
+    # #2715 (trinity-enterprise#580/#581/#582) — Resend + Gemini provider keys,
+    # landed on dev as routes of the monolith and re-ported into the package's
+    # `provider_keys` module (split out of `credentials` to stay under the
+    # 800-line threshold).
+    ("/api/settings/api-keys/resend", ("PUT",), "update_resend_key"),
+    ("/api/settings/api-keys/resend", ("DELETE",), "delete_resend_key"),
+    ("/api/settings/api-keys/resend/test", ("POST",), "test_resend_key"),
+    ("/api/settings/api-keys/gemini", ("PUT",), "update_gemini_key"),
+    ("/api/settings/api-keys/gemini", ("DELETE",), "delete_gemini_key"),
+    ("/api/settings/api-keys/gemini/test", ("POST",), "test_gemini_key"),
 }
 
 

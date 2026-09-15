@@ -690,7 +690,10 @@ def _card(svc, *, is_platform=True, runtime="claude-code", override=None, ctx=No
     row = {"agent_name": AGENT, "public_channel_model": override}
     return svc._row_to_card(row, False, None, availability="ready",
                             is_platform=is_platform, runtime=runtime,
-                            model_context=ctx if ctx is not None else svc._model_context())
+                            model_context=ctx if ctx is not None else svc._model_context(),
+                            # #2695 — neutral, like the three above it. This file
+                            # is about the model control.
+                            stt_ready=True)
 
 
 def test_the_control_is_absent_for_a_client_portal_principal(svc):
@@ -776,7 +779,7 @@ def test_row_to_cards_capability_arguments_have_no_defaults(svc):
     import inspect
 
     params = inspect.signature(svc._row_to_card).parameters
-    for name in ("is_platform", "runtime", "model_context"):
+    for name in ("is_platform", "runtime", "model_context", "stt_ready"):
         assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, name
         assert params[name].default is inspect.Parameter.empty, name
 

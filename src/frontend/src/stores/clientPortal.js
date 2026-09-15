@@ -7,6 +7,7 @@
  * endpoints — 404 in OSS/unentitled builds, but the route guard
  * ent#356 moved the module into OSS core, so it ships in every build.
  */
+import { markRaw } from 'vue'
 import { defineStore } from 'pinia'
 import {
   collaborationRecency, normalizeRoomRow, WORKSPACE_ROOT } from '@/components/portal/portalUtils'
@@ -18,6 +19,32 @@ import {
 } from '@/components/portal/portalBriefingState'
 import axios from 'axios'
 import { useAuthStore } from './auth'
+
+// --- carry-log bounds (#2794 follow-up) --------------------------------------
+//
+// Entries retain the `File` object, so the log is bounded three ways and the
+// tightest one wins. Age is the honest bound (a carry is a seconds-to-minutes
+// gesture); count and bytes exist so a pathological session cannot pin
+// hundreds of megabytes in memory waiting for an age-out that may never come.
+export const CARRY_MAX_AGE_MS = 15 * 60 * 1000
+export const CARRY_MAX_ENTRIES = 20
+export const CARRY_MAX_BYTES = 64 * 1024 * 1024
+
+/** Newest-last, within every bound. Pure — exported for the unit suite. */
+export function pruneCarryLog(entries, now = Date.now()) {
+  let kept = (Array.isArray(entries) ? entries : [])
+    .filter((e) => e && e.file && now - e.at <= CARRY_MAX_AGE_MS)
+  if (kept.length > CARRY_MAX_ENTRIES) kept = kept.slice(kept.length - CARRY_MAX_ENTRIES)
+  // Drop oldest until the retained bytes fit. A single file over the cap is
+  // kept regardless: the alternative is silently refusing to carry the one
+  // file the person actually cares about.
+  let bytes = kept.reduce((n, e) => n + (e.size || 0), 0)
+  while (kept.length > 1 && bytes > CARRY_MAX_BYTES) {
+    bytes -= kept[0].size || 0
+    kept = kept.slice(1)
+  }
+  return kept
+}
 // #2162: the page size for a windowed report read. A dependency-free leaf
 // shared with the operator reports store — never re-typed here, since the
 // backend already owns REPORT_ROWS_PAGE_DEFAULT and a third hand-written copy
@@ -215,9 +242,16 @@ installRotationInterceptor()
 const briefingsInFlight = new Set()
 const briefingAttempts = new Map()
 let briefingsBatchInFlight = false
+// #2703: agents whose briefing changed WHILE a hydration for them was in
+// flight. `ensureBriefing`/`revalidateBriefing` return early on an in-flight
+// name; without this a WS trigger landing mid-hydration would be lost and the
+// stale answer would win. `hydrateBriefings` re-runs once for a dirty name.
+const briefingsDirty = new Set()
 
 export const useClientPortalStore = defineStore('clientPortal', {
   state: () => ({
+    // ent#555 — agent name → the canvas id the rail currently shows.
+    openCanvasByAgent: {},
     clientEmail: null,
     agents: [],
     loading: false,
@@ -342,6 +376,26 @@ export const useClientPortalStore = defineStore('clientPortal', {
     //
     // The rail owner drains it (`usePortalRailFeeds`); nothing else reads it.
     pendingUploadNotes: {},
+
+    // --- Carry log (#2794 follow-up) ---
+    // Files uploaded to an agent that have NOT yet gone out with a message, so
+    // an escalation into a room can take them along.
+    //
+    // It lives on the store rather than in the composer because there are TWO
+    // upload surfaces and only one of them is the composer: the rail's Files
+    // panel (`PortalRailFiles.vue::uploadBatch`) sends straight to its "Send
+    // to" target and keeps no pending state at all. A user who attaches there
+    // and then @mentions a second agent got nothing carried and — because the
+    // composer had no attachments — not even a notice saying so. `uploadDocument`
+    // is the ONE funnel all three surfaces already share (#2582), so recording
+    // here is what makes the carry surface-agnostic.
+    //
+    // Bounded three ways because these entries retain the `File` itself:
+    // by count, by age, and by total retained bytes (see `noteUploadForCarry`).
+    uploadCarryLog: [],
+    // agent -> ms timestamp. Everything logged at or before it has already gone
+    // out with a message (or belongs to a previous visit) and is not carried.
+    uploadsCarriedAt: {},
   }),
 
   getters: {
@@ -554,13 +608,36 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // not "I don't know which". The backend cannot tell those apart from the
     // absence alone — which is why New chat used to land in the existing
     // conversation — and it ignores the flag when a session IS named.
+    /**
+     * ent#555 — which canvas the rail has open, per agent.
+     *
+     * Kept in the store rather than passed down because the two ends are in
+     * different subtrees: the selection happens in the rail's CanvasPanel and
+     * is needed by the composer in the conversation. Per-agent, so switching
+     * chats cannot carry one agent's selection into another's turn.
+     */
+    setOpenCanvas(agentName, canvasId) {
+      if (!agentName) return
+      this.openCanvasByAgent = { ...this.openCanvasByAgent, [agentName]: canvasId || null }
+    },
+
     // ent#403: `model` is the user's explicit pick, or null/'' to inherit. Sent
     // on BOTH turn actions — a field honoured by only one brings the bug back
     // exactly when streaming fails and this fallback runs.
-    async sendPortalChat(agentName, message, sessionId = null, { newThread = false, model = null } = {}) {
+    async sendPortalChat(agentName, message, sessionId = null,
+                    { newThread = false, openCanvasId = null, model = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat`,
-        { message, session_id: sessionId, new_thread: newThread, model: model || null },
+        {
+          message,
+          session_id: sessionId,
+          new_thread: newThread,
+          model: model || null,
+          // ent#555 — the canvas on screen, so "add a column to this" resolves.
+          // Server-validated: an id the caller cannot see is discarded there,
+          // so sending it is never a way to reach a canvas they could not open.
+          open_canvas_id: openCanvasId,
+        },
         { headers: this.authHeader }
       )
       return data
@@ -571,10 +648,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // `sendPortalChat` above is untouched — it stays the documented API surface
     // for headless clients (ent#83), and is still the fallback when streaming
     // is unavailable.
-    async startPortalChat(agentName, message, sessionId = null, { newThread = false, model = null } = {}) {
+    async startPortalChat(agentName, message, sessionId = null,
+                    { newThread = false, openCanvasId = null, model = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
-        { message, session_id: sessionId, new_thread: newThread, model: model || null },
+        {
+          message,
+          session_id: sessionId,
+          new_thread: newThread,
+          model: model || null,
+          // ent#555 — the canvas on screen, so "add a column to this" resolves.
+          // Server-validated: an id the caller cannot see is discarded there,
+          // so sending it is never a way to reach a canvas they could not open.
+          open_canvas_id: openCanvasId,
+        },
         { headers: this.authHeader }
       )
       return data   // {execution_id, session_id}
@@ -1216,6 +1303,35 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // ent#553 — the lifecycle writes. Roster-scoped and owner-gated server
+    // side; the card's `can_manage_canvases` only decides whether the control
+    // is rendered, so these never need to guess at permission themselves.
+    async deleteAgentCanvas(agentName, canvasId) {
+      await portalHttp.delete(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/${encodeURIComponent(canvasId)}`,
+        { headers: this.authHeader }
+      )
+      return true
+    },
+
+    async bulkDeleteAgentCanvases(agentName, canvasIds) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/bulk-delete`,
+        { canvas_ids: canvasIds },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    async pinAgentCanvas(agentName, canvasId, pinned) {
+      await portalHttp.put(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/${encodeURIComponent(canvasId)}/pin`,
+        { pinned },
+        { headers: this.authHeader }
+      )
+      return true
+    },
+
     async fetchDocuments(agentName) {
       const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/documents`,
@@ -1228,14 +1344,23 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // chat survives a refresh / re-sign-in. With `sessionId` loads that thread;
     // without, the most-recent. Returns `{ session_id, messages }` so the caller
     // can adopt the resolved thread when it didn't specify one.
-    async fetchHistory(agentName, sessionId = null) {
+    // #2694: two reads by intent. No `limit` → the thread WINDOW (the newest
+    // 100 typed turns plus the spoken rows of the calls among them; `truncated`
+    // when the row ceiling cut the old end). `limit` (≤ 50) → the newest N rows
+    // whatever their source — the reply poll's narrow read, which runs every
+    // few hundred milliseconds and only needs the newest reply.
+    async fetchHistory(agentName, sessionId = null, { limit = null } = {}) {
+      const params = {}
+      if (sessionId) params.session_id = sessionId
+      if (limit) params.limit = limit
       const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/history`,
-        { headers: this.authHeader, params: sessionId ? { session_id: sessionId } : {} }
+        { headers: this.authHeader, params }
       )
       return {
         sessionId: data.session_id || null,
         messages: data.messages || [],
+        truncated: data.truncated === true,
         // ent#286: non-null when a turn is running on this thread right now —
         // what a client that reloaded mid-turn resubscribes to.
         inFlightExecutionId: data.in_flight_execution_id || null,
@@ -1277,7 +1402,49 @@ export const useClientPortalStore = defineStore('clientPortal', {
         { headers: this.authHeader }
       )
       this.noteUploadPending(agentName)
+      this.noteUploadForCarry(agentName, file)
       return data
+    },
+
+    /**
+     * Remember a successful upload so an escalation can carry it (#2794).
+     *
+     * Only ever called from `uploadDocument`, i.e. after the server took the
+     * file — a refused upload is not carryable and must not be logged.
+     */
+    noteUploadForCarry(agentName, file) {
+      if (!agentName || !file) return
+      const now = Date.now()
+      const entry = {
+        agent: agentName,
+        name: file.name,
+        size: Number(file.size) || 0,
+        // `markRaw` for the reason `usePortalFileDrop` gives: a proxied `File`
+        // fails deep inside `FormData.append`, where the cause is invisible.
+        file: markRaw(file),
+        at: now,
+      }
+      const next = this.uploadCarryLog.concat(entry)
+      this.uploadCarryLog = pruneCarryLog(next, now)
+    },
+
+    /**
+     * Everything logged for this agent up to now has been accounted for — it
+     * went out with a message, or the conversation was just opened. The
+     * composer's chips clear at exactly these moments; this is the same act for
+     * the surfaces that have no chips.
+     */
+    markUploadsCarried(agentName) {
+      if (!agentName) return
+      this.uploadsCarriedAt = { ...this.uploadsCarriedAt, [agentName]: Date.now() }
+    },
+
+    /** Files sent to `agentName` that have not gone out with a message yet. */
+    carryableUploadsFor(agentName) {
+      if (!agentName) return []
+      const since = this.uploadsCarriedAt[agentName] || 0
+      const fresh = pruneCarryLog(this.uploadCarryLog, Date.now())
+      return fresh.filter((e) => e.agent === agentName && e.at > since)
     },
 
     /** Mark one agent's inbox listing stale. Drained by the rail owner (#2582). */
@@ -1672,7 +1839,42 @@ export const useClientPortalStore = defineStore('clientPortal', {
       } finally {
         if (requested) requested.forEach((n) => briefingsInFlight.delete(n))
         else briefingsBatchInFlight = false
+        // #2703: an invalidation that arrived mid-flight re-runs ONCE, so the
+        // listing the user sees is never the one fetched before the change.
+        const redo = (requested || this.agents.map((a) => a && a.name)).filter((n) => briefingsDirty.has(n))
+        redo.forEach((n) => briefingsDirty.delete(n))
+        if (redo.length) void this.revalidateBriefing(redo)
       }
+    },
+
+    /**
+     * Re-hydrate one agent's (or a few agents') briefing after its skill set
+     * changed (#2703) — stale-while-revalidate: the card keeps its hint cards
+     * and `/` entries until the new answer lands; `briefing_state` is NEVER
+     * flipped back to `pending`, because that re-enters the loading skeleton
+     * on a zone that has data (the p13 rule `mergeRosterBriefings` guards).
+     *
+     * Deliberately outside `shouldRequestBriefing`, whose job is the one-retry
+     * rule for a card that never hydrated; this is a card that did.
+     *
+     * `maxAge` (ms) bounds the call for the surfaces with no `/ws` — an
+     * external client's Workspace re-validates the active agent when the `/`
+     * popup opens, at most once per minute per agent.
+     */
+    async revalidateBriefing(names, { maxAge = 0 } = {}) {
+      const list = (Array.isArray(names) ? names : [names]).filter(Boolean)
+      const wanted = []
+      for (const name of list) {
+        const card = this.agents.find((a) => a && a.name === name)
+        if (!card) continue                               // not on this roster — nothing to show
+        if (maxAge > 0 && typeof card.briefing_hydrated_at === 'number'
+            && Date.now() - card.briefing_hydrated_at < maxAge) continue
+        if (briefingsInFlight.has(name)) { briefingsDirty.add(name); continue }
+        wanted.push(name)
+      }
+      if (!wanted.length) return
+      wanted.forEach((n) => briefingsInFlight.add(n))
+      await this.hydrateBriefings(wanted)
     },
 
     /**

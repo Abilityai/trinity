@@ -7,6 +7,12 @@ introduced by #581: the WS handler validated the JWT signature but discarded
 the payload, so any authenticated user could hijack any session whose
 128-bit id they observed (logs, browser inspection, XSS).
 
+Also the Workspace live-call lease (#2700, `TestWorkspaceLiveCallMarker`): the
+audio bridge is the only writer of `portal_voice_active:{thread}` — it arms the
+lease at connect and releases it on every exit — because the behavioural bridge
+harness (the importlib load of `routers/voice.py`, `_FakeWebSocket`, the stubbed
+voice service) lives in this file and nowhere else.
+
 Issue: https://github.com/abilityai/trinity/issues/600
 """
 
@@ -74,7 +80,14 @@ def _stub_voice_service():
     mod = types.ModuleType("services.gemini_voice")
 
     class _FakeVoiceSession:
-        def __init__(self, session_id, agent_name, user_id, user_email="u@example.com"):
+        # #2700: `portal_session_id` makes a fake Workspace-bound, and the
+        # bridge's close-out reads `end_reason`/`end_message` WITHOUT getattr
+        # defaults, so a portal-bound fake without them raises AttributeError
+        # inside the `finally`. The None/1800 defaults keep every pre-existing
+        # bridge test byte-identical.
+        def __init__(self, session_id, agent_name, user_id, user_email="u@example.com",
+                     portal_session_id=None, max_duration=1800,
+                     end_reason=None, end_message=None):
             self.session_id = session_id
             self.agent_name = agent_name
             self.user_id = user_id
@@ -83,6 +96,10 @@ def _stub_voice_service():
             self.transcript = []
             self._duration_seconds = 0.0
             self.panel_state = {"type": "empty", "content": "", "title": None, "updated_at": None}
+            self.portal_session_id = portal_session_id
+            self.max_duration = max_duration
+            self.end_reason = end_reason
+            self.end_message = end_message
 
     class _FakeVoiceService:
         def __init__(self):
@@ -517,3 +534,203 @@ class TestVoiceAuditAttribution:
         assert "SimpleNamespace" in source, (
             "SimpleNamespace wrapper is missing from actor_user= in voice_websocket"
         )
+
+
+# ── The Workspace live-call lease (#2700) ────────────────────────────────────
+
+def _install_fake_portal_voice(monkeypatch):
+    """A recording fake `client_portal.voice` for the bridge's local imports.
+
+    `routers/voice.py` imports `persist_voice_turn` unconditionally whenever
+    `portal_session_id` is truthy, so a fake missing it raises ImportError
+    before the arm ever runs. Installed with `monkeypatch.setitem` — the
+    per-test-scoped, lint-blessed pattern (`tests/lint_sys_modules.py`); the
+    module-level `_STUBBED_MODULE_NAMES` list snapshots and RESTORES, it does
+    not install, so it is not the right tool here.
+
+    Note what this fake costs: every assertion in this class runs against it,
+    so the real constants and the real compare-and-delete are pinned in
+    `test_2694_voice_delta_context.py` instead, and
+    `test_the_bridge_resolves_the_real_marker_helpers` there is what asserts the
+    real modules resolve each other.
+    """
+    rec = types.SimpleNamespace(calls=[], renews=[], persisted=[],
+                                renew_cancelled=False, gemini_cancelled=False)
+    mod = types.ModuleType("client_portal.voice")
+    mod.VOICE_MARKER_LEASE_SECONDS = 60
+    mod.VOICE_MARKER_TICK_SECONDS = 15.0
+    mod.VOICE_MARKER_SLACK_SECONDS = 120
+
+    def _mark(psid, ttl, *, owner):
+        rec.calls.append(("mark", psid, ttl, owner))
+
+    def _clear(psid, *, owner):
+        rec.calls.append(("clear", psid, owner))
+
+    async def _renew(psid, *, owner, max_seconds):
+        rec.renews.append((psid, owner, max_seconds))
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            rec.renew_cancelled = True
+            raise
+
+    mod.mark_voice_call_active = _mark
+    mod.clear_voice_call_active = _clear
+    mod.renew_voice_call_marker = _renew
+    mod.persist_voice_turn = lambda session, role, text: rec.persisted.append(("turn", role, text))
+    mod.persist_voice_call_end = lambda session, d, r, m: (rec.persisted.append(("end", d, r, m)), 1)[1]
+    monkeypatch.setitem(sys.modules, "client_portal.voice", mod)
+    return rec
+
+
+class _YieldingWebSocket(_FakeWebSocket):
+    """`_FakeWebSocket.receive_text` pops a queue without a single `await`, so a
+    bridge driven by it never yields to the loop and its `create_task`ed
+    children never get to start. A real socket always yields; this one does too,
+    which is what lets these tests observe the renewer and the gemini task at
+    all (#2700)."""
+
+    async def receive_text(self):
+        await asyncio.sleep(0)
+        return await super().receive_text()
+
+
+class TestWorkspaceLiveCallMarker:
+    """#2700 — the party that opens the effect closes it.
+
+    `/voice/start` used to arm the thread's live-call marker for the whole call
+    cap (1920 s) before the audio socket that is the only thing able to clear it
+    existed, so a start whose socket never opened refused every typed turn in
+    that thread for ~32 minutes. The bridge is the only writer now: it arms a
+    60 s lease at connect inside the same `try` whose `finally` releases it,
+    renews it while it lives, and releases it unconditionally, last, and only if
+    the lease is still its own.
+    """
+
+    PSID = "thread-2700"
+
+    def _portal_session(self, monkeypatch, **kw):
+        s = _FakeVoiceSession("vs_p", agent_name="alice-agent", user_id=1,
+                              portal_session_id=self.PSID, **kw)
+        _voice_service.add(s)
+        _patch_db(monkeypatch, {"alice": {"id": 1, "role": "user"}})
+        return s
+
+    def _drive(self, ws, sid="vs_p", user="alice"):
+        """Run the bridge to completion, then let cancellations land. Returns
+        the tasks still pending afterwards — the leak pin."""
+        token = _make_jwt(user)
+
+        async def _go():
+            await voice_router.voice_websocket(ws, sid, token=token)
+            for _ in range(4):
+                await asyncio.sleep(0)
+            return [t for t in asyncio.all_tasks()
+                    if t is not asyncio.current_task() and not t.done()]
+
+        return _run(_go())
+
+    def test_the_bridge_arms_a_lease_at_connect_and_releases_it_on_close(self, monkeypatch):
+        """The whole shape in one run: armed at connect with the call's own id
+        as the owner and the lease TTL (not the cap), a renewer started and
+        bounded at the call's `max_duration` + slack, and released last."""
+        rec = _install_fake_portal_voice(monkeypatch)
+        self._portal_session(monkeypatch, max_duration=1800)
+        ws = _YieldingWebSocket(queue=['{"type": "end"}'])
+        pending = self._drive(ws)
+        assert ws.accepted is True
+        assert rec.calls == [("mark", self.PSID, 60, "vs_p"), ("clear", self.PSID, "vs_p")]
+        assert rec.renews == [(self.PSID, "vs_p", 1800 + 120)]
+        assert rec.renew_cancelled is True          # cancelled by the bridge, not by loop teardown
+        assert pending == []                        # and it does not outlive the bridge
+        assert ("end", 0.0, None, None) in rec.persisted
+
+    def test_the_marker_is_released_even_when_the_session_already_ended(self, monkeypatch):
+        """Trap C. `end_session` returns None — the exact case the REST `/stop`
+        clear was added for — and the old clear sat inside `if ended:` →
+        `if ended.portal_session_id:`, so a bridge that armed and then got None
+        back re-stranded the marker: the same defect, moved. The release is
+        keyed on the local captured before the `try` instead."""
+        rec = _install_fake_portal_voice(monkeypatch)
+        self._portal_session(monkeypatch)
+        monkeypatch.setattr(_voice_service, "end_session", AsyncMock(return_value=None))
+        ws = _YieldingWebSocket(queue=['{"type": "end"}'])
+        assert self._drive(ws) == []
+        assert rec.calls == [("mark", self.PSID, 60, "vs_p"), ("clear", self.PSID, "vs_p")]
+        assert rec.persisted == []                  # nothing to close, nothing written
+
+    def test_the_marker_is_released_when_the_close_path_raises(self, monkeypatch):
+        """A raising close-out used to skip the gemini cancel, the `saved` frame
+        and the socket close as well. It is logged, not propagated, the tail is
+        always reached — and the release is behind it all."""
+        rec = _install_fake_portal_voice(monkeypatch)
+        self._portal_session(monkeypatch)
+        monkeypatch.setattr(_voice_service, "end_session", AsyncMock(side_effect=RuntimeError("boom")))
+
+        async def _never(*a, **kw):
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                rec.gemini_cancelled = True
+                raise
+
+        monkeypatch.setattr(_voice_service, "connect_and_stream", _never)
+        ws = _YieldingWebSocket(queue=['{"type": "end"}'])
+        assert self._drive(ws) == []                            # and no raise escaped
+        assert rec.calls == [("mark", self.PSID, 60, "vs_p"), ("clear", self.PSID, "vs_p")]
+        assert rec.gemini_cancelled is True
+        assert any(f.get("type") == "saved" for f in ws.sent)
+        assert ws.closed is True
+
+    def test_the_marker_is_released_when_the_bridge_is_cancelled(self, monkeypatch):
+        """Process-level cancellation (a shutdown, a worker reload) still runs
+        the `finally`; the release is synchronous, so it runs there too."""
+        rec = _install_fake_portal_voice(monkeypatch)
+        self._portal_session(monkeypatch)
+
+        class _SlowWebSocket(_YieldingWebSocket):
+            async def receive_text(self):
+                await asyncio.sleep(3600)
+
+        ws = _SlowWebSocket()
+        token = _make_jwt("alice")
+
+        async def _go():
+            task = asyncio.create_task(voice_router.voice_websocket(ws, "vs_p", token=token))
+            for _ in range(3):
+                await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        _run(_go())
+        assert ("mark", self.PSID, 60, "vs_p") in rec.calls
+        assert ("clear", self.PSID, "vs_p") in rec.calls
+
+    def test_an_agent_detail_call_never_arms_a_thread_marker(self, monkeypatch):
+        """A GUARD, not a regression test — it passes against the pre-#2700 code
+        too. It exists so a later edit cannot move the arm, the renewer or the
+        release outside the `if portal_session_id:`, which would make a
+        non-portal (Agent Detail / VoIP) bridge import `client_portal` and write
+        a thread key for a thread that does not exist."""
+        rec = _install_fake_portal_voice(monkeypatch)
+        s = _FakeVoiceSession("vs_alice", agent_name="alice-agent", user_id=1)
+        assert s.portal_session_id is None
+        _voice_service.add(s)
+        _patch_db(monkeypatch, {"alice": {"id": 1, "role": "user"}})
+        ws = _YieldingWebSocket(queue=['{"type": "end"}'])
+        assert self._drive(ws, sid="vs_alice") == []
+        assert (rec.calls, rec.renews, rec.persisted) == ([], [], [])
+
+    def test_the_rest_stop_releases_the_marker_for_a_stop_that_beats_the_socket(self, monkeypatch):
+        """An API-ONLY guard (D9): the Workspace UI passes `restStop: false` and
+        never calls `/stop`, so this is not a second live clear path and the
+        safety case does not lean on it. It stays because it is idempotent,
+        owner-matched, and reachable by a direct API client."""
+        rec = _install_fake_portal_voice(monkeypatch)
+        self._portal_session(monkeypatch)
+        req = voice_router.VoiceStopRequest(voice_session_id="vs_p")
+        result = _run(voice_router.voice_stop(req, name="alice-agent", current_user=_FakeUser(1)))
+        assert result.messages_saved == 0                 # a portal-bound stop writes nothing
+        assert rec.calls == [("clear", self.PSID, "vs_p")]
+

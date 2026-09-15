@@ -1,13 +1,13 @@
 # Tags and Organization
 
-Organize agents with tags, saved system views, and tag clouds for visual grouping on the Dashboard.
+Organize agents with tags and saved system views; tags also drive the Grid view's org overlay on the Dashboard.
 
 ## How It Works
 
 1. Tag agents from the agent detail page, or programmatically via API/MCP.
 2. Tags appear as colored badges on agent tiles throughout the UI.
-3. The Dashboard shows tag clouds -- agents grouped visually by tag.
-4. On the Agents page, filter by tags. Filters persist across navigation.
+3. On the Dashboard's Grid view, `dept-<name>` and `reports-to-<agent>` tags draw department zones and reporting lines — see [Dashboard → Org overlay](../operations/dashboard.md#org-overlay--departments-and-reporting-lines). These org tags can only be set by people, never by agent-scoped keys.
+4. On the Dashboard (any view mode), filter by tags. Filters persist across navigation.
 5. Create **System Views** to save filter combinations (tags plus other criteria) for quick access.
 
 ### Tag Management
@@ -38,7 +38,7 @@ System Views are saved filters that combine tags with other criteria. Create, up
 |----------|--------|-------------|
 | `/api/tags` | GET | List all tags |
 | `/api/agents/{name}/tags` | GET | Get tags for an agent |
-| `/api/agents/{name}/tags` | POST | Add a tag to an agent |
+| `/api/agents/{name}/tags/{tag}` | POST | Add a tag to an agent |
 | `/api/agents/{name}/tags/{tag}` | DELETE | Remove a tag from an agent |
 | `/api/agents/{name}/tags` | PUT | Replace all tags on an agent |
 | `/api/system-views` | GET | List saved system views |

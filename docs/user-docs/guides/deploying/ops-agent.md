@@ -23,6 +23,8 @@ cp .env.example .env
 
 Then open the directory in Claude Code. The repo ships with its own `.claude/skills/` so all the ops commands shown below work out of the box.
 
+If you have the [abilities](https://github.com/abilityai/abilities) `trinity` plugin installed, `/trinity:deploy` does this for you: it walks through deploying Trinity (cloud, remote SSH server, or localhost) or connecting to an existing instance, then clones this repo into a per-instance directory with `.env` already filled in.
+
 ## Configuration
 
 The ops agent connects to a Trinity instance via a `.env` file in its workspace.
@@ -34,13 +36,19 @@ The ops agent connects to a Trinity instance via a `.env` file in its workspace.
 | `SSH_KEY` | Remote only | `~/.ssh/id_rsa` | Path to private key |
 | `SSH_PASSWORD` | Optional | — | Password fallback if no key |
 | `SSH_PORT` | Optional | `22` | SSH port |
-| `TRINITY_PATH` | Optional | `~/trinity` | Trinity install directory on the server |
-| `ADMIN_PASSWORD` | Optional | — | Trinity admin password for API calls |
+| `TRINITY_PATH` | Optional | `~/trinity` (`.env.example` ships `/home/ubuntu/trinity`) | Trinity install directory on the server |
+| `COMPOSE_FILE` | Optional | `docker-compose.prod.yml` | The compose file the instance runs on (`docker-compose.hosted.yml` on a hosted install) |
+| `FRONTEND_PORT` / `BACKEND_PORT` / `MCP_PORT` / `SCHEDULER_PORT` | Optional | `80` / `8000` / `8080` / `8001` | Service ports on the instance, as the scripts probe them |
+| `ADMIN_PASSWORD` | Required | — | Trinity admin password for API calls |
 | `MCP_API_KEY` | Optional | — | MCP API key for agent queries |
+| `ANTHROPIC_API_KEY` | Optional | — | Passed through for agent containers |
+| `TUNNEL_FRONTEND` / `TUNNEL_BACKEND` / `TUNNEL_MCP` | Optional | `13000` / `18000` / `18080` | Local ports `tunnel.sh` forwards to on a remote instance |
 
 **Local mode:** Leave `SSH_HOST` empty. All commands run directly against the local Docker daemon.
 
 **Remote mode:** Set `SSH_HOST`. Commands are forwarded over SSH — no agent container is needed on the remote server.
+
+**Hosted (pull-only) installs:** the ops agent's `/update` and `update.sh` rebuild the platform images from source. On an instance installed with `./scripts/deploy/start.sh --hosted` (prebuilt GHCR images, including the DigitalOcean 1-Click), upgrade with `start.sh --hosted` instead — see [Upgrading → Hosted installs](upgrading.md#hosted-pull-only-installs). Health checks, logs, restarts and backups work the same on either install.
 
 ## Day-to-Day Operations
 
@@ -50,7 +58,7 @@ The ops agent connects to a Trinity instance via a `.env` file in its workspace.
 ./scripts/status.sh
 ```
 
-Checks all six Trinity services: backend (`8000`), frontend (`80`), MCP server (`8080`), scheduler (`8001`), Redis, and Vector (`8686`). Reports container status, HTTP endpoint responses, and the current git version.
+Lists every `trinity-*` and `agent-*` container with its status, then probes the backend (`/health` on `BACKEND_PORT`), the frontend (HTTP code on `FRONTEND_PORT`), Redis (`redis-cli ping`) and the scheduler (its Docker health status), and prints the checkout's current git commit. It does not probe the MCP server or Vector — use the six-probe list in [Monitoring](monitoring.md) for those.
 
 ### View and diagnose logs
 
@@ -82,7 +90,7 @@ Restarts all platform services using `docker compose restart` — not `down/up`,
 ./scripts/update.sh
 ```
 
-Pulls the latest Trinity code, rebuilds platform images (`backend`, `frontend`, `mcp-server`, `scheduler`), restarts, and verifies health. Does **not** rebuild the agent base image — that image changes rarely and rebuilding it forces every agent to be re-deployed.
+Pulls the latest Trinity code, rebuilds platform images (`backend`, `frontend`, `mcp-server`, `scheduler`), restarts, and verifies health — including a check that the running `version` matches the image it runs in, so a stale platform image is called out rather than missed. Does **not** rebuild the agent base image — that image changes rarely and rebuilding it forces every agent to be re-deployed; the script tells you when the pulled range touched it, and `/rebuild-agent` rolls a rebuilt image out to agents.
 
 ### Backup database
 
@@ -90,7 +98,7 @@ Pulls the latest Trinity code, rebuilds platform images (`backend`, `frontend`, 
 ./scripts/backup.sh
 ```
 
-Copies the SQLite database to `/tmp/trinity-<timestamp>.db` on the server. Run before any update or destructive change.
+Takes an on-demand copy into `~/backups/` on the host: for SQLite an online backup (`sqlite3 .backup`, verified with `PRAGMA quick_check` — never a raw `cp` of a live database), for the bundled PostgreSQL container a `pg_dump -Fc` archive. An external PostgreSQL is not handled — use your provider's tooling. Run before any update or destructive change. Trinity also backs itself up nightly at 03:30 UTC into `backups/` under its data directory; this script is for the extra copy you want right now. See [Backup and Restore](backup-and-restore.md).
 
 ### Agent management
 
@@ -112,7 +120,7 @@ Copies the SQLite database to `/tmp/trinity-<timestamp>.db` on the server. Run b
 ./scripts/tunnel.sh
 ```
 
-Opens SSH port-forwarding so you can access the Trinity UI (`http://localhost`) and API locally while the instance runs on a remote server.
+Opens SSH port-forwarding so you can reach the Trinity UI and API locally while the instance runs on a remote server — the UI at `http://localhost:13000` by default (`TUNNEL_FRONTEND`), the API at `http://localhost:18000` (`TUNNEL_BACKEND`). With `SSH_HOST` empty it prints the direct local address instead.
 
 ## Rollback
 
@@ -123,22 +131,42 @@ If an update breaks the instance:
 ./scripts/run.sh "cd ~/trinity && git checkout HEAD~1"
 
 # Rebuild platform services from the reverted code
-./scripts/run.sh "cd ~/trinity && docker compose build --no-cache backend frontend mcp-server"
+./scripts/run.sh "cd ~/trinity && docker compose -f docker-compose.prod.yml build --no-cache backend frontend mcp-server scheduler"
 
 # Restart
 ./scripts/restart.sh
 ```
 
+## Skills
+
+Open the repo in Claude Code and use the slash commands it ships with:
+
+| Skill | What it does |
+|-------|-------------|
+| `/status` | Health check — backend, scheduler, containers, version |
+| `/logs <service> [lines] [errors]` | View logs for any service or agent |
+| `/restart [service\|all]` | Restart services with health verification |
+| `/update [--wait\|--force]` | Back up the DB, pull latest, rebuild containers, restart, verify (source-built installs); `--wait` waits for running executions, `--force` skips that check |
+| `/agents [list\|start\|stop\|logs\|exec]` | Manage agent containers |
+| `/rebuild-agent <name\|--all>` | Rebuild agent containers from the latest base image |
+| `/diagnose` | Full error scan — logs, restarts, disk, DB integrity |
+| `/telemetry` | CPU, memory, disk, container resource stats |
+| `/rollback [commit] [backup]` | Roll back to a previous commit, optionally restoring a DB backup |
+| `/cleanup [--execute]` | Prune Docker images, build cache, old backups |
+| `/migrate-to-postgres` | Migrate the database from SQLite to PostgreSQL — validate in parallel, then cut over; one-line rollback |
+| `/provision [provider]` | Step-by-step provisioning for Hetzner, GCP, AWS, DigitalOcean or localhost |
+| `/sync-ops-knowledge` | Review recent Trinity changes and update the agent's own instructions |
+
 ## Minimum Server Requirements
 
-| Resource | Minimum |
-|----------|---------|
-| CPU | 1 vCPU |
-| RAM | 2 GB |
-| Disk | 20 GB |
-| OS | Ubuntu 22.04+ |
+| Resource | Minimum (ops agent) | Recommended (ops agent) |
+|----------|---------|---------|
+| CPU | 1 vCPU | 2 vCPU |
+| RAM | 2 GB | 4 GB |
+| Disk | 20 GB | 50 GB |
+| OS | Ubuntu 22.04+ | Ubuntu 24.04 |
 
-Supported providers: Hetzner Cloud, GCP, AWS, DigitalOcean, any Linux VM, localhost.
+These are the ops repo's figures for the smallest instance it can manage. Trinity's own floor for a working fleet is **8 GB RAM** (agent containers and platform services contend below that) — see [Single-Server Deployment](single-server.md#prerequisites). Supported providers: Hetzner Cloud, GCP, AWS, DigitalOcean, any Linux VM, localhost.
 
 ## See Also
 

@@ -1,7 +1,7 @@
 """Git sync operations for GitHub-native agents.
 
-#1028: this was one 2,322-line module. It is now a package of six
-responsibility modules — conflicts, gitignore, remotes, trinity_files, sync,
+#1028: this was one 2,322-line module. It is now a package of seven
+responsibility modules — conflicts, gitignore, remotes, token_scrub, trinity_files, sync,
 provisioning — with the full public surface re-exported here, so
 `from services.git_service import sync_to_github` and
 `git_service.sync_to_github` are unchanged.
@@ -62,14 +62,32 @@ from .provisioning import (  # noqa: F401
 from .remotes import (  # noqa: F401
     ContainerGitState,
     RebindResult,
-    _git_remote_url,
+    _credentialless_remote_url,
     _parse_repo_from_remote_url,
+    _remote_seturl_subcommand,
     _scrub_git_output,
     inspect_container_git,
     rebind_origin_and_push,
     update_remote_pat,
 )
+from .token_scrub import (  # noqa: F401
+    _SCRUB_CONCURRENCY,
+    _scrub_semaphore,
+    sweep_fleet_git_remote_tokens,
+    SCRUB_TIMEOUT_S,
+    _SCRUB_ALARM_ID_PREFIX,
+    _SCRUB_UNREADABLE_ALARM_ID_PREFIX,
+    _alarm_git_token_scrub_refused,
+    _alarm_git_token_scrub_unreadable,
+    _fleet_scrub_task,
+    _inflight_token_scrub_tasks,
+    schedule_fleet_git_remote_token_sweep,
+    scrub_git_remote_tokens,
+    spawn_git_remote_token_scrub,
+    write_container_github_pat,
+)
 from .sync import (  # noqa: F401
+    _agent_can_push,
     _agent_has_write_credentials,
     delete_agent_git_config,
     get_agent_git_config,

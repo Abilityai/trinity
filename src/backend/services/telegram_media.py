@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from config import GEMINI_API_KEY, GEMINI_TRANSCRIPTION_MODEL
+from config import GEMINI_TRANSCRIPTION_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -196,8 +196,9 @@ async def process_voice(bot_token: str, voice: dict) -> str:
         size_mb = file_size / (1024 * 1024)
         return f"[Voice message too large ({size_mb:.1f}MB) — transcription limit is 10MB]"
 
-    # Check if Gemini API is configured
-    if not GEMINI_API_KEY:
+    # Check if Gemini API is configured (resolved per call — Settings → env, ent#582)
+    from services.settings_service import get_gemini_api_key
+    if not get_gemini_api_key():
         return "[Voice message received — transcription not available (API not configured)]"
 
     # Download the voice file
@@ -225,8 +226,9 @@ async def _transcribe_audio_gemini(audio_data: bytes, mime_type: str = "audio/og
     """
     try:
         from google import genai
+        from services.settings_service import get_gemini_api_key
 
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        client = genai.Client(api_key=get_gemini_api_key())
 
         response = await client.aio.models.generate_content(
             model=GEMINI_TRANSCRIPTION_MODEL,

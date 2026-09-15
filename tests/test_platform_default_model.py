@@ -94,6 +94,15 @@ class TestFeatureFlagsEndpoint:
         resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", headers=headers, timeout=10)
         assert resp.status_code == 200
         data = resp.json()
+        # workspace_available is derived as `voice_available AND WORKSPACE_ENABLED`
+        # (routers/settings.py). The derivation holds on every instance; the
+        # default-off claim only holds on one that never set the flag, so on an
+        # instance that has it on we skip rather than assert its config (#2802).
+        if data["workspace_available"]:
+            assert data.get("voice_available") is True, (
+                "workspace_available=True requires voice_available=True"
+            )
+            pytest.skip("this instance has WORKSPACE_ENABLED set — default-off is only assertable on a stock instance")
         # In CI/test environments WORKSPACE_ENABLED is not set, so this must be False.
         # If GEMINI_API_KEY is also absent, voice_available=False makes workspace_available
         # False regardless — both conditions confirm the default-off behaviour.

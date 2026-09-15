@@ -118,6 +118,7 @@ from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
 from db.canvas import CanvasOperations
+from db.canvas_shares import CanvasShareOperations
 from db.user_preferences import UserPreferenceOperations
 from db.product_events import ProductEventOperations
 from db.evaluations import EvaluationOperations
@@ -635,6 +636,12 @@ def _mark_setup_completed_if_provisioned(cursor, conn):
     all end in the same observable state, and all three mean the same thing —
     somebody can log in, so the wizard has nothing left to do.
 
+    The other branch — no admin, flag left alone — is not only a dev leftover.
+    Since trinity-enterprise#580 it is how a marketplace one-click image boots on
+    purpose (`ADMIN_PASSWORD` blank, `ADMIN_PASSWORD_SOURCE=browser`): the first
+    visitor creates the admin at /setup. Its residual risk is accepted and
+    written down in `docs/DEPLOYMENT.md` → Security Recommendations.
+
     Fails SAFE and never raises. `init_database` runs at import time, so raising
     here would crash-loop the backend permanently (the `_seed_fresh_install_*`
     contract). A skipped write costs one more boot in the old behaviour; a raise
@@ -827,6 +834,15 @@ def _record_install_source_engine():
         print(_INSTALL_SOURCE_SKIPPED_NOTE % e)
 
 
+# Blank ADMIN_PASSWORD is a supported boot (ent#580: a marketplace image claimed
+# in the browser), so this says what happens next rather than "set the variable".
+_NO_ADMIN_AT_BOOT_NOTE = (
+    "ADMIN_PASSWORD not set - no admin account created at boot. The first "
+    "visitor to the web UI creates it at /setup (set ADMIN_PASSWORD to "
+    "provision it here instead)."
+)
+
+
 def _ensure_admin_user_engine():
     """Ensure the admin user exists — engine-based path for PostgreSQL (#300).
 
@@ -837,7 +853,7 @@ def _ensure_admin_user_engine():
     admin_password = os.getenv("ADMIN_PASSWORD", "")
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
     if not admin_password:
-        print("WARNING: ADMIN_PASSWORD not set - skipping admin user creation")
+        print(_NO_ADMIN_AT_BOOT_NOTE)
         return
 
     from passlib.context import CryptContext
@@ -890,8 +906,7 @@ def _ensure_admin_user(cursor, conn):
     if existing is None:
         # Create admin user
         if not admin_password:
-            print("WARNING: ADMIN_PASSWORD not set - skipping admin user creation")
-            print("         Set ADMIN_PASSWORD environment variable to create admin user")
+            print(_NO_ADMIN_AT_BOOT_NOTE)
             return
 
         now = utc_now_iso()
@@ -967,6 +982,7 @@ class DatabaseManager:
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
         self._canvas_ops = CanvasOperations()
+        self._canvas_share_ops = CanvasShareOperations()
         self._user_preference_ops = UserPreferenceOperations()
         self._product_event_ops = ProductEventOperations()
         self._evaluation_ops = EvaluationOperations()
@@ -1779,6 +1795,7 @@ class DatabaseManager:
         source_mcp_key_name: str = None,
         model_used: str = None,
         fan_out_id: str = None,
+        fan_out_task_id: str = None,
         loop_id: str = None,
         subscription_id: str = None,
         source_channel: str = None,
@@ -1786,6 +1803,7 @@ class DatabaseManager:
         source_channel_thread: str = None,
         source_channel_agent: str = None,
         source_channel_client: str = None,
+        open_canvas_id: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -1797,6 +1815,7 @@ class DatabaseManager:
             source_mcp_key_name=source_mcp_key_name,
             model_used=model_used,
             fan_out_id=fan_out_id,
+            fan_out_task_id=fan_out_task_id,
             loop_id=loop_id,
             subscription_id=subscription_id,
             source_channel=source_channel,
@@ -1806,6 +1825,7 @@ class DatabaseManager:
             # /task inheritance point; None for direct rows).
             source_channel_agent=source_channel_agent,
             source_channel_client=source_channel_client,
+            open_canvas_id=open_canvas_id,
         )
 
     def create_schedule_execution(
@@ -1880,6 +1900,10 @@ class DatabaseManager:
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
+
+    def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
+        """Every execution row of one fan-out batch (#2670)."""
+        return self._schedule_ops.get_fan_out_executions(agent_name, fan_out_id, limit)
 
     def get_all_agents_execution_stats(self, hours: int = 24):
         """Get execution statistics for all agents."""
@@ -2211,6 +2235,33 @@ class DatabaseManager:
 
     def delete_agent_canvas(self, agent_name: str, canvas_id: str) -> bool:
         return self._canvas_ops.delete_canvas(agent_name, canvas_id)
+
+    def delete_agent_canvases(self, agent_name: str, canvas_ids):
+        return self._canvas_ops.delete_canvases(agent_name, canvas_ids)
+
+    def count_agent_canvases(self, agent_name: str) -> int:
+        return self._canvas_ops.count_canvases(agent_name)
+
+    def set_agent_canvas_pinned(self, agent_name: str, canvas_id: str, pinned: bool) -> bool:
+        return self._canvas_ops.set_canvas_pinned(agent_name, canvas_id, pinned)
+
+    # --- canvas share links (ent#554) ---------------------------------------
+
+    def create_canvas_share(self, agent_name: str, canvas_id: str, **kwargs):
+        return self._canvas_share_ops.create_share(agent_name, canvas_id, **kwargs)
+
+    def get_canvas_share_by_token(self, token: str):
+        return self._canvas_share_ops.get_share_by_token(token)
+
+    def list_canvas_shares(self, agent_name: str, canvas_id: str = None,
+                           include_revoked: bool = False):
+        return self._canvas_share_ops.list_shares(agent_name, canvas_id, include_revoked)
+
+    def revoke_canvas_share(self, agent_name: str, share_id: str) -> bool:
+        return self._canvas_share_ops.revoke_share(agent_name, share_id)
+
+    def record_canvas_share_view(self, share_id: str) -> None:
+        return self._canvas_share_ops.record_view(share_id)
 
     def last_completed_execution_at(self, agent_name: str):
         return self._canvas_ops.last_completed_execution_at(agent_name)
@@ -2904,6 +2955,10 @@ class DatabaseManager:
     def has_any_subscription(self):
         return self._subscription_ops.has_any_subscription()
 
+    def list_agents_awaiting_first_credential(self):
+        """ent#582: agents the install's first Claude credential should reach."""
+        return self._subscription_ops.list_agents_awaiting_first_credential()
+
     def list_subscriptions_with_agents(self, owner_id: int = None):
         return self._subscription_ops.list_subscriptions_with_agents(owner_id)
 
@@ -2990,6 +3045,19 @@ class DatabaseManager:
         """#2409: the auto-switch candidate list — filter only, load-balance
         order; ranking lives in `services.subscription_auto_switch`."""
         return self._subscription_ops.list_viable_alternative_subscriptions(current_subscription_id)
+
+    def list_recently_failed_alternatives(self, current_subscription_id: str):
+        """#2638: the COMPLEMENT of the candidate list — the alternatives the 2h
+        skip-list is excluding, which the switcher may readmit only on positive
+        fresh evidence."""
+        return self._subscription_ops.list_recently_failed_alternatives(current_subscription_id)
+
+    def last_failure_at_by_subscription(self, subscription_ids, hours: int = 2):
+        """#2638: newest failure instant per subscription inside the window, one
+        query — the instant a provider reset time is compared against."""
+        return self._subscription_ops.last_failure_at_by_subscription(
+            subscription_ids, hours=hours
+        )
 
     def get_subscription_usage(self, subscription_id: str):
         """Return rolling usage totals for a subscription (SUB-004)."""
@@ -3101,6 +3169,10 @@ class DatabaseManager:
     def get_agent_last_execution_at(self, agent_name: str):
         """#1854: all-time MAX(started_at) for the agent (MCP-key `stale` health)."""
         return self._schedule_ops.get_agent_last_execution_at(agent_name)
+
+    def agent_has_running_execution(self, agent_name: str):
+        """ent#582: would a restart kill a turn right now?"""
+        return self._schedule_ops.agent_has_running_execution(agent_name)
 
     def get_schedule_analytics(self, schedule_id: str, hours: int,
                                 agent_name: str):
@@ -3767,6 +3839,12 @@ class DatabaseManager:
     def idempotency_purge_expired(self, ttl_hours: int = 24) -> int:
         """Purge idempotency rows older than ttl_hours. Returns rows removed."""
         return self._idempotency_ops.purge_expired(ttl_hours=ttl_hours)
+
+    # ---- Fan-out batch (#2524) ---------------------------------------------
+
+
+    def count_fan_out_open(self, fan_out_id: str) -> int:
+        return self._schedule_ops.count_fan_out_open(fan_out_id)
 
     # =========================================================================
     # Sequential Agent Loops (delegated to db/loops.py) - #740

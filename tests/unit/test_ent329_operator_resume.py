@@ -213,9 +213,22 @@ def _install(monkeypatch, *, enabled=True, recorder=None, flag_raises=False, rep
     # `task_execution_service`, a name the real module has never exported — so
     # the stub manufactured the symbol whose absence was the production bug and
     # this suite stayed green while every dispatch died on an ImportError.
+    # #2524: the service dispatches through `dispatch_and_await_terminal` (the
+    # sync edge adapter) rather than `execute_task` directly, because under
+    # `PULL_MODE_PILOT_AGENTS` a dispatch returns QUEUED and "queued" is not an
+    # outcome this function's audit receipt can report. The double stands in for
+    # the adapter and forwards to the recorder, so the assertions below still
+    # pin the kwargs that actually reach the shared execution path.
+    async def _adapter(**kwargs):
+        kwargs.pop("wait_timeout", None)
+        return await recorder.execute_task(**kwargs)
+
     _install_module(
         "services.task_execution_service",
-        SimpleNamespace(get_task_execution_service=lambda: recorder),
+        SimpleNamespace(
+            get_task_execution_service=lambda: recorder,
+            dispatch_and_await_terminal=_adapter,
+        ),
     )
     return recorder, audit
 
@@ -252,12 +265,32 @@ async def test_dispatch_goes_through_execute_task_not_a_bespoke_path(service, mo
 
     A second execution surface is how those questions get answered twice,
     differently, so pin the seam rather than trusting review to notice.
+
+    #2524 put `dispatch_and_await_terminal` between this service and
+    `execute_task`. That is not a second surface: the adapter's whole body is
+    `execute_task` plus, when the dispatch comes back QUEUED, a wait for that
+    same row's terminal. The kwargs reaching the shared path are unchanged, which
+    is what this pins.
     """
     recorder, _ = _install(monkeypatch, enabled=True)
     await service.maybe_dispatch_resume(ITEM, response="approve")
     assert set(recorder.calls[0]) <= {
         "agent_name", "message", "triggered_by", "source_user_email",
     }
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_is_the_real_terminal_even_when_the_dispatch_queues(
+    service, monkeypatch
+):
+    """#2524: under pull the dispatch returns QUEUED, and `queued` is not an
+    outcome the `operator_resume_dispatch` audit row can report — ent#329 exists
+    because this spends money on a person's answer. The adapter waits out the
+    queue so the receipt is the terminal either way."""
+    recorder, audit = _install(monkeypatch, enabled=True)
+    await service.maybe_dispatch_resume(ITEM, response="approve")
+    assert audit, "the dispatch must be audited"
+    assert audit[-1]["details"]["status"] != "queued"
 
 
 @pytest.mark.asyncio

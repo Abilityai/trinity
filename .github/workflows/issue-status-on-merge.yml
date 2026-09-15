@@ -1,7 +1,55 @@
 name: Issue Status on PR Merge
 
+# `pull_request_target`, not `pull_request` (#2767).
+#
+# On `pull_request` a PR opened from a FORK gets a READ-ONLY `GITHUB_TOKEN`, so
+# every label write was refused with "Resource not accessible by integration"
+# and the issue stranded in `status-in-progress` after its fix had already
+# landed. That only ever bit external contributors — the PRs nobody is watching
+# the label on. `pull_request_target` runs in the context of the BASE repo and
+# so carries the write token the `permissions:` block below asks for.
+#
+# WHY THAT IS SAFE HERE, AND WHAT WOULD MAKE IT UNSAFE
+#
+# `pull_request_target` is the standard privilege-escalation footgun: it hands a
+# write token to a workflow triggered by a stranger's PR. The escalation always
+# takes the same form — the workflow CHECKS OUT the PR's head and then EXECUTES
+# something from it (a build, a test, a script, an action pinned by a path in
+# the PR). This workflow does neither, and both absences are load-bearing:
+#
+#   * there is NO `actions/checkout` — no PR code is ever fetched;
+#   * there are NO `run:` steps — nothing from the PR is ever executed;
+#   * the only untrusted values read are `pull_request.title` and `.body`, and
+#     they reach exactly one regex that extracts `\d+`. Nothing is interpolated
+#     into a shell, and nothing is `eval`'d.
+#
+# Note also that `pull_request_target` runs the workflow file as it exists on
+# the BASE branch, never the PR's copy — so a fork cannot edit this file to make
+# it do something else. That is a property of the trigger, not of this file, and
+# it is why the three bullets above are sufficient rather than merely current.
+#
+# BUT IT IS REGISTERED FROM THE DEFAULT BRANCH (#2814). Executing the base
+# branch's copy is not the same as being triggered by it: GitHub decides
+# whether a `pull_request_target` run starts at all by reading `main`. So this
+# trigger change did nothing on `dev` — not red, absent — for every merge
+# between #2769 landing and the next release cut, while `main` still said
+# `pull_request`. The same rule already governs the `schedule` triggers on
+# `deploy-dev.yml` and `alembic-head-watch.yml`, which say so in their own
+# comments. `tests/unit/test_2814_workflow_trigger_parity.py` now states it once
+# for every workflow and fails when a default-branch-registered event exists on
+# this branch but not on `main`, unless the delay is recorded there with a reason.
+#
+# The residual capability is therefore bounded to what the feature does anyway:
+# a merged PR can name which issue numbers get relabelled. That requires a
+# maintainer to MERGE the PR first (`if: merged == true`), affects labels only,
+# and is recorded in the issue's own timeline.
+#
+# If you add a checkout, a `run:` step, or any use of the PR's text beyond the
+# number regex, this trigger stops being safe — go back to `pull_request` and
+# use a repo-scoped PAT for the label calls instead. `tests/unit/
+# test_2767_issue_status_fork_prs.py` fails the build if that happens.
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
     branches: [dev]
 
@@ -32,6 +80,14 @@ jobs:
 
             core.info(`Promoting ${issues.length} issue(s) to status-in-dev: ${issues.join(', ')}`);
 
+            // #2767: collected, not thrown at the first miss. Every issue is
+            // still attempted — one unlabelable issue must not strand the
+            // others — and the run goes RED at the end. A refused write used
+            // to be a `core.warning` on a SUCCESSFUL run, which is how this
+            // stayed invisible: the job was green while the issue sat in
+            // `status-in-progress` with its fix already on dev.
+            const failures = [];
+
             for (const num of issues) {
               try {
                 await github.rest.issues.addLabels({
@@ -42,7 +98,7 @@ jobs:
                 });
                 core.info(`#${num}: added status-in-dev`);
               } catch (e) {
-                core.warning(`#${num}: failed to add status-in-dev — ${e.message}`);
+                failures.push(`#${num}: could not add status-in-dev — ${e.message}`);
                 continue;
               }
 
@@ -55,9 +111,19 @@ jobs:
                 });
                 core.info(`#${num}: removed status-in-progress`);
               } catch (e) {
-                // Label may not be present; that's fine.
-                if (e.status !== 404) {
-                  core.warning(`#${num}: failed to remove status-in-progress — ${e.message}`);
+                // A 404 means the label was not on the issue — the normal case
+                // for an issue that was never picked up, and not a failure.
+                if (e.status === 404) {
+                  core.info(`#${num}: status-in-progress was not present`);
+                } else {
+                  failures.push(`#${num}: could not remove status-in-progress — ${e.message}`);
                 }
               }
+            }
+
+            if (failures.length > 0) {
+              core.setFailed(
+                `${failures.length} issue label write(s) were refused — the issues below are ` +
+                `still mislabelled and need a manual fix:\n` + failures.join('\n')
+              );
             }

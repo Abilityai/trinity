@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 logger = logging.getLogger(__name__)
 
 from models import (
+    ResendKeyRequest,
     A2AOutboundEndpointUpsert,
     AgentDefaultAccessPolicyUpdate,
     AgentDefaultResourcesUpdate,
@@ -42,10 +43,16 @@ from models import (
 from database import db, SystemSetting, SystemSettingUpdate
 from dependencies import get_current_user, assert_admin
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services import operator_intake_service, telemetry_sharing_service
+from services import operator_intake_service, platform_keys_service, telemetry_sharing_service
+
+from services.subscription_service import (
+    connect_agents_to_first_credential,
+    is_claude_auth_configured,
+)
 
 # Import from settings_service (these are re-exported for backward compatibility)
 from services.settings_service import (
+    get_gemini_api_key,
     get_anthropic_api_key,
     get_github_pat,
     get_google_api_key,
@@ -145,6 +152,13 @@ async def get_api_keys_status(
         github_configured = bool(github_pat)
         github_from_settings = has_secret_setting('github_pat')
 
+        def _status(value: str, setting_key: str) -> dict:
+            return {
+                "configured": bool(value),
+                "masked": mask_api_key(value) if value else None,
+                "source": "settings" if has_secret_setting(setting_key) else ("env" if value else None),
+            }
+
         return {
             "anthropic": {
                 "configured": anthropic_configured,
@@ -155,7 +169,15 @@ async def get_api_keys_status(
                 "configured": github_configured,
                 "masked": mask_api_key(github_pat) if github_configured else None,
                 "source": "settings" if github_from_settings else ("env" if github_configured else None)
-            }
+            },
+            # ent#582 — the two keys the first-run flow adds.
+            "resend": {
+                **_status(settings_service.get_resend_api_key(), 'resend_api_key'),
+                # Which provider actually sends: a key saved here selects Resend.
+                "provider": settings_service.get_email_provider(),
+                "from_address": settings_service.get_email_from_address(),
+            },
+            "gemini": _status(get_gemini_api_key(), 'google_api_key'),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get API keys status: {str(e)}")
@@ -175,16 +197,20 @@ async def update_anthropic_key(
     assert_admin(current_user)
 
     try:
-        # Validate format
+        # Validate format — an `sk-ant-oat` subscription token is refused with
+        # the ent#582 copy that names the right tab.
         key = body.api_key.strip()
-        if not key.startswith('sk-ant-'):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid API key format. Anthropic keys start with 'sk-ant-'"
-            )
+        format_error = platform_keys_service.anthropic_api_key_error(key)
+        if format_error:
+            raise HTTPException(status_code=400, detail=format_error)
+
+        # ent#582: read BEFORE the write — did this save give the install its
+        # first Claude credential?
+        first_credential = not is_claude_auth_configured()
 
         # Store in settings — AES-256-GCM encrypted at rest (ent#435)
         set_secret_setting('anthropic_api_key', key)
+        connected = connect_agents_to_first_credential() if first_credential else 0
 
         # SEC-001: audit API key change
         await platform_audit_service.log(
@@ -200,12 +226,75 @@ async def update_anthropic_key(
 
         return {
             "success": True,
-            "masked": mask_api_key(key)
+            "masked": mask_api_key(key),
+            # ent#582: HOW MANY agents had no Claude credential and now use this
+            # one (int; running ones restart in the background).
+            "connected_agents": connected,
         }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update API key: {str(e)}")
+
+
+# #2572 Trigger A2 — the instance Anthropic key can be cleared through TWO
+# reachable routes, and both must fire the credential-less adoption sweep.
+#
+# The canonical migration off a metered key is *register a subscription, then
+# delete the key*. In that order the registration sweep (Trigger A1) finds
+# nothing — the key still resolves, so it short-circuits — and the deletion then
+# strands the whole fleet in exactly #2572's state with no trigger left.
+#
+# Route 1 is the dedicated `DELETE /api-keys/anthropic` below, which the
+# Settings UI uses and which clears BOTH the encrypted and the legacy row via
+# `clear_secret_setting`.
+# Route 2 is the generic `DELETE /{key}` catch-all, which reaches the same rows
+# through `db.delete_setting` — a sink that, unlike `db.set_setting`, carries no
+# ent#435 secret-settings guard, so it is reachable rather than theoretical.
+#
+# The hook deliberately sits on the ROUTES, not on `clear_secret_setting`: that
+# leaf also serves `github_pat` and the Slack keys, and hooking it would run a
+# Claude-subscription sweep on unrelated credential deletions. (A third clear
+# path exists at `set_secret_setting`'s blank-write branch but is unreachable
+# for this key — `update_anthropic_key` 400s anything not starting `sk-ant-`,
+# and the generic PUT is refused by ent#435's sink guard. If that prefix
+# validation is ever relaxed, re-check this.)
+_ANTHROPIC_KEY_ALIASES = {"anthropic_api_key", "anthropic_api_key_encrypted"}
+
+
+async def _adopt_after_instance_key_removed(current_user: User, request: Request) -> None:
+    """#2572 Trigger A2: the instance API key just went away, so every
+    ``api_key``-mode agent is now credential-less — sweep them onto an available
+    subscription.
+
+    Best-effort in the strongest sense: it must NEVER fail the deletion the
+    operator asked for, so everything is swallowed. Only Phase A (decide +
+    persist) is awaited; the service backgrounds the container apply, so this
+    never times out the DELETE on a real fleet.
+
+    It is also inert unless the key is genuinely gone: the sweep's own first
+    condition re-resolves through ``get_anthropic_api_key()``, which still finds
+    an ``ANTHROPIC_API_KEY`` in the backend environment (the ``.env``/compose
+    fallback this route reports as ``fallback_configured``) and correctly adopts
+    nobody in that case.
+    """
+    try:
+        from services.subscription_service import (
+            TRIGGER_INSTANCE_KEY_DELETED,
+            adopt_for_credentialless_agents,
+        )
+        await adopt_for_credentialless_agents(
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            trigger=TRIGGER_INSTANCE_KEY_DELETED,
+        )
+    except Exception as e:
+        logger.error(
+            f"[#2572] credential-less adoption sweep failed after instance "
+            f"API key deletion: {e}"
+        )
 
 
 @router.delete("/api-keys/anthropic")
@@ -236,6 +325,10 @@ async def delete_anthropic_key(
                 details={"setting": "anthropic_api_key", "action": "delete"},
             )
 
+            # #2572 Trigger A2 — gated on `deleted` for the same reason the
+            # audit row above is: nothing changed ⇒ nothing to sweep.
+            await _adopt_after_instance_key_removed(current_user, request)
+
         # Check if env var fallback exists
         env_key = os.getenv('ANTHROPIC_API_KEY', '')
 
@@ -264,12 +357,10 @@ async def test_anthropic_key(
     try:
         key = body.api_key.strip()
 
-        # Validate format first
-        if not key.startswith('sk-ant-'):
-            return {
-                "valid": False,
-                "error": "Invalid format. Anthropic keys start with 'sk-ant-'"
-            }
+        # Validate format first (ent#582: an `sk-ant-oat` token names its tab)
+        format_error = platform_keys_service.anthropic_api_key_error(key)
+        if format_error:
+            return {"valid": False, "error": format_error}
 
         # Make a lightweight API call to test the key
         # Using the models endpoint which is simple and doesn't create any resources
@@ -288,12 +379,16 @@ async def test_anthropic_key(
             elif response.status_code == 401:
                 return {
                     "valid": False,
-                    "error": "Invalid API key"
+                    "error": (
+                        "Anthropic rejected this key — it may be revoked or mistyped. "
+                        "Copy it again from console.anthropic.com → API Keys "
+                        "(it starts with sk-ant-api)."
+                    ),
                 }
             else:
                 return {
                     "valid": False,
-                    "error": f"API returned status {response.status_code}"
+                    "error": f"Anthropic returned HTTP {response.status_code} — try again in a moment."
                 }
 
     except httpx.TimeoutException:

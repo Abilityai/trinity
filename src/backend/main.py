@@ -24,7 +24,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, Q
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-from config import CORS_ORIGINS, VOICE_ENABLED, GEMINI_API_KEY
+from config import CORS_ORIGINS, VOICE_ENABLED
 from models import User
 from dependencies import get_current_user, scope_may_open_event_stream
 from services.docker_service import docker_client, list_all_agents_fast
@@ -83,6 +83,7 @@ from routers.compatibility import router as compatibility_router  # #668 agent c
 from routers.skills import router as skills_router
 from routers.internal import router as internal_router, pull_router as internal_pull_router
 from routers.tags import router as tags_router, set_websocket_manager as set_tags_ws_manager
+from services.skill_service import set_websocket_manager as set_skills_ws_manager
 from routers.system_views import router as system_views_router
 from routers.notifications import router as notifications_router, set_websocket_manager as set_notifications_ws_manager, set_filtered_websocket_manager as set_notifications_filtered_ws_manager
 from routers.reports import router as reports_router
@@ -296,6 +297,7 @@ set_agent_rename_ws_manager(manager)
 set_agent_rename_filtered_ws_manager(filtered_manager)
 set_sharing_ws_manager(manager)
 set_tags_ws_manager(manager)  # agent_tags_changed (org overlay, ent#305)
+set_skills_ws_manager(manager)  # agent_skills_changed (#2703)
 set_chat_persistence_ws_manager(manager)  # #1483: chat_response_ready broadcast
 set_chat_execution_ws_manager(manager)    # #1483: agent_collaboration + self_task broadcasts
 set_public_links_ws_manager(manager)
@@ -648,6 +650,14 @@ async def _schedule_staggered_services() -> None:
         except Exception as e:
             logger.error(f"Error starting skills library sync service: {e}")
     asyncio.create_task(_start_skills_sync_delayed())
+
+    # ent#615: ONE-SHOT fleet remediation of remotes still carrying an embedded
+    # credential — deliberately not a loop, and the only reacher that covers a
+    # `restart: unless-stopped` container the daemon brought back after a host
+    # reboot. Scheduling lives in the service (strong task ref, stagger, the
+    # never-raises fence); rationale in `sweep_fleet_git_remote_tokens`.
+    from services import git_service as _git_service_boot
+    _git_service_boot.schedule_fleet_git_remote_token_sweep()
 
     # #447: subscription recovery probe — re-asks the provider whether a
     # subscription believed rate-limited is back. Nothing else can clear the
@@ -1062,6 +1072,16 @@ async def _shutdown_loops_and_transports(app: FastAPI) -> None:
         logger.info("Sync health service stopped")
     except Exception as e:
         logger.error(f"Error stopping sync health service: {e}")
+
+    # Shutdown the telemetry-sharing heartbeat (ent#12; #2618). Cancelling the
+    # task mid-send takes the tick's release path, so a graceful shutdown never
+    # leaves this process's tick marker blocking the next boot's first wake.
+    try:
+        from services.telemetry_sharing_service import telemetry_sharing_service
+        await telemetry_sharing_service.stop()
+        logger.info("Telemetry-sharing heartbeat stopped")
+    except Exception as e:
+        logger.error(f"Error stopping telemetry-sharing heartbeat: {e}")
 
     # Shutdown skills library sync service (trinity-enterprise#236)
     try:
@@ -1813,7 +1833,8 @@ async def get_version(current_user: User = Depends(get_current_user)):
     # exec-sliced by its own tests and must stay stdlib-only.
     install_source = _settings_service.get_install_source()
     return _build_version_payload(
-        VOICE_ENABLED and bool(GEMINI_API_KEY), edition, features, install_source
+        VOICE_ENABLED and bool(_settings_service.get_gemini_api_key()),
+        edition, features, install_source,
     )
 
 

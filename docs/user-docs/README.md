@@ -1,14 +1,14 @@
 # Trinity User Documentation
 
-> Auto-generated from source code. Run `/generate-user-docs` to update. Last sync: 2026-07-24.
+> Auto-generated from source code. Run `/generate-user-docs` to update. Last sync: 2026-09-14.
 
 ## What's New
 
-- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.8.5](whats-new/v0.8.5.md))
+- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.9.0](whats-new/v0.9.0.md), illustrated)
 
 ## FAQ
 
-- [Trinity FAQ](faq/README.md) — 280+ grounded answers to common questions, organized by topic ([troubleshooting](faq/troubleshooting.md) for symptom → fix)
+- [Trinity FAQ](faq/README.md) — 430+ grounded answers to common questions, organized by topic ([troubleshooting](faq/troubleshooting.md) for symptom → fix)
 
 ## Watch
 
@@ -23,7 +23,7 @@
 ## Getting Started
 
 - [Overview](getting-started/overview.md) — What is Trinity, key concepts, architecture
-- [Setup](getting-started/setup.md) — Installation, first-time setup, login
+- [Setup](getting-started/setup.md) — Installation, admin account (including the browser claim on 1-Click installs), the first-run setup sequence, login
 - [Quick Start](getting-started/quick-start.md) — Create your first agent in 5 minutes
 - [Roles and Permissions](getting-started/roles-and-permissions.md) — 4-tier role model, user management
 - [Getting Help](getting-started/help.md) — Docs Q&A bot, community resources
@@ -34,18 +34,19 @@
 - [Agent Runtimes](agents/agent-runtimes.md) — Claude Code, OpenAI Codex, Gemini CLI
 - [Managing Agents](agents/managing-agents.md) — Start/stop, rename, delete, health
 - [Agent Data & Portability](agents/agent-data.md) — Runtime data paths, export/import across instances
-- [Agent Chat](agents/agent-chat.md) — Chat interface, voice, streaming, history
-- [Agent Canvas](agents/agent-canvas.md) — A surface the agent keeps current: blocks, the design kit, starter layouts
+- [Agent Chat](agents/agent-chat.md) — The stateless per-turn chat on the agent page, streaming, history
+- [Agent Canvas](agents/agent-canvas.md) — A surface the agent keeps current: blocks, the design kit, starter layouts, sharing and PDF, pinning and clean-up
 - [Continuous Conversations](agents/agent-session.md) — What resuming preserves, auto-compact, per-turn limits
-- [Agent Terminal](agents/agent-terminal.md) — Web terminal, SSH access, mode switching
+- [Agent Terminal](agents/agent-terminal.md) — Ephemeral key-based SSH access; the WebSocket terminal for API clients
 - [Agent Files](agents/agent-files.md) — File browser, virtual filesystem, shared folders
 - [Agent Logs](agents/agent-logs.md) — Log viewing, telemetry, Vector aggregation
-- [Agent Configuration](agents/agent-configuration.md) — Autonomy, read-only, resources, timeout
-- [Agent Guardrails](agents/agent-guardrails.md) — Deterministic safety enforcement, bash deny-lists, credential protection
+- [Agent Configuration](agents/agent-configuration.md) — The Settings tab: guardrails, capacity, MCP exposure, access key, reliability (breaker, wake on answer), autonomy, resources, timeout
+- [Agent Guardrails](agents/agent-guardrails.md) — Deterministic safety enforcement, bash deny-lists, credential protection, tamper-proof hook registration
 - [Self-Execute](agents/self-execute.md) — Background tasks during chat, result injection
 
 ## Credentials
 
+- [Platform Keys](credentials/platform-keys.md) — Claude, GitHub, email (Resend) and Gemini keys, set from the browser
 - [Credential Management](credentials/credential-management.md) — Adding, editing, hot-reload, encrypted backup
 - [OAuth Credentials](credentials/oauth-credentials.md) — OAuth2 flows for Google, Slack, GitHub, Notion
 - [Subscription Credentials](credentials/subscription-credentials.md) — Shared Claude subscriptions, auto-assign, auto-switch
@@ -70,7 +71,7 @@
 
 ## Operations
 
-- [Dashboard](operations/dashboard.md) — Timeline, Grid, and List views, org overlay, tag clouds, activity feed
+- [Dashboard](operations/dashboard.md) — Timeline, Grid, and List views, org overlay, subscription pressure chips, the getting-started checklist
 - [Operations Page](operations/operating-room.md) — Unified tabbed view: operator queue, notifications, health, executions
 - [Monitoring](operations/monitoring.md) — Fleet health checks, agent heartbeats, cleanup service, retention sweeps
 - [Executions](operations/executions.md) — Fleet execution list, stats, detail, live streaming, termination
@@ -83,8 +84,8 @@
 
 - [Agent Sharing & Access](sharing-and-access/agent-sharing.md) — Access tab (operators), Sharing tab (external clients, channels, client roster)
 - [Access Control](sharing-and-access/access-control.md) — Cross-channel email verification, access requests
-- [Public Links](sharing-and-access/public-links.md) — Public chat URLs, email verification, session memory
-- [Workspace](sharing-and-access/workspace.md) — Signed-in chat app with continuous conversations, agent pages, rooms, and file upload
+- [Public Links](sharing-and-access/public-links.md) — Public chat URLs, email verification, session memory, Connect Slack
+- [Workspace](sharing-and-access/workspace.md) — The chat app: chat tabs and the pinned Main chat, the composer (typeahead, model picker, files, voice), the rail (Info, Files, Loops, Canvas, Work), agent pages
 - [Tags and Organization](sharing-and-access/tags-and-organization.md) — Tags, filtering, system views
 - [Mobile Admin](sharing-and-access/mobile-admin.md) — Mobile PWA at /m
 
@@ -95,7 +96,7 @@
 - [Slack Integration](integrations/slack-integration.md) — Multi-agent channels, DMs, thread routing
 - [Telegram Integration](integrations/telegram-integration.md) — Bot setup, group chats, privacy mode, trigger modes
 - [WhatsApp Integration](integrations/whatsapp-integration.md) — Twilio binding, sandbox setup, email verification
-- [MCP Server](integrations/mcp-server.md) — 116 MCP tools, API keys, dedicated per-agent tools
+- [MCP Server](integrations/mcp-server.md) — 130 MCP tools, API keys, inline email sign-in, dedicated per-agent tools
 - [A2A Protocol](integrations/a2a-protocol.md) — A2A `0.3.0` in both directions: inbound tasking, and outbound calls to external agents
 - [Nevermined Payments](integrations/nevermined-payments.md) — x402 payment monetization
 
@@ -106,7 +107,7 @@
 ## Abilities (Agent Development Toolkit)
 
 - [Overview](abilities/overview.md) — Plugin marketplace introduction, quick start
-- [create-agent Plugin](abilities/create-agent-plugin.md) — Agent creation wizards (14 wizards)
+- [create-agent Plugin](abilities/create-agent-plugin.md) — The interview-driven `custom` wizard, the website scaffold, and review/adjust/clone tooling
 - [agent-dev Plugin](abilities/agent-dev-plugin.md) — Development tools, memory systems, git sync, backlog cycle, pipelines, orchestration, canon, fleet analysis
 - [trinity Plugin](abilities/trinity-plugin.md) — Repository-first deployment, onboarding in place, sync, remote loops, instance provisioning
 - [dev-methodology Plugin](abilities/dev-methodology-plugin.md) — Documentation-driven development
@@ -118,7 +119,7 @@
 
 ## Advanced
 
-- [Voice Chat](advanced/voice-chat.md) — Real-time voice via Gemini Live API, in the Workspace
+- [Voice Chat](advanced/voice-chat.md) — Voice mode inside the Workspace conversation: the orb takes the call, the transcript stays in the thread
 - [Voice Replies](advanced/voice-replies.md) — Agents speak individual channel replies as voice notes (ElevenLabs TTS)
 - [VoIP Telephony](advanced/voip-telephony.md) — Agents place outbound phone calls via Twilio + Gemini Live
 - [Image Generation](advanced/image-generation.md) — Gemini two-step image pipeline

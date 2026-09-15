@@ -671,6 +671,14 @@ def selector(monkeypatch, fake_redis):
     auto_switch = _auto_switch()
     svc = _svc()
     db = MagicMock(name="db")
+    # #2638: the selector also reads the skip-list's COMPLEMENT, to readmit a
+    # candidate the provider is demonstrably serving again. Default it EMPTY so
+    # every test in this file keeps asking the #2409 question; a bare MagicMock
+    # here is not iterable, and the resulting TypeError would degrade the whole
+    # ranker to the load-balance fallback while the tests still read as if they
+    # were exercising it.
+    db.list_recently_failed_alternatives.return_value = []
+    db.last_failure_at_by_subscription.return_value = {}
     monkeypatch.setattr(auto_switch, "db", db)
     monkeypatch.setattr(svc, "is_auto_refresh_enabled", lambda: True)
     return auto_switch, svc, db, fake_redis
@@ -697,15 +705,22 @@ class TestServiceSelector:
         assert why["candidates"] == 3
         db.list_viable_alternative_subscriptions.assert_called_once_with("a")
 
-    def test_only_survivors_are_ever_read(self, selector, monkeypatch):
-        """The failure filter ran in the db; the selector must not even look at
-        a subscription the filter dropped."""
+    def test_only_survivors_are_ranked(self, selector, monkeypatch):
+        """The failure filter ran in the db; the selector ranks its survivors
+        and nothing else.
+
+        #2638 amended the wording, not the property. The selector now also asks
+        the db for the skip-list's complement and reads THOSE ids to decide
+        whether any of them is provably recovered — but with nothing readmitted
+        (the default here), the set that reaches the ranker is exactly the
+        survivors. The readmission read is asserted separately below.
+        """
         auto_switch, svc, db, r = selector
         db.list_viable_alternative_subscriptions.return_value = [_sub("c"), _sub("d")]
         seen = []
-        real = svc.cached_headroom_readings
-        monkeypatch.setattr(svc, "cached_headroom_readings",
-                            lambda ids, **k: seen.append(list(ids)) or real(ids, **k))
+        real = svc.rank_subscriptions
+        monkeypatch.setattr(svc, "rank_subscriptions",
+                            lambda cands, readings: seen.append([c.id for c in cands]) or real(cands, readings))
         auto_switch.select_best_alternative_subscription("a")
         assert seen == [["c", "d"]]
 

@@ -284,7 +284,24 @@ anonymous usage telemetry tracked separately (#758 / trinity-enterprise#12).
   `system_settings` is claimed **before** the POST, so restarts / re-runs /
   concurrent workers never double-submit. A stable random `installation_id`
   (also in `system_settings`, the seed for future #758 telemetry) correlates the
-  submission.
+  submission. The id has exactly three writers — this consent POST, the
+  product-event emit (§45), and the canary alert label (a documented, deliberate
+  write, #1987) — all through `get_or_create_installation_id`; **every
+  read-shaped path** (a GET, a status readback) uses the non-minting twin
+  `get_installation_id()` and reports `None` honestly when nothing has minted
+  it yet (ent#545), because a `get_or_create_*` on a read path is a durable
+  write with a race (learnings 2026-08-05). That writer set is pinned in CI:
+  `tests/unit/test_2669_minting_accessor_callers.py` fails the build on any use
+  of a minting accessor (`get_or_create_installation_id`,
+  `get_or_mint_sharing_id`, `get_instance_label`) outside its reasoned
+  allowlist, and on any write of the identity keys outside their home modules
+  (#2669; the private tree's twin is trinity-enterprise#575). The last such caller, the
+  enterprise activation-funnel read, adopts the twin in trinity-enterprise#570;
+  a public tree ahead of that submodule pointer still mints on the tab's first
+  open. The mint itself is a **write-once
+  claim** (`insert_setting_if_absent`, the #2380 primitive), so two workers
+  that SELECT-miss together land ONE id and the loser reads the winner's back —
+  the race #1987 recorded as pre-existing in the accessor is closed (ent#545).
 - **FR-4 — Off switch**: `OPERATOR_INTAKE_ENABLED=false` (or the cross-tool
   `DO_NOT_TRACK=1`) fully disables the outbound submission for air-gapped /
   privacy-strict installs — the consent box still appears, nothing leaves the box.
@@ -511,7 +528,15 @@ module's design lives in the private submodule.
   shows step-by-step activation counts + drop-off with an honest empty state when
   there's no data yet. It reads a gated enterprise endpoint
   (`requires_entitlement("telemetry")`) that aggregates `product_events` +
-  derives the first-value events from the OSS tables above. The **panel Vue**
+  derives the first-value events from the OSS tables above. **The read is pure
+  (ent#545)**: it reports the stored `installation_id` or `null` through the
+  non-minting accessor (§43.1) and never mints one — the first admin open of the
+  tab must not create the install's identity — and the panel footer renders an
+  honest "no install id yet" state rather than a blank, pointing at the one
+  writer an operator can actually reach (the updates opt-in, Settings →
+  General; the wizard's first product event only fires on an empty fleet or an
+  explicit `?onboarding=1`). A value that is neither an id nor the explicit
+  `null` renders as "unavailable", never as a claim about minting. The **panel Vue**
   ships in the OSS bundle but is hidden unless `telemetry` is in
   `enterprise_features` (the standard feature-flag gating). Explicitly **NOT** a
   new standalone analytics dashboard in v1.
@@ -549,10 +574,16 @@ transport); only the **reciprocity benchmark view** is entitlement-gated
   emails, no agent names.** The exact payload is **inspectable before send** via
   `GET /api/settings/telemetry-sharing` → `payload_preview` (the Settings panel).
 - **FR-3 — Periodic heartbeat + reversibility**: `TelemetrySharingService` is a
-  sleeps-first background loop (default 24h, jittered) that shares when consent is
-  on; opt-out stops egress at the next heartbeat. Fail-open (a blocked/failed/
-  air-gapped POST never affects the platform). Reuses the operator-intake httpx
-  fire-and-forget transport.
+  sleeps-first background loop that shares on the configured cadence (default
+  24h) when consent is on; opt-out stops egress at the next wake. Since #2618 the
+  loop wakes every 10 minutes (+ ≤10 min jitter) and decides from the persisted
+  `last_shared_at` whether a send is due — empty, unparseable, in the future, or
+  older than the interval — so a backend restart never resets the cadence (an
+  install that restarted daily used to share its consent-time backfill and never
+  again). Fail-open (a blocked/failed/air-gapped POST never affects the platform;
+  after five consecutive failures attempts fall to one per half-interval, measured
+  from the persisted send log). Reuses the operator-intake httpx fire-and-forget
+  transport.
 - **FR-4 — Retroactive backfill at consent**: on the off→on transition the router
   schedules an immediate fire-and-forget backfill share over a disclosed window
   (`backfill_days`, default 30) sourced from Tier-1 `product_events`, so late
@@ -612,6 +643,13 @@ no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry
   (`telemetry_sharing_enabled` / `_hard_disabled` / `_dismissed` /
   `_first_value`) and calls the admin status route only when it will render;
   the payload preview loads lazily on expand (`?preview=0` skips the builder).
+  **Amended (ent#581):** the card is gone; the ask is the `sharing` step of the
+  first-run overlay (`components/onboarding/steps/StepSharing.vue`), same server
+  terms and the same `CONSENT_COPY`. **Not now** is the overlay's per-step Skip
+  (an unexpired legacy snooze still reads as skipped). The warm copy renders when
+  the step renders after the first autonomous success, and is spent on render;
+  it does **not** reopen an overlay the operator already closed — that would be
+  the "separate dialog that appears afterwards" ent#581 exists to remove.
   Steady-state cost on a Dashboard load: zero telemetry queries.
 - **FR-2 — Share identity is separate from the install identity**:
   `installation_id` (§43.1) travels with the operator's email and company in the
@@ -651,21 +689,35 @@ no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry
   404 from the default URL is worded as a 404 at the default address (the
   receiver has been live since 2026-09-04, ent#190, so that is an anomaly to look
   at); from an overridden `TELEMETRY_SHARING_URL` as that receiver answering 404.
+  Since #2571 each entry records the origin it was posted to (scheme + host +
+  port; never path, query or userinfo), the last-shared stamp records the origin
+  that acknowledged it (`telemetry_sharing_last_shared_host`), and the receiver
+  sentence is decided from that record rather than from the URL configured at
+  read time: it names the host that answered and says plainly when the newest
+  entry's origin differs from the configured one (an entry without a recorded
+  origin reads as unknown and never as a mismatch); `share_url` is scrubbed
+  before it reaches the panel.
 - **FR-6 — Delivery that survives a missing receiver**: the consent-time backfill
-  is retried by the 24h heartbeat until the first 2xx
+  is retried at every due wake until the first 2xx
   (`telemetry_sharing_backfill_delivered_at`), then windows are cumulative from
-  `last_shared_at`; a Redis tick marker (`telemetry_share:tick`, TTL half the
-  interval, never released, fail-open) makes one worker send per interval.
+  `last_shared_at` in whole days; a Redis tick marker (`telemetry_share:tick`,
+  TTL half the interval, a fresh lock per claim, released only when the receiver
+  did not acknowledge, fail-open) makes one worker send per interval, and an
+  acknowledged send counts as delivered even if the local stamp write fails
+  (#2618).
 - **FR-7 — Reset paths**: every consent-family key sits under the
   `telemetry_sharing_` prefix the generic `PUT /api/settings/{key}` already
   refuses; the generic `DELETE` stays open for it by design — deleting a key
-  only moves toward off / ask again / re-mint. The builder runs off the event
+  only moves toward off / ask again / re-mint, or, for `last_shared_at`, one
+  re-share at the next wake (#2618; consent still gates), or, for `last_shared_host`,
+  a delivery line that reads "to an unknown receiver" (#2571). The builder runs off the event
   loop (`asyncio.to_thread`) and every reader is fenced so a stubbed or failing
   source degrades a field, never the payload.
 
 **Deferred**: feature-usage / click-through coverage (PR2, child issue); an
 edition-differentiated ask (ent#496, unblocked by ent#190); the taxonomy field
-(ent#418); the send log recording its destination host (#2571); `main.py`
+(ent#418); a destination change starting a new delivery episode and the
+benchmark read using the recorded origin (both deferred from #2571); `main.py`
 adopting `utils/app_version.py` (debt inbox
 `2026-09-03-main-version-resolver-adopt-util`).
 

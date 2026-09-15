@@ -30,7 +30,7 @@ sync/recovery without an LLM turn and investigate exactly what a tool did.
 
 | Type | Location | Description |
 |------|----------|-------------|
-| **MCP tool** | `get_git_status` | Live status — branch, remote, last commit, changed/untracked files, sync_status. Read-only. |
+| **MCP tool** | `get_git_status` | Live status — branch, remote, last commit, changed/untracked files, sync_status. Read-only. **#2742:** the agent payload is proxied verbatim, so this tool now also carries `computed_at` (the answer may be a coalesced snapshot up to one leader-run old), `lock_recovery` and `index_lock_stuck`; concurrent callers — this tool, the UI panel and the backend poller — coalesce onto ONE computation and one `git fetch`, so a burst no longer stacks overlapping fetches. No tool-signature change. |
 | **MCP tool** | `git_sync` | Stage + commit + push to working branch. Owner-only. `strategy: normal\|pull_first\|force_push`. |
 | **MCP tool** | `get_git_log` | Recent commits (limit clamped 1–100, default 10). Read-only. |
 | **MCP tool** | `git_pull` | Pull from GitHub. `strategy: clean\|stash_reapply\|force_reset`. Owner + shared accessors. |

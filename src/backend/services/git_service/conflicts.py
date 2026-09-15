@@ -45,6 +45,18 @@ _AUTH_PATTERNS = (
     re.compile(r"could not read password", re.IGNORECASE),
     re.compile(r"invalid username or password", re.IGNORECASE),
     re.compile(r"permission denied \(publickey\)", re.IGNORECASE),
+    # ent#615 AC4. The credential helper emits this on stderr when it resolves
+    # nothing, and it is the DISCRIMINATOR between "no credential" and
+    # "credential rejected" — the fallthrough itself is already matched above
+    # ("could not read Username for '<url>': terminal prompts disabled", which
+    # is what GIT_TERMINAL_PROMPT=0 turns a silent helper into; proven by
+    # execution, so AC4 needed no new pattern for the generic case).
+    #
+    # NOT a bare `403`: `classify_conflict` evaluates auth patterns FIRST, so a
+    # secondary-rate-limit 403, a SAML-SSO-enforcement 403 and an archived-repo
+    # push 403 would all be relabelled AUTH_FAILURE and shown to the operator
+    # as "no write credentials".
+    re.compile(r"TRINITY_GIT_NO_CREDENTIAL"),
 )
 
 _UNCOMMITTED_PATTERNS = (

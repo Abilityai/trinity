@@ -99,6 +99,10 @@ services:
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Must reach the container or the .env lever is inert in prod (the #1039 packaging class).
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.
+      # The refusal names this number, so it must reach the container or the
+      # operator is told to raise a lever that is inert (the #1039 class).
+      - CANVAS_MAX_PER_AGENT=${CANVAS_MAX_PER_AGENT:-100}        # canvases per agent
       # Skills library lifecycle automation (ent#236). The reconcile cap is named in the
       # refusal alarm's own remediation text, so it must be tunable from .env or the
       # operator is told to raise a lever that never reaches the container.
@@ -214,6 +218,11 @@ services:
       - DB_BACKUP_HOUR=${DB_BACKUP_HOUR:-3}
       - DB_BACKUP_MINUTE=${DB_BACKUP_MINUTE:-30}
       - DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS=${DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS:-1800}
+      # Git sync-health poll cadence (#2742). Default UNCHANGED at 60s; the knob
+      # exists so an operator can cut the per-poll `git fetch` load on a large
+      # fleet. Read at call time in sync_health_service, so it must reach the
+      # container or the .env lever is inert (the #1056/#1039 packaging class).
+      - SYNC_HEALTH_POLL_INTERVAL_SECONDS=${SYNC_HEALTH_POLL_INTERVAL_SECONDS:-60}  # seconds between fleet sync-health polls
       - TRINITY_DB_PATH=/data/trinity.db
       # Configurable database backend (#300). Unset → SQLite at TRINITY_DB_PATH
       # (default). Set to a postgresql:// URL (with the postgres profile up) to
@@ -549,6 +558,10 @@ services:
       # a structured `queued_timeout` receipt instead of `fetch failed`.
       # Default 25000ms sits below the typical 30-60s MCP gateway ceiling.
       - MCP_CHAT_TIMEOUT_MS=${MCP_CHAT_TIMEOUT_MS:-25000}
+      # #2661 ceiling for the executions lookup that recovery runs AFTER the
+      # abort — whatever is left of the gateway ceiling is all it has, so it
+      # must fail fast rather than hang into the same `fetch failed`.
+      - MCP_RECOVERY_TIMEOUT_MS=${MCP_RECOVERY_TIMEOUT_MS:-5000}
       # MCP server authenticates to backend as ADMIN_USERNAME/ADMIN_PASSWORD.
       # Read directly from ADMIN_PASSWORD so devs do not have to set the same
       # secret twice (issue #692).

@@ -12,6 +12,7 @@ from enum import Enum
 
 from utils.helpers import parse_iso_timestamp, to_utc_iso
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
+from db_models import SubscriptionCredential
 
 
 # Fork-to-own destination: "owner/name". Owner per GitHub rules (alphanumeric +
@@ -443,6 +444,16 @@ class User(BaseModel):
     # None on the JWT branch, which is the honest "no credential" answer.
     mcp_key_id: Optional[str] = None
     mcp_key_name: Optional[str] = None
+    # ent#614: the source agent the BACKEND vouches for. Set only on an EVT-001
+    # loopback JWT (`scope == dependencies.EVENT_LOOPBACK_SCOPE`, minted by
+    # `event_dispatch_service._get_internal_token`), and only when the event
+    # was agent-originated — `emit_event` writes a JWT caller's USERNAME into
+    # `agent_events.source_agent`, and that must never be certified as an agent.
+    # `dependencies.resolve_source_agent` treats it as the principal's identity,
+    # exactly like `agent_name` for an agent-scoped key, so the loopback's
+    # `X-Source-Agent` header is honoured for this one value and nothing else.
+    # None on every other branch, JWT humans included.
+    vouched_source_agent: Optional[str] = None
 
 
 class Token(BaseModel):
@@ -647,6 +658,25 @@ CANVAS_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 CANVAS_BLOCKS_MAX_BYTES = 512 * 1024  # 512 KiB
 CANVAS_MAX_BLOCKS = 50
 
+# ent#553 — the bound on the number of canvases ONE agent may hold.
+#
+# `agent_canvases` is bounded per canvas by its composite key (a write replaces
+# the row), but `canvas_id` is agent-chosen, so an agent writing one canvas per
+# run grows the table without limit. ent#438 read the first fact and concluded
+# the table needed no retention; the unbounded axis was missed, not decided.
+#
+# A CAP rather than a retention window, by operator ruling 2026-09-08: a window
+# deletes a person's surfaces on a timer, which is the failure direction #1638
+# established, whereas a cap refuses a WRITE and never destroys anything. The
+# refusal is named and tells the agent to retire a canvas (`clear_canvas`).
+# Generous on purpose — it is a runaway guard, not a budget anyone should feel.
+CANVAS_MAX_PER_AGENT = int(os.getenv("CANVAS_MAX_PER_AGENT", "100"))
+
+# ent#553 — how many canvases one bulk delete may name. A separate constant
+# from the per-agent cap: this bounds ONE request's `IN (...)` clause, that
+# bounds the table.
+CANVAS_BULK_DELETE_MAX = 100
+
 CANVAS_RATE_LIMIT = int(os.getenv("CANVAS_RATE_LIMIT", "60"))
 CANVAS_RATE_WINDOW = int(os.getenv("CANVAS_RATE_WINDOW", "60"))
 
@@ -773,7 +803,23 @@ class CanvasSummary(BaseModel):
     # ent#537 — the starter layout, or None for stacked blocks.
     template: Optional[str] = None
     # Derived, never stored: the agent has run since this canvas was written.
+    # Computed but NOT rendered since #2734 — kept so the derivation stays
+    # recoverable, and still counting the writing run as a run "since".
     stale: bool = False
+    # ent#553 — a human's pin. Stored, unlike `stale`, and never agent-written.
+    pinned: bool = False
+    # Derived, never stored. A `Field(description=...)` and not a bare comment
+    # on purpose: a comment is invisible to `model_fields`, so nothing can
+    # assert it, and it never reaches the OpenAPI schema the MCP consumer reads.
+    agent_last_run_at: Optional[str] = Field(
+        default=None,
+        description=(
+            "When the agent last FINISHED a run (db.last_completed_execution_at). "
+            "Null both when it never has and when that read failed — the header "
+            "omits the fact rather than asserting either, because 'we could not "
+            "read it' must never render as 'it never ran'."
+        ),
+    )
 
 
 class Canvas(CanvasSummary):
@@ -800,6 +846,70 @@ class CanvasWriteResult(Canvas):
     visible_to_requester: Optional[bool] = None
     #: Present only when there is something actionable to say.
     visibility_note: Optional[str] = None
+
+
+class CanvasPinRequest(BaseModel):
+    """Pin or unpin one canvas (ent#553).
+
+    `pinned` is required-but-explicit rather than a toggle: a toggle round-trips
+    the client's stale idea of the current state, so two people pinning at once
+    get whichever order the requests landed in. Stating the target value makes
+    the write idempotent and the intent readable in the audit row.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    pinned: bool
+
+
+class CanvasShareCreate(BaseModel):
+    """Mint a share link for one canvas (ent#554).
+
+    `scope` defaults to the NARROW one. Sharing must never widen the ent#438
+    audience by accident, so reaching further than "the people who could
+    already see it" is an explicit value a caller has to type.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["authorized", "public"] = "authorized"
+    expires_at: Optional[str] = Field(None, max_length=64)
+
+
+class CanvasShare(BaseModel):
+    """A share link as its owner sees it."""
+    id: str
+    agent_name: str
+    canvas_id: str
+    token: str
+    scope: str
+    url: Optional[str] = None
+    created_at: str
+    expires_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+    last_viewed_at: Optional[str] = None
+    view_count: int = 0
+
+
+class CanvasBulkDelete(BaseModel):
+    """Remove several canvases in one action (ent#553).
+
+    Bounded because the ids land in one `IN (...)` clause, and named explicitly
+    rather than reusing the block cap — these count different things.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    canvas_ids: List[str] = Field(..., min_length=1, max_length=CANVAS_BULK_DELETE_MAX)
+
+
+class CanvasBulkDeleteResult(BaseModel):
+    """What a bulk delete actually removed (ent#553).
+
+    `deleted` is the ids that existed, not the ids that were asked for, so the
+    UI can say "3 of 5 removed" honestly — and `requested` keeps the caller's
+    count visible beside it rather than making the client remember what it sent.
+    """
+    agent_name: str
+    requested: int
+    deleted: List[str]
 
 
 class ReportCreate(BaseModel):
@@ -2840,15 +2950,21 @@ class FanOutRequest(BaseModel):
     """Request model for fan-out parallel task execution."""
     tasks: List[FanOutTask]
     agent: str = "self"
-    # Optional overall fan-out deadline. When None, no outer deadline is
-    # applied — each sub-task is still bounded by the target agent's
-    # configured execution_timeout_seconds (TIMEOUT-001).
+    # Optional deadline on WAITING for the batch (#2524) — reaching it returns
+    # `deadline_exceeded` without stopping the subtasks. When None, the wait
+    # covers the whole batch: ceil(N / concurrency) × the agent's
+    # execution_timeout_seconds (TIMEOUT-001), plus a buffer.
     timeout_seconds: Optional[int] = None
     max_concurrency: int = 3
     policy: str = "best-effort"
     model: Optional[str] = None
     system_prompt: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
+    # #2524: return `{fan_out_id, status="accepted"}` immediately, without
+    # holding the connection for the whole batch. The caller polls
+    # `GET /api/agents/{name}/fan-out/{fan_out_id}`. Default False keeps the
+    # blocking contract every existing caller depends on.
+    async_mode: Optional[bool] = False
 
     @field_validator("tasks")
     @classmethod
@@ -2909,6 +3025,55 @@ class FanOutResponse(BaseModel):
     completed: int
     failed: int
     results: List[FanOutTaskResponse]
+
+
+# --- #2670: the batch's read surface ----------------------------------------
+#
+# `FanOutResponse` is built in memory and returned exactly once. A caller whose
+# HTTP call was killed by its own gateway timeout therefore has nothing to read,
+# while N executions keep running. These two models are what the batch looks
+# like when it is read back out of `schedule_executions` instead.
+#
+# Deliberately NOT a reuse of `FanOutResponse`: the aggregate has states the
+# dispatch response cannot have (`running` — some rows are still going) and
+# loses one it does have (`deadline_exceeded` is the DISPATCHER's verdict on its
+# own outer deadline, not a property of any row). Two different questions, two
+# shapes; making one serve both would mean a status vocabulary where half the
+# values are unreachable depending on which way you arrived.
+
+class FanOutBatchTask(BaseModel):
+    """One subtask of a batch, as recorded on its execution row."""
+    execution_id: str
+    # The caller's own `FanOutTask.id`, persisted on the row as
+    # `fan_out_task_id` since #2524. NULL on rows written before that column.
+    task_id: Optional[str] = None
+    status: str
+    # The dispatched message — the only link back to the task the caller named
+    # on rows that predate `task_id`.
+    message: Optional[str] = None
+    response: Optional[str] = None
+    error: Optional[str] = None
+    cost: Optional[float] = None
+    context_used: Optional[int] = None
+    duration_ms: Optional[int] = None
+    model_used: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class FanOutBatchStatus(BaseModel):
+    """A fan-out batch read back from its execution rows (#2670)."""
+    agent_name: str
+    fan_out_id: str
+    # `running` while any row is non-terminal; else `completed` when every row
+    # succeeded, `partial` when some did, `failed` when none did. An empty batch
+    # is unreachable here — the route 404s rather than reporting a batch of zero.
+    status: str
+    total: int
+    completed: int
+    failed: int
+    running: int
+    results: List[FanOutBatchTask]
 
 
 # =============================================================================
@@ -3671,6 +3836,30 @@ class ApiKeyUpdate(BaseModel):
 class ApiKeyTest(BaseModel):
     """Request body for testing an API key."""
     api_key: str
+
+
+class ResendKeyRequest(BaseModel):
+    """Body for PUT and POST …/test on /api/settings/api-keys/resend (ent#582).
+
+    ``from_address`` is the sender Resend must be willing to send from (a
+    verified domain). Omitted → the address currently in force (setting →
+    ``SMTP_FROM`` env) is kept and checked.
+    """
+    api_key: str
+    from_address: Optional[str] = None
+
+
+class SubscriptionTokenTest(BaseModel):
+    """Body for POST /api/subscriptions/test (ent#582) — a token to validate
+    BEFORE it is registered. Never persisted, never echoed."""
+    token: str
+
+
+class SubscriptionRegistration(SubscriptionCredential):
+    """POST /api/subscriptions response: the subscription plus how many agents
+    it just connected as the install's FIRST Claude credential (ent#582; 0
+    otherwise). The first-run Claude step reads `connected_agents` as an int."""
+    connected_agents: int = 0
 
 
 class OpsSettingsUpdate(BaseModel):

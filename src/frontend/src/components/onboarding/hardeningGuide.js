@@ -1,20 +1,19 @@
 /**
- * Decidable logic behind `HardeningGuide.vue` (#2380).
+ * Decidable logic behind the first-run hardening guide (#2380) — since ent#581
+ * the `secure` step of the first-run overlay (`steps/StepSecure.vue`), whose
+ * visibility is decided by the registry in `firstRunSteps.js`. The posture copy
+ * below is what that step speaks, unchanged.
  *
  * Split out of the SFC because `vitest.config.js` runs `environment: 'node'`
  * with no component-mount harness, so a decision left inside a component is one
- * no test can reach — the ent#392 rule. The component is a dispatcher over
- * this module; every visibility term and every sentence of posture copy lives
+ * no test can reach — the ent#392 rule. Every sentence of posture copy lives
  * here, where the spec can assert on it directly.
  */
 
-// Per-browser dismissal, matching `trinity_front_desk_dismissed` (ent#319) and
-// `trinity_onboarding_dismissed`. Deliberately NOT a server round-trip: this is
-// an ambient, non-gating nudge that retires itself the moment a domain is
-// configured, so a per-user table would be more machinery than the behaviour is
-// worth — and it must not add an endpoint to a first-boot security surface.
+// The retired card's per-browser dismissal. Nothing writes it any more; the
+// first-run overlay reads it once so an operator who dismissed the card is not
+// re-asked after the upgrade (`firstRunSteps.js::legacySkips`).
 export const HARDENING_GUIDE_DISMISSED_KEY = 'trinity_hardening_guide_dismissed'
-export const HARDENING_GUIDE_TUNNEL_DISMISSED_KEY = 'trinity_hardening_guide_tunnel_dismissed'
 
 // The posture that completes step ONE. It does NOT retire the card: the guide
 // advises two steps, and retiring on the first meant the second was mentioned
@@ -22,73 +21,53 @@ export const HARDENING_GUIDE_TUNNEL_DISMISSED_KEY = 'trinity_hardening_guide_tun
 // the card ADVANCES to the tunnel step instead, and a dismissal is what ends it.
 export const DOMAIN_POSTURE = 'https-domain'
 
-// Two stages, in the order the card advises them. `address` decides how the
-// instance is reached; `tunnel` decides who can reach it at all.
-export const HARDENING_STAGES = ['address', 'tunnel']
-
-/** Which step this posture puts the card on. */
+/**
+ * Which stage this posture puts the step on: `address` decides how the instance
+ * is reached, `tunnel` who can reach it at all.
+ */
 export function hardeningStage(installTlsPosture) {
   return installTlsPosture === DOMAIN_POSTURE ? 'tunnel' : 'address'
 }
 
 /**
- * Dismissal is PER STAGE, and that is load-bearing rather than tidy.
+ * The two lines that must be readable WITHOUT opening the disclosure (#2691):
+ * what saving this buys, and what has to be true first. Walked live on a fresh
+ * droplet, nobody in the room could say either — the field's help text said
+ * only "the address people will use to reach this instance", and the
+ * prerequisite was four sentences deep inside <details>.
  *
- * One key would let a dismissal of "you are on a bare IP" silently consume the
- * tunnel advice the operator has not been shown yet — the same shape as the
- * ent#437 warm ask being spent behind another card. The address stage keeps the
- * original key, so an existing dismissal keeps holding and nothing migrates.
+ * Shared with Settings → General so the meaning does not depend on which
+ * surface you arrive through, and so the two cannot drift apart.
  */
-export function dismissKeyForStage(stage) {
-  return stage === 'tunnel' ? HARDENING_GUIDE_TUNNEL_DISMISSED_KEY : HARDENING_GUIDE_DISMISSED_KEY
-}
+export const DOMAIN_BENEFIT =
+  'Trinity hands out this name instead of the IP, and the web server in front obtains a certificate for it.'
+export const DOMAIN_PREREQUISITE =
+  'Point the domain at this server first — save it here before DNS resolves and the name has nothing to answer it.'
 
 /**
- * Should the guide render?
+ * Saving this value re-points live integrations, immediately (#2691).
  *
- * `featureFlagsLoaded` is a required term, not a convenience: without it the
- * card flashes in on every page load before the answer arrives, because
- * `marketplaceInstall` starts false and a false→true flip after the fetch is
- * indistinguishable from a real one (the `stores/firstRun.js` `loaded`
- * rationale). On an established fleet the honest render during the fetch is
- * nothing at all.
- *
- * `marketplaceInstall` is resolved SERVER-side — the browser never decides
- * which install sources count as a marketplace. Every non-marketplace install,
- * including the entire managed fleet whose plain-HTTP-over-Tailscale shape is
- * indistinguishable from an unhardened droplet by any other signal, is false
- * here.
- *
- * `isAdmin` is a REAL GATE, not cosmetics, for two independent reasons. (1) The
- * only remediation this card offers is admin-only: `general` is `adminOnly` in
- * `Settings.vue`'s tab list, so a non-admin who follows the button lands on
- * `resolveTabFromQuery`'s fallback tab — a card whose single action dead-ends
- * for the person reading it. (2) The copy discloses this instance's network
- * posture (“advertises a plain-HTTP address”) to every user of the box, and the
- * flag document it derives from is served to any authenticated principal. It
- * defaults FALSE so the safe direction — hidden — is what an omitted term buys.
- *
- * `https-domain` no longer hides the card. It advances it: step one is done, so
- * the card switches to the tunnel step and the operator gets one look at the
- * advice before dismissing it. `dismissed` is therefore the only thing that
- * ends the guide, and it is resolved per stage by the caller.
+ * Every Telegram webhook is re-registered and every WhatsApp binding rewritten
+ * to the new base the moment a non-empty value is stored. On a name that is not
+ * live yet, working bots move to an address that answers nothing, and nothing
+ * in the product says so. Stated on the admin surface that owns the setting
+ * (Settings → General) rather than in the first-run flow, where an operator has
+ * no channels configured yet and the sentence would be noise.
  */
-export function isHardeningGuideVisible({
-  featureFlagsLoaded = false,
-  isAdmin = false,
-  marketplaceInstall = false,
-  installTlsPosture = 'unconfigured',
-  dismissed = false,
-} = {}) {
-  if (!featureFlagsLoaded) return false
-  if (!isAdmin) return false
-  if (!marketplaceInstall) return false
-  if (dismissed) return false
-  // `installTlsPosture` no longer gates visibility — it selects the STAGE (and
-  // therefore which copy speaks). An unknown posture has no copy, and the
-  // component's own belt hides the card rather than rendering an empty shell.
-  return true
-}
+/**
+ * The step-by-step walkthrough this step links out to (#2692) —
+ * `docs/user-docs/guides/deploying/hardening.md` in the public repo, published
+ * by the docs site under `getting-started/deploying/`.
+ *
+ * The published site, not a `github.com/.../blob/main/...` URL: the one other
+ * docs link in the first-run flow (`steps/credentialSteps.js`) points at a blob
+ * path and 404s today, because `main` is behind `dev` between release cuts.
+ * This 404s until the release that carries the page too, which is the same one.
+ */
+export const HARDENING_DOCS_URL = 'https://docs.ability.ai/getting-started/deploying/hardening'
+
+export const DOMAIN_SIDE_EFFECT =
+  'Saving re-points Telegram and WhatsApp webhooks to this address straight away, so set it once the domain is live.'
 
 /**
  * What the card is allowed to say, per posture.
@@ -102,11 +81,15 @@ export function isHardeningGuideVisible({
  * anyone in particular, and not that anything "works today" or is "not broken".
  * All three are claims about a wire this code has never touched.
  *
- * `https-ip` therefore says what it can see (an address) and what a marketplace
- * image is KNOWN to install (a short-lived IP-bound certificate, hedged as an
- * expectation), then argues the upgrade from properties of the ADDRESS — that
- * it is awkward to share and answers to the whole public internet — which are
- * readable from the string itself.
+ * `https-ip` therefore says what it can see (an address) and what an install of
+ * this shape is KNOWN to set up (a short-lived IP-bound certificate, hedged as
+ * an expectation), then argues the upgrade from properties of the ADDRESS —
+ * that it is awkward to share and answers to the whole public internet — which
+ * are readable from the string itself. The renewal caveat is worded the same way
+ * and for the same reason: a ~6-day certificate renewed only while the machine
+ * runs is a property of that certificate PROFILE, so it is stated as what such a
+ * setup does after a long shutdown, never as a claim about this instance's
+ * current certificate or its expiry.
  *
  * `http` is the one posture that names an exposure, and it still hedges: a
  * proxy in front of Trinity may already terminate TLS, in which case the
@@ -140,44 +123,43 @@ export const POSTURE_COPY = {
     badgeVariant: 'info',
     headline: 'This instance advertises HTTPS at a bare IP address.',
     detail:
-      'Trinity cannot inspect the certificate from here — it only knows the address it was told to advertise. If a marketplace image set this up, expect a short-lived certificate tied to the IP and renewed every few days. Either way, an IP address is awkward to share and answers to the whole public internet, so a real name is worth adding.',
+      'Trinity cannot inspect the certificate from here — it only knows the address it was told to advertise. If a marketplace image or the DigitalOcean install script set this up, expect a short-lived certificate tied to the IP, renewed automatically while the server is running. Certificates on that profile last about six days, so a server left switched off for longer than that comes back to a browser warning until renewal catches up. Either way, an IP address is awkward to share and answers to the whole public internet, so a real name is worth adding.',
   },
+  // Saved, but nothing has arrived at the name yet. This is the honest state
+  // for every domain the moment it is entered, and it is where a typo or an
+  // absent DNS record stays forever (#2691).
   'https-domain': {
-    badge: 'Domain set',
+    badge: 'Domain saved',
+    badgeVariant: 'info',
+    headline:
+      'Your domain is saved. The first visit to it is what proves the name works \u2014 until then Trinity cannot tell.',
+    detail:
+      'Trinity now hands out the name rather than the IP. It issues no certificates itself: the web server in front asks Trinity whether a name is allowed, and obtains the certificate for it on the first request that actually arrives for that name. So nothing here confirms the domain until someone visits it \u2014 if DNS does not point at this server, the visit fails in the browser and Trinity never learns of it. The step below is about reach rather than address: unless something in front of this server already restricts it, it still answers anyone who finds the address.',
+  },
+  // The one state in this file that rests on something OBSERVED rather than
+  // parsed: a request for exactly this name arrived and a certificate followed.
+  // It survives a proxy, a load balancer or a reserved IP in between, which is
+  // why it is the tick rather than a DNS lookup taken at save time.
+  'https-domain-reached': {
+    badge: 'Domain reached',
     badgeVariant: 'success',
     headline:
-      'Your domain is set. One optional step is left \u2014 a Cloudflare Tunnel can take this server off the public internet.',
+      'Your domain is serving traffic. One step is left \u2014 a Cloudflare Tunnel can take this server off the public internet.',
     detail:
-      'Step one is done: Trinity now hands out a name rather than an IP, and whatever terminates TLS in front of it can pick up that name. The step below is about reach rather than address \u2014 unless something in front of this server already restricts it, it still answers anyone who finds the address. This one is optional, and dismissing it here is a fine answer.',
+      'Step one is done, and confirmed: a request for your domain reached this server and a certificate was obtained for it. The step below is about reach rather than address \u2014 this server still answers anyone who finds the address. It is optional, but it is the difference between an instance anyone can knock on and one that is only reachable through Cloudflare. Skip it if you are evaluating; come back to it from Settings \u2192 General before this instance matters.',
   },
-}
-
-/** Copy for a posture, or `null` when the guide should not be speaking at all. */
-export function postureCopy(posture) {
-  return POSTURE_COPY[posture] || null
-}
-
-/** Read the persisted dismissal for one stage. Any storage failure reads as "not dismissed". */
-export function readHardeningGuideDismissed(stage = 'address') {
-  try {
-    return localStorage.getItem(dismissKeyForStage(stage)) === '1'
-  } catch {
-    // Private mode / disabled storage. Showing the card again is the safe
-    // direction for a security nudge; it is one click to wave away.
-    return false
-  }
 }
 
 /**
- * Persist the dismissal. Returns whether it stuck — the caller hides the card
- * for this session either way, so a refusal is a warning, never a failed verb.
+ * Copy for a posture, or `null` when the guide should not be speaking at all.
+ *
+ * `reached` splits the domain posture in two, and that split is the point of
+ * #2691: the posture itself is parsed from a string an admin typed, so it can
+ * only ever say "saved". Claiming the domain WORKS takes evidence, and the only
+ * evidence available is that a request for that exact name arrived here.
  */
-export function persistHardeningGuideDismissed(stage = 'address') {
-  try {
-    localStorage.setItem(dismissKeyForStage(stage), '1')
-    return true
-  } catch (e) {
-    console.warn('[hardeningGuide] could not persist dismissal:', e?.message || e)
-    return false
-  }
+export function postureCopy(posture, reached = false) {
+  if (posture === DOMAIN_POSTURE && reached) return POSTURE_COPY['https-domain-reached']
+  return POSTURE_COPY[posture] || null
 }
+

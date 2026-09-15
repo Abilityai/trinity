@@ -7,7 +7,7 @@ Connect agents to WhatsApp via Twilio. Users can send direct messages to the age
 - **1:1 Binding** — Each agent has its own Twilio account and WhatsApp sender. Twilio accounts cannot be shared across agents.
 - **Sandbox** — Twilio's shared test sender (`whatsapp:+14155238886`). Free to use; users must opt in with a keyword before messaging.
 - **Production Sender** — A dedicated phone number registered with Meta via Twilio. Requires Meta Business Manager approval (24–48 hours).
-- **Webhook** — Trinity receives inbound messages via a Twilio webhook URL. Requires `public_chat_url` to be configured in Settings and a Cloudflare Tunnel ingress rule.
+- **Webhook** — Trinity receives inbound messages via a Twilio webhook URL. Requires the **Public URL** (`public_chat_url`) to be set under **Settings → General** and a Cloudflare Tunnel ingress rule.
 - **Email Verification** — Users can verify their identity via `/login` to access agents with restricted access policies.
 
 ## Prerequisites
@@ -16,7 +16,7 @@ Before connecting a Twilio account, two platform-level prerequisites must be in 
 
 ### 1. Public URL
 
-Go to **Settings → Public Chat URL** and enter your Trinity instance's public domain (e.g., `https://your-domain.com`). Trinity uses this to generate the webhook URL shown in the UI.
+Go to **Settings → General → Public URL** and enter your Trinity instance's public domain (e.g., `https://your-domain.com`). Trinity uses this to generate the webhook URL shown in the UI.
 
 ### 2. Cloudflare Tunnel Ingress Rule
 
@@ -126,7 +126,7 @@ Agents can deliver files and images in their WhatsApp replies, not just text. Ea
 
 Rules:
 
-- Outbound media requires the agent's **file-sharing** toggle to be on (Sharing tab → Distribution → File sharing) and a configured **Public Chat URL** (media links must be HTTPS).
+- Outbound media requires the agent's **file-sharing** toggle to be on (Sharing tab → Distribution → File sharing) and a configured **Public URL** under Settings → General (media links must be HTTPS).
 - A file that is oversized, of an unsupported type, or otherwise undeliverable degrades to a `📎 name: url` download link appended to the text reply — it never blocks the reply or other files.
 
 ### Voice Replies (Outbound)
@@ -214,7 +214,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/whatsapp/test \
 
 ### "public_chat_url is not set" warning
 
-Go to **Settings → Public Chat URL** and enter your Trinity instance's public domain. The webhook URL generates automatically once saved.
+Go to **Settings → General → Public URL** and enter your Trinity instance's public domain. The webhook URL generates automatically once saved.
 
 ### Twilio webhook returns 404
 
@@ -261,12 +261,18 @@ If the log shows no `Refusing…` line at all, the failure is elsewhere:
 
 ### Attachment says "unsupported format"
 
-This is different from "download failed" — the file **was** fetched successfully, then rejected by Trinity's file-type policy. PDFs, archives, video, and audio (including WhatsApp voice notes) are not accepted into agent workspaces on any channel. Text, CSV, JSON, and images are.
+This is different from "download failed" — the file **was** fetched successfully, then rejected by Trinity's file-type policy. PDFs, tar/gzip/rar archives, video, and audio (including WhatsApp voice notes) are not accepted into agent workspaces on any channel. Text, CSV, JSON, ZIP, and images are.
 
 ## See Also
 
-- [Telegram Integration](telegram-integration.md)
-- [Slack Integration](slack-integration.md)
-- [Voice Replies](../advanced/voice-replies.md)
-- [Access Control](../sharing-and-access/access-control.md)
-- [Agent Sharing & Access](../sharing-and-access/agent-sharing.md)
+**Trinity docs:**
+
+- [Telegram Integration](telegram-integration.md) · [Slack Integration](slack-integration.md)
+- [Voice Replies](../advanced/voice-replies.md) — spoken replies across channels
+- [Access Control](../sharing-and-access/access-control.md) — the channel access policy `/login` enforces
+- [Agent Sharing & Access](../sharing-and-access/agent-sharing.md) — the Sharing tab that hosts the WhatsApp dialog
+
+**External references:**
+
+- [Twilio: WhatsApp Business API](https://www.twilio.com/docs/whatsapp) — senders, templates and the 24-hour messaging window
+- [Twilio: WhatsApp Sandbox](https://www.twilio.com/docs/whatsapp/sandbox) — the shared test sender and the join keyword

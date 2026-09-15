@@ -469,6 +469,22 @@
   "never read" as "all unread" would have badged every historical conversation
   in every install the day this shipped. A cursor is written the first time the
   viewer opens or sends in a thread.
+- **The absent-cursor half is amended by ent#557 (2026-09-10), and only that
+  half.** A thread with no cursor counts the agent messages newer than the
+  viewer's **account baseline** — a stored, write-once row in the same table
+  under a reserved kind, written on the viewer's first ever `mark_chat_read` and
+  never moved; every read of the table excludes it, so it is neither a phantom
+  chat nor a charge against either row cap. A viewer with no baseline (a
+  first-ever sign-in) still counts nothing, so the ent#359 property above is
+  preserved rather than traded away. The service emits those cursorless threads
+  in a second pass, de-duplicated against the rows it already returned and
+  **gated on there being room under the total-row cap**: `mark_chat_read`
+  silently no-ops at the cap, so a badge on a thread the viewer cannot mark read
+  would be one no user action clears. The count reaches the agent row, the
+  wordmark total, and the browser tab title (`utils/tabTitle.js` owns the
+  string, so the router's label and the count no longer overwrite each other),
+  and refreshes on the existing asks poll rather than only on the viewer's own
+  actions.
 - **Endpoints**: `GET /api/enterprise/client-portal/sessions` (#2198 — the whole
   sidebar list in ONE viewer-scoped call, replacing one per-agent call per rostered
   agent; roster-scoped by the same set the per-agent gate enforces, no cap and no
@@ -1164,14 +1180,35 @@ already holds.
   unaddressed report stays operator-only. The audience is a validated column,
   never a key inside `blocks`, for the ent#364 reason: `blocks` is agent-authored
   and a prompt-injected agent must not be able to decide who reads it.
-- **FR-5 — Staleness is derived, not a clock** (AC 7): the canvas always renders
-  `updated_at`, and is marked **may be out of date** when the agent has had a
-  terminal execution *after* the canvas was last written — i.e. it did work and
-  did not refresh this surface. An arbitrary age threshold was rejected: a canvas
-  has no inherent freshness expectation, so a clock would either cry wolf on a
-  monthly report or stay silent on a minute-by-minute one, whereas "the agent has
-  run since" is a fact about *this* canvas. `updated_by_execution_id` records
-  which run wrote it, so the claim is checkable.
+- **FR-5 — Freshness is two facts, never a verdict** (AC 7, rewritten by #2734):
+  the canvas header renders **two facts, both unconditional** — when the canvas
+  was last written (`updated_at`) and when the agent last finished a run
+  (`agent_last_run_at`, from the same one-per-agent `last_completed_execution_at`
+  read) — and Trinity derives **no verdict** from them:
+  `Updated 2h ago · agent last ran 40m ago`. An arbitrary age threshold was
+  rejected: a canvas has no inherent freshness expectation, so a clock would
+  either cry wolf on a monthly report or stay silent on a minute-by-minute one,
+  whereas "the agent has run since" is a fact about *this* canvas. The same
+  argument retires the derived verdict one step further: *"the agent has run
+  since"* could not know what a given canvas is for either, and it fired on the
+  **writing run's own output** — a run completes *after* it writes, and the
+  evidence that would exclude it (`updated_by_execution_id`) is optional and
+  absent on most live canvases — so the mark contradicted the timestamp beside
+  it (*"Updated just now"* next to *"may be out of date"*) and taught the reader
+  to ignore it. Two facts measured against one clock cannot contradict each
+  other, and the reader draws the conclusion the heuristic could not.
+  `updated_by_execution_id` still records which run wrote a canvas, so the
+  provenance stays checkable (#2577 consumes it).
+  **The second fact is omissible and is never narrated**: `agent_last_run_at` is
+  null both when the agent has never finished a run and when that read failed,
+  and the payload cannot tell those apart — so the header *omits* the fact
+  rather than saying "has not run yet", because narrating a read failure as an
+  absence claim is the design-system contract's stale-banner rule read at field
+  scope. The derived `stale` boolean stays on the payload, computed exactly as
+  before, and the header renders nothing from it — retained unchanged rather
+  than endorsed,
+  because it keeps the derivation recoverable and removing it would change an
+  agent-visible MCP response shape.
 - **FR-6 — Writes are self-gated, bounded, and provenance-stamped**: the write
   routes take `AuthorizedAgentByName` **plus** the #918 self-check
   (`current_user.agent_name == name` for an agent-scoped key), so a sibling agent
@@ -1193,9 +1230,14 @@ already holds.
   be the §5.11 blank-panel defect.
 - **Cascade + retention**: `agent_canvases` is registered in `AGENT_REFS`
   (CASCADE) so rename re-keys and the #834 hard purge wipes it — CI-blocking via
-  `test_agent_cleanup_parity`. Deliberately **no** retention window: a canvas is
-  bounded by construction (one row per `(agent, canvas_id)`, replaced on write),
-  unlike the append-only tables `RETENTION_OPS_KEYS` governs.
+  `test_agent_cleanup_parity`. Deliberately **no** retention window — but not
+  for the reason first recorded here. ent#438 wrote "bounded by construction
+  (one row per `(agent, canvas_id)`, replaced on write)", which bounds rows
+  *per canvas* while `canvas_id` is agent-chosen, so the *count* was unbounded;
+  the axis was missed, not decided. The bound is now a **per-agent cap** that
+  refuses and never evicts (FR-20, trinity-enterprise#553), and
+  `agent_canvases` stays out of `RETENTION_OPS_KEYS` for a stated reason:
+  deleting a person's surfaces on a timer is the #1638 failure direction.
 - **Migrations**: dual-track — `db/migrations.py::agent_canvases_table` + Alembic
   `0050_agent_canvases`. The #536 widening changes no DDL (ids and kinds live
   in the `blocks` JSON), so it carries no migration.
@@ -1323,6 +1365,79 @@ well, and the agent never touches CSS.
   requested. Tailwind utilities remain reachable from chat/report markdown
   (the class allowlist is canvas-only here) — follow-up issue.
 
+**Canvas lifecycle — delete, pin, search and a stated bound (trinity-enterprise#553, 2026-09-11)**
+— an agent that uses its canvas as intended accumulates dozens: one per report,
+per topic, per run. Before this the Workspace could only ever *add* to that
+pile: no delete on the client-portal surface at all, one ordering, and nothing
+bounding the table. OSS-core (Workspace rule above). Flow:
+[agent-canvas.md → Lifecycle](../feature-flows/agent-canvas.md#lifecycle--removing-pinning-and-living-with-a-lot-of-them-ent553).
+
+- **FR-18 — Deleting is owner-or-admin, and a non-owner sees no control** (AC
+  1, 2): the answer ent#548 gives for files. Both surfaces resolve it through
+  `db.can_user_share_agent` — the *same* predicate `dependencies.assert_agent_owner`
+  uses — so Agent Detail and the Workspace cannot disagree about who owns an
+  agent; the Workspace learns it from `PortalAgentCard.can_manage_canvases`,
+  the portal's only capability channel (#2128), which **fails closed** (an
+  external client, and any card predating the field, gets a read-only panel).
+  This *narrowed* the platform DELETE route, which accepted any user with
+  agent access; safe because no UI called it. A canvas is one shared surface
+  with no per-user copy, so there is no "hide it from my list" middle ground
+  to offer. Agents keep clearing their own (`clear_canvas`, the #918
+  self-gate). Every human delete and pin — operator *and* Workspace — writes an
+  audit row under the acting **user** (ids and counts only, G-04); the
+  Workspace rows are attributed through the resolved `users` row, never
+  email-only, because `_resolve_actor` derives `actor_type` from the user and
+  an email-only call lands as `system`/`trinity-system`.
+- **FR-19 — Bulk delete names its count and reports what existed** (AC 3):
+  `POST .../canvas/bulk-delete` on both surfaces — a POST, not a body-carrying
+  DELETE (bodies on DELETE are permitted-but-unreliable and this one is not
+  optional) — declared above the parameterized routes (Invariant #4). One
+  confirmation naming the count; the result lists the ids that *existed*, not
+  the ids requested, so "3 of 5 removed" is sayable. Deliberately **not** an
+  MCP tool (an agent's bulk-delete is `clear_canvas` per id).
+- **FR-20 — A stated per-agent cap that refuses and never evicts** (AC 6):
+  `CANVAS_MAX_PER_AGENT` (default 100; env-tunable, wired into all three
+  compose files + `.env.example` — an unwired lever is the #1039/#1056 class)
+  is checked **inside `upsert_canvas`'s INSERT branch, in the same transaction
+  as the INSERT**, so it is not a check-then-act race. Updating is never
+  refused (the check is on INSERT only — a cap that froze updates would punish
+  exactly the well-behaved agent that reuses ids); at the cap the agent gets a
+  named **409** telling it to retire one. The ceiling reaches the client as
+  `canvas_max_per_agent` on `GET /api/settings/feature-flags` (a constant, so
+  the flag surface where non-boolean UI values already live — no new route,
+  and `List[CanvasSummary]` stays a bare array for the MCP tool), and
+  `CanvasPanel` warns *before* the refusal (`canvasHeadroom`), since the
+  person who can act on the bound is not the one who receives the 409. `0` =
+  "not told", renders nothing, so an older backend behaves as before.
+- **FR-21 — Pin is the reader's decision, never the agent's** (AC 5):
+  `agent_canvases.pinned` (dual-track: `agent_canvases_pinned` + Alembic
+  `0059_agent_canvases_pinned`, NOT NULL DEFAULT 0, no backfill) is written
+  only by the human pin route (owner-or-admin, audited) and is absent from
+  every agent-facing tool, pinned by a test. `audience` is the agent's decision
+  about who may *read*; `pinned` is the reader's about what they see *first*,
+  and an agent that could pin itself to the top would defeat the ordering. A
+  pin survives the agent rewriting the canvas. Order is pinned-first then
+  newest-updated, in the SQL **and** in `canvasUtils.sortCanvases` — the client
+  re-derives it because an optimistic pin or delete mutates the list in place.
+- **FR-22 — Living with many** (AC 4): `CanvasPanel.vue`, shared by Agent
+  Detail and the Workspace rail (one rendering layer, ent#475): search over
+  title and id once the list passes six, a height-bounded scrolling strip so a
+  long list does not cost the rail its other tabs, and an opt-in Manage mode
+  (age, stale mark, pin toggle, delete, bulk bar). Decidable rules are pure in
+  `canvasUtils.js` (`sortCanvases`, `filterCanvases`, `selectionState`,
+  `bulkDeletePrompt`, `bulkDeleteOutcome`, `canvasHeadroom`,
+  `canvasSelectorVisible`, `canvasAutoSelect`, `canvasSearchVisible`) —
+  vitest runs `environment: 'node'`, so a rule inside the SFC is one no test
+  can reach; `canvasPanelSelectorGate.spec.js` slices the SFC's gate
+  expressions out and **runs** them. Two rules exist because a search is
+  state the list can change under: with a query typed, a single hit still
+  shows its chip and becomes the selection (the old `visible > 1` gate hid it
+  with the previous canvas still on screen), and the search box **outlives a
+  shrink below the threshold** while a query is active — `query` has exactly
+  one writer, the box's `v-model`, so a count-gated box unmounting after a
+  delete (or the agent's own `clear_canvas` plus a rail refresh) left the
+  panel filtering on text nobody could see or clear.
+
 ### 5.19 Workspace conversation rail — the shell (trinity-enterprise#474, slice 1 of #472)
 
 - **Status**: ✅ Implemented (shell) · **ID**: `WORKSPACE_RAIL_SHELL`
@@ -1383,6 +1498,30 @@ well, and the agent never touches CSS.
 - **AC-8 — the empty state teaches**: "Nothing running right now" + **See what
   you can ask** — scrolls to the briefing hints when they are on screen, else
   opens the agent page's "what it can do".
+- **AC-9 — the body's scrollbar is thin and hidden at rest
+  (trinity-enterprise#608)**: the rail's one scroll axis wears the
+  overlay-scrollbar convention of editor panels — a ~6px rounded thumb on a
+  transparent track, invisible until the pointer is over the scroll region,
+  focus is inside it, or the body is scrolling (`:hover` / `:focus-within` /
+  an `is-scrolling` class held ~800ms past the last `scroll` event), fading
+  rather than popping. The scroll arm is not optional on macOS: in the default
+  "show scroll bars: automatically" mode the platform never reveals an overlay
+  bar on hover, only during scrolling — and with the rest colour transparent
+  it would otherwise show nothing, ever.
+  Reveal changes the thumb's colour ONLY — never `display`, `width`,
+  `scrollbar-width` or `overflow` — so content wraps byte-identically hovered
+  or not; the thin bar keeps its gutter in classic-scrollbar mode by design.
+  The affordance is hidden, the capability is not (wheel, trackpad, touch and
+  focus-into-view all work at rest — the #1789 bar). Both engines, one look:
+  the standard `scrollbar-width: thin` + `scrollbar-color` pair (Firefox,
+  Chromium ≥121, where it also disables the `::-webkit-scrollbar` rules) and the
+  WebKit pseudo-elements for Safari. The thumb is the tertiary ink of each
+  theme (gray-500 light / gray-400 dark) at reduced alpha, stronger under the
+  pointer; `sm:`-and-up only, so the mobile sheet keeps its native overlay
+  bars. Scoped to `PortalRail.vue` — the global `.dark ::-webkit-scrollbar`
+  rule in `style.css` is untouched; the sidebar list and the conversation
+  transcript are a follow-up once the feel is confirmed. Gated on a human feel
+  check on the running instance before the PR.
 - **Not in this slice (recorded on the issue)**: the Work tab's content
   (#457), re-homing Loops / Canvas / Files (#472's second child), the sidebar /
   thread tab strip / top band / Agent-details panel / drop target of the
@@ -1805,7 +1944,7 @@ well, and the agent never touches CSS.
 - **Status**: ✅ Implemented (2026-07-30)
 - **Description**: Third dashboard mode **List** (Timeline / Grid / List) that replaces the standalone Agents page — the dashboard is the single canonical fleet surface. The Agents page's row list (three responsive layouts, per-row toggles, bulk tag ops, filters, empty states) is extracted into `components/AgentListPanel.vue`, mounted through the existing view-mode machinery (`VIEW_MODES` + `localStorage['trinity-dashboard-view']` — selection persists per user like the other modes). `views/Agents.vue` is deleted.
 - **Key Features**:
-  - **Full Agents-page parity** (28-item inventory audited, zero silent losses): name search (slug + display label, #1642) and status filter live in the List toolbar under NEW persisted keys `trinity-dashboard-list-filter-name` / `-status` (a clean break — the old page-scoped `trinity-agents-filter-*` keys are no longer read); sort dropdown bound to `agentsStore.sortBy` with the comparator extracted to `utils/agentSort.js` (system rows pinned first; `success_desc` gains a no-data-to-bottom tiebreak); row checkboxes + sticky bulk toolbar with bulk Add/Remove Tag; avatar-half-out rows with SYSTEM/GHOST/Shared badges in the name cell and the subscription-pressure badge plus a **non-default-runtime** badge on the row's secondary line beside the slug, activity + sync-health dots, success-rate bar, exec/schedule stats, CapacityMeter (#2358 — at `lg` the header and every row are items of ONE CSS grid (subgrid), so columns resolve in one sizing context, and the label leads with the slug following as selectable secondary text per §1.3.1 FR-4); filtered-empty ("No matching agents" + Clear all) and chassis-level true-empty ("Get started" → onboarding wizard) states; toast feedback.
+  - **Full Agents-page parity** (28-item inventory audited, zero silent losses): name search (slug + display label, #1642) and status filter live in the List toolbar under NEW persisted keys `trinity-dashboard-list-filter-name` / `-status` (a clean break — the old page-scoped `trinity-agents-filter-*` keys are no longer read); sort dropdown bound to `agentsStore.sortBy` with the comparator extracted to `utils/agentSort.js` (system rows pinned first; `success_desc` gains a no-data-to-bottom tiebreak); row checkboxes + sticky bulk toolbar with bulk Add/Remove Tag; avatar-half-out rows with SYSTEM/GHOST/Shared badges in the name cell and the subscription-pressure badge plus a **non-default-runtime** badge on the row's secondary line beside the slug, activity + sync-health dots, success-rate bar, exec/schedule stats, CapacityMeter (#2358 — at `lg` the header and every row are items of ONE CSS grid (subgrid), so columns resolve in one sizing context, and the label leads with the slug following as selectable secondary text per §1.3.1 FR-4); filtered-empty ("No matching agents" + Clear all) and chassis-level true-empty ("Get started" → the chassis Create Agent modal since ent#581) states; toast feedback.
   - **Filters migrated to chassis controls**: the page's single-tag dropdown and owner dropdown are superseded by the dashboard's existing quick-tag filter (multi-tag, server-side, counts) and owner filter, which apply to all three views; the List's Clear-all clears both layers (local name/status + chassis tags/owner via a `clear-chassis-filters` emit). The "X/Y" badge counts Y as the full fleet.
   - **Create Agent moved to the chassis header** — available in all three modes (previously the Agents page was the only persistent create surface); modal close refreshes the fleet.
   - **System-row Run guard adopted from the grid**: the List hides the Run toggle on system rows (the grid tile already refused it); stopping the system agent remains available on its Agent Detail page.
@@ -1819,7 +1958,7 @@ well, and the agent never touches CSS.
 - **Status**: ✅ Implemented (2026-07-31)
 - **Description**: Hotkey-activated, non-intrusive live type-to-filter across all three dashboard modes (Timeline / Grid / List). Press `/` anywhere on the Dashboard (outside editable fields and modals) → a small floating filter pill appears over the pane area; typing filters agents live in whichever view is active. An accelerator, not a takeover: **nothing is persisted** — a reload always starts unfiltered, and navigating away clears the query (Dashboard unmount). Purely client-side over the already-loaded fleet list; **zero backend changes**.
 - **Key Features**:
-  - **Activation**: `/` on a Dashboard-scoped document keydown listener. Guards, in order: `defaultPrevented`/`repeat` → non-`/` key (layout-produced — de-DE Shift+7 works; `shiftKey` NOT excluded) → Ctrl/Meta/Alt chords → IME composition (`isComposing`) → editable targets (INPUT / TEXTAREA / SELECT / `isContentEditable`) → open modals (onboarding wizard, System View editor, Create Agent modal). Then `preventDefault` (blocks Firefox quick-find) + open pill + focus input.
+  - **Activation**: `/` on a Dashboard-scoped document keydown listener. Guards, in order: `defaultPrevented`/`repeat` → non-`/` key (layout-produced — de-DE Shift+7 works; `shiftKey` NOT excluded) → Ctrl/Meta/Alt chords → IME composition (`isComposing`) → editable targets (INPUT / TEXTAREA / SELECT / `isContentEditable`) → open modals (first-run overlay, System View editor, Create Agent modal). Then `preventDefault` (blocks Firefox quick-find) + open pill + focus input.
   - **Predicate**: case-insensitive substring over slug AND display label via `agentDisplayName()` (#1642 house rule, §1.3.1 FR-3) — typing `TOM` finds an agent labelled TOM whose slug is `tom-marketing-ops`. Layered inside the store `visibleAgents` seam (`stores/network.js`): `ownerFilteredAgents` (tag ∘ owner) → `visibleAgents` (∘ query), so Grid + List filter with zero pane rewiring; the Timeline joins by switching its `:agents` prop from raw `agents` to `visibleAgents` (rows, communication arrows, and schedule markers all derive from the prop). Description/tags matching is a recorded follow-up.
   - **Node invariant**: every `convertAgentsToNodes` call site reads the **pre-query** `ownerFilteredAgents` — a transient query must never degrade timeline-row node enrichment (system-first sort, purple treatment) after Esc. (The 30s refresh poll previously rebuilt nodes from the RAW list, ignoring even the owner filter — fixed to the same pre-query collection.)
   - **Honest state (pill)**: floating pill anchored to the non-scrolling chassis column, rendered whenever open OR a query is applied (an applied-but-hidden filter is the dishonest state this prevents). Live **"X of Y match"** count (X = post-query, Y = the set the view would show without the query but with tag/owner filters; secondary per-view filters — timeline "Active only", List panel name/status — may prune rendered rows below X by design: the pill claims *matching*, not *rendering*). Esc hint + × button; wrapper `role="search"`, input stays `type="text"`.
@@ -1867,12 +2006,12 @@ well, and the agent never touches CSS.
 ### 9.14 Dashboard View-Mode Shortcut + Pinned Switcher (#2536)
 - **Status**: ✅ Implemented (2026-09-06)
 - **Description**: The Timeline / Grid / List switcher renders at a mode- and fetch-independent position — it is the LAST child of the right-anchored header controls cluster, and nothing conditional may be appended after it — and `v` cycles the modes in the switcher's visual order (Timeline → Grid → List → Timeline). Frontend only; **zero backend changes**.
-- **Activation**: `v` on the same Dashboard-scoped document keydown listener as `/` (`V` without Shift — i.e. Caps Lock — also fires; `Shift+V` is inert by design, reserved). Guards shared, in order: `defaultPrevented`/`repeat` → non-hotkey key (layout-produced via `e.key`; `shiftKey` NOT excluded for `/`, excluded for `v`) → Ctrl/Meta/Alt chords → IME composition → editable targets (INPUT / TEXTAREA / SELECT / `isContentEditable`) → open modals (onboarding wizard, System View editor, Create Agent modal). One document listener for both keys; armed at mount above every `await` (design-system principle 23, `mountListenerOrdering.spec.js`).
+- **Activation**: `v` on the same Dashboard-scoped document keydown listener as `/` (`V` without Shift — i.e. Caps Lock — also fires; `Shift+V` is inert by design, reserved). Guards shared, in order: `defaultPrevented`/`repeat` → non-hotkey key (layout-produced via `e.key`; `shiftKey` NOT excluded for `/`, excluded for `v`) → Ctrl/Meta/Alt chords → IME composition → editable targets (INPUT / TEXTAREA / SELECT / `isContentEditable`) → open modals (first-run overlay, System View editor, Create Agent modal). One document listener for both keys; armed at mount above every `await` (design-system principle 23, `mountListenerOrdering.spec.js`).
 - **Cycle order = visual order = default**: one exported constant `VIEW_MODES = ['timeline','grid','list']` in `utils/viewModes.js` (a zero-import leaf, the #2199 `gridStorageKeys` shape) feeds the store whitelist, the switcher `v-for`, `nextViewMode()`, and the e2e specs; index 0 is the degrade default. An unknown mode wraps to `timeline`.
 - **Persistence**: the hotkey calls `setViewMode(mode)` (default `persist: true`), so `localStorage['trinity-dashboard-view']` and the active button stay in sync; the `?view=` deep-link path (`persist: false`, §9.9) is untouched.
 - **Discoverability**: the switcher wrapper carries `title="Switch view (press v to cycle)"` — the same pattern as the filter button's `title="Filter agents (press /)"`. No `aria-label` on the mode buttons (their accessible names `timeline` / `grid` / `list` are contract for five e2e specs).
 - **Layout invariant**: the switcher's bounding box is identical in all three modes, with and without the history spinner (pinned by `tests/unit/viewModeStructure.spec.js` — last element child, the required CI gate — and `e2e/dashboard-mode-switcher.spec.js`). Tidy up / Reset sit immediately to the switcher's left (the grid tools stay beside the Grid button); the spinner stays a `v-if` (its replacement is #1921's remit).
-- **Known gaps (recorded; the same exposure `/` has today and the same as a mouse click on the switcher)**: guard 5 covers the three chassis modals (onboarding wizard, System View editor, Create Agent) but not the NavBar Build Info modal (no `role=dialog`), FleetGrid's Tiles menu / New-department popover / assign mode, or the List panel's bulk-tag popovers — with focus on a button inside one of those, `v` switches the pane and an in-progress grid org interaction is discarded, exactly as clicking a mode button would. Widening guard 5 to pane-internal state would couple the chassis handler to `FleetGrid` internals; deliberately not done. **WCAG 2.1.4 (Character Key Shortcuts)**: `/` and `v` are single-character shortcuts with no remap/disable control (speech-input users can trigger them); the mitigation path is one "Keyboard shortcuts" toggle on a Settings surface covering both keys — filed under #1430, not built here (a Settings surface is a product decision).
+- **Known gaps (recorded; the same exposure `/` has today and the same as a mouse click on the switcher)**: guard 5 covers the three chassis modals (first-run overlay, System View editor, Create Agent) but not the NavBar Build Info modal (no `role=dialog`), FleetGrid's Tiles menu / New-department popover / assign mode, or the List panel's bulk-tag popovers — with focus on a button inside one of those, `v` switches the pane and an in-progress grid org interaction is discarded, exactly as clicking a mode button would. Widening guard 5 to pane-internal state would couple the chassis handler to `FleetGrid` internals; deliberately not done. **WCAG 2.1.4 (Character Key Shortcuts)**: `/` and `v` are single-character shortcuts with no remap/disable control (speech-input users can trigger them); the mitigation path is one "Keyboard shortcuts" toggle on a Settings surface covering both keys — filed under #1430, not built here (a Settings surface is a product decision).
 - **Out of scope / follow-ups**: `1`/`2`/`3` direct jumps — a ≈3-line extension of the dispatch map; the honest cost of cycle-only is the transit (Timeline → List is `v v`, and the first press mounts `FleetGrid`, whose mount starts the grid batch poll, before the second press unmounts it — a wasted `refreshBatchData()` round); for that follow-up note that AZERTY's top-row digits are Shift-produced, so a digit binding must not exclude `shiftKey`. Reverse cycle on `Shift+V` (the chord is reserved). Layout-independent `e.code` matching (`e.key` matching means the physical V key on a non-Latin layout will not match — the same trade-off as `/`). `role="group" aria-label="View mode" aria-keyshortcuts="v"` on the wrapper and `aria-pressed` on the mode buttons — both change what assistive-tech users perceive, so they are listed for #1430 rather than defaulted (neither renames the buttons). Removing the bespoke header spinner (#1921). Narrow-width chrome overlap (#1754 — collapse this cluster from the LEFT; the switcher is last for stability and must be the last to go).
 - **Flow**: folded into `dashboard-grid-view.md`, `dashboard-timeline-view.md`, `dashboard-list-view.md` (the ent#261 precedent — no standalone flow doc).
 
@@ -2428,11 +2567,56 @@ no such record gets one `client` bucket, since that browser holds one portal
 token at a time. **Never derived from token material** — the key is written back
 to localStorage in the clear.
 
-- Clamps: sidebar 200–480, side panel 280–560, and the conversation has a 480px
-  floor. When the viewport cannot fit all three the **rail auto-collapses** —
-  the conversation is never the column that gets squeezed — checked on window
-  resize as well as on drag, because a window dragged narrower is the same
-  situation arrived at differently.
+- Clamps: sidebar and side panel have pixel MINIMA (200 / 280 — where a column
+  stops being able to do its job) and **viewport-derived MAXIMA** (#2617). When
+  the viewport cannot fit all three the **rail auto-collapses** — the
+  conversation is never the column that gets squeezed — checked on window resize
+  as well as on drag, because a window dragged narrower is the same situation
+  arrived at differently.
+- **The maxima are derived, not constants (#2617, 2026-09-09).** They shipped as
+  `SIDEBAR_MAX = 480` / `RAIL_MAX = 560`, applied unconditionally, which made the
+  share a person could give a column *shrink* as their screen grew: the rail
+  stopped at ~22% of a 2560px display. Reported by the operator — *"it does not
+  go bigger than like 20% or something. I should be able to make it whatever I
+  want, say half the screen width."* — and it contradicted the file's own stated
+  intent ("deliberately generous — this is a person arranging their own screen"),
+  which an absolute pixel number cannot express. The replacement was already in
+  the file: a column may take everything left after its neighbour and
+  `CONVERSATION_MIN`, so the conversation's readable floor is the one rule that
+  stops a drag, at every screen size. `railMaxFor(viewport, sidebar)` /
+  `sidebarMaxFor(viewport, rail)`; both floored at the column's own minimum,
+  because a ceiling under the floor would invert the clamp and pin the column to
+  the *maximum*. The sidebar got the same treatment though nobody had hit its
+  cap: leaving one derived and one fixed would leave the next reader guessing
+  which rule the file follows.
+- **Desired width and effective width are two numbers (#2617, AC 4).** What is
+  stored and dragged is what the person asked for; what the grid renders is
+  `min(desired, derived max)`. So a layout arranged on a 2560px monitor is
+  clamped down for display on a laptop and comes back intact on the monitor —
+  clamping at the persistence boundary instead would have written the laptop's
+  ceiling over their choice on the first `commit()`, which is "silently
+  discarded" wearing a clamp. `enforceFit` therefore tests the EFFECTIVE widths:
+  testing the desired one would collapse a rail that fits, purely because a
+  wider one was once arranged elsewhere. Since the drag is now bounded by the
+  same floor `fitsThreeColumns` asks about, a drag can no longer break the fit
+  at all — what remains for auto-collapse is the case it was written for, a
+  window too narrow for three columns at their minima.
+- **The sidebar's ceiling is billed against what the rail RENDERS, and the
+  handle reports the effective width (#2617 review).** Two mistakes of one shape,
+  both caught in review. `sidebarMax` was measured against `effectiveRail`, which
+  carries no open/closed term, so a COLLAPSED rail was still charged at its full
+  open width — at 1280px the ceiling landed at 416 while 752 was free, *below*
+  the `SIDEBAR_MAX = 480` constant being replaced, so a narrow window came out
+  worse than before the change. It is measured against `railWidth` (the rendered
+  width: effective when open, the 48px strip when closed). And the two handles
+  bound `:value` to the DESIRE while `:max` was the derived ceiling — which lets
+  `aria-valuenow` exceed `aria-valuemax`, and makes `startValue` begin every drag
+  at a position the clamp discards, so the handle is inert for the whole distance
+  between the desire and the ceiling (several hundred px on a laptop). They bind
+  `columns.effectiveSidebar` / `columns.effectiveRail`. The desire still survives
+  untouched in storage and returns when there is room; a drag from a clamped
+  position deliberately replaces it, because the person is moving the handle they
+  can see.
 - The message cap has ONE definition (`--ws-message-max`, 1100px, wider than the
   `max-w-4xl` it replaces) and `PortalSkeleton` shares it: the skeleton exists to
   hold the footprint the loaded surface lands on (#2540), so a placeholder capped
@@ -2629,9 +2813,11 @@ to localStorage in the clear.
   interpolation, **capped at 256 KB with the cap stated in the UI** ("Showing the
   first 256 KB of 1.1 MB · Download the full file"); an image over 10 MB shows
   the card instead of fetching. Bytes are fetched **whole and sliced
-  client-side, with no `Range` header** — `main.py`'s CORS `allow_headers` does
-  not list `Range`, so a ranged preview dies silently on any deployment whose
-  portal base URL differs from the API's origin, and slicing also keeps preview
+  client-side, with no `Range` header** — a share preview is fetched same-origin
+  (#2733: `sharePreviewPath` slices the path from `/api/files/` and drops
+  whatever origin `portal_base_url` resolved to), so `main.py`'s missing `Range`
+  in CORS `allow_headers` no longer reaches it; the whole-blob read stays
+  because the cap is applied by client-side slicing, which also keeps preview
   off the download-counter path entirely.
 - **AC-5 — delete (ent#548)**, backend-enforced with the UI mirroring it off the
   roster payload (#2128):

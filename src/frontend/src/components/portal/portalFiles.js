@@ -165,10 +165,18 @@ export function fileActions(row, { owned = false } = {}) {
  * no portal base URL is configured (`get_portal_base_url()` falls back to
  * `public_chat_url`, which can be `''`), and `new URL(relative)` throws.
  *
- * The invariant this rests on: the portal page and `/api` are same-origin by
- * construction. A deployment that configures a portal base URL pointing
- * somewhere else has a cross-origin fetch, and that is the deployment's problem
- * — we return the URL unchanged rather than pretending otherwise.
+ * This helper keeps its honest general contract: reduce a url that is ALREADY
+ * same-origin, leave anything else alone. **Not for `/api/files/` share urls —
+ * use `sharePreviewPath`**, which knows which route it is holding.
+ *
+ * Regression note (#2733). A portal base URL pointing at a different origin is a
+ * SUPPORTED production topology, not a misconfiguration: ent#79 exists so an
+ * operator can put portal links on a dedicated public agent hostname beside the
+ * app hostname. Returning the absolute url there is what broke preview — the
+ * browser refused the fetch, because `connect-src` lists `'self'` plus two
+ * build-time hosts while the portal base URL is a per-deployment SETTING no
+ * static header can carry (and CORS would refuse it a second time). The answer
+ * is not to widen the header but to stop asking cross-origin.
  */
 export function sameOriginPath(url, base = '') {
   const raw = String(url || '')
@@ -224,9 +232,155 @@ export async function errorDetail(err, fallback = 'Something went wrong.') {
   return fallback
 }
 
-/** Mark a preview read without mutating the original download URL. */
+/**
+ * The route whose bytes the portal page's OWN origin is guaranteed to serve.
+ * `portal_documents` builds every share url as `{portal_base}/api/files/{id}?…`,
+ * and `/api/` is proxied to the same backend on every hostname that fronts it
+ * (prod `nginx.conf`, the Vite dev proxy, and `api.js`'s empty `baseURL` — the
+ * Workspace could not load at all otherwise).
+ *
+ * @csp-coupled: `connect-src` cannot carry `portal_base_url`'s origin, so the
+ * preview fetch must not need it. Pinned by tests/unit/test_1400_csp_blob_preview.py.
+ */
+const SHARED_FILE_ROUTE = '/api/files/'
+
+/**
+ * Mark a preview read without mutating the original download URL — and ask the
+ * portal page's own origin for the bytes (#2733).
+ *
+ * The origin carries no authority here: `/api/files/{id}` is public and the
+ * 192-bit `?sig=` token is the sole credential, compared with `compare_digest`
+ * against the stored row rather than signed over the URL. Dropping the origin
+ * therefore costs nothing and buys a fetch that CSP `connect-src 'self'` and
+ * CORS both allow. `download_url` is untouched: it stays the shareable link the
+ * anchor-click Download uses, with #2582's one-way `&download=1` intact.
+ *
+ * The slice is taken FROM the route, not from the path root, because that is the
+ * exact inverse of the server's `f"{base}/api/files/{fid}"` — so a portal base
+ * URL carrying a path prefix (`https://host/trinity`) resolves to the same
+ * `/api/files/{id}` on this origin instead of a path this origin never serves.
+ * `lastIndexOf` rather than `indexOf` for the same reason: the route is appended
+ * last. The output is therefore ALWAYS either unchanged or a path under
+ * `/api/files/` — the rewrite cannot be steered at another route.
+ *
+ * A url with no `/api/files/` in its path is left to `sameOriginPath`'s unchanged
+ * behaviour: we do not know what it is, so we do not invent a local path for it.
+ *
+ * The caller fetches this with a bare `fetch`, NOT through `api.js` — that the
+ * url is now same-origin makes an `api.js` call look tempting, and it would
+ * attach the platform JWT to a route whose whole design is that the `sig` token
+ * is the only credential.
+ *
+ * The route check SELECTS a route; it does not SANITISE one. `%2f` survives
+ * `new URL()` un-decoded, so do not reuse this helper for a user-supplied URL.
+ * It is safe here because `download_url` is server-built from an admin-set
+ * `portal_base_url` plus a DB id, and the fetch carries no ambient credential
+ * (Trinity sets no cookies; the portal authenticates with a Bearer header).
+ */
 export function sharePreviewPath(url, base) {
   const parsed = new URL(url, base)
   parsed.searchParams.set('preview', '1')
+  const at = parsed.pathname.lastIndexOf(SHARED_FILE_ROUTE)
+  // Path + query only — never the origin, whatever `portal_base_url` resolved to.
+  if (at >= 0) return `${parsed.pathname.slice(at)}${parsed.search}`
   return sameOriginPath(parsed.href, base)
+}
+
+// ---------------------------------------------------------------------------
+// Who a file goes to (#2794)
+// ---------------------------------------------------------------------------
+//
+// The rail's send zone has always aimed at exactly ONE agent — a `Send to`
+// select that quietly defaults to the first participant. In a 1:1 that is the
+// only possible answer and nobody notices. In a ROOM it is a trap that produced
+// the reported bug end to end: the client sends a screenshot from the rail while
+// looking at a room with two agents in it, the file reaches the first name in
+// the list, and the message they then write — "@sidekick what is in this
+// image?" — is addressed to the agent that did not get it.
+//
+// The room's own drop zone already fans out (`PortalRoom.vue` uploads to every
+// participant). So the two surfaces disagreed about what "send a file to this
+// chat" means, and the one with the visible select was the one that was wrong.
+//
+// Fixed in the rules, not in the template: a room's default recipient is
+// EVERYONE in it, with the individual agents still selectable underneath for the
+// person who genuinely means one of them.
+
+/** The sentinel for "everyone in this chat". Not a legal agent name, so it can
+ *  never collide with one. */
+export const ALL_PARTICIPANTS = '*'
+
+/**
+ * The `Send to` options, in order, for a chat with these participants.
+ *
+ * A 1:1 gets no fan-out entry: with one agent "everyone" and "that agent" are
+ * the same recipient, and offering both would be a choice with no difference.
+ */
+export function uploadTargets(participants = []) {
+  const names = (participants || []).filter(Boolean)
+  if (names.length < 2) return names.map((name) => ({ value: name, label: name }))
+  return [
+    { value: ALL_PARTICIPANTS, label: `Everyone in this chat (${names.length} agents)` },
+    ...names.map((name) => ({ value: name, label: name })),
+  ]
+}
+
+/**
+ * The default recipient — everyone, wherever "everyone" is more than one.
+ *
+ * This is the line that fixes the reported bug. It is stated as its own function
+ * rather than an initial `ref()` value because a component's initial value is
+ * not reachable from a node-env test, and "a room sends to all of them" is
+ * precisely the claim that has to stay true.
+ */
+export function defaultUploadTarget(participants = []) {
+  const names = (participants || []).filter(Boolean)
+  if (names.length >= 2) return ALL_PARTICIPANTS
+  return names[0] || null
+}
+
+/**
+ * The agents a chosen target actually resolves to.
+ *
+ * Fails toward the fan-out: a target that is no longer a participant (an agent
+ * left the room while the panel was open) resolves to everyone rather than to
+ * nobody. A file sent to one agent too many is recoverable — the rail has a
+ * delete — and a file sent to nobody is the silent loss this whole issue is about.
+ */
+export function resolveRecipients(target, participants = []) {
+  const names = (participants || []).filter(Boolean)
+  if (!names.length) return []
+  if (target === ALL_PARTICIPANTS) return names
+  return names.includes(target) ? [target] : names
+}
+
+/**
+ * What the send zone's button says it will do. Named, never "the agent" — the
+ * person is about to hand over a file and should be able to read where it goes
+ * before they let go of it.
+ */
+export function uploadTargetLabel(target, participants = []) {
+  const names = resolveRecipients(target, participants)
+  if (!names.length) return 'the agent'
+  if (names.length === 1) return names[0]
+  if (names.length === 2) return `${names[0]} and ${names[1]}`
+  return `all ${names.length} agents`
+}
+
+/**
+ * The receipt. Both halves of a fan-out are stated — how many files, to how many
+ * agents — because "Sent file.png" over a two-agent fan-out is exactly the
+ * reassurance that was wrong before: it was true, and it was read as "both of
+ * them have it".
+ */
+export function uploadReceipt({ files = [], recipients = [] } = {}) {
+  const f = files.filter(Boolean)
+  if (!f.length || !recipients.length) return ''
+  const what = f.length === 1 ? `“${f[0]}”` : `${f.length} files`
+  const who = recipients.length === 1
+    ? recipients[0]
+    : recipients.length === 2
+      ? `${recipients[0]} and ${recipients[1]}`
+      : `all ${recipients.length} agents`
+  return `Sent ${what} to ${who}.`
 }

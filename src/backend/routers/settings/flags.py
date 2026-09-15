@@ -45,7 +45,13 @@ from services.platform_audit_service import platform_audit_service, AuditEventTy
 from services import operator_intake_service, telemetry_sharing_service
 
 # Import from settings_service (these are re-exported for backward compatibility)
+from services.subscription_service import (
+    connect_agents_to_first_credential,
+    is_claude_auth_configured,
+)
+
 from services.settings_service import (
+    get_gemini_api_key,
     get_anthropic_api_key,
     get_github_pat,
     get_google_api_key,
@@ -135,7 +141,6 @@ async def get_public_feature_flags(
     still keep them out of the unauthenticated surface.
     """
     from config import (
-        GEMINI_API_KEY,
         VOICE_ENABLED,
         VOIP_ENABLED,
         MCP_AGENT_CHAT_PULL_ENABLED,
@@ -144,11 +149,15 @@ async def get_public_feature_flags(
     )
     from services.entitlement_service import entitlement_service
     from services import a2a_outbound_service
+    from models import CANVAS_MAX_PER_AGENT
     # Function-local (#2217): a top-level import would pull the whole canary
     # package into the settings-router load; the handler pattern here is
     # function-local imports.
     from services.canary_service import canary_service
-    voice_available = VOICE_ENABLED and bool(GEMINI_API_KEY)
+    # ent#582: the Gemini key resolves per request (Settings → env), so a key
+    # saved in the first-run flow lights these flags without a restart.
+    gemini_key = bool(get_gemini_api_key())
+    voice_available = VOICE_ENABLED and gemini_key
     # Brain Orb flags are RUNTIME-RESOLVED (#85): system_settings override →
     # BRAIN_ORB_* env opt-in → OFF. An admin flip via PUT /api/settings/brain-orb
     # is reflected here without a backend restart.
@@ -159,7 +168,7 @@ async def get_public_feature_flags(
         "workspace_available": voice_available and settings_service.is_workspace_enabled(),
         # VoIP telephony (VOIP-001, #1056) — default OFF, mirrors workspace_available.
         # Also requires a per-agent voip_bindings row to actually function.
-        "voip_available": VOIP_ENABLED and bool(GEMINI_API_KEY),
+        "voip_available": VOIP_ENABLED and gemini_key,
         # Brain Orb (#58, trinity-enterprise) — gates the per-agent /agents/:name/brain
         # route + tab. Static render needs no Gemini; the per-agent capability gate is
         # the template.yaml `brain-orb` token, checked frontend-side.
@@ -171,7 +180,7 @@ async def get_public_feature_flags(
         # on AND the agent carries the `brain-orb` capability. Default OFF.
         "brain_orb_voice_available": brain_orb_enabled
         and settings_service.is_brain_orb_voice_enabled()
-        and bool(GEMINI_API_KEY),
+        and gemini_key,
         # Brain Orb KB-write surface (#58 Phase 4a, trinity-enterprise#61) — owner-gated
         # capture/link. DISTINCT kill-switch from brain_orb_available so writes can be
         # disabled without downing read/voice. UI-only hint (the write routes independently
@@ -214,6 +223,20 @@ async def get_public_feature_flags(
         # routes enforce it themselves.
         "a2a_outbound_available": a2a_outbound_service.is_outbound_enabled(),
         "platform_default_model": settings_service.get_platform_default_model(),
+        # ent#553: the per-agent canvas ceiling, so the UI can WARN before the
+        # agent meets the refusal instead of only reporting it afterwards. An
+        # INTEGER, not a flag — `platform_default_model` above is the precedent
+        # for a non-boolean here, and this is the same shape of thing: a value
+        # the browser needs to render a surface honestly.
+        #
+        # Surfaced here rather than on a new route because it is a CONSTANT, not
+        # per-agent state: the client already knows the count (it holds the
+        # list), so the ceiling is the only missing half, and a dedicated
+        # endpoint would owe Invariant #13 a third surface for one integer.
+        # Not folded into the canvas LIST response either — that would turn
+        # `List[CanvasSummary]` into an envelope and break the MCP tool and the
+        # Workspace, both of which read the bare array.
+        "canvas_max_per_agent": CANVAS_MAX_PER_AGENT,
         # Install provenance (#2380). A STRING, not a boolean — `platform_default_model`
         # above is the precedent for a non-boolean on this surface. One of
         # do-marketplace / vultr-marketplace / script / unknown, recorded once at
@@ -227,6 +250,15 @@ async def get_public_feature_flags(
         # including the entire managed fleet, whose plain-HTTP-over-Tailscale shape
         # is indistinguishable from an unhardened droplet by any other signal.
         "marketplace_install": settings_service.is_marketplace_install(),
+        # Whether the first-run hardening guide is offered here. A SEPARATE gate
+        # from `marketplace_install` (#2380): the guide's subject is "public
+        # cloud VM at a bare IP with no domain", which is equally true of a
+        # droplet installed by following the DigitalOcean deploy doc
+        # (`do-script`). Widened to that provenance, NOT to all installs —
+        # provenance is why the gate exists, and the managed fleet's
+        # plain-HTTP-behind-a-tunnel shape would otherwise carry the card
+        # permanently.
+        "hardening_guide_eligible": settings_service.is_hardening_guide_eligible(),
         # What URL this instance ADVERTISES itself at: unconfigured | http |
         # https-ip | https-domain. Derived from `public_chat_url` (else the baked
         # FRONTEND_URL) — nothing probes a socket or reads a certificate, because
@@ -235,13 +267,21 @@ async def get_public_feature_flags(
         # admin-only and this surface is not. The guide's copy must say
         # "advertises", never assert a verified certificate.
         "install_tls_posture": settings_service.get_install_tls_posture(),
+        # #2691: has that advertised name ever actually served a request? The
+        # posture above is a string an admin typed; this is the one thing the
+        # instance OBSERVED — the web server in front asked to obtain a
+        # certificate for exactly that host, which cannot happen unless DNS
+        # resolves here and the traffic arrives. It is what lets the first-run
+        # step say "saved, waiting for the first visit" instead of showing a
+        # green tick over a domain that may never have worked.
+        "public_url_reached": settings_service.is_public_url_reached(),
         # Onboarding (trinity-enterprise#52) — is Claude auth configured at all?
-        # Trinity agents can't think without it, so the first-run wizard uses
+        # Trinity agents can't think without it, so the first-run flow uses
         # this to surface the one hard setup gate. True if a platform-wide
         # Anthropic key exists (DB or env) OR any Claude subscription is
-        # registered. Non-sensitive: a boolean, never the key itself.
-        "claude_auth_configured": bool(settings_service.get_anthropic_api_key())
-        or db.has_any_subscription(),
+        # registered — one helper, shared with the ent#582 first-credential
+        # check. Non-sensitive: a boolean, never the key itself.
+        "claude_auth_configured": is_claude_auth_configured(),
         # #847 Phase 0 — enterprise entitlements. Empty list means OSS
         # build (or TRINITY_OSS_ONLY=1). UI uses this to hide
         # enterprise-only tabs cleanly without server-side conditional

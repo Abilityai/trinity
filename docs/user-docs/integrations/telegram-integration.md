@@ -7,7 +7,7 @@ Connect agents to Telegram bots. Supports direct messages, group chats, @mention
 ## Concepts
 
 - **1:1 Mapping** -- Each agent has its own dedicated Telegram bot. Bots cannot be shared across agents.
-- **Webhook** -- Trinity receives Telegram updates via a webhook URL. Requires `public_chat_url` to be configured in Settings.
+- **Webhook** -- Trinity receives Telegram updates via a webhook URL. Requires the **Public URL** (`public_chat_url`) to be set under **Settings → General**.
 - **Trigger Mode** -- In groups, controls whether the bot responds to all messages or only @mentions and direct replies.
 - **Privacy Mode** -- A Telegram-level setting that determines which messages the bot receives in groups. Must be disabled for "all messages" mode to work.
 
@@ -71,9 +71,9 @@ After connecting:
 | Status | Meaning |
 |--------|---------|
 | Green "Connected" | Bot configured, webhook active |
-| Yellow "Connected (no webhook)" | Bot configured, but `public_chat_url` not set in Settings -- messages won't be received |
+| Yellow "Bot connected but webhook not registered" | Bot configured, but no Public URL set in Settings -- messages won't be received |
 
-If you see the yellow warning, go to **Settings** and configure `public_chat_url` with your Trinity instance's public URL. The webhook registers automatically once saved.
+If you see the yellow warning, go to **Settings → General** and set **Public URL** to your Trinity instance's public URL. The webhook registers automatically once saved.
 
 ### Message Flow
 
@@ -82,6 +82,10 @@ User sends message -> Telegram API -> Trinity webhook -> Agent -> Response -> Te
 ```
 
 The agent receives the message text plus context for any media (photos, documents, voice notes). Responses are sent back as replies in the same chat.
+
+### Formatting in replies
+
+Agent replies are written in Markdown and rendered as Telegram formatting: bold, italic, strikethrough, inline code, fenced code blocks (with syntax highlighting when a language is given), headings, links, bullet lists, horizontal rules, `||spoilers||`, and `>` blockquotes (long ones collapse as expandable quotes). Tables are rendered as preformatted text. Literal `<`, `>` and `&` in a reply — a code snippet, an HTML tag, a comparison — survive intact instead of breaking the message's formatting. A reply longer than Telegram's 4,096-character limit is split into several messages, and each chunk keeps its formatting intact: a bold run or code block that straddles a cut is closed at the end of one chunk and reopened in the next. Proactive messages and completion reports use the same rendering.
 
 ### Knowing the Agent Is Working
 
@@ -105,15 +109,15 @@ Group chats have a per-group consent flag (on by default) controlling whether th
 
 ### Voice Messages
 
-Voice notes sent to the bot are automatically transcribed with Google Gemini 2.0 Flash and delivered to the agent as text prefixed with the 🎙️ emoji. Transcription is transparent — users just send voice notes normally.
+Voice notes sent to the bot are automatically transcribed with Gemini (`gemini-3.5-flash` unless `GEMINI_TRANSCRIPTION_MODEL` says otherwise) and delivered to the agent as text prefixed with the 🎙️ emoji. Transcription is transparent — users just send voice notes normally.
 
 | Constraint | Limit |
 |------------|-------|
 | Duration | 5 minutes |
 | File size | 10 MB |
-| Config required | `GEMINI_API_KEY` set on the backend |
+| Config required | A platform Gemini key — set in **Settings → Integrations** or as `GEMINI_API_KEY` on the backend (see [Platform Keys](../credentials/platform-keys.md#gemini)) |
 
-If transcription fails or `GEMINI_API_KEY` is not configured, the agent receives a placeholder such as `[Voice message received — transcription failed]` so the conversation still progresses.
+If transcription fails or no Gemini key is configured, the agent receives a placeholder such as `[Voice message received — transcription failed]` so the conversation still progresses.
 
 ### Voice Replies (Outbound)
 
@@ -194,8 +198,9 @@ Click the remove button next to a group to deactivate it. The bot will stop resp
 | `/api/agents/{name}/telegram` | DELETE | Remove bot binding |
 | `/api/agents/{name}/telegram/test` | POST | Verify bot or send test message |
 | `/api/agents/{name}/telegram/groups` | GET | List group configs |
-| `/api/agents/{name}/telegram/groups/{id}` | PUT | Update trigger mode / welcome |
+| `/api/agents/{name}/telegram/groups/{id}` | PUT | Update trigger mode / welcome, and the group's `allow_proactive` consent flag (human-only) |
 | `/api/agents/{name}/telegram/groups/{id}` | DELETE | Deactivate group config |
+| `/api/agents/{name}/telegram/groups/{chat_id}/messages` | POST | Post a proactive message to a connected group (owner-gated, rate-limited; what `send_group_message(channel_type: "telegram")` calls) |
 | `/api/agents/{name}/telegram/progress-indicator` | PUT | Turn the in-progress indicator on or off for this binding (human-only) |
 
 See [Backend API Docs](http://localhost:8000/docs) for full request/response schemas.
@@ -227,7 +232,7 @@ curl -X PUT http://localhost:8000/api/agents/my-agent/telegram/groups/1 \
 - **Group re-add required** -- After changing Privacy Mode, the bot must be removed and re-added to existing groups.
 - **Welcome messages require admin** -- The bot needs admin rights in the group to see member join events.
 - **20MB file limit** -- Media files larger than 20MB cannot be processed.
-- **Voice transcription limits** -- Voice notes over 5 minutes or 10MB are rejected; transcription requires `GEMINI_API_KEY` on the backend.
+- **Voice transcription limits** -- Voice notes over 5 minutes or 10MB are rejected; transcription requires a platform Gemini key.
 - **No edited message handling** -- Edited messages are not re-processed.
 
 ## Troubleshooting
@@ -239,18 +244,26 @@ curl -X PUT http://localhost:8000/api/agents/my-agent/telegram/groups/1 \
 3. **Check trigger mode**: In Trinity, verify the group is set to the expected trigger mode
 4. **Check agent status**: Ensure the agent container is running
 
-### "Connected (no webhook)" warning
+### "Bot connected but webhook not registered" warning
 
-Configure `public_chat_url` in Settings with your Trinity instance's publicly accessible URL. The webhook registers automatically.
+Set **Public URL** under **Settings → General** to your Trinity instance's publicly accessible URL. The webhook registers automatically.
 
 ### Messages delayed or not arriving
 
 - Check backend logs for webhook errors
-- Verify your `public_chat_url` is accessible from the internet
+- Verify your Public URL is accessible from the internet
 - Telegram may retry failed webhooks; check for 429 (rate limit) errors
 
 ## See Also
 
-- [Slack Integration](slack-integration.md)
-- [Agent Sharing](../sharing-and-access/agent-sharing.md)
+**Trinity docs:**
+
+- [Slack Integration](slack-integration.md) · [WhatsApp Integration](whatsapp-integration.md)
+- [Agent Sharing](../sharing-and-access/agent-sharing.md) — the Sharing tab that hosts the Telegram dialog
 - [Public Links](../sharing-and-access/public-links.md)
+- [Voice Replies](../advanced/voice-replies.md) — spoken replies across channels
+
+**External references:**
+
+- [Telegram Bot API](https://core.telegram.org/bots/api) — the API Trinity calls for webhooks, messages and reactions
+- [Telegram bot features: privacy mode](https://core.telegram.org/bots/features#privacy-mode) — what a bot sees in groups, and why "all messages" mode needs it off

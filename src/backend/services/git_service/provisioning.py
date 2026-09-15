@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 
 
-from . import gitignore, remotes
+from . import gitignore, remotes, token_scrub
 
 
 MAX_INSTANCE_ID_RETRIES = 5
@@ -399,6 +399,34 @@ async def initialize_git_in_container(
         timeout=5,
     )
 
+    # Step 2b (ent#615): install the credential helper and make `github_pat`
+    # resolvable through it, BEFORE anything writes a remote or fetches.
+    #
+    # This is also what stops this endpoint creating the orphan class it was
+    # named for. It used to push with the resolved — often GLOBAL — platform
+    # PAT while baking no git env, persisting no per-agent row and writing no
+    # `.env`, so the agent's only credential ended up inside its own
+    # `origin` URL. The seed puts it where the helper reads it instead, and the
+    # URL below is credential-less.
+    #
+    # A tokenless agent (ent#123 anonymous public template) legitimately
+    # resolves nothing — that is a read-only clone, not a failure. A PAT that
+    # was supplied and could NOT be placed IS a failure, and saying so here
+    # beats a cryptic auth error three commands later.
+    seed_report = await token_scrub.scrub_git_remote_tokens(
+        agent_name, git_dir=git_dir, seed_pat=github_pat
+    )
+    if github_pat and not seed_report.get("helper_ok"):
+        return GitInitResult(
+            success=False,
+            git_dir=git_dir,
+            error=(
+                "Could not install the git credential for this agent: the "
+                "credential helper resolved nothing after the token was "
+                "placed. Nothing was changed."
+            ),
+        )
+
     # Step 3: Initialize git and try to preserve remote history
     # Commands marked required=True will abort on failure;
     # optional commands (like fetch) may fail for empty repos.
@@ -415,7 +443,12 @@ async def initialize_git_in_container(
         ('git config --global maintenance.auto false', True),
         ('git config --global maintenance.autoDetach false', True),
         ('git init', True),
-        (remotes._remote_seturl_subcommand(remotes._git_remote_url(github_pat, github_repo)), True),
+        # ent#615: credential-LESS origin. The credential reaches `git fetch`
+        # below — and every later fetch/push — through the `trinity` credential
+        # helper, which the caller installs and PROVES before this runs. Order
+        # matters: a token-free origin registered before a working helper is a
+        # repo nothing can fetch.
+        (remotes._remote_seturl_subcommand(remotes._credentialless_remote_url(github_repo)), True),
         ('git fetch origin', False),  # Optional — remote may be empty
     ]
 

@@ -275,6 +275,7 @@ TABLES = {
             queued_at TEXT,
             backlog_metadata TEXT,
             fan_out_id TEXT,
+            fan_out_task_id TEXT,
             retry_count INTEGER DEFAULT 0,
             loop_id TEXT,
             claim_token TEXT,
@@ -286,6 +287,11 @@ TABLES = {
             source_channel_thread TEXT,
             source_channel_agent TEXT,
             source_channel_client TEXT,
+            -- ent#555: which canvas the user had OPEN when they sent this turn.
+            -- Context, never authority — it says what is being discussed and
+            -- never widens what the agent may read or write. Validated against
+            -- the agent's own canvases at the boundary that stamps it.
+            open_canvas_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -528,6 +534,11 @@ TABLES = {
             -- 'brief' | 'status-board'); NULL = stacked blocks. A property of
             -- the surface, like `audience`; a block's `slot` lives in `blocks`.
             template TEXT,
+            -- ent#553: pinned canvases sort above the rest so the default one
+            -- and the ones in daily use stay reachable as the pile grows. A
+            -- HUMAN's ordering preference, not the agent's — the write path
+            -- never sets it, so an agent cannot pin itself to the top.
+            pinned INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (agent_name, canvas_id)
         )
     """,
@@ -911,6 +922,40 @@ TABLES = {
     # -------------------------------------------------------------------------
     # Public Links Tables
     # -------------------------------------------------------------------------
+    # ent#554 — a share link for ONE canvas.
+    #
+    # Deliberately NOT a row in `agent_public_links`, even though that table has
+    # a `type` column that looks made for this. Nothing filters on it:
+    # `get_public_link_by_token` / `is_link_valid` / `routers/public.py::
+    # _validate_public_link` all resolve a token whatever its type, so a canvas
+    # row added there would ALSO be a working public-chat token — the exact
+    # silent widening this feature's AC forbids. A separate table means a canvas
+    # token cannot resolve on a chat route at all, by construction rather than
+    # by every consumer remembering to check.
+    "agent_canvas_shares": """
+        CREATE TABLE IF NOT EXISTS agent_canvas_shares (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            canvas_id TEXT NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            -- 'authorized' (default) = the people who could already see this
+            -- canvas; opening it requires signing in and the server re-checks
+            -- access. 'public' = anyone holding the URL, an explicit separate
+            -- choice. Default is the narrow one: a share must never widen the
+            -- ent#438 audience model by accident.
+            scope TEXT NOT NULL DEFAULT 'authorized',
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT,
+            -- Set, never deleted: a revoked link must be able to SAY it was
+            -- revoked rather than 404 blankly, which it cannot do if the row
+            -- is gone.
+            revoked_at TEXT,
+            last_viewed_at TEXT,
+            view_count INTEGER NOT NULL DEFAULT 0
+        )
+    """,
+
     "agent_public_links": """
         CREATE TABLE IF NOT EXISTS agent_public_links (
             id TEXT PRIMARY KEY,
@@ -1785,6 +1830,9 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_agent ON agent_reports(agent_name, created_at DESC)",
     # ent#438 — the agent-page read is "this agent's canvases, newest first".
     "CREATE INDEX IF NOT EXISTS idx_agent_canvases_agent ON agent_canvases(agent_name, updated_at DESC)",
+    # ent#554 — the token lookup is the hot path (every view of a shared link).
+    "CREATE INDEX IF NOT EXISTS idx_canvas_shares_token ON agent_canvas_shares(token)",
+    "CREATE INDEX IF NOT EXISTS idx_canvas_shares_canvas ON agent_canvas_shares(agent_name, canvas_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_agent ON agent_evaluations(agent_name, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_execution ON agent_evaluations(execution_id)",
     # ent#366 — one rating per person per thing. The UNIQUE is what makes
@@ -1980,6 +2028,10 @@ INDEXES = [
 
     # Execution fan-out / backlog / retry partial indexes
     "CREATE INDEX IF NOT EXISTS idx_executions_fan_out ON schedule_executions(fan_out_id)",
+    # #2524: the join counts non-terminal rows for one batch on every fan-out
+    # terminal; the single-column index above cannot serve that without
+    # reading every row of the batch.
+    "CREATE INDEX IF NOT EXISTS idx_executions_fan_out_status ON schedule_executions(fan_out_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_executions_queued "
     "ON schedule_executions(agent_name, queued_at) "
     "WHERE status = 'queued'",

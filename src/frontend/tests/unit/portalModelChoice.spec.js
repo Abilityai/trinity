@@ -252,7 +252,10 @@ describe('the curated set comes from the ONE catalog', () => {
 describe('the composer is wired to the rules', () => {
   it('uses the BaseSelect primitive, never a hand-rolled lookalike', () => {
     expect(CODE).toContain("import BaseSelect from '../base/BaseSelect.vue'")
-    expect(CODE).toMatch(/<BaseSelect[\s\S]{0,400}data-testid="portal-model-picker"/)
+    // 600, not 400: #2662 moved the picker into the composer's control row, four
+    // levels deeper, and the same eight attributes now cost ~420 characters of
+    // indentation. The window bounds a search; it is not a claim about size.
+    expect(CODE).toMatch(/<BaseSelect[\s\S]{0,600}data-testid="portal-model-picker"/)
   })
 
   it('renders on the SERVER’s answer, never on a feature flag', () => {

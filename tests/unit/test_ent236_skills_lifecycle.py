@@ -181,6 +181,27 @@ try:  # noqa: SIM105
 except Exception:  # noqa: BLE001
     pass
 
+def _real_url_validation():
+    """Load `utils/url_validation.py` by PATH, bypassing the stub table.
+
+    Pure stdlib, so there is nothing heavy to avoid — the module is only in the
+    stub table because the names have to exist before `skill_service` imports
+    them, and a stub that lies about the scrubbers would silently disarm the
+    one test that checks them.
+    """
+    import importlib.util as _ilu
+
+    if not hasattr(_real_url_validation, "_mod"):
+        _spec = _ilu.spec_from_file_location(
+            "_ent236_real_url_validation",
+            Path(__file__).resolve().parents[2] / "src/backend/utils/url_validation.py",
+        )
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _real_url_validation._mod = _mod
+    return _real_url_validation._mod
+
+
 _STUBS = {
     "database": {"db": MagicMock()},
     "services.settings_service": {
@@ -214,6 +235,18 @@ _STUBS = {
         "ALLOWED_SKILLS_LIBRARY_HOSTS": {"github.com", "www.github.com"},
         "EmbeddedCredentialError": type("EmbeddedCredentialError", (ValueError,), {}),
         "reject_embedded_credentials": lambda url: url,
+        # `skill_source_clone` (imported by skill_service) takes these two, so
+        # by the comment above they belong here. They were missing, which made
+        # this whole module's collection depend on some EARLIER file having
+        # already imported the real module — exactly the file-order failure the
+        # comment warns about, and it surfaces as an ImportError at collection.
+        #
+        # The REAL implementations, not stubs: `test_persisted_error_is_pat_scrubbed`
+        # asserts the durable error row is scrubbed, so a pass-through here
+        # would make that test pass against no scrubber at all. They are pure
+        # (stdlib-only) functions, so loading them by path costs nothing.
+        "scrub_url_credentials_in_text": _real_url_validation().scrub_url_credentials_in_text,
+        "strip_url_credentials": _real_url_validation().strip_url_credentials,
     },
     # `get_breaker_redis` is unused by skill_service (it holds its own client),
     # but skills_sync_service imports it here; `SingleFlightLock` (#1920) is now
@@ -664,7 +697,12 @@ class TestSyncStatusPersistence:
         class _FakeClone:
             def __init__(self, *a, **kw):
                 self.path = service.library_root / src.id
-            def sync(self, auth_url, expected_sha=None):
+            def sync(self, url, expected_sha=None, github_pat=""):
+                # ent#615: the URL handed to a clone is credential-less and the
+                # PAT is a separate argument, carried into the git child's
+                # environment rather than spliced into the URL.
+                assert "@" not in url, f"clone URL carries userinfo: {url!r}"
+                self.last_pat = github_pat
                 if isinstance(outcome, BaseException):
                     raise outcome
                 return dict(outcome)

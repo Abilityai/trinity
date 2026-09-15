@@ -93,9 +93,13 @@
           </div>
         </template>
 
-        <p class="mt-6 text-xs text-gray-400 dark:text-gray-500">
-          Install {{ installationId }} · the funnel is local-only; fleet benchmarks are
-          read from the hosted service only while usage sharing is on.
+        <!-- ent#545 — the enterprise read never mints the install id, so it is
+             `null` until a legitimate writer has minted it; the footer says so
+             (the decision lives in funnelFormat.js) instead of a blank "Install ·". -->
+        <p class="mt-6 text-xs text-gray-500 dark:text-gray-400">
+          <span :class="{ italic: installFooter.state !== 'minted' }">{{ installFooter.text }}</span>
+          · the funnel is local-only; fleet benchmarks are read from the hosted
+          service only while usage sharing is on.
         </p>
       </template>
     </div>
@@ -106,6 +110,7 @@
 import { ref, computed, onMounted } from 'vue'
 import api from '../../api'
 import FleetBenchmarkCard from './FleetBenchmarkCard.vue'
+import { installIdFooter } from './funnelFormat'
 
 // Labels for the setup-funnel steps (order = funnel order). Mirrors the
 // backend allow-list; the enterprise endpoint returns counts keyed by these.
@@ -128,7 +133,9 @@ const loading = ref(false)
 const error = ref('')
 const funnelCounts = ref({})
 const firstValueCounts = ref({})
-const installationId = ref('')
+// ent#545: the wire value as answered — `null` until a writer has minted the id
+// (the read never mints it); the footer decision lives in funnelFormat.js.
+const installationId = ref(undefined)
 // ent#12 → ent#190: the fleet-benchmark document and its own fetch state.
 const benchmark = ref(null)
 const benchmarkLoaded = ref(false)
@@ -141,6 +148,8 @@ const funnel = computed(() =>
 const firstValueRows = computed(() =>
   FIRST_VALUE.map((s) => ({ ...s, count: firstValueCounts.value[s.key] || 0 }))
 )
+
+const installFooter = computed(() => installIdFooter(installationId.value))
 
 const isEmpty = computed(
   () =>
@@ -172,7 +181,7 @@ async function load() {
     })
     funnelCounts.value = r.data?.funnel || {}
     firstValueCounts.value = r.data?.first_value || {}
-    installationId.value = r.data?.installation_id || ''
+    installationId.value = r.data?.installation_id
   } catch (e) {
     error.value =
       e?.response?.data?.detail ||

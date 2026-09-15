@@ -22,9 +22,9 @@ A GitHub PAT is required for:
 | Clone from public templates | No |
 | Pull from public repos (read-only) | No |
 
-> **The token needs the right scopes for each row above.** As of #1574 Trinity wires the managed token for **both** `git` **and** the `gh` CLI / REST API — but wiring only makes the token *available*; it can't grant scopes the token lacks. A git-contents-only PAT still 403s on Issues/PRs.
+> **The token needs the right scopes for each row above.** Trinity wires the managed token for **both** `git` **and** the `gh` CLI / REST API — but wiring only makes the token *available*; it can't grant scopes the token lacks. A git-contents-only PAT still 403s on Issues/PRs.
 
-## What the PAT Authenticates: Git **and** the `gh` CLI (#1574)
+## What the PAT Authenticates: Git **and** the `gh` CLI
 
 When an agent has a GitHub repo and a resolved PAT (per-agent override or the platform PAT), Trinity:
 
@@ -66,14 +66,14 @@ Non-admins are no longer confined to the admin PAT's repo scope — anyone can a
 
 ## Your Personal GitHub Token (per-user)
 
-You do not have to rely on the shared platform PAT. **Any authenticated user — not just admins — can store their own GitHub token** in personal Settings. At agent creation Trinity resolves a token in three tiers:
+You do not have to rely on the shared platform PAT. **Any authenticated user — not just admins — can store their own GitHub token** under **Settings → MCP Keys → Personal GitHub Token** (the tab every user can open). At agent creation Trinity resolves a token in three tiers:
 
 **per-agent override → your personal token → platform global**
 
 So a non-admin is no longer confined to the admin PAT's repo scope: an agent you create picks up *your* token first, reaching the repos *your* GitHub user can reach.
 
 - **Never echoed back.** A read returns status only (`configured`, `has_global`) — never the token string.
-- **Validated and encrypted.** The token is checked against GitHub before it is saved, then encrypted at rest.
+- **Validated and encrypted.** The token is checked against GitHub before it is saved, then encrypted at rest — as is the platform-wide PAT (see [Credential Management → Platform-level credentials](../credentials/credential-management.md#platform-level-credentials)).
 
 **How the resolved token is persisted:**
 
@@ -129,13 +129,13 @@ A classic PAT with `repo` scope grants access to **every repository your GitHub 
 
 **Step 2: Configure in Trinity**
 
-1. Go to **Settings** in Trinity (sidebar → Settings)
-2. Find the **GitHub Personal Access Token (PAT)** section
+1. Go to **Settings → Integrations** in Trinity
+2. Find the **GitHub Personal Access Token (PAT)** field under **API Keys**
 3. Paste your token
 4. Click **Test** to verify it works
 5. Click **Save**
 
-The test shows your GitHub username and confirms repo access.
+The test shows your GitHub username and confirms repo access. The first-run setup asks for the same token on its optional keys step — see [Platform Keys](../credentials/platform-keys.md#github-access-token).
 
 **Saving auto-propagates to running agents.** When the platform PAT changes, Trinity pushes the new token into every running agent's `.env` file within seconds — no restart required. The save response lists which agents were updated, skipped, or failed. Agents with a per-agent PAT override, or agents that never configured GitHub, are skipped. Per-agent failures are reported but never block the save.
 
@@ -286,10 +286,10 @@ Content-Type: application/json
 ### MCP Tool
 
 ```
-initialize_github_sync(agent_name, repo_url)
+initialize_github_sync(agent_name, repo_owner, repo_name, create_repo?, private?, description?)
 ```
 
-Uses the configured PAT to create/connect a GitHub repository for the agent.
+Uses the configured PAT to create (by default, private) or connect a GitHub repository for the agent.
 
 ## Troubleshooting
 
@@ -351,10 +351,9 @@ Uses the configured PAT to create/connect a GitHub repository for the agent.
 **Trinity docs:**
 - [GitHub Sync](github-sync.md) — Using git sync after PAT is configured
 - [Creating Agents](../agents/creating-agents.md) — Creating agents from GitHub templates
-- [Platform Settings](../operations/dashboard.md) — Other settings configuration
+- [Platform Keys](../credentials/platform-keys.md) — The platform token alongside the Claude, email and Gemini keys
 
-**GitHub references:**
+**External references:**
 - [Managing your personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) — Official GitHub docs: how PATs work, creation, deletion, security
 - [About authentication to GitHub](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/about-authentication-to-github) — Official: full picture of GitHub authentication methods and when to use each
 - [Introducing fine-grained personal access tokens](https://github.blog/security/application-security/introducing-fine-grained-personal-access-tokens-for-github/) — GitHub Blog: why fine-grained PATs exist and what problems they solve
-- [GitHub Classic vs. Fine-grained Personal Access Tokens](https://www.finecloud.ch/blog/github-classic-vs-fine-grained-personal-access-tokens/) — Third-party explainer: clear side-by-side comparison with practical scenarios

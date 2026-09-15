@@ -124,7 +124,7 @@ Shared primitives are the unit of consistency: **compose them, never re-implemen
 |---|---|---|
 | BaseButton | `components/base/BaseButton.vue` | `ConfirmDialog.vue` actions · TemplateRegistryPanel Save/Reset |
 | BaseInput | `components/base/BaseInput.vue` | TemplateRegistryPanel registry URL |
-| BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU |
+| BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU (`field`) · `PortalConversation.vue` model picker (`ghost`, #2662) |
 | BaseToggle | `components/base/BaseToggle.vue` | TemplateRegistryPanel enable switch |
 | BaseTextarea | `components/base/BaseTextarea.vue` | `SystemInstallPanel.vue` manifest editor (mono) |
 | BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips |
@@ -162,10 +162,21 @@ The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16
 
 ### BaseSelect
 
-Same field recipe as BaseInput. `appearance: none`, custom 14px chevron absolutely positioned right 10px (tertiary ink, pointer-events none), padding-right 32px so text never collides. Same focus/error treatment.
+Two variants, both native `<select>` under the hood — keyboard operation, the `:focus-visible` ring and the platform picker on touch come free, and a trigger + popover inherits none of them.
 
-- **Do:** reuse the shared select for every dropdown.
-- **Don't:** ship a per-view custom dropdown when a select does the job.
+**`variant="field"` (default).** Same field recipe as BaseInput. `appearance: none`, custom 14px chevron absolutely positioned right 10px (tertiary ink, pointer-events none), padding-right 32px so text never collides. Same focus/error treatment.
+
+**`variant="ghost"` (#2662).** The same control wearing chat chrome instead of form chrome: no border, no fill, **content-width** (no `w-full`), `h-11` so it is the same 44px box as the icon buttons it sits beside, 13.5 ink like every sibling recipe, 12px chevron at right 8px with a 28px gutter. Hover tints the **ground only** (`gray-100` / dark `gray-750`, the chrome shade — a `gray-800` tint is invisible on the `gray-800` composer shell). It carries a 1px `border` with **no colour in the base string** — the width is reserved so the focus border costs no layout shift, and which colour it takes is the valid/invalid arms' business, exactly as on `field`. Resting-transparent lives on the valid arm; the disabled hover reset is spelled in **both** theme arms. Both of those are cascade fixes, not style: with `border-transparent` in the base string a ghost select carrying an `error` rendered with no danger border, and with only the unvariated `disabled:hover:bg-transparent` a disabled one still lit up under the cursor in dark mode — see the ordering rule below. Live at `PortalConversation.vue`'s composer control row.
+
+**Open-state chevron (#2662, `ghost` only).** The chevron points **up while the picker is open** and animates the flip over 150ms, held still under `prefers-reduced-motion`. This is the chevron idiom the rest of the app already follows — `ChatHistoryDropdown`, `OverflowTabs`, `InfoPanel`, and the disclosure rows in `LoopsPanel` / `TasksPanel` / `PortalAgentDetails` / `PortalDeliverables` / `ChannelDisclosure` all flip on open — and selects were the one control excluded from it, because all nine of those own their open state in JS while a **native** `<select>`'s picker is drawn by the platform and reports nothing to the page. `:open` is the only hook that exists for it (Baseline newly-available 2026-05: Chrome 133, Firefox 136, Safari 26.5); on an older engine the chevron simply stays static, so nothing depends on it. The rule is a **sibling** selector on the select (`[&:open~svg]:rotate-180`), not `:has()` on the wrapper, because the chevron is the select's next sibling — so no group class is needed on the parent. `~` is the GENERAL sibling combinator, so the precondition is that the svg FOLLOWS the select as a sibling, not that it is adjacent to it: an element inserted between the two still matches (`select ~ svg` does, `select + svg` does not — measured in Chrome 151). The two edits that do kill it silently are wrapping the svg in an element and moving it above the select. It is resolved in the one `recipe` computed (`flip`), **not** on the shared `<select>`: #2662 is a Workspace composer bug and `field` is what Settings and `ResourceModal` render, so `field` keeps a byte-identical class string and a static chevron. Bringing every select into the idiom is the right end state, but it changes surfaces this issue does not own and belongs in its own issue. Guarded by `tests/unit/baseSelectChevron.spec.js`, which strips comments before matching, pins the sibling adjacency, and fails if the flip is widened onto the shared element.
+
+Both recipes live in `base/fieldClasses.js` (`FIELD_CLASS` / `FIELD_GHOST_CLASS`), and `BaseSelect.vue` resolves every variant-dependent class in one `recipe` computed so a third variant cannot be half-added.
+
+**Ordering rule for every field recipe (#2662).** Never let two utilities of the same CSS property sit in one class string and rely on which Tailwind emits last — the class attribute's order is not the stylesheet's order, and the stylesheet's order is a per-plugin implementation detail. State-dependent colour goes on **mutually exclusive arms** (base string carries the width, arms carry the colour), and a `dark:`-variant utility needs its state resets spelled in the dark arm too, because `dark:hover:bg-*` compiles to `:hover:is(.dark *)` and TIES an unvariated `disabled:hover:*` on specificity while being emitted later. Both mistakes shipped on this variant and both were green under `npm run test:unit`, `check:tokens` and the raw-colour ratchet: a class-string assertion is structurally blind to the cascade. `tests/unit/portalComposerAlignment.spec.js` pins the arrangement (colour on the arms, every dark hover tint paired with a dark disabled reset); the cascade itself is only checkable by reading `getComputedStyle` off a live render, in both themes.
+
+- **Do:** reuse the shared select for every dropdown; pick `ghost` when the select is a preference beside content, `field` when it is a field in a form.
+- **Don't:** ship a per-view custom dropdown when a select does the job — including a "just borderless" one in chat chrome, which is what `ghost` exists to absorb.
+- **Note:** `ghost` here is gray-inked chrome; `BaseButton`'s `ghost` is accent-inked. Same word, two recipes — see the open naming question in #2662.
 
 ### BaseToggle
 
@@ -365,8 +376,9 @@ skeletons by #2540 — a conversation is not a chart. Adopting a further CHART s
 ent#253 pass; adopting it on a page, list or thread is a violation, and
 `tests/unit/portalLoadingTreatment.spec.js` pins the importer set as an allowlist so a new
 non-chart adoption fails CI (the two pre-ruling holdovers, `LibrarySkillsSection` and
-`onboarding/FinishSetupCard`, are recorded on #1921's sweep and shrink that list as they
-convert).
+`onboarding/FinishSetupCard` — the latter since deleted, replaced by the ent#581 first-run
+overlay `onboarding/FirstRunOverlay.vue` — were swept to skeletons by #1921, so the
+holdover list is empty).
 
 `content-class` (#2163) is the consumer's hook on the primitive's OWN content wrapper —
 `.scan-content` is child-owned DOM and `:deep()` is forbidden here, so a zone whose
@@ -427,6 +439,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 6. Dimensions never oscillate as async data trickles in — size to the stable state.
 7. Panels flex to available width; no overlap at narrow widths; wide content scrolls in its own container, never the page.
 8. Scrolling is axis-locked — one axis at a time.
+29. **Recommendation, verified by eye: enabling something should not shove the rest of the panel (#954, #1563, #1939, #2640).** A user-driven state change — a toggle switched on, a checkbox that reveals dependent fields, a mode that swaps a column, a tab switch — deserves the same care as data arrival (principle 4), but this is guidance, not a hard rule: some reveals are genuinely better as an instant snap, and the judgement is the reviewer's. Preferred shapes, chosen by size: a **reserved footprint** for small dependents (the block already occupies its space, disabled or dimmed, and enabling fills it in place — the natural default for settings forms), or a **height/flex transition** for a whole section or column (150–300ms ease-out, `motion-reduce:transition-none`, via `<Transition>` or an animatable property such as `grid-template-rows` / `flex-grow`) rather than a bare `v-if` that lands the new layout in one paint. Aim for: the activated control stays under the pointer, new content opens below or beside its trigger rather than above it, and what the user was reading stays in view. A swap that must remount should let the leaving element finish before the entering one takes its width — a mid-transition third column is a worse jump than the one being fixed (#2647). **No scanner can see this** — it is confirmed only by a human toggling the control in the browser, in both themes, and watching what moves; record that you did in the PR.
 
 ### C. Density & progressive disclosure
 
@@ -470,6 +483,7 @@ The recurring failure modes, in one place:
 | A scanline beam over a page, list or thread | A skeleton placeholder keyed on `hasLoaded` (§6, #2540) |
 | A "Loading…" line or an `animate-spin` on a page | The skeleton recipe (§6), keyed on a verdict |
 | Skeleton re-flash on a 30s poll | Stale-while-revalidate, in-place swap |
+| A toggle whose `v-if` pops a block open and shoves the form below it, unreviewed | Prefer a reserved footprint or a height transition; either way, a human toggles it and watches what moves (principle 29, a recommendation) |
 | Tabs wrapping to two rows | OverflowTabs with "+N more" |
 | A table that grows the page unbounded | Bounded viewport + sticky header + stated total |
 | Red border as the whole error | Named error + fix + example |

@@ -479,7 +479,7 @@ test-agent-{name}/
 
 ## Related Documentation
 
-- **Testing Guide**: `docs/TESTING_GUIDE.md`
+- **Testing Strategy**: `docs/testing/STRATEGY.md`
 - **Agent Lifecycle**: `docs/memory/feature-flows/agent-lifecycle.md`
 - **Agent Network**: `docs/memory/feature-flows/agent-network.md`
 - **Execution Queue**: `docs/memory/feature-flows/execution-queue.md`
