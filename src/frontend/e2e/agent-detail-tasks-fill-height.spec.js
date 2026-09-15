@@ -44,7 +44,8 @@ test.beforeAll(async ({ baseURL }) => {
   const names = agents.map((a) => a.name)
   if (!TEST_AGENT || !names.includes(TEST_AGENT)) {
     if (names.length === 0) throw new Error('No agents available to test tasks fill height')
-    TEST_AGENT = names[0]
+    // Prefer the long-lived harness agent (#2080) over agents[0] (#2802).
+    TEST_AGENT = names.includes('test-harness-agent') ? 'test-harness-agent' : names[0]
   }
 })
 
