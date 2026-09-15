@@ -131,8 +131,8 @@ The agent's **Settings** tab surfaces this key so you can see and repair it. You
 
 Two actions:
 
-- **Verify** runs a one-shot probe inside the container and reports what its configuration actually contains — including whether it is carrying a foreign user key, another agent's key, or a duplicate entry. A stopped agent degrades to "unavailable" rather than erroring.
-- **Regenerate** rotates the key: a new one is minted, delivered to the container, and the superseded keys are deleted. A running agent is rebuilt to pick it up; a stopped agent is updated in the database and stays stopped. **No plaintext is ever returned.**
+- **Check what the container is using** (**Re-check** afterwards) runs a one-shot probe inside the container and reports what its configuration actually contains — including whether it is carrying a foreign user key, another agent's key, or a duplicate entry. A stopped agent degrades to "unavailable" rather than erroring.
+- **Regenerate key** (**Issue a key** when none exists) rotates the key: a new one is minted, delivered to the container, and the superseded keys are deleted. A running agent is rebuilt to pick it up; a stopped agent is updated in the database and stays stopped. **No plaintext is ever returned.**
 
 Trinity also self-heals: if an agent starts with a missing or mismatched key, the start path re-mints and re-injects one automatically.
 
@@ -148,7 +148,7 @@ These routes are owner-only and reachable only from an interactive (browser) ses
 
 | Tool | Why it exists |
 |------|---------------|
-| `chat_with_agent` | Send a message to another agent. **Gateway-timeout safe in every sync mode** — sequential chat (`parallel=false`) and the sync task route (`parallel=true, async=false`) alike: if the call exceeds `MCP_CHAT_TIMEOUT_MS` (default 25s), it returns `{status: "queued_timeout", agent, execution_id, message}` so the caller polls `get_execution_result` instead of duplicate-queueing the request. The receipt is only issued when the running execution can be attributed to *your* call unambiguously; otherwise the error says so and names `list_recent_executions`. Calls carry a deterministic idempotency key, so an identical re-send dedupes server-side and answers with the original `execution_id` — a **reworded** re-send is a new call and dispatches a second execution. For work you know will outlive the gateway, use `parallel=true, async=true` from the start. |
+| `chat_with_agent` | Send a message to another agent. **Gateway-timeout safe in every sync mode** — sequential chat (`parallel=false`) and the sync task route (`parallel=true, async=false`) alike: if the call exceeds `MCP_CHAT_TIMEOUT_MS` (default 25s), it returns `{status: "queued_timeout", agent, execution_id, message}` so the caller polls `get_execution_result` instead of duplicate-queueing the request. The receipt is only issued when the running execution can be attributed to *your* call unambiguously; otherwise the error says so and names `list_recent_executions`. Calls carry a deterministic idempotency key, so an identical re-send dedupes server-side and answers with the original `execution_id` — a **reworded** re-send is a new call and dispatches a second execution. For work you know will outlive the gateway, use `parallel=true, async=true` from the start. See [Agent Network](../collaboration/agent-network.md) for the async pattern. |
 | `fan_out` | Dispatch N independent tasks to an agent in parallel and collect all the results. **Gateway-timeout safe**: a batch runs longer than any single task in it, so this is the tool most likely to outlive the 25s ceiling — when it does, it returns `{status: "fan_out_timeout", agent, fan_out_id, execution_ids, task_count, message}` and the batch keeps running. Poll `get_fan_out_result(agent_name, fan_out_id)`. Re-sending the *identical* call is deduplicated server-side and answers with the same batch; **rewording it dispatches all N tasks again**. See [Fan-Out](../automation/fan-out.md). |
 | `get_fan_out_result` | Poll a fan-out batch: `running` while any task can still change, then `completed`, `partial` (some succeeded — normal for a best-effort batch) or `failed`, with per-task status and results. |
 | `run_agent_loop` | Run the same task against an agent repeatedly (bounded, sequential), with templated messages and an optional stop signal. Poll with `get_loop_status`; stop gracefully with `stop_loop`. See [Agent Loops](../automation/agent-loops.md). |
@@ -174,7 +174,9 @@ These routes are owner-only and reachable only from an interactive (browser) ses
 |----------|--------|-------------|
 | `/api/mcp/keys` | POST | Create API key |
 | `/api/mcp/keys` | GET | List API keys |
-| `/api/mcp/keys/{key_id}` | DELETE | Revoke API key |
+| `/api/mcp/keys/{key_id}` | GET | One key's metadata (never the secret) |
+| `/api/mcp/keys/{key_id}/revoke` | POST | Deactivate a key; its record stays for audit |
+| `/api/mcp/keys/{key_id}` | DELETE | Permanently delete a key |
 | `/api/settings/mcp-url` | GET/PUT/DELETE | The advertised MCP URL: read the effective and auto-detected values, set an override, or clear it (admin) |
 
 ### MCP Endpoint
@@ -194,6 +196,7 @@ These routes are owner-only and reachable only from an interactive (browser) ses
 ## See Also
 
 - [Fan-Out](../automation/fan-out.md) — parallel dispatch and polling a batch
+- [Agent Network](../collaboration/agent-network.md) — agent-to-agent calls, async delegation and the timeout receipt
 - [Chat API](../api-reference/chat-api.md) — the REST routes the chat and task tools call
 - [Nevermined Payments](nevermined-payments.md)
 - [Slack Integration](slack-integration.md)

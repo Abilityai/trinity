@@ -6,7 +6,7 @@ Lightweight pub/sub system for inter-agent event pipelines. Agents emit named ev
 
 - **Event** -- A named occurrence emitted by an agent with a structured JSON payload. Stored in the `agent_events` table.
 - **Subscription** -- A rule that says "when agent X emits event type Y, send agent Z an async task with message template M". Stored in the `agent_event_subscriptions` table.
-- **Message Template** -- Supports `{{payload.field}}` interpolation. The subscriber's task message is built from the event payload.
+- **Message Template** -- The `target_message` of a subscription. Supports `{{payload.field}}` interpolation. The subscriber's task message is built from the event payload.
 - **Permission-Gated** -- Uses existing `agent_permissions`. The subscribing agent must have permission to call the source agent.
 
 ## How It Works
@@ -28,7 +28,7 @@ Trinity deterministically emits `agent.task.completed` and `agent.task.failed` a
 subscribe_to_event(
   source_agent="research-worker",
   event_type="agent.task.completed",
-  message_template="research-worker finished task {{payload.execution_id}} ({{payload.status}}): {{payload.summary_or_error}}"
+  target_message="research-worker finished task {{payload.execution_id}} ({{payload.status}}): {{payload.summary_or_error}}"
 )
 ```
 
@@ -82,7 +82,7 @@ An ordinary turn that already answered inline is never reported a second time. E
 | Tool | Description |
 |------|-------------|
 | `emit_event(event_type, payload)` | Emit a named event with data |
-| `subscribe_to_event(source_agent, event_type, message_template)` | Create a subscription |
+| `subscribe_to_event(source_agent, event_type, target_message)` | Create a subscription |
 | `list_event_subscriptions(agent_name)` | List subscriptions |
 | `delete_event_subscription(subscription_id)` | Remove a subscription |
 

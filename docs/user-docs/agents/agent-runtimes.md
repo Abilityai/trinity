@@ -55,7 +55,7 @@ Set the runtime in the template's `template.yaml`:
 | `runtime.type` | `claude-code`, `gemini-cli`, `codex` | `claude-code` | Selects the harness |
 | `runtime.model` | runtime-specific model id (e.g. `gpt-5.6-sol`) | runtime default | Optional override — pin it, so recorded cost is attributable |
 
-A Codex agent reads its identity and instructions from `AGENTS.md`. Trinity mirrors the template's `CLAUDE.md` into `AGENTS.md` at startup, so a single instruction file works across runtimes.
+A Codex agent reads its identity and instructions from `AGENTS.md`. At startup Trinity copies the template's `CLAUDE.md` to `AGENTS.md` when the workspace has none, so a single instruction file works across runtimes; an `AGENTS.md` you ship yourself is left as it is.
 
 Trinity's MCP tools are available to Codex agents. Codex references tools by their bare name (no `mcp__trinity__` prefix); Trinity adjusts the platform prompt automatically so the agent calls them correctly.
 
