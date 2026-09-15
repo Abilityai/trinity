@@ -3033,6 +3033,18 @@
       "description": "Legacy skills-library adoption alert idempotency (#2744): the terminal 'already has sources' refusal mints a STABLE URL-derived request_id (sha256[:12], reserved family prefix) at priority low + logger.info, so N syncs collapse to one operator-queue row and an operator's dismissal sticks; a different refused URL still gets its own item; the validation-reject and adoption-exception branches keep priority high and timestamped repeat-visible ids; the echoed URL is credential-scrubbed so a PAT-bearing setting never reaches the log or operator_queue.context."
     },
     {
+      "file": "unit/test_2792_room_work_chat_id.py",
+      "feature": "#2792",
+      "added": "2026-09-14",
+      "categories": [
+        "backend",
+        "workspace",
+        "rooms",
+        "unit"
+      ],
+      "description": "A room turn is stamped with the room as its source chat under its own channel value (`config.ROOM_SOURCE_CHANNEL = \"room\"`, `source_channel_chat_id = room_id`, `source_channel_client`), on a first wake and a chained one; `report_completion` never resolves a room row (parent or delegated child — no resolver for the value, pinned with a spy over every existing resolver); the voice-reply route answers `not_a_channel_turn` for both; and the Workspace work projection exposes the room as `chat_id` (turn → `room`, child → `delegated`) while a Telegram stamp still projects none. The frontend half (`liveItemsForRoom` + the executed `PortalRoom.vue` selection line) is `src/frontend/tests/unit/roomWorkChatId.spec.js`."
+    },
+    {
       "file": "unit/test_ent615_token_free_remotes.py",
       "feature": "trinity-enterprise#615",
       "added": "2026-09-13",
