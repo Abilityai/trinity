@@ -97,6 +97,17 @@ def test_it_only_runs_when_the_label_is_present():
     )
 
 
+def test_only_the_authors_push_clears_it():
+    """AC#3 says a push BY THE AUTHOR. `synchronize` also fires for a reviewer's
+    "Update branch" click and for the merge train's Phase 4 push to a member
+    branch — neither addresses a finding. The event's `sender` is the pusher."""
+    cond = _job().get("if", "")
+    assert "github.event.sender.login == github.event.pull_request.user.login" in cond, (
+        "gate on sender == PR author, or a reviewer's Update-branch click clears "
+        "a finding the author never saw"
+    )
+
+
 def test_a_fork_prs_read_only_token_is_a_warning_not_a_red_run():
     """`pull_request` on a fork carries a read-only token (#2767). That is not
     the author's fault and must not redden their PR; it is logged for the

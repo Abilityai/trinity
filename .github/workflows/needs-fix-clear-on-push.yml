@@ -28,6 +28,12 @@ name: Needs-Fix Label Clears on Push
 # label by hand — the same manual step forks needed before this workflow
 # existed, on the PRs that get a `/review` least often.
 #
+# Only the AUTHOR's push clears it. `synchronize` also fires for a reviewer's
+# "Update branch" click and for the merge train's Phase 4 conflict push to a
+# member branch — neither addresses a finding, and clearing on them would hand
+# the PR back to the queue with the finding still standing. The payload's
+# `sender` is the pusher, so the job compares it to the PR author.
+#
 # No checkout, no `run:` step, no PR text read: the only thing this workflow
 # does with the event is delete one label from the PR that emitted it.
 # `tests/unit/test_2815_needs_fix_label_workflow.py` pins each of those.
@@ -41,7 +47,9 @@ permissions:
 
 jobs:
   clear-needs-fix:
-    if: contains(github.event.pull_request.labels.*.name, 'status-needs-fix')
+    if: >-
+      contains(github.event.pull_request.labels.*.name, 'status-needs-fix')
+      && github.event.sender.login == github.event.pull_request.user.login
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
