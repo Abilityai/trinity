@@ -9,6 +9,7 @@ import { z } from "zod";
 import { createHash } from "crypto";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext, AgentAccessCheckResult } from "../types.js";
+import { checkAgentEdge, resolveClient, uniformDenial } from "../access.js";
 
 /**
  * RELIABILITY-006 (#525): derive a deterministic Idempotency-Key for an MCP
@@ -50,34 +51,17 @@ async function checkAgentAccess(
     return { allowed: true };
   }
 
-  // Phase 11.1: System-scoped keys bypass ALL permission checks
-  // System agent can communicate with any agent
-  if (authContext.scope === "system") {
-    console.log(`[System Agent Access] ${authContext.agentName || "system"} -> ${targetAgentName} (bypassing permissions)`);
-    return { allowed: true };
+  // System and agent scopes: the canonical edge gate (ent#628, ../access.ts) —
+  // one implementation of P-02 shared with every tool the registration wrapper
+  // gates, so the reason a caller reads is the same on every tool.
+  if (authContext.scope === "system" || authContext.scope === "agent") {
+    return checkAgentEdge(client, authContext, targetAgentName);
   }
 
-  // Phase 9.10: Agent-scoped keys use permission system
-  if (authContext.scope === "agent" && authContext.agentName) {
-    const callerAgentName = authContext.agentName;
-
-    // Self-call is always allowed
-    if (callerAgentName === targetAgentName) {
-      return { allowed: true };
-    }
-
-    // Check if target is in permitted list
-    const isPermitted = await client.isAgentPermitted(callerAgentName, targetAgentName);
-    if (isPermitted) {
-      return { allowed: true };
-    }
-
-    // Not permitted
-    return {
-      allowed: false,
-      reason: `Permission denied: Agent '${callerAgentName}' is not permitted to communicate with '${targetAgentName}'. ` +
-        `Configure permissions in the Trinity UI.`
-    };
+  // #2323: an allowlist, not a fallthrough. Only a user key gets the ownership /
+  // sharing rule below; a scope this code has not heard of is least-privileged.
+  if (authContext.scope !== "user") {
+    return uniformDenial(targetAgentName);
   }
 
   // User-scoped keys: use existing ownership/sharing rules
@@ -117,29 +101,8 @@ async function checkAgentAccess(
   return uniformDenied;
 }
 
-/**
- * Resolve the Trinity client for a request.
- * When requireApiKey is true, REQUIRES the MCP API key from the auth context.
- * When requireApiKey is false, uses the base client (backward compatibility).
- *
- * Module-level so both createChatTools and the dedicated-tool path
- * (runAgentChat, #846) share one implementation.
- */
-function resolveClient(
-  baseClient: TrinityClient,
-  requireApiKey: boolean,
-  authContext?: McpAuthContext
-): TrinityClient {
-  if (requireApiKey) {
-    if (!authContext?.mcpApiKey) {
-      throw new Error("MCP API key authentication required but no API key found in request context");
-    }
-    const userClient = new TrinityClient(baseClient.getBaseUrl());
-    userClient.setToken(authContext.mcpApiKey);
-    return userClient;
-  }
-  return baseClient;
-}
+// resolveClient lives in ../access.ts (ent#628) — one implementation shared by
+// every tool module and by the registration-time gate in server.ts.
 
 /**
  * Parameters for a single chat_with_agent-style call (agent name bound
