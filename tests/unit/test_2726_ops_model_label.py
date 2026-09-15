@@ -43,7 +43,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(scope="module")
 def fmt():
-    from routers.ops import _format_model_name
+    from services.ops_costs_service import _format_model_name  # moved by #1028
 
     return _format_model_name
 

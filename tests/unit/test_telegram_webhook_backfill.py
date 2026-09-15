@@ -21,7 +21,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 _project_root = Path(__file__).resolve().parents[2]
-_settings_py = _project_root / "src" / "backend" / "routers" / "settings.py"
+# #1028: `_backfill_telegram_webhooks` lives in the generic `/{key}` module
+# of the `routers/settings` package — it is the PUT catch-all that triggers it.
+_settings_py = _project_root / "src" / "backend" / "routers" / "settings" / "generic.py"
 
 # Modules this test stubs into sys.modules — must be restored after each test
 # so other test files (e.g. test_webhook_signature.py) get clean imports.

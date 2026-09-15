@@ -575,7 +575,7 @@ def test_the_canvas_ceiling_is_on_the_feature_flags_surface():
     array).
     """
     import inspect
-    from routers import settings as settings_router
+    from routers.settings import flags as settings_router  # #1028: package
 
     src = inspect.getsource(settings_router.get_public_feature_flags)
     assert '"canvas_max_per_agent": CANVAS_MAX_PER_AGENT' in src

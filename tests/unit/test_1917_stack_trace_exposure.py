@@ -63,16 +63,30 @@ def _blob(obj) -> str:
 @pytest.fixture
 def ops(monkeypatch):
     import routers.ops as mod
+    # #1028: the fleet orchestration lives in services/fleet_ops_service; the
+    # route keeps the gate. Collaborator patches land on the service, the gate
+    # patch on the router, and the fixture hands the SERVICE back with the
+    # route entry points attached (the test_1860 shape).
+    import services.fleet_ops_service as svc
 
     monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None)  # **kw: #2323 added allow_scopes=
-    monkeypatch.setattr(mod, "db", MagicMock())
+    monkeypatch.setattr(svc, "db", MagicMock())
     # Mirrors the test_1860 fixture: a bare MagicMock reads as "this agent is an
     # ephemeral ghost / system agent", which makes the loop SKIP and the test
     # vacuous — the skip path produces no error field at all.
-    mod.db.get_agent_owner.return_value = {"is_system": False}
-    mod.db.get_agent_ephemeral_info.return_value = None
-    monkeypatch.setattr(mod, "platform_audit_service", MagicMock(log=AsyncMock()))
-    return mod
+    svc.db.get_agent_owner.return_value = {"is_system": False}
+    svc.db.get_agent_ephemeral_info.return_value = None
+    monkeypatch.setattr(svc, "platform_audit_service", MagicMock(log=AsyncMock()))
+    svc.stop_fleet = mod.stop_fleet
+    svc.get_fleet_health = mod.get_fleet_health
+    # the cost rollup has its own service (#1028) — attach the route and
+    # point per-test patches (httpx, the OTEL url) at that module.
+    import services.ops_costs_service as costs_svc
+    svc.get_ops_costs = mod.get_ops_costs
+    svc.httpx = costs_svc.httpx
+    svc.OTEL_COLLECTOR_METRICS_URL = None  # setattr target below is costs_svc
+    svc._costs = costs_svc
+    return svc
 
 
 class _Agent:
@@ -145,7 +159,7 @@ def test_fleet_health_probe_error_carries_no_raw_message(ops, monkeypatch):
 
 def test_ops_costs_error_carries_no_raw_message(ops, monkeypatch):
     """The OTel collector URL and its internal host live in this message."""
-    monkeypatch.setattr(ops, "OTEL_COLLECTOR_METRICS_URL", "http://otel:8889/metrics", raising=False)
+    monkeypatch.setattr(ops._costs, "OTEL_COLLECTOR_METRICS_URL", "http://otel:8889/metrics", raising=False)
 
     class _Client:
         async def __aenter__(self):
@@ -157,7 +171,7 @@ def test_ops_costs_error_carries_no_raw_message(ops, monkeypatch):
         async def get(self, *a, **k):
             raise RuntimeError(SENTINEL)
 
-    monkeypatch.setattr(ops.httpx, "AsyncClient", lambda *a, **k: _Client())
+    monkeypatch.setattr(ops._costs.httpx, "AsyncClient", lambda *a, **k: _Client())
 
     out = _run(ops.get_ops_costs(MagicMock(), current_user=_human_caller()))
 

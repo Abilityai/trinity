@@ -19,7 +19,6 @@ Covered:
 from __future__ import annotations
 
 import asyncio
-import importlib
 import logging
 import sys
 import time
@@ -45,16 +44,30 @@ if str(_BACKEND) not in sys.path:
 # No import-time os.environ mutation lives here any more.
 
 
-# Import via importlib to avoid pulling in the full services/__init__.py
-# (which drags in Docker, models, FastAPI, etc.).
-import importlib.util  # noqa: E402
+# #1028: `services/agent_client.py` is now the package `services/agent_client/`
+# (circuit + http_pool + client), so the `spec_from_file_location` load that used
+# to live here raises FileNotFoundError at *collection* — this whole file errored
+# out before a single test ran.
+#
+# Replaced by a plain import rather than a package-aware file load. The old
+# comment said the file load existed to avoid `services/__init__.py`; that has
+# not been true since the module started doing `from services.agent_auth import
+# merge_auth_headers` at import time (it is on `dev` too), which imports the
+# `services` package and runs that `__init__` regardless. A file load that
+# cannot deliver the isolation it claims is just a second, fragile import path.
+#
+# The private collaborators are deliberately NOT re-exported on the package
+# (see its `__init__` docstring: a name mirrored in two places can be patched on
+# the wrong one and silently detach), so they are reached through the module
+# that owns them.
+import services.agent_client as agent_client  # noqa: E402
+from services.agent_client import circuit as _ac_circuit  # noqa: E402
+from services.agent_client import http_pool as _ac_http_pool  # noqa: E402
 
-_spec = importlib.util.spec_from_file_location(
-    "agent_client_under_test",
-    str(_BACKEND / "services" / "agent_client.py"),
-)
-agent_client = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(agent_client)
+# Every submodule logger is a child of this one and inherits its level, so one
+# name still covers transitions logged from `circuit` and pool evictions logged
+# from `http_pool`.
+_AC_LOGGER = "services.agent_client"
 
 
 pytestmark = pytest.mark.integration
@@ -73,8 +86,8 @@ def agent_name(redis_client):
     name = f"cb-test-{uuid.uuid4().hex[:10]}"
     yield name
     redis_client.delete(
-        f"{agent_client._CIRCUIT_HASH_PREFIX}{name}",
-        f"{agent_client._CIRCUIT_HASH_PREFIX}{name}{agent_client._CIRCUIT_PROBE_LOCK_SUFFIX}",
+        f"{_ac_circuit._CIRCUIT_HASH_PREFIX}{name}",
+        f"{_ac_circuit._CIRCUIT_HASH_PREFIX}{name}{_ac_circuit._CIRCUIT_PROBE_LOCK_SUFFIX}",
     )
 
 
@@ -82,9 +95,9 @@ def agent_name(redis_client):
 def _ensure_redis_client_cached():
     """Force agent_client to re-resolve its Redis client between tests
     (each test may have skewed env / monkeypatched reset)."""
-    agent_client._reset_circuit_redis_client()
+    _ac_circuit._reset_circuit_redis_client()
     yield
-    agent_client._reset_circuit_redis_client()
+    _ac_circuit._reset_circuit_redis_client()
 
 
 @pytest.fixture(autouse=True)
@@ -151,7 +164,7 @@ class TestBackoffSchedule:
     def _read_next_probe(self, redis_client, agent_name) -> float:
         return float(
             redis_client.hget(
-                f"{agent_client._CIRCUIT_HASH_PREFIX}{agent_name}", "next_probe_at"
+                f"{_ac_circuit._CIRCUIT_HASH_PREFIX}{agent_name}", "next_probe_at"
             )
             or "0"
         )
@@ -417,7 +430,7 @@ class TestTransitionLogging:
         cs_a = agent_client.CircuitState(agent_name)
         cs_b = agent_client.CircuitState(agent_name)
 
-        with caplog.at_level(logging.WARNING, logger=agent_client.logger.name):
+        with caplog.at_level(logging.WARNING, logger=_AC_LOGGER):
             # First two failures from A keep us closed (assuming threshold=3).
             for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD - 1):
                 cs_a.record_failure()
@@ -439,7 +452,7 @@ class TestTransitionLogging:
         for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
             cs.record_failure()
 
-        with caplog.at_level(logging.INFO, logger=agent_client.logger.name):
+        with caplog.at_level(logging.INFO, logger=_AC_LOGGER):
             cs.record_success()
 
         closed_logs = [
@@ -463,10 +476,10 @@ class TestOperatorHooks:
         cs = agent_client.CircuitState(agent_name)
         for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
             cs.record_failure()
-        assert redis_client.exists(f"{agent_client._CIRCUIT_HASH_PREFIX}{agent_name}")
+        assert redis_client.exists(f"{_ac_circuit._CIRCUIT_HASH_PREFIX}{agent_name}")
 
         agent_client.reset_circuit(agent_name)
-        assert not redis_client.exists(f"{agent_client._CIRCUIT_HASH_PREFIX}{agent_name}")
+        assert not redis_client.exists(f"{_ac_circuit._CIRCUIT_HASH_PREFIX}{agent_name}")
         # Fresh facade reads as closed.
         assert agent_client.CircuitState(agent_name).state == "closed"
 
@@ -482,7 +495,7 @@ class TestGetAllStates:
         # Manually plant a probe-lock so the scan would pick it up if the
         # filter was wrong.
         redis_client.set(
-            f"{agent_client._CIRCUIT_HASH_PREFIX}{agent_name}{agent_client._CIRCUIT_PROBE_LOCK_SUFFIX}",
+            f"{_ac_circuit._CIRCUIT_HASH_PREFIX}{agent_name}{_ac_circuit._CIRCUIT_PROBE_LOCK_SUFFIX}",
             "1",
             ex=10,
         )
@@ -491,7 +504,7 @@ class TestGetAllStates:
             assert agent_name in states, "state hash missing from scan"
             # No `probe-lock`-suffixed entry should appear as an agent name.
             assert not any(
-                name.endswith(agent_client._CIRCUIT_PROBE_LOCK_SUFFIX)
+                name.endswith(_ac_circuit._CIRCUIT_PROBE_LOCK_SUFFIX)
                 for name in states.keys()
             )
             entry = states[agent_name]
@@ -499,7 +512,7 @@ class TestGetAllStates:
             assert entry["failure_count"] >= agent_client.CIRCUIT_FAILURE_THRESHOLD
         finally:
             redis_client.delete(
-                f"{agent_client._CIRCUIT_HASH_PREFIX}{agent_name}{agent_client._CIRCUIT_PROBE_LOCK_SUFFIX}"
+                f"{_ac_circuit._CIRCUIT_HASH_PREFIX}{agent_name}{_ac_circuit._CIRCUIT_PROBE_LOCK_SUFFIX}"
             )
 
 
@@ -533,7 +546,7 @@ class TestFailureClassification:
     pool exhaustion, and any HTTP response (incl. 5xx) must NOT trip it.
 
     Each test injects a MockTransport-wrapped AsyncClient into
-    agent_client._client_pool for the test's synthetic agent, so
+    _ac_http_pool._client_pool for the test's synthetic agent, so
     AgentClient._request() drives the handler we specify. Cleans up the
     pool entry on teardown to avoid cross-test pollution.
     """
@@ -551,13 +564,13 @@ class TestFailureClassification:
                 transport=httpx.MockTransport(handler),
                 base_url=base_url,
             )
-            agent_client._client_pool[base_url] = mock_client
+            _ac_http_pool._client_pool[base_url] = mock_client
             try:
                 client = agent_client.AgentClient(agent_name)
                 return await client._request("GET", "/health", timeout=timeout)
             finally:
                 await mock_client.aclose()
-                agent_client._client_pool.pop(base_url, None)
+                _ac_http_pool._client_pool.pop(base_url, None)
 
         return asyncio.run(runner())
 
@@ -901,7 +914,7 @@ class TestConcurrentTransportDrops:
 
         # Pre-warm the pool so we can install a raising .request method on
         # the pooled client object.
-        pooled = agent_client._get_http_client(base_url)
+        pooled = _ac_http_pool._get_http_client(base_url)
 
         async def _raise(*_a, **_kw):
             raise exc_factory()
@@ -916,7 +929,7 @@ class TestConcurrentTransportDrops:
             )
             return results
 
-        with caplog.at_level(logging.WARNING, logger=agent_client.logger.name):
+        with caplog.at_level(logging.WARNING, logger=_AC_LOGGER):
             results = asyncio.run(_burst())
 
         # Every call should have raised AgentConnectionDroppedError (not
@@ -943,6 +956,6 @@ class TestConcurrentTransportDrops:
 
         # Pool must be evicted — concurrency guard ensures the first worker
         # to land in the except block wins the pop; siblings see empty pool.
-        assert base_url not in agent_client._client_pool, (
+        assert base_url not in _ac_http_pool._client_pool, (
             "pooled client should be evicted after a transport drop"
         )

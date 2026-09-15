@@ -208,16 +208,39 @@ def test_outside_facing_surfaces_use_only_suppressed_trigger_labels():
     the new surface inherit disclosure by default.
     """
     literal = re.compile(r'triggered_by\s*=\s*"([a-z_]+)"')
-    for rel in (
-        "routers/public.py",
-        "routers/paid.py",
-        "client_portal/service.py",
-    ):
-        found = set(literal.findall((_BACKEND / rel).read_text()))
-        assert found, f"no triggered_by literal found in {rel} — did the file move?"
+
+    def _no_outside_label_beyond_the_suppressed_set(rel, found):
         unexpected = found - set(OUTSIDE_AUDIENCES)
         assert not unexpected, (
             f"{rel} labels a turn {sorted(unexpected)}, which is outside the "
             f"suppressed set {sorted(OUTSIDE_AUDIENCES)}. An outside-facing turn "
             "under a new label would disclose staff identities to that audience."
+        )
+
+    # The files that OWN an outside-facing label. Each must carry one, so a
+    # dispatch moving house trips the "did the file move?" branch rather than
+    # passing vacuously.
+    #
+    # #1028: `routers/public.py` used to be in this set. That router was made
+    # thin (Invariant #1) and its public-link / x402 dispatch moved to
+    # `services/public_chat_service.py`; the router now only COMPARES
+    # `triggered_by`, so a scan for an assignment finds nothing there. The
+    # audience decision this test exists to force is made in the service now.
+    for rel in (
+        "services/public_chat_service.py",
+        "routers/paid.py",
+        "client_portal/service.py",
+    ):
+        found = set(literal.findall((_BACKEND / rel).read_text()))
+        assert found, f"no triggered_by literal found in {rel} — did the file move?"
+        _no_outside_label_beyond_the_suppressed_set(rel, found)
+
+    # ...and the files that no longer own one but still SIT on an outside-facing
+    # path. They may legitimately carry zero literals, but if one reappears it
+    # is an outside-facing label and must still be in the suppressed set —
+    # otherwise the #1028 split would have quietly narrowed this guard, which is
+    # the one thing a refactor must never do to a disclosure check.
+    for rel in ("routers/public.py",):
+        _no_outside_label_beyond_the_suppressed_set(
+            rel, set(literal.findall((_BACKEND / rel).read_text()))
         )
