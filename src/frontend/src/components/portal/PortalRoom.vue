@@ -197,12 +197,12 @@
              conditional dropped inside the chain steals it and the fallbacks
              below render on the wrong condition. That is the #2794 defect, and
              the first draft of THIS change committed it. -->
-        <p
+        <InlineError
           v-if="stopError"
-          class="text-xs text-status-danger-600 dark:text-status-danger-400"
-          role="status"
+          :message="stopError"
           data-testid="portal-room-stop-error"
-        >{{ stopError }}</p>
+          @dismiss="stopError = ''"
+        />
       </div>
     </div>
     <PortalJumpToLatest :show="showJumpToLatest" :count="unreadBelow" @jump="scrollToLatest" />
@@ -345,6 +345,7 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { budgetNotice } from '@/utils/roomBudgets'
+import InlineError from '@/components/InlineError.vue'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
