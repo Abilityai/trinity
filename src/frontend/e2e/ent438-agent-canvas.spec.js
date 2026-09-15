@@ -1,8 +1,16 @@
 import { test, expect } from '@playwright/test'
+import { agentExists, missingAgentReason } from './helpers/agent-probe.js'
 
 // ent#438 smoke, driven against the live stack. Not part of the @smoke tier —
 // this exists to prove the surface actually renders before handing it over.
 const AGENT = process.env.CANVAS_AGENT || 'weather-watch'
+
+// The seeded demo agent is a fixture this spec cannot create; skip honestly
+// when it is absent instead of timing out on a 404 page (#2802). A broken
+// probe still throws (#2199) — only a genuine 404 skips.
+test.beforeEach(async ({ baseURL }) => {
+  test.skip(!(await agentExists(AGENT, { baseURL })), missingAgentReason(AGENT, 'CANVAS_AGENT'))
+})
 
 test('Agent Detail shows a Canvas tab that renders every block kind', async ({ page }) => {
   await page.goto(`/agents/${AGENT}?tab=canvas`)

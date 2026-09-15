@@ -127,7 +127,13 @@ def _iter_guarded_py():
         if not root.is_dir():
             continue
         for path in root.rglob("*.py"):
-            if "/tests/" in path.as_posix():
+            rel = path.relative_to(root).as_posix()
+            # OSS tree only: the enterprise submodule is optional, never mounted
+            # on public CI, and owns its own twin of this guard (#1677
+            # convention). `venv/` is a local-only dev artifact, never shipped.
+            if "/tests/" in path.as_posix() or rel.startswith(
+                ("enterprise/", "tests/", "__pycache__/", "venv/")
+            ):
                 continue
             yield path, root, prefix
 

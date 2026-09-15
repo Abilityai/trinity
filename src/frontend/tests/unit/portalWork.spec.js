@@ -452,10 +452,11 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
     expect(conv.slice(loadAt, loadAt + 200)).toContain('terminalOutcome.value = null')
   })
 
-  it('the room renders cards for the agents the SERVER says are working, and keeps its fallback line', () => {
+  it('the room renders cards for ITS OWN live rows (#2792: by chat id, ∩ the SERVER working list), and keeps its fallback line', () => {
     expect(room).toContain('<PortalWorkCard')
     expect(room).toContain('data-testid="portal-room-work"')
-    expect(room).toContain('workingAgents.value.includes(it.agent_name)')
+    // Executed, not just pinned, in roomWorkChatId.spec.js.
+    expect(room).toContain('liveItemsForRoom(workStore.live, props.roomId, workingAgents.value)')
     expect(room).toContain('v-else-if="workingAgents.length"')
     expect(room).toContain("@open-work=\"emit('open-work')\"")
   })

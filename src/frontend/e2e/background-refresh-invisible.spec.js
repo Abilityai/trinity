@@ -343,7 +343,9 @@ test.describe('Schedules › execution history (#1927)', () => {
       const resp = await api.get('/api/agents')
       if (resp.ok()) {
         const list = await resp.json()
-        const pick = (Array.isArray(list) ? list : []).find((a) => !a.is_system && !a.ephemeral)
+        const usable = (Array.isArray(list) ? list : []).filter((a) => !a.is_system && !a.ephemeral)
+        // Prefer the long-lived harness agent (#2080) over the first match (#2802).
+        const pick = usable.find((a) => a.name === 'test-harness-agent') || usable[0]
         agent = pick?.name || ''
       }
     }
@@ -443,7 +445,8 @@ test.describe('Agent Info tab (#1927)', () => {
       const resp = await api.get('/api/agents')
       if (resp.ok()) {
         const list = await resp.json()
-        agent = (Array.isArray(list) ? list : []).find((a) => !a.is_system && !a.ephemeral)?.name || ''
+        const usable = (Array.isArray(list) ? list : []).filter((a) => !a.is_system && !a.ephemeral)
+        agent = (usable.find((a) => a.name === 'test-harness-agent') || usable[0])?.name || ''
       }
       await api.dispose()
     }
