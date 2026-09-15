@@ -687,7 +687,7 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
                  availability: str = "unknown", *,
                  is_platform: bool, runtime: str,
                  model_context: ModelContext,
-                 stt_ready: bool | None = None,
+                 stt_ready: bool | None,
                  can_manage_canvases: bool = False) -> PortalAgentCard:
     """One roster row → one card. Shared by the roster and the single-agent
     lookup (#2160) so the two cannot disagree about how a card is built.
@@ -708,6 +708,10 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
     resolved once per load like `tts_ready` — threaded in, never probed here.
     `None` means "same as `tts_ready`", which is what the bit meant before the
     probe existed and what a caller that has not asked the provider still gets.
+    It carries NO default for the ent#403 reason above, and the guard in
+    `test_ent403_workspace_model.py` pins that: the omitted value resolves to the
+    PRE-FIX presence behaviour, so a default would let a third call site added
+    later silently un-fix #2695 with the whole suite green.
     """
     from services import tts_service
     name = r["agent_name"]
