@@ -3247,7 +3247,10 @@ def portal_attempt_ceiling_seconds(turn_timeout: int) -> int:
       + 10   `execute_task` dispatches with `timeout_seconds + 10` (HTTP slack)
       + cap  the #678 reader-race auto-retry runs a SECOND http call, capped at
              `_AUTO_RETRY_MAX_TIMEOUT_S`, ON TOP of whatever attempt 1 burned
-             (unlike the SUB-003 retry, which is capped to the remaining budget)
+             (unlike the SUB-003 retry, which is capped to the remaining budget
+             — true by construction only since #2789, which stopped that retry
+             sharing this ceiling; if it ever shares it again this derivation
+             under-counts by a whole ceiling and the marker expires mid-turn)
 
     The retry cap is IMPORTED, not copied, so it cannot drift — and imported
     function-locally, like every other service this module reaches for (the
