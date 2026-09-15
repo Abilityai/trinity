@@ -191,20 +191,31 @@ class _FakeRedis:
         self.ttls.pop(k, None)
 
 
-def _load_worker(fake_redis):
+def _load_worker(fake_redis, monkeypatch):
     """A second instance of the module = a second uvicorn worker: its own
-    `_local` / `_inflight`, the same Redis."""
+    `_local` / `_inflight`, the same Redis.
+
+    The synthetic name has to be in `sys.modules` for the duration of
+    `exec_module`, because `@dataclass` resolves the class's module BY NAME
+    while the module body runs. It is registered through `monkeypatch.setitem`
+    rather than assigned and popped by hand: pytest then removes it at teardown
+    even if `exec_module` raises, and the repo's `sys.modules` lint
+    (`tests/lint_sys_modules.py`) exists precisely to stop bare writes here —
+    one leaked entry is a module every later test in the session imports instead
+    of the real one.
+
+    Leaving the entry up until teardown rather than popping it immediately is
+    harmless and deliberate: the name is unique per fixture instance, and
+    nothing after `exec_module` resolves it.
+    """
     import importlib.util
     import inspect
     import sys
     name = f"stt_worker_{id(fake_redis)}"
     spec = importlib.util.spec_from_file_location(name, inspect.getsourcefile(stt))
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod          # `@dataclass` resolves the class's module by name
-    try:
-        spec.loader.exec_module(mod)
-    finally:
-        sys.modules.pop(name, None)
+    monkeypatch.setitem(sys.modules, name, mod)
+    spec.loader.exec_module(mod)
     mod._redis = lambda: fake_redis
     return mod
 
@@ -213,7 +224,7 @@ def _load_worker(fake_redis):
 def two_workers(monkeypatch):
     fake = _FakeRedis()
     monkeypatch.setattr(stt, "_redis", lambda: fake)   # worker A = the imported module
-    worker_b = _load_worker(fake)
+    worker_b = _load_worker(fake, monkeypatch)
     return fake, stt, worker_b
 
 
