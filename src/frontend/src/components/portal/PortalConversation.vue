@@ -1101,6 +1101,7 @@ const {
   batchNotice,
   addFiles,
   clear: clearAttachments,
+  settled: attachmentsSettled,
   handlers: dropHandlers,
 } = usePortalFileDrop((file) => store.uploadDocument(props.agent.name, file))
 const offline = ref(typeof navigator !== 'undefined' && navigator.onLine === false)
@@ -2075,7 +2076,28 @@ async function send() {
     if (others.length) {
       input.value = ''
       autoGrowAfterUpdate()
-      emit('escalate-to-room', { agents: [props.agent.name, ...others], message: text })
+      // #2794: the attachments go WITH the message. Until now the event
+      // carried only text, so a file the person had watched a chip confirm
+      // reached the original agent and nobody else, and the room showed no
+      // trace of it — they believed both agents had it.
+      //
+      // Awaited first, because "never silently dropped" is the rule and this
+      // is the only moment at which waiting is still possible. Uploads are
+      // seconds; sending now and explaining afterwards asks the person to fix
+      // something whose state they can no longer see. `settled()` never
+      // rejects — a failed upload is recorded on its own chip, and the shell
+      // reports it from there.
+      await attachmentsSettled()
+      // NOT cleared: on success this component unmounts as the room opens and
+      // the chips go with it; on failure the shell hands the text back and the
+      // chips are still standing beside it, which is the recovery AC without
+      // any new plumbing. Handing over a COPY so a later gesture in this
+      // composer cannot mutate what the shell is carrying.
+      emit('escalate-to-room', {
+        agents: [props.agent.name, ...others],
+        message: text,
+        attachments: attachments.value.slice(),
+      })
       return
     }
   }
