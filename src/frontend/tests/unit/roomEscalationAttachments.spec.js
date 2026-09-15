@@ -460,10 +460,24 @@ describe('#2794 pruneCarryLog — the log retains File objects, so it is bounded
 
 describe('#2794 the carry boundary is drawn where the chips clear', () => {
   const CONV = CONVERSATION
-  it('opening a conversation consumes anything sent before it', () => {
-    // Files from a previous visit must not ride along on an escalation.
-    const mounted = CONV.slice(CONV.indexOf('onMounted(async () => {'), CONV.indexOf('onMounted(async () => {') + 600)
-    expect(mounted).toMatch(/store\.markUploadsCarried\(props\.agent\?\.name\)/)
+  it('opening a conversation consumes NOTHING — mounting is not sending', () => {
+    // The regression this pins, found by the operator on the live instance:
+    // the rail is a SIBLING of the stage and survives navigation, so attaching
+    // from wherever you are and THEN opening the chat you want to escalate
+    // from is the ordinary gesture — and a mount boundary ate exactly that
+    // upload, carrying nothing and saying nothing. A thread switch and ⌘J
+    // remount this component too, so one boundary broke several gestures.
+    const start = CONV.indexOf('onMounted(async () => {')
+    const mounted = CONV.slice(start, start + 900)
+    expect(mounted).not.toMatch(/markUploadsCarried/)
+  })
+
+  it('the only consume points are a sent turn and an escalation', () => {
+    // Stated as a whole-file count so a third one cannot be added quietly.
+    const conv = (CONV.match(/store\.markUploadsCarried\(/g) || []).length
+    const portal = (PORTAL.match(/store\.markUploadsCarried\(/g) || []).length
+    expect(conv).toBe(1)     // deliver(), beside clearAttachments()
+    expect(portal).toBe(1)   // onEscalateToRoom()
   })
 
   it('a sent turn consumes them too', () => {

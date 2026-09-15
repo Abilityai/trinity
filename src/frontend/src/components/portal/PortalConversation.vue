@@ -1320,11 +1320,23 @@ watch(() => props.prefill, (v) => {
 })
 
 onMounted(async () => {
-  // #2794 follow-up: opening a conversation draws the carry line. Files sent to
-  // this agent BEFORE now belong to a previous visit or a previous message and
-  // must not ride along on an escalation. The composer starts with no chips for
-  // the same reason; this is that act for the rail, which has none.
-  store.markUploadsCarried(props.agent?.name)
+  // #2794 follow-up: there is deliberately NO carry boundary here.
+  //
+  // The first version drew one — "files sent before this conversation opened
+  // belong to a previous visit" — and it was wrong twice over. Mounting is not
+  // evidence that anything was SENT: the rail is a SIBLING of the stage and
+  // survives every navigation, so the ordinary gesture is to attach from
+  // wherever you are and then open the chat you want to escalate from. That
+  // mount consumed the upload the person had just made, and the escalation
+  // carried nothing and said nothing (reproduced: upload to A from B's rail,
+  // open A, @mention — no carry, no notice). A thread switch or ⌘J remounts
+  // this component too, so the same gesture failed several ways.
+  //
+  // The two things that genuinely consume a pending upload are a message going
+  // out and an escalation taking it, and both mark it themselves. "A previous
+  // visit" is already covered twice over: the log is bounded by
+  // `CARRY_MAX_AGE_MS`, and it is plain Pinia state, so a page load starts it
+  // empty regardless.
   window.addEventListener('online', onNet)
   window.addEventListener('offline', onNet)
   document.addEventListener('click', onDocClick)
