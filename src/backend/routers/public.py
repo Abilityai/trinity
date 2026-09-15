@@ -142,8 +142,13 @@ def _is_caddy_ask(request: Request) -> bool:
     The two paths are distinguishable at the headers: nginx always sets
     `X-Forwarded-For` and `X-Forwarded-Proto` (`src/frontend/nginx.conf`), and
     Caddy's ask sets neither and carries the loopback authority it dialled.
-    Fails CLOSED — an unrecognised shape costs the stamp, never the certificate,
-    and the gate's own answer is decided before this is consulted.
+    That makes the stamp unforgeable FROM THE PUBLIC FRONT DOOR — not from inside
+    the Docker network: any container that can reach `backend:8000` (an agent)
+    can send `Host: 127.0.0.1` with no forwarding headers and latch the tick.
+    The source address cannot close that gap, because Caddy reaches the backend
+    through the published port and arrives from a bridge gateway, not loopback.
+    Accepted because the stamp is advisory: it grants no certificate, access or
+    data, and the gate's own answer is decided before this is consulted.
     """
     headers = request.headers
     if headers.get("x-forwarded-for") or headers.get("x-forwarded-proto"):

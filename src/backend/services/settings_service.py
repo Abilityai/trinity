@@ -90,7 +90,8 @@ OPS_SETTINGS_DESCRIPTIONS = {
 # --- Remote template registry keys (TMPL-002, trinity-enterprise#14) -------
 # #2691: set the first time a real request arrives for the saved public URL and
 # a certificate is obtained for it (written by the on-demand-TLS gate in
-# `routers/public.py`, cleared when the saved host changes). It is the only
+# `routers/public.py`, stored as `<iso>|<host>`). Never cleared: a change of host
+# makes the stamp stop matching on read (`is_public_url_reached`). It is the only
 # evidence this instance can hold that the name an operator typed actually
 # works — everything else here is what the instance ADVERTISES, not what was
 # observed.

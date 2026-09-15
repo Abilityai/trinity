@@ -80,7 +80,7 @@ def test_caddyfile_carries_the_marketplace_header() -> None:
     assert 'provenance" = "do-marketplace"' in assignment, (
         "the header must be set only for the do-marketplace provenance"
     )
-    heredoc = text[text.index("cat > /etc/caddy/Caddyfile") : text.index("\nCADDY\n")]
+    heredoc = text[text.index("cat > /etc/caddy/Caddyfile.new") : text.index("\nCADDY\n")]
     assert "${_do_header}" in heredoc, "header variable is outside the Caddyfile heredoc"
 
 

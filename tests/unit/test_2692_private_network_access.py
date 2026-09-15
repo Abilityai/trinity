@@ -194,6 +194,41 @@ def test_the_generated_config_is_validated_before_caddy_is_restarted() -> None:
     assert "leaving the running config alone" in renderer
 
 
+def test_a_failed_validate_leaves_the_previous_caddyfile_on_disk() -> None:
+    """Caddy keeps a rejected config only in memory. If the invalid file has
+    already replaced the live one, the next reboot takes the site down — so the
+    render must land beside the live file and only move over it once valid.
+    `1.2.3.4/99` passes the charset filter and fails at validate, which makes
+    this reachable from `.env`."""
+    src = _START.read_text()
+    cidr_fn = src[src.index("provision_private_cidrs() {") : src.index("\n}\n", src.index("provision_private_cidrs() {")) + 3]
+    caddy_fn = src[src.index("provision_caddyfile() {") : src.index("\nprovision_site() {")]
+    with tempfile.TemporaryDirectory() as tmp:
+        live = Path(tmp) / "Caddyfile"
+        live.write_text("previous working config\n")
+        for validate_rc, expect_rc in ((1, 1), (0, 0)):
+            harness = (
+                (cidr_fn + "\n" + caddy_fn).replace("/etc/caddy/Caddyfile", str(live))
+                + "\n"
+                + "env_value() { printf '%s' \"$CIDRS\"; }\n"
+                + "systemctl() { :; }\n"
+                + f"caddy() {{ return {validate_rc}; }}\n"
+                + 'provision_caddyfile "203.0.113.10" "do-marketplace"\n'
+            )
+            proc = subprocess.run(
+                ["bash", "-c", harness],
+                capture_output=True,
+                text=True,
+                env={"PATH": "/usr/bin:/bin", "CIDRS": "1.2.3.4/99"},
+            )
+            assert proc.returncode == expect_rc, proc.stderr
+            assert not Path(f"{live}.new").exists(), "the rejected render was left behind"
+            if validate_rc:
+                assert live.read_text() == "previous working config\n", "an invalid render replaced the live file"
+            else:
+                assert "remote_ip 1.2.3.4/99" in live.read_text(), "a valid render was not installed"
+
+
 def test_the_variable_is_documented_where_an_operator_will_set_it() -> None:
     env_example = (_ROOT / ".env.example").read_text()
     assert "PRIVATE_NETWORK_CIDRS=" in env_example

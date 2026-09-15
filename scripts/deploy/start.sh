@@ -342,7 +342,10 @@ PRIVATE
         _private_block="    redir https://{host}{uri} permanent"
     fi
 
-    cat > /etc/caddy/Caddyfile <<CADDY
+    # Render beside the live file, never over it. Caddy keeps a bad config
+    # only in memory until the next restart; an invalid file on disk with the
+    # unit enabled takes the site down on the next reboot.
+    cat > /etc/caddy/Caddyfile.new <<CADDY
 {
     acme_ca https://acme-v02.api.letsencrypt.org/directory
     on_demand_tls {
@@ -384,11 +387,13 @@ CADDY
     # Validate before reloading. A malformed Caddyfile does not degrade the web
     # server, it stops it — and on a box reached only over the network that is
     # indistinguishable from bricking it.
-    if ! caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+    if ! caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile.new >/dev/null 2>&1; then
         echo "❌ Generated Caddyfile is invalid — leaving the running config alone." >&2
-        caddy validate --config /etc/caddy/Caddyfile >&2 || true
+        caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile.new >&2 || true
+        rm -f /etc/caddy/Caddyfile.new
         return 1
     fi
+    mv -f /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
     systemctl enable caddy
     systemctl restart caddy
 }

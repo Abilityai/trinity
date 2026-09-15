@@ -320,11 +320,15 @@
                       </svg>
                       <span class="text-status-success-600 dark:text-status-success-400">Saved</span>
                     </template>
-                    <!-- #2691: a saved URL is a string an admin typed. The tick
-                         waits until a request for that exact name has actually
-                         arrived here and a certificate was obtained for it —
-                         the same distinction the first-run step draws. -->
-                    <template v-else-if="publicUrlCurrent && sessionsStore.publicUrlReached">
+                    <!-- #2691: a saved URL is a string an admin typed. On a
+                         provisioned install the tick waits until a request for
+                         that exact name has actually arrived here and a
+                         certificate was obtained for it — the same distinction
+                         the first-run step draws. Only the provisioned Caddyfile
+                         calls the gate that latches it, so everywhere else (own
+                         proxy, tunnel, tailnet) the wait would never end: those
+                         keep the plain saved tick. -->
+                    <template v-else-if="publicUrlCurrent && (sessionsStore.publicUrlReached || !sessionsStore.hardeningGuideEligible)">
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>

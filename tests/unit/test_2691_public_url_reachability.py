@@ -20,7 +20,6 @@ for what is a pure function over one settings read.
 from __future__ import annotations
 
 import asyncio
-import importlib
 import sys
 import types
 from pathlib import Path
@@ -319,7 +318,7 @@ def test_the_refusal_precedes_the_webhook_repoint() -> None:
     assert guard < repoint, "validation runs after the webhooks are re-pointed"
 
 
-def test_a_stamp_for_another_host_does_not_count() -> None:
+def test_a_stamp_for_another_host_does_not_count(monkeypatch) -> None:
     """The stamp describes ONE name, and the reader compares it to the host in
     force. That is what makes a stale row — a restored backup, a direct edit, a
     writer that never learned to clear — read as not-reached rather than show a
@@ -328,24 +327,21 @@ def test_a_stamp_for_another_host_does_not_count() -> None:
 
     svc = ss.SettingsService()
     stamps: dict = {"public_url_reached_at": "2026-09-14T10:00:00Z|old.example.com"}
-    ss.db.get_setting_value = lambda key, default="": stamps.get(key, default)  # type: ignore[assignment]
-    try:
-        svc.get_public_chat_url = lambda: "https://old.example.com"  # type: ignore[assignment]
-        assert svc.is_public_url_reached() is True
+    monkeypatch.setattr(ss.db, "get_setting_value", lambda key, default="": stamps.get(key, default))
+    svc.get_public_chat_url = lambda: "https://old.example.com"  # type: ignore[assignment]
+    assert svc.is_public_url_reached() is True
 
-        svc.get_public_chat_url = lambda: "https://new.example.com"  # type: ignore[assignment]
-        assert svc.is_public_url_reached() is False, "a stale stamp showed a tick"
+    svc.get_public_chat_url = lambda: "https://new.example.com"  # type: ignore[assignment]
+    assert svc.is_public_url_reached() is False, "a stale stamp showed a tick"
 
-        # Cleared setting: nothing is in force, so nothing is reached.
-        svc.get_public_chat_url = lambda: ""  # type: ignore[assignment]
-        assert svc.is_public_url_reached() is False
+    # Cleared setting: nothing is in force, so nothing is reached.
+    svc.get_public_chat_url = lambda: ""  # type: ignore[assignment]
+    assert svc.is_public_url_reached() is False
 
-        # And the same name in its other spelling still counts.
-        stamps["public_url_reached_at"] = "2026-09-14T10:00:00Z|xn--mnchen-3ya.example.com"
-        svc.get_public_chat_url = lambda: "https://münchen.example.com"  # type: ignore[assignment]
-        assert svc.is_public_url_reached() is True
-    finally:
-        importlib.reload(ss)
+    # And the same name in its other spelling still counts.
+    stamps["public_url_reached_at"] = "2026-09-14T10:00:00Z|xn--mnchen-3ya.example.com"
+    svc.get_public_chat_url = lambda: "https://münchen.example.com"  # type: ignore[assignment]
+    assert svc.is_public_url_reached() is True
 
 
 def test_reachability_is_on_the_flag_surface() -> None:

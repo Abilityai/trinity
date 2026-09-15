@@ -555,6 +555,15 @@ describe('the domain step says why, and what has to be true first (#2691)', () =
     expect(GUIDE_SFC).toMatch(/postureCopy\(props\.ctx\.tlsPosture, reached\.value\)/)
   })
 
+  it('only makes Settings wait where something can end the wait', () => {
+    // The latch is written by the provisioned Caddyfile's TLS ask alone. An
+    // install behind its own proxy, a tunnel or a tailnet never calls it, so an
+    // ungated wait there would never end and the sentence would be false.
+    expect(SETTINGS_SFC).toContain(
+      'publicUrlCurrent && (sessionsStore.publicUrlReached || !sessionsStore.hardeningGuideEligible)'
+    )
+  })
+
   it('links the full walkthrough at the published docs site', () => {
     // The only other docs link in the first-run flow points at a github blob
     // path on `main` and 404s between release cuts.
