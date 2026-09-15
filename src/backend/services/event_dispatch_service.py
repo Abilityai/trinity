@@ -125,24 +125,52 @@ def _interpolate_template(template: str, payload: dict) -> str:
     return re.sub(r"\{\{(payload(?:\.[a-zA-Z0-9_]+)+)\}\}", replacer, template)
 
 
-def _get_internal_token() -> str:
-    """Get a JWT token for internal API calls."""
+def _get_internal_token(source_agent: Optional[str] = None) -> str:
+    """Mint the JWT for the EVT-001 loopback (ent#614).
+
+    ``sub: "admin"`` as before, plus ``scope: EVENT_LOOPBACK_SCOPE`` — the claim
+    ``get_current_user`` fences to ``POST /api/agents/{name}/task`` — and, ONLY
+    for an agent-originated event, ``source_agent``: the value the backend
+    derived and therefore vouches for. ``dependencies.resolve_source_agent``
+    honours the loopback's ``X-Source-Agent`` header when it equals this claim
+    and nothing else, so a subscriber's audit row / execution origin can no
+    longer be pinned on a human's username (``emit_event`` writes one into
+    ``agent_events.source_agent`` for a JWT caller) — that dispatch simply
+    carries no source agent.
+
+    SECRET_KEY-signed on purpose: unlike ``INTERNAL_API_SECRET`` (C-003), which
+    the scheduler and the MCP server also hold, only the backend can mint this.
+    """
     from jose import jwt
     from config import SECRET_KEY, ALGORITHM
     from datetime import datetime, timedelta
+    from dependencies import EVENT_LOOPBACK_SCOPE
 
     payload = {
         "sub": "admin",
+        "scope": EVENT_LOOPBACK_SCOPE,
         "exp": datetime.utcnow() + timedelta(minutes=5),
     }
+    if source_agent:
+        payload["source_agent"] = source_agent
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
-async def trigger_subscription(subscription, event):
+async def trigger_subscription(subscription, event, *, agent_originated: bool):
     """
     Send an async task to the subscribing agent with the interpolated message.
 
     Uses the backend's internal task endpoint to avoid circular MCP calls.
+
+    ``agent_originated`` (ent#614, keyword-only so every caller states it): True
+    when ``event.source_agent`` names the agent that actually emitted — an
+    agent-scoped key on ``emit_event``, the ``{name}`` of ``emit_event_for_agent``
+    (that endpoint's own contract), or a #1578 system-emitted terminal. Only then
+    does the loopback carry ``X-Source-Agent`` plus the JWT ``source_agent`` claim
+    that lets the subscriber's ``/task`` honour it. A human-emitted event
+    (``emit_event`` on a JWT writes the caller's USERNAME into ``source_agent``)
+    carries neither: the subscriber's task runs as an ordinary MCP-triggered
+    execution instead of an agent-to-agent call from a phantom agent.
 
     #1578 recursion-break: when the dispatched event is in the reserved
     ``agent.task.*`` namespace, stamp the loopback ``/task`` with the
@@ -162,11 +190,15 @@ async def trigger_subscription(subscription, event):
         f"{message}"
     )
 
+    vouched = event.source_agent if agent_originated else None
     headers = {
-        "Authorization": f"Bearer {_get_internal_token()}",
-        "X-Source-Agent": event.source_agent,
+        "Authorization": f"Bearer {_get_internal_token(vouched)}",
         "X-Via-MCP": "true",
     }
+    if vouched:
+        # ent#614: the header is the loopback's stated INTENT; the JWT claim is
+        # the proof `resolve_source_agent` checks it against.
+        headers["X-Source-Agent"] = vouched
     # #1578: tag reserved-namespace dispatches so the spawned task's terminal is
     # suppressed by the recursion-break (no A→B→A auto-emit loop). The tag is
     # authenticated as backend-internal via the C-003 `X-Internal-Secret` so an
@@ -345,7 +377,9 @@ async def emit_task_terminal_event(
         )
 
         for sub in matching_subs:
-            _spawn_emit_dispatch(trigger_subscription(sub, event))
+            # ent#614: a #1578 terminal is system-emitted for the execution's
+            # own agent — backend-derived, so the loopback may vouch for it.
+            _spawn_emit_dispatch(trigger_subscription(sub, event, agent_originated=True))
     except Exception as e:  # noqa: BLE001 — fail-open: never affect the billed terminal
         logger.warning(
             "[#1578] emit_task_terminal_event failed for %s/%s: %s",

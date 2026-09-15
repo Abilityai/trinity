@@ -14,7 +14,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import JSONResponse
 
-from dependencies import get_current_user, get_authorized_agent
+from dependencies import get_current_user, get_authorized_agent, resolve_source_agent
 from database import db
 from models import (
     FanOutBatchStatus,
@@ -57,6 +57,12 @@ async def fan_out(
 
     The `agent` field must be "self" or match the path agent name for v1.
     """
+    # ent#614: resolve the raw X-Source-Agent header BEFORE anything reads it
+    # (the replay audit row and the batch's origin below). Rebinding makes the
+    # raw header unreachable past this line.
+    x_source_agent = resolve_source_agent(
+        current_user, x_source_agent, endpoint=f"/api/agents/{name}/fan-out"
+    )
     # Validate agent targeting (v1: self-only)
     if request.agent not in ("self", name):
         raise HTTPException(
@@ -77,6 +83,14 @@ async def fan_out(
             source="mcp" if x_via_mcp else "api",
             actor_user=current_user if not x_source_agent else None,
             actor_agent_name=x_source_agent,
+            # ent#614: on the agent branch the resolver yields no email, so the
+            # key OWNER is carried explicitly (the join back to the human), and
+            # the presented credential is passed the way the /chat and /task
+            # sites already do — this replay row used to record neither.
+            actor_email=getattr(current_user, "email", None),
+            mcp_key_id=getattr(current_user, "mcp_key_id", None),
+            mcp_key_name=getattr(current_user, "mcp_key_name", None),
+            mcp_scope=getattr(current_user, "mcp_scope", None),
             target_type="agent",
             target_id=name,
             endpoint=f"/api/agents/{name}/fan-out",

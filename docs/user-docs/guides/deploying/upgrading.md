@@ -104,6 +104,8 @@ There is nothing to build. One command re-pulls the four platform images **and**
 
 Do not substitute a bare `docker compose -f docker-compose.hosted.yml pull`: the agent base image is not a compose service, so that pull skips it and leaves every agent on the old runtime. `start.sh --hosted` also performs Step 4 for you — `docker compose up -d` recreates only the containers whose image changed and leaves the agent network in place — so continue at [Step 5](#step-5-verify).
 
+On a Marketplace Droplet whose admin was created in the browser, `.env` carries a blank `ADMIN_PASSWORD` with `ADMIN_PASSWORD_SOURCE=browser`; the re-run honours that marker and never generates a password over the one you chose. Setting a real `ADMIN_PASSWORD` in `.env` before the re-run is the deliberate way to reset it.
+
 ### Step 4: Restart Platform Services
 
 > **Use `docker compose restart`, not `down/up`.** `docker compose down` removes the `trinity-agent-network`, which orphans every running agent container — they keep running but lose their network and have to be removed and recreated. `restart` preserves both the agents and the network. The only times to use `down` are: (1) intentional full teardown, (2) recovering from a corrupted compose state.

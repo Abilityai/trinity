@@ -19,6 +19,8 @@ Expose a public URL that fires an agent schedule from an external system (CI/CD,
 | `/api/agents/{name}/schedules/{id}/webhook/secret` | DELETE | JWT | Disable signature auth (URL stays live, unauthenticated) |
 | `/api/webhooks/{token}` | POST | Token (in URL) | Public trigger — returns `202 Accepted`; optional `{"context": "..."}` body (≤4000 chars) is appended to the schedule message |
 
+**Rate limits.** The public trigger allows 10 calls per 60 seconds per token (`WEBHOOK_RATE_LIMIT`), and 60 calls per 60 seconds per client IP before the token is even looked up (`WEBHOOK_IP_RATE_LIMIT`). Over either limit the call returns `429`. Both limits fail open if Redis is unavailable.
+
 ### Configuring a webhook from the UI
 
 Open **Agent → Schedules**, expand a schedule, and click **Webhook**:
@@ -57,13 +59,6 @@ All webhook calls are audit-logged (caller IP, schedule, agent). Signature auth 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/internal/execute-task` | POST | Execute task (used by scheduler, supports async_mode) |
-| `/api/internal/decrypt-and-inject` | POST | Auto-import credentials on agent startup |
-
-### Process Triggers
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/processes/{id}/execute` | POST | Start process execution |
 
 ### Slack Events
 

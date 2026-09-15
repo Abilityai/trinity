@@ -25,7 +25,8 @@ As an agent, I want to kick off background work (research, file processing, code
 │  MCP Server ──► Detects self-call ──► Logs [Self-Task]               │
 │         │                                                             │
 │         ▼                                                             │
-│  Backend /task ──► Validates X-Source-Agent matches MCP key scope    │
+│  Backend /task ──► resolve_source_agent: header must equal the key's │
+│                    own agent (403 otherwise, and for any non-agent)  │
 │         │                                                             │
 │         ├──► is_self_task = (x_source_agent == name)                 │
 │         ├──► Creates execution record                                │
@@ -138,15 +139,32 @@ New request body fields:
 
 ## Security
 
-### Header Validation
+### Header Validation (one gate since ent#614)
 
-The backend validates that the `X-Source-Agent` header matches the MCP key's agent scope to prevent header spoofing:
+`X-Source-Agent` is a raw client header, so every router that reads it resolves it
+through `dependencies.resolve_source_agent` before anything consumes the value —
+`/chat`, `/task` and `/fan-out` **rebind** the parameter so the raw header is
+unreachable downstream:
 
 ```python
-if x_source_agent and current_user.agent_name:
-    if x_source_agent != current_user.agent_name:
-        raise HTTPException(403, "Source agent header doesn't match API key scope")
+x_source_agent = resolve_source_agent(
+    current_user, x_source_agent, endpoint=f"/api/agents/{name}/task"
+)
 ```
+
+The helper honours the header only when the principal can prove it names itself:
+
+```python
+identity = current_user.agent_name or current_user.vouched_source_agent
+if identity:
+    return header if header == identity else 403   # SELF-EXEC-001
+403  # every other principal — a human, a user/system/ops/connector/portal key
+```
+
+The original check (`if x_source_agent and current_user.agent_name`) was gated on the
+principal already being agent-scoped, so it never fired for a human — a permitted user
+could name any agent and have it recorded as the actor. `vouched_source_agent` is set
+only on the EVT-001 loopback JWT, whose source the backend itself derived.
 
 ### Session Ownership
 

@@ -46,7 +46,7 @@ Channel and voice triggers (`telegram`, `slack`, `whatsapp`, `voip`, `voice`, `p
 The fleet execution list lives on the **Executions** tab of the [Operations page](operating-room.md) (`/operations?tab=executions`). The legacy `/executions` route redirects there.
 
 1. Lists all executions across the fleet. Admins see every agent; other users see only agents they own or that are shared with them.
-2. Stat cards show Total, **Completion**, and Cost for the selected time window. Running and queued counts are always live, regardless of the window.
+2. Stat cards show Total, **Completion**, Failed, and Cost for the selected time window. Running and queued counts are always live, regardless of the window.
 3. Filter by agent, status, trigger type, time range (1h to 30d, or all time), and free-text search over task messages.
 4. The list loads 50 rows at a time; **Load more** appends the next page.
 5. A "N running now" strip appears whenever executions are in flight.

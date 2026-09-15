@@ -64,6 +64,36 @@ export function liveItems(items) {
 }
 
 /**
+ * The ONE live item Escape may stop, or null (#2795).
+ *
+ * A 1:1 has exactly one turn, so Escape there is unambiguous. A room fans a
+ * message out to several agents, and "stop the turn" stops *which*? Guessing
+ * destroys work somebody is still waiting for, which is the failure
+ * `shouldCancelOnEscape` is written to avoid ("when in doubt Escape does
+ * nothing") — so the rule is not "stop the first one" but "stop it only when
+ * there is nothing to be ambiguous about".
+ *
+ * That is not as narrow as it sounds: the room fan-out is SEQUENTIAL
+ * (`shared_sessions.service.post_message` awaits each `_wake_agent` in turn),
+ * so one room normally has exactly one execution in flight and Escape works
+ * the way it does everywhere else. Two live rows means the same agent is also
+ * busy in another room, or a chain overlapped — and then Escape is a no-op and
+ * the tile's own Stop button is the unambiguous control.
+ *
+ * An item already being stopped does not count: it is on its way out, and
+ * letting it hold the "sole" slot would make a second press act on it again.
+ *
+ * @param {Array} items      the surface's live rows
+ * @param {Array} stoppingIds ids with a cancel already in flight
+ */
+export function soleStoppableItem(items, stoppingIds = []) {
+  const busy = new Set(stoppingIds || [])
+  const candidates = (Array.isArray(items) ? items : [])
+    .filter((it) => it && it.can_stop === true && isLive(it) && !busy.has(it.id))
+  return candidates.length === 1 ? candidates[0] : null
+}
+
+/**
  * The status word a person reads. Honest about WHY it ended (the
  * `loopStatusLabel` rule, applied to executions): a timeout, a cancel and a
  * failure are three situations with three next actions.

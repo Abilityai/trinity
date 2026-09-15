@@ -1,13 +1,13 @@
 # Platform Keys: Claude, GitHub, Email and Gemini
 
-The keys a Trinity instance needs, all configurable from the browser — in the first-run setup, or later under **Settings → Integrations**. No terminal and no `.env` edit is needed for any of them.
+The keys a Trinity instance needs, all configurable from the browser — in the first-run setup (re-open it any time from **Settings → General → Re-run setup**), or later under **Settings → Integrations**. No terminal and no `.env` edit is needed for any of them.
 
 | Key | Required? | What it switches on | If you skip it |
 |-----|-----------|---------------------|----------------|
 | [Claude](#claude) | **Yes** | Every agent's thinking | No agent can run |
 | [GitHub access token](#github-access-token) | No | Private repos, pushing agent work to GitHub | Public templates only; no push |
 | [Email provider (Resend)](#email-provider-resend) | No | Email-code sign-in for you and anyone you share with | Only the admin password works; codes go to the server log |
-| [Gemini](#gemini) | No | Voice conversations, generated agent avatars | No voice; agents show initials instead of pictures |
+| [Gemini](#gemini) | No | Voice conversations, generated agent avatars, Gemini-runtime agents | No voice; no generated avatars |
 
 Every key is checked with its provider **before** it is saved, and stored encrypted (AES-256-GCM) in the platform database — never in plain text. A key saved in Settings takes precedence over the same key in the server's `.env`, and takes effect without a restart.
 
@@ -23,6 +23,8 @@ Two ways to connect — pick one tab:
 Pasting a subscription token into the API key tab (or the other way round) is caught before anything is sent, and the step offers to move it to the right tab.
 
 **What happens when you connect the first credential.** Agents that were created before any Claude credential existed — for example the starter fleet a fresh install comes with — are switched onto it automatically. Running ones restart in the background, which takes about a minute — except one in the middle of a task, which picks the credential up the next time it starts. Agents that were deliberately set up with their own key, or have already completed a run, are left alone. New agents pick up a credential when they are created.
+
+The same connection happens in reverse: **Remove** the API key on an install that has subscriptions registered, and the agents that were running on it move onto a subscription automatically (see [Subscription Credentials](subscription-credentials.md#registering-a-subscription)).
 
 Manage it later: **Settings → Integrations** — the API key field, and the Subscriptions panel for tokens (auto-assign, auto-switch, usage). See [Subscription Credentials](subscription-credentials.md).
 
@@ -40,7 +42,7 @@ Trinity sends a one-time code to sign in by email — for you, and for anyone yo
 2. Verify the domain you want to send from at [resend.com/domains](https://resend.com/domains).
 3. Paste the key and a **Send codes from** address on that domain (for example `noreply@your-domain.com`).
 
-The check reads your Resend account's domains and refuses an address whose domain Resend has not verified — Resend would reject every code sent from it. A sending-only key cannot list domains; it is accepted with a warning to confirm the domain yourself.
+The check reads your Resend account's domains and refuses an address whose domain Resend has not verified — Resend would reject every code sent from it. A sending-only key cannot list domains; it is accepted with a warning to confirm the domain yourself. Resend's shared test domain (`resend.dev`) is accepted with a warning too: it delivers only to your own Resend account address.
 
 A key saved here makes Resend the email provider, even if the server's `.env` says otherwise. **Remove** reverts email to the `.env` configuration.
 
@@ -48,9 +50,9 @@ If you skip it, nobody can sign in with an email code — only the admin passwor
 
 ## Gemini
 
-Powers voice conversations with agents and Telegram voice-note transcription, and generates agent avatars. (Phone calls and the Brain Orb voice tile also use it, but each has its own feature switch as well.) Create a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (it starts with `AIza`).
+Powers voice conversations with agents and Telegram voice-note transcription, and generates agent avatars. (Phone calls and the Brain Orb voice tile also use it, but each has its own feature switch as well.) An agent created on the Gemini runtime receives it as `GEMINI_API_KEY`. Create a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (it starts with `AIza` — a key without that prefix is refused).
 
-If you skip it, voice is off and agents get no generated avatars — the starter fleet shows initials instead of pictures. Add the key later and voice switches on without a restart; generate avatars from each agent's avatar menu. See [Voice Chat](../advanced/voice-chat.md) and [Agent Avatars](../advanced/agent-avatars.md).
+If you skip it, voice is off and agents get no generated avatars — the starter fleet keeps the pictures it ships with; other agents show initials. Add the key later and voice switches on without a restart; generate avatars with **Generate Default Avatars** under **Settings → General**, or from each agent's avatar menu. See [Voice Chat](../advanced/voice-chat.md) and [Agent Avatars](../advanced/agent-avatars.md).
 
 ## For admins and automation
 
@@ -60,9 +62,9 @@ All endpoints are admin-only and never return a key — only whether one is set,
 |----------|---------|
 | `GET /api/settings/api-keys` | Status of `anthropic`, `github`, `resend` (with `provider`, `from_address`), `gemini` |
 | `POST /api/settings/api-keys/{anthropic,github,resend,gemini}/test` | Check a key with its provider; nothing is saved |
-| `PUT /api/settings/api-keys/{anthropic,github,resend,gemini}` | Save a key (Resend also takes `from_address`) |
-| `DELETE /api/settings/api-keys/{anthropic,github,resend,gemini}` | Remove the saved key; the `.env` value, if any, applies again |
+| `PUT /api/settings/api-keys/{anthropic,github,resend,gemini}` | Save a key (Resend also takes `from_address`). The Anthropic response carries `connected_agents` — how many agents had no credential and now use this one |
+| `DELETE /api/settings/api-keys/{anthropic,github,resend,gemini}` | Remove the saved key; the `.env` value, if any, applies again (`fallback_configured`). Removing the Anthropic key moves agents that relied on it onto a registered subscription |
 | `POST /api/subscriptions/test` | Check a subscription token (one tiny request on your plan); nothing is saved |
-| `POST /api/subscriptions` | Register a subscription token |
+| `POST /api/subscriptions` | Register a subscription token; also returns `connected_agents` |
 
 Environment fallbacks, used only when nothing is saved in Settings: `ANTHROPIC_API_KEY`, `GITHUB_PAT`, `RESEND_API_KEY` with `EMAIL_PROVIDER` and `SMTP_FROM`, and `GEMINI_API_KEY` (or `GOOGLE_API_KEY`).
