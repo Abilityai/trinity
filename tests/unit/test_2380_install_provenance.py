@@ -994,7 +994,7 @@ class TestRouterGuards:
 # ROUTER — /feature-flags
 # ===========================================================================
 
-def _flags(monkeypatch, *, source, marketplace, posture, guide=None):
+def _flags(monkeypatch, *, source, marketplace, posture, guide=None, reached=False):
     """Drive `get_public_feature_flags` with every DB-backed service stubbed.
 
     Mirrors `test_2217_canary_status.py`: a pure handler test that still
@@ -1017,6 +1017,10 @@ def _flags(monkeypatch, *, source, marketplace, posture, guide=None):
         # meaning; the do-script case passes it explicitly.
         is_hardening_guide_eligible=lambda: (marketplace if guide is None else guide),
         get_install_tls_posture=lambda: posture,
+        # #2691: whether that advertised name has ever actually served a
+        # request. Its own cases live in test_2691_public_url_reachability.py;
+        # here it only has to exist, so the posture assertions still run.
+        is_public_url_reached=lambda: reached,
     )
     monkeypatch.setattr(rs, "settings_service", stub_settings)
     monkeypatch.setattr(

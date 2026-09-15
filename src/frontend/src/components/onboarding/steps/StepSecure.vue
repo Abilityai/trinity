@@ -23,7 +23,7 @@
       kicker="Network"
       title="Secure this instance"
       :lead="copy.headline"
-      :badge="stage === 'tunnel' ? 'Done' : 'Recommended'"
+      :badge="stage === 'tunnel' && reached ? 'Done' : 'Recommended'"
       schematic="secure"
     />
 
@@ -41,6 +41,9 @@
         guide has no root shell in the loop.
       -->
       <form v-if="stage === 'address'" class="max-w-md space-y-2" novalidate @submit.prevent="save">
+        <!-- Benefit and prerequisite are readable WITHOUT opening the
+             disclosure (#2691). The help text used to say only "the address
+             people will use to reach this instance", which states neither. -->
         <BaseInput
           v-model="url"
           type="url"
@@ -48,9 +51,15 @@
           placeholder="https://your-domain.com"
           :error="fieldError"
           :disabled="saving"
-          help="The address people will use to reach this instance."
+          :help="DOMAIN_BENEFIT"
           data-testid="first-run-public-url"
         />
+        <p
+          class="text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400"
+          data-testid="first-run-public-url-prerequisite"
+        >
+          {{ DOMAIN_PREREQUISITE }}
+        </p>
         <BaseButton
           type="submit"
           variant="secondary"
@@ -104,8 +113,11 @@
               the name you save, the first time someone visits it — so the domain gets an
               ordinary long-lived certificate instead of a short-lived IP one, and Trinity hands
               out the name instead of the IP. Only the name you save is allowed, so nobody else
-              can point a domain here and have certificates issued. Give DNS time to settle
-              first: until the record points here, the name has nothing to answer it.
+              can point a domain here and have certificates issued. Point the domain at this
+              server before you save: the certificate is obtained on the first request that
+              arrives for the name, so if the record is missing or points elsewhere, that
+              request never gets here — the visitor sees a certificate error and Trinity,
+              which is not in that conversation, carries on showing the name as saved.
             </p>
           </div>
 
@@ -142,6 +154,24 @@
             settles who can reach it at all. The tunnel needs the name, so it is the
             second step rather than a different one.
           </p>
+
+          <!-- #2692: the full walkthrough — both steps end to end, plus the VPN
+               option this page deliberately does not carry. First docs link this
+               step has ever had; until the next release cut it 404s, which is
+               the same release the page itself ships in. -->
+          <p class="text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
+            <a
+              :href="HARDENING_DOCS_URL"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-500 dark:hover:text-action-primary-400"
+              data-testid="first-run-secure-docs"
+            >
+              Read the full hardening guide
+            </a>
+            — both steps end to end, and a private-network option for an instance only you
+            need to reach.
+          </p>
         </div>
       </details>
     </div>
@@ -156,7 +186,13 @@ import BaseButton from '../../base/BaseButton.vue'
 import BaseInput from '../../base/BaseInput.vue'
 import InlineError from '../../InlineError.vue'
 import FirstRunStepHeader from '../FirstRunStepHeader.vue'
-import { hardeningStage, postureCopy } from '../hardeningGuide'
+import {
+  DOMAIN_BENEFIT,
+  DOMAIN_PREREQUISITE,
+  HARDENING_DOCS_URL,
+  hardeningStage,
+  postureCopy,
+} from '../hardeningGuide'
 
 const props = defineProps({ ctx: { type: Object, default: () => ({}) } })
 const emit = defineEmits(['complete', 'skip'])
@@ -166,7 +202,14 @@ const settingsStore = useSettingsStore()
 // `https-domain` means step one landed: the step reads done and the copy speaks
 // only to the (optional) tunnel.
 const stage = computed(() => hardeningStage(props.ctx.tlsPosture))
-const copy = computed(() => postureCopy(props.ctx.tlsPosture) || postureCopy('unconfigured'))
+// #2691: saved is not the same as working. The tick waits for a request to
+// actually arrive for the saved name — the only proof available from in here,
+// and the one thing a DNS lookup at save time could not tell us, since a
+// proxied or load-balanced domain resolves somewhere else by design.
+const reached = computed(() => !!props.ctx.publicUrlReached)
+const copy = computed(
+  () => postureCopy(props.ctx.tlsPosture, reached.value) || postureCopy('unconfigured')
+)
 
 const url = ref('')
 const saving = ref(false)
@@ -177,7 +220,11 @@ async function save() {
   const value = url.value.trim().replace(/\/+$/, '')
   // Named, actionable, with an example (principle 17). The posture is derived
   // from this string, so a bare hostname would read as "no public URL".
-  if (!/^https?:\/\/[^\s/]+\.[^\s/]+/.test(value)) {
+  // `https` only (#2691): the pattern was `https?`, so `http://…` saved
+  // cleanly, the step emitted `complete` and advanced, and the badge then read
+  // "Advertises HTTP" — the step congratulating the operator for reaching the
+  // posture it exists to move them off.
+  if (!/^https:\/\/[^\s/]+\.[^\s/]+/.test(value)) {
     fieldError.value = 'Enter the full address, including https:// — for example https://trinity.example.com'
     return
   }

@@ -310,6 +310,14 @@ async def get_public_feature_flags(
         # admin-only and this surface is not. The guide's copy must say
         # "advertises", never assert a verified certificate.
         "install_tls_posture": settings_service.get_install_tls_posture(),
+        # #2691: has that advertised name ever actually served a request? The
+        # posture above is a string an admin typed; this is the one thing the
+        # instance OBSERVED — the web server in front asked to obtain a
+        # certificate for exactly that host, which cannot happen unless DNS
+        # resolves here and the traffic arrives. It is what lets the first-run
+        # step say "saved, waiting for the first visit" instead of showing a
+        # green tick over a domain that may never have worked.
+        "public_url_reached": settings_service.is_public_url_reached(),
         # Onboarding (trinity-enterprise#52) — is Claude auth configured at all?
         # Trinity agents can't think without it, so the first-run flow uses
         # this to surface the one hard setup gate. True if a platform-wide
@@ -3545,6 +3553,34 @@ async def update_setting(
             body.value = validate_ops_setting(key, body.value)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
+
+    # #2691: `public_chat_url` is the one generic-PUT key whose write has
+    # immediate side effects on live integrations — every Telegram webhook is
+    # re-registered and every WhatsApp binding rewritten a few lines below. It
+    # had no validation at all, so `htp://typo.com` stored cleanly and took the
+    # bots with it to an address that answers nothing. Refuse only what cannot
+    # take effect: a value that does not parse as a URL with a host. Plain
+    # `http://` stays legal — the managed fleet advertises exactly that behind a
+    # tunnel — and clearing the setting stays legal.
+    if key == "public_chat_url":
+        from services.settings_service import classify_advertised_url
+
+        body.value = (body.value or "").strip().rstrip("/")
+        if body.value and classify_advertised_url(body.value) == "unconfigured":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "That is not a URL Trinity can hand out. Enter the full "
+                    "address including the scheme, for example "
+                    "https://trinity.example.com."
+                ),
+            )
+        # Nothing to do about the reachability stamp here: it records the host
+        # it was written for, and `is_public_url_reached` compares that to the
+        # host in force. Clearing it from this handler would add a race (a
+        # handshake landing between the write and the clear is wiped by the save
+        # that provoked it) and would still miss every writer that is not this
+        # route.
 
     try:
         setting = db.set_setting(key, body.value)
