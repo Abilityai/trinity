@@ -20,6 +20,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import { runAgentChat } from "./chat.js";
+import type { ToolAccessPolicy } from "../access.js";
 
 /** One exposed agent as returned by GET /api/internal/mcp-exposed-agents. */
 export interface ExposedAgentSpec {
@@ -143,7 +144,7 @@ export interface ReconcilerOptions {
   requireApiKey: boolean;
   agentChatPullEnabled: boolean;
   /** Register a dynamic tool with the operator-only gate + bound audit target. */
-  registerDynamicTool: (tool: any, canAccess: (auth: any) => boolean, auditTargetId: string) => void;
+  registerDynamicTool: (tool: any, canAccess: (auth: any) => boolean, auditTargetId: string, policy: ToolAccessPolicy) => void;
   /** Remove a previously-registered dynamic tool by name. */
   unregisterDynamicTool: (name: string) => void;
   /** Operator-tier visibility gate (mirrors the static operator tools, #848). */
@@ -277,7 +278,10 @@ export function startExposedToolsReconciler(opts: ReconcilerOptions): Reconciler
         // (and starve every later agent). On failure, leave `name` out of
         // `current` so the next poll retries it.
         try {
-          registerDynamicTool(tool, operatorOnly, name);
+          registerDynamicTool(tool, operatorOnly, name, {
+            kind: "in-tool",
+            how: "runAgentChat → checkAgentAccess on the bound agent (#846)",
+          });
           current.set(name, spec.tool_name);
           claimedToolNames.add(spec.tool_name);
         } catch (e) {

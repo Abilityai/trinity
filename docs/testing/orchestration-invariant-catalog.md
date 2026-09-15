@@ -270,7 +270,7 @@ Idle agent (no running executions) shows `agent-server` CPU < 5 %. (Was 83 % wit
 Every row in `agent_permissions` points to two existing agents. Dangling edges = cascade bug in delete.
 
 **P-02** MCP-layer enforcement matches DB *(Tier A, 🟡)*
-Agent A's MCP `list_agents` returns exactly `{A} ∪ {B : exists agent_permissions(A→B)}`. Agent A's `chat_with_agent(B)` succeeds iff edge exists or A is system.
+Agent A's MCP `list_agents` returns exactly `{A} ∪ {B : exists agent_permissions(A→B)}`. Agent A's `chat_with_agent(B)`, `fan_out(B)` and `run_agent_loop(B)` succeed iff edge exists or A is system; a loop-id read or stop is refused without naming the loop's agent once the edge is gone. Which tools carry the gate is declared per tool in `src/mcp-server/src/access.ts` (`TOOL_ACCESS_POLICY`, trinity-enterprise#628) — a tool-surface gate; the REST routes stay owner-equivalent for an agent key (Invariant #8, trinity-enterprise#629).
 
 **P-03** Sharing → access symmetry *(Tier A, 🟡)*
 User U can chat via web/Slack/Telegram with A iff one of: U is owner, U is admin, `agent_sharing(A, U.email)` exists, or `open_access(A)=1 AND U.email verified`.
