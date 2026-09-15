@@ -341,17 +341,25 @@ async function uploadBatch(fileList) {
     // nothing is precisely the reassurance that made the original gap invisible.
     // A partial lands in the failure line instead, naming the agents it missed,
     // which says both what happened and what to do about it.
+    //
+    // The receipt names what LANDED, not what was picked: the server sanitizes
+    // the filename (`_safe_filename`) and returns the name it actually wrote, so
+    // reporting `file.name` would claim a file the inbox does not contain. The
+    // failure line keeps `file.name`, which is the only name the person can
+    // recognise for something that never arrived.
     const missed = []
+    let landed = file.name
     for (const agent of to) {
       try {
-        await feeds.upload(agent, file)
+        const res = await feeds.upload(agent, file)
+        if (res?.filename) landed = res.filename
       } catch (err) {
         missed.push(agent)
         lastReason = uploadFailureReason(err)
       }
     }
     if (missed.length) failed.push(`${file.name} → ${missed.join(', ')}: ${lastReason}`)
-    else sent.push(file.name)
+    else sent.push(landed)
   }
   uploading.value = false
   // Both halves are stated. A batch that half-succeeded used to report only the

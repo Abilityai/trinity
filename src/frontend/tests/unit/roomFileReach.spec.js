@@ -121,13 +121,21 @@ describe('the rail is wired to those rules', () => {
     expect(RAIL).toContain('feeds.upload(agent, file)')
   })
 
+  it('reports the name the SERVER wrote, not the one that was picked', () => {
+    // `_safe_filename` sanitizes server-side and the response carries the name
+    // that actually landed; reporting `file.name` would name a file the inbox
+    // does not contain — the honesty class this whole PR is about.
+    expect(RAIL).toContain('if (res?.filename) landed = res.filename')
+    expect(RAIL).toContain('else sent.push(landed)')
+  })
+
   it('names the agents a file MISSED, and counts a partial as a failure', () => {
     // Counting a partial fan-out as a success would rebuild the reported bug
     // inside its own fix: "Sent shot.png to analyst-demo and sidekick" while
     // sidekick got nothing is exactly what made the gap invisible.
     expect(RAIL).toContain('if (missed.length) failed.push')
     expect(RAIL).toMatch(/\$\{file\.name\} → \$\{missed\.join\(', '\)\}/)
-    expect(RAIL).toContain('else sent.push(file.name)')
+    expect(RAIL).toContain('else sent.push(landed)')
   })
 })
 
