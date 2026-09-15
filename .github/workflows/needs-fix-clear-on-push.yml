@@ -1,0 +1,75 @@
+name: Needs-Fix Label Clears on Push
+
+# #2815: a `/review`, `/validate-pr` or merge-train finding posted as a COMMENT
+# never touches `reviewDecision`, so a PR carrying an unaddressed finding is
+# byte-identical — in every field the queue reads — to one nobody has looked
+# at. `/open-pull-requests` listed three such PRs as ✅ Ready, and the next
+# merge train re-validated them from scratch at full lane depth to rediscover
+# what was already written down.
+#
+# The finding is now also a LABEL, `status-needs-fix`, which the queue view
+# sorts out of Ready and the train's Phase 0 treats as a hold. This workflow is
+# the other half: the author's next push clears it, so "a finding is
+# outstanding" needs no human bookkeeping in either direction. A push that does
+# not address the finding also clears it — accepted; the reviewer re-applies it,
+# and the alternative (a human deciding per push) is the bookkeeping the label
+# exists to remove.
+#
+# `pull_request`, NOT `pull_request_target` — deliberately, twice over:
+#
+#   * `pull_request_target` is registered from the DEFAULT branch, so a new
+#     workflow declaring it is inert on `dev` until the next release cut
+#     (#2814); this one has to work the day it lands.
+#   * `pull_request` reads the PR's own ref, and on a same-repo PR — every PR
+#     the train handles — its GITHUB_TOKEN can write labels.
+#
+# The cost is fork PRs: there the token is read-only (#2767) and the removal
+# below is refused. That is logged, never fatal, and the reviewer clears the
+# label by hand — the same manual step forks needed before this workflow
+# existed, on the PRs that get a `/review` least often.
+#
+# No checkout, no `run:` step, no PR text read: the only thing this workflow
+# does with the event is delete one label from the PR that emitted it.
+# `tests/unit/test_2815_needs_fix_label_workflow.py` pins each of those.
+on:
+  pull_request:
+    types: [synchronize]
+    branches: [dev, main]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  clear-needs-fix:
+    if: contains(github.event.pull_request.labels.*.name, 'status-needs-fix')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Remove status-needs-fix (the author pushed)
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                name: 'status-needs-fix',
+              });
+              core.info(`#${pr.number}: status-needs-fix cleared by push ${pr.head.sha.slice(0, 7)}`);
+            } catch (e) {
+              if (e.status === 404) {
+                // Raced with a manual removal — the label is gone either way.
+                core.info(`#${pr.number}: status-needs-fix was already absent`);
+              } else if (e.status === 403) {
+                // A fork PR's token is read-only (#2767). Not a failure of
+                // the push; the reviewer clears the label by hand.
+                core.warning(
+                  `#${pr.number}: could not clear status-needs-fix (${e.message}) — ` +
+                  `read-only token on a fork PR; remove it manually after re-review`
+                );
+              } else {
+                core.setFailed(`#${pr.number}: could not clear status-needs-fix — ${e.message}`);
+              }
+            }
