@@ -163,8 +163,19 @@ journeys:
     promise: "My agents can call each other, and I can see what they said."
     actor: user
     lanes: [local]
-    tier: live-stack
-    harness: null
+    # journey-smoke, not live-stack: `journey-smoke.yml` runs `tests/journeys/`
+    # wholesale on every PR, so this file gates PRs whatever the field says, and
+    # the field has to tell the truth. The credential-free half (the permission
+    # boundary, attribution, the stopped callee, the fan-out and loop bounds,
+    # the delete cascade) runs there; the half that needs B's real answer skips
+    # with the allowlisted "journey needs a real provider key" reason and runs
+    # on a keyed stack, exactly like J03 — which is also why `built` stays
+    # false: the promise is "I can see what they SAID", and the words are the
+    # half the gate never sees. Reading the caller's own MCP key needs the
+    # Docker socket of the host running the stack (the harness FAILS without
+    # it, never skips), so the lane stays `local`.
+    tier: journey-smoke
+    harness: tests/journeys/test_j10_agent_calls_agent_journey.py
     built: false
     owner: trinity
     # P-01/P-02: the permission edge and the MCP gate that consults it;

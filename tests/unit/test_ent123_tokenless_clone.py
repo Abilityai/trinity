@@ -622,7 +622,13 @@ class TestWriteCredentialGuard:
         gs, db = git_service_env
         db.get_agent_github_pat.return_value = None
         c = _FakeContainer(["OTHER=1"])
-        with patch.object(gs, "get_agent_container", MagicMock(return_value=c)):
+        # ent#615: the guard now also asks the credential helper, because a
+        # credential in `.env` or the harvest file is invisible to the cheap
+        # tiers. Non-zero exit = the helper resolved nothing, i.e. genuinely
+        # tokenless.
+        with patch.object(gs, "get_agent_container", MagicMock(return_value=c)), \
+             patch.object(gs, "execute_command_in_container",
+                          AsyncMock(return_value={"exit_code": 1, "output": ""})):
             result = _run(gs.sync_to_github("a1"))
         assert result.success is False
         assert result.conflict_type == "no_write_credentials"
@@ -636,6 +642,45 @@ class TestWriteCredentialGuard:
         low = result.message.lower()
         assert "no write credentials" in low
         assert "token" in low, "the refusal must still name a remedy"
+
+    def test_helper_resolvable_credential_counts_as_writable(self, git_service_env):
+        """ent#615: a `.env`-only PAT is invisible to both cheap tiers.
+
+        Before the credential helper, "the global tier is deliberately excluded
+        — a global PAT never reaches a tokenless container's remote" was true,
+        so the cheap tiers were the whole predicate. The helper resolves `.env`
+        (and the ent#615 harvest file) at request time, so an agent with
+        neither baked env nor a DB row can now genuinely push — and answering
+        `no_write_credentials` to it would be a lie.
+        """
+        gs, db = git_service_env
+        db.get_agent_github_pat.return_value = None
+        c = _FakeContainer(["OTHER=1"])
+        probe = AsyncMock(return_value={"exit_code": 0, "output": ""})
+        assert _run(gs._agent_can_push("a1", c)) is True
+        with patch.object(gs, "execute_command_in_container", probe):
+            assert _run(gs._agent_can_push("a1", c)) is True
+        probe.assert_awaited_once()
+        # EXIT CODE only — `git credential fill` prints the credential on
+        # stdout, and this exec's output reaches the platform log.
+        assert "password=" not in probe.await_args.kwargs["command"] or \
+            "grep -q" in probe.await_args.kwargs["command"]
+
+    def test_helper_probe_is_skipped_when_a_cheap_tier_answers(self, git_service_env):
+        gs, _db = git_service_env
+        c = _FakeContainer(["GITHUB_PAT=ghp_x"])
+        probe = AsyncMock()
+        with patch.object(gs, "execute_command_in_container", probe):
+            assert _run(gs._agent_can_push("a1", c)) is True
+        probe.assert_not_awaited()
+
+    def test_helper_probe_fails_open(self, git_service_env):
+        gs, db = git_service_env
+        db.get_agent_github_pat.return_value = None
+        c = _FakeContainer(["OTHER=1"])
+        with patch.object(gs, "execute_command_in_container",
+                          AsyncMock(side_effect=RuntimeError("docker down"))):
+            assert _run(gs._agent_can_push("a1", c)) is True
 
     def test_sync_to_github_passes_credentialed_agent(self, git_service_env):
         gs, _db = git_service_env
@@ -658,7 +703,9 @@ class TestWriteCredentialGuard:
         activity_mod.activity_service.get_current_activities = AsyncMock(
             return_value=[])
         with patch.dict(sys.modules, {"services.activity_service": activity_mod}), \
-             patch.object(gs, "get_agent_container", MagicMock(return_value=c)):
+             patch.object(gs, "get_agent_container", MagicMock(return_value=c)), \
+             patch.object(gs, "execute_command_in_container",
+                          AsyncMock(return_value={"exit_code": 1, "output": ""})):
             result = _run(gs.reset_to_main_preserve_state("a1"))
         assert result["error"] == "no_write_credentials"
 
@@ -678,8 +725,19 @@ class TestStartupShTokenless:
     def test_credential_less_clone_url_branch_exists(self, sh):
         assert 'CLONE_URL="${GIT_SCHEME}://${GIT_HOST_PATH}/${GITHUB_REPO}.git"' in sh
 
-    def test_pat_clone_url_still_authenticated(self, sh):
-        assert 'CLONE_URL="${GIT_SCHEME}://oauth2:${GITHUB_PAT}@${GIT_HOST_PATH}/${GITHUB_REPO}.git"' in sh
+    def test_the_clone_url_is_the_only_form_and_carries_no_credential(self, sh):
+        """ent#615 replaced this test's premise.
+
+        ent#123 introduced a credential-LESS branch beside the token-bearing
+        one, and this pinned that the token-bearing branch survived. There is
+        now exactly one branch, and it is the credential-less one: the token
+        reaches git through the `trinity` credential helper instead, so it is
+        in neither `.git/config` nor `git-remote-https`'s argv. ent#123's own
+        property — a tokenless agent clones anonymously — is unchanged and is
+        pinned by the test above.
+        """
+        assert "oauth2:${GITHUB_PAT}@" not in sh
+        assert sh.count('CLONE_URL="${GIT_SCHEME}://${GIT_HOST_PATH}/${GITHUB_REPO}.git"') == 1
 
     def test_terminal_prompt_disabled(self, sh):
         assert "export GIT_TERMINAL_PROMPT=0" in sh

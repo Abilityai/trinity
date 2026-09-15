@@ -64,6 +64,36 @@ export function liveItems(items) {
 }
 
 /**
+ * The ONE live item Escape may stop, or null (#2795).
+ *
+ * A 1:1 has exactly one turn, so Escape there is unambiguous. A room fans a
+ * message out to several agents, and "stop the turn" stops *which*? Guessing
+ * destroys work somebody is still waiting for, which is the failure
+ * `shouldCancelOnEscape` is written to avoid ("when in doubt Escape does
+ * nothing") — so the rule is not "stop the first one" but "stop it only when
+ * there is nothing to be ambiguous about".
+ *
+ * That is not as narrow as it sounds: the room fan-out is SEQUENTIAL
+ * (`shared_sessions.service.post_message` awaits each `_wake_agent` in turn),
+ * so one room normally has exactly one execution in flight and Escape works
+ * the way it does everywhere else. Two live rows means the same agent is also
+ * busy in another room, or a chain overlapped — and then Escape is a no-op and
+ * the tile's own Stop button is the unambiguous control.
+ *
+ * An item already being stopped does not count: it is on its way out, and
+ * letting it hold the "sole" slot would make a second press act on it again.
+ *
+ * @param {Array} items      the surface's live rows
+ * @param {Array} stoppingIds ids with a cancel already in flight
+ */
+export function soleStoppableItem(items, stoppingIds = []) {
+  const busy = new Set(stoppingIds || [])
+  const candidates = (Array.isArray(items) ? items : [])
+    .filter((it) => it && it.can_stop === true && isLive(it) && !busy.has(it.id))
+  return candidates.length === 1 ? candidates[0] : null
+}
+
+/**
  * The status word a person reads. Honest about WHY it ended (the
  * `loopStatusLabel` rule, applied to executions): a timeout, a cancel and a
  * failure are three situations with three next actions.
@@ -188,6 +218,26 @@ export function holderLine(holder, { agentName = null, masked = false } = {}) {
 export function childrenForChat(items, chatId, excludeId = null) {
   if (!chatId) return []
   return liveItems(items).filter((it) => it.chat_id === chatId && it.id !== excludeId)
+}
+
+/**
+ * A room's OWN live work (#2792): the in-flight rows stamped with `roomId`, and
+ * nothing else the participants happen to be doing. The feed is agent-scoped
+ * in a room by design (the rail's Work tab shows everything), so this is where
+ * the join happens — on the chat id, never on the agent name, which is how a
+ * schedule run, a loop turn, a 1:1 thread or another room used to render as
+ * this room's card. When `workingAgents` (the server's list) is given, the row's
+ * agent must also be in it: the room polls at 3 s and the feed at 12 s, so a
+ * row the server has already retired would otherwise sit under the posted
+ * reply. A masked (off-roster) agent has no name to draw, so no card.
+ */
+export function liveItemsForRoom(items, roomId, workingAgents = null) {
+  if (!roomId) return []
+  const working = Array.isArray(workingAgents) ? new Set(workingAgents) : null
+  return liveItems(items).filter((it) =>
+    it.chat_id === roomId
+    && typeof it.agent_name === 'string' && it.agent_name
+    && (working === null || working.has(it.agent_name)))
 }
 
 /** The feed's row for the turn on screen, by execution id — never "latest running" (review E5). */

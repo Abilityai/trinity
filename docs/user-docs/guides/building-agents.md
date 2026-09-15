@@ -27,23 +27,19 @@ Or from the terminal: `claude plugin add abilityai/abilities`
 
 ## Path A: Creating a New Agent
 
-Start from scratch with a guided wizard.
+Start from scratch with the interview-driven wizard.
 
-### Step 1: Choose a wizard and run it
+### Step 1: Run the wizard
 
 ```bash
 /create-agent:create        # Shows all available wizards
 
-# Or jump directly to a specific wizard:
-/create-agent:prospector    # B2B sales research agent
-/create-agent:chief-of-staff # Executive assistant
-/create-agent:webmaster     # Website management
-/create-agent:recon         # Competitive intelligence
-/create-agent:ghostwriter   # Content writer
-/create-agent:custom        # Blank canvas (you define everything)
+# Or jump directly:
+/create-agent:custom        # Any agent, from an interview — role, skills, schedules, credentials, Trinity wiring
+/create-agent:website       # A website scaffold (no agent)
 ```
 
-Each wizard asks domain-specific questions and scaffolds a complete agent.
+The `custom` wizard asks about your domain and scaffolds a complete agent. It covers every shape the retired domain wizards used to — describe the role and the interview builds it.
 
 ### Step 2: Connect to Trinity (one-time)
 
@@ -132,7 +128,7 @@ Wizard-created agents include everything needed for Trinity:
 
 ## Next Steps
 
-- [create-agent Plugin](../abilities/create-agent-plugin.md) — All 14 creation wizards explained
+- [create-agent Plugin](../abilities/create-agent-plugin.md) — The `custom` and `website` wizards, plus review, adjust, and clone
 - [agent-dev Plugin](../abilities/agent-dev-plugin.md) — Skills, memory systems, backlog, project management, planning
 - [trinity Plugin](../abilities/trinity-plugin.md) — Connect, onboard, deploy, sync workflows
 

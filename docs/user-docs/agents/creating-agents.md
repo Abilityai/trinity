@@ -30,7 +30,7 @@ A default install therefore shows starter templates plus whatever the registry o
 | `.mcp.json.template` | MCP config template with `${VAR}` placeholders for credential injection |
 | `.env.example` | Example credentials file listing required environment variables |
 
-All bundled templates ship the canonical `.gitignore`, so an agent created from one never auto-commits caches, virtualenvs, or local databases into its repository.
+All bundled templates ship the canonical `.gitignore`, so an agent created from one never auto-commits caches, virtualenvs, or local databases into its repository. An agent created from any GitHub repository with auto-sync on gets the same rules merged into its `.gitignore` right after creation, before the first sync cycle can commit runtime state or credential files.
 
 **Runtime options** control which CLI the agent uses. An agent's runtime — Claude Code, OpenAI Codex, or Gemini CLI — is chosen via `runtime.type` in `template.yaml` (see [Agent Runtimes](agent-runtimes.md)):
 

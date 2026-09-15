@@ -1,6 +1,6 @@
 # Trinity User Documentation
 
-> Auto-generated from source code. Run `/generate-user-docs` to update. Last sync: 2026-09-12.
+> Auto-generated from source code. Run `/generate-user-docs` to update. Last sync: 2026-09-14.
 
 ## What's New
 
@@ -23,7 +23,7 @@
 ## Getting Started
 
 - [Overview](getting-started/overview.md) — What is Trinity, key concepts, architecture
-- [Setup](getting-started/setup.md) — Installation, first-time setup, login
+- [Setup](getting-started/setup.md) — Installation, admin account (including the browser claim on 1-Click installs), the first-run setup sequence, login
 - [Quick Start](getting-started/quick-start.md) — Create your first agent in 5 minutes
 - [Roles and Permissions](getting-started/roles-and-permissions.md) — 4-tier role model, user management
 - [Getting Help](getting-started/help.md) — Docs Q&A bot, community resources
@@ -35,7 +35,7 @@
 - [Managing Agents](agents/managing-agents.md) — Start/stop, rename, delete, health
 - [Agent Data & Portability](agents/agent-data.md) — Runtime data paths, export/import across instances
 - [Agent Chat](agents/agent-chat.md) — The stateless per-turn chat on the agent page, streaming, history
-- [Agent Canvas](agents/agent-canvas.md) — A surface the agent keeps current: blocks, the design kit, starter layouts
+- [Agent Canvas](agents/agent-canvas.md) — A surface the agent keeps current: blocks, the design kit, starter layouts, sharing and PDF, pinning and clean-up
 - [Continuous Conversations](agents/agent-session.md) — What resuming preserves, auto-compact, per-turn limits
 - [Agent Terminal](agents/agent-terminal.md) — Ephemeral key-based SSH access; the WebSocket terminal for API clients
 - [Agent Files](agents/agent-files.md) — File browser, virtual filesystem, shared folders
@@ -71,7 +71,7 @@
 
 ## Operations
 
-- [Dashboard](operations/dashboard.md) — Timeline, Grid, and List views, org overlay, tag clouds, activity feed
+- [Dashboard](operations/dashboard.md) — Timeline, Grid, and List views, org overlay, subscription pressure chips, the getting-started checklist
 - [Operations Page](operations/operating-room.md) — Unified tabbed view: operator queue, notifications, health, executions
 - [Monitoring](operations/monitoring.md) — Fleet health checks, agent heartbeats, cleanup service, retention sweeps
 - [Executions](operations/executions.md) — Fleet execution list, stats, detail, live streaming, termination
@@ -84,7 +84,7 @@
 
 - [Agent Sharing & Access](sharing-and-access/agent-sharing.md) — Access tab (operators), Sharing tab (external clients, channels, client roster)
 - [Access Control](sharing-and-access/access-control.md) — Cross-channel email verification, access requests
-- [Public Links](sharing-and-access/public-links.md) — Public chat URLs, email verification, session memory
+- [Public Links](sharing-and-access/public-links.md) — Public chat URLs, email verification, session memory, Connect Slack
 - [Workspace](sharing-and-access/workspace.md) — The chat app: chat tabs and the pinned Main chat, the composer (typeahead, model picker, files, voice), the rail (Info, Files, Loops, Canvas, Work), agent pages
 - [Tags and Organization](sharing-and-access/tags-and-organization.md) — Tags, filtering, system views
 - [Mobile Admin](sharing-and-access/mobile-admin.md) — Mobile PWA at /m
@@ -107,7 +107,7 @@
 ## Abilities (Agent Development Toolkit)
 
 - [Overview](abilities/overview.md) — Plugin marketplace introduction, quick start
-- [create-agent Plugin](abilities/create-agent-plugin.md) — Agent creation wizards (14 wizards)
+- [create-agent Plugin](abilities/create-agent-plugin.md) — The interview-driven `custom` wizard, the website scaffold, and review/adjust/clone tooling
 - [agent-dev Plugin](abilities/agent-dev-plugin.md) — Development tools, memory systems, git sync, backlog cycle, pipelines, orchestration, canon, fleet analysis
 - [trinity Plugin](abilities/trinity-plugin.md) — Repository-first deployment, onboarding in place, sync, remote loops, instance provisioning
 - [dev-methodology Plugin](abilities/dev-methodology-plugin.md) — Documentation-driven development

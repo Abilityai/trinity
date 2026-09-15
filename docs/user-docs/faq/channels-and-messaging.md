@@ -4,7 +4,7 @@
 
 ## How do I connect my Trinity instance to Slack?
 
-Connection happens in two steps. First, a platform admin goes to **Settings → Integrations → Slack Integration**, enters a Slack App Token (`xapp-...`), clicks **Connect** to start the Socket Mode transport, then clicks **Install to Workspace** to complete OAuth and obtain a bot token — the app token, client secret, and signing secret are stored encrypted at rest. Second, each agent is bound to Slack from its own detail page: open the **Sharing** tab, click **Configure** on the Slack row, and click **Create Channel** to create a dedicated channel bound to that agent. Note that only one Slack workspace can be connected per Trinity instance. See [Slack Integration](../integrations/slack-integration.md).
+Connection happens in two stages. First, a platform admin sets up the Slack app under **Settings → Integrations → Slack Integration**, following the checklist shown inline: under **OAuth Credentials**, enter the app's Client ID, Client Secret and Signing Secret and click **Save Credentials**; under **Transport Connection**, paste the app-level token (`xapp-...`) and click **Connect** to start Socket Mode (the badge reads **Socket Mode**, **Webhook** or **Disconnected**); then click **Install to Workspace** (**Reinstall to Workspace** once a workspace is connected) to complete OAuth and obtain the bot token. The client secret, signing secret and app token are stored encrypted at rest. Second, each agent is bound to Slack from its own detail page: open the **Sharing** tab, click **Configure** on the Slack row, and click **Create Channel** to create a dedicated channel bound to that agent — a public link's **Connect Slack** button is a shortcut into the same binding (see [Sharing, Access & Monetization](sharing-access-and-monetization.md#can-i-connect-a-public-link-to-slack)). Only one Slack workspace can be connected per Trinity instance. See [Slack Integration](../integrations/slack-integration.md).
 
 ## What is the difference between Socket Mode and webhook mode for Slack?
 
@@ -36,7 +36,7 @@ Trinity posts each reply with the agent's name and its Trinity avatar as the per
 
 ## How do I connect an agent to Telegram?
 
-Create a bot first: message @BotFather on Telegram, send `/newbot`, choose a name and a username ending in `bot`, and copy the bot token. Then open the agent's **Sharing** tab, click **Configure** on the Telegram row, paste the token, and click **Connect Bot** — Trinity validates the token and registers the webhook. Each agent needs its own dedicated bot; bots cannot be shared across agents. If the status shows "Connected (no webhook)", set your instance's public URL under **Settings → Public Chat URL** so Telegram can deliver messages. See [Telegram Integration](../integrations/telegram-integration.md).
+Create a bot first: message @BotFather on Telegram, send `/newbot`, choose a name and a username ending in `bot`, and copy the bot token. Then open the agent's **Sharing** tab, click **Configure** on the Telegram row, paste the token, and click **Connect Bot** — Trinity validates the token and registers the webhook. Each agent needs its own dedicated bot; bots cannot be shared across agents. If the status shows the yellow "Bot connected but webhook not registered", set **Public URL** under **Settings → General** to your instance's public address — the webhook registers automatically once saved. See [Telegram Integration](../integrations/telegram-integration.md).
 
 ## Why doesn't my Telegram bot see every message in a group?
 
@@ -44,7 +44,11 @@ Two settings control this. In Trinity, each group has a trigger mode: **Mention 
 
 ## Can users send voice messages to my Telegram bot?
 
-Yes. Voice notes are automatically transcribed with Google Gemini and delivered to the agent as text prefixed with a 🎙️ emoji — users just send voice notes normally. Limits: 5 minutes duration, 10 MB file size, and the backend must have `GEMINI_API_KEY` configured. If transcription fails, the agent receives a placeholder message instead, so the conversation still progresses. See [Telegram Integration](../integrations/telegram-integration.md).
+Yes. Voice notes are automatically transcribed with Gemini and delivered to the agent as text prefixed with a 🎙️ emoji — users just send voice notes normally. Limits: 5 minutes duration and 10 MB file size, and the platform needs a Gemini key (next question). If transcription fails or no key is configured, the agent receives a placeholder such as `[Voice message received — transcription failed]` instead, so the conversation still progresses. See [Telegram Integration](../integrations/telegram-integration.md).
+
+## Which Gemini model transcribes Telegram voice notes, and where does the key come from?
+
+`gemini-3.5-flash` by default; set `GEMINI_TRANSCRIPTION_MODEL` on the backend to use another. The key is the platform Gemini key — saved from the browser under **Settings → Integrations → API Keys** (or the **Other keys** step of first-run setup), with `GEMINI_API_KEY` in the server's `.env` as the fallback when nothing is saved in Settings. It must start with `AIza`, and it is the same key that powers voice conversations and generated avatars, so adding it once switches all three on. See [Telegram Integration](../integrations/telegram-integration.md#voice-messages) and [Platform Keys](../credentials/platform-keys.md#gemini).
 
 ## Does my agent's Markdown render properly in Telegram, and what happens to long replies?
 
@@ -52,7 +56,7 @@ Yes. Replies are converted to Telegram formatting — bold, italic, strikethroug
 
 ## How do I connect an agent to WhatsApp?
 
-Trinity connects to WhatsApp through Twilio — you bring your own Twilio account. Open the agent's **Sharing** tab, click **Configure** on the WhatsApp row, and enter your Twilio Account SID, Auth Token (stored encrypted), and WhatsApp sender number in the form `whatsapp:+15551234567`. After connecting, copy the generated webhook URL into your Twilio console so inbound messages reach Trinity. You also need **Settings → Public Chat URL** set to your public domain, and if you route traffic through a tunnel, a rule sending `/api/whatsapp/webhook/*` to the backend service. See [WhatsApp Integration](../integrations/whatsapp-integration.md).
+Trinity connects to WhatsApp through Twilio — you bring your own Twilio account. Open the agent's **Sharing** tab, click **Configure** on the WhatsApp row, and enter your Twilio Account SID, Auth Token (stored encrypted), and WhatsApp sender number in the form `whatsapp:+15551234567`. After connecting, copy the generated webhook URL into your Twilio console so inbound messages reach Trinity. You also need **Settings → General → Public URL** set to your public domain, and if you route traffic through a Cloudflare Tunnel, an ingress rule sending `/api/whatsapp/webhook/*` to the backend service (not the frontend). See [WhatsApp Integration](../integrations/whatsapp-integration.md).
 
 ## Should I use the Twilio sandbox or a production WhatsApp sender?
 
@@ -92,7 +96,7 @@ Because voice is opt-in per message and fails soft — a voice problem never los
 
 ## Can my agent place real phone calls?
 
-Yes — agents can dial a number through Twilio and hold a live, interruptible spoken conversation powered by Gemini Live. VoIP is off by default: the platform needs `VOIP_ENABLED=true` plus a `GEMINI_API_KEY`, a configured Public Chat URL, and a publicly reachable deployment (Twilio must open a WebSocket to your instance). The agent owner then configures a per-agent Twilio voice binding in the Sharing tab's **Voice calls** row, and calls are placed via the `call_user` MCP tool or the API. This release is outbound only — agents do not answer incoming calls. See [VoIP Telephony](../advanced/voip-telephony.md).
+Yes — agents can dial a number through Twilio and hold a live, interruptible spoken conversation powered by Gemini Live. VoIP is off by default: the platform needs `VOIP_ENABLED=true` plus a Gemini key, the **Public URL** set in Settings, and a publicly reachable deployment (Twilio must open a WebSocket to your instance). The agent owner then configures a per-agent Twilio voice binding in the Sharing tab's **Voice calls** row, and calls are placed via the `call_user` MCP tool or the API. This release is outbound only — agents do not answer incoming calls. See [VoIP Telephony](../advanced/voip-telephony.md).
 
 ## What limits apply to agent phone calls, and what happens after a call?
 
@@ -114,7 +118,15 @@ Yes, three layers, all fail-soft and on by default per bot binding. A 👀 react
 
 ## An agent delegated my Telegram request to another agent — will I hear back?
 
-Yes. When work that started from Telegram finishes later — because it was delegated or run in the background — the result is posted back into the originating chat, threaded to your original message and sent by the same bot you were talking to. Failures report honestly rather than vanishing. An ordinary chat turn already answers inline, so it is never double-posted. Group chats have a per-group consent flag (on by default) that suppresses these when turned off; direct messages are consented by construction. Slack behaves the same way, gated on the channel's proactive-consent toggle — a channel that denies proactive posts gets no completion note. The same report-back also reaches the Workspace chat a job was started from. See [Telegram Integration](../integrations/telegram-integration.md#completion-report-back), [Slack Integration](../integrations/slack-integration.md#completion-report-back), and [Event Subscriptions](../collaboration/event-subscriptions.md#reporting-back-to-the-person-who-asked).
+Yes. When work that started from Telegram finishes later — because it was delegated or run in the background — the result is posted back into the originating chat, threaded to your original message and sent by the same bot you were talking to. Failures report honestly rather than vanishing. An ordinary chat turn already answers inline, so it is never double-posted. Group chats have a per-group consent flag, `allow_proactive` (on by default), that suppresses these when turned off; direct messages are consented by construction. Slack behaves the same way, gated on the channel's proactive-consent toggle — a channel that denies proactive posts gets no completion note. The same report-back also reaches the Workspace chat a job was started from. See [Telegram Integration](../integrations/telegram-integration.md#completion-report-back), [Slack Integration](../integrations/slack-integration.md#completion-report-back), and [Event Subscriptions](../collaboration/event-subscriptions.md#reporting-back-to-the-person-who-asked).
+
+## Why can't my agent use all its tools when replying in Slack?
+
+Because channel replies run with a restricted tool set: by default only **WebSearch** and **WebFetch**, with `Read` added automatically when the message carries readable files, and a 120-second execution timeout. Those are platform settings — `channel_allowed_tools` for the tools, `channel_rate_limit_max` and `channel_rate_limit_window` for the per-Slack-user rate limit (30 messages per 60 seconds by default) — so an admin can widen the list for an agent that genuinely needs more. Rate limits are per Slack user, not per agent. See [Slack Integration](../integrations/slack-integration.md#rate-limiting).
+
+## Why won't my agent post to a Telegram group on its own?
+
+Most likely the group's proactive consent is off. Every connected group carries an `allow_proactive` flag — on by default — that governs whether the bot may post there without being asked: agent-initiated messages via `send_group_message(channel_type: "telegram")` and the completion report-back for delegated work. Turn it back on with `PUT /api/agents/{name}/telegram/groups/{id}` (a human-only route). If the flag is on, check that the group hasn't been removed (deactivated) in the Sharing tab's Telegram Groups section and that the agent's proactive caps under **Settings → General → Proactive message limits** haven't been hit. Direct messages never need consent — the user started the conversation. See [Telegram Integration](../integrations/telegram-integration.md#completion-report-back).
 
 ## A file someone sent my agent in Slack never arrived. Why?
 

@@ -216,6 +216,12 @@ services:
       - DB_BACKUP_HOUR=${DB_BACKUP_HOUR:-3}
       - DB_BACKUP_MINUTE=${DB_BACKUP_MINUTE:-30}
       - DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS=${DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS:-1800}
+      # Git sync-health poll cadence (#2742). Default UNCHANGED at 60s; the knob
+      # exists so an operator can cut the per-poll `git fetch` load on a large
+      # fleet. Read at call time in sync_health_service, so it must reach the
+      # container; prod compose launches standalone (no base merge / env_file),
+      # so wire it here too or the lever is inert (the #1056/#1039 class).
+      - SYNC_HEALTH_POLL_INTERVAL_SECONDS=${SYNC_HEALTH_POLL_INTERVAL_SECONDS:-60}  # seconds between fleet sync-health polls
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
       # First-run default system seed (trinity-enterprise#124): a path to an

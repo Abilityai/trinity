@@ -205,6 +205,12 @@ export interface Schedule {
   timeout_seconds: number;
   allowed_tools?: string[];
   model?: string;
+  // Validation configuration (VALIDATE-001). The backend has returned these
+  // on every read since the feature landed; they were missing from the write
+  // surface only. #2759
+  validation_enabled?: boolean;
+  validation_prompt?: string;
+  validation_timeout_seconds?: number;
   // ent#498: deliver this schedule's output into that person's Workspace
   // conversation with the agent. Absent = no delivery.
   deliver_to_workspace_email?: string;
@@ -223,6 +229,10 @@ export interface ScheduleCreate {
   // RETRY-001: Retry configuration
   max_retries?: number;
   retry_delay_seconds?: number;
+  // VALIDATE-001: Post-execution validation configuration
+  validation_enabled?: boolean;
+  validation_prompt?: string;
+  validation_timeout_seconds?: number;
   // ent#498: deliver this schedule's output into that person's Workspace
   // conversation with the agent. Absent = no delivery.
   deliver_to_workspace_email?: string;
@@ -241,6 +251,10 @@ export interface ScheduleUpdate {
   // RETRY-001: Retry configuration
   max_retries?: number;
   retry_delay_seconds?: number;
+  // VALIDATE-001: Post-execution validation configuration
+  validation_enabled?: boolean;
+  validation_prompt?: string;
+  validation_timeout_seconds?: number;
   // ent#498: `null` CLEARS the delivery target (the handler uses exclude_unset,
   // so omitting keeps it) — hence nullable here and not merely optional.
   deliver_to_workspace_email?: string | null;
@@ -335,6 +349,8 @@ export interface FanOutBatchStatus {
   running: number;
   results: Array<{
     execution_id: string;
+    /** The caller's own task id (#2524); absent on rows written before it was persisted. */
+    task_id?: string;
     /** The EXECUTION status verbatim (`queued`/`running`/`success`/…), not the
      * dispatch response's two-value `completed`/`failed` pair — a live batch has
      * to distinguish "waiting for a slot" from "running". */
