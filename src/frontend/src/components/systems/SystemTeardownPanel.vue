@@ -54,27 +54,52 @@
 
     <!-- Remove view ------------------------------------------------------- -->
     <div v-else class="mt-4 space-y-4">
-      <div class="flex flex-wrap items-end gap-3">
-        <BaseInput
-          :model-value="store.teardownName"
-          label="System name"
-          class="min-w-0 flex-1"
-          placeholder="acme"
-          data-testid="teardown-name"
-          help="The name the manifest deployed under — the prefix its agents share."
-          @update:model-value="store.setTeardownName($event)"
-          @keyup.enter="preview"
-        />
-        <BaseButton
-          :disabled="!store.teardownName.trim() || store.isPreviewingTeardown"
-          :loading="store.isPreviewingTeardown"
-          loading-label="Checking…"
-          variant="secondary"
-          data-testid="teardown-preview"
-          @click="preview"
-        >
-          Preview removal
-        </BaseButton>
+      <!-- The panel owns the label and the help, not BaseInput — which is the
+           affordance that primitive documents ("`label`/`help` are optional so
+           the control can slot into composed layouts that own their own
+           label") and the shape TemplateRegistryPanel already uses for the same
+           control-plus-action row.
+
+           It has to be composed this way because BaseInput is a THREE-part
+           stack: label, control, help. Left whole inside the row, any flex
+           alignment resolves against that whole box, so `items-end` put the
+           button's bottom on the HELP TEXT's bottom — 22px below the control's
+           centre, reading as a stranded caption rather than the field's action.
+           With label and help lifted out, the row holds two control boxes and
+           alignment means what it says.
+
+           `items-stretch` rather than `items-start`: the two primitives are
+           deliberately different heights (field py-2 on a 20px line box = 38px,
+           button py-[7px] on a 13.5px/1.35 line box = 34px), and stretching the
+           shorter one to the row costs no magic number and no override of
+           either recipe's padding. -->
+      <div>
+        <label :for="nameFieldId" :class="[LABEL_CLASS, 'mb-1']">System name</label>
+        <div class="flex flex-wrap items-stretch gap-3">
+          <BaseInput
+            :id="nameFieldId"
+            :model-value="store.teardownName"
+            class="min-w-0 flex-1"
+            placeholder="acme"
+            data-testid="teardown-name"
+            :aria-describedby="`${nameFieldId}-help`"
+            @update:model-value="store.setTeardownName($event)"
+            @keyup.enter="preview"
+          />
+          <BaseButton
+            :disabled="!store.teardownName.trim() || store.isPreviewingTeardown"
+            :loading="store.isPreviewingTeardown"
+            loading-label="Checking…"
+            variant="secondary"
+            data-testid="teardown-preview"
+            @click="preview"
+          >
+            Preview removal
+          </BaseButton>
+        </div>
+        <p :id="`${nameFieldId}-help`" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+          The name the manifest deployed under — the prefix its agents share.
+        </p>
       </div>
 
       <InlineError
@@ -156,13 +181,14 @@
  * `GET /api/systems`: that endpoint groups agents by their last hyphen rather
  * than by the membership predicate, so it reports names that are not systems.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, ref, useId, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSystemsStore, TEARDOWN_FEATURE_ID } from '../../stores/systems'
 import { useEnterpriseStore } from '../../stores/enterprise'
 import BaseButton from '../base/BaseButton.vue'
 import BaseCard from '../base/BaseCard.vue'
 import BaseInput from '../base/BaseInput.vue'
+import { LABEL_CLASS } from '../base/fieldClasses'
 import InlineError from '../InlineError.vue'
 import TeardownPreview from './TeardownPreview.vue'
 import TeardownResult from './TeardownResult.vue'
@@ -178,6 +204,11 @@ const store = useSystemsStore()
 const enterpriseStore = useEnterpriseStore()
 
 const entitled = computed(() => enterpriseStore.enterpriseFeatures.includes(TEARDOWN_FEATURE_ID))
+
+// The label and help live in the template, so their `for`/`aria-describedby`
+// wiring needs an id the panel controls rather than the one BaseInput would
+// have minted for itself.
+const nameFieldId = useId()
 
 const acknowledged = ref(false)
 const checked = ref([])
