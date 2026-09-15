@@ -95,6 +95,7 @@ Outbound phone calls — flag-gated, off by default. See [VoIP Telephony](../adv
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/voip` | GET/PUT/DELETE | Voice binding status / configure / remove (owner) |
+| `/api/agents/{name}/voip/enabled` | PUT | Enable or disable calling without re-entering credentials (owner) |
 | `/api/agents/{name}/voip/call` | POST | Place an outbound call (rate-limited, daily-capped; accepts `Idempotency-Key`) |
 
 ### Shared Folders

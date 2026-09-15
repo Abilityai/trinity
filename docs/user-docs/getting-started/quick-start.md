@@ -7,36 +7,42 @@ Create and interact with a Trinity agent using the Web UI, API, or MCP tools.
 ## Guided Onboarding (First Run)
 
 The fastest path: let Trinity guide you. A fresh install already runs a seeded starter fleet
-(see [First-Time Setup → Your Starter Fleet](setup.md#your-starter-fleet)), so the Dashboard
-opens with a **Start here** card instead of an empty screen. Click **Make me one** on that
-card to open the onboarding wizard. It asks one question — *pick what you want it to do* —
-with four purpose cards (**Research a market or topic**, **Advise on strategy**,
-**Write content & reports**, **Start from scratch**), then:
+(see [First-Time Setup → Your Starter Fleet](setup.md#your-starter-fleet)), and the Dashboard
+opens with **first-run setup** — one guided sequence over the Dashboard (the full step list is
+in [First-Time Setup → Your First Dashboard](setup.md#your-first-dashboard)). Its
+**Connect Claude** step is the one you cannot skip: paste a Claude subscription
+token or an Anthropic API key, and Trinity checks it with Anthropic before saving it, so your
+agent can actually think. Then the **Your first agent** step offers two doors:
 
-1. Opens the real **Create Agent** form with the matching starter template pre-selected.
-2. After the agent is created, walks you to the **Claude subscription** step so your
-   agent can actually think (**Settings → Integrations → Claude Subscriptions**), or offers
-   **Open chat with &lt;agent&gt;** if Claude auth is already configured.
+- **Show me** — **Watch Cornelius work** opens a seeded agent's chat, before you build anything.
+- **Make me one** — *pick what it should do*, with four purpose cards (**Research a market or
+  topic**, **Advise on strategy**, **Write content & reports**, **Start from scratch**). Your pick
+  opens the real **Create Agent** form with the matching starter template pre-selected; once the
+  agent is created, the step is done.
 
-You can dismiss it at any time (**Skip for now — I'll explore on my own**) — it won't nag
-you again.
+Already running a fleet elsewhere? A small **Bring it over** link points at the migration docs.
+Click **Continue**, and **Done** at the end of the sequence opens your new agent's chat
+(**Show me** opens the seeded agent's chat instead).
 
-The wizard opens **by itself** only on an install with no agents at all (first-run seeding
-disabled); there the Dashboard's empty state shows a **Get started** button that opens the
-same wizard.
+The agent step is optional: **Skip — later in the dashboard** moves on, and **Finish later**
+closes the whole sequence. Neither nags you again.
 
-**Relaunch the wizard any time** (e.g. to spin up another agent, or if you skipped it):
-open the Dashboard with the `?onboarding=1` query parameter:
+On an install with no agents at all (first-run seeding disabled), the Dashboard's empty state
+shows a **Get started** button that opens the **Create Agent** form directly.
+
+**Re-run first-run setup any time** (e.g. to spin up another agent, or if you skipped it):
+open the Dashboard with the `?onboarding=1` query parameter, or use
+**Settings → General → First-run setup → Re-run setup**:
 
 ```
 http://localhost/?onboarding=1
 ```
 
-This works regardless of how many agents you already have. **Log in first**, then
-open the link (opening it while signed out sends you through the login page, which
-drops the `?onboarding=1` parameter).
+This works regardless of how many agents you already have — completed steps show as done.
+**Log in first**, then open the link (opening it while signed out sends you through the
+login page, which drops the `?onboarding=1` parameter).
 
-> Prefer to do it manually? Skip the wizard and follow **How It Works** below.
+> Prefer to do it manually? Skip the step and follow **How It Works** below.
 
 ## How It Works
 

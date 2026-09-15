@@ -50,7 +50,7 @@ One limit, reported rather than fixed: many default patterns are directory-form 
 Agents created without a Git repository can be connected after the fact:
 
 - Use the Git repo initialization flow in the UI.
-- Via MCP: `initialize_github_sync(agent_name, repo_url)`
+- Via MCP: `initialize_github_sync(agent_name, repo_owner, repo_name)` — creates the repository if it does not exist (private by default; `create_repo`, `private` and `description` are optional)
 
 ### Binding an agent to a repository you own
 
@@ -125,6 +125,13 @@ Trailing slashes are stripped automatically. Defaults target `github.com` and `h
 | `/api/agents/{name}/git/sync` | POST | Trigger sync; the response carries `removed_paths`, `unignored_paths`, and `shadowed_negations` from the `.gitignore` sweep |
 | `/api/agents/{name}/git/log` | GET | Recent commits |
 | `/api/agents/{name}/git/pull` | POST | Pull from remote |
+| `/api/agents/{name}/git/config` | GET | The agent's stored git configuration (repo, mode, branch) |
+| `/api/agents/{name}/git/initialize` | POST | Connect an agent created without a repository to GitHub |
+| `/api/agents/{name}/github-pat` | GET / PUT / DELETE | Per-agent PAT override: status only, set, or clear (back to the platform PAT) |
+| `/api/agents/{name}/git/reset-to-main-preserve-state` | POST | Adopt `origin/main` as the new baseline while keeping the agent's persisted state |
+| `/api/agents/{name}/git/auto-sync` | GET / PUT | The 15-minute auto-sync heartbeat for this agent |
+| `/api/agents/{name}/git/freeze-schedules-if-failing` | GET / PUT | Pause scheduled executions while sync is failing |
+| `/api/agents/{name}/git/sync-state` | GET | The persisted sync-state row for this agent |
 | `/api/agents/{name}/git/bind-to-own-repo` | POST | Bind to a repository you own (owner-only, human-only) |
 | `/api/agents/{name}/git/bind-to-own-repo/status` | GET | Reconcile a binding whose response was lost |
 | `/api/agents/sync-health` | GET | Per-agent sync health for the fleet |
