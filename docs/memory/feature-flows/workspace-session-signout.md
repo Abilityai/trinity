@@ -163,6 +163,80 @@ form simply reappeared, indistinguishable from "you were never signed in".
 **Degradation:** if `sessionStorage` is unavailable (private mode), the marker reads
 as absent — pre-#2261 behaviour, rather than a workspace nobody can enter.
 
+## One credential, one verdict, one handler (#2791)
+
+Everything above is about *which session a tab is in*. #2791 is the layer under
+it: **where the credential lives, and who is allowed to end it.**
+
+One browser used to hold the platform JWT in two places that could disagree —
+the in-memory `axios.defaults.headers.common['Authorization']` written once at
+login by `auth.js::setupAxiosAuth`, and `localStorage['token']` re-read per
+request by `api.js` — with no cross-tab listener anywhere under
+`src/frontend/src`, and three separate 401 handlers. The Workspace made it bite
+hardest because it opens in its own tab (ent#456) and polls every 20s.
+
+**The reported symptom.** Log out and log back in on the main app with a
+Workspace tab open from the previous session. That tab still holds the OLD JWT;
+its next poll 401s; the handler calls `authStore.logout()`, which removes
+`localStorage['token']` — *the token the re-login had just written*. The main
+tab's next request finds nothing and hard-redirects to `/login`. A stale tab
+killed a fresh session, and the handler never asked whether the credential that
+failed was still the current one.
+
+### The three things that are now singular
+
+**One source.** `utils/platformSession.js::readStoredToken()` is the only reader.
+The `axios.defaults` copy is gone (`setupAxiosAuth` is a documented no-op), and
+`main.js` installs a global axios **request** interceptor that rebuilds the
+header from storage on every request — so all ~368 bare-`axios` call sites get
+the current credential without being rewritten, and one added tomorrow cannot
+forget to opt in. An **explicit** header on the config still wins, and exactly
+one caller needs that: the logout revoke, which must carry a token storage has
+already dropped (the #2258 ordering above is unchanged, so the token is captured
+*before* the clear and passed *after* it — otherwise #187 silently stopped
+revoking anything).
+
+**One verdict.** `sessionLostVerdict()` is a pure function returning
+`ignore | stale | logout`, and it replaced a predicate that had been hand-copied
+into `api.js`, `main.js` and `portalHttp` and drifted three ways:
+
+| situation | verdict |
+|---|---|
+| already on `/login`, `/setup`, `/m` | `ignore` |
+| the failed token is **not** the stored one | `stale` — adopt the current session, never destroy it |
+| no stored token, on the Workspace | `ignore` (an ordinary external client) |
+| no stored token, anywhere else | `logout` |
+| on the Workspace **and** a portal token is live | `ignore` — **AC #5**: a client whose browser holds a dead operator JWT is no longer thrown onto the operator login by `initializeAuth`'s `fetchUserProfile` |
+| otherwise | `logout` |
+
+The `stale` arm is the fix for the reported symptom. The Workspace veto is scoped
+by path *as well as* by portal token deliberately: off the Workspace the surface
+is an operator one, so an expired operator JWT still bounces there even with a
+stray portal token — this change does not widen that.
+
+**One handler.** `setPlatformUnauthorizedHandler` / `notifyPlatformUnauthorized`
+in `utils/platformSession.js`. `main.js` registers the reaction (it is the only
+module that already has both the router and the store);
+`api.js`, the global interceptor and `portalHttp` all report to it.
+`clientPortal.js` keeps `isPlatformSession` as its local gate — not redundant,
+because it is the only thing that knows this tab's client session was
+*suppressed* (#2261's `platformFallbackSuppressed`), which no amount of reading
+localStorage reconstructs.
+
+### Cross-tab sync
+
+`main.js` listens for `storage` on the platform token key. A sibling tab logging
+in → `adoptStoredSession()` (converge, re-fetch the profile, reset
+`profileVerified` so role-gated UI stays closed until *this* token's profile
+lands). A sibling logging out → `applySessionEndedElsewhere()`, which drops the
+in-memory mirror only: it fires no second server revoke for an already-revoked
+token, and writes nothing to storage, because N background tabs reacting to one
+event would otherwise each clear it again.
+
+Neither branch navigates. A background tab pushing `/login` is the noise this
+issue reports; the visible tab converges through the router guard and its next
+request, both of which read the state these set.
+
 ## Stated residuals (not hidden)
 
 - ~~**Client-session expiry with a later platform login** still falls back to the
@@ -182,8 +256,12 @@ as absent — pre-#2261 behaviour, rather than a workspace nobody can enter.
 ## Files
 
 - `src/frontend/src/stores/clientPortal.js` — `signOutEverywhere()`, `PLATFORM_LOGIN_ROUTE`
-- `src/frontend/src/stores/auth.js` — `logout()` local-clear-before-revoke ordering
+- `src/frontend/src/utils/platformSession.js` — #2791: the one reader, the one verdict, the one handler registry
+- `src/frontend/src/stores/auth.js` — `logout()` local-clear-before-revoke ordering; `adoptStoredSession` / `applySessionEndedElsewhere`
+- `src/frontend/src/main.js` — global request interceptor, the registered reaction, the `storage` listener
+- `src/frontend/src/api.js` — reports to the shared handler (no private predicate, no hard reload)
 - `src/frontend/src/views/Portal.vue` — `onSignOut`, `signingOut` frame
 - `src/frontend/src/components/portal/PortalSidebar.vue` — footer button + caption
 - `src/frontend/src/components/portal/portalUtils.js` — `signOutLabelFor`
-- `src/frontend/tests/unit/workspaceSession.spec.js`, `workspaceSignOut.spec.js`
+- `src/frontend/tests/unit/workspaceSession.spec.js`, `workspaceSignOut.spec.js`,
+  `platformSessionVerdict.spec.js`, `platformSessionSync.spec.js`
