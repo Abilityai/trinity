@@ -135,8 +135,13 @@ async def wait_for_fan_out_batch(fan_out_id: str, timeout: float) -> None:
     async def _poll_db():
         while True:
             await asyncio.sleep(SYNC_WAITER_POLL_INTERVAL)
-            if db.count_fan_out_open(fan_out_id) == 0:
-                return True
+            try:
+                if db.count_fan_out_open(fan_out_id) == 0:
+                    return True
+            except Exception as exc:  # noqa: BLE001 — a DB blip is not a 500
+                # The poll is the correctness net; one failed read must not
+                # escape as an exception from the whole wait (#2524 review).
+                logger.warning("[SyncWaiter] fan-out %s poll failed: %s", fan_out_id, exc)
 
     poll_task = asyncio.create_task(_poll_db())
     try:

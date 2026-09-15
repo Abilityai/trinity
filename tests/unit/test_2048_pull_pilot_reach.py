@@ -32,11 +32,10 @@ rather than extending the reach. So these tests pin two things:
 `schedule`, `webhook` and `reminder` joined the reachable set. The structural
 test below was re-derived rather than relaxed: it now pins BOTH policies on that
 producer *and* pins that the wider one is gated, which is the property that was
-never asserted before and is the one that actually matters. Everything else in
-this file still holds — a stranded trigger is still stranded (`loop`, `fan_out`,
-`a2a`, `operator_response`, all four blocked by a synchronous result consumer
-rather than by the producer's policy), and the diagnostic still tells the
-operator so.
+never asserted before and is the one that actually matters. #2523 (`loop`)
+and #2524 (`fan_out`, `a2a`, `operator_response`) then removed the synchronous
+result consumers that stranded the rest, so the stranded set is empty; the
+narrowing and the diagnostic are exercised against a synthetic omission.
 
 Pure unit test — no Redis, no DB, no agent. Path bootstrap and lazy imports
 follow `test_1766_pull_pilot_exclusive.py`.

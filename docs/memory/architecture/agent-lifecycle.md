@@ -28,17 +28,17 @@ Cost, stated because it is #1816's own bug class generalized: involuntary reboot
 
 Rotating an agent's subscription token used to recreate the container, making "rotate a credential" and "kill every in-flight turn" the same operation (#1037). Rotation now hot-reloads the running container; recreate is reserved for image/template/auth-**mode** changes. The agent server authenticates Claude purely from `CLAUDE_CODE_OAUTH_TOKEN` and is a single uvicorn worker, so mutating its process env makes the **next** subprocess use the new token while in-flight ones finish on the old.
 
-Backend orchestration in `services/subscription_auto_switch.py`: `_hot_reload_subscription_token(agent_name)` POSTs the DB token to the agent-server `POST /api/credentials/reload-token`, falling back to `_restart_agent` on 404/transport failure/missing token. Three producer paths converted, all under the #799 `agent_switch_lock`: **auto-switch** (`_perform_auto_switch`, SUB-003), **manual sub→sub reassignment** (`PUT /api/subscriptions/agents/{name}`; auth-mode changes still recreate), and **key rollover** (`reload_subscription_for_all_agents(sub_id)` fans a best-effort reload across running agents). Durable override (`/var/lib/trinity/oauth-token`) + `startup.sh` read make a rotation survive a plain restart. **#2114:** the helper sends `remove_api_key=True` for Claude-runtime agents (`trinity.agent-runtime` label, claude-code default; non-Claude keep `False` — their scripts may legitimately use a `.env` `ANTHROPIC_API_KEY`, which never shadows anything there); the endpoint force-unsets `ANTHROPIC_AUTH_TOKEN` alongside `ANTHROPIC_API_KEY` and returns `env_shadow` (names of force-unset keys the current `.env` still carries), which the backend logs at WARNING — so a `.env` key shadowing subscription auth is diagnosed from the backend log at switch time instead of a container-log line nobody tails. Agent-server mirroring follows Invariant #5.
+Backend orchestration in `services/subscription_auto_switch.py`: `_hot_reload_subscription_token(agent_name)` POSTs the DB token to the agent-server `POST /api/credentials/reload-token`, falling back to `_restart_agent` on 404/transport failure/missing token. Three producer paths converted, all under the #799 `agent_switch_lock`: **auto-switch** (`_perform_auto_switch`, SUB-003), **manual sub→sub reassignment** (`PUT /api/subscriptions/agents/{name}`; auth-mode changes still recreate), and **key rollover** (`reload_subscription_for_all_agents(sub_id)` fans a best-effort reload across running agents). **#2572 adds a FOURTH producer that deliberately takes the RECREATE branch**: the credential-less adoption sweep (`subscription_service.adopt_for_credentialless_agents`) is an auth-MODE change — no credential → subscription — so it calls `_restart_agent` and does NOT join the hot-reload list, whose docstring invariant is that every producer is sub→sub by construction. Its background apply phase carries two exclusions the other three do not need: `trinity-system` is adopted in the DB but never restarted (`_restart_agent` stops first, so `was_already_running` is False and the #1816 "never recreate a running trinity-system" guard is bypassed by construction), and ephemeral ghosts are kept out of the sweep entirely (volume-less by invariant, and the AUTH recreate predicate — unlike the image-drift one — carries no ghost exemption, so a restart destroys the workspace mid-budget, trinity-enterprise#69). Durable override (`/var/lib/trinity/oauth-token`) + `startup.sh` read make a rotation survive a plain restart. **#2114:** the helper sends `remove_api_key=True` for Claude-runtime agents (`trinity.agent-runtime` label, claude-code default; non-Claude keep `False` — their scripts may legitimately use a `.env` `ANTHROPIC_API_KEY`, which never shadows anything there); the endpoint force-unsets `ANTHROPIC_AUTH_TOKEN` alongside `ANTHROPIC_API_KEY` and returns `env_shadow` (names of force-unset keys the current `.env` still carries), which the backend logs at WARNING — so a `.env` key shadowing subscription auth is diagnosed from the backend log at switch time instead of a container-log line nobody tails. Agent-server mirroring follows Invariant #5.
 
 ### Install Provenance & First-Run Hardening Guide (#2380)
 
 **How** an instance was installed, recorded once at boot, gating a first-run
-HTTPS/VPN hardening guide that can appear on a marketplace install and nowhere
-else. Full flow: [install-provenance.md](../feature-flows/install-provenance.md);
+hardening guide that can appear on a marketplace or DigitalOcean-script
+(`do-script`) install and nowhere else. Full flow: [install-provenance.md](../feature-flows/install-provenance.md);
 requirements §8.10 (`infrastructure.md`).
 
-- **Provenance is the gate, and it has to be** — a marketplace droplet is the one
-  install where Trinity knows at boot that it is on a public IPv4 with no domain
+- **Provenance is the gate, and it has to be** — a provisioned droplet (marketplace
+  image or DigitalOcean install script) is the one install where Trinity knows at boot that it is on a public IPv4 with no domain
   and zero network configuration. The obvious predicate is unusable: measured
   across all 16 managed instances, every one serves plain HTTP with no `DOMAIN`,
   no `HTTPS_ENABLED`, on a `100.x` Tailscale CGNAT address — structurally
@@ -82,23 +82,35 @@ requirements §8.10 (`infrastructure.md`).
   2026-01-15 (~6-day `shortlived` profile) and DigitalOcean's own 1-Click rules
   ship Caddy with them, so a droplet can boot on genuinely trusted HTTPS — just
   on a short renewal cycle at an unmemorable address.
-- **The card** (`components/onboarding/HardeningGuide.vue`) renders only when the
-  flags have loaded AND `marketplace_install` AND not dismissed AND posture ≠
-  `https-domain`. Dismissal is localStorage (the ent#319 precedent — no new
-  endpoint); retirement is server state, so a configured domain hides it with no
+- **The guide** is the `secure` step of the first-run overlay since ent#581
+  (`components/onboarding/steps/StepSecure.vue`, dispatched by
+  `FirstRunOverlay.vue` over the `firstRunSteps.js` registry; it replaced
+  `HardeningGuide.vue`). It applies only when the flags have loaded AND a
+  verified admin AND `hardening_guide_eligible` (a separate set from
+  `marketplace_install`: the marketplace sources plus `do-script`; the overlay
+  hands it to the registry as `marketplaceInstall`) AND posture ≠
+  `https-domain`, and a skipped step does not re-open the overlay. One step
+  carries both stages the guide advises — the domain field (`address`), then the
+  Cloudflare Tunnel guidance (`tunnel`) — and the posture picks the stage:
+  `https-domain` completes the step, which then stops opening the overlay and, on
+  a re-open (`?onboarding=1`, Settings → General → Re-run setup), reads done and
+  speaks only to the optional tunnel. Skipping is localStorage (the ent#319
+  precedent — no new endpoint; a pre-ent#581 address-stage dismissal counts as a
+  skip); completion is server state, so a configured domain completes it with no
   client state. Server *state*, not verified fact: the posture reads an
-  operator-declared address, so an admin who types any https domain suppresses
-  the card. That is deliberate — it is the AC's completion condition, and an
-  admin can already dismiss it outright — but it is NOT the standard PROV-003
-  holds provenance to, and the difference is that this one gates a nudge while
-  that one gates whether the nudge may exist at all. It offers a real domain and
-  a VPN as **complementary** paths, and says plainly that Trinity issues no
-  certificate itself: setting the Public URL changes the name Trinity hands out,
-  and whatever terminates TLS in front of it is what acts on that.
-- **Nothing in the OSS tree writes the marker** — #2281's Packer snapshot and
-  §8.9's outstanding cloud-init example do — so provenance reads `unknown` on
-  every install today and the guide renders nowhere. That is the contract
-  working, and it is what makes this half safe to ship first.
+  operator-declared address, so an admin who types any https domain completes
+  the step. That is deliberate — it is the AC's completion condition, and an
+  admin can already skip it outright — but it is NOT the standard PROV-003 holds
+  provenance to, and the difference is that this one gates a nudge while that one
+  gates whether the nudge may exist at all. It offers a real domain, then a
+  Cloudflare Tunnel, as steps that stack. Trinity issues no certificate itself;
+  on a `start.sh --provision` host Caddy obtains one for the saved Public URL
+  behind the backend's on-demand-TLS `ask` gate (`GET /api/public/tls-allowed`,
+  PROV-015).
+- **The marker's writer is `start.sh --provision`** (PROV-011): `--provenance`
+  if given, else `do-script` on DigitalOcean. An install that never passes
+  through `--provision` writes nothing, reads `unknown`, and never sees the guide
+  — the contract working.
 
 ### First-Run Provisioning — honest `setup_completed` (#2381)
 
@@ -111,9 +123,11 @@ requirements §8.10 (`infrastructure.md`).
 - **`routers/setup.py` (the security half)** refuses whenever a usable admin exists, **above** the flag check and **above** the bcrypt hash — the route is unauthenticated and unrate-limited, so an expensive hash before the gate is both a DoS lever and a timing signal. **Fail-closed**: a DB read error refuses, because failing open would restore the vulnerability on exactly the transient conditions an attacker can retry against.
 - **`database.py::_mark_setup_completed_if_provisioned{,_engine}` (the honesty half)** writes the flag when a usable admin exists. Deliberately **not a migration**: a new one would inherit the same once-only semantics, and the population that matters has already booted with the migration recorded. A boot-time reconciliation re-runs every start, so an already-exposed install converges on its next restart. It asks about the **result** rather than the action, so `_ensure_admin_user`'s create branch, its env-password re-sync branch, and the already-correct case all land in the same state. **Never raises** — `init_database` runs at import, so a raise crash-loops the backend (the `_seed_fresh_install_*` contract).
 
-**What the wizard is now for.** It renders exactly where it has work to do: an install with **no** admin account — blank `ADMIN_PASSWORD` dev, hand-rolled — where login is blocked by the same flag and the wizard is the only way in. It disappears where `ADMIN_PASSWORD` provisioned an admin at boot: production compose (mandatory `:?`), `start.sh` (refuses blank), `--unattended` (auto-generates), hosted/marketplace images. This closes ent#49's tokenless first-run window **without reinstating the token**: ent#49 priced that tradeoff on the premise *there is no admin yet*, which is true only for the installs that still get the wizard.
+**What the wizard is now for.** It renders exactly where it has work to do: an install with **no** admin account — blank `ADMIN_PASSWORD` dev, hand-rolled, and (ent#580) a marketplace one-click image — where login is blocked by the same flag and the wizard is the only way in. It disappears where `ADMIN_PASSWORD` provisioned an admin at boot: `start.sh` (refuses blank), `--unattended` (auto-generates), a marketplace image given a user-data password. This closes ent#49's tokenless first-run window **without reinstating the token**: ent#49 priced that tradeoff on the premise *there is no admin yet*, which is true only for the installs that still get the wizard.
 
-**Collateral the wizard used to carry.** It was the only capture point for the admin sign-in email and for the ent#38 product-updates opt-in. The email moves to a dismissible post-login prompt (since ent#437 the first section of `components/onboarding/FinishSetupCard.vue`, formerly `AdminEmailNudge.vue`; admin-only, `profileVerified`-gated, derivation-only so it vanishes the moment an email exists anywhere) — strictly better placed, since an unauthenticated wizard's "admin email" could be typed by whoever loaded the page first on a hosted install. The opt-in has no second home and needs one: `abilityai/trinity-enterprise#463`. Note the sibling telemetry-sharing consent (ent#12) is unaffected — it has always had its own Settings surface.
+**Marketplace claim (ent#580).** A one-click droplet has no deploy-time input form, so first boot (`packer/digitalocean/files/opt/trinity-firstboot/firstboot.sh`) no longer generates a password: with no user-data password it exports `ADMIN_PASSWORD_SOURCE=browser`, and `start.sh::ensure_admin_password` writes `ADMIN_PASSWORD=` (explicitly blank) plus that marker to `.env` instead of refusing or generating. The marker is what keeps later `start.sh --hosted` runs — the documented update path — from generating a password that `_ensure_admin_user` would re-sync over the browser-set one on the next boot; a blank env never re-syncs. `start.sh` decides blank with `env_value` (compose's reading), so `ADMIN_PASSWORD=""`, `=''` and a trailing space are blank, not set. Only the hosted compose moved from `${ADMIN_PASSWORD:?}` to `${ADMIN_PASSWORD?}` (unset still refuses to render); prod keeps `:?`, since the marketplace runs hosted, and the parity test allowlists exactly that env difference. Hosted also forwards `ADMIN_PASSWORD_SOURCE=${ADMIN_PASSWORD_SOURCE:-unset}` so `routers/setup.py` can refuse a hand-run hosted compose's blank password (403) — the one backend change; the no-admin branch of `_ensure_admin_user` / `_mark_setup_completed_if_provisioned` already existed and just stopped being dev-only. The MOTD prints the URL (and, via `/api/setup/status`, whether it has been claimed), never a password. The creation-to-first-visit window is an accepted risk (`docs/DEPLOYMENT.md` → Security Recommendations). Guards: `tests/unit/test_ent580_marketplace_admin_claim.py`, `tests/unit/test_2281_firstboot_password.py`.
+
+**Collateral the wizard used to carry.** It was the only capture point for the admin sign-in email and for the ent#38 product-updates opt-in. The email moves to a skippable post-login prompt (since ent#581 the `email` step of the first-run overlay, `components/onboarding/FirstRunOverlay.vue` over `firstRunSteps.js` — formerly `FinishSetupCard.vue` section 1, before that `AdminEmailNudge.vue`; admin-only, `profileVerified`-gated, derivation-only so it is done the moment an email exists anywhere) — strictly better placed, since an unauthenticated wizard's "admin email" could be typed by whoever loaded the page first on a hosted install. The opt-in has no second home and needs one: `abilityai/trinity-enterprise#463`. Note the sibling telemetry-sharing consent (ent#12) is unaffected — it has always had its own Settings surface.
 
 **Adjacent fix, same PR.** `docker-compose.prod.yml` never passed `ADMIN_USERNAME` (present in `docker-compose.yml` and `.env.example`), so the variable was inert in production — the #1707 packaging-gap class. Proven by `docker compose config` resolution, not grep.
 

@@ -482,6 +482,48 @@
           </div>
         </div>
 
+        <!-- API-key fallback (#2638) -->
+        <div class="pt-4 border-t border-gray-200 dark:border-gray-700">
+          <div class="flex items-center justify-between">
+            <div class="flex-1 mr-4">
+              <label for="api-key-fallback-toggle" class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                Fall back to the platform API key
+              </label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                When every subscription is out of quota, keep the agent working by moving it onto the
+                platform API key instead of failing the message. The agent's subscription assignment is
+                cleared when this happens and you are notified &mdash; it is not a temporary redirect.
+                Turn it off if spend must only ever go through subscriptions.
+              </p>
+              <p
+                v-if="subsStore.apiKeyFallback.loaded && subsStore.apiKeyFallback.enabled
+                  && subsStore.apiKeyFallback.key_configured === false"
+                class="mt-1 text-xs text-status-warning-600 dark:text-status-warning-400"
+              >
+                No platform API key is configured, so this has nothing to fall back to. Add one under
+                API Keys for it to take effect.
+              </p>
+            </div>
+            <button
+              id="api-key-fallback-toggle"
+              type="button"
+              :class="[
+                subsStore.apiKeyFallback.enabled ? 'bg-action-primary-600' : 'bg-gray-200 dark:bg-gray-600',
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2'
+              ]"
+              :disabled="savingApiKeyFallback"
+              @click="toggleApiKeyFallback"
+            >
+              <span
+                :class="[
+                  subsStore.apiKeyFallback.enabled ? 'translate-x-5' : 'translate-x-0',
+                  'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out'
+                ]"
+              />
+            </button>
+          </div>
+        </div>
+
         <!-- Weekly-limit alert threshold (ent#434) -->
         <div class="pt-4 border-t border-gray-200 dark:border-gray-700">
           <div class="flex items-start justify-between gap-4">
@@ -872,6 +914,20 @@ async function toggleAutoSwitch() {
   }
 }
 
+// #2638 API-key fallback toggle
+const savingApiKeyFallback = ref(false)
+async function toggleApiKeyFallback() {
+  savingApiKeyFallback.value = true
+  error.value = null
+  try {
+    await subsStore.setApiKeyFallback(!subsStore.apiKeyFallback.enabled)
+  } catch (e) {
+    error.value = e.response?.data?.detail || 'Failed to update the API-key fallback setting'
+  } finally {
+    savingApiKeyFallback.value = false
+  }
+}
+
 // #471 headroom auto-refresh toggle
 async function toggleHeadroomAutoRefresh() {
   savingHeadroomToggle.value = true
@@ -889,5 +945,6 @@ onMounted(() => {
   loadSubscriptions()
   loadAutoSwitchSetting()
   subsStore.fetchHeadroomAutoRefresh()
+  subsStore.fetchApiKeyFallback()
 })
 </script>

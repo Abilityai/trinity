@@ -210,7 +210,7 @@ def note_unreachable_pull_trigger(agent_name: str, triggered_by: Optional[str]) 
             "the dispatch topology is the limit. Reachable triggers today: %s. "
             "Every autonomous trigger is pullable as of #2524, so seeing this "
             "at all means a NEW trigger was added without being classified — "
-            "see docs/testing/PULL_MIGRATION_TESTING.md §9.",
+            "see docs/planning/PULL_MIGRATION_TESTING.md §9.",
             agent_name, triggered_by, sorted(PULL_REACHABLE_TRIGGERS),
         )
         return True

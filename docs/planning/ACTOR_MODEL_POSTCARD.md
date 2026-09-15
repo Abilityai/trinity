@@ -1,5 +1,9 @@
 # The Actor-Model Postcard (#945)
 
+> **Start at [`PULL_MIGRATION_STATUS.md`](PULL_MIGRATION_STATUS.md) — it is the migration's entry point and the one
+> place that states current phase, remaining gates and open decisions. This file is reference
+> material.**
+
 > **Status**: Decision record. Unblocks the pull pilot (#946).
 >
 > **What this is.** The #945 "postcard" gate from the archived

@@ -32,7 +32,7 @@
           <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
             <template v-if="store.status.enabled">
               On since {{ fmt(store.status.consent_at) }}.
-              <template v-if="store.status.last_shared_at">Last delivered {{ fmt(store.status.last_shared_at) }}.</template>
+              <template v-if="store.status.last_shared_at">Last delivered {{ fmt(store.status.last_shared_at) }} to {{ receiverLabel(store.status.last_shared_host) }}.</template>
               <template v-else>Nothing delivered yet.</template>
             </template>
             <template v-else>Currently off — no egress.</template>
@@ -116,7 +116,7 @@
                 <BaseBadge :variant="send.ok ? 'success' : 'warning'" dot>{{ send.ok ? 'delivered' : 'not delivered' }}</BaseBadge>
                 <span class="tabular-nums" :title="send.sent_at">{{ fmt(send.sent_at) }}</span>
                 <span class="text-gray-500 dark:text-gray-400">
-                  {{ send.backfill ? 'backfill' : 'heartbeat' }} · {{ send.window_days }}d window
+                  {{ send.backfill ? 'backfill' : 'heartbeat' }} · {{ send.window_days }}d window · to {{ receiverLabel(send.host) }}
                   <template v-if="send.http_status"> · HTTP {{ send.http_status }}</template>
                   <template v-else-if="send.error"> · {{ send.error }}</template>
                 </span>
@@ -139,7 +139,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useTelemetrySharingStore } from '../../stores/telemetrySharing'
 import BaseBadge from '../base/BaseBadge.vue'
-import { receiverCopy } from '../onboarding/telemetryConsent'
+import { receiverCopy, receiverLabel } from '../onboarding/telemetryConsent'
 
 const RECENT_LIMIT = 5
 
@@ -150,8 +150,17 @@ const prettyPreview = computed(() =>
   store.payloadPreview ? JSON.stringify(store.payloadPreview, null, 2) : '(load to preview)'
 )
 
+// #2571: the line is decided from what the newest attempt RECORDED (its origin),
+// never from the address configured now — those differ after a test against a
+// local sink, and that is exactly when the old sentence lied. Every value here
+// is the backend's verdict; the panel only renders.
 const receiverLine = computed(() =>
-  receiverCopy(store.status.receiver_hint, store.status.share_url)
+  receiverCopy(store.status.receiver_hint, {
+    host: store.status.receiver_host,
+    configuredHost: store.status.configured_host,
+    mismatch: store.status.receiver_mismatch,
+    enabled: store.status.enabled,
+  })
 )
 
 function pretty(obj) {

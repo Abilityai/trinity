@@ -92,6 +92,16 @@ class PortalAgentCard(BaseModel):
     # which answers with real statuses and real messages) over the browser Web
     # Speech API, and to drop the mic entirely when neither path can work.
     stt_available: bool = False
+    # ent#553 — may THIS caller delete or pin this agent's canvases (owner or
+    # admin, platform sessions only). Per-agent, unlike the instance-level
+    # capability bits above, because ownership is.
+    #
+    # Fails CLOSED like its siblings, and for the same reason stated at
+    # `voice_available`: the bug being guarded is showing a control that then
+    # refuses. AC #2 asks that a user who may not delete never sees the
+    # affordance, so this is the field that decides it. UX, not containment —
+    # the routes re-check with the same predicate.
+    can_manage_canvases: bool = False
     # #138 briefing — ships with the roster at sign-in so the new-chat screen
     # renders with zero extra fetches. Best-effort live data (a stopped/slow
     # agent yields None/[]). `playbooks` is the hint-card set (ent#380): the
@@ -311,6 +321,13 @@ class PortalChatRequest(BaseModel):
     # conversation. Ignored when `session_id` names a thread: the id is a fact,
     # this is an intent. Defaults False so no existing caller changes behaviour.
     new_thread: bool = False
+    # ent#555 — which canvas the client has open on screen, so "add a column to
+    # this" resolves without asking. Client-supplied and therefore VALIDATED
+    # server-side against the agent's own visible canvases; an unrecognised
+    # value degrades to "nothing open" rather than erroring. Optional, so every
+    # existing caller (and the headless integration surface ent#83 documents)
+    # is unaffected.
+    open_canvas_id: Optional[str] = Field(None, max_length=64)
     # ent#403 — the model this turn should run on. THREE states, preserving the
     # #894 shape rather than collapsing it to two: a curated id = an explicit
     # choice; `None`/`""`/whitespace = INHERIT (the agent's `public_channel_model`,
@@ -690,6 +707,11 @@ class PortalHistory(BaseModel):
     # the budget above is: an undeclared key is stripped by `response_model` and
     # never reaches the client.
     last_turn_outcome: Optional[PortalTurnOutcome] = None
+    # #2694: the window is counted in typed turns and bounded by a row ceiling;
+    # True when the ceiling cut rows off the OLD end, so the client can say
+    # "earlier messages aren't shown" instead of rendering a thread that
+    # silently starts mid-call. Declared for the same reason as the two above.
+    truncated: bool = False
 
 
 # --- Operator controls over a signed-in client (ent#281) ----------------------

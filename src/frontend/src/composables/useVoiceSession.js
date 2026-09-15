@@ -27,6 +27,7 @@ import {
   PANEL_TOOL_NAMES,
   VOICE_INSECURE_REASON,
   VOICE_NO_MIC_REASON,
+  applyTaskFrame,
   startFailureReason,
 } from '../components/portal/portalVoiceMode'
 
@@ -50,6 +51,10 @@ export function useVoiceSession(agentName) {
   const portalSessionId = ref(null)
   const transcriptEntries = ref([])
   const toolName = ref(null)       // name of currently executing tool
+  // ent#551: tasks the agent is running in the background, `{taskId, label}`.
+  // Distinct from `toolName`: a tool call is over in a moment, a task outlives
+  // it and the badge must persist across turns until the task lands.
+  const backgroundTasks = ref([])
   const amplitude = ref(0)         // 0–1 output amplitude for orb animation
   // ent#534: why the call ended (null = the person ended it) and the server's
   // words for it; bumped once per finished canvas verb.
@@ -73,6 +78,7 @@ export function useVoiceSession(agentName) {
   const isSpeaking = computed(() => status.value === 'speaking')
   const isListening = computed(() => status.value === 'listening')
   const isToolCalling = computed(() => status.value === 'tool_calling')
+  const hasBackgroundTasks = computed(() => backgroundTasks.value.length > 0)
 
   /**
    * Start a voice session with a caller-supplied start request (ent#534: the
@@ -103,6 +109,7 @@ export function useVoiceSession(agentName) {
     saved.value = null
     transcriptEntries.value = []
     toolName.value = null
+    backgroundTasks.value = []
     status.value = 'connecting'
     active.value = true
     restStopOnEnd = restStop
@@ -171,6 +178,13 @@ export function useVoiceSession(agentName) {
             if (PANEL_TOOL_NAMES.includes(msg.tool)) panelVersion.value += 1
             toolName.value = null
             if (status.value === 'tool_calling') status.value = 'listening'
+
+          } else if (msg.type === 'task') {
+            // ent#551: a background task started / finished / failed. A task
+            // that landed may have written to the canvas — refetch in the same
+            // moment the agent brings it up.
+            backgroundTasks.value = applyTaskFrame(backgroundTasks.value, msg)
+            if (msg.state !== 'started') panelVersion.value += 1
 
           } else if (msg.type === 'saved') {
             // ent#534: the transcript rows exist NOW. Reloading on `ended`
@@ -285,6 +299,7 @@ export function useVoiceSession(agentName) {
     active.value = false
     status.value = 'idle'
     toolName.value = null
+    backgroundTasks.value = []
 
     _stopMedia()
 
@@ -305,6 +320,7 @@ export function useVoiceSession(agentName) {
     voiceSessionId, chatSessionId, portalSessionId,
     transcriptEntries,
     toolName,
+    backgroundTasks, hasBackgroundTasks,
     amplitude,
     endReason, endMessage, panelVersion, saved,
 

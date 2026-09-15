@@ -299,6 +299,14 @@ export async function runAgentChat(
       mcpKeyInfo,
       idempotencyKey
     );
+
+    // #2661: the parallel branch surfaces the gateway-timeout receipt exactly
+    // as the sequential branch does below. Without the log line the two routes
+    // are indistinguishable in the MCP server's own output, which is how the
+    // 2026-09-08 cascade read as "chat_with_agent just fails sometimes".
+    if ('status' in response && response.status === 'queued_timeout') {
+      console.log(`[Task Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#2661)`);
+    }
     return JSON.stringify(response, null, 2);
   }
 
@@ -392,13 +400,20 @@ export function createChatTools(
         "Best for independent tasks, batch processing, orchestrator delegation.\n" +
         "- `async=true` (with parallel=true): Fire-and-forget mode. Returns immediately with execution_id. " +
         "Poll GET /api/agents/{name}/executions/{execution_id} for results." +
-        "\n\n**#914 Gateway-Timeout Receipt (sync chat mode only):** " +
+        "\n\n**Gateway-Timeout Receipt (EVERY sync mode — #914 sequential, #2661 parallel):** " +
         "If the MCP-server's synchronous fetch to the backend takes longer than `MCP_CHAT_TIMEOUT_MS` " +
         "(default 25s, set under the typical 30-60s MCP gateway ceiling), the call returns " +
         "`{status: \"queued_timeout\", agent, execution_id, message}` instead of a generic `fetch failed`. " +
+        "This applies to `parallel=false` AND `parallel=true` sync calls. " +
         "The task IS still running on the agent — call `get_execution_result(execution_id)` to poll for the " +
         "result instead of retrying. Retrying will duplicate-queue and Trinity's concurrent-duplicate guard " +
-        "will kill mid-execution, burning budget. For tasks you know will exceed the gateway timeout, prefer " +
+        "will kill mid-execution, burning budget. **Never re-send a reworded variant** after any failure you " +
+        "cannot confirm: an identical re-send is deduplicated server-side and answers with the original " +
+        "`execution_id`, but a REWORDED one derives a different idempotency key and dispatches a second " +
+        "execution. If no execution can be attributed to your call, the error says so explicitly and names " +
+        "`list_recent_executions` — check it before retrying. " +
+        "In sync `parallel=true` mode `timeout_seconds` bounds only the agent-side run, not how long this " +
+        "call waits. For tasks you know will exceed the gateway timeout, prefer " +
         "`parallel=true, async=true` from the start.",
       parameters: z.object({
         agent_name: z.string().describe("The name of the agent to chat with"),
@@ -595,8 +610,22 @@ export function createChatTools(
         "any workload that is embarrassingly parallel. " +
         "\n\n**Concurrency:** Controlled by max_concurrency (default 3, max 10). " +
         "Tasks beyond the limit queue internally until a slot frees up. " +
-        "\n\n**Timeout:** Overall deadline for the entire fan-out. Tasks still running " +
-        "when the deadline hits are marked as failed with timeout error.",
+        "\n\n**Timeout:** `timeout_seconds` bounds how long the backend WAITS for the batch, " +
+        "not the tasks. Tasks still open at the deadline report status `running` (batch status " +
+        "`deadline_exceeded`) and keep running — poll `get_fan_out_result` for their outcome." +
+        "\n\n**async_mode:** set `async_mode: true` to get `{fan_out_id, status: 'accepted', total}` " +
+        "back immediately and poll `get_fan_out_result(agent_name, fan_out_id)` instead of waiting. " +
+        "Match results to your task ids by `task_id`." +
+        "\n\n**Gateway timeout (#2670) — READ THIS BEFORE RETRYING.** A fan-out runs " +
+        "longer than any single task in it, so this call is the most likely of all the " +
+        "dispatch tools to outlive the MCP gateway. When it does, the tool returns " +
+        "`{status: 'fan_out_timeout', agent, fan_out_id, execution_ids, task_count, message}` " +
+        "instead of results — the batch is STILL RUNNING and nothing was lost. Poll " +
+        "`get_fan_out_result(agent_name, fan_out_id)` for the aggregate. " +
+        "\n\nDo not re-send to 'try again': an IDENTICAL re-send is deduplicated " +
+        "server-side and answers with the same batch, but a REWORDED one derives a " +
+        "different idempotency key and dispatches all N tasks a second time — N more " +
+        "executions, N more times the cost, against an agent already working.",
       parameters: z.object({
         agent_name: z
           .string()
@@ -615,9 +644,9 @@ export function createChatTools(
           .number()
           .optional()
           .describe(
-            "Overall deadline in seconds for the entire fan-out (max: 3600). " +
-            "If omitted, no outer deadline is applied — each sub-task is still " +
-            "bounded by the target agent's configured execution_timeout_seconds."
+            "Deadline in seconds for waiting on the fan-out (max: 3600). Reaching it " +
+            "does not stop the tasks. If omitted, the backend waits out the whole batch " +
+            "(each sub-task is bounded by the target agent's execution_timeout_seconds)."
           ),
         max_concurrency: z
           .number()
@@ -636,6 +665,13 @@ export function createChatTools(
           .array(z.string())
           .optional()
           .describe("Restrict which tools subtasks can use"),
+        async_mode: z
+          .boolean()
+          .optional()
+          .describe(
+            "Return {fan_out_id, status: 'accepted'} immediately instead of waiting; " +
+            "poll get_fan_out_result for the outcome (default: false)"
+          ),
       }),
       execute: async (
         {
@@ -646,6 +682,7 @@ export function createChatTools(
           model,
           system_prompt,
           allowed_tools,
+          async_mode,
         }: {
           agent_name: string;
           tasks: Array<{ id: string; message: string }>;
@@ -654,6 +691,7 @@ export function createChatTools(
           model?: string;
           system_prompt?: string;
           allowed_tools?: string[];
+          async_mode?: boolean;
         },
         context: any
       ) => {
@@ -685,6 +723,9 @@ export function createChatTools(
           "fan_out",
           model,
           JSON.stringify(tasks),
+          // #2524: an async call's replay snapshot is the ACCEPTED receipt, so
+          // a sync call with the same tasks must not share its key.
+          ...(async_mode ? ["async"] : []),
         ]);
 
         const response = await apiClient.fanOut(
@@ -696,6 +737,7 @@ export function createChatTools(
             model,
             system_prompt,
             allowed_tools,
+            async_mode,
           },
           sourceAgent,
           mcpKeyInfo,

@@ -290,6 +290,8 @@ schedule_executions = Table(
     # ent#457 review: WHICH human the channel context belongs to. Only the
     # portal leg reads it today — see `_resolve_portal`'s recipient check.
     Column("source_channel_client", Text),
+    # ent#555 — the canvas the user had open for this turn (context, not authority).
+    Column("open_canvas_id", Text),
 )
 
 agent_loops = Table(
@@ -596,6 +598,24 @@ enterprise_room_messages = Table(
 )
 
 
+agent_canvas_shares = Table(
+    # ent#554 — one share link for one canvas. Separate from
+    # `agent_public_links` on purpose; see the DDL comment in db/schema.py.
+    "agent_canvas_shares",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("canvas_id", Text),
+    Column("token", Text),
+    Column("scope", Text),
+    Column("created_by", Text),
+    Column("created_at", Text),
+    Column("expires_at", Text),
+    Column("revoked_at", Text),
+    Column("last_viewed_at", Text),
+    Column("view_count", Integer),
+)
+
 agent_canvases = Table(
     # ent#438 — a durable, addressable surface an agent renders onto and
     # UPDATES. Composite PK (agent_name, canvas_id): the write is an upsert,
@@ -615,6 +635,8 @@ agent_canvases = Table(
     Column("updated_by_execution_id", Text),
     # ent#537 — starter layout by name; NULL = stacked.
     Column("template", Text),
+    # ent#553 — a human's pin, so the pile stays navigable. Never agent-written.
+    Column("pinned", Integer),
 )
 
 user_ui_preferences = Table(

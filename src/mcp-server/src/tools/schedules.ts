@@ -567,7 +567,13 @@ export function createScheduleTools(
           result = await apiClient.triggerAgentSchedule(
             agent_name,
             schedule_id,
-            authContext?.agentName,
+            // ent#614: the backend honours X-Source-Agent only for an
+            // agent-scoped key naming itself and refuses every other principal
+            // with a 403. A system key's agentName is its bound agent, but its
+            // backend principal is not agent-scoped — so gate exactly the way
+            // chat.ts does; a system-key trigger stays attributable through
+            // the key id/name below.
+            authContext?.scope === "agent" ? authContext?.agentName : undefined,
             authContext
               ? { keyId: authContext.keyId, keyName: authContext.keyName }
               : undefined

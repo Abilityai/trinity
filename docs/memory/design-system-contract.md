@@ -8,6 +8,7 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 - Never write a raw Tailwind palette class (`bg-green-500`, `text-red-600`) or a hex. `tests/unit/rawColorRatchet.spec.js` ratchets per-file counts down and holds a file with no baseline entry to **zero** non-gray palette classes — new code must be at zero, and that half is now machine-checked rather than prose (#2605).
 - Workhorse shades: 500/600 solids; 100 tinted grounds (light); 700 text-on-tint (light); 500/16% grounds + 300 text (dark); 400–500 solid accents (dark).
 - `gray-750` (#2a303c) is the custom dark chrome/border shade — use it, don't approximate it.
+- **Never put two utilities of the same CSS property in one class string and rely on which Tailwind emits last (#2662).** The class attribute's order is not the stylesheet's order, and the stylesheet's order is a per-plugin implementation detail — `.border-transparent` is emitted after `.border-gray-300` but `.bg-transparent` before `.bg-white`, so one visual pair can resolve in opposite directions. Put state-dependent colour on **mutually exclusive arms** (`:class="cond ? 'a' : 'b'"`) and leave the property out of the static class. A variant chain also buys specificity: `dark:hover:bg-*` compiles to `:hover:is(.dark *)` and ties an unvariated `disabled:hover:*`, so a reset that must hold in both themes is spelled in both arms. Three occurrences in #2662; every one was green under `test:unit`, `check:tokens` and the ratchet, because all three read the class string, not the cascade. Only `getComputedStyle` off a live render — in **both** themes — can see it.
 
 ## Themes — both first-class
 
@@ -22,6 +23,7 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 - Compose `BaseButton`, `BaseInput`, `BaseSelect`, `BaseToggle`, `BaseTextarea`, `BaseBadge`, `BaseCard`, the modal shell (`ConfirmDialog`), `OverflowTabs`, the bounded data table, and the failed-state pair `LoadFailed` (failed fetch) / `InlineError` (failed verb). Never hand-roll a lookalike — identical pixels from a class string is still a defect.
 - BaseButton: 4 variants (primary/secondary/danger/ghost) × 2 sizes (md 13.5 pad 7×14 · sm 12.5 pad 4×10), radius 6px. Disabled = opacity .45. In-flight = 16px spinner + progressive label. Focus ring on all variants.
 - BaseInput/BaseSelect: field bg, border-strong, radius 6px, pad 8×11; focus = accent border + 3px ring; errors name the problem, the fix, and an example — never a bare red border.
+- BaseSelect: 2 variants — `field` (default, the recipe above) and `ghost` (#2662: borderless, transparent, content-width, 44px tall, hover tints the ground only). Use `ghost` where a select is a lightweight preference beside content rather than a field in a form; a form keeps `field`. Reach for the variant, never a hand-rolled select in chat chrome. `ghost` flips the chevron up while the picker is open via `:open` (#2662) — the app's chevron idiom, which selects were excluded from only because a native picker cannot report its state; `field` deliberately does not, that being a change to Settings surfaces #2662 does not own. The selector is `[&:open~svg]` — a GENERAL sibling, so the chevron must FOLLOW the select as a sibling; an element between the two is harmless. What kills it silently is wrapping the svg, or moving it above the select.
 - BaseTextarea: min-height 84px, `resize: vertical` only, mono variant for prompts/config, same focus/error as inputs.
 - BaseBadge: pill, 11.5/550; light token-100 bg + token-700 text; dark token-500/16% + token-300; one fact per badge.
 - BaseCard: surface bg, 1px border, radius 8px, padding 16, shadow-sm — the only surface recipe.
@@ -59,6 +61,7 @@ Layout stability:
 6. Dimensions never oscillate as async data trickles in — size to the stable state.
 7. Panels flex to width; no overlap when narrow; wide content scrolls in its own container, never the page.
 8. Scrolling is axis-locked — one axis at a time.
+29. Recommendation, not a hard rule: enabling something should not shove the rest of the panel. Prefer a reserved footprint (small dependents: disabled in place) or a height/flex transition (section/column: 150–300ms, `motion-reduce:transition-none`) over a bare `v-if` snap; aim for the trigger staying under the pointer, new content opening below or beside it, and what the user was reading staying in view. No scanner sees this — a human toggles it in the browser and watches (#954, #1563, #1939, #2640).
 
 Density:
 9. Overflowing tabs collapse into a counted "More ▾" menu (OverflowTabs) — everywhere.
@@ -97,6 +100,7 @@ Before requesting review, verify:
 - [ ] Verified in light AND dark; dark meta text is gray-300/400, never gray-500
 - [ ] Spacing on the 4px grid; radii 6px controls / 8–10px surfaces; type within the six-size scale
 - [ ] Loading/empty/failed states all exist, visually distinct, sharing one footprint — no layout shift on arrival; the empty branch gates on a succeeded fetch (`hasLoaded`), not on list length
+- [ ] Every toggle, checkbox, or mode switch that reveals or hides content was exercised by a human in the browser, in both themes, watching what moves — a reserved footprint or a transition is the recommendation (principle 29), a snap is acceptable when judged so, and the PR says it was looked at
 - [ ] Every action failure has a user-visible home (`InlineError` near the control); no `console.error`-only catch, no `alert()`, and `Promise.allSettled` bulk helpers report their rejected count
 - [ ] Data loading uses the scanline primitive on chart surfaces and a skeleton placeholder on every other first load, keyed off store state; background refresh is invisible (no re-flash, no scroll reset) — no bare `v-if="loading"` gate on a data surface: gate on "no data yet" (`utils/loadingState.js::viewState`), stale refresh = sibling `InlineError` banner; `tests/unit/loadingGateRatchet.spec.js` fails if a file's bare-gate count grows (#1927)
 - [ ] `prefers-reduced-motion` handled on any animation touched

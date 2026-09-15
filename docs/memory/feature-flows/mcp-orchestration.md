@@ -384,6 +384,7 @@ console.log(`Registered ${totalTools} tools`);
 | `get_chat_history` | 275-292 | `{agent_name}` | `GET /api/agents/{name}/chat/history` |
 | `get_agent_logs` | 297-326 | `{agent_name, lines?}` | `GET /api/agents/{name}/logs` |
 | `fan_out` | 390-590 | `{agent_name, tasks[], timeout_seconds?, max_concurrency?, model?, system_prompt?, allowed_tools?}` | `POST /api/agents/{name}/fan-out` |
+| `get_fan_out_result` | `tools/executions.ts` | `{agent_name, fan_out_id}` | `GET /api/agents/{name}/fan-out/{fan_out_id}` (#2670) |
 
 > **Per-agent timeout fallback (#418, 2026-04-20)**: For `chat_with_agent` (when `parallel=true`) and `fan_out`, `timeout_seconds` is fully optional with **no default**. When omitted, the backend falls back to the target agent's configured `execution_timeout_seconds` (TIMEOUT-001; default 900s, max 7200s). Previously, the Zod schema defaulted to `600`, which silently capped inter-agent invocations below the per-agent setting.
 
@@ -587,6 +588,133 @@ if (response.status === 429) {
     };
 }
 ```
+
+### Gateway-Timeout Receipt — all three sync routes (#914 `/chat`, #2661 `/task`, #2670 `fan_out`)
+
+A synchronous `chat_with_agent` holds the MCP-gateway → backend → agent HTTP
+chain open for the whole agent run. The MCP client imposes its own 30–60s
+timeout on the JSON-RPC call, so a longer task surfaced a bare `fetch failed`
+while the target kept running — and a naive caller re-sent.
+
+The MCP server therefore aborts its own fetch **first** (`MCP_CHAT_TIMEOUT_MS`,
+default 25000, under the gateway ceiling) and answers with a receipt:
+
+```jsonc
+{ "status": "queued_timeout", "agent": "bdr-agent",
+  "execution_id": "fZv-iXtUXSolY1wzPO7T6w",
+  "message": "… Poll get_execution_result(execution_id) instead of retrying …" }
+```
+
+**#914 covered `/chat` only.** `parallel=true, async=false` dispatches through
+`client.ts::task()`, which held the fetch for `timeout_seconds + 60` (up to
+7260s) with no receipt at all. #2661 closed that route.
+
+#### Why the `/chat` matcher could not simply be reused
+
+`/chat` is queue-serialised — roughly one non-terminal row per agent — so
+"newest non-terminal MCP row wins" was near-unambiguous. **`/task` exists to run
+N tasks concurrently**, and every filter that rule applied (`triggered_by`,
+`source_mcp_key_id`, the recency window) is *identical* across one caller's
+concurrent tasks. Mirroring it would have handed caller A the `execution_id` of
+caller B's task; A then polls and acts on a well-formed **foreign** result —
+silent wrong data, strictly worse than the loud error it replaced.
+
+#### Attribution rules (one place — a fourth route must not re-derive them)
+
+| Rule | Why |
+|---|---|
+| Read the `execution_id` out of an idempotency **409** rather than throwing `API error (409)` | Exact key→execution mapping the backend already sends (RELIABILITY-006) |
+| Match the call's own **`message`**, not just key + trigger | The only per-call discriminator on the row |
+| **>1 candidate ⇒ no receipt** | Ambiguity equals the pre-#914 behaviour; a wrong id is worse than none |
+| Trigger set is **per call site** | `/chat` must not accept `self_task`: `/task` is unqueued, so such a row can be RUNNING while a `/chat` sits queued |
+| Window **derived** from the timeout (`+10s`) | A fixed 30s made raising the documented `MCP_CHAT_TIMEOUT_MS` knob a silent kill-switch for every receipt |
+| Recovery read separately bounded (`MCP_RECOVERY_TIMEOUT_MS`, no 401-reauth) | It spends what is left of the gateway budget; an unbounded lookup reproduces the `fetch failed` it exists to prevent |
+| `/task` recovers on `AbortError` **only** | A `TypeError` may mean the request never landed, and on this route a concurrent peer row is the normal state |
+
+**Retry guidance the tool description now states:** an *identical* re-send is
+deduplicated server-side and answers with the original `execution_id`; a
+**reworded** one derives a different idempotency key and dispatches a second
+execution. That asymmetry is why the opaque error was dangerous — it invited the
+rewrite.
+
+**Backend counterpart (#2661):** a failed/cancelled/timed-out sync `/task` now
+releases its idempotency claim (`_map_task_failure`). It previously left the
+claim `in_flight` for the full 24h TTL, so a legitimate retry answered 409 for a
+day against a task that had died minutes earlier — and rewording was the only
+way through, which is exactly the duplicate-dispatch behaviour being fixed.
+The backlog long-poll (`_dispatch_sync_backlog`) had two more exits between
+`begin()` and `complete()`: a **vanished row** now releases (nothing is
+running under that key), and a **long-poll timeout** first re-reads the row —
+a terminal the wait missed is settled normally, while a row still
+queued/running completes the claim with a `queued_timeout` receipt (the
+`_queued_payload` shape). Not released, because a retry would dispatch a
+second execution beside the live one; not left `in_flight`, because nothing
+downstream completes it. A replay therefore answers 200 + the execution to
+poll, and the row stays the single source of truth for the outcome.
+
+#### Route three — `fan_out` (#2670)
+
+`client.ts::fanOut()` carried the same unbounded `(timeout_seconds ?? 7200) + 60`
+ceiling, and it is the route that exceeds the gateway most reliably: a fan-out
+dispatches N tasks and by construction runs longer than any single one of them.
+
+**The receipt names a `fan_out_id`, not an `execution_id`.** A batch is N rows
+sharing one id, so a single execution id could only ever name one arbitrary
+member of it. `{status: "fan_out_timeout", agent, fan_out_id, execution_ids,
+task_count, message}`.
+
+**Ambiguity is redefined, not reused.** #2661 refuses when more than one ROW
+survives its filters, because on `/task` it cannot tell which row is the
+caller's. A fan-out stamps one `fan_out_id` on all N of its rows, so finding
+*any* row finds the batch and N survivors is the expected shape. The unit that
+must be unambiguous is therefore the BATCH: `pickRecentFanOut` refuses when more
+than one distinct `fan_out_id` survives. Same rule ("a wrong id is worse than
+none"), measured on the right thing.
+
+**Status is deliberately not filtered.** `/chat` and `/task` require a
+non-terminal row, because a terminal one is evidence the receipt is unnecessary.
+By the time a fan-out's gateway gives up, the batch is normally a *mix* — some
+subtasks done, some running — so requiring non-terminal rows would drop exactly
+the batches furthest along. The recency window is what bounds staleness.
+
+**The polling surface reads rows, not the idempotency snapshot.**
+`GET /api/agents/{name}/fan-out/{fan_out_id}` folds `schedule_executions` (where
+`fan_out_id` has been stamped on every subtask since FANOUT-001) into an
+aggregate. `routers/fan_out.py` does store the whole aggregated response as its
+idempotency snapshot, which looks like a free receipt — but `complete()` runs
+only once the batch has FINISHED, so the snapshot cannot answer the question a
+timed-out caller is actually asking, which is *what is happening right now*.
+
+| aggregate status | means |
+|---|---|
+| `running` | any subtask can still change — outranks every verdict, because reporting one early is what makes a polling caller stop polling |
+| `completed` | every subtask succeeded |
+| `partial` | some did. Best-effort is the fan-out's default policy, so this is a normal outcome, not an error |
+| `failed` | none did |
+
+`deadline_exceeded` is absent by construction: it is the dispatcher's verdict on
+its own outer deadline, held in memory by the call that timed out, and not a
+property of any row. Per-task status is the **execution** status verbatim
+(`queued`/`running`/`success`/…), not the dispatch response's two-value pair — a
+live batch has to distinguish "waiting for a slot" from "running", and a
+two-value vocabulary reports a healthy queued subtask as a failure.
+
+**Backend counterparts (#2670):** the in-flight 409 now returns the same
+`{error, message, execution_id}` shape `/chat` and `/task` do — it was a bare
+string, so `fan_out` could not benefit from the #2661 client that reads that
+field — and the batch id is attached to the idempotency claim **when it is
+minted** (`FanOutService.execute(on_started=…)`) rather than at `complete()`.
+Attaching at the end records the id exactly when nobody needs it any more: the
+window in which a concurrent duplicate arrives, and in which this call's own
+gateway gives up, is the whole run.
+
+**New MCP tool:** `get_fan_out_result(agent_name, fan_out_id)` — same
+`{self} ∪ permitted` gate as `get_execution_result` beside it. A malformed id, an
+unknown one and one belonging to another agent are a single uniform 404
+(Invariant #8); the id is server-minted and unguessable, so this costs a caller
+nothing it could otherwise have had.
+
+Live harness: `src/mcp-server/scripts/verify_914.ts <agent> [chat|task|fanout|all]`.
 
 ### Agent-to-Agent Access Control (`chat.ts:29-100`)
 ```typescript

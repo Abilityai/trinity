@@ -99,6 +99,7 @@ class ScheduleExecutionsMixin:
             # Binding-agent for channel report-back (ent#265)
             source_channel_agent=row["source_channel_agent"] if "source_channel_agent" in row_keys else None,
             source_channel_client=row["source_channel_client"] if "source_channel_client" in row_keys else None,
+            open_canvas_id=row["open_canvas_id"] if "open_canvas_id" in row_keys else None,
         )
 
     # =========================================================================
@@ -125,6 +126,7 @@ class ScheduleExecutionsMixin:
         source_channel_thread: str = None,
         source_channel_agent: str = None,
         source_channel_client: str = None,
+        open_canvas_id: str = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
 
@@ -180,6 +182,7 @@ class ScheduleExecutionsMixin:
                     source_channel_thread=source_channel_thread,
                     source_channel_agent=source_channel_agent,
                     source_channel_client=source_channel_client,
+                    open_canvas_id=open_canvas_id,
                 )
             )
 
@@ -205,6 +208,7 @@ class ScheduleExecutionsMixin:
                 source_channel_thread=source_channel_thread,
                 source_channel_agent=source_channel_agent,
                 source_channel_client=source_channel_client,
+                open_canvas_id=open_canvas_id,
             )
 
     def create_schedule_execution(
@@ -696,47 +700,72 @@ class ScheduleExecutionsMixin:
             return rows
 
     # ------------------------------------------------------------------
-    # Fan-out batch (#2524)
+    # Fan-out batch (#2524, #2670)
     # ------------------------------------------------------------------
 
     # A fan-out subtask is finished when its row leaves these. Mirrors
-    # `sync_waiter.TERMINAL_TASK_STATUSES` — `queued` (waiting for a pull
-    # worker) and `pending_retry` are explicitly NOT terminal, which is the
-    # whole point: the batch must keep waiting through them.
+    # `sync_waiter.TERMINAL_TASK_STATUSES` — `queued` (created, not yet
+    # dispatched, or waiting for a pull worker) and `pending_retry` are
+    # explicitly NOT terminal, which is the whole point: the batch must keep
+    # waiting through them.
     _FAN_OUT_OPEN_STATUSES = (
         TaskExecutionStatus.QUEUED,
         TaskExecutionStatus.RUNNING,
         TaskExecutionStatus.PENDING_RETRY,
     )
 
-    def list_fan_out_executions(self, fan_out_id: str) -> List[Dict]:
-        """Every execution row in one fan-out batch, oldest first (#2524).
+    def get_fan_out_executions(
+        self, agent_name: str, fan_out_id: str, limit: int = 200
+    ) -> List[dict]:
+        """Every execution row of one fan-out batch, oldest first (#2670).
 
-        The aggregate `FanOutResult` is rebuilt from this rather than from a
-        dict in the dispatching coroutine, so it survives the request that
-        started the batch — which is what makes `async_mode` and the status
-        endpoint possible, and what lets the subtasks be claimed by a pull
-        worker instead of pushed.
+        The batch's rows are the ONLY durable record of a fan-out, which makes
+        this the read surface a gateway-timeout receipt can be resolved
+        against (#2670) and the source `FanOutService` rebuilds the sync
+        aggregate from (#2524) — and, unlike the idempotency snapshot, it
+        answers WHILE THE BATCH IS STILL RUNNING.
+
+        Scoped by `agent_name` as well as `fan_out_id`: the id is server-minted
+        and unguessable, but the route that exposes this is agent-gated, so the
+        query must not be able to return another agent's rows even if an id were
+        somehow reused.
+
+        Ordered by `started_at` ASC. That is creation order for a batch at
+        rest, but not a contract: a row that is re-queued or claimed by a pull
+        worker has `started_at` re-stamped. Callers match subtasks by
+        `fan_out_task_id` / `id`. `limit` is a belt (MAX_TASKS bounds a batch
+        at creation).
         """
         stmt = (
             select(
                 schedule_executions.c.id,
-                schedule_executions.c.agent_name,
                 schedule_executions.c.fan_out_task_id,
                 schedule_executions.c.status,
+                schedule_executions.c.started_at,
+                schedule_executions.c.completed_at,
+                schedule_executions.c.duration_ms,
+                schedule_executions.c.message,
                 schedule_executions.c.response,
                 schedule_executions.c.error,
                 schedule_executions.c.cost,
                 schedule_executions.c.context_used,
-                schedule_executions.c.duration_ms,
-                schedule_executions.c.started_at,
-                schedule_executions.c.completed_at,
+                schedule_executions.c.model_used,
             )
+            .where(schedule_executions.c.agent_name == agent_name)
             .where(schedule_executions.c.fan_out_id == fan_out_id)
             .order_by(schedule_executions.c.started_at.asc())
+            .limit(limit)
         )
         with get_engine().connect() as conn:
-            return [dict(row) for row in conn.execute(stmt).mappings()]
+            rows = []
+            for row in conn.execute(stmt).mappings():
+                d = dict(row)
+                # #1474: the scheduler is not the writer here, but normalise
+                # anyway so this surface can never serialize a naive timestamp.
+                d["started_at"] = _norm_ts(d.get("started_at"))
+                d["completed_at"] = _norm_ts(d.get("completed_at"))
+                rows.append(d)
+            return rows
 
     def count_fan_out_open(self, fan_out_id: str) -> int:
         """How many of a batch's rows have not reached a terminal (#2524).

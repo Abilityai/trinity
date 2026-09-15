@@ -106,13 +106,67 @@ def get_or_create_installation_id() -> str:
     A random UUID persisted in `system_settings` — not tied to any user, never
     regenerated. It is the once-per-install correlation key for the intake
     submission and the natural seed for future installation telemetry (#758).
+
+    **This is the writers' accessor** — a `get_or_create_*` is a write API
+    wearing a read API's name (learnings 2026-08-05). Its callers are the paths
+    that legitimately need the id to exist: the consent POST below, the
+    product-event emit (`routers/product_events.py`), and the canary alert label
+    (`services/instance_identity.py`, a documented deliberate write). A
+    read-shaped path — a GET, a status readback — must call
+    `get_installation_id()` instead, so that *looking* never mints identity
+    (ent#545).
     """
-    existing = db.get_setting_value(_INSTALLATION_ID_KEY, "")
-    if existing:
+    existing = get_installation_id()
+    if existing is not None:
         return existing
+    # A write-once CLAIM, not an upsert (ent#545, closing the race #1987
+    # recorded as pre-existing): under `--workers 2` two first emits used to
+    # SELECT-miss together and each `set_setting` its own UUID, last-write-wins,
+    # so one worker's rows were keyed on an id that no longer existed. The
+    # PRIMARY KEY now decides the winner, and a losing worker reads the
+    # winner's id back instead of returning its own candidate — the shape
+    # `insert_setting_if_absent` was built for (#2380) and
+    # `telemetry_sharing_service._claim` already uses for the share id.
     new_id = str(uuid.uuid4())
+    db.insert_setting_if_absent(_INSTALLATION_ID_KEY, new_id)
+    stored = get_installation_id()
+    if stored is not None:
+        return stored
+    # The row exists but holds nothing usable — an empty string (reachable
+    # through the generic `PUT /api/settings/installation_id`, a partial
+    # restore, a manual edit), whitespace, or a non-string. The claim cannot
+    # overwrite an existing row, so this is the one place the upsert is right:
+    # self-heal it, exactly as the pre-ent#545 mint did for a blank row, and
+    # for exactly the values the read twin refuses — the two accessors agree on
+    # what "minted" means. (Two workers healing the same corrupt row at once is
+    # last-write-wins, as it always was for that row; a healthy row never
+    # reaches this branch.)
     db.set_setting(_INSTALLATION_ID_KEY, new_id)
     return new_id
+
+
+def get_installation_id() -> Optional[str]:
+    """The stored installation id, or ``None`` when nothing has minted it yet.
+
+    The non-minting twin of `get_or_create_installation_id` (ent#545): one
+    settings read, no write on a miss, no self-heal. This is the accessor for
+    every read-shaped path — the enterprise activation-funnel GET was the last
+    caller that reached the minting one from a read, and on an install whose
+    id had never been minted the first admin open of Settings → Activation was
+    what created the durable identity row.
+
+    A blank or non-string stored value reads as ``None`` — "not minted" is the
+    only honest rendering of an id that cannot be shown, and it is the same
+    judgement the writers' accessor applies before it heals such a row. A
+    settings read that raises is NOT swallowed to ``None``: ``None`` means
+    "not minted" to every caller, and reporting a DB fault as "not minted"
+    would be a lie; the caller decides what an unreadable store means for its
+    surface.
+    """
+    stored = db.get_setting_value(_INSTALLATION_ID_KEY, None)
+    if not isinstance(stored, str) or not stored.strip():
+        return None
+    return stored
 
 
 async def submit_operator_intake(

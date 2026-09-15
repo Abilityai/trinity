@@ -948,6 +948,69 @@ async def test_case14_nonfatal_avatar_seed_failure(crud_env, monkeypatch, tmp_pa
     ctx["docker_utils"].containers_run.assert_awaited()
 
 
+def _png_bytes(size=64):
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (size, size), (40, 90, 160)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_2693_bundled_avatar_installed_as_default(crud_env, monkeypatch, tmp_path):
+    """#2693: a template's bundled avatar lands in the avatar store as WebP and the
+    row is still written as a DEFAULT avatar, so Generate Default Avatars can
+    overwrite it once a Gemini key exists."""
+    crud, ctx = crud_env
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
+    (tpl / "avatar.png").write_bytes(_png_bytes())
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    monkeypatch.setattr(crud, "_AVATAR_DIR", tmp_path / "avatars")
+
+    await crud.create_agent_internal(
+        AgentConfig(name="bundled-av", template="local:avtpl"), _user(), None)
+
+    installed = (tmp_path / "avatars" / "bundled-av.webp").read_bytes()
+    assert installed[:4] == b"RIFF" and installed[8:12] == b"WEBP"
+    ctx["db"].set_default_avatar.assert_called_once()
+    assert ctx["db"].set_default_avatar.call_args.args[:2] == ("bundled-av", "a wizard")
+
+
+@pytest.mark.asyncio
+async def test_2693_corrupt_bundled_avatar_keeps_prompt_seed(crud_env, monkeypatch, tmp_path):
+    crud, ctx = crud_env
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
+    (tpl / "avatar.webp").write_bytes(b"not an image")
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    monkeypatch.setattr(crud, "_AVATAR_DIR", tmp_path / "avatars")
+
+    await crud.create_agent_internal(
+        AgentConfig(name="bad-av", template="local:avtpl"), _user(), None)
+
+    assert not (tmp_path / "avatars" / "bad-av.webp").exists()
+    ctx["db"].set_default_avatar.assert_called_once()
+    ctx["docker_utils"].containers_run.assert_awaited()
+
+
+def test_2693_first_run_fleet_ships_bundled_avatars():
+    """AC4: every agent in the bundled first-run manifest carries both a bundled
+    image and the `avatar_prompt` that makes it installable + regenerable."""
+    import yaml
+    from PIL import Image
+    repo = Path(__file__).resolve().parents[2]
+    manifest = yaml.safe_load((repo / "config/manifests/default-system.yaml").read_text())
+    for spec in manifest["agents"].values():
+        tpl = repo / "config/agent-templates" / spec["template"].removeprefix("local:")
+        assert yaml.safe_load((tpl / "template.yaml").read_text()).get("avatar_prompt"), tpl
+        image = tpl / "avatar.webp"
+        assert image.stat().st_size <= 2 * 1024 * 1024, tpl
+        Image.open(image).verify()
+
+
 # ===========================================================================
 # Cases 15-18 — rollback matrix (inject failure AFTER a successful container)
 # ===========================================================================

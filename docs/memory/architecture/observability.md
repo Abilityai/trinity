@@ -164,18 +164,28 @@ canvas under the new name while the old one stayed visible.
   response (ent#365 FR-2). Roster gate and audience narrowing are both needed:
   one answers *may this person reach this agent*, the other *did the agent mean
   this for them*.
-- **Staleness is derived, not a clock.** `stale` = the agent finished a run
-  after the canvas was last written. An age threshold was rejected — a canvas
-  has no inherent freshness expectation, so a clock cries wolf on a monthly
-  summary or stays silent on a minute-by-minute one, whereas "the agent has run
-  since" is a fact about *this* canvas, checkable against
-  `updated_by_execution_id`. `last_completed_execution_at` is a `MAX` over the
-  whole column rather than a windowed scan **because** a head full of
-  `queued`/`running` rows would push the newest completed row out of a window
-  and report a stale canvas as current. Fail-QUIET is available here and only
-  here: the mark is an addition to an always-rendered `updated_at`, so missing
-  evidence costs the mark, not the honesty — marking on no evidence would train
-  the reader to ignore it. Derived once per agent, never once per canvas.
+- **Freshness is two facts, never a verdict (#2734).** The header renders
+  `updated_at` and `agent_last_run_at` — *"Updated 2h ago · agent last ran 40m
+  ago"* — and Trinity derives nothing from them. An age threshold was rejected —
+  a canvas has no inherent freshness expectation, so a clock cries wolf on a
+  monthly summary or stays silent on a minute-by-minute one, whereas "the agent
+  has run since" is a fact about *this* canvas, checkable against
+  `updated_by_execution_id`. #2734 carried that argument one step further: the
+  derived verdict could not know what a canvas is for either, and it fired on the
+  **writing run's own output** (a run completes after it writes, and the stamp
+  that would exclude it is optional and usually absent), so it contradicted the
+  timestamp beside it. `last_completed_execution_at` is a `MAX` over the whole
+  column rather than a windowed scan **because** a head full of `queued`/`running`
+  rows would push the newest completed row out of a window and report a stale
+  canvas as current — the same read, now the source of a *rendered* timestamp,
+  normalised to Z-suffixed UTC in `canvas_service.decorate` (the #1474 boundary
+  rule) rather than in the db module. Missing evidence **omits** the second fact
+  and never narrates it: the field is null both for "never ran" and for a failed
+  read, and the payload cannot tell them apart, so a claim either way would
+  sometimes be a lie. Derived once per agent, never once per canvas. The
+  `stale` boolean is still computed and still shipped; the header renders
+  nothing from it (the ent#553 Manage row still renders its own pill from the
+  payload flag).
 - **One rendering layer, one vocabulary (ent#536).** Blocks are `{id, kind,
   title?, payload}` — every stored block carries an id (`b1..bN` assigned when
   absent) so `patch_canvas` can address it. `table`/`kpi`/`markdown`/`timeline`/

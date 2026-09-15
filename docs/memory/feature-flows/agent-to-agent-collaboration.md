@@ -306,7 +306,6 @@ This mirrors the existing `/chat` (chat.py:242) and `CapacityFull` (chat.py:1577
 
 ### Reference docs
 
-- `docs/planning/PULL_PILOT_946_SOAK.md` — soak harness + go/no-go criteria
 - `docs/planning/ACTOR_MODEL_POSTCARD.md`, `docs/planning/TARGET_ARCHITECTURE.md` — pull-coordination direction (Epic #1045 / #1081)
 - `mcp-orchestration.md`, `task-execution-service.md`, `idempotency-keys.md`, `dispatch-circuit-breaker.md`
 
@@ -327,6 +326,16 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Source-Agent", "Accept"],
 )
 ```
+
+**The header is allowlisted for browsers but inert to them (ent#614).** Being
+CORS-allowed is not being trusted: every router that reads `X-Source-Agent` resolves it
+through `dependencies.resolve_source_agent` first, which honours it only for an
+agent-scoped key naming its own agent or the EVT-001 loopback's backend-vouched source,
+and answers a named **403** to every other principal. Before that fix a permitted user
+could set the header on `/chat` and forge a `actor_type='agent'` SEC-001 audit row (with
+the human dropped), a `triggered_by='agent'` execution, and an `AGENT_COLLABORATION`
+activity plus a WebSocket edge on an agent they could not access. The MCP client is
+unaffected: it sets the header only when `authContext.scope === "agent"`.
 
 ### Chat Endpoint
 **File**: `src/backend/routers/chat.py`

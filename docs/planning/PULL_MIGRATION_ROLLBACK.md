@@ -1,5 +1,9 @@
 # Pull / Work-Stealing Migration — Rollback Runbook
 
+> **Start at [`PULL_MIGRATION_STATUS.md`](PULL_MIGRATION_STATUS.md) — it is the migration's entry point and the one
+> place that states current phase, remaining gates and open decisions. This file is reference
+> material.**
+
 **Scope:** how to safely disable or roll back the pull-coordination change (umbrella #1081, Phases 0–3)
 on a live instance. Companion to `PULL_MIGRATION_STATUS.md` (what shipped) and `PULL_MIGRATION_TESTING.md`
 (risk surface + findings).
@@ -130,6 +134,7 @@ Only do this after a full code rollback (Tier 1) — never drop columns the runn
 
 This PR covers **Phases 0–3 only** and flips **nothing** on by default. The irreversible step is **Phase 5**
 (default-ON + *deleting* the legacy push machinery: slot ZSET, overflow LIST, dispatch-breaker-gate, canary
-S-01–S-03). That is explicitly gated behind a **≥2-week zero-orphan soak (#856)** plus the side-effect gates
-(#1401/#1402/#1408), and is **out of scope here**. Until Phase 5, the push path remains the always-available
+S-01–S-03). That is explicitly gated behind a zero-orphan soak (#1766) plus the side-effect gates
+(#1401/#1402 shipped; #1408 and #2392 open), and is **out of scope here**. ⚠️ The "≥2 weeks" figure
+this file previously carried was mis-cited to #856 — see `PULL_MIGRATION_STATUS.md` §4. Until Phase 5, the push path remains the always-available
 fallback and every tier above applies.

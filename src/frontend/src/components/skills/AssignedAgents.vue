@@ -108,6 +108,20 @@
       <p v-if="writeError" class="mt-1 text-[11px] text-red-700 dark:text-red-300">
         {{ writeError }}
       </p>
+      <!-- #2703: the DELIVERY outcome of the last assign — this control has no
+           Sync button beside it, so "assigned" alone hid whether the agent
+           actually got the skill. A re-click on the same agent is the retry. -->
+      <p
+        v-else-if="deliveryNote"
+        data-testid="skill-delivery-note"
+        :data-tone="deliveryNote.tone"
+        class="mt-1 text-[11px]"
+        :class="deliveryNote.tone === 'bad'
+          ? 'text-status-danger-700 dark:text-status-danger-300'
+          : deliveryNote.tone === 'pending'
+            ? 'text-status-warning-700 dark:text-status-warning-300'
+            : 'text-status-success-700 dark:text-status-success-300'"
+      >{{ deliveryNote.agent }}: {{ deliveryNote.text }}</p>
     </template>
   </div>
 </template>
@@ -129,6 +143,7 @@
  */
 import { computed, ref } from 'vue'
 import { useSkillsLibraryStore } from '../../stores/skillsLibrary'
+import { deliveryText } from '../../utils/skillDelivery'
 
 const props = defineProps({
   skillName: { type: String, required: true },
@@ -149,6 +164,14 @@ const writeError = ref(null)
 const selectId = computed(() => `assign-${props.skillName.replace(/[^a-zA-Z0-9_-]/g, '-')}`)
 
 const assignable = computed(() => store.assignableFor(props.skillName))
+
+// #2703 — the inline delivery note; null until an assign has been made here.
+const deliveryNote = computed(() => {
+  const d = store.deliveries[props.skillName]
+  if (!d) return null
+  const v = deliveryText(d.report, { saved: false })
+  return { ...v, agent: d.agent }
+})
 
 async function onAssign() {
   if (!picked.value) return

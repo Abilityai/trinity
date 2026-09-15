@@ -139,9 +139,13 @@ test.describe('Workspace compact header', () => {
     const probe = await page.evaluate(() => {
       const call = document.querySelector('[data-testid="portal-voice-call"]')
       const form = call ? call.closest('form') : document.querySelector('form');
-      const inert = form && [...form.children].find(
-        (c) => c.classList.contains('flex-1') && c.classList.contains('min-w-0')
-      )
+      // A DESCENDANT query, not a direct-children walk. #2662 wrapped the
+      // composer in a shell, so the inert region is `form` -> `div.rounded-2xl`
+      // -> `div.mt-1.flex` -> here, two levels below the form. The children walk
+      // this replaces matched nothing after that change and left both assertions
+      // below reading `null` — and this spec is `@interactive`, which CI never
+      // runs (frontend-e2e.yml runs `@smoke` only), so nothing would have said so.
+      const inert = form && form.querySelector('.flex-1.min-w-0')
       const buttons = form ? [...form.querySelectorAll('button')] : []
       const header = document.querySelector('header')
       return {
@@ -151,6 +155,7 @@ test.describe('Workspace compact header', () => {
           const r = b.getBoundingClientRect()
           return { w: Math.round(r.width), h: Math.round(r.height) }
         }),
+        inertRegionFound: !!inert,
         callInsideInertRegion: call && inert ? inert.contains(call) : null,
         attachInsideInertRegion: inert ? !!inert.querySelector('button[title^="Attach"]') : null,
         headerText: header ? header.textContent.replace(/\s+/g, ' ').trim() : '',
@@ -175,6 +180,12 @@ test.describe('Workspace compact header', () => {
       // the call's duration; the toggle that ENDS the call must sit outside
       // that region or it renders pressed and refuses the click — the exact
       // dead control ent#547's own AC 5 forbids, created by AC 4's move.
+      // Named separately so the next nesting change reports its own cause
+      // instead of a confusing `null !== false` two lines down.
+      expect(
+        probe.inertRegionFound,
+        'the inert region was not found — the composer nesting moved again'
+      ).toBe(true)
       expect(probe.callInsideInertRegion).toBe(false)
       expect(probe.attachInsideInertRegion).toBe(true)
     }

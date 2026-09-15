@@ -202,6 +202,20 @@ async def agent_container_runtimes_async() -> Optional[Dict[str, str]]:
     return await loop.run_in_executor(_docker_executor, agent_container_runtimes)
 
 
+async def agent_container_runtime_labels_async() -> Optional[Dict[str, Optional[str]]]:
+    """Async form of ``docker_service.agent_container_runtime_labels`` (#2572).
+
+    The label-STRICT batch read: ``{agent_name: label_or_None}``, ``None`` when
+    Docker could not be asked. Same tri-state semantics, same executor bound and
+    the same function-local-import rule as the pairs above — only the
+    ``from x import y`` form resolves through ``sys.modules`` at call time,
+    which is what a suite that stubs ``services.docker_service`` depends on.
+    """
+    from services.docker_service import agent_container_runtime_labels
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_docker_executor, agent_container_runtime_labels)
+
+
 async def agent_container_state_async(name: str) -> Optional[str]:
     """Async form of ``docker_service.agent_container_state`` (#2196).
 

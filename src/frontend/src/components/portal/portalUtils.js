@@ -630,6 +630,12 @@ export function collapseSelection(selected, { multi = false } = {}) {
 // the same predicate rather than in a second one somebody has to remember.
 export const STAGE_QUERY_KEYS = ['agent', 'new', 'voice']
 
+// The Workspace root. Two consumers: the stage guard below, and the brand
+// mark's link target (ent#556, `PortalBrand`). It is the only route the mark
+// may point at — a client session holds no `users` row, so a platform route
+// would be a door that 404s or bounces to `/login` for exactly the audience
+// this surface exists for, and a dead affordance is one of the two failures
+// the brand corner must not have (the other being an unlabelled one).
 export const WORKSPACE_ROOT = '/workspace'
 
 export function shouldEscapeStage(path, query) {
@@ -896,6 +902,39 @@ export function availabilityChip(agent, { detailed = false } = {}) {
       variant: 'danger',
       title: `This agent has no running container — ask ${who} to start it.`,
     }
+}
+
+/**
+ * #2641 — does THIS list of rows need the availability slot reserved at all?
+ *
+ * The slot's fixed footprint exists so a row does not reflow when an agent
+ * starts or stops between refreshes (#2196), and that is worth keeping. What
+ * was wrong is paying for it on every row unconditionally: `availabilityChip`
+ * returns null for every state except `stopped` and `unavailable`, so on a
+ * fleet where everything is running — the normal case — the strip is empty on
+ * EVERY row. That produced both halves of the reported defect at once: the
+ * dates stopped 72px short of the right edge, and 72px per row came out of the
+ * only element that wanted it, the name.
+ *
+ * The reservation is now a property of the LIST, not of a row: reserve on every
+ * row iff any row can actually show a chip. Uniform down the list, so #2580's
+ * identical truncation point survives, and free when there is nothing to hold
+ * space for.
+ *
+ * Takes the ROWS BEING RENDERED, not the whole roster — a stopped agent hidden
+ * by search or by the collapse limit would otherwise reserve width on a list
+ * that shows no chip, which is the original bug with extra steps.
+ *
+ * Residual, stated rather than discovered: the 0→1 transition (the first agent
+ * in view stops) reflows the whole list once, where before it reflowed nothing.
+ * That is the honest cost of not charging every row for the empty case, and it
+ * is the trade the issue delegates. Within a populated list nothing moves: a
+ * second agent stopping, or the first one restarting while another is still
+ * stopped, changes only that row's chip.
+ */
+export function reservesAvailabilitySlot(rows, opts = {}) {
+  if (!Array.isArray(rows)) return false
+  return rows.some((a) => availabilityChip(a, opts) !== null)
 }
 
 export const EMPTY_REASON_NO_PLAYBOOKS = 'No playbooks are available for this agent right now.'
@@ -1938,19 +1977,67 @@ export function assistantRow({ content = '', id = null, my_rating = null,
 // The reply a just-finished turn produced, read out of the history payload the
 // client polls anyway (`awaitPersistedReply`).
 //
-// `baselineAssistants` is the count taken BEFORE dispatch: the newest assistant
-// row is only this turn's reply if the count has grown, otherwise it is the
-// PREVIOUS turn's and would be shown twice. Returns null while that is the
-// case, which is the caller's "keep waiting".
+// `baseline` is taken BEFORE dispatch (`replyBaseline`): the newest assistant
+// row is only this turn's reply if it differs from the baseline, otherwise it
+// is the PREVIOUS turn's and would be shown twice. Returns null while that is
+// the case, which is the caller's "keep waiting".
 //
 // This is where the id was being lost. The persisted row was already in hand —
 // it is what the count is derived from — and only its content and cost were
 // carried out of the function.
-export function replyFromHistory(messages, baselineAssistants) {
-  const assistants = (Array.isArray(messages) ? messages : [])
-    .filter((m) => m && m.role === 'assistant')
-  if (assistants.length <= (Number(baselineAssistants) || 0)) return null
-  const last = assistants[assistants.length - 1]
+//
+// #2694: found by IDENTITY, not by count. The history read is now a window of
+// typed turns plus the spoken rows of the calls among them, so between the
+// baseline read and a poll the window can shift by a whole call — a count
+// would never grow, the poll would idle out, and a turn that answered would
+// be reported as "check shortly". The baseline is the id of the newest TYPED
+// assistant row (`replyBaseline`); a reply is new when that id changed. A
+// spoken reply (`source === 'voice'`) is never this turn's answer. The count
+// survives only as the fallback for a row with no id (the best-effort write).
+export function latestTypedReply(messages) {
+  const rows = Array.isArray(messages) ? messages : []
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const m = rows[i]
+    if (m && m.role === 'assistant' && m.source !== 'voice') return m
+  }
+  return null
+}
+
+function typedReplyCount(messages) {
+  return (Array.isArray(messages) ? messages : [])
+    .filter((m) => m && m.role === 'assistant' && m.source !== 'voice').length
+}
+
+// What a reply must differ from: taken BEFORE dispatch, from the same rows the
+// poll will read (the server's newest rows, or the local thread on a reattach).
+export function replyBaseline(messages) {
+  const last = latestTypedReply(messages)
+  return { id: last?.id || null, count: typedReplyCount(messages) }
+}
+
+// A missing session id is not an empty conversation. The portal backend resolves
+// it to the pair's Main chat, so the baseline read must make the same request and
+// let the server name the thread. Otherwise Main's last reply looks new as soon
+// as the streaming dispatch adopts the resolved session.
+export async function readReplyBaseline(fetchHistory, sessionId) {
+  try {
+    const data = await fetchHistory(sessionId || null)
+    return replyBaseline(data?.messages)
+  } catch {
+    return replyBaseline([])
+  }
+}
+
+export function replyFromHistory(messages, baseline) {
+  const last = latestTypedReply(messages)
+  if (!last) return null
+  const base = baseline && typeof baseline === 'object'
+    ? baseline
+    : { id: null, count: Number(baseline) || 0 }
+  const isNew = last.id && base.id
+    ? last.id !== base.id
+    : typedReplyCount(messages) > (Number(base.count) || 0)
+  if (!isNew) return null
   return {
     response: last.content,
     cost: last.cost ?? null,

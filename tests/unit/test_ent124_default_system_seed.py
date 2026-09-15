@@ -537,6 +537,9 @@ def orch(env):
         sss.cornelius_agent_service, "ensure_seeded", fake_cornelius
     )
     env.monkeypatch.setattr(svc, "ensure_seeded", fake_fleet)
+    # ent#582: a "created" pass re-runs the first-credential connect, which reads
+    # the real DB, Docker and Redis. Pinned in test_ent582_platform_keys.py.
+    env.monkeypatch.setattr(sss, "_connect_seeded_agents", lambda *results: None)
     return types.SimpleNamespace(env=env, calls=calls)
 
 
@@ -556,6 +559,17 @@ def test_orchestrator_computes_verdict_once_before_cornelius(orch):
     assert orch.calls[0][1] is True                # received the verdict
     assert orch.calls[0][2] == "true"              # ...already persisted by then
     assert orch.calls[1] == ("fleet", True, "true")
+
+
+def test_orchestrator_hands_both_results_to_the_credential_connect(orch):
+    """ent#582: agents whose create straddled the first Claude credential."""
+    seen = []
+    orch.env.monkeypatch.setattr(sss, "_connect_seeded_agents", lambda *r: seen.append(r))
+
+    result = asyncio.run(ensure_first_run_seeded())
+
+    assert seen == [({}, {"action": "created"})]
+    assert result == {"action": "created"}
 
 
 def test_orchestrator_reuses_stored_verdict(orch):

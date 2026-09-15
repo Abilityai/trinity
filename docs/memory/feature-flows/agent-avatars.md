@@ -626,6 +626,8 @@ avatar_prompt: A sharp-eyed explorer with binoculars and a weathered field journ
 
 On agent creation from a local template with `avatar_prompt`, the prompt is stored in the DB via `db.set_default_avatar()`. This means even if the agent is stopped when generate-defaults runs, the meaningful prompt is already available.
 
+**Bundled image (#2693).** A `local:` template may also ship `avatar.webp` (or `avatar.png`, ≤2 MB) beside `template.yaml`. When it declares an `avatar_prompt`, `crud._install_bundled_avatar` re-encodes that file through `optimize_avatar` into `/data/avatars/{name}.webp` before the prompt is seeded — so the agent has a face with no `GEMINI_API_KEY` and no outbound call. It is still recorded as a *default* avatar, so Generate Default Avatars overwrites it once a key exists. A missing or undecodable image degrades to the prompt-only seed. The first-run fleet (`scout`, `sage`, `scribe`) ships one each; `test_2693_first_run_fleet_ships_bundled_avatars` fails if a manifest agent loses either half.
+
 ### DB Tracking
 
 **New column**: `is_default_avatar INTEGER DEFAULT 0` in `agent_ownership`

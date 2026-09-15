@@ -70,7 +70,9 @@ Admin's Machine                  Trinity Backend                    Agent Contai
 +----------------+              +-------------------+               +------------------+
 ```
 
-### Auto-Assign on Agent Creation (#74)
+### Auto-Assign — at Creation (#74) and to a Credential-less Fleet (#2572)
+
+There are **three** triggers that put an agent on a subscription automatically, all sharing one ranker and one never-move rule, and deliberately **no periodic sweep**: agent creation (#74, below), subscription registration (#2572, [Flow 1](#flow-1-register-subscription)) and deletion of the instance Anthropic API key (#2572, [platform-settings.md](platform-settings.md)).
 
 New agents are automatically assigned a subscription: since #2409 the one with the most cached provider headroom (the auto-switch ranker — furthest from the nearest wall, a fresh provider refusal dropped), with fewest-agents round-robin as the order among candidates that have no usable reading. Subscriptions that failed within the last 2h — rate-limit OR auth (#2352) — are skipped first. Falls back to platform API key if no viable subscription exists.
 
@@ -97,10 +99,10 @@ create_agent_internal()
 - `src/backend/services/agent_service/crud.py:507` — DB persist after `register_agent_owner()`
 
 **Edge cases:**
-- No subscriptions → skip, use `ANTHROPIC_API_KEY`
+- No subscriptions → skip, use `ANTHROPIC_API_KEY`. **Since #2572** the agent is not stranded there: when a subscription is later registered (or the instance key is deleted), the credential-less adoption sweep assigns it one with no per-agent click.
 - Token decrypt fails → warn, keep `ANTHROPIC_API_KEY`
 - Exception → warn, keep `ANTHROPIC_API_KEY`
-- System agents → separate `_create_system_agent()` path, unaffected
+- System agents → separate `_create_system_agent()` path, which never calls the selector, so `trinity-system` is provisioned credential-less on a keyless instance. The #2572 sweep now adopts it in the DB (its badge and `GET /api/subscriptions` become correct) but never restarts it — #1816 reserves that for a deliberate operator action.
 - Equal agent count → alphabetical tie-break (`s.name ASC`)
 
 ---
@@ -115,9 +117,9 @@ create_agent_internal()
 | **Agent Detail: AgentHeader subscription switcher** | `DELETE /api/subscriptions/agents/{agent_name}` | Revert to API Key from dropdown |
 | **Settings Page: Claude Subscriptions** | `GET /api/subscriptions/encryption-status` | Check if CREDENTIAL_ENCRYPTION_KEY is configured (shows warning banner if not) |
 | **Settings Page: Claude Subscriptions** | `GET /api/subscriptions` | List subscriptions (Settings UI) |
-| **Settings Page: Add Subscription** | `POST /api/subscriptions` | Register via token input (returns 503 if encryption key missing) |
+| **Settings Page: Add Subscription** | `POST /api/subscriptions` | Register via token input (returns 503 if encryption key missing); **also runs the #2572 credential-less adoption sweep** |
 | **Settings Page: Delete Button** | `DELETE /api/subscriptions/{id}` | Delete with cascade confirmation |
-| MCP Tool: `register_subscription` | `POST /api/subscriptions` | Register new subscription |
+| MCP Tool: `register_subscription` | `POST /api/subscriptions` | Register new subscription — the SAME endpoint, so the #2572 sweep fires here too |
 | MCP Tool: `list_subscriptions` | `GET /api/subscriptions` | List all subscriptions with agents |
 | MCP Tool: `assign_subscription` | `PUT /api/subscriptions/agents/{agent_name}` | Assign subscription to agent |
 | MCP Tool: `clear_agent_subscription` | `DELETE /api/subscriptions/agents/{agent_name}` | Clear subscription from agent |
@@ -466,6 +468,10 @@ AgentDetail.changeSubscription(subscriptionName)
 
 Admin registers a long-lived Claude subscription token generated via `claude setup-token`. Token is validated for `sk-ant-oat01-` prefix, encrypted using AES-256-GCM, and stored in the database.
 
+**Since #2572 the POST does two more things after the credential is stored, each in its own swallow-everything `try/except` so neither can fail a registration whose token is already persisted:** the #1089 key-rollover hot-reload fan-out (a no-op on a first registration), and the **credential-less adoption sweep**. The sweep is what makes registration the useful action it reads as — before it, an instance with no `ANTHROPIC_API_KEY` registered a subscription and every existing agent stayed on API-Key auth with nothing behind it.
+
+Only the sweep's **decide-and-persist** phase is awaited: it resolves the credential-less set, picks a subscription per agent through the same #2409 ranker the create path uses, and writes `agent_ownership.subscription_id` — all with the blocking work in `asyncio.to_thread`. That phase must be inside the request, because `SubscriptionsPanel.vue::addSubscription()` refetches `GET /api/subscriptions` on the very next line and would otherwise render `agent_count: 0`. The **container apply** phase is backgrounded (per-agent #799 lock, re-verified before each restart, `trinity-system` and ephemeral ghosts excluded), because a registration must not block on N container recreates.
+
 ### Sequence Diagram
 
 ```
@@ -486,10 +492,32 @@ Admin             MCP/Claude Code          Backend                     Database
   |                    |                      | Upsert by name             |
   |                    |                      |--------------------------->|
   |                    |                      |<---------------------------|
+  |                    |                      |                            |
+  |                    |                      | #1089 rollover fan-out     |
+  |                    |                      | (no-op on first register)  |
+  |                    |                      |                            |
+  |                    |                      | #2572 adoption sweep       |
+  |                    |                      |  Phase A (AWAITED):        |
+  |                    |                      |   instance key resolved?   |
+  |                    |                      |   -- yes -> adopt nobody   |
+  |                    |                      |   credential-less set      |
+  |                    |                      |--------------------------->|
+  |                    |                      |   1 batch Docker read:     |
+  |                    |                      |   runtime label strict     |
+  |                    |                      |   per agent, under #799:   |
+  |                    |                      |    re-check NULL -> assign |
+  |                    |                      |--------------------------->|
+  |                    |                      |    audit row (no token)    |
+  |                    |                      |--------------------------->|
+  |                    |                      |  Phase B (BACKGROUND):     |
+  |                    |                      |   re-verify under lock,    |
+  |                    |                      |   _restart_agent           |
+  |                    |                      |   (skip trinity-system)    |
   |                    |<---------------------|                            |
   |<-------------------|                      |                            |
   | "Subscription      |                      |                            |
   |  registered"       |                      |                            |
+  |  (GET /api/subscriptions now already lists the adopted agents)         |
 ```
 
 ### Pydantic Validation (`src/backend/db_models.py:623-635`)
@@ -570,17 +598,18 @@ async def get_encryption_status(current_user: User = Depends(get_current_user)):
 
 Frontend calls this on Settings page load. If `configured: false`, a yellow warning banner is shown and the Register button is disabled.
 
-### Backend Endpoint (`src/backend/routers/subscriptions.py:51-99`)
+### Backend Endpoint (`src/backend/routers/subscriptions.py::register_subscription`)
 
 ```python
 @router.post("", response_model=SubscriptionCredential)
 async def register_subscription(
-    request: SubscriptionCredentialCreate,
+    payload: SubscriptionCredentialCreate,   # renamed from `request` — see below
+    http_request: Request,                   # audit context for the #2572 sweep
     current_user: User = Depends(get_current_user)
 ):
     """Register a new subscription token. Admin-only.
     Token must start with `sk-ant-oat01-` (Claude Code OAuth access token)."""
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Early validation — returns 503 with actionable instructions if key missing
     encryption_key = os.getenv("CREDENTIAL_ENCRYPTION_KEY")
@@ -589,8 +618,27 @@ async def register_subscription(
 
     user = db.get_user_by_username(current_user.username)
     subscription = db.create_subscription(...)
+
+    try:                                    # #1089 key rollover — best effort
+        await reload_subscription_for_all_agents(subscription.id)
+    except Exception as e:
+        logger.error(f"... '{payload.name}': {e}")
+
+    try:                                    # #2572 credential-less adoption
+        await adopt_for_credentialless_agents(
+            actor_user=current_user, ...,   # Phase A only; Phase B is spawned
+        )
+    except Exception as e:
+        logger.error(f"... '{payload.name}': {e}")
+
     return subscription
 ```
+
+**Why the body parameter is `payload`.** The handler now also takes the injected
+`Request`, and two things named `request` in one function is how a log line
+inside an `except` block raises `AttributeError` — which escapes to this
+handler's outer `except Exception` and returns **500 with the credential already
+stored**, the single failure the two inner `try/except` blocks exist to prevent.
 
 ### Database Operations (`src/backend/db/subscriptions.py:66-137`)
 
@@ -1451,6 +1499,7 @@ The error flows through: Claude Code → `process_stream_line()` (stores in `met
 
 | Date | Changes |
 |------|---------|
+| 2026-09-12 | **#2572 — credential-less agents adopt an available subscription.** Registration (`POST /api/subscriptions`) and deletion of the instance Anthropic key now sweep every agent whose active auth mode resolves to no usable credential onto an available subscription; agent creation (#74) already did. Documented the five-condition predicate, the two never-move guards (a working instance key; an agent already on a subscription), the awaited-decide / backgrounded-apply split, the `trinity-system` and ephemeral-ghost exclusions from the restart phase, and the new audit actions — including `subscription_assign` / `subscription_clear`, which this router had never written. `register_subscription`'s body parameter is renamed `payload`. |
 | 2026-03-26 | **Line number refresh**: Updated all stale line references across Settings.vue (template +100, state +390, methods +600), subscriptions.py (+20), helpers.py (+54), lifecycle.py (-30 to +90), crud.py (+7), claude_code.py (+116), db_models.py, migrations.py, and MCP client.ts (+133). Updated `start_agent_internal` code snippet to reflect removal of `inject_trinity_meta_prompt` (now runtime via `--append-system-prompt`). |
 | 2026-03-18 | **Subscription switcher dropdown on Agent Detail** (commit d166976): Updated doc to reflect current `AgentHeader.vue` and `AgentDetail.vue` wiring — corrected line numbers, clarified that `loadAvailableSubscriptions` is called only once in `onMounted` (not on route change), documented the three props passed to `AgentHeader` (`:auth-status`, `:subscriptions`, `:subscription-changing`), and added switcher test cases for admin and non-admin paths. |
 | 2026-03-03 | **SUB-003 Agent assignment UI**: Added assign/unassign controls to expanded subscription rows in Settings. Agent badges have X buttons for removal, dropdown + Assign button for adding agents, agents on other subs shown with "(on sub-name)" suffix. No backend changes. |

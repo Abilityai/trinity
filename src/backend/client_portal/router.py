@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+from types import SimpleNamespace
 from typing import Optional
 
 import httpx
@@ -34,11 +35,17 @@ from dependencies import (
     reject_agent_principal,
     require_admin,
 )
-from models import REPORT_ROWS_PAGE_MAX, User
+from models import (
+    REPORT_ROWS_PAGE_MAX,
+    CanvasBulkDelete,
+    CanvasPinRequest,
+    User,
+)
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
+from database import db
 from . import agent_page, service
 from .models import (
     PortalSessionRename,
@@ -347,7 +354,28 @@ async def portal_auth_exchange(
     # ent#375: report the token's ACTUAL lifetime (the idle window), not a
     # constant. The session now slides, so this is when it expires *if the
     # client goes quiet* — a client that keeps using it keeps it alive.
-    idle_s, _ = settings_service.get_portal_session_policy()
+    #
+    # #2689: this line named `settings_service`, which the router never imports,
+    # so every call to this route — the whole ent#163 trusted-issuer seam —
+    # answered 500 with a NameError, on `dev` and on `main`.
+    #
+    # Read through `dependencies`, which owns the ONE reader of this setting and
+    # carries the two properties the route needs: the import is function-local
+    # (`settings_service` imports `db`, so a module-level import cycles) and the
+    # read degrades to the shipped policy, because a settings hiccup must not
+    # 500 an auth path. A second copy of the call here would be a second chance
+    # to omit that degrade.
+    #
+    # Imported INSIDE the handler, not at module scope. Both module-scope forms
+    # capture at import time — a `from`-import binds the function object, and
+    # `import dependencies as _deps` binds the module object — and both go stale
+    # if `dependencies` is re-imported after this module. Measured under pytest:
+    # `sys.modules["dependencies"]` and the router's captured reference were
+    # different objects, so the route read the shipped default while the test's
+    # patch moved the live module. Resolving through `sys.modules` at call time
+    # cannot diverge.
+    from dependencies import _portal_session_policy
+    idle_s, _ = _portal_session_policy()
     return PortalExchangeResponse(
         token=token,
         email=email,
@@ -749,6 +777,30 @@ def portal_agent_canvases(
         agent_name, audience=agent_page.canvas_audience_for(principal.is_platform))}
 
 
+@router.post("/agents/{agent_name}/canvas/bulk-delete")
+async def portal_bulk_delete_canvases(
+    agent_name: str,
+    body: CanvasBulkDelete,
+    request: Request,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Remove several of this agent's canvases from the Workspace (ent#553).
+
+    Declared above the parameterized canvas routes (Invariant #4). Audited like
+    its operator twin — see `_audit_canvas_change`.
+    """
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    _require_canvas_manager(agent_name, principal)
+    deleted = db.delete_agent_canvases(agent_name, body.canvas_ids)
+    await _audit_canvas_change(
+        request, principal, action="canvas_bulk_delete", agent_name=agent_name,
+        details={"requested": len(body.canvas_ids), "deleted": deleted,
+                 "surface": "workspace"},
+    )
+    return {"agent_name": agent_name, "requested": len(body.canvas_ids),
+            "deleted": deleted}
+
+
 @router.get("/agents/{agent_name}/canvas/{canvas_id}")
 def portal_agent_canvas_detail(
     agent_name: str,
@@ -774,6 +826,134 @@ def portal_agent_canvas_detail(
     if canvas is None:
         raise HTTPException(status_code=404, detail="Canvas not found")
     return canvas
+
+
+async def _audit_canvas_change(request: Request, principal: PortalPrincipal, *,
+                               action: str, agent_name: str, details: dict) -> None:
+    """One audit row per Workspace canvas delete/pin (ent#553 review).
+
+    The operator twins in `routers/canvas.py` have logged since they shipped and
+    `docs/user-docs/agents/agent-canvas.md` tells users deletion is audited —
+    these routes recorded nothing, so the claim was false for exactly the surface
+    an external-facing product is most often asked about.
+
+    **The actor is resolved to the real `users` row, not left as an email.**
+    Passing `actor_email` alone looks sufficient and is not: `_resolve_actor`
+    keys `actor_type` off `actor_user` / `actor_agent_name` / `mcp_scope` /
+    `mcp_key_id`, so an email-only call falls through to its last branch and the
+    row lands as `actor_type="system"`, `actor_id="trinity-system"` — a named
+    operator's deletion recorded as a PLATFORM action, invisible to any
+    `actor_type=user` query and to the per-actor filter the audit UI offers.
+    That is worse than the missing row this function was added to fix: a wrong
+    attribution is believed. (The #848 inline-auth precedent for `actor_email`
+    holds where the caller genuinely has no `users` row; here
+    `_require_canvas_manager` is platform-only and resolves through
+    `db.can_user_share_agent`, so a row exists by construction.)
+
+    The lookup is best-effort: if it somehow misses, the row is still written
+    with the email attached rather than dropped — an under-attributed audit
+    entry beats none — and the miss is logged, because it would mean the gate
+    admitted someone the user table does not know.
+
+    Ids and counts only — a canvas's blocks are agent-authored free-form content
+    and the audit log is broadly readable (the canary G-04 rule the operator
+    routes state).
+    """
+    actor_user = None
+    try:
+        row = db.get_user_by_email(principal.email)
+        if row:
+            actor_user = SimpleNamespace(
+                id=row.get("id"), email=row.get("email") or principal.email,
+                username=row.get("username"),
+            )
+    except Exception as e:  # noqa: BLE001 — attribution must not fail the action
+        logger.warning("canvas audit: could not resolve actor for %s: %s",
+                       principal.email, e)
+    if actor_user is None:
+        logger.warning(
+            "canvas audit: no users row for %s on a platform-only route; "
+            "recording the action with the email but no user attribution",
+            principal.email,
+        )
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action=action,
+        source="api",
+        actor_user=actor_user,
+        actor_email=principal.email,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details=details,
+    )
+
+
+def _require_canvas_manager(agent_name: str, principal: PortalPrincipal) -> None:
+    """Owner-or-admin, platform-only — the ent#553 gate for changing a canvas.
+
+    A uniform 404, not a 403: this prefix's contract is that a caller learns
+    nothing about what they cannot reach, and an external client who could tell
+    "exists but you may not" from "does not exist" has been told which canvases
+    the agent keeps for its operator.
+    """
+    if not service.may_manage_canvases(agent_name, principal.email,
+                                       is_platform=principal.is_platform):
+        raise HTTPException(status_code=404, detail="Canvas not found")
+
+
+@router.delete("/agents/{agent_name}/canvas/{canvas_id}")
+async def portal_delete_canvas(
+    agent_name: str,
+    canvas_id: str,
+    request: Request,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Remove one canvas from the Workspace (ent#553).
+
+    Idempotent, matching the operator route: a list one poll out of date must
+    not turn a second click into an error. Only a delete that REMOVED something
+    is audited — the same rule as the operator twin, for the same reason: a
+    repeat click is a no-op and logging those fills the trail with events where
+    nothing happened.
+    """
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    _require_canvas_manager(agent_name, principal)
+    deleted = db.delete_agent_canvas(agent_name, canvas_id)
+    if deleted:
+        await _audit_canvas_change(
+            request, principal, action="canvas_delete", agent_name=agent_name,
+            details={"canvas_id": canvas_id, "surface": "workspace"},
+        )
+    return {"canvas_id": canvas_id, "deleted": bool(deleted)}
+
+
+@router.put("/agents/{agent_name}/canvas/{canvas_id}/pin")
+async def portal_pin_canvas(
+    agent_name: str,
+    canvas_id: str,
+    body: CanvasPinRequest,
+    request: Request,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Pin or unpin one canvas so it stays at the top of the rail (ent#553).
+
+    Audited: a pin is what decides which canvas a whole roster sees first, so it
+    is an administrative act on a shared surface, not a per-viewer preference.
+    """
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    _require_canvas_manager(agent_name, principal)
+    if not db.set_agent_canvas_pinned(agent_name, canvas_id, body.pinned):
+        raise HTTPException(status_code=404, detail="Canvas not found")
+    await _audit_canvas_change(
+        request, principal, action="canvas_pin", agent_name=agent_name,
+        details={"canvas_id": canvas_id, "pinned": bool(body.pinned),
+                 "surface": "workspace"},
+    )
+    return {"canvas_id": canvas_id, "pinned": body.pinned}
 
 
 @router.get("/agents/{agent_name}/reports", response_model=PortalAgentReports)
@@ -903,6 +1083,14 @@ async def portal_chat(
         result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id,
                                           include_owned=include_owned,
                                           new_thread=body.new_thread,
+                                          # ent#555 — validated HERE, before it is
+                                          # stamped anywhere: the id is
+                                          # client-supplied, and an unrecognised
+                                          # one means "nothing open", never an error.
+                                          open_canvas_id=service.validated_open_canvas(
+                                              agent_name,
+                                              getattr(body, "open_canvas_id", None),
+                                              is_platform=principal.is_platform),
                                           model=requested_model)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
@@ -1220,10 +1408,18 @@ def portal_rename_session(agent_name: str, session_id: str, body: PortalSessionR
 
 @router.get("/agents/{agent_name}/history", response_model=PortalHistory)
 def portal_history(agent_name: str, session_id: str | None = None,
+                   limit: int | None = Query(None, ge=1, le=50),
                    principal: PortalPrincipal = Depends(get_portal_principal)):
     """The client's persisted conversation with a rostered agent (oldest-first),
     so it survives a refresh / re-sign-in. With ``?session_id=`` returns that
     thread; without, the most-recent one. Roster-scoped (miss → 404).
+
+    #2694: without ``limit`` the thread is read as a WINDOW of typed turns (the
+    newest 100, plus the spoken rows of the calls among them, under a row
+    ceiling that reports itself as ``truncated``). ``?limit=N`` (1–50) is the
+    narrow read the reply poll makes every few hundred milliseconds: the newest
+    N rows, whatever their source — never the window, and nothing here can
+    widen it.
     """
     email = principal.email
     # ent#358: the scope of what a caller can DO must equal what they can
@@ -1231,7 +1427,8 @@ def portal_history(agent_name: str, session_id: str | None = None,
     # gate below has to as well, or an owner 404s on their own agent.
     include_owned = principal.is_platform
     try:
-        return service.get_history(agent_name, email, session_id=session_id, include_owned=include_owned)
+        return service.get_history(agent_name, email, session_id=session_id,
+                                   include_owned=include_owned, limit=limit)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
@@ -1567,6 +1764,11 @@ async def portal_chat_stream(
             # one above is its fallback. A flag honoured by only one brings the
             # bug back exactly when streaming fails.
             new_thread=body.new_thread,
+            # ent#555 — the streaming path carries it too, for the reason
+            # stated directly above about a flag honoured by only one path.
+            open_canvas_id=service.validated_open_canvas(
+                agent_name, getattr(body, "open_canvas_id", None),
+                is_platform=principal.is_platform),
             model=requested_model,   # ent#403, same rule as the flag above
         )
     except ClientPortalError as e:
@@ -1618,6 +1820,9 @@ async def portal_terminate_execution(
     rate_limiter.enforce(f"portal_cancel:{email}:{agent_name}", 30, 60,
                          detail="Too many cancellations.")
 
+    # ent#551 QA: the one line that says a PERSON in the Workspace asked for
+    # this cancel (see `terminate_execution`'s entry log for the actor kind).
+    logger.info("portal cancel: %s stops execution %s on %s", email, execution_id, agent_name)
     try:
         return await service.terminate_portal_turn(agent_name, execution_id)
     except ClientPortalError as e:

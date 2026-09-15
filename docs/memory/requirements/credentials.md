@@ -187,3 +187,77 @@
   historical backups still hold the plaintext, so the affected tokens must be
   rotated. Runbook:
   [`docs/migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md`](../../migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md).
+
+---
+
+### 3.8 Platform Keys in the First-Run Flow — No Terminal (ent#582)
+- **Status**: ✅ Implemented
+- **Description**: The first-run overlay (ent#581) configures every credential an
+  instance needs from the browser. The chassis owns the sequence; this entry owns
+  the two credential steps' content and validation and the backend they write
+  through. Every write goes through the same endpoints Settings → Integrations
+  uses — no parallel path.
+- **`claude` step (the only required step)**: two tabs — *Subscription token*
+  (`sk-ant-oat01-…`, from `claude setup-token` on the operator's own machine) and
+  *API key* (`sk-ant-api…`, created in the browser at console.anthropic.com, so
+  there is always a path with no terminal at all). The copy says plainly that
+  without a credential no agent can run. A credential is **validated before it is
+  accepted**: format client-side, then a live check (`POST /api/subscriptions/test`
+  — one `max_tokens=1` probe on the token, the #471 headroom probe's request;
+  `POST /api/settings/api-keys/anthropic/test`). The step emits `complete` only
+  after a validated save. An `sk-ant-oat` token pasted into the API-key tab is
+  refused client-side AND server-side with the spec's copy: *"That key was
+  rejected. API keys start with `sk-ant-api` — this one starts with `sk-ant-oat`,
+  which is a subscription token. Paste it on the Subscription token tab instead."*
+- **The first credential reaches the agents that already exist**: agents created
+  before any credential (the ent#124 seeded fleet, Cornelius, `trinity-system`)
+  were baked with no Claude auth — #74 auto-assign runs only at create and nothing
+  re-bakes a running container. So when a write makes the install go from *no
+  Claude credential* to *one* (`POST /api/subscriptions`,
+  `PUT /api/settings/api-keys/anthropic`), every agent that could not
+  authenticate is connected. Candidates are the DB agent rows (not the container
+  list, which reads empty on a Docker fault): Claude runtime, not ephemeral, no
+  subscription, `use_platform_api_key` on, and **no successful execution ever** —
+  a success proves the agent authenticates another way (its own `.env` key or a
+  terminal login) that a subscription would shadow (#2114). A subscription is
+  assigned to each; agents whose container is running are restarted in the
+  background so the new env is baked (an auth-mode change is a recreate), except
+  one with a **running execution** (left alone; it picks the credential up on its
+  next start) or whose env already carries it. Agents with `use_platform_api_key`
+  off are never touched; an install that already had a credential is never
+  touched. Both responses carry `connected_agents: int` — how many agents now use
+  it. Because first-run seeding runs in the background right after `/setup`, a
+  seed pass that created agents re-runs the same idempotent connect at its end, so
+  an agent whose create straddled the save is not left without a credential.
+  After this step the operator can reach a running execution with nothing else
+  configured.
+- **`claude_auth_configured`** (feature flags) is true for every credential the
+  step accepts — a platform API key (settings or env) OR any registered
+  subscription — resolved by one helper
+  (`subscription_service.is_claude_auth_configured`) that both the flag and the
+  first-credential check use. The chassis refreshes it with
+  `stores/sessions.js::loadFeatureFlags(true)`.
+- **`keys` step (optional, each skippable)**: GitHub PAT · email provider (Resend)
+  · Gemini. Each names where to get the key (provider link), links the Trinity
+  docs page, states the consequence of skipping (no email-code sign-in; no voice
+  and no generated agent avatars) and where to do it later (Settings →
+  Integrations, where every key stays manageable).
+- **Resend** (`PUT/DELETE /api/settings/api-keys/resend`, `POST …/resend/test`):
+  the key persists as `resend_api_key` (added to `SECRET_SETTING_KEYS`, so
+  AES-256-GCM under `resend_api_key_encrypted`); the "send from" address persists
+  as the plain setting `email_from_address`. Resolved per send: settings → env
+  (`RESEND_API_KEY`, `SMTP_FROM`). A Resend key **saved in Settings selects Resend
+  as the provider** — a fresh install's `.env` says `EMAIL_PROVIDER=console`, and
+  a key the env silently overrides would be a dead end. The live test lists the
+  account's domains and refuses a from-address whose domain Resend has not
+  verified (Resend rejects that send), naming the verified ones.
+- **Gemini** (`PUT/DELETE /api/settings/api-keys/gemini`, `POST …/gemini/test`):
+  persists through the existing ent#435 `google_api_key` secret (the platform
+  already coalesces `GOOGLE_API_KEY` into its Gemini key). Every platform Gemini
+  consumer (voice, Workspace/VoIP/Brain Orb voice, Telegram transcription, image
+  and avatar generation, the feature flags) resolves it at call time: encrypted
+  setting → `GEMINI_API_KEY` → `GOOGLE_API_KEY` env. No restart.
+- **Write gates**: every new endpoint is `assert_admin` (rejects agent principals
+  itself — never `require_role("admin")`); key values are never logged or echoed
+  (masked reads, audit rows record set/cleared only). No schema change —
+  `system_settings` rows only.

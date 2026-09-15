@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { setBaseTitle } from '@/utils/tabTitle'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'
@@ -233,6 +234,17 @@ export const routes = [
     // in one click. Standalone (no NavBar / platform chrome), no requiresAuth:
     // the external path must stay reachable without an account. Backend 404s in
     // OSS/unentitled builds; the page shows its sign-in / unavailable state.
+    // ent#554 — a shared canvas at a stable link. No `requiresAuth` for the
+    // same reason the Workspace has none: a `public` share must open with no
+    // account at all. An `authorized` share answers 401 from the API and the
+    // view offers a sign-in — the SERVER decides which, never the router, since
+    // a guard here would turn every public link into a login wall.
+    path: '/canvas/s/:token',
+    name: 'shared-canvas',
+    component: () => import('../views/SharedCanvas.vue'),
+    meta: { title: 'Shared canvas', hideHelpWidget: true }
+  },
+  {
     path: '/workspace',
     name: 'Workspace',
     component: () => import('../views/Portal.vue'),
@@ -265,7 +277,16 @@ export const routes = [
     path: '/workspace/a/:agentName',
     name: 'WorkspaceAgent',
     component: () => import('../views/Portal.vue'),
-    meta: { title: 'Workspace', hideHelpWidget: true }
+    // ent#556: the one Workspace route whose subject the ROUTE knows, so it is
+    // the one that can name it. Keeps the surface in the title — a bare agent
+    // name would lose "Workspace" — and reuses `agentTabTitle`, so an operator
+    // (warm agents store) sees the display name and a client session, which
+    // never populates that store, falls back to the slug. Threads and rooms
+    // cannot do this: their subject lives in component state, not the route.
+    meta: {
+      title: (to) => `Workspace · ${agentTabTitle(to.params.agentName)}`,
+      hideHelpWidget: true,
+    }
   },
   // ent#357 legacy paths. Function form so query AND hash survive the hop —
   // these URLs were handed to real clients by email, and a client landing on a
@@ -414,7 +435,13 @@ const BASE_TITLE = 'Trinity'
 router.afterEach((to) => {
   const raw = to.meta?.title
   const label = typeof raw === 'function' ? raw(to) : raw
-  document.title = label ? `${BASE_TITLE} — ${label}` : `${BASE_TITLE} — Agent Orchestration`
+  // ent#557: routed THROUGH `setBaseTitle` rather than assigned here. The
+  // Workspace's unread count is a prefix on this string and changes on its own
+  // schedule, so with two direct writers the last one to fire would erase the
+  // other's half — a navigation would drop the count, a count update would drop
+  // the label. `utils/tabTitle.js` holds both halves and renders the whole
+  // string; this line still owns what the LABEL says.
+  setBaseTitle(label ? `${BASE_TITLE} — ${label}` : `${BASE_TITLE} — Agent Orchestration`)
 })
 
 // Clear setup cache on successful setup

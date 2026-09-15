@@ -812,7 +812,12 @@ onMounted(async () => {
 ### WebSocket Broadcasts
 
 #### agent_collaboration Event
-Broadcast when `X-Source-Agent` header detected:
+Broadcast when a **resolved** source agent is present — i.e. `X-Source-Agent` survived
+`dependencies.resolve_source_agent` (ent#614), which passes it only for an agent-scoped
+key naming its own agent or the EVT-001 loopback's vouched source. A human sending the
+header is refused with a 403 before this point, so the edge and its
+`AGENT_COLLABORATION` activity can no longer be forged onto an agent the caller cannot
+even access:
 
 ```json
 {

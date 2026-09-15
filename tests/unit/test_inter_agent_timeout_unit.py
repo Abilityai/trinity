@@ -96,6 +96,7 @@ FanOutTaskInput = fos.FanOutTaskInput
 _fake_deps = types.ModuleType("dependencies")
 _fake_deps.get_authorized_agent = lambda: None
 _fake_deps.get_current_user = lambda: None
+_fake_deps.resolve_source_agent = lambda _user, header, **_kw: header  # ent#614
 sys.modules.setdefault("dependencies", _fake_deps)
 
 _fake_models = types.ModuleType("models")
@@ -197,7 +198,7 @@ class _FanOutRows:
     The aggregate is a query over `fan_out_id` now, not a dict in the
     dispatching coroutine, so a bare `MagicMock()` db no longer stands in for
     it — `count_fan_out_open` has to return a real integer or the batch never
-    completes, and `list_fan_out_executions` has to return real rows or there is
+    completes, and `get_fan_out_executions` has to return real rows or there is
     no aggregate to assert on.
     """
 
@@ -225,8 +226,11 @@ class _FanOutRows:
     def finish(self, execution_id, status="success", response="ok", error=None):
         self.rows[execution_id].update(status=status, response=response, error=error)
 
-    def list_fan_out_executions(self, fan_out_id):
-        return [dict(r) for r in self.rows.values() if r["fan_out_id"] == fan_out_id]
+    def get_fan_out_executions(self, agent_name, fan_out_id, limit=200):
+        return [
+            dict(r) for r in self.rows.values()
+            if r["fan_out_id"] == fan_out_id and r["agent_name"] == agent_name
+        ][:limit]
 
     def count_fan_out_open(self, fan_out_id):
         return sum(
@@ -241,6 +245,12 @@ class _FanOutRows:
 
     def get_execution_timeout(self, agent_name):
         return 600
+
+    def get_max_parallel_tasks(self, agent_name):
+        return 3
+
+    def get_agent_subscription_id(self, agent_name):
+        return None
 
     def update_execution_status(self, **_kw):
         return True
@@ -384,9 +394,9 @@ def test_fan_out_service_outer_deadline_actually_applies():
 
 
 def test_fan_out_async_mode_returns_a_receipt_without_waiting():
-    """#2524: `async_mode` returns as soon as the rows exist. The whole point is
-    that the batch outlives the request that started it, which is also what a
-    pull-claimed subtask needs — its turn runs later, in the agent's worker."""
+    """#2524: `async_mode` returns without waiting on the subtasks. The batch
+    outlives the request that started it, which is also what a pull-claimed
+    subtask needs — its turn runs later, in the agent's worker."""
     rows = _install_rows()
 
     async def _never_finishes(**kwargs):
@@ -401,7 +411,7 @@ def test_fan_out_async_mode_returns_a_receipt_without_waiting():
     tasks = [FanOutTaskInput(id=f"t{i}", message=f"task {i}") for i in range(3)]
 
     async def _drive():
-        return await asyncio.wait_for(
+        res = await asyncio.wait_for(
             service.execute(
                 agent_name="delegate-4",
                 tasks=tasks,
@@ -410,24 +420,29 @@ def test_fan_out_async_mode_returns_a_receipt_without_waiting():
             ),
             timeout=2,  # must NOT block on the subtasks
         )
+        # The spawned dispatch creates each row as its slot is granted; with
+        # max_concurrency=3 all three are granted on its first steps.
+        for _ in range(50):
+            if len(rows.get_fan_out_executions("delegate-4", res.fan_out_id)) == 3:
+                break
+            await asyncio.sleep(0)
+        return res, len(rows.get_fan_out_executions("delegate-4", res.fan_out_id))
 
-    result = asyncio.run(_drive())
+    result, row_count = asyncio.run(_drive())
 
     assert result.status == "accepted"
     assert result.fan_out_id.startswith("fo_")
     assert result.total == 3
     assert result.results == []
-    # The rows exist before the caller is answered, so the batch is already
-    # discoverable by `fan_out_id` — a status poll can never 404 a live batch.
-    assert len(rows.list_fan_out_executions(result.fan_out_id)) == 3
+    assert row_count == 3
 
 
-def test_fan_out_status_rebuilds_the_aggregate_from_the_rows():
+def test_fan_out_aggregate_is_rebuilt_from_the_rows():
     """The join, and the reason `fan_out_task_id` had to become a column: the
-    caller's own subtask ids have to survive into an aggregate assembled long
-    after the dispatching coroutine is gone."""
+    caller's own subtask ids have to survive from the row into the aggregate,
+    rather than from a dict of `execute_task` return values — which a pull
+    dispatch never fills."""
     rows = _install_rows()
-    service = FanOutService()
 
     fan_out_id = "fo_status_test"
     for task_id, status, response in (
@@ -442,8 +457,7 @@ def test_fan_out_status_rebuilds_the_aggregate_from_the_rows():
             rows.finish(execution.id, status=status, response=response,
                         error=None if status == "success" else "boom")
 
-    result = service.get_status(fan_out_id)
-    assert result is not None
+    result = fos.build_aggregate("delegate-5", fan_out_id, ["alpha", "beta", "gamma"])
     assert result.total == 3
     assert result.completed == 1
     assert result.failed == 1
@@ -452,7 +466,6 @@ def test_fan_out_status_rebuilds_the_aggregate_from_the_rows():
     assert by_id["alpha"].status == "completed" and by_id["alpha"].response == "A"
     assert by_id["beta"].status == "failed" and by_id["beta"].error == "boom"
     assert by_id["gamma"].status == "running"
-
-    assert service.get_status("fo_does_not_exist") is None
-    assert service.batch_belongs_to(fan_out_id, "delegate-5") is True
-    assert service.batch_belongs_to(fan_out_id, "someone-else") is False
+    # Another agent's view of the same id is empty (the read is agent-scoped).
+    other = fos.build_aggregate("someone-else", fan_out_id, ["alpha"])
+    assert other.results[0].execution_id is None

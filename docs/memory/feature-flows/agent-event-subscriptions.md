@@ -81,8 +81,21 @@ No dedicated UI components. This feature is consumed entirely through the MCP to
    - `message`: interpolated template
    - `async_mode: true` (fire-and-forget)
    - `system_prompt`: event metadata
-   - Headers: `Authorization` (internal JWT), `X-Source-Agent`, `X-Via-MCP`
-4. Internal JWT generated via `_get_internal_token()` (5-minute TTL, admin subject)
+   - Headers: `Authorization` (loopback JWT), `X-Via-MCP`, and `X-Source-Agent`
+     **only for an agent-originated event** (ent#614)
+4. Loopback JWT generated via `_get_internal_token(source_agent)` — 5-minute TTL, admin
+   subject, `scope="event_loopback"`, and a `source_agent` claim. `get_current_user`
+   fences that scope to `POST /api/agents/{name}/task` (it used to be an unrestricted
+   admin bearer) and surfaces the claim as `User.vouched_source_agent`, which is the
+   identity `resolve_source_agent` checks the `X-Source-Agent` header against.
+5. `trigger_subscription(..., agent_originated=)` decides whether there is anything to
+   vouch for. `emit_event` writes `current_user.agent_name or current_user.username`
+   into `agent_events.source_agent`, so for a **human** emitter that field holds a
+   username — dispatching it as an agent would attribute the subscriber's execution to
+   a phantom agent and forge a collaboration activity. A human-emitted event therefore
+   carries neither the header nor the claim, and the subscriber's task is an ordinary
+   MCP-triggered execution. `emit_event_for_agent` passes `True` by its own contract
+   (any accessor of `{name}` may emit as it — a stated residual).
 
 ### Template Interpolation (lines 55-76)
 - Pattern: `{{payload.field}}` or `{{payload.nested.field}}`
