@@ -24,6 +24,10 @@ Share Claude Max/Pro subscription tokens across multiple agents, with automatic 
 3. Under **Add Subscription**, enter a **Name**, choose a **Type** (**Claude Max** / **Claude Pro** / **Unknown**), and paste the **Token**. The field turns red until the token starts with `sk-ant-oat01-`.
 4. Click **Register Subscription**. Registering a name that already exists replaces its token and hot-reloads every running agent on it.
 
+The first-run setup's Claude step registers a subscription the same way, after checking the token with Anthropic first (see [Platform Keys](platform-keys.md#claude)).
+
+**Agents with no credential are brought onto it.** On an install with no platform API key, registering a subscription assigns it to every Claude-runtime agent that has no subscription and is not opted out of platform credentials — the starter fleet of a fresh install, for example. Running agents are restarted in the background, one at a time; an agent in the middle of a task is left alone and picks the subscription up on its next start. Agents that already have a working API key or another subscription are not moved. The same sweep runs when the platform API key is **removed** from Settings, since that is the usual order when migrating off a metered key: register the subscription, then delete the key. Each adoption is recorded in the audit log.
+
 The table lists each subscription's **Name**, **Type**, **Agents** count, **Pressure**, and **Created** date, with a **Delete** action. Deleting a subscription clears it from every assigned agent (the confirmation names how many). A running agent keeps its current token until it is next restarted, after which it uses the platform API key.
 
 ### Assigning agents
@@ -113,7 +117,8 @@ All four controls live under the subscriptions table in **Settings → Integrati
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/subscriptions` | GET | List subscriptions with assigned agents — admins see the fleet, everyone else their own |
-| `/api/subscriptions` | POST | Register (or, by name, replace) a subscription. Admin |
+| `/api/subscriptions` | POST | Register (or, by name, replace) a subscription; the response carries `connected_agents`, the number of credential-less agents brought onto it. Admin |
+| `/api/subscriptions/test` | POST | Check a token before registering it (`{token}`): one minimal request on the plan, nothing stored. Returns `valid`, a `status` such as `ok`, `rate_limited` or `invalid_token`, and the fix to apply. Admin |
 | `/api/subscriptions/{id}` | GET | One subscription with its agents. Admin. `{id}` accepts the UUID or the name on every route below |
 | `/api/subscriptions/{id}` | DELETE | Delete a subscription; clears its agents. Admin |
 | `/api/subscriptions/{id}/usage` | GET | 5h/7d observed usage, 24h failure events by kind, `rate_limited_now`, `source`, and the `headroom` block (per-window utilization, status, reset, snapshot age). Admin |
@@ -158,6 +163,7 @@ Usage, headroom, and the settings toggles have no MCP tool; use the REST endpoin
 ## See Also
 
 - [Credential Management](credential-management.md)
+- [Platform Keys](platform-keys.md) — the API-key alternative, and the first-run Claude step
 - [Dashboard](../operations/dashboard.md) — the Subscription pressure tile and per-agent pressure chips
 - [Operations Page](../operations/operating-room.md) — where weekly-limit alerts land
 - [First-Time Setup](../getting-started/setup.md) — the Settings page overview

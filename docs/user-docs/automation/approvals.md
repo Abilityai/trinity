@@ -77,14 +77,15 @@ See the [Operating Room doc](../operations/operating-room.md) for the full queue
 
 ### MCP Tools
 
-Agents can inspect the queue programmatically (read-only):
+Agents can inspect the queue and resolve a pending item programmatically:
 
 | Tool | Description |
 |------|-------------|
 | `list_operator_queue` | List queue items, broad or filtered by `agent_name` |
 | `get_operator_queue_item` | Fetch a single item by id |
+| `respond_to_operator_queue(item_id, response, response_text?)` | Submit the decision for a pending item — the same rules as the `respond` route: `response` must be an offered option, and an item that is no longer pending returns a structured error |
 
-Agent-scoped API keys see only items for the calling agent itself plus agents it has been explicitly permitted to access. Responding and cancelling remain human actions through the UI or the routes above.
+Agent-scoped API keys see only items for the calling agent itself plus agents it has been explicitly permitted to access, and can respond only to those. Cancelling remains a human action through the UI or the routes above.
 
 ## Limitations
 

@@ -9,7 +9,7 @@ Standalone mobile-optimized PWA at `/m` for managing agents on the go — check 
 3. The interface has three tabs:
    - **Agents** -- List agents, start or stop one, toggle autonomy (**AUTO**/**Manual**), open a chat, view logs. Each card carries a success-rate bar; search filters by name.
    - **Ops** -- Two sub-tabs. **Queue** shows the operator queue items awaiting a response (the same items as the desktop [Operations page](../operations/operating-room.md)); **Alerts** shows notifications with an acknowledge button. Tab and sub-tab badges carry the pending counts.
-   - **System** -- Fleet health (Total / Running / Stopped / High Context) and the fleet-level actions: **Emergency Stop**, **Fleet Restart**, **Pause Schedules**, **Resume Schedules**. Each confirms in a bottom sheet before running.
+   - **System** -- Fleet health (Total / Running / Stopped / High Ctx) and the fleet-level actions: **Emergency Stop**, **Fleet Restart**, **Pause Schedules**, **Resume Schedules**. Each confirms in a bottom sheet before running.
 4. Each tab refreshes every 15 seconds while it is open, and pull-to-refresh forces one. A refresh that fails keeps what is on screen and says when it was last fetched, with **Retry**.
 
 ### Answering the queue
