@@ -4,14 +4,20 @@
  *
  * `vitest.config.js` pins `environment: 'node'`: there is no `window`, so the
  * interceptors and the `storage` listener registered in `main.js` cannot be
- * driven here. What CAN be driven is everything they delegate to, which is why
- * #2791 put the verdict in a pure function and the reaction in two store actions
- * instead of inside three closures.
+ * driven here. What CAN be driven is everything they delegate to — and after
+ * the merge-train review of this PR, that is the whole reaction, not just the
+ * verdict: `reactToPlatformUnauthorized`, `reactToStorageEvent` and
+ * `applyRequestCredential` take their collaborators as arguments and are
+ * EXECUTED below with fakes. The first version pinned the wiring by regex, and
+ * a mutation battery (restore the reported bug on the `stale` branch; invert
+ * the storage listener) stayed fully green. `main.js` is now wiring only, and
+ * the source guards at the bottom assert exactly that: that it calls these.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
-import { readFileSync } from 'fs'
+import { readFileSync, readdirSync } from 'fs'
 import { fileURLToPath } from 'url'
+import { join, relative } from 'path'
 import { stripComments } from './helpers/stripComments'
 
 // node has no localStorage; the same hoisted shim `workspaceSignOut.spec.js`
@@ -49,6 +55,27 @@ const MAIN = read('../../src/main.js')
 const API = read('../../src/api.js')
 const AUTH = read('../../src/stores/auth.js')
 const PORTAL = read('../../src/stores/clientPortal.js')
+const APP = read('../../src/App.vue')
+
+// Every source file under src/frontend/src, comments stripped — for the guards
+// that must walk the WHOLE tree. The first version of the defaults-writer guard
+// walked `auth.js` only and stayed green over `App.vue:64`, the one writer that
+// made the whole mechanism inert (review C2; Invariant #5's "a guard that walks
+// only one of the two trees is not a guard").
+const SRC_ROOT = fileURLToPath(new URL('../../src/', import.meta.url))
+function walk(dir) {
+  const out = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) out.push(...walk(full))
+    else if (/\.(js|vue|ts)$/.test(entry.name)) out.push(full)
+  }
+  return out
+}
+const TREE = walk(SRC_ROOT).map((f) => ({
+  file: relative(SRC_ROOT, f),
+  src: stripComments(readFileSync(f, 'utf8')),
+}))
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -138,32 +165,209 @@ describe('a sibling tab ending the session', () => {
   })
 })
 
-describe('one credential source, one handler (source guards)', () => {
-  it('nothing writes the axios defaults Authorization copy any more', () => {
-    // The second credential source. Only the logout cleanup may still DELETE it
-    // (a tab running the previous build still carries one).
-    const writes = AUTH.match(/axios\.defaults\.headers\.common\['Authorization'\]\s*=/g) || []
-    expect(writes).toEqual([])
-    expect(AUTH).toContain("delete axios.defaults.headers.common['Authorization']")
+describe('the reaction to a 401, executed (review C4 + the CI gap)', () => {
+  // Fakes for the collaborators main.js supplies for real.
+  function harness({ storedToken = 'NEW', portalTokenPresent = false, path = '/agents' } = {}) {
+    const calls = { adopt: 0, logout: 0, login: 0 }
+    const deps = {
+      path,
+      portalTokenPresent,
+      readToken: () => storedToken,
+      adoptStoredSession: () => { calls.adopt += 1 },
+      logout: () => { calls.logout += 1 },
+      goToLogin: () => { calls.login += 1; return Promise.resolve('navigated') },
+    }
+    return { calls, deps }
+  }
+  const failedWith = (token) => ({ config: { headers: { Authorization: `Bearer ${token}` } } })
+
+  it('the reported bug: a superseded token ADOPTS the current session and never logs out', async () => {
+    const { reactToPlatformUnauthorized } = await import('@/utils/platformSession')
+    const { calls, deps } = harness({ storedToken: 'NEW' })
+    const { verdict } = reactToPlatformUnauthorized(failedWith('OLD'), deps)
+    expect(verdict).toBe('stale')
+    expect(calls).toEqual({ adopt: 1, logout: 0, login: 0 })
   })
 
-  it('every transport derives the header from the one reader', () => {
-    expect(API).toContain('readStoredToken()')
-    expect(MAIN).toContain('readStoredToken()')
-    // `api.js` must not re-read storage directly any more.
-    expect(API).not.toMatch(/localStorage\.getItem\(['"]token['"]\)/)
+  it('the stored token itself failing logs out and navigates, in that order, without awaiting', async () => {
+    const { reactToPlatformUnauthorized } = await import('@/utils/platformSession')
+    const order = []
+    const { deps } = harness({ storedToken: 'CUR' })
+    deps.logout = () => order.push('logout')
+    deps.goToLogin = () => { order.push('login'); return Promise.resolve() }
+    const { verdict, navigation } = reactToPlatformUnauthorized(failedWith('CUR'), deps)
+    expect(verdict).toBe('logout')
+    expect(order).toEqual(['logout', 'login'])
+    // The navigation promise is RETURNED so notifyPlatformUnauthorized can
+    // absorb a rejected redundant navigation (review C4).
+    expect(typeof navigation?.then).toBe('function')
+  })
+
+  it("a client tab's dead operator JWT on the Workspace is ignored (AC #5)", async () => {
+    const { reactToPlatformUnauthorized } = await import('@/utils/platformSession')
+    const { calls, deps } = harness({ storedToken: 'CUR', portalTokenPresent: true, path: '/workspace' })
+    expect(reactToPlatformUnauthorized(failedWith('CUR'), deps).verdict).toBe('ignore')
+    expect(calls).toEqual({ adopt: 0, logout: 0, login: 0 })
+  })
+
+  it('an auth route never bounces off itself', async () => {
+    const { reactToPlatformUnauthorized } = await import('@/utils/platformSession')
+    const { calls, deps } = harness({ storedToken: 'CUR', path: '/login' })
+    expect(reactToPlatformUnauthorized(failedWith('CUR'), deps).verdict).toBe('ignore')
+    expect(calls.login).toBe(0)
+  })
+
+  it('a rejected redundant navigation from the REAL handler shape is absorbed', async () => {
+    const { reactToPlatformUnauthorized, setPlatformUnauthorizedHandler, notifyPlatformUnauthorized } =
+      await import('@/utils/platformSession')
+    const { deps } = harness({ storedToken: 'CUR' })
+    deps.goToLogin = () => Promise.reject(new Error('Avoided redundant navigation to /login'))
+    let escaped = null
+    const onUnhandled = (e) => { escaped = e }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      // The production handler RETURNS the reaction's navigation — the shape
+      // review C4 found missing (it ended `router.push(...)` without `return`).
+      setPlatformUnauthorizedHandler((error) => reactToPlatformUnauthorized(error, deps).navigation)
+      notifyPlatformUnauthorized(failedWith('CUR'))
+      await new Promise((r) => setTimeout(r, 10))
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      setPlatformUnauthorizedHandler(null)
+    }
+    expect(escaped).toBeNull()
+  })
+})
+
+describe('the storage listener, executed (AC #2)', () => {
+  function harness(storedToken) {
+    const calls = { adopt: 0, ended: 0 }
+    const storage = {}
+    const deps = {
+      storage,
+      readToken: () => storedToken,
+      adoptStoredSession: () => { calls.adopt += 1 },
+      applySessionEndedElsewhere: () => { calls.ended += 1 },
+    }
+    return { calls, deps, storage }
+  }
+
+  it('a sibling LOGIN adopts; a sibling LOGOUT ends — never the other way round', async () => {
+    const { reactToStorageEvent, TOKEN_KEY } = await import('@/utils/platformSession')
+    let h = harness('NEW')
+    expect(reactToStorageEvent({ key: TOKEN_KEY, storageArea: h.storage }, h.deps)).toBe('adopt')
+    expect(h.calls).toEqual({ adopt: 1, ended: 0 })
+    h = harness(null)
+    expect(reactToStorageEvent({ key: TOKEN_KEY, storageArea: h.storage }, h.deps)).toBe('ended')
+    expect(h.calls).toEqual({ adopt: 0, ended: 1 })
+  })
+
+  it('a whole-storage clear ends the session too', async () => {
+    const { reactToStorageEvent } = await import('@/utils/platformSession')
+    const h = harness(null)
+    expect(reactToStorageEvent({ key: null, storageArea: h.storage }, h.deps)).toBe('ended')
+  })
+
+  it('the user key is heard as well — a sibling login writes it a tick after the token (W6)', async () => {
+    const { reactToStorageEvent, USER_KEY } = await import('@/utils/platformSession')
+    const h = harness('NEW')
+    expect(reactToStorageEvent({ key: USER_KEY, storageArea: h.storage }, h.deps)).toBe('adopt')
+  })
+
+  it('other keys and other storage areas are ignored', async () => {
+    const { reactToStorageEvent, TOKEN_KEY } = await import('@/utils/platformSession')
+    const h = harness('NEW')
+    expect(reactToStorageEvent({ key: 'trinity-dashboard-view', storageArea: h.storage }, h.deps)).toBe('ignored')
+    expect(reactToStorageEvent({ key: TOKEN_KEY, storageArea: {} }, h.deps)).toBe('ignored')
+    expect(h.calls).toEqual({ adopt: 0, ended: 0 })
+  })
+})
+
+describe('the request credential, executed', () => {
+  it('a bare request gets the CURRENT stored token', async () => {
+    const { applyRequestCredential } = await import('@/utils/platformSession')
+    const cfg = applyRequestCredential({ url: '/api/x' }, () => 'CUR')
+    expect(cfg.headers.Authorization).toBe('Bearer CUR')
+  })
+
+  it('an explicit header wins — the logout revoke depends on it (#2258)', async () => {
+    const { applyRequestCredential } = await import('@/utils/platformSession')
+    const cfg = applyRequestCredential({ headers: { Authorization: 'Bearer REVOKING' } }, () => 'CUR')
+    expect(cfg.headers.Authorization).toBe('Bearer REVOKING')
+    const lower = applyRequestCredential({ headers: { authorization: 'Bearer x' } }, () => 'CUR')
+    expect(lower.headers.Authorization).toBeUndefined()
+  })
+
+  it('no stored token means no header, not a "Bearer null"', async () => {
+    const { applyRequestCredential } = await import('@/utils/platformSession')
+    const cfg = applyRequestCredential({}, () => null)
+    expect(cfg.headers.Authorization).toBeUndefined()
+  })
+})
+
+describe('adopting the browser session drops any in-memory credential copy (W2)', () => {
+  it('adoptStoredSession and applySessionEndedElsewhere both delete the axios default', async () => {
+    const axios = (await import('axios')).default
+    const { useAuthStore } = await import('@/stores/auth')
+    const auth = useAuthStore()
+    axios.defaults.headers.common['Authorization'] = 'Bearer STALE-FROM-A-PREVIOUS-BUILD'
+    localStorage.setItem('token', 'NEW')
+    auth.adoptStoredSession()
+    expect(axios.defaults.headers.common['Authorization']).toBeUndefined()
+    axios.defaults.headers.common['Authorization'] = 'Bearer STALE-AGAIN'
+    auth.applySessionEndedElsewhere()
+    expect(axios.defaults.headers.common['Authorization']).toBeUndefined()
+  })
+})
+
+describe('one credential source, one handler (source guards — wiring only)', () => {
+  it('NOTHING in src/frontend/src writes the axios defaults Authorization copy', () => {
+    // Walks the whole tree. Axios merges this default into every request BEFORE
+    // the interceptor chain runs, so one writer anywhere makes
+    // applyRequestCredential inert for the life of the tab — which is exactly
+    // what App.vue:64 did while the previous version of this guard read
+    // auth.js alone.
+    const writers = TREE
+      .filter(({ src }) => /axios\.defaults\.headers\.common\[['"]Authorization['"]\]\s*=/.test(src))
+      .map(({ file }) => file)
+    expect(writers).toEqual([])
+    // Only deletes remain, and they are the belt in the two sync actions + logout.
+    expect(AUTH.match(/delete axios\.defaults\.headers\.common\['Authorization'\]/g)?.length).toBeGreaterThanOrEqual(3)
+    expect(APP).not.toContain('axios.defaults')
+  })
+
+  it('one reader: nothing outside platformSession.js reads the token key from storage directly', () => {
+    const readers = TREE
+      .filter(({ file }) => file !== 'utils/platformSession.js')
+      .filter(({ src }) => /localStorage\.getItem\(['"]token['"]\)/.test(src))
+      .map(({ file }) => file)
+    expect(readers).toEqual([])
+  })
+
+  it('main.js wires the executed reactions and nothing else', () => {
+    expect(MAIN).toContain('axios.interceptors.request.use((config) => applyRequestCredential(config))')
+    expect(MAIN).toContain('reactToPlatformUnauthorized(error, {')
+    expect(MAIN).toContain('reactToStorageEvent(event, {')
+    expect(MAIN).toContain('setPlatformUnauthorizedHandler(handlePlatformUnauthorized)')
+    // The handler RETURNS the navigation (review C4).
+    expect(MAIN).toContain('return navigation')
+    // No private copy of the verdict or the reaction survives in main.js.
+    expect(MAIN).not.toContain('sessionLostVerdict(')
+    expect(MAIN).not.toContain("router.push('/login')\n}")
+  })
+
+  it('the Workspace veto reads the per-tab store, not shared storage (W1)', () => {
+    expect(MAIN).toContain('useClientPortalStore().portalToken')
+    expect(MAIN).not.toContain('localStorage.getItem(PORTAL_TOKEN_KEY)')
   })
 
   it('all three 401 sites report to the single handler', () => {
     expect(API).toContain('notifyPlatformUnauthorized(error)')
     expect(MAIN).toContain('notifyPlatformUnauthorized(error)')
     expect(PORTAL).toContain('notifyPlatformUnauthorized(error)')
-    // …and exactly one of them registers the reaction.
-    expect(MAIN).toContain('setPlatformUnauthorizedHandler(handlePlatformUnauthorized)')
   })
 
   it('none of them carries a private copy of the bounce predicate', () => {
-    // The duplicated expression that drifted three ways.
     for (const src of [API, MAIN]) {
       expect(src).not.toContain('const internalSession =')
       expect(src).not.toMatch(/!onWorkspace \|\| internalSession/)
@@ -173,25 +377,12 @@ describe('one credential source, one handler (source guards)', () => {
   it('the api.js 401 path no longer hard-reloads or half-clears', () => {
     expect(API).not.toContain("window.location.href = '/login'")
     expect(API).not.toContain("localStorage.removeItem('token')")
+    expect(API).toContain('readStoredToken()')
   })
 
-  it('a logout elsewhere is heard, and only for the platform token', () => {
-    expect(MAIN).toContain("window.addEventListener('storage'")
-    expect(MAIN).toContain('adoptStoredSession()')
-    expect(MAIN).toContain('applySessionEndedElsewhere()')
-    // A whole-storage clear (`key === null`) must count as the session ending.
-    expect(MAIN).toContain('event.key !== null && event.key !== TOKEN_KEY')
-  })
-
-  it('a rejected navigation from the reaction never escapes as an unhandled rejection', async () => {
-    const { setPlatformUnauthorizedHandler, notifyPlatformUnauthorized } =
-      await import('@/utils/platformSession')
-    // Vue Router rejects a redundant navigation, which is exactly what a second
-    // 401 arriving while /login is already loading produces.
-    setPlatformUnauthorizedHandler(() => Promise.reject(new Error('redundant navigation')))
-    expect(() => notifyPlatformUnauthorized({})).not.toThrow()
-    await new Promise((r) => setTimeout(r, 0))   // let the rejection settle
-    setPlatformUnauthorizedHandler(null)
+  it('the reaction does not hold the user on a dead page for the revoke', () => {
+    expect(MAIN).not.toContain('await authStore.logout()')
+    expect(AUTH).toContain('headers: { Authorization: `Bearer ${revoking}` }')
   })
 
   it('a throwing reaction never replaces the error being rejected', async () => {
@@ -200,18 +391,5 @@ describe('one credential source, one handler (source guards)', () => {
     setPlatformUnauthorizedHandler(() => { throw new Error('boom') })
     expect(() => notifyPlatformUnauthorized({})).not.toThrow()
     setPlatformUnauthorizedHandler(null)
-  })
-
-  it('the reaction does not hold the user on a dead page for the revoke', () => {
-    // `logout()` clears local state synchronously before its first await, so
-    // the router guard is satisfied without waiting for the network call.
-    expect(MAIN).not.toContain('await authStore.logout()')
-  })
-
-  it('the global request interceptor leaves an explicit header alone', () => {
-    // The logout revoke depends on it: #2258 clears storage BEFORE the revoke,
-    // so the only credential that call can carry is the explicit one.
-    expect(MAIN).toContain('if (!headers.Authorization && !headers.authorization)')
-    expect(AUTH).toContain('headers: { Authorization: `Bearer ${revoking}` }')
   })
 })

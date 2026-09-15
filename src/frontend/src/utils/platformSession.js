@@ -14,12 +14,21 @@
  *
  *   1. **where the credential lives** — `readStoredToken()` / `clearStoredSession()`;
  *   2. **what a 401 means** — `sessionLostVerdict()`, the one predicate;
- *   3. **how other tabs find out** — `installCrossTabSync()`.
+ *   3. **what to DO about it** — `reactToPlatformUnauthorized()`, the one reaction;
+ *   4. **how a request gets its credential** — `applyRequestCredential()`;
+ *   5. **how other tabs find out** — `reactToStorageEvent()`, driven by the
+ *      `storage` listener `main.js` installs.
  *
  * Everything decidable is a pure function of its arguments, because
  * `vitest.config.js` pins `environment: 'node'` with no mount harness: a rule
  * that lives inside an interceptor closure is a rule no unit test can reach, and
- * this file exists precisely because three copies of one rule drifted.
+ * this file exists precisely because three copies of one rule drifted. The
+ * first version of this fix kept (3)–(5) inline in `main.js` and pinned them by
+ * regex over the source; a mutation battery (restore the reported bug on the
+ * `stale` branch, invert the storage listener) stayed fully green. The
+ * reactions now take their collaborators as arguments — the store's two sync
+ * actions, the router push, the storage reader — so a test can hand in fakes
+ * and watch what is CALLED, and `main.js` is left with wiring only.
  */
 
 export const TOKEN_KEY = 'token'
@@ -186,4 +195,119 @@ export function notifyPlatformUnauthorized(error) {
   } catch {
     /* a failure to react must never replace the error being rejected */
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// The reactions, as functions of their collaborators (#2791 review C4 / CI gap)
+// ---------------------------------------------------------------------------
+
+/**
+ * Give one outgoing request the CURRENT platform credential.
+ *
+ * Every bare-`axios` call site (~368 of them outside `api.js`) is served by
+ * this, installed as a global request interceptor from `main.js`. An EXPLICIT
+ * header on the config wins — the logout revoke must carry a token storage has
+ * already dropped (#2258's ordering) — and everything else gets `readToken()`
+ * per request, so there is exactly one place a credential can come from.
+ *
+ * `axios.defaults.headers.common['Authorization']` is deliberately NOT one of
+ * the sources: axios merges it into `config.headers` BEFORE the interceptor
+ * chain runs, so a value written there would arrive here looking explicit and
+ * win over storage on every request for the life of the tab. Nothing may write
+ * it — `platformSessionSync.spec.js` walks the whole source tree for a writer.
+ *
+ * @param {object} config  an axios request config (mutated and returned)
+ * @param {() => string|null} readToken
+ */
+export function applyRequestCredential(config, readToken = readStoredToken) {
+  const headers = config.headers || {}
+  if (!headers.Authorization && !headers.authorization) {
+    const token = readToken()
+    if (token) headers.Authorization = `Bearer ${token}`
+  }
+  config.headers = headers
+  return config
+}
+
+/**
+ * Act on a 401. The ONE reaction, behind the ONE verdict.
+ *
+ * @param {object} error         the axios error (only `config` is read)
+ * @param {object} deps
+ * @param {string} deps.path                  the current route path
+ * @param {boolean} deps.portalTokenPresent   does THIS TAB hold a client session
+ * @param {() => string|null} [deps.readToken]
+ * @param {() => void} deps.adoptStoredSession   authStore.adoptStoredSession
+ * @param {() => unknown} deps.logout             authStore.logout — NOT awaited
+ * @param {() => Promise|unknown} deps.goToLogin  router.push('/login')
+ * @returns {{ verdict: 'ignore'|'stale'|'logout', navigation: unknown }}
+ *   `navigation` is whatever `goToLogin` returned, so the caller can absorb a
+ *   rejected (redundant) navigation — see `notifyPlatformUnauthorized`.
+ */
+export function reactToPlatformUnauthorized(error, {
+  path = '',
+  portalTokenPresent = false,
+  readToken = readStoredToken,
+  adoptStoredSession,
+  logout,
+  goToLogin,
+}) {
+  const verdict = sessionLostVerdict({
+    failedToken: tokenOfRequest(error?.config),
+    storedToken: readToken(),
+    portalTokenPresent,
+    path,
+  })
+
+  if (verdict === 'ignore') return { verdict, navigation: undefined }
+
+  if (verdict === 'stale') {
+    // The credential that failed has already been replaced — by a re-login in
+    // this browser, in this tab or another. Destroying the session now would
+    // delete the NEW token, which is the reported bug: a Workspace tab left open
+    // across a logout/login killed the fresh session within one poll.
+    adoptStoredSession()
+    return { verdict, navigation: undefined }
+  }
+
+  // NOT awaited, deliberately. `logout()` clears local state synchronously
+  // before its first `await` (#2258's ordering), so the `/login → /` router
+  // guard — which keys on `isAuthenticated` — is already satisfied when the push
+  // runs. Awaiting would hold the user on a dead page for the length of the
+  // server revoke, and a hung revoke would hold them there indefinitely.
+  logout()
+  return { verdict, navigation: goToLogin() }
+}
+
+/**
+ * A sibling tab changed `localStorage`. Converge on what it holds now.
+ *
+ * The `storage` event does NOT fire in the tab that made the change, so this is
+ * purely "somebody else did something". Neither branch navigates: a background
+ * tab pushing `/login` is the noise this issue reports; the visible tab converges
+ * through the router guard and its next request, both of which read the state
+ * the store actions set.
+ *
+ * Keys: the token, the user (a sibling login writes `token` first and
+ * `auth0_user` a tick later — reacting to both closes that gap), and `null`,
+ * which is a whole-storage clear and ends the session too.
+ *
+ * @returns {'adopt'|'ended'|'ignored'}
+ */
+export function reactToStorageEvent(event, {
+  storage,
+  readToken = readStoredToken,
+  adoptStoredSession,
+  applySessionEndedElsewhere,
+}) {
+  if (storage !== undefined && event?.storageArea !== storage) return 'ignored'
+  const key = event?.key
+  if (key !== null && key !== TOKEN_KEY && key !== USER_KEY) return 'ignored'
+  if (readToken()) {
+    adoptStoredSession()
+    return 'adopt'
+  }
+  applySessionEndedElsewhere()
+  return 'ended'
 }

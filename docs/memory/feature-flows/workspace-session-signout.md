@@ -185,12 +185,18 @@ failed was still the current one.
 
 ### The three things that are now singular
 
-**One source.** `utils/platformSession.js::readStoredToken()` is the only reader.
-The `axios.defaults` copy is gone (`setupAxiosAuth` is a documented no-op), and
-`main.js` installs a global axios **request** interceptor that rebuilds the
-header from storage on every request — so all ~368 bare-`axios` call sites get
-the current credential without being rewritten, and one added tomorrow cannot
-forget to opt in. An **explicit** header on the config still wins, and exactly
+**One source.** `utils/platformSession.js::readStoredToken()` is the only reader
+— every former `localStorage.getItem('token')` site (22 of them, incl. the
+WebSocket and EventSource ones that cannot use an interceptor) now goes through
+it, and a tree-wide guard keeps it that way. The `axios.defaults` copy is gone:
+`setupAxiosAuth` is a documented no-op, `App.vue`'s boot-time write — the one
+that survived the first cut and made everything below inert, since axios merges
+that default into the request BEFORE the interceptor chain runs — is removed,
+and the guard for "nobody writes it" walks `src/frontend/src/**`, not one file.
+`main.js` installs a global axios **request** interceptor
+(`applyRequestCredential`) that rebuilds the header from storage on every
+request — so all ~368 bare-`axios` call sites get the current credential without
+being rewritten, and one added tomorrow cannot forget to opt in. An **explicit** header on the config still wins, and exactly
 one caller needs that: the logout revoke, which must carry a token storage has
 already dropped (the #2258 ordering above is unchanged, so the token is captured
 *before* the clear and passed *after* it — otherwise #187 silently stopped
@@ -215,9 +221,19 @@ is an operator one, so an expired operator JWT still bounces there even with a
 stray portal token — this change does not widen that.
 
 **One handler.** `setPlatformUnauthorizedHandler` / `notifyPlatformUnauthorized`
-in `utils/platformSession.js`. `main.js` registers the reaction (it is the only
-module that already has both the router and the store);
-`api.js`, the global interceptor and `portalHttp` all report to it.
+in `utils/platformSession.js`. The reaction is `reactToPlatformUnauthorized(error,
+deps)` in the same file — it takes the store's two sync actions, `logout` and the
+router push as arguments, so the unit suite executes it with fakes (the first cut
+kept it inline in `main.js` and pinned it by regex; a mutation restoring the
+reported bug stayed green). `main.js` registers a thin adapter that supplies the
+real collaborators and **returns** the navigation promise, so a rejected
+redundant navigation is absorbed by `notifyPlatformUnauthorized` rather than
+escaping as an unhandled rejection. `api.js`, the global interceptor and
+`portalHttp` all report to it. The verdict's Workspace veto
+(`portalTokenPresent`) is read from the **per-tab** `clientPortal` store — the
+same gate `portalHttp` uses — never from shared `localStorage`, or a client's
+login in another tab would tell an operator's Workspace tab to `ignore` its own
+expired JWT.
 `clientPortal.js` keeps `isPlatformSession` as its local gate — not redundant,
 because it is the only thing that knows this tab's client session was
 *suppressed* (#2261's `platformFallbackSuppressed`), which no amount of reading
@@ -225,8 +241,10 @@ localStorage reconstructs.
 
 ### Cross-tab sync
 
-`main.js` listens for `storage` on the platform token key. A sibling tab logging
-in → `adoptStoredSession()` (converge, re-fetch the profile, reset
+`main.js` listens for `storage` and hands the event to `reactToStorageEvent`
+(executed by the unit suite), which acts on the token key, the user key — a
+sibling login writes `token` first and `auth0_user` a tick later — and a
+whole-storage clear. A sibling tab logging in → `adoptStoredSession()` (converge, re-fetch the profile, reset
 `profileVerified` so role-gated UI stays closed until *this* token's profile
 lands). A sibling logging out → `applySessionEndedElsewhere()`, which drops the
 in-memory mirror only: it fires no second server revoke for an already-revoked

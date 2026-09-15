@@ -117,7 +117,7 @@ export const useAuthStore = defineStore('auth', {
       // First detect auth mode from backend
       await this.detectAuthMode()
 
-      const storedToken = localStorage.getItem('token')
+      const storedToken = readStoredToken()
       const storedUser = localStorage.getItem('auth0_user')
 
       if (storedToken && storedUser) {
@@ -218,14 +218,25 @@ export const useAuthStore = defineStore('auth', {
     // Returns whether a session is now held, so a caller can branch without
     // re-reading storage.
     adoptStoredSession() {
+      // Belt for the one-source rule: nothing writes the axios defaults copy
+      // any more (a tree-wide guard says so), but if one ever reappears it would
+      // win over storage on every request — so converging on the browser's
+      // session drops any such copy first, and a tab can never be left riding
+      // a credential storage no longer holds (review W2).
+      delete axios.defaults.headers.common['Authorization']
       const token = readStoredToken()
       if (!token) {
         this.applySessionEndedElsewhere()
         return false
       }
-      if (this.token === token) return true
-      this.token = token
       const stored = readStoredUser()
+      if (this.token === token) {
+        // Same session. A sibling login writes `token` first and `auth0_user` a
+        // tick later, so the user may have landed since we adopted (review W6).
+        if (stored) this.user = { ...this.user, ...stored }
+        return true
+      }
+      this.token = token
       if (stored) this.user = stored
       this.isAuthenticated = true
       this.authError = null
@@ -247,6 +258,9 @@ export const useAuthStore = defineStore('auth', {
     // the issue reports; the router guard and the next 401 handle the visible
     // tab, and both read the state this sets.
     applySessionEndedElsewhere() {
+      // Same belt as `adoptStoredSession`: a sibling tab's logout must not leave
+      // this tab transmitting an in-memory copy of the revoked JWT.
+      delete axios.defaults.headers.common['Authorization']
       this.token = null
       this.user = null
       this.isAuthenticated = false

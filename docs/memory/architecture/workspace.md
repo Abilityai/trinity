@@ -53,10 +53,19 @@ the only reader (`readStoredToken`), the only verdict (`sessionLostVerdict` →
 been replaced, so adopt the current session rather than destroy it*) and the only handler
 registry; `main.js` installs a global axios **request** interceptor so every bare-`axios`
 caller derives the header per request, and a `storage` listener so a login or logout in
-one tab reaches every other. The `axios.defaults` copy is written nowhere (only cleared on
-logout, for tabs still running a pre-fix build); the logout revoke carries its token
-**explicitly**, because #2258's clear-before-revoke ordering means storage is already
-empty by then. Full model and the verdict table:
+one tab reaches every other. The `axios.defaults` copy is written nowhere — a **tree-wide**
+source guard says so, because the first cut of this fix guarded `auth.js` alone while
+`App.vue` still wrote it on every boot, and axios merges that default into the request
+*before* the interceptor chain runs, so the per-request rebuild was inert for the life of
+the tab (the merge-train review's C1); the two sync actions and `logout()` delete it as a
+belt. The reaction itself (`reactToPlatformUnauthorized`), the storage listener
+(`reactToStorageEvent`) and the request rebuild (`applyRequestCredential`) are functions
+of their collaborators, executed by unit tests with fakes — `main.js` is wiring only. The
+logout revoke carries its token **explicitly**, because #2258's clear-before-revoke
+ordering means storage is already empty by then. The Workspace veto in the verdict reads
+the **per-tab** portal token from the store, not shared `localStorage`, so a client
+signing in in another tab cannot strand an operator's Workspace tab on an expired JWT.
+Full model and the verdict table:
 [workspace-session-signout.md](../feature-flows/workspace-session-signout.md).
 
 **Membership is a DB fact; container state is a projection onto the card (#2196).** The
