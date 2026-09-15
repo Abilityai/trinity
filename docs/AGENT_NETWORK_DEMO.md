@@ -154,21 +154,28 @@ When an agent sends a chat message to another agent via Trinity MCP:
 
 ### Via API
 
+An agent-to-agent call is attributed to the **calling agent's own key**. The
+backend honours the `X-Source-Agent` header only when the bearer is that agent's
+agent-scoped MCP key naming itself (SELF-EXEC-001, ent#614); an admin or user
+token sending it is refused with a 403. So the recipe uses agent-a's own key —
+the agent-scoped key injected into its container as `TRINITY_MCP_API_KEY`.
+
 ```bash
-# Get auth token
-TOKEN=$(curl -s -X POST http://localhost:8000/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=admin&password=YOUR_PASSWORD" | jq -r '.access_token // empty')
+# agent-a's agent-scoped key
+AGENT_A_KEY=$(docker exec agent-agent-a printenv TRINITY_MCP_API_KEY)
 
 # Trigger collaboration from agent-a to agent-b
 curl -X POST http://localhost:8000/api/agents/agent-b/chat \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $AGENT_A_KEY" \
   -H "Content-Type: application/json" \
   -H "X-Source-Agent: agent-a" \
   -d '{"message": "Hello from agent-a!"}'
 ```
 
-**Key**: The `X-Source-Agent` header is what triggers the collaboration visualization.
+**Key**: the `X-Source-Agent` header names the caller, and the backend accepts it
+only from that agent's own key — that pairing is what triggers the collaboration
+visualization. From inside agent-a, the `chat_with_agent` MCP tool below sets it
+for you.
 
 ### Via Trinity MCP
 

@@ -289,6 +289,19 @@ def decode_mfa_challenge(token: str) -> Optional[dict]:
 # SECRET_KEY/ALGORITHM, so a backend restart invalidates portal sessions too.
 PORTAL_SESSION_SCOPE = "portal_session"
 
+# ent#614 — scope claim on the JWT `event_dispatch_service._get_internal_token`
+# mints for the EVT-001 loopback (`POST /api/agents/{subscriber}/task`). Signed
+# with the backend-only SECRET_KEY, so — unlike `INTERNAL_API_SECRET`, which the
+# scheduler and the MCP server also hold — only the backend can produce one. The
+# token may carry a `source_agent` claim the backend derived from an
+# agent-originated event; `get_current_user` surfaces it as
+# `User.vouched_source_agent` (the identity `resolve_source_agent` checks the
+# loopback's `X-Source-Agent` header against) and fences the token to the one
+# route it exists for — before #614 it was an unrestricted five-minute admin
+# bearer.
+EVENT_LOOPBACK_SCOPE = "event_loopback"
+EVENT_LOOPBACK_ROUTE = re.compile(r"^/api/agents/[^/]+/task$")
+
 # RETIRED as a lifetime (ent#375). The session now slides: `_portal_session_policy()`
 # supplies an idle window and an absolute cap, and every consumer reads those.
 #
@@ -632,6 +645,20 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         if payload.get("scope") == PORTAL_SESSION_SCOPE:
             raise credentials_exception
 
+        # ent#614 — the EVT-001 loopback token is single-purpose: it may reach
+        # ONLY `POST /api/agents/{subscriber}/task`. Fenced here at the auth
+        # entry point (the connector / portal_delegate pattern below) so a
+        # leaked loopback bearer is not a five-minute admin session.
+        loopback = payload.get("scope") == EVENT_LOOPBACK_SCOPE
+        if loopback and (
+            request.method.upper() != "POST"
+            or not EVENT_LOOPBACK_ROUTE.match(request.url.path)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Event-loopback tokens may only dispatch a subscriber task",
+            )
+
         # #187 — reject a token revoked via logout.
         if is_token_revoked(payload.get("jti")):
             raise credentials_exception
@@ -651,7 +678,10 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
             id=user["id"],
             username=user["username"],
             email=user.get("email"),
-            role=user["role"]
+            role=user["role"],
+            # ent#614: only a loopback token carries this, and only when the
+            # backend derived the source from an agent-originated event.
+            vouched_source_agent=(payload.get("source_agent") or None) if loopback else None,
         )
     except JWTError:
         # JWT failed, try MCP API key
@@ -1621,6 +1651,76 @@ def assert_owns(
     """
     if current_user.id != owner_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def resolve_source_agent(
+    current_user: User, x_source_agent: Optional[str], *, endpoint: str
+) -> Optional[str]:
+    """ent#614 — the effective ``X-Source-Agent`` for this request, or ``None``.
+
+    The header is a raw client value. It is honoured ONLY when the principal
+    can prove it names itself:
+
+    * an **agent-scoped** key naming its own agent (``current_user.agent_name``
+      — the SELF-EXEC-001 rule that ``derive_source_and_trigger`` applied to
+      ``/task`` alone, while ``/chat`` and ``/fan-out`` applied nothing); or
+    * the **EVT-001 loopback** token, whose ``vouched_source_agent`` the
+      backend itself derived from an agent-originated event.
+
+    A mismatch under either is a 403 (the pre-existing SELF-EXEC-001 wording).
+    Every other principal — a JWT human, a user / system / ops / connector /
+    portal-delegate key, any scope a later PR invents — is refused with a
+    NAMED 403 rather than silently trusted or silently ignored. Trusted was the
+    defect: three audit sites recorded the header as the actor
+    (``actor_type='agent'``, the human dropped), the execution row read
+    ``triggered_by='agent'``, and an ``AGENT_COLLABORATION`` activity plus a
+    WebSocket edge were forged onto the named agent, which the caller may not
+    even be able to access. Ignored would be the next defect: a warning nobody
+    reads is how the next producer ships with attribution silently dropped; a
+    403 that names the rule is how it gets fixed.
+
+    Order is load-bearing: the falsy check runs BEFORE any ``getattr`` (bare
+    ``MagicMock`` / ``SimpleNamespace`` principals in older suites call handlers
+    with ``x_source_agent=None``), and the ``getattr`` default is ``None`` — the
+    UNPRIVILEGED direction (#2323): a principal carrying neither attribute is
+    "not an agent", never "trusted". The header stays an opt-in INTENT flag: an
+    agent key calling ``/task`` raw without it keeps today's ``mcp`` /
+    ``manual`` semantics rather than silently flipping to ``self_task``.
+
+    Every router that declares the header must route it through here —
+    ``tests/unit/test_ent614_source_agent_attribution.py`` walks the OSS tree
+    and fails a reader that forwards the raw value.
+    """
+    if not x_source_agent:
+        return None
+    identity = getattr(current_user, "agent_name", None) or getattr(
+        current_user, "vouched_source_agent", None
+    )
+    if identity:
+        if x_source_agent == identity:
+            return x_source_agent
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Source agent header '{x_source_agent}' doesn't match API key "
+                f"scope '{identity}'"
+            ),
+        )
+    logger.warning(
+        "[ent#614] %s: X-Source-Agent=%r refused — principal %s (mcp_scope=%r) "
+        "is not agent-scoped and cannot name a source agent",
+        endpoint,
+        x_source_agent[:64],
+        getattr(current_user, "id", None),
+        getattr(current_user, "mcp_scope", None),
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "X-Source-Agent is honoured only for an agent-scoped API key naming "
+            "its own agent (SELF-EXEC-001); drop the header to act as yourself"
+        ),
+    )
 
 
 # Type aliases for cleaner signatures

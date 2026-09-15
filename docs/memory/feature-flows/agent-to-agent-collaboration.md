@@ -327,6 +327,16 @@ app.add_middleware(
 )
 ```
 
+**The header is allowlisted for browsers but inert to them (ent#614).** Being
+CORS-allowed is not being trusted: every router that reads `X-Source-Agent` resolves it
+through `dependencies.resolve_source_agent` first, which honours it only for an
+agent-scoped key naming its own agent or the EVT-001 loopback's backend-vouched source,
+and answers a named **403** to every other principal. Before that fix a permitted user
+could set the header on `/chat` and forge a `actor_type='agent'` SEC-001 audit row (with
+the human dropped), a `triggered_by='agent'` execution, and an `AGENT_COLLABORATION`
+activity plus a WebSocket edge on an agent they could not access. The MCP client is
+unaffected: it sets the header only when `authContext.scope === "agent"`.
+
 ### Chat Endpoint
 **File**: `src/backend/routers/chat.py`
 **Lines**: 106-416
