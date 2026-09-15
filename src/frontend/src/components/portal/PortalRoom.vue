@@ -310,17 +310,18 @@
           :class="carryNotice.problem
             ? 'text-status-warning-700 dark:text-status-warning-300'
             : 'text-status-info-700 dark:text-status-info-300'"
-          role="status"
+          :role="carryNotice.problem ? 'alert' : 'status'"
           data-testid="portal-room-carry-notice"
         >
           <svg class="w-3.5 h-3.5 mt-px shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
           <span class="min-w-0">{{ carryNotice.text }}</span>
-          <button
-            type="button"
-            class="ml-auto shrink-0 underline hover:no-underline"
+          <BaseButton
+            size="sm"
+            variant="ghost"
+            class="ml-auto shrink-0"
             data-testid="portal-room-carry-notice-dismiss"
             @click="emit('dismiss-carry-notice')"
-          >Dismiss</button>
+          >Dismiss</BaseButton>
         </div>
       </div>
     </div>
@@ -358,6 +359,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
+import BaseButton from '@/components/base/BaseButton.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import { workSignalFromRoom } from './portalRail'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'

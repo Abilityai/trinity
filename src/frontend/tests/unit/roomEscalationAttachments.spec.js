@@ -17,7 +17,7 @@
  *   3. source guards for the wiring no unit test can reach, since
  *      `vitest.config.js` pins `environment: 'node'` with no mount harness.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { stripComments } from './helpers/stripComments'
