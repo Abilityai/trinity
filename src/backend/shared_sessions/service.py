@@ -1134,10 +1134,29 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
         _broadcast("room_participant_state",
                    {"room_id": room_id, "identity": agent_name, "state": "idle"})
 
+    # `TaskExecutionStatus` is a `str` Enum, so a plain string compare works for
+    # either — but normalise anyway rather than relying on that at a distance.
     status = getattr(result, "status", None)
+    status = str(getattr(status, "value", status) or "").strip().lower()
     reply = (getattr(result, "response", "") or "").strip()
 
-    if status in ("failed", "cancelled") or not reply:
+    # #2795: a CANCEL IS NOT A FAILURE, and the room must not describe it as
+    # one. A person can now stop a room turn from the tile or the Work tab, and
+    # the line they got for doing it was "<agent> could not respond (no
+    # response)." — the surface reporting a fault for something the reader
+    # themselves just asked for, which is the AC's "no 'something went wrong'
+    # for a cancel the user asked for".
+    #
+    # It also must not clear the resume handle. That drop exists for a DEAD
+    # handle (the Session-tab idiom below), and a cancel is no evidence of one
+    # — the next turn would pay for a cold rebuild of a context that was fine.
+    # The read cursor is left alone either way, so the delta this turn never
+    # answered is re-delivered on the next wake.
+    if status == "cancelled":
+        _post_system(room_id, f"{agent_name}'s turn was stopped.")
+        return
+
+    if status == "failed" or not reply:
         # A dead resume handle is the common cause — drop it so the next wake is
         # cold instead of failing the same way forever (Session-tab idiom).
         if cached:
