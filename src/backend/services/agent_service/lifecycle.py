@@ -523,6 +523,25 @@ async def start_agent_internal(agent_name: str) -> dict:
             e,
         )
 
+    # ent#615: install the git credential helper and remove any embedded
+    # credential from this agent's remotes. Same fire-and-forget shape as the
+    # #2069 merge above and DELIBERATELY NOT behind its `auto_sync_enabled`
+    # gate — whether an agent auto-syncs has nothing to do with whether its
+    # `.git/config` holds a token, and copying that gate would silently skip
+    # every agent that does not. Idempotent, and it refuses rather than
+    # stripping a credential it could not replace, so running it on every start
+    # is safe. Fire-and-forget, so it adds no start latency.
+    try:
+        from services import git_service
+        git_service.spawn_git_remote_token_scrub(agent_name)
+    except Exception as e:
+        logger.warning(
+            "[ent#615] failed to spawn the git remote-token scrub for %s on "
+            "start: %s",
+            agent_name,
+            e,
+        )
+
     return {
         "message": f"Agent {agent_name} started",
         "credentials_injection": credentials_status,
