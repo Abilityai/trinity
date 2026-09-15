@@ -783,6 +783,12 @@ async function send() {
     // files that had been delivered several messages ago as though they were
     // still pending.
     clearAttachments()
+    // The carry notice describes the message that CREATED this room. Once a
+    // newer message exists it is describing history while sitting under the
+    // composer, so a send retires it — same reason as the chips above. The
+    // escalation's own first post is made by the shell, not here, so this
+    // cannot retire the notice before it has been read.
+    if (props.carryNotice) emit('dismiss-carry-notice')
     // The post returns once the mentioned agents have been woken; their replies
     // land as further messages, which the poll picks up.
     await load()

@@ -256,6 +256,20 @@ describe('#2794 the 1:1 hands the attachments over', () => {
     expect(CONVERSATION).toMatch(/await attachmentsSettled\(\)/)
   })
 
+  it('cannot re-enter while it waits — a second Enter must not eat the message', () => {
+    // The await is seconds long, and `input.value` is cleared BEFORE it. A
+    // second send in that window would clear the newly typed text and emit a
+    // second escalation, which `Portal.vue`'s own `escalating` flag drops on
+    // the floor: message gone, no error, no composer to recover it from.
+    const start = CONVERSATION.indexOf('async function send()')
+    const send = CONVERSATION.slice(start, CONVERSATION.indexOf('async function submitUserText', start))
+    expect(send).toMatch(/if \(!text \|\| sending\.value \|\| escalatingNow\.value\) return/)
+    expect(send).toMatch(/escalatingNow\.value = true/)
+    // Released on BOTH paths: a flag left set would outlive a failed
+    // escalation and leave the composer the shell just restored dead.
+    expect(send).toMatch(/} finally \{[\s\S]*escalatingNow\.value = false/)
+  })
+
   it('emits them with the message', () => {
     expect(CONVERSATION).toMatch(/attachments: attachments\.value\.slice\(\)/)
   })
@@ -319,6 +333,14 @@ describe('#2794 the room shows what came with the message', () => {
   it('renders the carry notice', () => {
     expect(ROOM).toMatch(/data-testid="portal-room-carry-notice"/)
     expect(ROOM).toMatch(/carryNotice: \{ type: Object, default: null \}/)
+  })
+
+  it('retires the carry notice on the next message — it describes history by then', () => {
+    const send = ROOM.slice(ROOM.indexOf('async function send()'), ROOM.indexOf('async function addAgent'))
+    expect(send).toMatch(/if \(props\.carryNotice\) emit\('dismiss-carry-notice'\)/)
+    // The escalation's own first post is made by the shell, so this cannot
+    // retire the notice before it has been read.
+    expect(PORTAL).toMatch(/await store\.postRoomMessage\(roomId, message\)/)
   })
 
   it('clears its own chips once a message has gone', () => {

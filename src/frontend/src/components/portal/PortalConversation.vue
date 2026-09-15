@@ -2055,9 +2055,19 @@ function markFailed(index, content, error, { retryable = true } = {}) {
   row.retryable = retryable
 }
 
+// #2794: an escalation now AWAITS the in-flight uploads, so the composer is
+// clearable-and-emptied for as long as that takes — seconds, not a microtask.
+// Without a guard a second Enter in that window re-enters `send()`, clears the
+// new text, and emits a second escalation that `Portal.vue`'s own `escalating`
+// flag then drops on the floor: the message is gone with no error and no
+// composer to recover it from. Held here rather than reusing `sending`, which
+// means "a turn is running" and is read by the header, the Stop control and
+// the reattach poller.
+const escalatingNow = ref(false)
+
 async function send() {
   const text = input.value.trim()
-  if (!text || sending.value) return
+  if (!text || sending.value || escalatingNow.value) return
   // The composer is about to be cleared programmatically, which fires no input
   // event — so the popup and its Esc sentinel are cleared here rather than left
   // armed against a message that no longer exists.
@@ -2087,17 +2097,26 @@ async function send() {
       // something whose state they can no longer see. `settled()` never
       // rejects — a failed upload is recorded on its own chip, and the shell
       // reports it from there.
-      await attachmentsSettled()
-      // NOT cleared: on success this component unmounts as the room opens and
-      // the chips go with it; on failure the shell hands the text back and the
-      // chips are still standing beside it, which is the recovery AC without
-      // any new plumbing. Handing over a COPY so a later gesture in this
-      // composer cannot mutate what the shell is carrying.
-      emit('escalate-to-room', {
-        agents: [props.agent.name, ...others],
-        message: text,
-        attachments: attachments.value.slice(),
-      })
+      escalatingNow.value = true
+      try {
+        await attachmentsSettled()
+        // NOT cleared: on success this component unmounts as the room opens and
+        // the chips go with it; on failure the shell hands the text back and the
+        // chips are still standing beside it, which is the recovery AC without
+        // any new plumbing. Handing over a COPY so a later gesture in this
+        // composer cannot mutate what the shell is carrying.
+        emit('escalate-to-room', {
+          agents: [props.agent.name, ...others],
+          message: text,
+          attachments: attachments.value.slice(),
+        })
+      } finally {
+        // Released even on the success path: the emit is synchronous and this
+        // component is not unmounted until the route change renders, so a flag
+        // left set would outlive a FAILED escalation and leave the composer
+        // the shell just restored permanently dead.
+        escalatingNow.value = false
+      }
       return
     }
   }
