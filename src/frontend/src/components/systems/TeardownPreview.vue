@@ -146,7 +146,12 @@
     <section
       class="rounded-lg border-2 border-status-warning-400 dark:border-status-warning-600 bg-status-warning-50 dark:bg-status-warning-900/20 p-4"
     >
-      <h4 class="font-semibold text-status-warning-900 dark:text-status-warning-100 flex items-center gap-2">
+      <!-- `text-sm` like every other h4 in this file, including the danger
+           callout at the top which has the identical anatomy. Written without a
+           size class it fell through to the UA default (1em = 16px), which made
+           the DEEPEST heading on the page the LARGEST — bigger than its four
+           siblings and bigger than the h3 that contains them all. -->
+      <h4 class="text-sm font-semibold text-status-warning-900 dark:text-status-warning-100 flex items-center gap-2">
         <span aria-hidden="true">⚠️</span> This removes running agents
       </h4>
       <ul class="mt-2 space-y-1 text-sm text-status-warning-800 dark:text-status-warning-200 list-disc list-inside">

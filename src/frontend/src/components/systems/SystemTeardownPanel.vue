@@ -35,7 +35,8 @@
       v-else-if="store.teardownOutcomeUnknown"
       class="mt-4 rounded-lg border-2 border-status-warning-400 dark:border-status-warning-600 bg-status-warning-50 dark:bg-status-warning-900/20 p-4"
     >
-      <h4 class="font-semibold text-status-warning-900 dark:text-status-warning-100 flex items-center gap-2">
+      <!-- `text-sm`, like its twin in TeardownPreview and the panel h3 above. -->
+      <h4 class="text-sm font-semibold text-status-warning-900 dark:text-status-warning-100 flex items-center gap-2">
         <span aria-hidden="true">❓</span> Outcome unknown — removal may still be running
       </h4>
       <p class="mt-2 text-sm text-status-warning-800 dark:text-status-warning-200">
