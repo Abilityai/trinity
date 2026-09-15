@@ -1,21 +1,42 @@
 name: Issue Status on PR Merge
 
-# `pull_request_target`, not `pull_request` (#2767).
+# `push` to `dev` — not `pull_request_target` (#2822), not `pull_request` (#2767).
+#
+# WHY NOT `pull_request_target` (#2822 — this file produced ZERO runs for 6 merges)
+#
+# GitHub reads a `pull_request_target` workflow from the DEFAULT branch of the
+# base repository, not from the pull request's base branch: the event's
+# `GITHUB_REF` is the default branch and `GITHUB_SHA` is the last commit on it.
+# #2769 changed the trigger here on `dev`, where the file lands first, so
+# neither branch could start a run — `main` still said `pull_request`, and
+# `dev`'s copy was never consulted for registration. `pull_request` was equally
+# dead by then: it is read from the PR's merge ref, which resolves against
+# `dev`, and `dev` no longer declared it. Six merges promoted nothing and four
+# issues were relabelled by hand.
+#
+# `push` is read from the ref being pushed — the docs are explicit that this
+# "includes workflows that are not merged into the default branch" — so a
+# trigger change to this file takes effect on the merge that lands it and can
+# never go dark waiting for a release cut. That is the property #2822 asks for,
+# not merely a way to restore today's promotion.
+#
+# WHY IT STILL FIXES #2767 (fork PRs)
 #
 # On `pull_request` a PR opened from a FORK gets a READ-ONLY `GITHUB_TOKEN`, so
 # every label write was refused with "Resource not accessible by integration"
 # and the issue stranded in `status-in-progress` after its fix had already
 # landed. That only ever bit external contributors — the PRs nobody is watching
-# the label on. `pull_request_target` runs in the context of the BASE repo and
-# so carries the write token the `permissions:` block below asks for.
+# the label on. A `push` to `dev` is a base-repo event whatever the merged PR's
+# origin, so the token carries exactly the `permissions:` block below and a
+# fork's issue is promoted like anyone else's.
 #
-# WHY THAT IS SAFE HERE, AND WHAT WOULD MAKE IT UNSAFE
+# WHY THIS IS SAFE, AND WHAT WOULD MAKE IT UNSAFE
 #
-# `pull_request_target` is the standard privilege-escalation footgun: it hands a
-# write token to a workflow triggered by a stranger's PR. The escalation always
-# takes the same form — the workflow CHECKS OUT the PR's head and then EXECUTES
-# something from it (a build, a test, a script, an action pinned by a path in
-# the PR). This workflow does neither, and both absences are load-bearing:
+# The privilege-escalation footgun that came with `pull_request_target` — a
+# write token handed to a workflow a stranger's PR can start — is gone: a push
+# to `dev` only happens after a maintainer merges. The two properties that
+# bounded it are kept anyway, because they are what makes the untrusted PR text
+# harmless:
 #
 #   * there is NO `actions/checkout` — no PR code is ever fetched;
 #   * there are NO `run:` steps — nothing from the PR is ever executed;
@@ -23,34 +44,22 @@ name: Issue Status on PR Merge
 #     they reach exactly one regex that extracts `\d+`. Nothing is interpolated
 #     into a shell, and nothing is `eval`'d.
 #
-# Note also that `pull_request_target` runs the workflow file as it exists on
-# the BASE branch, never the PR's copy — so a fork cannot edit this file to make
-# it do something else. That is a property of the trigger, not of this file, and
-# it is why the three bullets above are sufficient rather than merely current.
+# The residual capability is bounded to what the feature does anyway: a merged
+# PR can name which issue numbers get relabelled. That requires a maintainer to
+# MERGE it first, affects labels only, and is recorded in the issue's timeline.
 #
-# BUT IT IS REGISTERED FROM THE DEFAULT BRANCH (#2814). Executing the base
-# branch's copy is not the same as being triggered by it: GitHub decides
-# whether a `pull_request_target` run starts at all by reading `main`. So this
-# trigger change did nothing on `dev` — not red, absent — for every merge
-# between #2769 landing and the next release cut, while `main` still said
-# `pull_request`. The same rule already governs the `schedule` triggers on
-# `deploy-dev.yml` and `alembic-head-watch.yml`, which say so in their own
-# comments. `tests/unit/test_2814_workflow_trigger_parity.py` now states it once
-# for every workflow and fails when a default-branch-registered event exists on
-# this branch but not on `main`, unless the delay is recorded there with a reason.
+# If you add a checkout or a `run:` step, or use the PR's text beyond the number
+# regex, re-derive that argument — `tests/unit/test_2767_issue_status_fork_prs.py`
+# fails the build if any of it stops holding, and
+# `tests/unit/test_2822_issue_status_trigger_registration.py` fails if the
+# trigger moves back to one that is registered from `main`.
 #
-# The residual capability is therefore bounded to what the feature does anyway:
-# a merged PR can name which issue numbers get relabelled. That requires a
-# maintainer to MERGE the PR first (`if: merged == true`), affects labels only,
-# and is recorded in the issue's own timeline.
-#
-# If you add a checkout, a `run:` step, or any use of the PR's text beyond the
-# number regex, this trigger stops being safe — go back to `pull_request` and
-# use a repo-scoped PAT for the label calls instead. `tests/unit/
-# test_2767_issue_status_fork_prs.py` fails the build if that happens.
+# Keeping `push` also takes this file out of the scope of
+# `tests/unit/test_2814_workflow_trigger_parity.py`: that check exists for events
+# GitHub registers from the default branch, and it asserts `push` is not one of
+# them. The divergence it was written to catch is the one this change removes.
 on:
-  pull_request_target:
-    types: [closed]
+  push:
     branches: [dev]
 
 permissions:
@@ -59,15 +68,51 @@ permissions:
 
 jobs:
   mark-in-dev:
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Mark referenced issues as status-in-dev
         uses: actions/github-script@v9
         with:
           script: |
-            const pr = context.payload.pull_request;
-            const haystack = `${pr.title || ''}\n${pr.body || ''}`;
+            const base = context.ref.replace('refs/heads/', '');
+
+            // A `push` payload carries no pull request, so the merged PR is
+            // resolved from the commits the push landed. A squash merge is one
+            // commit, and every PR here is squash-merged; the loop is for the
+            // multi-commit push (an admin back-merge) that would otherwise
+            // promote only the tip's PR. `head_commit` is null for a branch
+            // deletion, which `dev`'s branch protection makes unreachable.
+            const shas = (context.payload.commits || []).map(c => c.id);
+            if (shas.length === 0 && context.payload.head_commit) {
+              shas.push(context.payload.head_commit.id);
+            }
+            if (shas.length === 0) {
+              core.info('Push carried no commits — nothing to promote.');
+              return;
+            }
+
+            const prs = new Map();
+            for (const sha of shas) {
+              const { data } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: sha,
+              });
+              // A commit on `dev` is also part of the HEAD of the open
+              // `dev` -> `main` release PR, whose body closes every issue in
+              // the release. Only a PR that actually merged INTO this branch
+              // may promote anything, or a release PR sitting open would
+              // relabel the whole backlog on every merge.
+              for (const pr of data) {
+                if (pr.merged_at && pr.base && pr.base.ref === base) {
+                  prs.set(pr.number, pr);
+                }
+              }
+            }
+
+            const haystack = [...prs.values()]
+              .map(pr => `${pr.title || ''}\n${pr.body || ''}`)
+              .join('\n');
 
             // Match Fixes/Fixed/Closes/Closed/Resolves/Resolved #N (case-insensitive)
             const pattern = /\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s+#(\d+)/gi;
