@@ -828,6 +828,53 @@ def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: boo
     return header + _format_delta(delta)
 
 
+async def _room_inbox_context(agent_name: str, email: str | None,
+                              delta: list[dict]) -> tuple[str, list[dict]]:
+    """What this agent should be told about the client's files, for this wake.
+
+    #2794. A room turn used to be built from the transcript and nothing else, so
+    an agent @mentioned about a picture the client had just sent it replied — in
+    good faith — "I don't see any image attached", about a file sitting in its
+    own inbox. Every part of the delivery already worked: the drop fans out to
+    every participating agent, the bytes land in each agent's
+    ``~/inbox/<client>/``, the rail lists them. Only the *telling* was missing,
+    and it was missing because the sentence that does it was written inline in
+    the 1:1 chat path and never existed anywhere else.
+
+    So this is a thin adapter onto the ONE composer
+    (``client_portal.service.collect_inbox_context``) — deliberately not a
+    second implementation of the manifest. The import is local for the same
+    reason ``agent_on_roster`` is: rooms lean on the portal at a handful of
+    points and neither module may import the other at module scope.
+
+    Two decisions worth stating, because neither is obvious:
+
+    * **Whose inbox.** The posting principal's. A portal inbox is keyed by the
+      client's email, and in a Workspace room that principal IS the person who
+      put the file there. *Residual:* a room with two humans surfaces only the
+      email of whoever's message triggered this wake — the other's files stay
+      unmentioned. Reading every human participant's inbox would cost one
+      ``docker exec`` per human per wake, and the shape rooms actually have is
+      one person and N agents.
+
+    * **What counts as asking for an image.** The WHOLE delta, including agent
+      lines — not just the human's. "@sidekick can you look at the screenshot the
+      client sent?" is an ordinary room move, and scoping the intent test to
+      human text would make exactly that relay come through image-less: the bug
+      this fixes, one hop along. The size/count caps upstream bound the cost.
+
+    Never raises. A room turn that cannot be told about a file still runs.
+    """
+    if not email:
+        return "", []
+    try:
+        from client_portal.service import collect_inbox_context
+        return await collect_inbox_context(agent_name, email, _format_delta(delta))
+    except Exception as e:  # noqa: BLE001 — a file we cannot mention never costs a turn
+        logger.warning("room: inbox context for %s/%s failed: %s", agent_name, email, e)
+        return "", []
+
+
 async def post_message(current_user, room_id: str, content: str,
                        _chain_depth: int = 0,
                        _sender_override: Optional[tuple[str, str]] = None,
@@ -1104,13 +1151,22 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
 
     room_prompt = build_user_facing_room_prompt() if user_facing else None
 
+    # #2794: the client's files, named to THIS agent. The prefix rides in front
+    # of the transcript for the same reason it rides in front of a 1:1 message —
+    # the agent has to know a file exists before the transcript referring to it
+    # means anything — and `images` is what makes "what is in this picture"
+    # answerable at all, since an agent must never read an image as text (#728).
+    client_email = getattr(current_user, "email", None)
+    manifest_prefix, images = await _room_inbox_context(agent_name, client_email, delta)
+
     try:
         result = await get_task_execution_service().execute_task(
             agent_name=agent_name,
-            message=_build_turn_prompt(room, agent_name, delta, cold, user_facing),
+            message=manifest_prefix + _build_turn_prompt(room, agent_name, delta, cold, user_facing),
             triggered_by="room",
             system_prompt=room_prompt,
-            source_user_email=getattr(current_user, "email", None),
+            images=images or None,
+            source_user_email=client_email,
             timeout_seconds=ROOM_TURN_TIMEOUT_SECONDS,
             resume_session_id=cached,
             persist_session=True,
