@@ -60,7 +60,7 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 
 ## Limitations
 
-- Voice replies cover the messaging channels (Telegram, Slack, WhatsApp) — not the web chat UI or public links.
+- Voice replies cover the messaging channels (Telegram, Slack, WhatsApp) — not the Agent Detail chat or public links. The [Workspace](../sharing-and-access/workspace.md) has its own speaker toggle (**Speak replies aloud**) that reads replies with the same agent voice; it is a viewer-side choice, not something the agent opts into.
 - Voice is per-reply — the agent decides each time; there is no way to force every reply to be spoken.
 - The voice is an ElevenLabs voice; it is unrelated to the Gemini voice used for [Voice Chat](voice-chat.md) and [VoIP calls](voip-telephony.md).
 - Synthesis cost accrues on your ElevenLabs account per character spoken.

@@ -444,6 +444,16 @@ class User(BaseModel):
     # None on the JWT branch, which is the honest "no credential" answer.
     mcp_key_id: Optional[str] = None
     mcp_key_name: Optional[str] = None
+    # ent#614: the source agent the BACKEND vouches for. Set only on an EVT-001
+    # loopback JWT (`scope == dependencies.EVENT_LOOPBACK_SCOPE`, minted by
+    # `event_dispatch_service._get_internal_token`), and only when the event
+    # was agent-originated — `emit_event` writes a JWT caller's USERNAME into
+    # `agent_events.source_agent`, and that must never be certified as an agent.
+    # `dependencies.resolve_source_agent` treats it as the principal's identity,
+    # exactly like `agent_name` for an agent-scoped key, so the loopback's
+    # `X-Source-Agent` header is honoured for this one value and nothing else.
+    # None on every other branch, JWT humans included.
+    vouched_source_agent: Optional[str] = None
 
 
 class Token(BaseModel):
@@ -2940,15 +2950,21 @@ class FanOutRequest(BaseModel):
     """Request model for fan-out parallel task execution."""
     tasks: List[FanOutTask]
     agent: str = "self"
-    # Optional overall fan-out deadline. When None, no outer deadline is
-    # applied — each sub-task is still bounded by the target agent's
-    # configured execution_timeout_seconds (TIMEOUT-001).
+    # Optional deadline on WAITING for the batch (#2524) — reaching it returns
+    # `deadline_exceeded` without stopping the subtasks. When None, the wait
+    # covers the whole batch: ceil(N / concurrency) × the agent's
+    # execution_timeout_seconds (TIMEOUT-001), plus a buffer.
     timeout_seconds: Optional[int] = None
     max_concurrency: int = 3
     policy: str = "best-effort"
     model: Optional[str] = None
     system_prompt: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
+    # #2524: return `{fan_out_id, status="accepted"}` immediately, without
+    # holding the connection for the whole batch. The caller polls
+    # `GET /api/agents/{name}/fan-out/{fan_out_id}`. Default False keeps the
+    # blocking contract every existing caller depends on.
+    async_mode: Optional[bool] = False
 
     @field_validator("tasks")
     @classmethod
@@ -3028,10 +3044,12 @@ class FanOutResponse(BaseModel):
 class FanOutBatchTask(BaseModel):
     """One subtask of a batch, as recorded on its execution row."""
     execution_id: str
+    # The caller's own `FanOutTask.id`, persisted on the row as
+    # `fan_out_task_id` since #2524. NULL on rows written before that column.
+    task_id: Optional[str] = None
     status: str
-    # The dispatched message. It is the only thing tying a row back to the task
-    # the caller named — `FanOutTask.id` is a request-local label and is not
-    # persisted anywhere on the row.
+    # The dispatched message — the only link back to the task the caller named
+    # on rows that predate `task_id`.
     message: Optional[str] = None
     response: Optional[str] = None
     error: Optional[str] = None

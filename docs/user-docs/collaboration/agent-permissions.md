@@ -9,8 +9,8 @@ Explicit permission model controlling which agents can communicate with which. R
 ![Agent Permissions tab showing the agent collaboration list with Allow All / Allow None controls](../../screenshots/agent-permissions.png)
 
 1. Open the agent detail page and click the **Permissions** tab (located in the agent files/config area).
-2. You will see a list of all agents in the system.
-3. Toggle permissions to allow or deny each agent from calling the current agent.
+2. You will see a list of the other agents in the system.
+3. Toggle each agent to allow or deny the current agent calling it. **Allow All** and **Allow None** set every row at once. Click **Save Permissions** to apply.
 4. Permissions are directional: allowing Agent A to call Agent B does **not** allow Agent B to call Agent A. Each direction must be granted separately.
 5. System agents (e.g., `trinity-system`) bypass permission checks entirely.
 

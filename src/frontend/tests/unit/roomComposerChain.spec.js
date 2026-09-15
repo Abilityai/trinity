@@ -1,25 +1,30 @@
 /**
- * #2620 — the room composer's `v-else` must stay chained to the attachments
- * block.
+ * The room composer renders on a condition it STATES (#2620, rewritten #2794).
  *
- * `PortalRoom.vue` renders the attachment chips OR the composer:
+ * #2620 shipped this file to stop a conditional being inserted between the
+ * attachment chips and `<form v-else>`, because `v-else` binds to the
+ * immediately preceding element and the composer would then render on the
+ * wrong condition. The mechanism it describes is real and the hazard is real.
  *
- *     <div v-if="attachments.length"> …chips… </div>
- *     <form v-else> …composer… </form>
+ * What it got wrong is WHICH relationship was correct. The composer was
+ * written as `v-else` to the "this conversation has ended" line (ent#358) —
+ * render the composer unless the room is closed. By the time #2620 looked, the
+ * batch notice, the attachment chips (ent#524) and its own budget banner had
+ * each been inserted in between, so the chain already ended on
+ * `attachments.length`. #2620 then pinned that as the contract, and with it two
+ * live defects: attaching a file to a room REPLACED the composer (and the room
+ * cleared no chips, so it never came back), and a closed room rendered a live
+ * composer directly under the line saying it had ended.
  *
- * `v-else` binds to the **immediately preceding element**, so anything
- * conditional inserted between them silently steals the chain and the composer
- * then renders on the new condition instead. During this issue a banner was
- * added exactly there, and the effect was that the composer DISAPPEARED at the
- * moment the banner fired — the warning removed the ability to act on it.
+ * So the composer now carries `v-if="!isClosed"`. A `v-else` is a promise about
+ * whatever element happens to sit above it, and this neighbourhood has broken
+ * that promise three times in three changes.
  *
- * Nothing else catches this: the SFC compiles (a `v-else` after any `v-if` is
- * valid) and the suite has no mount harness, so nothing renders the template.
- *
- * This walks the parsed template AST rather than matching text. A first
- * attempt did match text — "is the gap after the last `</div>` empty" — and
- * was VACUOUS, because the intruder's own closing tag becomes the last one and
- * the gap reads clean. A structural question needs the structure.
+ * This file therefore pins the OUTCOME rather than the chain: the composer's
+ * condition is its own and names the closed state; the chips render beside the
+ * composer rather than instead of it; and the banner is still there. It walks
+ * the parsed template AST rather than matching text — a structural question
+ * needs the structure (#2620's own first attempt matched text and was vacuous).
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
@@ -59,33 +64,53 @@ function elementChildren(node) {
   return (node.children || []).filter((c) => c.type === ELEMENT)
 }
 
-describe('#2620 room composer v-if/v-else chain', () => {
+describe('#2620/#2794 the room composer renders on a stated condition', () => {
   const ast = templateAst()
   const all = elements(ast)
 
-  it('the composer form carries v-else', () => {
-    const form = all.find((n) => n.tag === 'form' && directive(n, 'else'))
-    expect(form, 'no <form v-else> found — did the composer change shape?').toBeTruthy()
+  const composer = () => all.find((n) => n.tag === 'form' && directive(n, 'if'))
+
+  it('the composer names its own condition, and it is the closed state', () => {
+    // THE property. Anything inserted above a `v-else` silently repoints it;
+    // a stated condition cannot be stolen by a neighbour.
+    const form = composer()
+    expect(form, 'no <form v-if> found — did the composer go back to v-else?').toBeTruthy()
+    expect(directive(form, 'if').exp.content).toContain('isClosed')
   })
 
-  it('its preceding element sibling is the attachments v-if block', () => {
-    // THE property. `v-else` binds to the previous element sibling, so this is
-    // the one relationship that decides whether the composer renders.
-    const form = all.find((n) => n.tag === 'form' && directive(n, 'else'))
-    const parent = all.find((n) => elementChildren(n).includes(form))
-    expect(parent, 'could not locate the form’s parent').toBeTruthy()
-
-    const siblings = elementChildren(parent)
-    const prev = siblings[siblings.indexOf(form) - 1]
-    expect(prev, 'the form has no preceding element — its v-else binds to nothing').toBeTruthy()
-
-    const vIf = directive(prev, 'if')
+  it('no composer form carries v-else or v-else-if', () => {
+    const chained = all.find((n) => n.tag === 'form' && (directive(n, 'else') || directive(n, 'else-if')))
     expect(
-      vIf && vIf.exp && vIf.exp.content,
-      `the element before the composer is <${prev.tag}> with no v-if — ` +
-      'something was inserted between the attachments block and the composer, ' +
-      'and it has taken over the v-else',
-    ).toContain('attachments.length')
+      chained,
+      'the composer is chained to whatever element precedes it again — that is ' +
+      'how it came to render on `attachments.length` (#2794)',
+    ).toBeFalsy()
+  })
+
+  it('the attachment chips render BESIDE the composer, not instead of it', () => {
+    // The defect in one assertion: with the chips and the composer on mutually
+    // exclusive conditions, attaching a file removes the box you type in.
+    const chips = all.find((n) => {
+      const vIf = directive(n, 'if')
+      return vIf && vIf.exp.content.includes('attachments.length')
+    })
+    expect(chips, 'the attachment chip block is gone').toBeTruthy()
+
+    const form = composer()
+    const parent = all.find((n) => elementChildren(n).includes(form))
+    const siblings = elementChildren(parent)
+    // Both are children of the composer region, and both can be true at once.
+    expect(siblings).toContain(chips)
+    expect(directive(chips, 'else')).toBeFalsy()
+    expect(directive(chips, 'else-if')).toBeFalsy()
+  })
+
+  it('a closed room still says so', () => {
+    const line = all.find((n) => {
+      const vIf = directive(n, 'if')
+      return n.tag === 'p' && vIf && vIf.exp.content === 'isClosed'
+    })
+    expect(line, 'the "this conversation has ended" line is gone').toBeTruthy()
   })
 
   it('the budget banner is still rendered — moved, not dropped', () => {

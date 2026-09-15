@@ -491,14 +491,22 @@ def test_backend_prefers_the_validated_agent_name_over_the_header():
     """`current_user.agent_name` comes from the validated agent-scoped key;
     `X-Source-Agent` is a raw client header anyone may set.
 
-    Header-first (chat.py's order) would let an agent pin its run on a sibling
-    agent — harmless for a collaboration hint, wrong for the audit column this
-    issue exists to populate. Validated-first; the header only fills the
-    user-scoped case, where `agent_name` is None and it is the sole signal.
+    Header-first (chat.py's pre-ent#614 order) would let an agent pin its run on
+    a sibling agent — harmless for a collaboration hint, wrong for the audit
+    column this issue exists to populate. Validated-first; and since ent#614 the
+    other arm is `resolve_source_agent`, which honours the header only for a
+    principal that can prove it names itself and refuses everyone else with a
+    403 — the raw header never fills the column for a user-scoped key any more.
     """
     endpoint = _backend_trigger_endpoint()
-    assert "current_user.agent_name or x_source_agent" in endpoint
+    assert "_source_agent = current_user.agent_name or _resolved_source" in endpoint
     assert "x_source_agent or current_user.agent_name" not in endpoint
+    # ent#614: the raw header is never the fallback, and the resolve is NOT behind an
+    # `or` — a short-circuit would skip the check for an agent principal and silently
+    # ignore a mismatched header.
+    assert "or x_source_agent" not in endpoint
+    assert "or resolve_source_agent(" not in endpoint
+    assert "_resolved_source = resolve_source_agent(" in endpoint
 
 
 def test_mcp_trigger_tool_sends_origin_headers():

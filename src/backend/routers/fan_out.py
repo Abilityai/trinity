@@ -3,8 +3,15 @@
 Fan-out router — parallel task dispatch and result collection (FANOUT-001).
 
 POST /api/agents/{name}/fan-out
-    Dispatches N independent tasks to an agent in parallel, waits for results,
-    and returns aggregated per-task results.
+    Dispatches N independent tasks to an agent in parallel and returns
+    aggregated per-task results. With `async_mode` the batch is accepted and the
+    caller polls the status endpoint instead of holding the connection (#2524).
+
+GET /api/agents/{name}/fan-out/{fan_out_id}
+    A batch read back from its execution rows (#2670). Answers after the
+    dispatching request is gone, which is what makes `async_mode` usable — and
+    is the source of truth after a deadline, since a deadline stops the WAIT,
+    not the subtasks (#2524).
 """
 
 import logging
@@ -14,7 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import JSONResponse
 
-from dependencies import get_current_user, get_authorized_agent
+from dependencies import get_current_user, get_authorized_agent, resolve_source_agent
 from database import db
 from models import (
     FanOutBatchStatus,
@@ -24,7 +31,6 @@ from models import (
     User,
 )
 from services.fan_out_service import (
-    FanOutService,
     build_fan_out_batch_status,
     FanOutTaskInput,
     get_fan_out_service,
@@ -57,6 +63,12 @@ async def fan_out(
 
     The `agent` field must be "self" or match the path agent name for v1.
     """
+    # ent#614: resolve the raw X-Source-Agent header BEFORE anything reads it
+    # (the replay audit row and the batch's origin below). Rebinding makes the
+    # raw header unreachable past this line.
+    x_source_agent = resolve_source_agent(
+        current_user, x_source_agent, endpoint=f"/api/agents/{name}/fan-out"
+    )
     # Validate agent targeting (v1: self-only)
     if request.agent not in ("self", name):
         raise HTTPException(
@@ -77,6 +89,14 @@ async def fan_out(
             source="mcp" if x_via_mcp else "api",
             actor_user=current_user if not x_source_agent else None,
             actor_agent_name=x_source_agent,
+            # ent#614: on the agent branch the resolver yields no email, so the
+            # key OWNER is carried explicitly (the join back to the human), and
+            # the presented credential is passed the way the /chat and /task
+            # sites already do — this replay row used to record neither.
+            actor_email=getattr(current_user, "email", None),
+            mcp_key_id=getattr(current_user, "mcp_key_id", None),
+            mcp_key_name=getattr(current_user, "mcp_key_name", None),
+            mcp_scope=getattr(current_user, "mcp_scope", None),
             target_type="agent",
             target_id=name,
             endpoint=f"/api/agents/{name}/fan-out",
@@ -116,6 +136,7 @@ async def fan_out(
 
     try:
         result = await service.execute(
+            async_mode=bool(request.async_mode),
             agent_name=name,
             tasks=task_inputs,
             max_concurrency=request.max_concurrency,
@@ -163,7 +184,10 @@ async def fan_out(
         ],
     )
 
-    # Store the aggregated batch result so a duplicate replays it (#525).
+    # Store the aggregated batch result so a duplicate replays it (#525). On the
+    # async path that snapshot is the ACCEPTED receipt, not the outcome — which
+    # is the right thing to replay, since re-dispatching N subtasks is exactly
+    # what the key exists to prevent.
     idempotency_service.complete(idem, result.fan_out_id, response.model_dump())
     return response
 

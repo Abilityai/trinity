@@ -343,6 +343,38 @@ RUN mkdir -p /tmp/secure && \
 RUN mkdir -p /var/lib/trinity && \
     chown developer:developer /var/lib/trinity
 
+# ent#615: the git credential helper. Trinity used to persist every agent's
+# remote as `<scheme>://oauth2:<PAT>@<host>/...`, which put the platform token
+# in `.git/config` on the workspace volume AND — because git expands the stored
+# URL into `git-remote-https`'s argv — in the container's process table on every
+# fetch/push, from where `ps` → the orphan sweep's reaped-cmdline log → Vector →
+# the logs API carried it into another agent's context (ent#292, rated P0, was
+# the last hop of that chain). Git speaks the credential protocol to a helper
+# over stdin/stdout, which never reaches argv and is never persisted.
+#
+# Registered as `trinity`, NOT as the filename: git prepends `git-credential-`
+# to any helper value that is not an absolute path, so `git-credential-trinity`
+# resolves to `git-credential-git-credential-trinity` and the helper never runs
+# — which, with token-free URLs, is a silent fleet-wide fetch/push outage.
+#
+# Registered UNSCOPED (no `credential.<base>.`) because `TRINITY_GIT_BASE_URL`
+# is a runtime value: a base baked at image-build time can only ever be
+# github.com, so a self-hosted install would get no helper at all. The helper
+# resolves the allowed origin itself, at request time, and refuses every other
+# host. `--replace-all` because `credential.helper` is multi-valued and helper
+# lists COMPOSE — a competing helper answering first masks everything.
+#
+# Root-owned by construction: `/usr/local/bin` and `/etc/gitconfig` are outside
+# the agent-writable home. That stops ACCIDENTAL rewrites — an errant `pip
+# install`, a template hook, a skill writing to `$HOME`. It is NOT a boundary
+# against a deliberate agent: `developer` holds `NOPASSWD:ALL` (see the
+# `usermod -aG sudo` above), so `sudo` reaches both paths. And it is not
+# confidentiality either — the agent can still read its own `GITHUB_PAT`. The
+# structural fix is trinity-enterprise#558 (AAuth).
+COPY --chown=root:root ./git-credential-trinity.sh /usr/local/bin/git-credential-trinity
+RUN chmod 0755 /usr/local/bin/git-credential-trinity && \
+    git config --system --replace-all credential.helper trinity
+
 USER developer
 
 CMD ["/app/startup.sh"]

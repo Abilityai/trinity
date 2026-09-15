@@ -316,14 +316,40 @@ async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
 
 ### Docker Service (`src/backend/services/docker_service.py`)
 
-**execute_command_in_container() (lines 208-243)**:
+**execute_command_in_container()**:
 ```python
-async def execute_command_in_container(container_name: str, command: str, timeout: int = 60) -> dict:
+async def execute_command_in_container(
+    container_name: str, command: str, timeout: int = 60, *,
+    environment: Optional[Dict[str, str]] = None,   # ent#615
+    user: str = "developer",                        # ent#615
+) -> dict:
     from services.docker_utils import container_exec_run, container_get
 
     container = await container_get(container_name)
-    result = await container_exec_run(container, command, user="developer")
+    result = await container_exec_run(
+        container, command, user=user, environment=environment,
+    )
 ```
+
+Two ent#615 additions, both load-bearing for credential handling:
+
+- **`environment`** is sent in the Exec Create body, **not argv**. An exec's
+  argv is visible in the container's process table, which is the leak ent#615
+  is about — so base64-ing a token onto argv would relocate it, not remove it.
+  This is how a credential reaches an in-container git without appearing in
+  `ps`.
+- **`user`** was hard-coded to `developer`. `user="root"` covers two cases:
+  installing root-owned platform files, and an exec whose `environment`
+  carries a credential the AGENT must not read — a **same-uid** process can
+  read `/proc/<pid>/environ` for the life of the exec, a different-uid one
+  cannot. (`ssh_service.py` is the pre-existing root-exec precedent.)
+
+⚠️ **`timeout` is accepted and forwarded nowhere** — pre-existing, since
+`container_exec_run` has no timeout parameter and docker-py's exec has none
+either. A caller that can hang must bound **itself**, and the two bounds free
+different resources: `asyncio.wait_for` frees the caller, while an
+in-container `timeout N` prefix frees the `_docker_executor` pool thread,
+which `wait_for` alone does not. ent#615's fleet sweep uses both.
 
 ### Git Service (`src/backend/services/git_service.py`)
 

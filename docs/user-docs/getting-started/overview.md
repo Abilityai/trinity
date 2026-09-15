@@ -30,7 +30,7 @@ Trinity is an autonomous agent orchestration and infrastructure platform — sov
 
 Trinity runs as a set of Docker containers on your local machine or server. After starting the platform, you interact with it through the web UI or the API.
 
-1. **Start the platform** -- Run `./scripts/deploy/start.sh` to bring up all services. The web UI is available at `http://localhost` and the API at `http://localhost:8000/docs`.
+1. **Start the platform** -- Run `./scripts/deploy/start.sh` to bring up all services. The web UI is available at `http://localhost` and the API at `http://localhost:8000/docs`. On your first login a short first-run setup connects Claude and walks you to your first agent (see [Setup](setup.md#your-first-dashboard)).
 2. **Create an agent** -- From the dashboard, click "Create Agent" and select a template (GitHub repo URL or local path). Trinity pulls the template, builds a container, and deploys the agent.
 3. **Configure credentials** -- Add API keys and secrets through the agent's credential panel. Credentials are encrypted in Redis and injected into the container at runtime with hot-reload support.
 4. **Chat with the agent** -- Open the **Workspace** for a continuous conversation, or use the stateless Chat tab on the agent detail page for one-off turns. The agent processes your request using its configured tools, MCP connections, and reasoning context.
@@ -97,7 +97,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents
 - A2A `0.3.0` in both directions — Agent Card discovery and opt-in inbound tasking, plus outbound calls to external A2A agents
 - Voice calls with an agent inside the Workspace conversation (Gemini Live API)
 - x402 payment protocol for agent monetization
-- Prebuilt images for a pull-only install, and a DigitalOcean Marketplace 1-Click image
+- Prebuilt images for a pull-only install, and a DigitalOcean Marketplace 1-Click image whose admin account is created in the browser — no terminal
 - Opt-in, anonymous usage sharing (off by default)
 
 ## See Also

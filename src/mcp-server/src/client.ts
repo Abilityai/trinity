@@ -1385,6 +1385,7 @@ export class TrinityClient {
       model?: string;
       system_prompt?: string;
       allowed_tools?: string[];
+      async_mode?: boolean;
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
@@ -1433,6 +1434,9 @@ export class TrinityClient {
     };
     if (options?.timeout_seconds !== undefined) {
       body.timeout_seconds = options.timeout_seconds;
+    }
+    if (options?.async_mode) {
+      body.async_mode = true;
     }
 
     // #2670: bounded by OUR ceiling, not the backend's. The old
