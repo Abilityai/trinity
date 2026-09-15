@@ -9,13 +9,6 @@
       "args": [
         "@playwright/mcp@latest"
       ]
-    },
-    "trinity": {
-      "type": "http",
-      "url": "${TRINITY_URL}/mcp",
-      "headers": {
-        "Authorization": "Bearer ${TRINITY_API_KEY}"
-      }
     }
   }
 }
