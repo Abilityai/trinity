@@ -82,8 +82,12 @@ class PortalAgentCard(BaseModel):
     avatar_url: Optional[str] = None
     shared_at: Optional[str] = None
     voice_available: bool = False    # #78: portal voice (ElevenLabs key + agent voice set)
-    # #2212 — whether the platform can TRANSCRIBE, i.e. exactly the `/stt` gate:
-    # an ElevenLabs key resolves. Deliberately a SEPARATE bit from
+    # #2212 — whether the platform can TRANSCRIBE, i.e. exactly the `/stt` gate.
+    # #2695: that gate is no longer key PRESENCE alone — it is the key resolving
+    # AND the capability verdict not being `refused`, because ElevenLabs
+    # permissions are per endpoint and a key with Text-to-Speech but no
+    # Speech-to-Text rendered a mic that failed on every press. Deliberately a
+    # SEPARATE bit from
     # `voice_available`: output additionally needs an effective voice to speak
     # WITH, input does not, so collapsing the two would either hide a working mic
     # or render a dead one. Fails CLOSED for the same reason `voice_available`
