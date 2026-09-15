@@ -828,6 +828,53 @@ def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: boo
     return header + _format_delta(delta)
 
 
+async def _room_inbox_context(agent_name: str, email: str | None,
+                              delta: list[dict]) -> tuple[str, list[dict]]:
+    """What this agent should be told about the client's files, for this wake.
+
+    #2794. A room turn used to be built from the transcript and nothing else, so
+    an agent @mentioned about a picture the client had just sent it replied — in
+    good faith — "I don't see any image attached", about a file sitting in its
+    own inbox. Every part of the delivery already worked: the drop fans out to
+    every participating agent, the bytes land in each agent's
+    ``~/inbox/<client>/``, the rail lists them. Only the *telling* was missing,
+    and it was missing because the sentence that does it was written inline in
+    the 1:1 chat path and never existed anywhere else.
+
+    So this is a thin adapter onto the ONE composer
+    (``client_portal.service.collect_inbox_context``) — deliberately not a
+    second implementation of the manifest. The import is local for the same
+    reason ``agent_on_roster`` is: rooms lean on the portal at a handful of
+    points and neither module may import the other at module scope.
+
+    Two decisions worth stating, because neither is obvious:
+
+    * **Whose inbox.** The posting principal's. A portal inbox is keyed by the
+      client's email, and in a Workspace room that principal IS the person who
+      put the file there. *Residual:* a room with two humans surfaces only the
+      email of whoever's message triggered this wake — the other's files stay
+      unmentioned. Reading every human participant's inbox would cost one
+      ``docker exec`` per human per wake, and the shape rooms actually have is
+      one person and N agents.
+
+    * **What counts as asking for an image.** The WHOLE delta, including agent
+      lines — not just the human's. "@sidekick can you look at the screenshot the
+      client sent?" is an ordinary room move, and scoping the intent test to
+      human text would make exactly that relay come through image-less: the bug
+      this fixes, one hop along. The size/count caps upstream bound the cost.
+
+    Never raises. A room turn that cannot be told about a file still runs.
+    """
+    if not email:
+        return "", []
+    try:
+        from client_portal.service import collect_inbox_context
+        return await collect_inbox_context(agent_name, email, _format_delta(delta))
+    except Exception as e:  # noqa: BLE001 — a file we cannot mention never costs a turn
+        logger.warning("room: inbox context for %s/%s failed: %s", agent_name, email, e)
+        return "", []
+
+
 async def post_message(current_user, room_id: str, content: str,
                        _chain_depth: int = 0,
                        _sender_override: Optional[tuple[str, str]] = None,
@@ -1104,13 +1151,22 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
 
     room_prompt = build_user_facing_room_prompt() if user_facing else None
 
+    # #2794: the client's files, named to THIS agent. The prefix rides in front
+    # of the transcript for the same reason it rides in front of a 1:1 message —
+    # the agent has to know a file exists before the transcript referring to it
+    # means anything — and `images` is what makes "what is in this picture"
+    # answerable at all, since an agent must never read an image as text (#728).
+    client_email = getattr(current_user, "email", None)
+    manifest_prefix, images = await _room_inbox_context(agent_name, client_email, delta)
+
     try:
         result = await get_task_execution_service().execute_task(
             agent_name=agent_name,
-            message=_build_turn_prompt(room, agent_name, delta, cold, user_facing),
+            message=manifest_prefix + _build_turn_prompt(room, agent_name, delta, cold, user_facing),
             triggered_by="room",
             system_prompt=room_prompt,
-            source_user_email=getattr(current_user, "email", None),
+            images=images or None,
+            source_user_email=client_email,
             timeout_seconds=ROOM_TURN_TIMEOUT_SECONDS,
             resume_session_id=cached,
             persist_session=True,
@@ -1134,10 +1190,64 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
         _broadcast("room_participant_state",
                    {"room_id": room_id, "identity": agent_name, "state": "idle"})
 
+    # `TaskExecutionStatus` is a `str` Enum, so a plain string compare works for
+    # either — but normalise anyway rather than relying on that at a distance.
     status = getattr(result, "status", None)
+    status = str(getattr(status, "value", status) or "").strip().lower()
     reply = (getattr(result, "response", "") or "").strip()
 
-    if status in ("failed", "cancelled") or not reply:
+    # #2795: the RETURNED status is not always the one that stands.
+    #
+    # On a current agent image a cancelled turn comes back labelled: the agent
+    # relabels its own 504/502/500 to a `cancelled` 200 (#679 F3), so
+    # `execute_task` returns CANCELLED and the branch below is exact. An OLDER
+    # image re-raises instead, `execute_task` writes FAILED, that write LOSES
+    # the CAS to the CANCELLED the terminate route already wrote — and returns
+    # FAILED anyway. The room would then blame the agent for a stop the reader
+    # asked for, and drop a resume handle that was never bad.
+    #
+    # The 1:1 does not have this problem because it remembers the cancel
+    # client-side (`cancelledExecutionIds`); a room has no such memory, so it
+    # asks the row that actually stands. One indexed read, only on a path that
+    # has already lost an LLM turn, and fail-open — an unreadable row leaves the
+    # returned status in force.
+    # Only where it can change the outcome: the branch below fires on FAILED or
+    # on an empty reply, so anything else — a success with a reply — must pay
+    # nothing. (A test pinned this after the first draft re-read on every
+    # successful turn.)
+    if status != "cancelled" and (status == "failed" or not reply):
+        eid = getattr(result, "execution_id", None)
+        if eid:
+            try:
+                from database import db as core_db
+                persisted = core_db.get_execution(eid)
+                persisted_status = str(
+                    getattr(getattr(persisted, "status", None), "value",
+                            getattr(persisted, "status", None)) or ""
+                ).strip().lower()
+                if persisted_status == "cancelled":
+                    status = "cancelled"
+            except Exception as e:  # noqa: BLE001 — never let a label read break the turn
+                logger.warning("room %s: could not re-read execution %s for its "
+                               "terminal label (%s)", room_id, eid, e)
+
+    # #2795: a CANCEL IS NOT A FAILURE, and the room must not describe it as
+    # one. A person can now stop a room turn from the tile or the Work tab, and
+    # the line they got for doing it was "<agent> could not respond (no
+    # response)." — the surface reporting a fault for something the reader
+    # themselves just asked for, which is the AC's "no 'something went wrong'
+    # for a cancel the user asked for".
+    #
+    # It also must not clear the resume handle. That drop exists for a DEAD
+    # handle (the Session-tab idiom below), and a cancel is no evidence of one
+    # — the next turn would pay for a cold rebuild of a context that was fine.
+    # The read cursor is left alone either way, so the delta this turn never
+    # answered is re-delivered on the next wake.
+    if status == "cancelled":
+        _post_system(room_id, f"{agent_name}'s turn was stopped.")
+        return
+
+    if status == "failed" or not reply:
         # A dead resume handle is the common cause — drop it so the next wake is
         # cold instead of failing the same way forever (Session-tab idiom).
         if cached:

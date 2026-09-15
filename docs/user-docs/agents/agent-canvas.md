@@ -19,6 +19,8 @@ Every agent has a **Canvas** tab on its detail page. In the Workspace the same c
 3. Open the agent's **Canvas** tab, or the rail's **Canvas** tab in the Workspace. A dot on the rail tab means the canvas changed since you last looked. Narrow screens and the rail collapse layouts to one column.
 4. Ask for changes the same way. The agent patches only the blocks that changed; the header timestamp moves.
 
+In the Workspace, the canvas you have open on the rail is the one the agent means by "this". A request that names no canvas lands on the open one, then on `main` if nothing is open, and the agent says which canvas it changed when you did not name one. If you delete the open canvas mid-conversation, the agent's next write does not recreate it. The Chat tab on Agent Detail does not carry an open canvas — name the canvas there.
+
 During a [voice call](../advanced/voice-chat.md) the agent draws on `main` while it talks, and what it drew stays on the canvas afterwards. Blocks the agent wrote itself survive a call untouched: the call only ever replaces its own.
 
 ## Layouts at a Glance
@@ -86,7 +88,10 @@ the **Canvas tab in the Workspace rail**.
   un-pin it. Pinning is recorded in the audit log too, from either surface,
   because a pin decides what everyone who can see the agent sees first.
 - **Search** appears once there are more than six, matching the title or the id.
-  Each row in Manage shows how old it is and whether it may be out of date.
+  Each row in Manage shows how old it is; a **stale** mark means one of the
+  agent's runs finished after the canvas was written. It is a hint, not a
+  verdict — the run that wrote the canvas counts too, so read the header's two
+  timestamps before retiring anything.
 - **Deleting the default canvas is fine.** The agent recreates it the next time
   it writes; you lose the contents, not the surface.
 
@@ -106,21 +111,30 @@ All canvas content is sanitised before it renders. Scripts never execute, `<styl
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents/{name}/canvas` | GET | List the agent's canvases (metadata) |
+| `/api/agents/{name}/canvas` | GET | List the agent's canvases (metadata, pinned first). Every row carries `updated_at`, `pinned` and `agent_last_run_at` — when the agent last finished a run |
+| `/api/agents/{name}/canvas/context` | GET | Which canvas is open for a turn — `?execution_id=`; returns `{canvas_id, source, open_canvas_id, default_canvas_id}`, where `source` says why (`explicit`, `open` or `default`) |
 | `/api/agents/{name}/canvas/{canvas_id}` | GET | One canvas with its blocks |
-| `/api/agents/{name}/canvas/{canvas_id}` | PUT | Create or replace a canvas — `{title?, blocks, audience?, template?, execution_id?}`; at most 50 blocks / 512 KB. The result carries `visible_to_requester` and `visibility_note` |
+| `/api/agents/{name}/canvas/{canvas_id}` | PUT | Create or replace a canvas — `{title?, blocks, audience?, template?, execution_id?}`; at most 50 blocks / 512 KB. The result carries `visible_to_requester` and `visibility_note`. Creating a new canvas when the agent already holds 100 is refused with `409`; updating an existing one always works |
 | `/api/agents/{name}/canvas/{canvas_id}` | PATCH | Replace named blocks in place — `{blocks:[{id, kind, title?, slot?, payload}]}`; an unknown id is refused by name |
-| `/api/agents/{name}/canvas/{canvas_id}` | DELETE | Remove a canvas |
+| `/api/agents/{name}/canvas/{canvas_id}` | DELETE | Remove a canvas. An agent key may remove its own; a person must own the agent (or be an admin) |
+| `/api/agents/{name}/canvas/bulk-delete` | POST | Remove several — `{canvas_ids}`; same gate as DELETE; returns `{requested, deleted}` |
+| `/api/agents/{name}/canvas/{canvas_id}/pin` | PUT | Pin or unpin — `{pinned}`; owner or admin, and never an agent key |
+| `/api/agents/{name}/canvas/{canvas_id}/share` | POST | Mint a share link — `{scope?, expires_at?}`, `scope` is `authorized` (default) or `public`; returns the share with its `url`. Owner or admin, never an agent key |
+| `/api/agents/{name}/canvas/shares` | GET | List the agent's live share links (`?canvas_id=` narrows to one canvas); the same gate as creating one, because the payload carries the token |
+| `/api/agents/{name}/canvas/shares/{share_id}` | DELETE | Revoke a link. The row is kept so the link can say it was turned off |
+| `/api/public/canvas/{token}` | GET | What a shared link opens. Answers with the canvas, or a status: `sign_in_required`, `not_authorized`, `not_found`, `revoked` or `expired` |
 
 An agent-scoped key writes only its own canvas; an operator with access to the agent may write through the REST routes too. Reads follow the audience rules above. Per-kind limits: Mermaid source up to 20,000 characters, inline images up to 64 KB.
 
 ### MCP Tools
 
-- `set_canvas(blocks, canvas_id?, title?, audience?, template?, execution_id?)` — write the whole canvas. Omit `canvas_id` for `main`. Pass `execution_id` and the result says whether the person in this conversation can see it: `visible_to_requester` is `true`, `false` (the audience does not reach them — `visibility_note` says what to do) or `null` (could not be determined).
-- `patch_canvas(blocks, canvas_id?)` — replace specific blocks by id, leaving the rest, the title and the audience untouched.
-- `get_canvas(canvas_id?)` — read a canvas, ids included, to see what to patch.
-- `list_canvases()` — ids, titles, audiences and update times.
-- `clear_canvas(canvas_id)` — remove one.
+- `set_canvas(blocks, canvas_id?, title?, audience?, template?, execution_id?)` — write the whole canvas. Pass `execution_id` and the result says whether the person in this conversation can see it: `visible_to_requester` is `true`, `false` (the audience does not reach them — `visibility_note` says what to do) or `null` (could not be determined).
+- `patch_canvas(blocks, canvas_id?, execution_id?)` — replace specific blocks by id, leaving the rest, the title and the audience untouched.
+- `get_canvas(canvas_id?, execution_id?)` — read a canvas, ids included, to see what to patch.
+- `list_canvases()` — ids, titles, audiences, update times and `agent_last_run_at`.
+- `clear_canvas(canvas_id)` — remove one. Succeeds whether or not the canvas existed.
+
+When `canvas_id` is omitted, the three read-and-write tools ask `GET …/canvas/context` first: the canvas the user has open wins, then `main`. An explicit `canvas_id` always wins. Pin, bulk delete and the share routes have no MCP tool on purpose — they decide what other people see, and the routes refuse an agent key as well.
 
 **API Endpoints**: See [Backend API Docs](http://localhost:8000/docs) for full schemas.
 

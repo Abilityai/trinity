@@ -17,7 +17,7 @@ Roles are hierarchical: admin > creator > operator > user. Higher roles inherit 
 
 ### The admin account
 
-The `admin` account is created once: from `ADMIN_PASSWORD` at first boot, or through the first-run **Create your admin account** form when no password was set. The form only ever provisions the **first** admin — on an install that already has a usable admin account it refuses, whether or not the setup flag says setup is complete. See [Setup](setup.md).
+The `admin` account is created once: from `ADMIN_PASSWORD` at first boot, or through the first-run **Create your admin account** form when no password was set (the DigitalOcean Marketplace 1-Click path — the first browser visitor claims the instance). The form only ever provisions the **first** admin — on an install that already has a usable admin account it refuses, whether or not the setup flag says setup is complete. See [Setup](setup.md).
 
 If two-factor authentication applies to the account (requires an entitlement), a correct password does not sign you in on its own: the login page moves to the second-factor step, and no session exists until it is completed. Two-factor can start applying the moment an administrator enables the role policy, before anyone has enrolled.
 

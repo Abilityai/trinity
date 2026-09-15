@@ -24,6 +24,24 @@ Two invariants:
    their own, and `ephemeral` keeps only its (non-lock) quota seed — proof the
    consolidation actually removed the copies rather than adding another.
 
+**Both trees are walked (#2742).** This guard originally walked `src/backend`
+only, and Invariant #5 names exactly that failure — *"a guard that walks only one
+of the two trees is not a guard"* (ent#314, whose AST scan had an empty allowlist
+over the whole backend and still missed six bare `yaml.safe_load` calls in the
+agent server, because it never looked there). #2742 gave the agent-server tree a
+single-flight of its own, so the walk now covers
+`docker/base-image/agent_server/` too, with agent-server paths reported under an
+`agent_server/` prefix so the two trees can never collide in `_ALLOWED`.
+
+That tree currently issues **no** `nx=True` set, and deliberately gets no
+allowlist row: agents physically cannot route to Redis (they are on
+`trinity-agent-network`, Redis is on `trinity-platform-network`), so a
+distributed lock there would itself be the bug. #2742's coalescing is a
+different class — an in-process `asyncio.Future` slot on a single-process server
+— and is pinned behaviourally by `test_2742_git_status_lock_free.py`
+(`test_only_one_thread_is_used_per_inflight_computation` and the `shield` /
+slot-clearing tests) plus the one-home assertion at the bottom of this file.
+
 Plus the ACL trap: the leaf `redis_breaker_util.py` must never introduce
 `KEYS` / `.keys(` / `SCAN` — the backend Redis ACL is `-@dangerous`, so `KEYS`
 raises at runtime and a stubbed client hides it (learnings:
@@ -39,7 +57,14 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-_BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
+_REPO = Path(__file__).resolve().parents[2]
+_BACKEND = _REPO / "src" / "backend"
+_AGENT_SERVER = _REPO / "docker" / "base-image" / "agent_server"
+
+# The trees this guard walks → the prefix their findings are reported under.
+# Backend files keep their bare backend-relative path so every existing
+# `_ALLOWED` key is unchanged; agent-server files get an `agent_server/` prefix.
+_TREES = ((_BACKEND, ""), (_AGENT_SERVER, "agent_server/"))
 
 # Files permitted to issue a `set(..., nx=True, …)`. Keyed by backend-relative
 # POSIX path → the reason it is not a violation. Adding a NEW single-flight lock
@@ -54,6 +79,7 @@ _ALLOWED = {
     "services/operator_queue_service.py": "opqueue:leader — leader lease, verbatim copy of monitoring (#1632)",
     "services/skills_sync_service.py": "skills:sync:leader — leader lease (ent#236)",
     "services/canary_service.py": "canary:leader — Lua-CAD leader lease, the 8th shape (#1881)",
+    "services/sync_health_service.py": "synchealth:leader — leader lease in the #1464 monitoring shape (#2742). NOT adoptable: SingleFlightLock mints a unique token per acquire, so a lease could never recognise — and therefore never refresh — its own grant across cycles; a stable per-worker id is kept for exactly that",
     "services/subscription_recovery_service.py": "subscription:recovery:leader — leader lease in the #1464 monitoring shape (#447). NOT adoptable: SingleFlightLock mints a UNIQUE token per acquire, so a lease could never recognise — and therefore never refresh — its own grant across cycles; this one keeps a stable per-worker id for exactly that",
     # --- pre-#1920 hand-rolled single-flight locks NOT in this issue's scope ---
     #     (the LeaderLease / other-lock consolidation follow-up surface).
@@ -95,11 +121,15 @@ _ADOPTED_MUST_BE_CLEAN = {
 }
 
 
-def _iter_backend_py():
-    for path in _BACKEND.rglob("*.py"):
-        if "/tests/" in path.as_posix():
+def _iter_guarded_py():
+    """Every .py in BOTH guarded trees, with the prefix it reports under."""
+    for root, prefix in _TREES:
+        if not root.is_dir():
             continue
-        yield path
+        for path in root.rglob("*.py"):
+            if "/tests/" in path.as_posix():
+                continue
+            yield path, root, prefix
 
 
 def _has_nx_true_set(tree: ast.AST) -> bool:
@@ -122,13 +152,13 @@ def _has_nx_true_set(tree: ast.AST) -> bool:
 
 def _collect_nx_true_files() -> set[str]:
     found: set[str] = set()
-    for path in _iter_backend_py():
+    for path, root, prefix in _iter_guarded_py():
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:
             continue
         if _has_nx_true_set(tree):
-            found.add(path.relative_to(_BACKEND).as_posix())
+            found.add(prefix + path.relative_to(root).as_posix())
     return found
 
 
@@ -181,3 +211,32 @@ def test_helper_has_no_KEYS_or_scan():
             f"redis_breaker_util.py must not use {needle!r} — the ACL blocks "
             "KEYS/SCAN and the locks are single fixed keys (no scan needed)."
         )
+
+
+def test_both_trees_are_actually_walked():
+    """Meta-assertion with teeth: if the agent-server root is renamed or moved,
+    the walk would silently degrade to the single-tree guard ent#314 was burned
+    by, and every other test here would still pass."""
+    assert _AGENT_SERVER.is_dir(), (
+        f"the agent-server tree is not where this guard looks ({_AGENT_SERVER}) — "
+        "the walk has silently degraded to backend-only"
+    )
+    walked = {root for _path, root, _prefix in _iter_guarded_py()}
+    assert walked == {_BACKEND, _AGENT_SERVER}
+
+
+def test_agent_server_single_flight_has_exactly_one_home():
+    """#2742 planted an in-process single-flight in the agent server. That class
+    is invisible to the `nx=True` scan above (it uses no Redis — agents cannot
+    route to it at all), so its "one home" property is asserted directly: a
+    second copy is how a pattern quietly becomes a family."""
+    homes = sorted(
+        path.relative_to(_AGENT_SERVER).as_posix()
+        for path, _root, _prefix in _iter_guarded_py()
+        if _root == _AGENT_SERVER and "_STATUS_INFLIGHT" in path.read_text(encoding="utf-8")
+    )
+    assert homes == ["routers/git.py"], (
+        "the /api/git/status single-flight must live in exactly one module "
+        f"(found: {homes}). A second copy means a second slot with its own "
+        "clearing rules — adopt the existing one or justify the divergence."
+    )
