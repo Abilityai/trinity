@@ -2950,15 +2950,21 @@ class FanOutRequest(BaseModel):
     """Request model for fan-out parallel task execution."""
     tasks: List[FanOutTask]
     agent: str = "self"
-    # Optional overall fan-out deadline. When None, no outer deadline is
-    # applied — each sub-task is still bounded by the target agent's
-    # configured execution_timeout_seconds (TIMEOUT-001).
+    # Optional deadline on WAITING for the batch (#2524) — reaching it returns
+    # `deadline_exceeded` without stopping the subtasks. When None, the wait
+    # covers the whole batch: ceil(N / concurrency) × the agent's
+    # execution_timeout_seconds (TIMEOUT-001), plus a buffer.
     timeout_seconds: Optional[int] = None
     max_concurrency: int = 3
     policy: str = "best-effort"
     model: Optional[str] = None
     system_prompt: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
+    # #2524: return `{fan_out_id, status="accepted"}` immediately, without
+    # holding the connection for the whole batch. The caller polls
+    # `GET /api/agents/{name}/fan-out/{fan_out_id}`. Default False keeps the
+    # blocking contract every existing caller depends on.
+    async_mode: Optional[bool] = False
 
     @field_validator("tasks")
     @classmethod
@@ -3038,10 +3044,12 @@ class FanOutResponse(BaseModel):
 class FanOutBatchTask(BaseModel):
     """One subtask of a batch, as recorded on its execution row."""
     execution_id: str
+    # The caller's own `FanOutTask.id`, persisted on the row as
+    # `fan_out_task_id` since #2524. NULL on rows written before that column.
+    task_id: Optional[str] = None
     status: str
-    # The dispatched message. It is the only thing tying a row back to the task
-    # the caller named — `FanOutTask.id` is a request-local label and is not
-    # persisted anywhere on the row.
+    # The dispatched message — the only link back to the task the caller named
+    # on rows that predate `task_id`.
     message: Optional[str] = None
     response: Optional[str] = None
     error: Optional[str] = None
