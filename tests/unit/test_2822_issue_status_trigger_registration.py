@@ -1,8 +1,9 @@
 """#2822 — the status promoter's trigger must be readable from `dev`.
 
 #2769 moved this workflow from `pull_request` to `pull_request_target` so fork
-PRs would get a token that can write labels. It then produced ZERO runs: six
-PRs merged to `dev` and four issues were relabelled by hand.
+PRs would get a token that can write labels. It then produced ZERO runs.
+Measured 2026-09-15: 17 PRs merged into `dev` after that commit, 10 of them
+naming 11 issues with a closing keyword, every one relabelled by hand.
 
 Neither trigger could start a run, for opposite reasons:
 
@@ -20,7 +21,9 @@ and the failure is silent — no run, nothing red.**
 
 `push` is read from the ref being pushed ("this includes workflows that are not
 merged into the default branch"), so the fix takes effect on the merge that
-lands it. These guards pin that, and — following
+lands it — and it is the one trigger this repo already proves live on `dev`:
+`deploy-dev.yml` and fifteen others declare `push: branches: [dev]` and ran on
+every merge this file missed. These guards pin that, and — following
 `test_2533_alembic_head_watch.py` — actually EXECUTE the workflow's own
 `script:` under node, because the promotion logic changed shape too: a `push`
 payload carries no pull request, so the merged PR is resolved from the commits.
@@ -256,7 +259,7 @@ def _run(*, commits, pulls, head_commit=..., ref="refs/heads/dev", label_errors=
     assert proc.returncode == 0, f"node failed:\n{proc.stderr}"
     marker = "@@RESULT@@"
     line = next(
-        (l for l in proc.stdout.splitlines() if l.startswith(marker)), None
+        (ln for ln in proc.stdout.splitlines() if ln.startswith(marker)), None
     )
     assert line, f"harness produced no result:\n{proc.stdout}\n{proc.stderr}"
     out = json.loads(line[len(marker) :])
@@ -286,17 +289,39 @@ def test_the_keyword_is_read_from_the_pr_title_too():
 
 
 @needs_node
-def test_an_open_release_pr_cannot_promote_the_whole_backlog():
-    """A commit on `dev` is also in the HEAD of the open `dev` -> `main`
-    release PR, whose body closes every issue in the release. Reading that PR
-    would relabel the entire released backlog back to `status-in-dev` on every
-    single merge."""
+def test_an_open_pr_that_merely_contains_the_commit_promotes_nothing():
+    """The endpoint documents that for a commit "not present in the default
+    branch" — every `dev` commit, until a release cut — it returns "merged and
+    open pull requests associated with the commit". Measured against
+    `b8a790b2`: six PRs, one merged and five OPEN, all of them `base: dev`,
+    because any branch cut from `dev` afterwards contains that commit.
+
+    Without the `merged_at` filter, one merge would promote the close list of
+    every open PR in flight."""
     out = _run(
         commits=["c0ffee"],
         pulls={
             "c0ffee": [
                 _pr(2830, body="Closes #2822"),
-                _pr(2900, base="main", merged=False, body="Closes #1 Closes #2"),
+                _pr(2793, merged=False, body="Fixes #2700"),
+                _pr(2804, merged=False, body="Closes #1234"),
+            ]
+        },
+    )
+    assert [c["issue"] for c in out["addLabels"]] == [2822]
+
+
+@needs_node
+def test_an_open_release_pr_cannot_promote_the_whole_backlog():
+    """The other half: the `dev` -> `main` release PR's head contains every
+    dev commit and its body closes every issue in the release. `base.ref` is
+    what excludes it, since `merged_at` will not once the release lands."""
+    out = _run(
+        commits=["c0ffee"],
+        pulls={
+            "c0ffee": [
+                _pr(2830, body="Closes #2822"),
+                _pr(2900, base="main", body="Closes #1 Closes #2"),
             ]
         },
     )
