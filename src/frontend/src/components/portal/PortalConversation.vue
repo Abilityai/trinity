@@ -1320,6 +1320,11 @@ watch(() => props.prefill, (v) => {
 })
 
 onMounted(async () => {
+  // #2794 follow-up: opening a conversation draws the carry line. Files sent to
+  // this agent BEFORE now belong to a previous visit or a previous message and
+  // must not ride along on an escalation. The composer starts with no chips for
+  // the same reason; this is that act for the rail, which has none.
+  store.markUploadsCarried(props.agent?.name)
   window.addEventListener('online', onNet)
   window.addEventListener('offline', onNet)
   document.addEventListener('click', onDocClick)
@@ -1780,6 +1785,9 @@ async function deliver(text) {
     // refresh on a conversation nobody is talking in.
     deliverableTick.value += 1
     clearAttachments()
+    // …and the rail's half of the same set (#2794 follow-up): this turn has
+    // gone out, so nothing sent before it is still pending.
+    store.markUploadsCarried(props.agent?.name)
     return true
   } catch (err) {
     return { error: deliveryFailureReason(err) }

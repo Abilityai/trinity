@@ -696,7 +696,7 @@ import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
 import {
-  partitionAttachments, fanOutPlan, carriedNotice, noticeIsProblem,
+  partitionAttachments, fanOutPlan, carriedNotice, noticeIsProblem, mergeCarrySources,
 } from '@/components/portal/portalAttachments'
 import PortalAgentBand from '@/components/portal/PortalAgentBand.vue'
 import PortalAgentDetails from '@/components/portal/PortalAgentDetails.vue'
@@ -1263,7 +1263,14 @@ async function onEscalateToRoom({ agents, message, attachments = [] } = {}) {
     // participant), applied to the participants that do not already have the
     // file — the origin agent received it when the chip was drawn, and sending
     // it again would put two copies in one inbox.
-    const { carried, dropped } = partitionAttachments(attachments)
+    // Both upload surfaces, not just the composer: the rail's Files panel sends
+    // straight to its target and holds no pending state, so a file attached
+    // there was invisible to the escalation — no carry and no notice. The
+    // carry log is the store's record of uploads that have not yet gone out
+    // with a message; the composer's own entries win a tie.
+    const { carried, dropped } = partitionAttachments(
+      mergeCarrySources(attachments, store.carryableUploadsFor(agents[0])),
+    )
     const plan = fanOutPlan(carried, { origin: agents[0], participants: agents })
     // Read OFF the plan rather than re-derived from `agents`: the plan already
     // excludes the origin agent and collapses a duplicate mention, and two
@@ -1286,6 +1293,11 @@ async function onEscalateToRoom({ agents, message, attachments = [] } = {}) {
       }
       if (missed.length) failures.push({ name: item.name, agents: missed })
     }
+
+    // Consumed: these have now gone out with a message, so a LATER escalation
+    // in this conversation must not carry them a second time. Same moment the
+    // composer clears its chips.
+    store.markUploadsCarried(agents[0])
 
     const notice = carriedNotice({ carried, dropped, failures, recipients })
     if (notice) {

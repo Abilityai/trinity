@@ -51,6 +51,53 @@ export function partitionAttachments(entries) {
 }
 
 /**
+ * The one carry set, from BOTH upload surfaces.
+ *
+ * The composer is not the only way to attach a file: the rail's Files panel
+ * (`PortalRailFiles.vue`) sends straight to its "Send to" target and keeps no
+ * pending state, so a person who attached there and then @mentioned a second
+ * agent had nothing carried — and, because the composer held no attachments,
+ * not even a notice saying so. Both surfaces funnel through
+ * `clientPortal.uploadDocument`, which logs them; this merges the two views.
+ *
+ * Composer entries WIN a tie: they carry the live per-file outcome the chip is
+ * rendering, and the carry-log entry is the same upload seen from the funnel.
+ * Identity is `name + size` rather than the `File` object, because the two
+ * surfaces hold different references to the same upload only when the composer
+ * was used — dedup by reference would double-carry every composer file.
+ *
+ * Rail entries are normalised into the entry shape the rest of this module
+ * speaks (`partitionAttachments` reads `attachmentState`), and they are
+ * `done: true` by construction: `uploadDocument` logs only after the server
+ * took the file.
+ */
+export function mergeCarrySources(composerEntries, railUploads) {
+  const merged = []
+  const seen = new Set()
+  const key = (e) => `${e.name}\u0000${e.size ?? ''}`
+
+  for (const e of Array.isArray(composerEntries) ? composerEntries : []) {
+    if (!e || !e.name) continue
+    seen.add(key(e))
+    merged.push(e)
+  }
+  for (const u of Array.isArray(railUploads) ? railUploads : []) {
+    if (!u || !u.name || !u.file) continue
+    if (seen.has(key(u))) continue
+    seen.add(key(u))
+    merged.push({
+      name: u.name,
+      size: u.size,
+      file: u.file,
+      uploading: false,
+      error: '',
+      done: true,
+    })
+  }
+  return merged
+}
+
+/**
  * Who still needs each carried file.
  *
  * `origin` already has it — that is what the 1:1 upload did — so it is excluded
