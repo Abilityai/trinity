@@ -27,6 +27,12 @@ Nothing is overwritten silently. The winning skill carries a `shadowed_by` marke
 
 Deleting a source does **not** unassign its skills — they keep resolving through whatever source still provides them.
 
+#### Upgraded from a single-library install
+
+An installation that predates multiple sources carries one legacy skills-library URL setting. On the first sync after upgrading, an install with no sources adopts that URL as a custom source named **Migrated library** (tracking the branch it tracked before) and clears the setting — no admin action needed. If the install already has sources, the URL is matched against them by repository, so `https://github.com/Org/repo.git`, `https://github.com/Org/repo/` and `github.com/Org/repo` all count as the same source, and nothing happens.
+
+A legacy URL that names a repository which is **not** one of your sources is refused — adding a source is an admin action, never an automatic one — and Trinity files one low-priority **Legacy skills-library adoption refused** heads-up in the Operations queue, from `_skills-sync`. It is one row per refused URL, however many syncs run; a different URL raises its own. Dismiss it by **cancelling** it (`POST /api/operator-queue/{id}/cancel`, or **Clear All** on the Needs Response tab, which cancels every open item) rather than clicking **Got it**: an acknowledged alert waits for an agent reply that never comes and cannot be cleared, while a cancelled one stays gone. If you want that repository, add it as a source in the panel above. The legacy setting itself can no longer be written through the settings API.
+
 #### Repository layout
 
 A source repository can lay its skills out in one of three ways. Trinity tries them in order and falls through on anything invalid:

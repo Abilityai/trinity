@@ -1,11 +1,13 @@
 """
 Git sync endpoints for GitHub bidirectional sync.
 """
+import asyncio
 import functools
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import logging
 import threading
@@ -49,9 +51,13 @@ def _compute_ahead_behind(home_dir: Path, branch: str) -> tuple:
     here has non-empty stderr, so a failure to resolve counts is harmless.
     """
     try:
-        result = subprocess.run(
+        # #2742: sweep-registered. Reached from the status path AND from
+        # `_conflict_response`, i.e. the 409 path of every locked endpoint —
+        # `run_registered` takes neither `capture_output` nor `text` (it hardcodes
+        # PIPE + text in Popen), so both kwargs are deleted, not renamed.
+        result = run_registered(
             ["git", "rev-list", "--left-right", "--count", f"origin/{branch}...HEAD"],
-            capture_output=True, text=True, cwd=str(home_dir), timeout=10
+            cwd=str(home_dir), timeout=10,
         )
         if result.returncode == 0:
             parts = result.stdout.strip().split()
@@ -109,7 +115,13 @@ _SYNC_STATE_DEFAULT: Dict = {
     "maintenance_status": None,  # #1595: last maintenance outcome string
     "maintenance_failures": 0,  # #1595: consecutive failed maintenance attempts
     "maintenance_next_attempt_at": None,  # #1595: backoff gate (ISO timestamp)
+    "last_lock_recovery": None,  # #2742: the boot reap's own record of a wedge
 }
+
+
+# #2742: hard ceiling on the agent-authored sync-state document (see
+# `_read_sync_state_file`). Not a tunable — it is a boundary guard.
+_SYNC_STATE_MAX_BYTES = 64 * 1024
 
 
 def _sync_state_path(home_dir: Path) -> Path:
@@ -122,6 +134,19 @@ def _read_sync_state_file(home_dir: Path) -> Dict:
     if not path.exists():
         return dict(_SYNC_STATE_DEFAULT)
     try:
+        # #2742: bound the read before taking it. This file is FULLY
+        # agent-authored (`merged.update(data)` below merges it wholesale) and
+        # the backend's poller reads every agent concurrently via
+        # asyncio.gather — so an unbounded read_text() on a runaway or hostile
+        # sync-state.json OOMs this container's uvicorn AND the backend, once a
+        # minute. 64 KiB is ~30x the largest legitimate document.
+        size = path.stat().st_size
+        if size > _SYNC_STATE_MAX_BYTES:
+            logger.warning(
+                "sync-state.json too large (%s bytes > %s), using defaults",
+                size, _SYNC_STATE_MAX_BYTES,
+            )
+            return dict(_SYNC_STATE_DEFAULT)
         data = json.loads(path.read_text())
         if not isinstance(data, dict):
             raise ValueError("sync-state.json root is not an object")
@@ -219,6 +244,267 @@ def _write_sync_state_file(
     return prior
 
 
+def _patch_sync_state(home_dir: Path, updates: Dict) -> Dict:
+    """Atomically set ONLY the given keys in `sync-state.json` (#2742).
+
+    A dedicated writer is mandatory, not tidiness: `_write_sync_state_file`
+    unconditionally stamps `last_sync_at = now`, so reusing it to record an
+    observability field would mark a never-synced agent as freshly synced and
+    turn its dashboard dot green. This one never touches `last_sync_status`,
+    `last_sync_at` or `consecutive_failures`.
+
+    Same atomic tmp + `os.replace` posture as the sync writer, and the same
+    read-modify-write race against it — which is why the caller set is kept tiny
+    (one write per container boot), and why the stuck-lock detector's per-tick
+    ledger deliberately does NOT live in this file.
+    """
+    state = _read_sync_state_file(home_dir)
+    state.update(updates)
+    path = _sync_state_path(home_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(state, indent=2))
+    os.replace(tmp_path, path)
+    return state
+
+
+# #2742: written by `startup.sh` when the boot reap actually removed something.
+_LOCK_RECOVERY_MARKER = ".trinity/lock-recovery.json"
+_LOCK_RECOVERY_MARKER_MAX_BYTES = 4096
+
+
+def _record_lock_recovery(home_dir: Path) -> Optional[Dict]:
+    """Fold `startup.sh`'s boot-reap marker into sync-state, once (#2742).
+
+    The reap itself is the safe half of AC3 and already existed — it runs where
+    "no git process is running" is definitional. The missing half was that it
+    was silent. This turns the one-shot marker into a durable
+    `sync_state.last_lock_recovery` the backend poller can see, then deletes the
+    marker so the event is reported once rather than every minute forever.
+
+    Server-composed on read: the marker is written by our own startup script,
+    but it lives in an agent-writable directory, so only the parsed timestamp
+    and a bounded label survive. Best-effort throughout — a failure here must
+    never fail a status read.
+    """
+    marker = home_dir / _LOCK_RECOVERY_MARKER
+    try:
+        if not marker.is_file():
+            return None
+        if marker.stat().st_size > _LOCK_RECOVERY_MARKER_MAX_BYTES:
+            marker.unlink(missing_ok=True)
+            return None
+        data = json.loads(marker.read_text())
+        if not isinstance(data, dict):
+            marker.unlink(missing_ok=True)
+            return None
+        record = {
+            "at": str(data.get("at") or "")[:64],
+            "locks": str(data.get("locks") or "")[:200],
+            "source": "startup_reap",
+        }
+        _patch_sync_state(home_dir, {"last_lock_recovery": record})
+        marker.unlink(missing_ok=True)
+        logger.warning(
+            "git lock recovery recorded from the boot reap (locks=%s)",
+            record["locks"],
+        )
+        return record
+    except (OSError, ValueError, json.JSONDecodeError):
+        logger.debug("could not fold the lock-recovery marker", exc_info=True)
+        try:
+            marker.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Stuck-lock OBSERVER (#2742) — reports, never unlinks. Read the reasoning
+# before shortening any of it; every clause below was a measurement.
+# ---------------------------------------------------------------------------
+
+# Number of consecutive unchanged sightings of the SAME inode before a lock is
+# called a wedge, and the minimum wall span those sightings must cover. The
+# tunable is the SIGHTING COUNT, not a wall-clock age, and that is the whole
+# point: `st_mtime` on an index.lock is stamped at create and never advances
+# (git does not write into the fd until the final flush), so age measures the
+# IN-FLIGHT OPERATION, not abandonment. Measured: a healthy `git add -A` holds a
+# 0-byte lock for 100% of its life — 3.9 s on 450 MB, 29 s at 60 000 files,
+# 155 s with a `clean` filter configured. A one-tick age gate cannot tell that
+# apart from a wedge; two observations of an unchanged inode can. It is also
+# immune to a forward NTP step or a live migration, which instantly age every
+# existing lock at once — the one clock direction that makes a false positive
+# MORE likely.
+_STUCK_LOCK_MIN_SIGHTINGS = 3
+_STUCK_LOCK_MIN_AGE_SECONDS = 900  # 15 min
+
+# The sighting ledger, in memory and deliberately NOT in sync-state.
+#
+# Per-tick writes into the agent-authored sync-state document would race the
+# auto-sync writer's own read-modify-write and could drop `consecutive_failures`
+# or `last_sync_status` — an observability path corrupting the very feed it
+# exists to brighten. And it does not need to be durable: the only thing that
+# clears a genuinely wedged lock is a container restart, which clears this too.
+# Keyed by absolute candidate path; monotonic clock so a clock step cannot forge
+# stability either.
+_LOCK_SIGHTINGS: Dict[str, Dict] = {}
+
+_GITFILE_MAX_BYTES = 4096
+
+
+def _resolve_git_dir(home_dir: Path) -> Optional[Path]:
+    """The REAL gitdir for `home_dir`, or None when there isn't one to reason about.
+
+    `home_dir/".git"` is a plain directory for an ordinary clone, but a FILE
+    holding `gitdir: <path>` for a linked worktree (`git worktree add`) and for a
+    submodule — both of which an agent can create in its own workspace. Assuming
+    a directory makes the observer look in a place where the lock provably is
+    not, while the real one sits at `<gitdir>/worktrees/<wt>/index.lock`.
+
+    A symlinked `.git` returns None: a follow-stat reasons about one file while
+    any action would touch another, and this code refuses to be in that position
+    even though it only ever reads.
+    """
+    git_path = home_dir / ".git"
+    st = os.lstat(git_path)  # OSError if absent — caller owns it
+    if stat.S_ISLNK(st.st_mode):
+        return None
+    if stat.S_ISDIR(st.st_mode):
+        return git_path
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    if st.st_size > _GITFILE_MAX_BYTES:
+        return None
+    text = git_path.read_text(errors="replace")
+    for line in text.splitlines():
+        if line.startswith("gitdir:"):
+            target = line.split("gitdir:", 1)[1].strip()
+            if not target:
+                return None
+            resolved = Path(target)
+            if not resolved.is_absolute():
+                resolved = (home_dir / resolved).resolve()
+            return resolved if resolved.is_dir() else None
+    return None
+
+
+def _index_lock_candidates(git_dir: Path):
+    """`<gitdir>/index.lock` plus the submodule and linked-worktree indexes.
+
+    A lock under `modules/` or `worktrees/` is covered by neither the per-cycle
+    reaper nor (before #2742) the boot reap, so those wedges used to be
+    permanent and survive every restart.
+    """
+    yield git_dir / "index.lock"
+    for sub in ("modules", "worktrees"):
+        base = git_dir / sub
+        try:
+            if not base.is_dir():
+                continue
+            yield from base.glob("*/index.lock")
+        except OSError:
+            continue
+
+
+def _index_lock_stuck(home_dir: Path) -> Optional[Dict]:
+    """Report a lock that looks abandoned. **Never unlinks anything.**
+
+    Why there is no delete here, in one place so nobody re-derives it:
+
+    1. `st_size == 0` is the signature of a LIVE writer, not an abandoned one.
+       git creates the lock with O_EXCL *before* walking the worktree and writes
+       the new index into it only at the very end.
+    2. `st_mtime` never advances, so age measures the in-flight operation.
+    3. A wrong unlink is permanent and strictly worse than the wedge it repairs:
+       git renames by PATH, so after an unlink a second git owns the path and the
+       first git's closing `rename(index.lock, index)` promotes the second's
+       in-flight file onto `.git/index`. The corrupting process exits rc=0 with
+       empty stderr, and the resulting 0-byte index is cleared by nothing —
+       not the boot reap, not `_reap_stale_git_litter`, not `git reset`.
+    4. "No process holds this lock" is provable for free only when no processes
+       exist, i.e. at container boot — which is exactly where the repair lives.
+    5. `_REPO_LOCK` would not help: it excludes this server's own auto-sync
+       cycle and nothing else — not the agent's own `git add`, which is the
+       entire premise of #2742.
+
+    It also takes NO lock: an `lstat` needs no mutual exclusion, and holding
+    `_REPO_LOCK` across the observation would make a status poll a brand-new
+    source of 409 `agent_busy` on an operator's `POST /api/git/sync`.
+
+    Wrapped end to end in its own `except OSError` — it runs inside
+    `_compute_git_status`'s `try`, whose tail is `HTTPException(500)`, and a 500
+    makes the backend poller write NOTHING, so an EACCES or a gitlink `.git`
+    would silently darken the very feed this exists to brighten.
+    """
+    try:
+        git_dir = _resolve_git_dir(home_dir)
+        if git_dir is None:
+            return None
+
+        now = time.monotonic()
+        seen_paths = set()
+        report: Optional[Dict] = None
+
+        for candidate in _index_lock_candidates(git_dir):
+            key = str(candidate)
+            seen_paths.add(key)
+            try:
+                st = os.lstat(candidate)
+            except OSError:
+                _LOCK_SIGHTINGS.pop(key, None)
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                _LOCK_SIGHTINGS.pop(key, None)
+                continue
+
+            fingerprint = (st.st_ino, st.st_mtime_ns, st.st_size)
+            prior = _LOCK_SIGHTINGS.get(key)
+            if prior is None or prior["fingerprint"] != fingerprint:
+                # A changed (or brand-new) inode is a DIFFERENT operation — a
+                # finishing git replacing the lock looks exactly like this, and
+                # calling that a wedge is how a healthy 155-second `git add`
+                # gets reaped. Start counting again from one.
+                _LOCK_SIGHTINGS[key] = {
+                    "fingerprint": fingerprint,
+                    "first_seen": now,
+                    "count": 1,
+                }
+                continue
+
+            prior["count"] += 1
+            stable_for = now - prior["first_seen"]
+            if (
+                prior["count"] >= _STUCK_LOCK_MIN_SIGHTINGS
+                and stable_for >= _STUCK_LOCK_MIN_AGE_SECONDS
+                and report is None
+            ):
+                report = {
+                    "path": candidate.relative_to(git_dir).as_posix(),
+                    "age_seconds": max(0, int(time.time() - st.st_mtime)),
+                    "stable_for_seconds": int(stable_for),
+                    "sightings": prior["count"],
+                    "size_bytes": st.st_size,
+                }
+
+        # Forget candidates that no longer exist so the ledger cannot grow.
+        for gone in [k for k in _LOCK_SIGHTINGS if k not in seen_paths]:
+            _LOCK_SIGHTINGS.pop(gone, None)
+
+        if report is not None:
+            logger.warning(
+                "git index lock has been unchanged for %ss across %s status "
+                "reads (%s) — REPORTING ONLY, not removing it: a running git "
+                "may still hold it, and container restart is the only race-free "
+                "repair",
+                report["stable_for_seconds"], report["sightings"], report["path"],
+            )
+        return report
+    except OSError:
+        logger.debug("stuck-lock observation failed (non-fatal)", exc_info=True)
+        return None
+
+
 # #1596: auto-sync commits the workspace on every heartbeat and never ran git
 # maintenance, so `git gc --auto` (which only stacks incremental packs under this
 # write pattern) let one agent's .git reach 44GB / 2,267 packs. Consolidate when
@@ -244,6 +530,16 @@ _GIT_MAINTENANCE_LOOSE_THRESHOLD = int(
 # roulette), or run during a repack. Non-blocking everywhere: the cycle skips
 # when an operator op is in flight; operator endpoints 409 (`agent_busy`)
 # while a cycle/maintenance runs.
+#
+# #2742 — what it does NOT exclude, because misreading this produced a plan to
+# treat a successful non-blocking acquire as evidence of quiescence. It is an
+# in-process `threading.Lock`: it excludes the agent server's own auto-sync
+# cycle and its own operator endpoints, and NOTHING ELSE. It does not exclude
+# the agent's own git (Claude Code running `git add` in its turn) — the dominant
+# index writer in a Trinity agent and the entire premise of #2742 — nor the
+# backend's ~22 `docker exec` git sites (the repo says so itself at
+# `services/git_service.py`: "the backend's docker exec runs outside the agent
+# server's _REPO_LOCK"). Never treat holding it as "no git is running here".
 _REPO_LOCK = threading.Lock()
 
 
@@ -588,9 +884,11 @@ def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
     """
     if not current_branch.startswith("trinity/"):
         return current_branch
-    result = subprocess.run(
+    # #2742: sweep-registered (also reached from `sync_to_github` and
+    # `pull_from_github` under `_with_repo_lock` — intended, see the module note).
+    result = run_registered(
         ["git", "rev-parse", "--verify", "origin/main"],
-        capture_output=True, text=True, cwd=str(home_dir), timeout=10
+        cwd=str(home_dir), timeout=10,
     )
     return "main" if result.returncode == 0 else current_branch
 
@@ -619,10 +917,9 @@ def _persist_last_remote_sha(branch: str, home_dir: Path) -> None:
     has no lease and behaves like plain `--force` (one-time regression, not
     silent corruption).
     """
-    rev = subprocess.run(
+    # #2742: sweep-registered (also reached from `sync_to_github` under the lock).
+    rev = run_registered(
         ["git", "rev-parse", f"origin/{branch}"],
-        capture_output=True,
-        text=True,
         cwd=str(home_dir),
         timeout=10,
     )
@@ -757,39 +1054,91 @@ def _dual_ahead_behind_payload(current_branch: str, home_dir: Path) -> dict:
     }
 
 
-@router.get("/api/git/status")
-async def get_git_status():
-    """
-    Get git repository status including current branch, changes, and sync state.
-    Only available for agents with git sync enabled.
-    """
-    home_dir = Path("/home/developer")
-    git_dir = home_dir / ".git"
+# #2742: the one repo this handler ever reads. A module constant rather than an
+# inline literal so the single-flight slot (which is also module-global) and the
+# computation agree on their subject by construction.
+_STATUS_HOME_DIR = Path("/home/developer")
 
-    if not git_dir.exists():
-        return {
-            "git_enabled": False,
-            "message": "Git sync not enabled for this agent"
-        }
+# #2742 — CALLER bound. Set at or just past the point every real client has
+# already given up: the backend poller times out at 10 s, `git_service` at 30 s,
+# so a follower waiting longer than 35 s can only produce work nobody awaits.
+# Exceeding it is a 504, not a second computation.
+_STATUS_FOLLOWER_WAIT_SECONDS = 35
 
+# #2742 — COMPUTATION bound, deliberately a different number and a different
+# kind of thing. The child timeouts sum to ~130 s nominal (see
+# `_compute_git_status`'s docstring for the arithmetic) before `run_registered`'s
+# post-killpg drain, and on this design a slow leader costs no follower threads
+# but DOES hold the in-flight slot — so every caller in that window 504s. Cap it
+# so a wedged leader releases the slot instead of monopolising it.
+_STATUS_LEADER_DEADLINE_SECONDS = 90
+
+# #2742 — the single-flight slot, keyed by resolved home path.
+#
+# Production has exactly one repo, so a bare `Optional[Future]` would be correct
+# there — but any test that repoints `_STATUS_HOME_DIR` would then inherit a live
+# slot from the previous test and be served the PREVIOUS repo's payload. Keying
+# it costs three lines and removes the class.
+#
+# The check-and-set below is atomic WITHOUT a lock because there is no `await`
+# between the test and the assignment and the agent server is single-process
+# (`agent_server/main.py` calls `uvicorn.run(app, ...)` with no `workers=`). The
+# BACKEND is not single-process, which is what the #2742 Redis lease is for.
+_STATUS_INFLIGHT: Dict[str, "asyncio.Future"] = {}
+
+
+def _compute_git_status(home_dir: Path) -> Dict:
+    """The whole `/api/git/status` computation, as ONE blocking callable (#2742).
+
+    Extracted verbatim from the route handler so the handler can become a thin
+    wrapper. Nothing here is `async`: every step is a blocking `git` child, and
+    running ~8 of them directly on the agent's event loop is what this extraction
+    exists to stop.
+
+    Raises the same `HTTPException` 504/500 the route always raised, so the
+    contract at the boundary is unchanged.
+
+    **Child-timeout budget, written down because the arithmetic decides the
+    caller-side bounds.** Sequential worst case:
+    `rev-parse` 10 + `status` 10 + `log` 10 + `fetch` **30** + `merge-base` 10 +
+    `log`(ancestor) 10 + `remote get-url` 10 = 90, plus `_persist_last_remote_sha`
+    10, `_get_pull_branch` 10 and `_dual_ahead_behind_payload` 10 (20 on a
+    `trinity/*` branch) = **~130 s nominal**, before `run_registered`'s
+    post-`killpg` drain of up to 10 s per timing-out child. The flow doc's old
+    "~30 s worst case" was wrong and is corrected there.
+    """
     try:
         # Get current branch
-        branch_result = subprocess.run(
+        branch_result = run_registered(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
             cwd=str(home_dir),
-            timeout=10
+            timeout=10,
         )
         current_branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "unknown"
 
         # Get status (modified, untracked files)
-        status_result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
+        #
+        # #2742 — THE call site this issue exists for. `git status --porcelain`
+        # takes `.git/index.lock` on EVERY invocation in order to refresh the
+        # index, whether or not it ends up rewriting it, for a window that scales
+        # with index size (0.6 ms at one file, 12.8-15.4 ms at 20 000, 334-473 ms
+        # measured in a real container). Driven by the backend's 60 s poll that
+        # meant the platform took this agent's index lock ~2x/min, outside
+        # `_REPO_LOCK`, racing the agent's own `git add` — and a sweep-killed
+        # child orphaned a 0-byte lock that silently failed every later git write.
+        # `--no-optional-locks` is precisely what the flag exists for.
+        #
+        # SCOPED to this one site on purpose. The auto-sync cycle's own status
+        # (right after `git add -A`, under the repo lock) and the `sync`/`pull`
+        # bodies keep the plain form: they are lock-serialized, they proceed to
+        # stage/commit, and they WANT the refreshed stat cache. Flag form, not
+        # `GIT_OPTIONAL_LOCKS=0`: `run_registered` has no `env=` kwarg, the env
+        # form would silently change the mutating sites too, and only the argv is
+        # assertable in a test. Needs git >= 2.15; bookworm ships 2.39.
+        status_result = run_registered(
+            ["git", "--no-optional-locks", "status", "--porcelain"],
             cwd=str(home_dir),
-            timeout=10
+            timeout=10,
         )
         changes = []
         if status_result.returncode == 0 and status_result.stdout.strip():
@@ -803,12 +1152,10 @@ async def get_git_status():
                     })
 
         # Get last commit
-        log_result = subprocess.run(
+        log_result = run_registered(
             ["git", "log", "-1", "--format=%H|%h|%s|%an|%ai"],
-            capture_output=True,
-            text=True,
             cwd=str(home_dir),
-            timeout=10
+            timeout=10,
         )
         last_commit = None
         if log_result.returncode == 0 and log_result.stdout.strip():
@@ -823,12 +1170,16 @@ async def get_git_status():
                 }
 
         # Fetch to update remote refs (required for accurate ahead/behind)
-        fetch_result = subprocess.run(
+        # #2742: `--no-optional-locks` closes only the index-lock half. A sweep
+        # tick straddling this 30 s child still SIGKILLs it, and a killed fetch
+        # can orphan `FETCH_HEAD.lock` / `refs/remotes/origin/*.lock` /
+        # `packed-refs.lock` — which NO reaper covers, not even `startup.sh`'s
+        # (its find is scoped to refs/ and logs/, and the other two sit directly
+        # in .git/). Registering the child is what stops the poll producing them.
+        fetch_result = run_registered(
             ["git", "fetch", "origin"],
-            capture_output=True,
-            text=True,
             cwd=str(home_dir),
-            timeout=30
+            timeout=30,
         )
         # S7 Layer 3 (#382): snapshot the remote SHA we just observed so
         # the next push can use it as the --force-with-lease expected-sha.
@@ -850,22 +1201,18 @@ async def get_git_status():
         pull_branch = _get_pull_branch(current_branch, home_dir)
         common_ancestor_sha = ""
         common_ancestor_age_days = None
-        merge_base_result = subprocess.run(
+        merge_base_result = run_registered(
             ["git", "merge-base", "HEAD", f"origin/{pull_branch}"],
-            capture_output=True,
-            text=True,
             cwd=str(home_dir),
-            timeout=10
+            timeout=10,
         )
         if merge_base_result.returncode == 0:
             common_ancestor_sha = merge_base_result.stdout.strip()
             if common_ancestor_sha:
-                ancestor_date_result = subprocess.run(
+                ancestor_date_result = run_registered(
                     ["git", "log", "-1", "--format=%cI", common_ancestor_sha],
-                    capture_output=True,
-                    text=True,
                     cwd=str(home_dir),
-                    timeout=10
+                    timeout=10,
                 )
                 if ancestor_date_result.returncode == 0:
                     date_str = ancestor_date_result.stdout.strip()
@@ -882,21 +1229,24 @@ async def get_git_status():
                             )
 
         # Get remote URL (without credentials)
-        remote_result = subprocess.run(
+        remote_result = run_registered(
             ["git", "remote", "get-url", "origin"],
-            capture_output=True,
-            text=True,
             cwd=str(home_dir),
-            timeout=10
+            timeout=10,
         )
         remote_url = ""
         if remote_result.returncode == 0:
             url = remote_result.stdout.strip()
-            # Remove credentials from URL for display
-            if '@github.com' in url:
-                remote_url = "https://github.com/" + url.split('@github.com/')[1]
-            else:
-                remote_url = url
+            # #2742: redact unconditionally. The old shape special-cased
+            # `@github.com` and returned the URL VERBATIM otherwise — so for any
+            # non-github.com remote (GitHub Enterprise, GitLab, a host-rewritten
+            # origin) this response body carried the fully tokenized
+            # `https://oauth2:<PAT>@host/...`, straight through
+            # `git_service.get_git_status` (which returns `response.json()`
+            # unmodified) to the UI and the MCP tool. ent#615 owns the broader
+            # credential-in-argv class; this is the one line in it that this
+            # diff was already moving.
+            remote_url = redact_url_userinfo(url)
 
         response = {
             "git_enabled": True,
@@ -914,8 +1264,29 @@ async def get_git_status():
         }
         # #389: dual ahead/behind tuples plus legacy ahead/behind aliases.
         response.update(ahead_behind)
+        # #2742: fold the boot reap's one-shot marker into sync-state BEFORE
+        # reading it, so a recovery surfaces on the very first poll after the
+        # restart that performed it rather than a minute later.
+        _record_lock_recovery(home_dir)
+
         # #389: merge auto-sync heartbeat state (may be defaults if never run).
         response["sync_state"] = _read_sync_state_file(home_dir)
+        # #2742: lift the recovery record to the top level too — the backend
+        # rebuilds it from coerced values and never trusts the nested copy,
+        # which `_read_sync_state_file` merges wholesale from agent-written JSON.
+        response["lock_recovery"] = response["sync_state"].get("last_lock_recovery")
+        # #2742: a currently-stuck lock is REPORTED, never removed. This is the
+        # "tell the truth about state" half — a stale lock does not fail
+        # `git status` (rc=0, empty stderr), so before this the read could not
+        # see the wedge it was reporting on. That is the "silent" in #2742.
+        response["index_lock_stuck"] = _index_lock_stuck(home_dir)
+        # #2742: coalescing IS bounded staleness, and saying so is cheaper than
+        # denying it. A follower arriving at t=29 s of a 30 s leader run is
+        # served a 29-second-old snapshot — visibly, an operator pressing Sync
+        # and seeing "1 ahead" right after a successful push. Stamp the age so
+        # every consumer can see it. (TTL caching was rejected: serving late
+        # followers a FRESH run reintroduces the overlapping fetch AC2 forbids.)
+        response["computed_at"] = datetime.now(timezone.utc).isoformat()
         return response
 
     except subprocess.TimeoutExpired:
@@ -923,6 +1294,95 @@ async def get_git_status():
     except Exception as e:
         logger.error(f"Git status error: {e}")
         raise HTTPException(status_code=500, detail=f"Git status error: {str(e)}")
+
+
+async def _run_status_computation(home_dir: Path) -> Dict:
+    """Run ONE `_compute_git_status` in ONE worker thread, under its own deadline.
+
+    `asyncio.to_thread` uses the loop's DEFAULT executor. On a 2-vCPU agent that
+    is `min(32, cpu+4)` = 6 threads, and `services/headless_executor.py` records
+    that `ctx.terminate`, auto-sync and pipe-close deliberately stay on that same
+    pool — so parking followers in it is the #2433 starvation class, where a
+    burst of status callers stalls EXECUTION TERMINATION. Exactly one thread per
+    in-flight computation, ever; the callers coalesce on the loop instead.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_compute_git_status, home_dir),
+            timeout=_STATUS_LEADER_DEADLINE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        # The worker thread's git children are killed by their own
+        # `run_registered` timeouts; what this bound protects is the SLOT.
+        raise HTTPException(
+            status_code=504,
+            detail="Git status timed out (overall computation deadline)",
+        )
+
+
+@router.get("/api/git/status")
+async def get_git_status():
+    """
+    Get git repository status including current branch, changes, and sync state.
+    Only available for agents with git sync enabled.
+
+    #2742 — single-flight, on the event loop. Three callers converge on this
+    route (the backend's 60 s sync-health poll, the UI git panel's own 60 s poll
+    while open, and the MCP `get_git_status` tool), and each computation runs a
+    30 s `git fetch origin`, so concurrent callers used to stack overlapping
+    fetches against one repo. Now the first caller starts the computation and
+    every other caller awaits the SAME future.
+
+    No 409 by design: this is a read, and `_with_repo_lock` on it would turn
+    every poll into a contended write and flap the agent `unreachable`.
+
+    Coalescing is bounded staleness, not free — see `computed_at` in the
+    payload, which is the honest way to say so.
+    """
+    home_dir = _STATUS_HOME_DIR
+    git_dir = home_dir / ".git"
+
+    if not git_dir.exists():
+        return {
+            "git_enabled": False,
+            "message": "Git sync not enabled for this agent"
+        }
+
+    key = str(home_dir)
+    fut = _STATUS_INFLIGHT.get(key)
+    if fut is None or fut.done():
+        # Atomic by construction: no `await` between the test and the assignment.
+        fut = asyncio.ensure_future(_run_status_computation(home_dir))
+        _STATUS_INFLIGHT[key] = fut
+
+        def _release_slot(done: "asyncio.Future", _key: str = key) -> None:
+            # Only clear the slot if it still holds THIS future — a later flight
+            # may already have claimed it.
+            if _STATUS_INFLIGHT.get(_key) is done:
+                _STATUS_INFLIGHT.pop(_key, None)
+            # Mark a failure retrieved even if every waiter was cancelled, so a
+            # disconnect storm cannot print "Future exception was never
+            # retrieved" once per poll.
+            if not done.cancelled():
+                done.exception()
+
+        fut.add_done_callback(_release_slot)
+
+    try:
+        # `shield` is load-bearing: a follower that times out or whose client
+        # disconnects must not cancel the leader's computation for everybody
+        # else. And the future is ALWAYS resolved — `asyncio.to_thread` ->
+        # `run_in_executor` -> `_WorkItem.run` catches BaseException and calls
+        # `set_exception` — so no hand-rolled set_result/set_exception pair and
+        # no "leader vanished" fallback is needed here. Do not add one.
+        return await asyncio.wait_for(
+            asyncio.shield(fut), timeout=_STATUS_FOLLOWER_WAIT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="Git status busy: coalesced status did not complete in time",
+        )
 
 
 @router.post("/api/git/sync")

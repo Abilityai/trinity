@@ -548,7 +548,9 @@ def service(sources_db, tmp_path, monkeypatch):
     svc = ss.SkillService()
     svc.library_root = tmp_path / "clones"
     svc.library_path = tmp_path / "clones"
-    monkeypatch.setattr(svc, "_authenticated_url", lambda url, pat: url, raising=False)
+    # ent#615: normalisation and the PAT decision are separate now; only the
+    # first has to be bypassed for a local fixture repo path.
+    monkeypatch.setattr(svc, "_normalized_url", lambda url: url, raising=False)
     return svc
 
 

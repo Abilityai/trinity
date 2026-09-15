@@ -7,6 +7,7 @@
  * endpoints — 404 in OSS/unentitled builds, but the route guard
  * ent#356 moved the module into OSS core, so it ships in every build.
  */
+import { markRaw } from 'vue'
 import { defineStore } from 'pinia'
 import {
   collaborationRecency, normalizeRoomRow, WORKSPACE_ROOT } from '@/components/portal/portalUtils'
@@ -18,6 +19,32 @@ import {
 } from '@/components/portal/portalBriefingState'
 import axios from 'axios'
 import { useAuthStore } from './auth'
+
+// --- carry-log bounds (#2794 follow-up) --------------------------------------
+//
+// Entries retain the `File` object, so the log is bounded three ways and the
+// tightest one wins. Age is the honest bound (a carry is a seconds-to-minutes
+// gesture); count and bytes exist so a pathological session cannot pin
+// hundreds of megabytes in memory waiting for an age-out that may never come.
+export const CARRY_MAX_AGE_MS = 15 * 60 * 1000
+export const CARRY_MAX_ENTRIES = 20
+export const CARRY_MAX_BYTES = 64 * 1024 * 1024
+
+/** Newest-last, within every bound. Pure — exported for the unit suite. */
+export function pruneCarryLog(entries, now = Date.now()) {
+  let kept = (Array.isArray(entries) ? entries : [])
+    .filter((e) => e && e.file && now - e.at <= CARRY_MAX_AGE_MS)
+  if (kept.length > CARRY_MAX_ENTRIES) kept = kept.slice(kept.length - CARRY_MAX_ENTRIES)
+  // Drop oldest until the retained bytes fit. A single file over the cap is
+  // kept regardless: the alternative is silently refusing to carry the one
+  // file the person actually cares about.
+  let bytes = kept.reduce((n, e) => n + (e.size || 0), 0)
+  while (kept.length > 1 && bytes > CARRY_MAX_BYTES) {
+    bytes -= kept[0].size || 0
+    kept = kept.slice(1)
+  }
+  return kept
+}
 // #2162: the page size for a windowed report read. A dependency-free leaf
 // shared with the operator reports store — never re-typed here, since the
 // backend already owns REPORT_ROWS_PAGE_DEFAULT and a third hand-written copy
@@ -349,6 +376,26 @@ export const useClientPortalStore = defineStore('clientPortal', {
     //
     // The rail owner drains it (`usePortalRailFeeds`); nothing else reads it.
     pendingUploadNotes: {},
+
+    // --- Carry log (#2794 follow-up) ---
+    // Files uploaded to an agent that have NOT yet gone out with a message, so
+    // an escalation into a room can take them along.
+    //
+    // It lives on the store rather than in the composer because there are TWO
+    // upload surfaces and only one of them is the composer: the rail's Files
+    // panel (`PortalRailFiles.vue::uploadBatch`) sends straight to its "Send
+    // to" target and keeps no pending state at all. A user who attaches there
+    // and then @mentions a second agent got nothing carried and — because the
+    // composer had no attachments — not even a notice saying so. `uploadDocument`
+    // is the ONE funnel all three surfaces already share (#2582), so recording
+    // here is what makes the carry surface-agnostic.
+    //
+    // Bounded three ways because these entries retain the `File` itself:
+    // by count, by age, and by total retained bytes (see `noteUploadForCarry`).
+    uploadCarryLog: [],
+    // agent -> ms timestamp. Everything logged at or before it has already gone
+    // out with a message (or belongs to a previous visit) and is not carried.
+    uploadsCarriedAt: {},
   }),
 
   getters: {
@@ -1355,7 +1402,49 @@ export const useClientPortalStore = defineStore('clientPortal', {
         { headers: this.authHeader }
       )
       this.noteUploadPending(agentName)
+      this.noteUploadForCarry(agentName, file)
       return data
+    },
+
+    /**
+     * Remember a successful upload so an escalation can carry it (#2794).
+     *
+     * Only ever called from `uploadDocument`, i.e. after the server took the
+     * file — a refused upload is not carryable and must not be logged.
+     */
+    noteUploadForCarry(agentName, file) {
+      if (!agentName || !file) return
+      const now = Date.now()
+      const entry = {
+        agent: agentName,
+        name: file.name,
+        size: Number(file.size) || 0,
+        // `markRaw` for the reason `usePortalFileDrop` gives: a proxied `File`
+        // fails deep inside `FormData.append`, where the cause is invisible.
+        file: markRaw(file),
+        at: now,
+      }
+      const next = this.uploadCarryLog.concat(entry)
+      this.uploadCarryLog = pruneCarryLog(next, now)
+    },
+
+    /**
+     * Everything logged for this agent up to now has been accounted for — it
+     * went out with a message, or the conversation was just opened. The
+     * composer's chips clear at exactly these moments; this is the same act for
+     * the surfaces that have no chips.
+     */
+    markUploadsCarried(agentName) {
+      if (!agentName) return
+      this.uploadsCarriedAt = { ...this.uploadsCarriedAt, [agentName]: Date.now() }
+    },
+
+    /** Files sent to `agentName` that have not gone out with a message yet. */
+    carryableUploadsFor(agentName) {
+      if (!agentName) return []
+      const since = this.uploadsCarriedAt[agentName] || 0
+      const fresh = pruneCarryLog(this.uploadCarryLog, Date.now())
+      return fresh.filter((e) => e.agent === agentName && e.at > since)
     },
 
     /** Mark one agent's inbox listing stale. Drained by the rail owner (#2582). */

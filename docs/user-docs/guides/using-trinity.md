@@ -35,6 +35,8 @@ The Dashboard gives you a bird's-eye view of your agent fleet in three interchan
 
 Shared controls across all three: press `/` to type-filter the fleet by name, press `v` to cycle the view, plus tag filter, owner filter, time range, and **Create Agent**.
 
+On a fresh install the Dashboard opens **first-run setup** — one guided sequence (connect Claude, optional keys, your first agent, usage sharing) that you can re-run from **Settings → General → First-run setup** or with `?onboarding=1`. See [First-Time Setup → Your First Dashboard](../getting-started/setup.md#your-first-dashboard).
+
 See [Dashboard](../operations/dashboard.md) for the full reference.
 
 ## Library
@@ -112,9 +114,9 @@ Settings is visible to every authenticated user, but most tabs are admin-only. N
 
 | Tab | Who | Purpose |
 |-----|-----|---------|
-| **General** | Admin | **Usage sharing** (opt-in telemetry), **Security & product updates** (operator contact), admin sign-in email, platform options and feature flags, proactive message limits, Brain Orb, voice, Trinity prompt, build info, default avatars |
+| **General** | Admin | **First-run setup** (re-run the guided sequence), **Usage sharing** (opt-in telemetry), **Security & product updates** (operator contact), admin sign-in email, platform options and feature flags, proactive message limits, Brain Orb, voice, Trinity prompt, build info, default avatars |
 | **Access** | Admin | Email whitelist, user management and roles, **SSH Access** toggle |
-| **Integrations** | Admin | API keys, Slack, OAuth credentials, subscriptions (Claude subscription pool with live headroom), transport connection |
+| **Integrations** | Admin | Platform keys set in the browser (Anthropic, GitHub, email provider, Gemini), Slack, OAuth credentials, subscriptions (Claude subscription pool with live headroom), transport connection |
 | **MCP Keys** | Everyone | Create and revoke your own MCP API keys; your personal GitHub token |
 | **Agents** | Admin | GitHub templates, **Template registry**, **Skills Library** sources, agent quotas, automation defaults |
 | **Retention** | Admin | How long executions, logs, health checks, and soft-deleted records are kept; **Workspace sessions** policy; **Room budgets** |

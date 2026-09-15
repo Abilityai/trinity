@@ -9,15 +9,15 @@ This release is **outbound only** — agents place calls; they do not answer inc
 ## Concepts
 
 - **VoIP Binding** — A per-agent Twilio voice configuration: Account SID, Auth Token (stored encrypted), and a voice-capable from-number. Each agent owner brings their own Twilio account; calls bill to that account.
-- **Feature Flag** — VoIP is off by default. It requires both `VOIP_ENABLED=true` and a `GEMINI_API_KEY` on the platform. When off, every VoIP endpoint returns 404.
+- **Feature Flag** — VoIP is off by default. It requires both `VOIP_ENABLED=true` and a Gemini key on the platform (**Settings → Integrations**, or `GEMINI_API_KEY`). When off, every VoIP endpoint returns 404.
 - **Media Streams Bridge** — Twilio streams call audio to Trinity over a WebSocket; Trinity bridges it to the same Gemini Live engine that powers browser voice chat. The agent can interrupt and be interrupted mid-sentence (barge-in).
 - **Post-Call Processing** — When the call ends, the full transcript is saved to the agent's chat history (source `voice`) and, by default, dispatched to the agent as a task so it can follow up — update memory, create tasks, send messages.
 - **Abuse Controls** — A sliding-window rate limit per (owner, destination number) plus a durable per-agent daily call cap bound phone spend.
 
 ## Requirements
 
-1. **Platform flags** — In `.env`: `VOIP_ENABLED=true` and a valid `GEMINI_API_KEY`. Restart the backend after changing them.
-2. **Public URL** — **Settings → Public Chat URL** must be set to your instance's public domain (e.g. `https://your-domain.com`). Trinity builds the audio WebSocket URL from it.
+1. **Platform flags** — `VOIP_ENABLED=true` in `.env` (restart the backend after changing it) and a valid Gemini key — saved in **Settings → Integrations** ([Platform Keys](../credentials/platform-keys.md#gemini)), which applies without a restart, or `GEMINI_API_KEY` in `.env`.
+2. **Public URL** — **Settings → Public URL** must be set to your instance's public domain (e.g. `https://your-domain.com`). Trinity builds the audio WebSocket URL from it.
 3. **Public reachability** — Twilio must be able to open a WebSocket to `wss://your-domain.com/api/voip/voice/...`. This works on publicly reachable deployments, e.g. with a Cloudflare Tunnel set up per [Public Access](../guides/deploying/public-access.md). A catch-all tunnel route to the frontend needs nothing extra; a tunnel that routes specific paths directly to the backend must also route `api/voip/*`.
 4. **Per-agent Twilio binding** — A Twilio account with a voice-capable phone number, configured on the agent (below). Without a binding, calls fail with 400 even when the flag is on.
 
@@ -71,7 +71,7 @@ The optional `context` (up to 2,000 characters) becomes the call's purpose in th
 ### 3. During the Call
 
 - The conversation runs on Gemini Live with the agent's voice persona (same per-agent voice system prompt resolution as [Voice Chat](voice-chat.md)).
-- The agent can delegate to its full Claude reasoning via the `run_task` tool mid-call — and announces it first ("let me check that") instead of going silent during slow lookups.
+- The agent can delegate to its full Claude reasoning via the `run_task` tool mid-call — and announces it first ("let me check that") instead of going silent during slow lookups. On a phone call the task is waited for, with a 30-second limit (the background hand-off described in [Voice Chat](voice-chat.md#tool-calling) applies to Workspace calls only).
 - You can interrupt the agent mid-sentence; it stops talking and listens.
 - Calls are hard-capped at **10 minutes** by default (`VOIP_MAX_CALL_DURATION`).
 
@@ -118,7 +118,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/voip/call \
 | Status | Meaning |
 |--------|---------|
 | 404 | VoIP is not enabled on the platform |
-| 400 | No active binding, invalid phone number (must be E.164, e.g. `+15551234567`), or Public Chat URL not configured |
+| 400 | No active binding, invalid phone number (must be E.164, e.g. `+15551234567`), or Public URL not configured |
 | 429 | Rate limit (default 5 calls per owner+destination per 60s) or daily call cap reached |
 | 502 | Twilio rejected the call (e.g. unverified destination on a trial account) |
 
@@ -131,7 +131,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/voip/call \
 | `VOIP_DEFAULT_DAILY_CALL_CAP` | Per-agent calls/day (overridable per binding) | `50` |
 | `VOIP_CALL_RATE_LIMIT` / `VOIP_CALL_RATE_WINDOW` | Calls per owner+destination per window (seconds) | `5` / `60` |
 
-`GEMINI_API_KEY` (shared with voice chat) must also be set.
+A Gemini key (shared with voice chat — **Settings → Integrations** or `GEMINI_API_KEY`) must also be present.
 
 ## Limitations
 

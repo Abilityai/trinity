@@ -285,3 +285,102 @@ export function sharePreviewPath(url, base) {
   if (at >= 0) return `${parsed.pathname.slice(at)}${parsed.search}`
   return sameOriginPath(parsed.href, base)
 }
+
+// ---------------------------------------------------------------------------
+// Who a file goes to (#2794)
+// ---------------------------------------------------------------------------
+//
+// The rail's send zone has always aimed at exactly ONE agent — a `Send to`
+// select that quietly defaults to the first participant. In a 1:1 that is the
+// only possible answer and nobody notices. In a ROOM it is a trap that produced
+// the reported bug end to end: the client sends a screenshot from the rail while
+// looking at a room with two agents in it, the file reaches the first name in
+// the list, and the message they then write — "@sidekick what is in this
+// image?" — is addressed to the agent that did not get it.
+//
+// The room's own drop zone already fans out (`PortalRoom.vue` uploads to every
+// participant). So the two surfaces disagreed about what "send a file to this
+// chat" means, and the one with the visible select was the one that was wrong.
+//
+// Fixed in the rules, not in the template: a room's default recipient is
+// EVERYONE in it, with the individual agents still selectable underneath for the
+// person who genuinely means one of them.
+
+/** The sentinel for "everyone in this chat". Not a legal agent name, so it can
+ *  never collide with one. */
+export const ALL_PARTICIPANTS = '*'
+
+/**
+ * The `Send to` options, in order, for a chat with these participants.
+ *
+ * A 1:1 gets no fan-out entry: with one agent "everyone" and "that agent" are
+ * the same recipient, and offering both would be a choice with no difference.
+ */
+export function uploadTargets(participants = []) {
+  const names = (participants || []).filter(Boolean)
+  if (names.length < 2) return names.map((name) => ({ value: name, label: name }))
+  return [
+    { value: ALL_PARTICIPANTS, label: `Everyone in this chat (${names.length} agents)` },
+    ...names.map((name) => ({ value: name, label: name })),
+  ]
+}
+
+/**
+ * The default recipient — everyone, wherever "everyone" is more than one.
+ *
+ * This is the line that fixes the reported bug. It is stated as its own function
+ * rather than an initial `ref()` value because a component's initial value is
+ * not reachable from a node-env test, and "a room sends to all of them" is
+ * precisely the claim that has to stay true.
+ */
+export function defaultUploadTarget(participants = []) {
+  const names = (participants || []).filter(Boolean)
+  if (names.length >= 2) return ALL_PARTICIPANTS
+  return names[0] || null
+}
+
+/**
+ * The agents a chosen target actually resolves to.
+ *
+ * Fails toward the fan-out: a target that is no longer a participant (an agent
+ * left the room while the panel was open) resolves to everyone rather than to
+ * nobody. A file sent to one agent too many is recoverable — the rail has a
+ * delete — and a file sent to nobody is the silent loss this whole issue is about.
+ */
+export function resolveRecipients(target, participants = []) {
+  const names = (participants || []).filter(Boolean)
+  if (!names.length) return []
+  if (target === ALL_PARTICIPANTS) return names
+  return names.includes(target) ? [target] : names
+}
+
+/**
+ * What the send zone's button says it will do. Named, never "the agent" — the
+ * person is about to hand over a file and should be able to read where it goes
+ * before they let go of it.
+ */
+export function uploadTargetLabel(target, participants = []) {
+  const names = resolveRecipients(target, participants)
+  if (!names.length) return 'the agent'
+  if (names.length === 1) return names[0]
+  if (names.length === 2) return `${names[0]} and ${names[1]}`
+  return `all ${names.length} agents`
+}
+
+/**
+ * The receipt. Both halves of a fan-out are stated — how many files, to how many
+ * agents — because "Sent file.png" over a two-agent fan-out is exactly the
+ * reassurance that was wrong before: it was true, and it was read as "both of
+ * them have it".
+ */
+export function uploadReceipt({ files = [], recipients = [] } = {}) {
+  const f = files.filter(Boolean)
+  if (!f.length || !recipients.length) return ''
+  const what = f.length === 1 ? `“${f[0]}”` : `${f.length} files`
+  const who = recipients.length === 1
+    ? recipients[0]
+    : recipients.length === 2
+      ? `${recipients[0]} and ${recipients[1]}`
+      : `all ${recipients.length} agents`
+  return `Sent ${what} to ${who}.`
+}

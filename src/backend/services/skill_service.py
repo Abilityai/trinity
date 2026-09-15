@@ -45,7 +45,7 @@ from services.skill_source_clone import (
     SkillSourceClone,
     redact,
 )
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 from utils.url_validation import (
     ALLOWED_SKILLS_LIBRARY_HOSTS,
@@ -603,7 +603,7 @@ class SkillService:
                 db.record_skill_source_sync(src.id, success=False, error=msg)
                 continue
 
-            auth_url = self._authenticated_url(url, github_pat)
+            clone_url, source_pat = self._clone_target(url, github_pat)
             logger.info(
                 "syncing skill source %s (%s) %s=%s",
                 src.name, src.id, src.ref_type, src.ref,
@@ -616,8 +616,9 @@ class SkillService:
             # backend restart).
             previous_sha = src.last_commit_sha
             outcome = clone.sync(
-                auth_url,
+                clone_url,
                 expected_sha=src.last_commit_sha if src.ref_type == "tag" else None,
+                github_pat=source_pat,
             )
             db.record_skill_source_sync(
                 src.id,
@@ -680,24 +681,25 @@ class SkillService:
         }
 
     @staticmethod
-    def _authenticated_url(url: str, github_pat: Optional[str]) -> str:
-        """Splice a PAT into the clone URL for a private source.
+    def _normalized_url(url: str) -> str:
+        """Absolute, CREDENTIAL-LESS clone URL for a source row.
 
-        The host is decided by PARSING, never by `"github.com" in url`
-        (CodeQL py/incomplete-url-substring-sanitization, flagged on PR #1901).
-        A substring test is satisfied by `https://evil.com/?x=github.com`, and
-        the old `.replace("https://", ...)` would then have sent the platform
-        PAT to evil.com. Not reachable today — `sync_library` validates every
-        source URL first — but "safe only because a caller three frames up
-        validates" is precisely the property that breaks when a caller is added,
-        and the blast radius here is a live GitHub credential.
+        ent#615 split this in two. It used to also splice the platform PAT into
+        the URL, which put that credential on the backend's git argv and — via
+        the `origin` git writes at clone time — at rest in
+        `/data/skills-library/*/.git/config`, on the `~/trinity-data` HOST BIND
+        MOUNT and therefore in every backup and snapshot. The PAT now travels
+        in the git child's environment (`_auth_pat_for` decides whether it
+        travels at all, and `SkillSourceClone.sync` carries it).
 
-        Shorthand (`owner/repo`, `github.com/owner/repo`) is normalised to an
-        absolute https URL FIRST, so exactly one parsed host decides the splice.
-        Telling those two shorthands apart is itself done by parsing rather than
-        by `url.startswith("github.com/")`: a host prefix test is the same class
-        of check as the substring test above, and keeping ONE way to answer
-        "which host is this" is what stops the two answers from drifting apart.
+        What remains here is normalisation. Shorthand (`owner/repo`,
+        `github.com/owner/repo`) becomes an absolute https URL, and telling
+        those two shorthands apart is done by PARSING rather than by
+        `url.startswith("github.com/")` — a host prefix test is the same class
+        of check as the `"github.com" in url` substring test CodeQL flagged on
+        PR #1901 (satisfied by `https://evil.com/?x=github.com`), and keeping
+        ONE way to answer "which host is this" is what stops the two answers
+        from drifting apart.
         """
         if "://" in url:
             absolute = url
@@ -712,18 +714,51 @@ class SkillService:
             else:
                 absolute = f"https://github.com/{url}"
 
-        if not github_pat:
-            return absolute
+        return absolute
 
-        parsed = urlparse(absolute)
-        # Exact host match against the same allowlist the SSRF guard uses — a
-        # PAT is only ever spliced for a host we know is GitHub.
+    def _clone_target(self, url: str, github_pat: Optional[str]) -> tuple:
+        """``(clone_url, pat)`` for one source — the two halves, composed.
+
+        The composition carries one rule the halves cannot: **when we are going
+        to send a credential, the URL must not carry one.** A source row may
+        hold userinfo of its own (`_adopt_legacy_clone` writes rows with no
+        validation, and `reject_embedded_credentials` only guards NEW writes),
+        and git would then send BOTH — libcurl's basic auth from the URL and
+        our `http.extraHeader` — which is the double-credential shape ent#347
+        documented as *rejected*, just spelled differently.
+
+        When we are NOT sending one, the stored userinfo is left exactly as it
+        is: for a row whose own token is the only credential it has, stripping
+        it would be this issue's own cardinal sin — removing a credential
+        without a replacement — applied to the skills library.
+        """
+        # Resolved through `self`, not the class: `_normalized_url` is the seam
+        # a test overrides per instance to let a local fixture repo path
+        # through, and a `cls.`-qualified call would silently bypass it.
+        clone_url = self._normalized_url(url)
+        pat = self._auth_pat_for(clone_url, github_pat)
+        if pat:
+            clone_url = strip_url_credentials(clone_url)
+        return clone_url, pat
+
+    @staticmethod
+    def _auth_pat_for(url: str, github_pat: Optional[str]) -> str:
+        """The PAT to hand git for ``url`` — empty for any host that is not ours.
+
+        The other half of the ent#615 split, and it keeps PR #1901's property:
+        the host is decided by PARSING and matched EXACTLY against the same
+        allowlist the SSRF guard uses, so the platform credential is only ever
+        offered to a host we know is GitHub. Moving the credential from the URL
+        to the environment does not weaken that — an `http.extraHeader` is sent
+        to whatever host git connects to, so the decision still has to be made
+        here.
+        """
+        if not github_pat:
+            return ""
+        parsed = urlparse(url)
         if parsed.scheme != "https" or (parsed.hostname or "").lower() not in ALLOWED_SKILLS_LIBRARY_HOSTS:
-            return absolute
-        # Rebuild rather than string-replace: replace() would also rewrite a
-        # second "https://" occurrence inside a path or query.
-        netloc = f"{github_pat}@{parsed.netloc}"
-        return urlunparse(parsed._replace(netloc=netloc))
+            return ""
+        return github_pat
 
     def _adopt_legacy_clone(self) -> Optional[str]:
         """Migrate a pre-ent#237 single-repo install into the source model.

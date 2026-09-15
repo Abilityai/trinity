@@ -323,6 +323,12 @@ Auth failures are transport-level `401`; exposure/allow-list failures are `404`/
 
 ## See Also
 
-- [MCP Server](mcp-server.md) — Trinity's own inter-agent protocol
+**Trinity docs:**
+
+- [MCP Server](mcp-server.md) — Trinity's own inter-agent protocol, and where the Bearer key comes from
+- [Agent Network](../collaboration/agent-network.md) — agent-to-agent calls inside one Trinity instance
+
+**External references:**
+
 - [A2A Protocol specification](https://a2a-protocol.org) — the canonical spec
 - [a2aproject/A2A](https://github.com/a2aproject/A2A) — reference implementations

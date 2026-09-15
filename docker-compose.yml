@@ -218,6 +218,11 @@ services:
       - DB_BACKUP_HOUR=${DB_BACKUP_HOUR:-3}
       - DB_BACKUP_MINUTE=${DB_BACKUP_MINUTE:-30}
       - DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS=${DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS:-1800}
+      # Git sync-health poll cadence (#2742). Default UNCHANGED at 60s; the knob
+      # exists so an operator can cut the per-poll `git fetch` load on a large
+      # fleet. Read at call time in sync_health_service, so it must reach the
+      # container or the .env lever is inert (the #1056/#1039 packaging class).
+      - SYNC_HEALTH_POLL_INTERVAL_SECONDS=${SYNC_HEALTH_POLL_INTERVAL_SECONDS:-60}  # seconds between fleet sync-health polls
       - TRINITY_DB_PATH=/data/trinity.db
       # Configurable database backend (#300). Unset → SQLite at TRINITY_DB_PATH
       # (default). Set to a postgresql:// URL (with the postgres profile up) to
