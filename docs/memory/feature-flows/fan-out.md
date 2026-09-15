@@ -328,6 +328,8 @@ Once every row is terminal, `status` becomes `completed` (all `success`), `parti
 
 ## Testing
 
+**Automated**: journey J10 (`tests/journeys/test_j10_agent_calls_agent_journey.py`, #2349) drives `fan_out` through the MCP server with an agent-scoped key — 51 tasks refused at the tool and `422` at the backend, a 12-task batch read back from `GET /api/agents/{name}/fan-out/{fan_out_id}` as one batch on one agent (IA-02), and, on a keyed stack, every subtask completed.
+
 ### Prerequisites
 - Backend running at `http://localhost:8000`
 - At least one running agent
