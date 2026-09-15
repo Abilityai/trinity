@@ -50,7 +50,6 @@ from services.platform_audit_service import platform_audit_service, AuditEventTy
 from services import operator_intake_service, telemetry_sharing_service
 
 # Import from settings_service (these are re-exported for backward compatibility)
-from . import credentials
 from services.settings_service import (
     get_anthropic_api_key,
     get_github_pat,
@@ -608,6 +607,13 @@ async def delete_setting(
             # the instance Anthropic key without ever touching
             # `clear_secret_setting` — leaving it unhooked would reopen exactly
             # the hole the dedicated route's hook closes.
+            # #2572 lives in the `credentials` sibling. Imported HERE, absolutely,
+            # rather than `from . import credentials` at module level: two test
+            # files load this module in isolation via `spec_from_file_location`
+            # (no parent package), where a relative import raises at load. Still
+            # reached through the module object, so a test that patches
+            # `credentials._adopt_after_instance_key_removed` reaches this call.
+            from routers.settings import credentials
             if key in credentials._ANTHROPIC_KEY_ALIASES:
                 await credentials._adopt_after_instance_key_removed(current_user, request)
 

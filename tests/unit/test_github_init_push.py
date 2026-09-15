@@ -117,7 +117,8 @@ async def test_empty_remote_force_pushes():
 
     with patch.object(gs, "execute_command_in_container", fake), \
             patch.object(gs.gitignore, "execute_command_in_container", fake), \
-            patch.object(gs.remotes, "execute_command_in_container", fake):
+            patch.object(gs.remotes, "execute_command_in_container", fake), \
+            patch.object(gs.token_scrub, "execute_command_in_container", fake):
         result = await gs.initialize_git_in_container(
             agent_name="test-agent",
             github_repo="owner/repo",
@@ -147,7 +148,8 @@ async def test_existing_remote_pushes_after_commit():
 
     with patch.object(gs, "execute_command_in_container", fake), \
             patch.object(gs.gitignore, "execute_command_in_container", fake), \
-            patch.object(gs.remotes, "execute_command_in_container", fake):
+            patch.object(gs.remotes, "execute_command_in_container", fake), \
+            patch.object(gs.token_scrub, "execute_command_in_container", fake):
         result = await gs.initialize_git_in_container(
             agent_name="test-agent",
             github_repo="owner/repo",
@@ -175,7 +177,8 @@ async def test_existing_remote_reset_precedes_commit():
 
     with patch.object(gs, "execute_command_in_container", fake), \
             patch.object(gs.gitignore, "execute_command_in_container", fake), \
-            patch.object(gs.remotes, "execute_command_in_container", fake):
+            patch.object(gs.remotes, "execute_command_in_container", fake), \
+            patch.object(gs.token_scrub, "execute_command_in_container", fake):
         await gs.initialize_git_in_container(
             agent_name="test-agent",
             github_repo="owner/repo",
@@ -215,7 +218,8 @@ async def test_existing_remote_nothing_to_commit_still_pushes():
 
     with patch.object(gs, "execute_command_in_container", fake), \
             patch.object(gs.gitignore, "execute_command_in_container", fake), \
-            patch.object(gs.remotes, "execute_command_in_container", fake):
+            patch.object(gs.remotes, "execute_command_in_container", fake), \
+            patch.object(gs.token_scrub, "execute_command_in_container", fake):
         result = await gs.initialize_git_in_container(
             agent_name="test-agent",
             github_repo="owner/repo",

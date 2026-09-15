@@ -448,7 +448,7 @@ async def _ready(value):
 
 
 def test_settings_state_distinguishes_configured_from_can_transcribe(monkeypatch):
-    from routers import settings as settings_router
+    from routers.settings import integrations as settings_router  # #1028: package
 
     with patch("services.settings_service.settings_service.get_elevenlabs_api_key",
                return_value=KEY), \
@@ -467,7 +467,7 @@ def test_settings_state_distinguishes_configured_from_can_transcribe(monkeypatch
 
 
 def test_settings_state_without_a_key_is_unconfigured(monkeypatch):
-    from routers import settings as settings_router
+    from routers.settings import integrations as settings_router  # #1028: package
 
     calls = _stub_provider(monkeypatch, status=422)
     with patch("services.settings_service.settings_service.get_elevenlabs_api_key",
