@@ -88,18 +88,70 @@ if [ -n "${GITHUB_PAT}" ]; then
     export GITHUB_TOKEN="${GITHUB_PAT}"
 fi
 
-# === Stale git lock reap (#1595) ===
+# === Stale git lock reap (#1595, announced #2742) ===
 # A SIGKILLed git process (orphan-sweep kill, container recreation mid-op)
 # leaves lock litter that silently wedges every later git op — a stale
 # index.lock froze agents for 12 days producing fake $0 successes. At
 # container start no git process is running, so any lock under .git is
 # definitionally stale.
+#
+# #2742: container start is the ONLY context in which "no process holds this
+# lock" is provable for free (the PID namespace is empty), which is why the
+# repair lives here and NOT in the running container — an unlink from a live
+# container races git's own rename-by-path and can promote another git's
+# in-flight file onto .git/index, a permanent 0-byte-index wedge that nothing
+# in Trinity clears. What was missing was only the OBSERVABLE half: this block
+# was `rm -f`, silent whether or not it removed anything, so the one moment the
+# platform reliably heals a wedge produced no evidence that it had. It now
+# tests-then-removes, says what it cleared (Vector captures the line), and drops
+# a marker the agent server folds into sync-state.last_lock_recovery.
 if [ -d /home/developer/.git ]; then
-    rm -f /home/developer/.git/index.lock \
-          /home/developer/.git/gc.pid \
-          /home/developer/.git/objects/maintenance.lock 2>/dev/null || true
-    find /home/developer/.git/refs /home/developer/.git/logs \
-        -name "*.lock" -type f -delete 2>/dev/null || true
+    TRINITY_REAPED_LOCKS=""
+    for _lock in /home/developer/.git/index.lock \
+                 /home/developer/.git/gc.pid \
+                 /home/developer/.git/objects/maintenance.lock; do
+        if [ -e "${_lock}" ]; then
+            rm -f "${_lock}" 2>/dev/null || true
+            echo "[startup] reaped stale git lock at container start: ${_lock}"
+            TRINITY_REAPED_LOCKS="${TRINITY_REAPED_LOCKS}${TRINITY_REAPED_LOCKS:+,}$(basename "${_lock}")"
+        fi
+    done
+
+    # Linked worktrees and submodules keep their own index under
+    # .git/worktrees/<name>/ and .git/modules/<name>/ (#2742). A lock there is
+    # reached by neither the ref/reflog find below nor the per-cycle reaper, so
+    # before this a submodule wedge survived every restart.
+    for _sub in /home/developer/.git/modules /home/developer/.git/worktrees; do
+        if [ -d "${_sub}" ]; then
+            _sub_locks=$(find "${_sub}" -name "index.lock" -type f 2>/dev/null | wc -l | tr -d ' ')
+            if [ "${_sub_locks:-0}" -gt 0 ]; then
+                find "${_sub}" -name "index.lock" -type f -delete 2>/dev/null || true
+                echo "[startup] reaped ${_sub_locks} stale index.lock under ${_sub}"
+                TRINITY_REAPED_LOCKS="${TRINITY_REAPED_LOCKS}${TRINITY_REAPED_LOCKS:+,}index.lock"
+            fi
+        fi
+    done
+
+    _ref_locks=$(find /home/developer/.git/refs /home/developer/.git/logs \
+        -name "*.lock" -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${_ref_locks:-0}" -gt 0 ]; then
+        find /home/developer/.git/refs /home/developer/.git/logs \
+            -name "*.lock" -type f -delete 2>/dev/null || true
+        echo "[startup] reaped ${_ref_locks} stale ref/reflog lock(s) at container start"
+    fi
+
+    # The marker is what carries the event off this container. The agent server
+    # folds it into sync-state.last_lock_recovery on the next status read, the
+    # backend poller logs it once, and an operator can finally see that a wedge
+    # existed and was cleared — instead of a silent `rm -f` and an agent whose
+    # commits mysteriously started working again.
+    if [ -n "${TRINITY_REAPED_LOCKS}" ]; then
+        mkdir -p /home/developer/.trinity 2>/dev/null || true
+        printf '{"at": "%s", "locks": "%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TRINITY_REAPED_LOCKS}" \
+            > /home/developer/.trinity/lock-recovery.json 2>/dev/null || true
+        echo "[startup] recorded git lock recovery: ${TRINITY_REAPED_LOCKS}"
+    fi
 fi
 
 # Initialize from GitHub repository if specified.
