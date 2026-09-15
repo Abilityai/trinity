@@ -148,7 +148,22 @@
         <div v-if="roomLiveItems.length" class="space-y-2" data-testid="portal-room-work">
           <div v-for="it in roomLiveItems" :key="it.id" class="flex items-start gap-2.5">
             <PortalAvatar :name="it.agent_name" :size="28" class="mt-0.5" />
-            <PortalWorkCard :item="it" show-agent :elapsed-seconds="elapsedOf(it)" show-open-in-work @open-work="emit('open-work')" />
+            <!-- #2795: the card has always RENDERED a Stop button — it was
+                 simply never handed the two props that turn it on, so a room
+                 was the one surface where live work could not be interrupted.
+                 `can_stop` is the server's verdict (it mirrors what the
+                 terminate route will accept), never a local guess, and the
+                 store action is the Work tab's own. -->
+            <PortalWorkCard
+              :item="it"
+              show-agent
+              :elapsed-seconds="elapsedOf(it)"
+              :can-stop="it.can_stop"
+              :stopping="workStore.stoppingIds.includes(it.id)"
+              show-open-in-work
+              @stop="onStopWork"
+              @open-work="emit('open-work')"
+            />
           </div>
         </div>
         <div v-else-if="workingAgents.length" class="flex items-start gap-2.5">
@@ -172,6 +187,22 @@
             <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:300ms"></span>
           </span>
         </div>
+        <!-- A refused cancel is the one outcome the person must be told about:
+             the turn is still running and still spending. A SUCCESSFUL stop
+             needs no line here — the room posts its own "…turn was stopped."
+             into the transcript.
+
+             Placed AFTER the live-work chain closes, not between its arms:
+             `v-else-if` binds to the immediately preceding element, so a
+             conditional dropped inside the chain steals it and the fallbacks
+             below render on the wrong condition. That is the #2794 defect, and
+             the first draft of THIS change committed it. -->
+        <InlineError
+          v-if="stopError"
+          :message="stopError"
+          data-testid="portal-room-stop-error"
+          @dismiss="stopError = ''"
+        />
       </div>
     </div>
     <PortalJumpToLatest :show="showJumpToLatest" :count="unreadBelow" @jump="scrollToLatest" />
@@ -314,10 +345,11 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { budgetNotice } from '@/utils/roomBudgets'
+import InlineError from '@/components/InlineError.vue'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
-import { liveElapsedSeconds } from './portalWork'
+import { liveElapsedSeconds, soleStoppableItem } from './portalWork'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
@@ -325,6 +357,7 @@ import PortalTypeahead from './PortalTypeahead.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import { workSignalFromRoom } from './portalRail'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import { shouldCancelOnEscape, cancelOutcome } from '@/utils/turnCancel'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import {
   applyTypeaheadInsert,
@@ -459,6 +492,32 @@ watch(() => roomLiveItems.value.length > 0, (on) => {
 }, { immediate: true })
 onBeforeUnmount(() => { if (clockTimer) clearInterval(clockTimer) })
 function elapsedOf(it) { return liveElapsedSeconds(it, { fetchedAtMs: workStore.fetchedAt, nowMs: clockMs.value }) }
+
+// #2795 — stopping a room turn.
+//
+// The store action is the Work tab's, unchanged: it re-checks `can_stop`, calls
+// the same portal terminate route, treats a 404 as the lost race rather than a
+// refusal, and refetches so CANCELLED comes back from the server instead of
+// being written optimistically here. Two surfaces, one cancel path.
+//
+// Only a FAILURE is reported. A successful stop already says so where the
+// reader is looking — `_wake_agent` posts "<agent>'s turn was stopped." into
+// the transcript — so a banner would be the same news twice.
+const stopError = ref('')
+
+async function onStopWork(item) {
+  stopError.value = ''
+  const res = await workStore.stopItem(item)
+  if (!res.success) stopError.value = cancelOutcome({ ok: false }).message
+}
+
+// Escape stops the turn ONLY when there is exactly one to stop (see
+// `soleStoppableItem`). A room fans out to several agents, and a keystroke that
+// picks one of them by position would destroy work somebody is still waiting
+// for. In practice the fan-out is sequential, so a room normally has one live
+// row and Escape behaves exactly as it does in a 1:1; when it does not, the
+// tile's own Stop button is the unambiguous control.
+const escapeStoppable = computed(() => soleStoppableItem(roomLiveItems.value, workStore.stoppingIds))
 
 // ent#474 — the shell scopes the rail to the room's participants and derives
 // its Work signal from the SERVER's `working` list (never a local flag), so
@@ -640,6 +699,20 @@ function focusComposerFromShell(event) {
 }
 
 function onComposerKeydown(e) {
+  // Asked BEFORE `resolveComposerKey`, and gated on the typeahead/add-agent
+  // popups via `overlays`, so a press that belongs to something nearer the
+  // keystroke never reaches the turn (ent#155's rule, unchanged).
+  const target = escapeStoppable.value
+  if (target && shouldCancelOnEscape(e, {
+    inFlight: true,
+    cancelling: workStore.stoppingIds.includes(target.id),
+    overlays: [typeaheadOpen.value, addOpen.value],
+  })) {
+    e.preventDefault()
+    onStopWork(target)
+    return
+  }
+
   const length = typeaheadBound.value.visible.length
   switch (resolveComposerKey({
     key: e.key,
