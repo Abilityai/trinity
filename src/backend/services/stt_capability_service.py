@@ -24,8 +24,11 @@ cached, and keeps the answer fail-soft:
   a digest of the key — never the key itself — means a key change is a cache
   MISS by construction: nothing has to remember to invalidate, and the resolver
   it reads through stays uncached (the `--workers 2` rule #506 / ent#117 set).
-  Redis down ⇒ a per-process fallback with the same key and TTLs, so the two
-  workers can at worst each probe once.
+  Redis is the ONE authority; the per-process fallback is consulted only when
+  Redis cannot be asked (no client, or the read raised), so the two workers can
+  at worst each probe once during an outage. A Redis MISS is a miss — it never
+  falls through to a local copy, because that copy is exactly what `invalidate`
+  on the OTHER worker cannot reach (cross-worker staleness, the #2695 AC).
 
 * **Fails SOFT.** `unknown` renders the mic. Hiding a control that would have
   worked is the defect this exists to prevent in the other direction, so only a
@@ -60,8 +63,11 @@ VERDICT_UNCONFIGURED = "unconfigured"
 # timeout) and is re-asked soon.
 TTL_DECIDED_SECONDS = 6 * 3600
 TTL_UNKNOWN_SECONDS = 120
-# The probe's own HTTP timeout. Below the roster's patience (`WAIT_BUDGET`),
-# so a slow provider degrades to `unknown` rather than stalling sign-in.
+# The probe's own HTTP timeout — deliberately ABOVE the roster's patience
+# (`WAIT_BUDGET_SECONDS`): the reader stops waiting at 4 s and answers
+# `unknown`, while the probe runs on to fill the cache for the next reader. A
+# probe bounded tighter than the reader would time out into a 2-minute
+# `unknown` on every slow provider and the cache would never settle.
 PROBE_TIMEOUT_SECONDS = 8.0
 # How long a cache-missing reader (the roster, the Settings panel) waits for
 # the probe before answering `unknown` and letting it finish in the background.
@@ -110,7 +116,8 @@ def _ttl_for(cap: SttCapability) -> int:
 
 # ---- cache ------------------------------------------------------------------
 
-# Per-process fallback for a Redis outage: {cache_key: (expires_at, cap)}.
+# Per-process fallback for a Redis OUTAGE only: {cache_key: (expires_at, cap)}.
+# Never read while Redis answers — see `read_cached`.
 _local: dict[str, tuple[float, SttCapability]] = {}
 _inflight: dict[str, "asyncio.Task[SttCapability]"] = {}
 
@@ -120,23 +127,38 @@ def _redis():
     return get_breaker_redis()
 
 
+def _read_local(k: str) -> Optional[SttCapability]:
+    hit = _local.get(k)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+    return None
+
+
 def read_cached(api_key: str) -> Optional[SttCapability]:
+    """The cached verdict, or None on a miss.
+
+    Redis is authoritative whenever it ANSWERS: a hit is returned, a miss is a
+    miss — and evicts this worker's local copy, since a row another worker
+    deleted (`invalidate`) or that expired is the one thing the local copy must
+    not resurrect. `_local` is read only when Redis cannot be asked at all.
+    """
     if not api_key:
         return UNCONFIGURED
     k = cache_key(api_key)
     r = _redis()
-    if r is not None:
-        try:
-            raw = r.get(k)
-            if raw:
-                cap = SttCapability.from_json(raw)
-                if cap is not None:
-                    return cap
-        except Exception as e:  # noqa: BLE001
-            logger.warning("stt capability cache read failed-open (%s)", e)
-    hit = _local.get(k)
-    if hit and hit[0] > time.monotonic():
-        return hit[1]
+    if r is None:
+        return _read_local(k)
+    try:
+        raw = r.get(k)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("stt capability cache read failed-open (%s)", e)
+        return _read_local(k)
+    if raw:
+        cap = SttCapability.from_json(raw)
+        if cap is not None:
+            return cap
+        # A corrupt row is a miss, not a fall-through to a local copy.
+    _local.pop(k, None)
     return None
 
 
@@ -216,7 +238,8 @@ async def probe(api_key: str, *, timeout: float = PROBE_TIMEOUT_SECONDS) -> SttC
         return SttCapability(VERDICT_UNKNOWN, detail=type(e).__name__, checked_at=time.time())
     cap = classify_response(resp.status_code, resp.text)
     if cap.verdict == VERDICT_REFUSED:
-        logger.warning("ElevenLabs key cannot transcribe (%s %s) — the Workspace mic is hidden",
+        logger.warning("ElevenLabs key cannot transcribe (%s %s) — Workspace server-side "
+                       "dictation is disabled; the browser's own engine, if any, remains",
                        resp.status_code, cap.detail)
     return cap
 
@@ -258,7 +281,7 @@ async def ensure_capability(api_key: Optional[str] = None, *,
 
 def record_live_refusal(api_key: str, status_code: int, body: str) -> None:
     """A genuine `/stt` call was refused by the provider: learn from it, so the
-    next roster load hides the mic without waiting for a probe. Only a 401/403
+    next roster load withholds server-side dictation without waiting for a probe. Only a 401/403
     is a verdict about the key; anything else says nothing about permissions."""
     if status_code in (401, 403) and api_key:
         store(api_key, classify_response(status_code, body))

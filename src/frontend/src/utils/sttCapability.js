@@ -27,7 +27,8 @@ export function describeSttCapability(state) {
       return {
         tone: STT_TONE.bad,
         label: state.stt_detail ? `cannot transcribe — ${state.stt_detail}` : 'cannot transcribe',
-        hint: 'This key is not permitted to call speech-to-text, so the Workspace mic is hidden. '
+        hint: 'This key is not permitted to call speech-to-text, so Workspace server-side dictation '
+          + 'is disabled (the browser\'s own dictation engine, where it has one, still works). '
           + 'Grant the Speech to Text permission on the key at ElevenLabs, then save it again.',
       }
     default:

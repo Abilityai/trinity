@@ -7,8 +7,10 @@ replacement gate end to end — the pure classifier, the cache, the fail-soft
 direction, and every consumer of the verdict (roster card, agent page, the `/stt`
 endpoint, the admin panel), by EXECUTING each one rather than reading its source.
 
-No real Redis, no real HTTP: the provider is a stubbed `httpx.AsyncClient`, the
-cache is the module's own per-process fallback (Redis stubbed to None).
+No real Redis, no real HTTP: the provider is a stubbed `httpx.AsyncClient`; the
+cache is the module's own per-process fallback (Redis stubbed to None) in the
+single-worker tests and a dict-backed fake Redis shared by two module instances
+in the two-worker block, which is where the cross-worker AC is proven.
 """
 from __future__ import annotations
 
@@ -154,6 +156,120 @@ def test_invalidate_forgets_this_key_only(monkeypatch):
     assert stt.read_cached(KEY).verdict == stt.VERDICT_REFUSED
     stt.invalidate(KEY)
     assert stt.read_cached(KEY) is None
+
+
+# ---- the cache with Redis PRESENT: two workers, one authority ---------------
+#
+# Every other test stubs Redis to None, so without this block the Redis-present
+# branch (`r.get` / `r.set(ex=)` / `r.delete`, `from_json` on a decoded row) had
+# zero executing coverage — and the defect it hid was the #2695 AC itself: the
+# per-process `_local` was consulted on a Redis MISS, so worker B kept serving a
+# `refused` that worker A had already invalidated, for the rest of the 6 h.
+
+
+class _FakeRedis:
+    """A dict-backed Redis shared by both simulated workers. Records every
+    `set`'s TTL so the test can pin that the decided/unknown split reaches
+    the wire, and can be made to raise so the outage branch is reachable too."""
+
+    def __init__(self):
+        self.rows: dict[str, str] = {}
+        self.ttls: dict[str, int] = {}
+        self.raise_on_read = False
+
+    def get(self, k):
+        if self.raise_on_read:
+            raise ConnectionError("redis down")
+        return self.rows.get(k)
+
+    def set(self, k, v, ex=None):
+        self.rows[k] = v
+        self.ttls[k] = ex
+
+    def delete(self, k):
+        self.rows.pop(k, None)
+        self.ttls.pop(k, None)
+
+
+def _load_worker(fake_redis):
+    """A second instance of the module = a second uvicorn worker: its own
+    `_local` / `_inflight`, the same Redis."""
+    import importlib.util
+    import inspect
+    import sys
+    name = f"stt_worker_{id(fake_redis)}"
+    spec = importlib.util.spec_from_file_location(name, inspect.getsourcefile(stt))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod          # `@dataclass` resolves the class's module by name
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.modules.pop(name, None)
+    mod._redis = lambda: fake_redis
+    return mod
+
+
+@pytest.fixture
+def two_workers(monkeypatch):
+    fake = _FakeRedis()
+    monkeypatch.setattr(stt, "_redis", lambda: fake)   # worker A = the imported module
+    worker_b = _load_worker(fake)
+    return fake, stt, worker_b
+
+
+def test_redis_row_is_written_with_the_verdicts_ttl_and_read_back(two_workers):
+    fake, a, _ = two_workers
+    a.store(KEY, a.SttCapability(a.VERDICT_REFUSED, detail="missing_permissions", checked_at=1.0))
+    k = a.cache_key(KEY)
+    assert k in fake.rows and fake.ttls[k] == a.TTL_DECIDED_SECONDS
+    assert a.read_cached(KEY).detail == "missing_permissions"   # decoded via from_json
+    a.store(KEY, a.SttCapability(a.VERDICT_UNKNOWN))
+    assert fake.ttls[k] == a.TTL_UNKNOWN_SECONDS
+
+
+def test_invalidate_on_one_worker_is_honoured_by_the_other(two_workers):
+    """The #2695 AC: re-saving a key must not leave the OTHER worker serving the
+    old verdict. Worker A learns `refused`, worker B reads it (and caches it
+    locally as it would in production), the admin re-saves the key on A."""
+    fake, a, b = two_workers
+    a.store(KEY, a.SttCapability(a.VERDICT_REFUSED, detail="missing_permissions"))
+    assert b.read_cached(KEY).verdict == b.VERDICT_REFUSED
+    b.store(KEY, b.read_cached(KEY))          # B's own write also lands in B._local
+    assert b.cache_key(KEY) in b._local
+
+    a.invalidate(KEY)                          # admin re-saved the key on worker A
+    assert fake.rows == {}                     # the shared row is gone …
+    assert b.read_cached(KEY) is None          # … and B does NOT resurrect it from _local
+    assert b.cache_key(KEY) not in b._local    # the stale local copy was evicted, not just skipped
+
+
+def test_a_redis_miss_is_a_miss_even_when_a_local_copy_exists(two_workers):
+    """The 6 h sequence from the review: A's re-probe lands `unknown` (2 min),
+    that row expires, B must now MISS — not fall back to its 6 h `refused`."""
+    fake, a, b = two_workers
+    b.store(KEY, b.SttCapability(b.VERDICT_REFUSED))
+    a.invalidate(KEY)
+    a.store(KEY, a.SttCapability(a.VERDICT_UNKNOWN))   # A's re-probe: unknown, 2-min row
+    fake.rows.clear(); fake.ttls.clear()               # … which then expires
+    assert b.read_cached(KEY) is None
+
+
+def test_local_copy_is_used_only_when_redis_cannot_be_asked(two_workers):
+    fake, a, b = two_workers
+    b.store(KEY, b.SttCapability(b.VERDICT_CAPABLE))
+    fake.raise_on_read = True                          # outage: the read raises
+    assert b.read_cached(KEY).verdict == b.VERDICT_CAPABLE   # local fallback, fail-open
+    fake.raise_on_read = False
+    fake.rows.clear()                                  # Redis answers again: empty
+    assert b.read_cached(KEY) is None                  # authority restored → miss
+
+
+def test_a_corrupt_redis_row_is_a_miss_not_a_local_fallthrough(two_workers):
+    fake, a, _ = two_workers
+    a.store(KEY, a.SttCapability(a.VERDICT_REFUSED))
+    fake.rows[a.cache_key(KEY)] = "{not json"
+    assert a.read_cached(KEY) is None
+    assert a.cache_key(KEY) not in a._local
 
 
 def test_unknown_has_a_short_ttl_and_a_decided_verdict_a_long_one():
