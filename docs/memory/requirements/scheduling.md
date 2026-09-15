@@ -1317,6 +1317,32 @@ schedules:
   batch that is still running — which is every batch a receipt is issued
   for.
 
+### 37.4 Async Fan-Out Join + Sync Edge Adapter (#2524)
+- **Status**: 🚧 In Progress (PR #2532)
+- **Implements**: Issue #2524 (#1081 Phase 4)
+- **Description**: A fan-out batch is joined from its execution rows so it can
+  run on the durable pull queue, and callers that must block get an adapter
+  instead of reading a `QUEUED` dispatch result.
+- **Requirements**:
+  - Every subtask row carries `fan_out_id` and the caller's `fan_out_task_id`;
+    the sync aggregate is rebuilt from the rows, in input order, and the #2670
+    GET exposes `task_id`.
+  - A subtask row is created only when its subtask holds a `max_concurrency`
+    slot. No undispatched subtask may exist as a `RUNNING` or `QUEUED` row.
+  - `async_mode: true` returns `{fan_out_id, status: "accepted", total}`
+    without waiting (backend and MCP `fan_out`).
+  - The outer deadline bounds the wait, never the work: still-open subtasks
+    (including undispatched ones) report `running`, the batch reports
+    `deadline_exceeded`. With no deadline the wait covers the whole batch
+    (`ceil(N / min(max_concurrency, max_parallel_tasks))` waves).
+  - `fan_out`, `a2a` and `operator_response` are in `PULL_REACHABLE_TRIGGERS`;
+    `a2a` and `operator_response` block on the row's terminal via
+    `dispatch_and_await_terminal`, and the ent#329 receipt is never `queued`.
+- **Known limits**: the not-yet-dispatched tail of a batch is held in-process
+  and is lost on backend restart; `error_code` exists only on push results;
+  the in-process waiter registry makes the 5s DB poll the wake path on
+  multi-worker deployments.
+
 ## 38. Sequential Agent Loops (#740)
 
 ### 38.1 `run_agent_loop` MCP Tool + Backend Loop Service (#740 — Phase 1)

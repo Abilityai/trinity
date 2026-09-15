@@ -349,6 +349,8 @@ export interface FanOutBatchStatus {
   running: number;
   results: Array<{
     execution_id: string;
+    /** The caller's own task id (#2524); absent on rows written before it was persisted. */
+    task_id?: string;
     /** The EXECUTION status verbatim (`queued`/`running`/`success`/…), not the
      * dispatch response's two-value `completed`/`failed` pair — a live batch has
      * to distinguish "waiting for a slot" from "running". */
