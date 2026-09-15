@@ -3181,6 +3181,106 @@ def _migrate_agent_sync_state_git_dir_bytes(cursor, conn):
         "ALTER TABLE agent_sync_state ADD COLUMN git_dir_bytes INTEGER",
     )
 
+# Every column the #2800 rebuild copies — the guard in the migration compares the
+# live table against this set so a column it does not name can never be dropped.
+_AGENT_SYNC_STATE_REBUILD_COLUMNS = frozenset({
+    "agent_name", "last_sync_at", "last_sync_status", "consecutive_failures",
+    "last_error_summary", "last_remote_sha_main", "last_remote_sha_working",
+    "ahead_main", "behind_main", "ahead_working", "behind_working",
+    "git_dir_bytes", "pack_count", "loose_objects", "maintenance_failures",
+    "last_check_at", "updated_at",
+})
+
+
+def _migrate_agent_sync_state_git_dir_bytes_bigint(cursor, conn):
+    """Re-declare agent_sync_state.git_dir_bytes as BIGINT (#2800).
+
+    The defect is a PostgreSQL one — INTEGER there is int4, so any ``.git`` over
+    2 GiB made the sync-state upsert raise ``NumericValueOutOfRange`` — and it is
+    fixed on that track by Alembic ``0062_agent_sync_state_git_dir_bytes_bigint``.
+    SQLite is unaffected: BIGINT and INTEGER are the same 64-bit INTEGER affinity,
+    so this migration changes no stored value and no runtime behaviour.
+
+    It is NOT a bare no-op, though. ``schema.py`` is the single source of truth
+    for BOTH backends (the PG DDL is translated from the same strings), so the
+    canonical DDL now reads ``BIGINT`` — and the schema-parity test compares a
+    fresh ``init_schema`` database against an upgraded one by DECLARED column
+    type. A recorded no-op would leave every upgraded SQLite file declaring
+    ``INTEGER`` against a fresh file's ``BIGINT`` and turn that guard red
+    forever. SQLite has no ``ALTER COLUMN TYPE``, so the declared type is fixed
+    the only way it can be: the #1160 rename-swap rebuild, one row per agent,
+    every column copied verbatim, the one index re-created. Skipped when the
+    column already reads BIGINT (fresh installs, re-runs).
+    """
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_sync_state'")
+    if not cursor.fetchone():
+        return  # fresh install: init_schema creates it as BIGINT
+    cursor.execute("PRAGMA table_info(agent_sync_state)")
+    declared = {row[1]: (row[2] or "").upper() for row in cursor.fetchall()}
+    if declared.get("git_dir_bytes") == "BIGINT":
+        return
+    if "git_dir_bytes" not in declared:
+        return  # #1596's add-column migration has not run yet; it runs first in MIGRATIONS order
+    # A rename-swap copies exactly the columns it names and DROPs the rest. The
+    # copy list below is the full agent_sync_state column set as of this
+    # migration; refuse — loudly, before touching anything — if the live table
+    # carries a column this list does not know, rather than silently dropping
+    # its data. A raise here surfaces as `first_pending` in the /health 503
+    # (#1160); the table is left exactly as it was.
+    unexpected = set(declared) - _AGENT_SYNC_STATE_REBUILD_COLUMNS
+    if unexpected:
+        raise RuntimeError(
+            "agent_sync_state_git_dir_bytes_bigint: refusing to rebuild agent_sync_state — "
+            f"unknown column(s) {sorted(unexpected)} would be dropped by the rename-swap"
+        )
+    print("Re-declaring agent_sync_state.git_dir_bytes as BIGINT (#2800)...")
+    _atomic_rebuild(
+        cursor,
+        conn,
+        "agent_sync_state",
+        """
+        CREATE TABLE agent_sync_state_new (
+            agent_name TEXT PRIMARY KEY,
+            last_sync_at TEXT,
+            last_sync_status TEXT,
+            consecutive_failures INTEGER DEFAULT 0,
+            last_error_summary TEXT,
+            last_remote_sha_main TEXT,
+            last_remote_sha_working TEXT,
+            ahead_main INTEGER DEFAULT 0,
+            behind_main INTEGER DEFAULT 0,
+            ahead_working INTEGER DEFAULT 0,
+            behind_working INTEGER DEFAULT 0,
+            git_dir_bytes BIGINT,
+            pack_count INTEGER,
+            loose_objects INTEGER,
+            maintenance_failures INTEGER DEFAULT 0,
+            last_check_at TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
+        )
+        """,
+        """
+        INSERT INTO agent_sync_state_new
+            (agent_name, last_sync_at, last_sync_status, consecutive_failures,
+             last_error_summary, last_remote_sha_main, last_remote_sha_working,
+             ahead_main, behind_main, ahead_working, behind_working,
+             git_dir_bytes, pack_count, loose_objects, maintenance_failures,
+             last_check_at, updated_at)
+        SELECT agent_name, last_sync_at, last_sync_status, consecutive_failures,
+               last_error_summary, last_remote_sha_main, last_remote_sha_working,
+               ahead_main, behind_main, ahead_working, behind_working,
+               git_dir_bytes, pack_count, loose_objects, maintenance_failures,
+               last_check_at, updated_at
+        FROM agent_sync_state
+        """,
+        indexes=(
+            "CREATE INDEX IF NOT EXISTS idx_sync_state_status "
+            "ON agent_sync_state(last_sync_status, consecutive_failures)",
+        ),
+    )
+
+
 def _migrate_agent_sync_state_gc_signals(cursor, conn):
     """Add pack_count / loose_objects / maintenance_failures to agent_sync_state (#1595).
 
@@ -4370,4 +4470,5 @@ MIGRATIONS = [
     ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
     ("portal_messages_voice_source", _migrate_portal_messages_voice_source),
     ("portal_file_dismissals_table", _migrate_portal_file_dismissals_table),
+    ("agent_sync_state_git_dir_bytes_bigint", _migrate_agent_sync_state_git_dir_bytes_bigint),
 ]

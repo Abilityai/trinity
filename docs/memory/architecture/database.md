@@ -688,7 +688,7 @@ CREATE TABLE agent_sync_state (
     behind_main INTEGER DEFAULT 0,
     ahead_working INTEGER DEFAULT 0,       -- #389 P6: working-branch divergence
     behind_working INTEGER DEFAULT 0,
-    git_dir_bytes INTEGER,                 -- #1596: agent .git on-disk size (bloat curve)
+    git_dir_bytes BIGINT,                  -- #1596: agent .git on-disk size (bloat curve); BIGINT since #2800 (int4 on PG overflowed at 2 GiB)
     pack_count INTEGER,                    -- #1595: packs from `git count-objects -v`
     loose_objects INTEGER,                 -- #1595: loose objects (gc-health signal)
     maintenance_failures INTEGER DEFAULT 0, -- #1595: consecutive failed maintenance attempts

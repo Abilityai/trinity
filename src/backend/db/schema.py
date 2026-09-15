@@ -1085,7 +1085,7 @@ TABLES = {
             behind_main INTEGER DEFAULT 0,
             ahead_working INTEGER DEFAULT 0,
             behind_working INTEGER DEFAULT 0,
-            git_dir_bytes INTEGER,
+            git_dir_bytes BIGINT,  -- #2800: int8 on PG; INTEGER affinity on SQLite
             pack_count INTEGER,
             loose_objects INTEGER,
             maintenance_failures INTEGER DEFAULT 0,
