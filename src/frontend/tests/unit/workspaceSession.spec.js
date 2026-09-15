@@ -17,6 +17,7 @@
  * who lands on a dead link has no way to report it.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { sessionLostVerdict } from '@/utils/platformSession'
 import { setActivePinia, createPinia } from 'pinia'
 
 // `vitest.config.js` runs unit tests in the NODE environment on purpose ("pure
@@ -417,37 +418,53 @@ describe('workspace availability state is not sticky (/review C1)', () => {
   })
 })
 
-describe('who gets bounced to /login on a 401 (/review I1)', () => {
-  // The guards live in api.js / main.js interceptors, which need `window`. The
-  // property under test is the PREDICATE, so assert it directly against the
-  // storage states it reads — the same expression both interceptors use.
-  const shouldBounce = (path, hasPlatformToken) => {
-    const onWorkspace = path.startsWith('/workspace') || path.startsWith('/portal')
-    return !onWorkspace || hasPlatformToken
-  }
+describe('who gets bounced to /login on a 401 (/review I1, rewritten for #2791)', () => {
+  // This block used to define its OWN `shouldBounce` helper — a hand-copied
+  // duplicate of the expression in `api.js` and `main.js`. That is why it stayed
+  // green while the two interceptors and `portalHttp` drifted into three
+  // different answers, and it would have stayed green through #2791 too: nothing
+  // under test imported it.
+  //
+  // It now asserts the REAL predicate, which is a pure function precisely so a
+  // node-env spec can reach it.
 
   it('an internal user whose platform session expired IS bounced', () => {
-    expect(shouldBounce('/workspace', true)).toBe(true)
+    expect(sessionLostVerdict({
+      failedToken: 'jwt', storedToken: 'jwt', path: '/workspace',
+    })).toBe('logout')
   })
 
   it('an external client on the workspace is NOT bounced to the operator login', () => {
-    expect(shouldBounce('/workspace', false)).toBe(false)
-    expect(shouldBounce('/workspace/c/abc', false)).toBe(false)
-    expect(shouldBounce('/portal', false)).toBe(false)   // legacy URL, mid-redirect
+    // #2791 widens this: it now holds for a client whose browser also carries a
+    // DEAD operator JWT, which is the case #2261 left open (AC #5). The old
+    // predicate keyed on the token merely EXISTING and bounced them.
+    for (const path of ['/workspace', '/workspace/c/abc', '/portal']) {
+      expect(sessionLostVerdict({ storedToken: null, path })).toBe('ignore')
+      expect(sessionLostVerdict({
+        failedToken: 'dead-operator-jwt', storedToken: 'dead-operator-jwt',
+        portalTokenPresent: true, path,
+      })).toBe('ignore')
+    }
   })
 
-  it('the verdict does not depend on the portal token, which signOut() races away', () => {
+  it('the verdict does not depend on the portal token racing away', () => {
     // The first 401 drops the portal token (fetchRoster -> signOut). A second,
-    // concurrent 401 must reach the same answer as the first — keying on the
-    // portal token made this flip and threw the client onto /login.
-    const before = shouldBounce('/workspace', false)   // portal token present
-    const after = shouldBounce('/workspace', false)    // portal token now gone
+    // concurrent 401 must reach the same answer as the first. For an OPERATOR
+    // (no portal token either way) that answer is stable by construction.
+    const before = sessionLostVerdict({
+      failedToken: 'jwt', storedToken: 'jwt', portalTokenPresent: false, path: '/workspace',
+    })
+    const after = sessionLostVerdict({
+      failedToken: 'jwt', storedToken: 'jwt', portalTokenPresent: false, path: '/workspace',
+    })
     expect(after).toBe(before)
   })
 
   it('everywhere else keeps the normal bounce', () => {
-    expect(shouldBounce('/agents/scout', false)).toBe(true)
-    expect(shouldBounce('/', true)).toBe(true)
+    expect(sessionLostVerdict({ storedToken: null, path: '/agents/scout' })).toBe('logout')
+    expect(sessionLostVerdict({
+      failedToken: 'jwt', storedToken: 'jwt', path: '/',
+    })).toBe('logout')
   })
 })
 
