@@ -2889,35 +2889,12 @@ async def portal_chat(agent_name: str, message: str, email: str,
         _spawn_title_generation(agent_name, session_id, client_message, "",
                                 attempt=title_attempt)
 
-    # #78: make the agent aware of the client's uploaded files. Images are handed
-    # to the model as VISION blocks (so "what's in the picture" works) and MUST
-    # NOT be read as text — reading a binary floods the stream-json pipe and can
-    # trip the #728 subprocess-drain deadlock (a zombie claude pegging a core).
-    # Text files are listed by path so the agent can read them. Best-effort — a
-    # listing/read hiccup never blocks the chat.
-    # #78: make the agent aware of the client's files. Images are attached as
-    # vision blocks ONLY when this turn references them ("only when told"), never
-    # every turn; documents are listed for on-demand reading. The agent must NEVER
-    # read an image file as text — that floods the stream-json pipe (#728), which
-    # is exactly why we hand images over as vision INPUT instead.
-    images, image_names, doc_files = await _collect_inbox_for_turn(agent_name, email, message)
-    manifest_parts = []
-    if images:
-        manifest_parts.append(
-            "The client's image(s) are shown to you directly below as images — "
-            "do NOT open/cat/read image files as text: " + ", ".join(image_names)
-        )
-    elif image_names:
-        manifest_parts.append(
-            "The client has image(s) in your inbox (ask to see one and it'll be shown to you; "
-            "do NOT read image files as text): " + ", ".join(image_names)
-        )
-    if doc_files:
-        listing = ", ".join(f"{d['filename']} ({_human_size(d['size_bytes'])})" for d in doc_files)
-        manifest_parts.append(
-            f"The client has uploaded these files to your inbox at `{_client_inbox(email)}/` — "
-            f"read any that are relevant: {listing}"
-        )
+    # #78: make the agent aware of the client's files — see `collect_inbox_context`,
+    # which owns both halves (the sentence and the vision blocks). #2794 moved the
+    # composition there because a ROOM turn needs the identical thing, and two
+    # copies of "how an agent is told about a file" is how one surface silently
+    # stops telling it (the room was the surface that never told it at all).
+    manifest_prefix, images = await collect_inbox_context(agent_name, email, message)
     # Compose the execution message: prior conversation (context) → file manifest
     # → the client's actual message. Each section is optional.
     #
@@ -2925,9 +2902,6 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # when resuming (the session already remembers); `cold_message` always keeps
     # it, and is what the engine sends if the resume fails and it retries cold —
     # the retry has no session memory, so it needs the replay back.
-    manifest_prefix = ""
-    if manifest_parts:
-        manifest_prefix = "[Client Portal] " + " ".join(manifest_parts) + "\n\n"
     history_prefix = (convo_context + "\n\n") if convo_context else ""
     # #2694: the resumed turn carries the DELTA (what the session never heard),
     # never the whole-thread replay; the cold message carries the replay, which
@@ -4774,6 +4748,56 @@ async def _collect_inbox_for_turn(agent_name: str, email: str, message: str):
                     images.append({"media_type": mt, "data": b64})
                     total += u["size_bytes"]
     return images, image_names, doc_files
+
+
+async def collect_inbox_context(agent_name: str, email: str, message: str) -> tuple[str, list[dict]]:
+    """How ONE agent is told about ONE client's files for ONE turn.
+
+    Returns ``(manifest_prefix, images)``:
+
+    * ``manifest_prefix`` — the ``"[Client Portal] …\n\n"`` sentence to put in
+      front of the turn's message, or ``""`` when the inbox is empty. It names
+      the images, names the documents with their sizes and the directory to read
+      them from, and in every branch tells the agent NOT to read an image as
+      text (#728: a binary through the stream-json pipe is the zombie-claude
+      deadlock, reproduced on an 83 KB JPEG).
+    * ``images`` — vision blocks for ``execute_task(images=…)``, attached only
+      when this turn actually references them ("only when told", #78).
+
+    **This is the one place that composition lives (#2794).** It was inline in
+    `portal_chat`, which meant the 1:1 conversation was the only surface that
+    ever told an agent a file existed: a multi-agent ROOM built its turn prompt
+    from the transcript alone, so an agent @mentioned about a picture the client
+    had just sent it answered, correctly and uselessly, "I don't see any image
+    attached" — about a file sitting in its own inbox. Rooms now call this too.
+    Do not re-inline it: a third surface that composes its own sentence is the
+    same bug wearing a different name.
+
+    Best-effort in both halves — a listing or read failure yields ``("", [])``
+    rather than raising, because a file the agent cannot be told about must
+    still not cost the client their turn.
+    """
+    images, image_names, doc_files = await _collect_inbox_for_turn(agent_name, email, message)
+    parts: list[str] = []
+    if images:
+        parts.append(
+            "The client's image(s) are shown to you directly below as images — "
+            "do NOT open/cat/read image files as text: " + ", ".join(image_names)
+        )
+    elif image_names:
+        parts.append(
+            "The client has image(s) in your inbox (ask to see one and it'll be shown to you; "
+            "do NOT read image files as text): " + ", ".join(image_names)
+        )
+    if doc_files:
+        listing = ", ".join(f"{d['filename']} ({_human_size(d['size_bytes'])})" for d in doc_files)
+        parts.append(
+            f"The client has uploaded these files to your inbox at `{_client_inbox(email)}/` — "
+            f"read any that are relevant: {listing}"
+        )
+    if not parts:
+        return "", images
+    return "[Client Portal] " + " ".join(parts) + "\n\n", images
 
 
 async def list_client_uploads(agent_name: str, email: str, include_owned: bool = False) -> dict:

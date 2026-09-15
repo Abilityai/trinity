@@ -260,7 +260,9 @@
           :starred="isStarred('room', activeRoomIdFromRoute)"
           :prefill="prefill"
           :rename="renameRoom"
+          :carry-notice="activeRoomCarryNotice"
           @open-menu="mobileNav = true"
+          @dismiss-carry-notice="roomCarryNotice = null"
           @rooms-changed="refreshThreads"
           @toggle-star="toggleStar"
           @participants-changed="onRoomParticipants"
@@ -693,6 +695,9 @@ import PortalRailFiles from '@/components/portal/PortalRailFiles.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
+import {
+  partitionAttachments, fanOutPlan, carriedNotice, noticeIsProblem, mergeCarrySources,
+} from '@/components/portal/portalAttachments'
 import PortalAgentBand from '@/components/portal/PortalAgentBand.vue'
 import PortalAgentDetails from '@/components/portal/PortalAgentDetails.vue'
 import ColumnResizeHandle from '@/components/ColumnResizeHandle.vue'
@@ -1226,14 +1231,79 @@ const pickerError = ref(null)
 // created-but-unreachable room does not.
 const escalating = ref(false)
 
-async function onEscalateToRoom({ agents, message } = {}) {
+// #2794 — what the room says about the files that came with the escalated
+// message, scoped to the room it belongs to so it cannot follow the reader
+// into a different conversation. Held by the SHELL and not by the room:
+// the carry happens while the room is still mounting, and a notice owned by a
+// component that does not exist yet has nowhere to live.
+const roomCarryNotice = ref(null)
+const activeRoomCarryNotice = computed(() => (
+  roomCarryNotice.value && roomCarryNotice.value.roomId === activeRoomIdFromRoute.value
+    ? roomCarryNotice.value
+    : null
+))
+
+async function onEscalateToRoom({ agents, message, attachments = [] } = {}) {
   if (escalating.value || !agents?.length) return
   escalating.value = true
+  roomCarryNotice.value = null
   try {
     const room = await store.createRoom(agents, `Chat with ${agents.join(', ')}`)
     const roomId = room.id || room.room_id
     await refreshThreads()
     openRoom(roomId)
+
+    // #2794 — the attachments travel with the message.
+    //
+    // BEFORE the post, never after: the message is what wakes the mentioned
+    // agent, and a turn that starts before the file is in that agent's inbox
+    // cannot see the thing it was asked about. The order is the feature.
+    //
+    // The fan-out rule is the ROOM's own (`PortalRoom.vue`: one upload per
+    // participant), applied to the participants that do not already have the
+    // file — the origin agent received it when the chip was drawn, and sending
+    // it again would put two copies in one inbox.
+    // Both upload surfaces, not just the composer: the rail's Files panel sends
+    // straight to its target and holds no pending state, so a file attached
+    // there was invisible to the escalation — no carry and no notice. The
+    // carry log is the store's record of uploads that have not yet gone out
+    // with a message; the composer's own entries win a tie.
+    const { carried, dropped } = partitionAttachments(
+      mergeCarrySources(attachments, store.carryableUploadsFor(agents[0])),
+    )
+    const plan = fanOutPlan(carried, { origin: agents[0], participants: agents })
+    // Read OFF the plan rather than re-derived from `agents`: the plan already
+    // excludes the origin agent and collapses a duplicate mention, and two
+    // places deciding who the recipients are is how the notice ends up naming
+    // somebody the fan-out never wrote to.
+    const recipients = plan.length ? plan[0].agents : []
+    const failures = []
+    for (const item of plan) {
+      const missed = []
+      for (const name of item.agents) {
+        // Sequential and per-agent: the per-email upload limiter counts
+        // requests (ent#287), and one refused participant is reported as
+        // itself rather than failing the whole carry — the same per-file,
+        // per-destination honesty a room-native drop already has.
+        try {
+          await store.uploadDocument(name, item.file)
+        } catch {
+          missed.push(name)
+        }
+      }
+      if (missed.length) failures.push({ name: item.name, agents: missed })
+    }
+
+    // Consumed: these have now gone out with a message, so a LATER escalation
+    // in this conversation must not carry them a second time. Same moment the
+    // composer clears its chips.
+    store.markUploadsCarried(agents[0])
+
+    const notice = carriedNotice({ carried, dropped, failures, recipients })
+    if (notice) {
+      roomCarryNotice.value = { roomId, text: notice, problem: noticeIsProblem({ dropped, failures }) }
+    }
+
     if (message) {
       try {
         await store.postRoomMessage(roomId, message)
@@ -1241,7 +1311,9 @@ async function onEscalateToRoom({ agents, message } = {}) {
     }
   } catch (err) {
     // Escalation failed, so the user is still in the 1:1 with an emptied
-    // composer. Give the text back rather than losing what they typed.
+    // composer. Give the text back rather than losing what they typed — and
+    // the attachment chips are still standing beside it, because the
+    // conversation deliberately does not clear them on escalate (#2794).
     prefill.value = ''
     await nextTick()
     prefill.value = message || ''
