@@ -80,6 +80,10 @@ export const useSessionsStore = defineStore('sessions', {
     installSource: 'unknown',
     hardeningGuideEligible: false,
     installTlsPosture: 'unconfigured',
+    // #2691: whether that advertised name has ever actually served a request.
+    // Defaults false and falls back to false on a failed read — the closed
+    // value, so a flags failure never shows a tick over an unproven domain.
+    publicUrlReached: false,
     // ent#437: the four booleans the Finish-setup consent card gates on. They
     // ride the flags document so the card decides from a payload the page
     // already awaits and never calls the admin status route on a Dashboard load
@@ -157,6 +161,7 @@ export const useSessionsStore = defineStore('sessions', {
         this.installSource = r.data?.install_source || 'unknown'
         this.hardeningGuideEligible = !!r.data?.hardening_guide_eligible
         this.installTlsPosture = r.data?.install_tls_posture || 'unconfigured'
+        this.publicUrlReached = !!r.data?.public_url_reached
         // ent#437: an absent field reads as hidden (`dismissed`), never as a
         // fresh ask — an older backend must not pop the card on every load.
         this.telemetrySharingEnabled = !!r.data?.telemetry_sharing_enabled
@@ -187,6 +192,7 @@ export const useSessionsStore = defineStore('sessions', {
         this.installSource = 'unknown'
         this.hardeningGuideEligible = false
         this.installTlsPosture = 'unconfigured'
+        this.publicUrlReached = false
         // ent#437 fails in the HIDDEN direction: a failed flags fetch must not
         // pop a consent ask, so `dismissed` reads true until a real answer.
         this.telemetrySharingEnabled = false

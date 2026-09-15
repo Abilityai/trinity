@@ -310,6 +310,7 @@ Step-by-step guides for each deployment scenario:
 | [Local Development](deploying/local-development.md) | Docker Desktop, dev compose, hot reload, what `start.sh` generates |
 | [Single Server](deploying/single-server.md) | Linux VPS: prebuilt images (`--hosted`) or build from source, the DigitalOcean 1-Click and installer script, every `.env` key and which compose forwards it, Redis dual-password setup, which compose files go together |
 | [Public Access](deploying/public-access.md) | Cloudflare Tunnel, TLS postures, webhook surface, Slack/Telegram/WhatsApp integrations, `/mcp` through the tunnel |
+| [Hardening a Marketplace Install](deploying/hardening.md) | Bare IP → domain → tunnel or private network, and how to verify each stage |
 | [Upgrading](deploying/upgrading.md) | Pre-flight → backup → rebuild or re-pull → restart → verify → rollback |
 | [Backup and Restore](deploying/backup-and-restore.md) | Automatic nightly backups, manual copies, restore procedure, PostgreSQL |
 | [Monitoring](deploying/monitoring.md) | Six-probe health check, resource thresholds, recovery patterns |

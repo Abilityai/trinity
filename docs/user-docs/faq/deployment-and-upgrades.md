@@ -150,6 +150,18 @@ Run the six-probe health check: backend (`curl http://localhost:8000/health`), s
 
 Vector's default Docker log source misbehaves on Docker Desktop and other VM-based Docker runtimes: the virtualized log relay keeps closing its follow streams, and the resulting reconnect storm can peg the Docker VM's CPU. Native Linux servers are unaffected. `start.sh` handles this automatically — when it detects Docker Desktop it creates a `docker-compose.override.yml` that switches Vector to an on-disk file source (local logs then land in `/data/logs/local-*.json`); you can force the behavior with `TRINITY_LOCAL_LOG_SOURCE=file` or opt out with `TRINITY_LOCAL_LOG_SOURCE=docker`. See [Local Development](../guides/deploying/local-development.md).
 
+## I saved my domain but Trinity says "waiting for the first visit" — what does that mean?
+
+Saving the Public URL tells Trinity which name to hand out and authorises the web server in front to obtain a certificate for it, but nothing is obtained until a request for that name actually arrives. Until then Trinity has no evidence the name works — DNS may not have propagated, or may point somewhere else entirely — so it reports the address as saved rather than showing it as confirmed. Open `https://your-domain.com` in a browser and the status changes on the next load. If it does not, the request is not reaching your server. This state only appears on installs provisioned with the bundled web server (a one-click marketplace image or the DigitalOcean install script); it is that server's certificate request that confirms the name. If visitors only ever arrive over a Cloudflare Tunnel that bypasses it, visit the name directly once, before closing ports 80 and 443. See [Hardening a Marketplace Install](../guides/deploying/hardening.md).
+
+## My domain shows a certificate error, but Trinity says the domain is set. Why?
+
+Trinity issues no certificates itself — it only tells the web server in front which single name is allowed. That server obtains the certificate on the first request for the name, so if the DNS record is missing or points elsewhere, the request never arrives and no certificate is ever issued. The failure happens in the visitor's browser, where Trinity cannot see it. Check that the `A` record resolves to this server and that ports 80 and 443 are open to the internet. See [Hardening a Marketplace Install](../guides/deploying/hardening.md).
+
+## If I only reach Trinity over a VPN, do I still need the web server in front of it?
+
+Strictly it is redundant — a private network already encrypts the traffic, so terminating TLS a second time buys nothing. But turning it off does not give you a working UI, because the blocker is elsewhere: the web server is a host process, while the frontend is a container port, and Trinity's container firewall drops anything reaching a container from off-box, tailnet traffic included. Set `PRIVATE_NETWORK_CIDRS` in `.env` to your VPN's ranges and re-render the config with `--caddy-only`; Trinity then serves those sources over plain HTTP, which is safe because the VPN already encrypts the transport. An SSH tunnel to the local frontend port works too, with no configuration. See [Hardening a Marketplace Install](../guides/deploying/hardening.md#reaching-the-ui-over-the-tailnet).
+
 ## Why do I have to log in again after restarting the backend?
 
 JWT tokens are invalidated whenever the backend restarts, so every web UI session must log in again — this is expected after any upgrade or restart, not a bug. MCP clients such as Claude Code also need to reconnect: run `/mcp` in your session or restart the client. See [Monitoring](../guides/deploying/monitoring.md).
