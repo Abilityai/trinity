@@ -460,6 +460,7 @@ describe('the store fails closed', () => {
     install_source: 'do-marketplace',
     hardening_guide_eligible: true,
     install_tls_posture: 'https-ip',
+    public_url_reached: true,
   }
 
   it('starts closed before anything is fetched', () => {
@@ -467,15 +468,22 @@ describe('the store fails closed', () => {
     expect(store.installSource).toBe('unknown')
     expect(store.hardeningGuideEligible).toBe(false)
     expect(store.installTlsPosture).toBe('unconfigured')
+    expect(store.publicUrlReached).toBe(false)
   })
 
-  it('carries the three fields through on a successful read', async () => {
+  it('carries the four fields through on a successful read', async () => {
     axios.get.mockResolvedValueOnce({ data: flagPayload })
     await store.loadFeatureFlags()
 
     expect(store.installSource).toBe('do-marketplace')
     expect(store.hardeningGuideEligible).toBe(true)
     expect(store.installTlsPosture).toBe('https-ip')
+    // #2691: the tick is EARNED, so this field is the one that has to survive the
+    // round trip — it is what flips the badge to Done and swaps the copy to the
+    // reached variant. Asserted on the store rather than only in the SFC text,
+    // because a dropped assignment here leaves both of those dead with the rest
+    // of this file still green.
+    expect(store.publicUrlReached).toBe(true)
   })
 
   it('falls back to the closed values when the payload omits them', async () => {
@@ -486,6 +494,7 @@ describe('the store fails closed', () => {
     expect(store.installSource).toBe('unknown')
     expect(store.hardeningGuideEligible).toBe(false)
     expect(store.installTlsPosture).toBe('unconfigured')
+    expect(store.publicUrlReached).toBe(false)
   })
 
   it('fails CLOSED when the flag read fails, so the step stays out', async () => {
@@ -495,7 +504,35 @@ describe('the store fails closed', () => {
     expect(store.installSource).toBe('unknown')
     expect(store.hardeningGuideEligible).toBe(false)
     expect(store.installTlsPosture).toBe('unconfigured')
+    // An unreachable backend must not award the tick.
+    expect(store.publicUrlReached).toBe(false)
     expect(store.featureFlagsLoaded).toBe(true) // resolved, just not to a gate
+  })
+
+  it('REVOKES a tick it already awarded when a later read fails', async () => {
+    // The tests above start from a fresh store, where every closed value equals
+    // the state default — so they pass even with the `catch` block's resets
+    // deleted, and cannot tell a reset from an initial value. This one earns the
+    // tick first and then fails the read, which is the only shape that pins the
+    // fail-closed branch itself. An instance whose backend has gone unreachable
+    // must stop claiming its public URL was reached.
+    //
+    // `force` + `resetInFlight()` is the real second-read path, not a contrivance:
+    // `FirstRunOverlay.vue:378` and the three `Settings.vue` save handlers all
+    // re-read with `force` — which is exactly when a just-saved domain's tick is
+    // resolved, so it is also exactly when a failing backend must revoke it.
+    axios.get.mockResolvedValueOnce({ data: flagPayload })
+    await store.loadFeatureFlags()
+    expect(store.publicUrlReached).toBe(true)
+
+    resetInFlight()
+    axios.get.mockRejectedValueOnce(new Error('boom'))
+    await store.loadFeatureFlags(true)
+
+    expect(store.publicUrlReached).toBe(false)
+    expect(store.hardeningGuideEligible).toBe(false)
+    expect(store.installSource).toBe('unknown')
+    expect(store.installTlsPosture).toBe('unconfigured')
   })
 })
 
