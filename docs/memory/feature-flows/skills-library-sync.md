@@ -249,8 +249,12 @@ async def get_library_status(current_user: User = Depends(get_current_user)):
 > are sensitive. Returning the dict raw handed the admin-gated value to the
 > callers that gate excludes. `SkillsLibraryStatus` is an allow-list: the flat
 > `url`, the per-source `url`, and per-source `last_error` (git failure text
-> echoes the PAT-spliced clone URL — ent#347) are withheld; everything the
+> can echo a credential-bearing URL — ent#347) are withheld; everything the
 > frontend actually derives state from is kept. Widening it re-opens the leak.
+> **ent#615 removed the platform's own splice** (git failure text can still
+> carry userinfo from a *stored* source row — `_adopt_legacy_clone` writes
+> rows with no validation — and from any `origin` written before that change,
+> so the scrubbers and this allow-list stay exactly as they are).
 
 **Sync Endpoint (lines 73-87)**
 
@@ -275,6 +279,17 @@ async def sync_library(admin_user: User = Depends(require_admin)):
 
 **Sync Library Method (lines 51-114)**
 
+> ⚠️ **ent#615 rewrote the credential half of this.** The platform PAT is no
+> longer spliced into the clone URL. It was: git then wrote that URL to
+> `origin`, leaving the platform credential at rest in
+> `/data/skills-library/*/.git/config` — on the `~/trinity-data` **host bind
+> mount**, and therefore in every backup and snapshot of it — as well as on the
+> backend's git argv. The host DECISION is unchanged and still parse-based
+> (PR #1901): an `http.extraHeader` is sent to whatever host git connects to,
+> so "is this host ours" still decides whether the credential travels at all.
+> (The snippet below also predates ent#237's multi-source refactor; read it for
+> the shape, not for the call graph.)
+
 ```python
 def sync_library(self) -> Dict[str, Any]:
     """
@@ -297,25 +312,13 @@ def sync_library(self) -> Dict[str, Any]:
     branch = get_skills_library_branch()
     github_pat = get_github_pat()
 
-    # Construct authenticated URL for private repos
-    if github_pat and "github.com" in url:
-        # Handle various URL formats
-        if url.startswith("https://"):
-            auth_url = url.replace("https://", f"https://{github_pat}@")
-        elif url.startswith("github.com"):
-            auth_url = f"https://{github_pat}@{url}"
-        else:
-            auth_url = f"https://{github_pat}@github.com/{url}"
-    else:
-        # Public repo or no PAT
-        if not url.startswith("https://"):
-            auth_url = f"https://github.com/{url}"
-        else:
-            auth_url = url
+    # ent#615: the URL is NORMALISED, never spliced, and the PAT travels in the
+    # git child's ENVIRONMENT (`http.extraHeader` via GIT_CONFIG_*). The two
+    # halves are separate functions because they answer different questions.
+    clone_url = self._normalized_url(url)                     # credential-less
+    source_pat = self._auth_pat_for(clone_url, github_pat)    # "" off-host
 
-    # Log without exposing PAT
-    safe_url = re.sub(r'https://[^@]+@', 'https://***@', auth_url)
-    logger.info(f"Syncing skills library from {safe_url} (branch: {branch})")
+    logger.info(f"Syncing skills library from {clone_url} (branch: {branch})")
 
     try:
         if self.library_path.exists():
@@ -323,7 +326,7 @@ def sync_library(self) -> Dict[str, Any]:
             result = self._git_pull(branch)
         else:
             # Clone repository
-            result = self._git_clone(auth_url, branch)
+            result = clone.sync(clone_url, github_pat=source_pat)
 
         if result["success"]:
             self._last_sync = datetime.utcnow()

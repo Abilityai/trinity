@@ -22,10 +22,13 @@ API endpoints for agent chat, voice, streaming, and public chat access.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents/{name}/voice/start` | POST | Start voice session |
+| `/api/enterprise/client-portal/agents/{name}/voice/start` | POST | Start a Workspace voice call bound to a chat (`portal_session_id`); 409 while a reply is in flight |
+| `/api/agents/{name}/voice/start` | POST | Start a per-agent voice session (retained for API clients; the UI starts calls in the Workspace) |
 | `/api/agents/{name}/voice/stop` | POST | Stop session |
 | `/api/agents/{name}/voice/status` | GET | Session status |
 | `/ws/voice/{session_id}` | WS | Audio WebSocket bridge (URL returned by `voice/start`) |
+
+The per-agent voice prompt, voice name and canvas panel routes are listed in [Voice Chat](../advanced/voice-chat.md#api-endpoints).
 
 ### Public Chat (no auth)
 
@@ -36,6 +39,7 @@ API endpoints for agent chat, voice, streaming, and public chat access.
 | `/api/public/executions/{token}/{execution_id}/status` | GET | Status of a turn started from this link |
 | `/api/public/executions/{token}/{execution_id}/stream` | GET | Live activity for that turn (SSE) |
 | `/api/public/executions/{token}/{execution_id}/terminate` | POST | Stop a turn started from this link. Scoped per link **and** per trigger: it stops only turns this public link started — never a scheduled run, an operator chat, or a Workspace turn on the same agent. A link with email verification requires the same `session_token` that started the turn. |
+| `/api/public/canvas/{token}` | GET | Resolve a canvas share link (the page at `/canvas/s/{token}`). A `public` share renders with no credential; an `authorized` share answers **401** until the viewer signs in and is re-checked against the agent's access list. Unknown, revoked and expired tokens are told apart only where the holder already knew the canvas existed. See [Agent Canvas](../agents/agent-canvas.md#sharing-a-canvas-and-saving-it-as-a-pdf). |
 
 ### Paid Chat (x402)
 

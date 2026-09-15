@@ -389,6 +389,12 @@ All four require `X-Internal-Secret` **AND** `MCP_INLINE_AUTH_ENABLED`; with the
 | GET | `/api/internal/mcp-auth/playbooks` | `X-Internal-Secret` + flag | Exposed-playbook allow-list for one `(agent, verified email)` pair; re-gated per call |
 | POST | `/api/internal/mcp-auth/chat` | `X-Internal-Secret` + flag | Dispatch a playbook turn as the verified email; re-gated per call. Idempotency is scoped by `make_inline_auth_scope(agent, email)` — folding the **email** in, because MCP clients derive deterministic keys from call args, so two verified users of one shared agent would otherwise share a `(scope, key)` and the second would receive the first's response snapshot and `execution_id` (cross-user disclosure reachable by accident, not just malice) |
 
+### Fan-Out (FANOUT-001)
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/agents/{name}/fan-out` | JWT/MCP | Dispatch 1–50 tasks in parallel (`max_concurrency` 1–10). Sync: waits for the batch and returns the aggregate (`timeout_seconds` bounds the wait, not the subtasks — open ones report `running`, batch `deadline_exceeded`; #2524). `async_mode: true` → `{fan_out_id, status: "accepted", total}` immediately (#2524). Accepts `Idempotency-Key`; in-flight duplicate → 409 `{error, message, execution_id: <fan_out_id>}` (#2670) |
+| GET | `/api/agents/{name}/fan-out/{fan_out_id}` | JWT/MCP | Batch read back from its execution rows: `running` \| `completed` \| `partial` \| `failed`, per-task execution status verbatim + `task_id` (#2670, #2524). Malformed / unknown / other agent's id → uniform 404 |
+
 ### Sequential Agent Loops (#740)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|

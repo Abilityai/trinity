@@ -261,3 +261,41 @@
   itself — never `require_role("admin")`); key values are never logged or echoed
   (masked reads, audit rows record set/cleared only). No schema change —
   `system_settings` rows only.
+
+---
+
+### 3.9 The Git Credential Source of Record (trinity-enterprise#615)
+
+Git authentication is a **resolution ladder**, not a stored URL. Before
+ent#615 the source of record was the remote URL itself
+(`<scheme>://oauth2:<PAT>@<host>/…`), which is why `github_pat_propagation_service`
+could state that "`.env` is not where git authenticates from". That is now
+inverted, and the inversion is the point: a URL is persisted and echoed, a
+ladder is resolved per operation.
+
+The ladder, resolved in the container by `/usr/local/bin/git-credential-trinity`:
+
+| Rung | Where | Written by |
+|---|---|---|
+| 1 | `/home/developer/.env` → `GITHUB_PAT` | `github_pat_propagation_service` over HTTP (primary, also runs `sync_process_env()`), and `git_service.write_container_github_pat` over `docker exec` (the belt — `docker exec` works while the agent server is wedged, restarting or OOM) |
+| 2 | Container `Config.Env` → `GITHUB_PAT` | `lifecycle._apply_git_env_from_db` at create/recreate |
+| 3 | `/home/developer/.trinity/git-credential` (0600) | The ent#615 sweep — a credential rescued from a legacy URL, or seeded by a caller that already holds one |
+
+`.env` is **first**, not last: it is the rung a no-restart change reaches
+(#1264, #1967), while `Config.Env` is immutable until the next recreate. Rung 3
+is **last** so it can only ever serve an agent that has nothing else, which is
+exactly the orphan case it exists for.
+
+Rung 3 is deliberately NOT `.env` and NOT the per-agent DB row. `.env`'s
+`GITHUB_PAT` is exported as `GH_TOKEN`/`GITHUB_TOKEN` and gates the ent#123
+push blackhole, so writing that name would be a privilege **grant**; the DB
+row arrives at the same grant one recreate later, via `_apply_git_env_from_db`.
+`.trinity/*` is ignored contents-only (#2070), so the file is never committed.
+
+Under **Invariant #12** nothing here changes where a credential is *stored* —
+`agent_git_config.github_pat_encrypted` and `users.github_pat_encrypted` remain
+AES-256-GCM envelopes. What changed is how git *reads* one.
+
+**Full requirement**: `docs/memory/requirements/github.md` §11.16.
+**Security surface**: `docs/memory/requirements/security.md` §20.9b.
+

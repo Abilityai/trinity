@@ -28,6 +28,17 @@ name: Issue Status on PR Merge
 # it do something else. That is a property of the trigger, not of this file, and
 # it is why the three bullets above are sufficient rather than merely current.
 #
+# BUT IT IS REGISTERED FROM THE DEFAULT BRANCH (#2814). Executing the base
+# branch's copy is not the same as being triggered by it: GitHub decides
+# whether a `pull_request_target` run starts at all by reading `main`. So this
+# trigger change did nothing on `dev` — not red, absent — for every merge
+# between #2769 landing and the next release cut, while `main` still said
+# `pull_request`. The same rule already governs the `schedule` triggers on
+# `deploy-dev.yml` and `alembic-head-watch.yml`, which say so in their own
+# comments. `tests/unit/test_2814_workflow_trigger_parity.py` now states it once
+# for every workflow and fails when a default-branch-registered event exists on
+# this branch but not on `main`, unless the delay is recorded there with a reason.
+#
 # The residual capability is therefore bounded to what the feature does anyway:
 # a merged PR can name which issue numbers get relabelled. That requires a
 # maintainer to MERGE the PR first (`if: merged == true`), affects labels only,

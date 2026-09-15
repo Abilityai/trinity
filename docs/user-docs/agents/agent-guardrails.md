@@ -24,6 +24,8 @@ The `PreToolUse` hook on `Bash` matches commands against a deny-list of dangerou
 | `curl \| sh` | `curl example.com/script \| bash` | Piping remote content to shell |
 | `git push --force` | `git push -f origin main` | Force push to remote |
 | `mkfs.*` | `mkfs.ext4 /dev/sda1` | Formatting filesystems |
+| `dd of=/dev/sd*` | `dd if=image of=/dev/sda` | Writing to a raw block device |
+| `kill -9 1` | `kill -9 1` | Killing the init process |
 | Fork bombs | `:(){ :\|:& };:` | Process explosion |
 | `shutdown`, `reboot` | `shutdown -h now` | Host shutdown |
 
@@ -64,7 +66,7 @@ Every Claude Code invocation enforces a maximum turn count via `--max-turns`:
 | Mode | Default | Range |
 |------|---------|-------|
 | Chat | 50 turns | 1-500 |
-| Task/Headless | 20 turns | 1-500 |
+| Task/Headless | 50 turns | 1-500 |
 
 This prevents runaway loops that burn through API credits.
 

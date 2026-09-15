@@ -615,6 +615,16 @@ class ActivityType(str, Enum):
 
 ---
 
+## Testing
+
+**Journey J10 — "My agents can call each other, and I can see what they said"** (`tests/journeys/test_j10_agent_calls_agent_journey.py`, #2349; record in `tests/journeys/catalog.yaml`). Two ephemeral agents; every call is made through the MCP server with the caller's own agent-scoped key, read from its container, so the `checkAgentAccess` gate above is what the harness crosses. Credential-free on every PR (`journey-smoke.yml`): the permitted call lands on the callee attributed to the caller (IA-01) with an `agent_collaboration` activity on the caller (AC-01); a call with no edge is refused with a reason naming both agents and nothing runs on the callee (P-02); a stopped callee answers `503 Agent is not running` within seconds and leaves no row (IA-03); a fan-out is capped at 50 and lands as one batch on the callee (IA-02); a loop stops at its budget; deleting the callee leaves no dangling edge (L-03). On a keyed stack the callee's real answer is read back from its execution record. Three `strict=True` xfails carry open findings: no chain-depth guard (#2806), refusals audited as successful tool calls (#2807), and `run_agent_loop` skipping the permission gate (trinity-enterprise#628). The backend REST routes do not consult `agent_permissions` for agent principals (Invariant #8); that ruling is trinity-enterprise#629.
+
+Run it locally (creates and deletes `pytest-ephemeral-journey-*` agents only; needs the Docker socket of the host running the stack):
+
+```bash
+cd tests && TRINITY_API_URL=http://localhost:8000 pytest journeys/test_j10_agent_calls_agent_journey.py -v -rsxX --timeout=300
+```
+
 ## Related Flows
 
 - **Downstream**: Activity Monitoring - collaboration events appear in activity stream

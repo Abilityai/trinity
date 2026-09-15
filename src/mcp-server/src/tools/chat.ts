@@ -610,8 +610,12 @@ export function createChatTools(
         "any workload that is embarrassingly parallel. " +
         "\n\n**Concurrency:** Controlled by max_concurrency (default 3, max 10). " +
         "Tasks beyond the limit queue internally until a slot frees up. " +
-        "\n\n**Timeout:** Overall deadline for the entire fan-out. Tasks still running " +
-        "when the deadline hits are marked as failed with timeout error." +
+        "\n\n**Timeout:** `timeout_seconds` bounds how long the backend WAITS for the batch, " +
+        "not the tasks. Tasks still open at the deadline report status `running` (batch status " +
+        "`deadline_exceeded`) and keep running — poll `get_fan_out_result` for their outcome." +
+        "\n\n**async_mode:** set `async_mode: true` to get `{fan_out_id, status: 'accepted', total}` " +
+        "back immediately and poll `get_fan_out_result(agent_name, fan_out_id)` instead of waiting. " +
+        "Match results to your task ids by `task_id`." +
         "\n\n**Gateway timeout (#2670) — READ THIS BEFORE RETRYING.** A fan-out runs " +
         "longer than any single task in it, so this call is the most likely of all the " +
         "dispatch tools to outlive the MCP gateway. When it does, the tool returns " +
@@ -640,9 +644,9 @@ export function createChatTools(
           .number()
           .optional()
           .describe(
-            "Overall deadline in seconds for the entire fan-out (max: 3600). " +
-            "If omitted, no outer deadline is applied — each sub-task is still " +
-            "bounded by the target agent's configured execution_timeout_seconds."
+            "Deadline in seconds for waiting on the fan-out (max: 3600). Reaching it " +
+            "does not stop the tasks. If omitted, the backend waits out the whole batch " +
+            "(each sub-task is bounded by the target agent's execution_timeout_seconds)."
           ),
         max_concurrency: z
           .number()
@@ -661,6 +665,13 @@ export function createChatTools(
           .array(z.string())
           .optional()
           .describe("Restrict which tools subtasks can use"),
+        async_mode: z
+          .boolean()
+          .optional()
+          .describe(
+            "Return {fan_out_id, status: 'accepted'} immediately instead of waiting; " +
+            "poll get_fan_out_result for the outcome (default: false)"
+          ),
       }),
       execute: async (
         {
@@ -671,6 +682,7 @@ export function createChatTools(
           model,
           system_prompt,
           allowed_tools,
+          async_mode,
         }: {
           agent_name: string;
           tasks: Array<{ id: string; message: string }>;
@@ -679,6 +691,7 @@ export function createChatTools(
           model?: string;
           system_prompt?: string;
           allowed_tools?: string[];
+          async_mode?: boolean;
         },
         context: any
       ) => {
@@ -710,6 +723,9 @@ export function createChatTools(
           "fan_out",
           model,
           JSON.stringify(tasks),
+          // #2524: an async call's replay snapshot is the ACCEPTED receipt, so
+          // a sync call with the same tasks must not share its key.
+          ...(async_mode ? ["async"] : []),
         ]);
 
         const response = await apiClient.fanOut(
@@ -721,6 +737,7 @@ export function createChatTools(
             model,
             system_prompt,
             allowed_tools,
+            async_mode,
           },
           sourceAgent,
           mcpKeyInfo,

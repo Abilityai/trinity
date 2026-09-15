@@ -585,6 +585,8 @@ Events logged to audit service:
 
 **File**: `tests/test_agent_permissions.py` (16 tests, all passing)
 
+**Journey**: `tests/journeys/test_j10_agent_calls_agent_journey.py` (J10, #2349) asserts the MCP-layer enforcement end to end with a real agent-scoped key — `list_agents` = self ∪ permitted, `chat_with_agent`/`fan_out` refused without an edge and admitted with one, and the delete cascade read back from the source agent's own permission list. `run_agent_loop` is the known gap (trinity-enterprise#628, strict xfail there).
+
 | Test Class | Tests | Coverage |
 |------------|-------|----------|
 | `TestGetPermissions` | 3 | GET endpoint, response structure, field validation |
