@@ -17,6 +17,7 @@ import {
   shouldRequestBriefing,
 } from '@/components/portal/portalBriefingState'
 import axios from 'axios'
+import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
 import { useAuthStore } from './auth'
 // #2162: the page size for a windowed report read. A dependency-free leaf
 // shared with the operator reports store — never re-typed here, since the
@@ -24,7 +25,9 @@ import { useAuthStore } from './auth'
 // is the shape that drifts while each side's tests pin its own version.
 import { REPORT_ROWS_PAGE as ROWS_PAGE } from '@/utils/reportPaging'
 
-const PORTAL_TOKEN_KEY = 'trinity.portalToken'
+// #2791: exported so the cross-tab listener and the shared 401 verdict can ask
+// whether a CLIENT session is live without re-deriving the key.
+export const PORTAL_TOKEN_KEY = 'trinity.portalToken'
 // #2261 — per-TAB, so an operator working in another tab is untouched by a
 // client's idle timeout (that is the whole reason expiry may not end the
 // platform session). sessionStorage, not localStorage: it must survive a
@@ -84,11 +87,12 @@ export const portalHttp = axios.create()
 //
 // A callback rather than a router import: the store is imported BY the views the
 // router loads, so importing the router here is a cycle.
-let _onPlatformSessionLost = null
-
-export function setPlatformSessionLostHandler(fn) {
-  _onPlatformSessionLost = fn
-}
+// #2791: the per-module callback this file used to own is gone — the reaction is
+// registered once, on `utils/platformSession.js`, and reached from all three
+// transports. Kept as a thin re-export so an out-of-tree caller (or a test that
+// has not been updated) still resolves to the one handler rather than silently
+// registering a second.
+export { setPlatformUnauthorizedHandler as setPlatformSessionLostHandler }
 
 portalHttp.interceptors.request.use((config) => {
   // The store is the ONLY source of a workspace credential. Whatever arrived on
@@ -190,8 +194,17 @@ function installRotationInterceptor() {
       // token) must never reach it: their tab may well hold an operator's JWT,
       // and bouncing would destroy a session that did nothing wrong.
       if (error?.response?.status === 401) {
+        // #2791: the third 401 site now reports to the SAME handler as
+        // `api.js` and the global interceptor, which owns the verdict.
+        //
+        // `isPlatformSession` stays as the local gate, and it is not redundant
+        // with the shared verdict: it is the only thing that knows this tab's
+        // client session was SUPPRESSED (#2261's `platformFallbackSuppressed`),
+        // a state no amount of reading localStorage can reconstruct. The shared
+        // verdict then adds what this site could never see — whether the token
+        // that failed is still the stored one.
         try {
-          if (useClientPortalStore().isPlatformSession) _onPlatformSessionLost?.()
+          if (useClientPortalStore().isPlatformSession) notifyPlatformUnauthorized(error)
         } catch {
           // Pinia not active (module-scope request, or teardown): no session to
           // reason about, so there is nothing to bounce.
