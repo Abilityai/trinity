@@ -12,15 +12,19 @@ By design. Trinity's permission model is restrictive by default: a new agent has
 
 ## How do I let one agent call another?
 
-Open the agent's detail page and go to the **Permissions** tab, which lists every agent in the system with a toggle (plus **Allow All** / **Allow None** controls). Toggle on the agents you want to allow, keeping in mind that permissions are directional: allowing Agent A to call Agent B does not allow B to call A — each direction is a separate grant. The change takes effect on the next MCP call, with no restart needed. See [Agent Permissions](../collaboration/agent-permissions.md).
+Open the detail page of the agent that will be *making* the calls and go to its **Permissions** tab, which lists every other agent in the system with a toggle (**Allow All** / **Allow None** set every row at once). Toggle on the agents it may call and click **Save Permissions**. Permissions are directional: allowing Agent A to call Agent B does not allow B to call A — each direction is a separate grant, made from B's own Permissions tab. The change takes effect on the next MCP call, with no restart needed. See [Agent Permissions](../collaboration/agent-permissions.md).
+
+## Does the Permissions tab control who can call my agent, or who my agent can call?
+
+Who *your agent* can call. Each row on an agent's Permissions tab is a grant from this agent to the listed one — toggling `research-worker` on for `orchestrator` lets `orchestrator` call `research-worker`, subscribe to its events and mount its shared folder, and says nothing about whether `research-worker` may call back. To control who may call your agent, open each *caller's* Permissions tab and toggle your agent there. Nothing is granted in either direction by default, and only the system agent (`trinity-system`) bypasses the check. See [Agent Permissions](../collaboration/agent-permissions.md).
 
 ## What does granting permission actually let an agent do?
 
-Permission grants communication, not control. A permitted agent can see the target in `list_agents`, send it messages via `chat_with_agent`, subscribe to its events, and mount its exposed shared folder — the same permission record gates all three collaboration surfaces. It does not let the calling agent manage the target (start, stop, or reconfigure it), and the reverse direction stays blocked until you grant it separately. See [Agent Permissions](../collaboration/agent-permissions.md).
+Permission grants communication, not control. A permitted agent can see the target in `list_agents`, send it messages via `chat_with_agent`, subscribe to its events, and mount its exposed shared folder — the same permission record gates all three collaboration surfaces, and it is also the boundary for reading or answering the target's operator-queue items over MCP (see [MCP & API](mcp-and-api.md#can-an-agent-read-or-answer-the-operating-room-queue-over-mcp)). It does not let the calling agent manage the target (start, stop, or reconfigure it), and the reverse direction stays blocked until you grant it separately. See [Agent Permissions](../collaboration/agent-permissions.md).
 
 ## Can one agent hand off a long-running task to another without waiting?
 
-Yes. Call `chat_with_agent(agent_name, message, async=true)`, which returns an `execution_id` immediately instead of holding the connection open, then poll `get_execution_result(execution_id)` until the task completes. This avoids the synchronous MCP call timeout and suits delegation chains where the worker may run for many minutes. See [Agent Network](../collaboration/agent-network.md).
+Yes. Call `chat_with_agent(agent_name, message, async=true)`, which returns an `execution_id` immediately instead of holding the connection open, then poll `get_execution_result(execution_id)` until the task completes. This keeps you clear of the synchronous call bound (`MCP_CHAT_TIMEOUT_MS`, default 25 seconds) and suits delegation chains where the worker may run for many minutes. A synchronous call that outlives that bound is not lost either — it answers with a `status: "queued_timeout"` receipt carrying the `execution_id` to poll, so never re-send a reworded version, which would dispatch a second execution (details in [MCP & API](mcp-and-api.md#why-is-chat_with_agent-returning-queued_timeout-instead-of-a-reply)). To avoid polling altogether, subscribe to the worker's task-completion events instead (below). See [Agent Network](../collaboration/agent-network.md).
 
 ## How do I share files between two agents?
 
@@ -32,7 +36,7 @@ Volume mounts are applied when a container is created, so a restart of both agen
 
 ## How do event subscriptions between agents work?
 
-Events are a lightweight pub/sub layer. A source agent calls `emit_event(event_type, payload)` with a namespaced type like `report.generated`; Trinity finds every subscription matching that source agent and event type and dispatches an async task to each subscriber. The task's message comes from the subscription's template, with placeholders like `{{payload.field}}` filled in from the event payload — for example `Process report {{payload.url}}`. Events are persisted and broadcast over WebSocket for real-time visibility. See [Event Subscriptions](../collaboration/event-subscriptions.md).
+Events are a lightweight pub/sub layer. A source agent calls `emit_event(event_type, payload)` with a type like `report_ready`; Trinity finds every subscription matching that source agent and event type and dispatches an async task to each subscriber. The subscriber creates the rule with `subscribe_to_event(source_agent, event_type, target_message)`, and the task's message is built from that `target_message` template with placeholders like `{{payload.field}}` filled in from the event payload — for example `Process report {{payload.url}}`. Events are persisted and broadcast over WebSocket for real-time visibility. See [Event Subscriptions](../collaboration/event-subscriptions.md).
 
 ## Why isn't my agent receiving events it subscribed to?
 

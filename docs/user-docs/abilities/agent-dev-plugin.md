@@ -1,6 +1,6 @@
 # agent-dev Plugin
 
-Development tools for extending existing agents — skills, memory systems, git-backed state, a GitHub Issues development cycle, cross-actor project management, long-running pipelines, multi-agent orchestration, a shared canonical-data layer, and fleet analysis and migration. Thirty skills in v1.16.0.
+Development tools for extending existing agents — skills, memory systems, git-backed state, a GitHub Issues development cycle, cross-actor project management, long-running pipelines, multi-agent orchestration, a shared canonical-data layer, and fleet analysis and migration. Thirty skills in v1.16.1.
 
 Two kinds of skill live here. **Installers** (`add-*`) put a capability into an agent. **Runtime skills** are what the agent then runs — the nine backlog-workflow skills and the five `project-*` skills. Each runtime skill is authored once in this plugin; the installers copy it in at install time (they embed nothing of their own), and the same files are mirrored into the community skills catalog Trinity ships with (`trinity-skills`), so a deployed agent can also receive them by [assignment](../automation/skills-and-playbooks.md) without running the installer.
 
@@ -109,7 +109,7 @@ It picks a complexity tier and generates from a bundled template:
 | 2 — Stateful skill | Reads/writes agent state between runs | `stateful-skill` |
 | 3 — Full playbook | Multi-step, scheduled or delegated work | `manual`, `gated`, or `autonomous` — by automation level |
 
-Every generated skill carries a `metadata:` block with a newest-first changelog and a what's-new banner, and — for anything on a schedule — invokes by slash name so the scheduler message stays a bare call. Playbooks are written to be **called**: from a single `/name [args]` line, with inputs declared in `argument-hint`, running only themselves when invoked by another agent. See [Playbook calls](../automation/abilities-marketplace.md#playbook-calls-the-unit-of-inter-agent-work) for the convention, and the `--autonomous` run mode any gated playbook needs before it can go on a cron.
+Every generated skill carries a `metadata:` block with a newest-first changelog and a what's-new banner, and — for anything on a schedule — invokes by slash name so the scheduler message stays a bare call. Playbooks are written to be **called**: from a single `/name [args]` line, with inputs declared in `argument-hint`, running only themselves when invoked by another agent. See [Playbook calls](../automation/abilities-marketplace.md#playbook-calls--the-unit-of-inter-agent-work) for the convention, and the `--autonomous` run mode any gated playbook needs before it can go on a cron.
 
 ### Modify an Existing Playbook
 
@@ -182,7 +182,7 @@ Makes any agent a system-aware orchestrator of other agents. Two modes, picked b
 |-------|---------|
 | `/discover-agents` | Discover the fleet (from the live Trinity instance and/or a repo list) into a descriptive `fleet/system-map.yaml` — including each agent's pipelines and canon declarations |
 | `/compose-system` | Turn the map into a Trinity system manifest and deploy it; members are declared as `github:Org/repo` so the fleet is reproducible from source, and a spec-less repo gets a post-deploy `/trinity:onboard in-place` playbook call |
-| `/orchestrate` | Route work to the right agent, fan the same task out across several, chain ordered steps, open a room, wire standing event reactions, or roll out an ephemeral agent for a one-off job — via Trinity MCP |
+| `/orchestrate` | Route work to the right agent, fan N tasks out to one agent (many agents run as parallel per-agent dispatches), chain ordered steps, open a room, wire standing event reactions, or roll out an ephemeral agent for a one-off job — via Trinity MCP |
 | `/sync-fleet-to-head` | Non-destructively bring in-scope agents to their GitHub HEAD |
 | `/profile-fleet` | Interview and introspect agents, reconcile reality against the fleet narrative |
 | `/fleet-reconcile` | Fold already-verified deltas into every doc surface behind one gate |
@@ -190,7 +190,7 @@ Makes any agent a system-aware orchestrator of other agents. Two modes, picked b
 
 Three conventions run through the whole bundle:
 
-- **Dispatch is a playbook call.** `/orchestrate` resolves each dispatch to a playbook from the target agent's *live* skill catalog and sends one line — `/<playbook> [args] --run <task_id>` — never a prose brief (a freeform brief is the recorded exception). Fire-and-park, never block-and-wait: it subscribes to the target's task-completion event and reports back when the work lands. See [Playbook calls](../automation/abilities-marketplace.md#playbook-calls-the-unit-of-inter-agent-work).
+- **Dispatch is a playbook call.** `/orchestrate` resolves each dispatch to a playbook from the target agent's *live* skill catalog and sends one line — `/<playbook> [args] --run <task_id>` — never a prose brief (a freeform brief is the recorded exception). Fire-and-park, never block-and-wait: it subscribes to the target's task-completion event and reports back when the work lands. See [Playbook calls](../automation/abilities-marketplace.md#playbook-calls--the-unit-of-inter-agent-work).
 - **Standing wiring uses events, not pollers.** For "whenever X happens, have Y react", `/orchestrate` wires Trinity's pub/sub layer: the source agent's playbook is instructed to `emit_event` a named domain event, and the reacting agent subscribes *itself* (subscriptions are self-service, so the setup is dispatched to the subscriber, never wired on its behalf) with a `{{payload.field}}`-interpolated task. The design rules the platform does not enforce — exact-match event names, keep custom event graphs acyclic (only the built-in task-completion events carry a loop guard), a wake reaches only a running subscriber, interpolated payloads are agent-authored text — are written into the fleet narrative so the wiring stays reviewable. See [Event Subscriptions](../collaboration/event-subscriptions.md).
 - **Loop closure.** A run is not done until the requester has been told the outcome, including failure; work parked on someone outside the fleet is labeled `waiting-on:<actor>`, aged, and handed back with a drafted follow-up. The agent drafts; the human sends.
 

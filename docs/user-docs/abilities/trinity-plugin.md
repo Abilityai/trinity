@@ -63,7 +63,9 @@ This:
 1. Prompts for your Trinity instance URL
 2. Authenticates via email verification
 3. Provisions an MCP API key
-4. Configures `.mcp.json` for Trinity MCP tools
+4. Writes `.mcp.json` pointing at `<instance-url>/mcp` — the production frontend serves that path, so it works on installs that expose only ports 80/443; it falls back to the MCP server's own port 8080 when the route is not served
+
+An account that requires a second factor stops after step 2: complete the sign-in in the web UI, create the key under **Settings → API Keys**, then re-run `/trinity:connect --force`. See [Authentication](../api-reference/authentication.md).
 
 After connecting, Trinity MCP tools become available:
 
@@ -117,7 +119,7 @@ There are three ways an agent gets onto Trinity:
 
 Sync is git-based and multi-remote — a `.trinity-remote.yaml` registry lets one repo serve several instances (production, staging), each tracking its own branch. `push` advances the deployed agent to your new commit; `pull` brings the agent's own commits back; `deploy` switches a remote to another branch.
 
-`schedules` and `plugins` treat `template.yaml` as the design truth and the operator as owner of the live extras: they **create or install what is declared but missing, and report what is live but undeclared — never delete, never uninstall**. Both also run automatically after `push`, `pull`, and `deploy`, and read-only in `status`. A plugin installed by reconciliation loads on the agent's *next* execution.
+`schedules` and `plugins` treat `template.yaml` as the design truth and the operator as owner of the live extras: they **create or install what is declared but missing, and report what is live but undeclared — never delete, never uninstall**. Both also run automatically after `push`, `pull`, and `deploy`, and read-only in `status`. `plugins` reads what is installed from the platform's compatibility report first, and only falls back to the CLI inside the container. A plugin installed by reconciliation loads on the agent's *next* execution.
 
 ## Onboarding a Deployed Agent In Place
 
@@ -145,6 +147,7 @@ The remote counterpart to Claude Code's built-in `/loop`. Where `/loop` re-invok
 /trinity:loop [@agent] <message>             start a loop
 /trinity:loop status <loop_id>               show per-run progress
 /trinity:loop stop <loop_id>                 request a graceful stop
+/trinity:loop local <message>                run the same bounded loop in this session
 ```
 
 No `@agent` means **this agent's remote copy** — the usual case is looping your own remote counterpart on Trinity (resolved from `.trinity-remote.yaml` or by name match).
@@ -167,7 +170,9 @@ Examples:
 /trinity:loop stop loop_a1b2c3
 ```
 
-After firing, the skill starts a lightweight local watch by default — it polls the loop and reports run-by-run progress, stalls, and the final result. Say "fire and forget" to skip the watch; the remote loop runs either way and also appears on the agent's **Loops** tab in the Trinity web UI.
+After firing, the skill starts a lightweight local watch by default — it polls the loop and reports run-by-run progress, stalls, and the final result. Say "fire and forget" to skip the watch; the remote loop runs either way and also appears on the agent's **Loops** tab in the Trinity web UI. Inside a deployed Trinity agent there is no watch — the wake-up tools it relies on are denied there — so poll with `/trinity:loop status` or a `set_reminder` instead.
+
+`local` runs the same Fixed or Until loop natively in your Claude Code session — no Trinity connection, no `loop_id`. Use it when the task lives on this machine or Trinity is unreachable; if the loop must outlive your session, it is remote.
 
 The loop mechanics — modes, template variables, stop signals, capacity, costs — are the platform's Sequential Agent Loops feature. See [Agent Loops](../automation/agent-loops.md) for the full guide.
 
@@ -176,7 +181,7 @@ The loop mechanics — modes, template variables, stop signals, capacity, costs 
 | You want | Use |
 |----------|-----|
 | One remote turn | `chat_with_agent` |
-| The same task across many agents at once | `fan_out` |
+| The same task over many inputs, all on one agent | `fan_out` — see [Fan-Out](../automation/fan-out.md); for many agents, dispatch `chat_with_agent` per agent |
 | One agent, N sequential iterations | `/trinity:loop` (or `run_agent_loop` directly) |
 | A recurring task on a cron cadence | A Trinity [schedule](../automation/scheduling.md) |
 
@@ -196,7 +201,7 @@ The generated skill writes only widget types Trinity renders — `metric`, `stat
 /trinity:deploy-new-instance
 ```
 
-Deploys a complete Trinity instance on any server you can reach — fresh installs and existing instances both — and scaffolds a dedicated ops agent to manage it (health checks, updates, rollbacks). See [Deploying Trinity](../guides/deploying-trinity.md) and the [Trinity Ops Agent](../guides/deploying/ops-agent.md).
+Deploys a complete Trinity instance — on a cloud host, any server you can reach over SSH, or local Docker; fresh installs and existing instances both — and scaffolds a dedicated ops agent with 13 skills to manage it (health checks, updates, rollbacks, provisioning). It builds from source or pulls prebuilt images (`start.sh --hosted` with a pinned `TRINITY_IMAGE_TAG`), seeds the admin account from `.env` so there is no first-run setup screen, and needs only the frontend port opened in the firewall — the MCP server is reachable through it at `/mcp`. See [Deploying Trinity](../guides/deploying-trinity.md) and the [Trinity Ops Agent](../guides/deploying/ops-agent.md).
 
 ## Alternative: Trinity CLI
 

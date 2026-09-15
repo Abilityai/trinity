@@ -8,17 +8,17 @@ Agents communicate with each other via Trinity's MCP server, enabling orchestrat
 
 **Agent-to-Agent Communication** -- Agents call each other through Trinity MCP tools using agent-scoped API keys. The `chat_with_agent` MCP tool sends a message to another agent and returns the response.
 
-**Async Collaboration** -- For long-running tasks, use `chat_with_agent(async=true)` which returns an `execution_id` immediately. Poll with `get_execution_result(id)` until complete. This bypasses the 60-second MCP timeout. To avoid polling entirely, subscribe to the worker's task-completion events and get woken with an automatic report-back task instead (see [Event Subscriptions](./event-subscriptions.md)).
+**Async Collaboration** -- For long-running tasks, use `chat_with_agent(async=true)` which returns an `execution_id` immediately. Poll with `get_execution_result(id)` until complete. This keeps the call under the MCP server's own call bound (`MCP_CHAT_TIMEOUT_MS`, default 25 seconds, set below the 30–60 second ceiling most MCP gateways enforce). A synchronous call that outlives that bound is not lost either: the tool answers with a receipt — `status: "queued_timeout"` plus the `execution_id` — instead of a transport error. Poll `get_execution_result(id)` and never re-send a reworded version, which dispatches a second execution. To avoid polling entirely, subscribe to the worker's task-completion events and get woken with an automatic report-back task instead (see [Event Subscriptions](./event-subscriptions.md)).
 
 **Timeline Replay** -- Collaboration is surfaced on the Dashboard as a **Timeline** of executions, color-coded by trigger type with collaboration arrows linking calls between agents. (The old live node/edge graph view was retired; the underlying collaboration data still flows and feeds the Timeline.)
 
-**Grid Dashboard** -- The Grid view lays out the fleet as tiles with per-agent runtime, autonomy, and health chips -- a fast at-a-glance fleet status alongside the Timeline.
+**Grid Dashboard** -- The Grid view lays out the fleet as tiles with per-agent runtime, autonomy, and health chips -- a fast at-a-glance fleet status alongside the Timeline. A third **List** view shows the same fleet as rows. Press `v` to cycle Timeline → Grid → List.
 
 **Pull-Pilot Routing (experimental)** -- An alternative routing path for agent-to-agent `chat_with_agent` calls, behind a default-OFF flag (`MCP_AGENT_CHAT_PULL_ENABLED`). When enabled, a sequential agent-to-agent call is dispatched through Trinity's durable async task path instead of a held synchronous call: the caller gets an immediate receipt with an `execution_id` and polls `get_execution_result(id)` for the result. This is an opt-in proof-of-concept for pull/work-stealing coordination. It does not change human chat, parallel calls, or self-calls. Leave it off unless you are piloting it.
 
 ## How It Works
 
-1. The Dashboard offers a **Timeline** view and a **Grid** view of the fleet.
+1. The Dashboard offers a **Timeline** view, a **Grid** view, and a **List** view of the fleet.
 2. Timeline shows execution boxes color-coded by trigger type (manual, schedule, MCP, chat) with collaboration arrows drawn between calls that hand off between agents.
 3. Grid lays agents out as tiles with runtime, autonomy, and health chips.
 4. Click through to any agent's detail page for its full activity.

@@ -33,7 +33,7 @@ Agents can publish files to a signed download URL that works universally — web
 ### Enabling File Sharing
 
 1. Open the agent detail page and go to the **Sharing** tab.
-2. In the **File Sharing** panel, toggle **Enable file sharing** on.
+2. In the **File Sharing** panel, switch the toggle on (it reads **Enabled** / **Disabled**).
 3. A restart-required banner appears — restart the agent to mount the publish volume.
 4. After restart, the agent's `/home/developer/public/` directory is live.
 
