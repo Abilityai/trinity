@@ -3181,6 +3181,17 @@ def _migrate_agent_sync_state_git_dir_bytes(cursor, conn):
         "ALTER TABLE agent_sync_state ADD COLUMN git_dir_bytes INTEGER",
     )
 
+# Every column the #2800 rebuild copies — the guard in the migration compares the
+# live table against this set so a column it does not name can never be dropped.
+_AGENT_SYNC_STATE_REBUILD_COLUMNS = frozenset({
+    "agent_name", "last_sync_at", "last_sync_status", "consecutive_failures",
+    "last_error_summary", "last_remote_sha_main", "last_remote_sha_working",
+    "ahead_main", "behind_main", "ahead_working", "behind_working",
+    "git_dir_bytes", "pack_count", "loose_objects", "maintenance_failures",
+    "last_check_at", "updated_at",
+})
+
+
 def _migrate_agent_sync_state_git_dir_bytes_bigint(cursor, conn):
     """Re-declare agent_sync_state.git_dir_bytes as BIGINT (#2800).
 
@@ -3210,6 +3221,18 @@ def _migrate_agent_sync_state_git_dir_bytes_bigint(cursor, conn):
         return
     if "git_dir_bytes" not in declared:
         return  # #1596's add-column migration has not run yet; it runs first in MIGRATIONS order
+    # A rename-swap copies exactly the columns it names and DROPs the rest. The
+    # copy list below is the full agent_sync_state column set as of this
+    # migration; refuse — loudly, before touching anything — if the live table
+    # carries a column this list does not know, rather than silently dropping
+    # its data. A raise here surfaces as `first_pending` in the /health 503
+    # (#1160); the table is left exactly as it was.
+    unexpected = set(declared) - _AGENT_SYNC_STATE_REBUILD_COLUMNS
+    if unexpected:
+        raise RuntimeError(
+            "agent_sync_state_git_dir_bytes_bigint: refusing to rebuild agent_sync_state — "
+            f"unknown column(s) {sorted(unexpected)} would be dropped by the rename-swap"
+        )
     print("Re-declaring agent_sync_state.git_dir_bytes as BIGINT (#2800)...")
     _atomic_rebuild(
         cursor,

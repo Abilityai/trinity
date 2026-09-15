@@ -172,6 +172,22 @@ class TestGitDirBytesSqliteDeclaredTypeMigration:
         mig._migrate_agent_sync_state_git_dir_bytes_bigint(cur, conn)
         assert cur.execute("SELECT COUNT(*) FROM agent_sync_state").fetchone()[0] == 1
 
+    def test_refuses_to_drop_an_unknown_column(self):
+        """A rename-swap copies only the columns it names; an unknown one must stop it, not vanish."""
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE agent_sync_state (agent_name TEXT PRIMARY KEY, git_dir_bytes INTEGER, "
+            "updated_at TEXT NOT NULL, future_col TEXT)"
+        )
+        cur.execute("INSERT INTO agent_sync_state VALUES ('a1', 1, 'now', 'keep me')")
+        conn.commit()
+        with pytest.raises(RuntimeError, match="future_col"):
+            self._migrations()._migrate_agent_sync_state_git_dir_bytes_bigint(cur, conn)
+        # Nothing touched: column and row both still there, no orphan _new table.
+        assert cur.execute("SELECT future_col FROM agent_sync_state").fetchone() == ("keep me",)
+        assert not cur.execute("SELECT 1 FROM sqlite_master WHERE name='agent_sync_state_new'").fetchone()
+
     def test_noop_before_the_column_exists(self):
         """Pre-#1596 file: the add-column migration runs first; this one must not rebuild a table it cannot describe."""
         conn = sqlite3.connect(":memory:")
