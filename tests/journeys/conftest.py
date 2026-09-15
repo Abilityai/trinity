@@ -348,7 +348,19 @@ class McpSession:
             return resp.status_code, None
         ctype = resp.headers.get("content-type", "")
         if "text/event-stream" in ctype:
-            msgs = [json.loads(line[6:]) for line in resp.text.splitlines() if line.startswith("data: ")]
+            # A frame that is not JSON, or not an object, is skipped rather than
+            # thrown: the caller turns "no message" into a named failure, which is
+            # more useful than a raw ValueError from inside the transport.
+            msgs = []
+            for line in resp.text.splitlines():
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    parsed = json.loads(line[6:])
+                except ValueError:
+                    continue
+                if isinstance(parsed, dict):
+                    msgs.append(parsed)
             mine = [m for m in msgs if m.get("id") == body["id"]]
             return resp.status_code, (mine[-1] if mine else (msgs[-1] if msgs else None))
         try:
@@ -417,8 +429,22 @@ def add_edge(client, source: str, target: str) -> None:
 
 
 def clear_edges(client, source: str) -> None:
+    """Remove every edge `source` holds, and PROVE it — the module-scoped pair's
+    order-independence rests on this reset, so a DELETE that quietly 404s or
+    500s would leak an edge into the next test and make the permission test go
+    red blaming the product for a harness leak (review of #2349, I1)."""
     for target in permitted_agents(client, source):
-        client.delete(f"/api/agents/{source}/permissions/{target}")
+        resp = client.delete(f"/api/agents/{source}/permissions/{target}")
+        assert resp.status_code in (200, 204), (
+            f"harness reset: revoking '{source}' → '{target}' answered "
+            f"{resp.status_code}: {resp.text[:200]}"
+        )
+    left = permitted_agents(client, source)
+    assert not left, (
+        f"harness reset: '{source}' still holds edges {left} after clear_edges — "
+        f"a leaked edge here would make a later permission test fail for the "
+        f"wrong reason"
+    )
 
 
 # ---- what the platform recorded (the "I can see what they said" half) -------
