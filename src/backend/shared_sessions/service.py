@@ -1190,10 +1190,64 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
         _broadcast("room_participant_state",
                    {"room_id": room_id, "identity": agent_name, "state": "idle"})
 
+    # `TaskExecutionStatus` is a `str` Enum, so a plain string compare works for
+    # either — but normalise anyway rather than relying on that at a distance.
     status = getattr(result, "status", None)
+    status = str(getattr(status, "value", status) or "").strip().lower()
     reply = (getattr(result, "response", "") or "").strip()
 
-    if status in ("failed", "cancelled") or not reply:
+    # #2795: the RETURNED status is not always the one that stands.
+    #
+    # On a current agent image a cancelled turn comes back labelled: the agent
+    # relabels its own 504/502/500 to a `cancelled` 200 (#679 F3), so
+    # `execute_task` returns CANCELLED and the branch below is exact. An OLDER
+    # image re-raises instead, `execute_task` writes FAILED, that write LOSES
+    # the CAS to the CANCELLED the terminate route already wrote — and returns
+    # FAILED anyway. The room would then blame the agent for a stop the reader
+    # asked for, and drop a resume handle that was never bad.
+    #
+    # The 1:1 does not have this problem because it remembers the cancel
+    # client-side (`cancelledExecutionIds`); a room has no such memory, so it
+    # asks the row that actually stands. One indexed read, only on a path that
+    # has already lost an LLM turn, and fail-open — an unreadable row leaves the
+    # returned status in force.
+    # Only where it can change the outcome: the branch below fires on FAILED or
+    # on an empty reply, so anything else — a success with a reply — must pay
+    # nothing. (A test pinned this after the first draft re-read on every
+    # successful turn.)
+    if status != "cancelled" and (status == "failed" or not reply):
+        eid = getattr(result, "execution_id", None)
+        if eid:
+            try:
+                from database import db as core_db
+                persisted = core_db.get_execution(eid)
+                persisted_status = str(
+                    getattr(getattr(persisted, "status", None), "value",
+                            getattr(persisted, "status", None)) or ""
+                ).strip().lower()
+                if persisted_status == "cancelled":
+                    status = "cancelled"
+            except Exception as e:  # noqa: BLE001 — never let a label read break the turn
+                logger.warning("room %s: could not re-read execution %s for its "
+                               "terminal label (%s)", room_id, eid, e)
+
+    # #2795: a CANCEL IS NOT A FAILURE, and the room must not describe it as
+    # one. A person can now stop a room turn from the tile or the Work tab, and
+    # the line they got for doing it was "<agent> could not respond (no
+    # response)." — the surface reporting a fault for something the reader
+    # themselves just asked for, which is the AC's "no 'something went wrong'
+    # for a cancel the user asked for".
+    #
+    # It also must not clear the resume handle. That drop exists for a DEAD
+    # handle (the Session-tab idiom below), and a cancel is no evidence of one
+    # — the next turn would pay for a cold rebuild of a context that was fine.
+    # The read cursor is left alone either way, so the delta this turn never
+    # answered is re-delivered on the next wake.
+    if status == "cancelled":
+        _post_system(room_id, f"{agent_name}'s turn was stopped.")
+        return
+
+    if status == "failed" or not reply:
         # A dead resume handle is the common cause — drop it so the next wake is
         # cold instead of failing the same way forever (Session-tab idiom).
         if cached:

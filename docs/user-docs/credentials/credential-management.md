@@ -61,12 +61,12 @@ The full contract is published at [`docs/schemas/trinity-agent-credentials.schem
 
 ### Adding credentials
 
-Add credentials using one of four methods:
+Add credentials using one of four methods on the **Credentials** tab:
 
 - **Setup checklist** -- Per-variable inputs, with descriptions and setup links.
-- **Manual entry** -- Name, value, and service fields.
-- **Bulk import** -- Paste `.env`-style KEY=VALUE pairs.
-- **From encrypted backup** -- Import a `.credentials.enc` file.
+- **Quick Inject** -- Paste `.env`-style KEY=VALUE pairs; they are merged into the agent's `.env`.
+- **Upload Credential File** -- Upload one file to a destination path (service-account JSON, TLS certs and keys, kubeconfig, SSH keys — see [Which Files Can Be Injected](#which-files-can-be-injected)).
+- **Import from Git** -- Decrypt and inject the `.credentials.enc` backup in the agent's workspace; **Export to Git** writes it.
 
 **Hot-reload:** paste or edit credentials on a running agent. The `.env` file is updated and `.mcp.json` is regenerated immediately. No restart needed.
 
@@ -100,7 +100,7 @@ Injection accepts a curated set of credential file types, not just `.env`. Anyth
 
 - **Export** creates an encrypted `.credentials.enc` file for backup. It captures the **full injected credential set** — every allow-listed credential file present in the agent (discovered live), text and binary alike — not just `.env` and `.mcp.json`.
 - **Import** decrypts and injects credentials from an encrypted file. The archive is re-validated against the same path policy on the way in.
-- **Auto-import** runs on agent startup via `POST /api/internal/decrypt-and-inject`.
+- **Auto-import on startup is not currently available.** The agent's startup script still tries to import a `.credentials.enc` it finds without a `.env`, but the internal route it calls no longer exists, so the attempt is logged as "Could not auto-import credentials" and the agent starts without them. Use **Import** from the Credentials tab (or the import endpoint) instead.
 
 ### Rotating the Encryption Key
 
@@ -132,7 +132,7 @@ Where the vault is not available — an instance without the entitlement, or a c
 
 ### Platform-level credentials
 
-The credentials the platform itself holds — the Anthropic API key and platform GitHub PAT (**Settings → Integrations → API Keys**), the Slack app token, client secret, and signing secret (**Settings → Integrations → Slack Integration**), and the Google API key — are stored AES-256-GCM encrypted at rest, never in cleartext. An install upgraded from an older release re-encrypts a leftover cleartext row the first time it is read and deletes the cleartext copy, so a restored old backup or a direct database write cannot leave a plaintext value behind for long.
+The credentials the platform itself holds — the Anthropic API key, platform GitHub PAT, Resend email key and Gemini key (**Settings → Integrations → API Keys**; see [Platform Keys](platform-keys.md)), and the Slack app token, client secret, and signing secret (**Settings → Integrations → Slack Integration**) — are stored AES-256-GCM encrypted at rest, never in cleartext. An install upgraded from an older release re-encrypts a leftover cleartext row the first time it is read and deletes the cleartext copy, so a restored old backup or a direct database write cannot leave a plaintext value behind for long.
 
 The generic settings route refuses to store a secret in the clear: `PUT /api/settings/{key}` for any of those keys, or for any credential-shaped key (`*_api_key`, `*_token`, `*_secret`, `*_pat`, `*_password`, `*_credentials`), answers `422` and names the dedicated route to use. The Slack **client ID** is a reviewed exemption — it is a public OAuth identifier that appears verbatim in the authorize URL.
 
@@ -154,6 +154,7 @@ Credential values are never logged. All operations use structured logging with v
 | `/api/agents/{name}/credentials/export` | POST | Export to `.credentials.enc` |
 | `/api/agents/{name}/credentials/import` | POST | Import from encrypted file |
 | `/api/agents/{name}/credentials/env-drift` | GET | Per-variable drift between the agent's `.env` and the environment its running process actually has (variable names only). Owner-only and human-only; a stopped agent returns `agent_not_running` rather than an error. |
+| `/api/credentials/encryption-key` | GET | The platform encryption key, for decrypting an exported `.credentials.enc` elsewhere. Admin-only |
 
 The inject, export, import, checklist, and drift routes are owner-only **and human-only** — an agent-scoped API key is rejected, so a prompt-injected agent cannot read or rewrite its own credential set.
 
@@ -169,5 +170,6 @@ The inject, export, import, checklist, and drift routes are owner-only **and hum
 ## See Also
 
 - [Agent Configuration](../agents/agent-configuration.md)
+- [Platform Keys](platform-keys.md) — the Claude, GitHub, email and Gemini keys the platform itself holds
 - [Subscription Credentials](subscription-credentials.md)
 - [OAuth Credentials](oauth-credentials.md)

@@ -159,16 +159,18 @@ Two real-time endpoints, two credentials:
 | `/api/users/me` | GET | JWT | Get current user info |
 | `/api/setup/status` | GET | None | First-time setup status |
 | `/api/setup/admin-password` | POST | None | First-run admin creation — provisions the **first** admin only; 403 whenever a usable admin account already exists, whatever the setup flag says |
-| `/api/health` | GET | None | Health check |
+| `/health` | GET | None | Health check (503 while schema migrations are incomplete) |
+| `/api/access/request` | POST | None | Public self-signup — adds the submitted email to the login allow-list. **Disabled by default** (403) until an admin enables public access requests |
 | `/api/mcp/keys` | POST | JWT | Create MCP API key — body `{name, description?, scope?}`; `scope` defaults to `user`, admins may request `portal_delegate` or `ops` |
 | `/api/mcp/keys` | GET | JWT | List MCP API keys |
-| `/api/mcp/keys/{id}` | DELETE | JWT | Revoke an MCP API key |
+| `/api/mcp/keys/{id}/revoke` | POST | JWT | Revoke (deactivate) an MCP API key |
+| `/api/mcp/keys/{id}` | DELETE | JWT | Permanently delete an MCP API key |
 | `/api/ws/ticket` | POST | JWT | Mint a single-use 30-second ticket for `/ws` (503 when Redis is unavailable) |
 
 ### Unauthenticated Endpoints
 
 The following endpoints do not require a Bearer token:
-`/api/auth/mode`, `/api/setup/status`, `/api/setup/admin-password`, `/api/token`, `/api/health`
+`/api/auth/mode`, `/api/auth/email/request`, `/api/auth/email/verify`, `/api/access/request`, `/api/setup/status`, `/api/setup/admin-password`, `/api/token`, `/health`
 
 ## See Also
 

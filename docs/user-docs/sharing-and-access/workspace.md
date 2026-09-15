@@ -73,6 +73,7 @@ One box: the message field on top, the controls in a row inside it. Enter sends;
 - **Attach** — the paperclip picks files, and dropping files anywhere on the conversation sends them (*Drop files to send to …*). Up to 20 files per drop, 25 MB each, uploaded one after another; each shows as a chip with its own progress, and a refused file names itself and the limit. Sent files land in the agent's inbox and appear under **Files you sent** in the rail.
 - **Speak your message** — the microphone dictates into the field where the browser or platform can transcribe. It is separate from the voice call.
 - **Voice call** — the leftmost button starts the real-time call in this chat; see [Voice Chat](../advanced/voice-chat.md).
+- **Speak replies aloud** — a speaker button above the composer, shown only when the agent has a voice configured, reads each reply in the agent's ElevenLabs voice on your side. Click again to mute. It is hidden during a call, when the orb owns playback. See [Voice Replies](../advanced/voice-replies.md).
 - **Send** becomes **Stop** while a turn runs.
 
 An agent that is stopped or unreachable is labelled above the field before you type; the message still sends, and the server's refusal is the answer.
@@ -107,11 +108,13 @@ The rail sits beside the conversation, collapsed to a strip of icons by default;
 |-----|---------------|-------------|
 | **Work** | The agent's executions from this chat and its history — see [Executions](../operations/executions.md) | Platform users |
 | **Loops** | Run and watch loops on the agent from here — see [Agent Loops](../automation/agent-loops.md) | Platform users |
-| **Canvas** | The agent's canvas — see [Agent Canvas](../agents/agent-canvas.md). While there is none, **Ask for a canvas** pre-fills a request | Everyone; a client sees only canvases the agent published to its roster |
+| **Canvas** | The agent's canvases (below) — see [Agent Canvas](../agents/agent-canvas.md). While there is none, **Ask for a canvas** pre-fills a request | Everyone; a client sees only canvases the agent published to its roster |
 | **Files** | Files you sent and files the agent shared | Everyone |
 | **Info** | The agent's context (below) | Everyone, in a 1:1 chat |
 
 **Files.** Drop a file on the tab, or click to send one (in a room, pick the recipient first). The list is grouped **Files you sent** / **Files from {agent}**. Click a name to preview it — images, Markdown and text up to 256 KB; ← and → step through the previewable files, Esc closes — or **Download** to save it. The bin icon deletes a file you sent, or removes a shared file from your list without touching the share. An agent's owner, signed in as a platform user, additionally gets **Delete for everyone**.
+
+**Canvas.** One canvas shows at a time; pick another from the chips above it, where a pinned canvas carries 📌 and comes first. Once an agent has more than six, **Search canvases…** filters them by title or id. The header states two facts and draws no conclusion from them — *Updated 2h ago · agent last ran 40m ago*. **PDF** prints the open canvas through the browser's own print dialog. An agent's owner (or an admin), signed in as a platform user, also gets **Manage**: each row shows its age, a pin toggle and **Delete**, and a checkbox per row feeds **Delete selected** with one confirmation naming the count; everyone else has a read-only panel. Sharing a canvas at a link is done from the agent's Canvas tab on Agent Detail, not from the rail — see [Agent Canvas](../agents/agent-canvas.md). The canvas you have open travels with each message you send from that chat, so *add a column to this* names the right one. It is context, not permission: the agent still reaches only the canvases it could already reach, and a canvas deleted mid-conversation resolves to nothing.
 
 ### The agent's page is the conversation
 
@@ -158,14 +161,14 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/my-agents` | GET | The caller's roster, each agent with its label, description, availability, model default and capability cards; instance-level `model_options` and `realtime_voice` |
+| `/my-agents` | GET | The caller's roster, each agent with its label, description, availability, model default, capability cards and `can_manage_canvases` (the only capability channel a Workspace principal has — absent reads as false); instance-level `model_options` and `realtime_voice` |
 | `/briefings?agents=a,b` | GET | The capability hints for some or all rostered agents, loaded off the roster's critical path |
 | `/sessions` | GET | Every chat the caller has, across all agents, in one call |
 | `/agents/{name}/sessions` | GET / POST | This agent's chats (the read mints Main if missing) / start an empty chat |
 | `/agents/{name}/sessions/main/reset` | POST | Archive Main and mint a fresh one; refused while a turn is in flight |
 | `/agents/{name}/sessions/{id}` | PATCH | Rename a chat — `{title}`, one line, ≤100 characters |
 | `/agents/{name}/history?session_id=&limit=` | GET | A chat's messages, the in-flight marker and the last turn's outcome |
-| `/agents/{name}/chat` | POST | Send a turn and wait for the reply — the synchronous integration surface; accepts `session_id`, `new_thread` and `model` |
+| `/agents/{name}/chat` | POST | Send a turn and wait for the reply — the synchronous integration surface; accepts `session_id`, `new_thread`, `model` and `open_canvas_id` (the canvas on screen, passed as context; an id the caller cannot see resolves to nothing) |
 | `/agents/{name}/chat/stream` | POST | Begin a turn, returning an execution id to watch; same body |
 | `/agents/{name}/executions/{id}/stream` | GET | Live activity for one of your own turns (SSE) |
 | `/agents/{name}/executions/{id}/terminate` | POST | Stop one of your own turns |
@@ -175,6 +178,9 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 | `/agents/{name}/page` | GET | The band and Info payload in one call |
 | `/agents/{name}/reports`, `/reports/{id}` | GET | Report metadata and one report's payload (`rows_offset`/`rows_limit` page a table) |
 | `/agents/{name}/canvas`, `/canvas/{id}` | GET | The agent's canvases, narrowed to the roster audience for a client |
+| `/agents/{name}/canvas/{id}` | DELETE | Remove a canvas (owner or admin, platform session) |
+| `/agents/{name}/canvas/bulk-delete` | POST | Remove several — `{canvas_ids}`; reports the ids that existed |
+| `/agents/{name}/canvas/{id}/pin` | PUT | Pin or unpin — `{pinned}` (owner or admin) |
 | `/agents/{name}/ratings` | POST | Rate a message or a deliverable |
 | `/agents/{name}/voice/start` | POST | Start a voice call bound to a chat (platform users) |
 | `/chat-state` | GET | Star and unread state for every chat |
