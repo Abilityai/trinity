@@ -287,11 +287,14 @@ def test_retry_timeout_bounded():
         timeout_seconds=300,
     )
 
+    from services.task_execution_service import _AGENT_HTTP_SLACK_S
+
     assert ctx.agent_call_count == 2
     retry_timeout = ctx.timeouts[1]
     # `execute_task` dispatches with `timeout_seconds + _AGENT_HTTP_SLACK_S`;
-    # the retry gets whatever of that is left after the first attempt.
-    assert 0 < retry_timeout <= 300 + 10
+    # the retry gets whatever of that is left after the first attempt. The
+    # constant, not a literal 10 — the PR replaced that literal everywhere else.
+    assert 0 < retry_timeout <= 300 + _AGENT_HTTP_SLACK_S
 
 
 def test_non_switch_failure_no_retry():
