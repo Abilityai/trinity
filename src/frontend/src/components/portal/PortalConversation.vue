@@ -169,6 +169,10 @@
              apart doing different things (open a panel / pick a file). The
              rail strip still opens Files, and ent#524's drop-anywhere is
              untouched. -->
+        <!-- ent#625: the theme switch is the LAST control in the header, in a
+             slot the shell fills, so the conversation owns its header row and
+             the shell owns the control — the same seam the room's header has. -->
+        <slot name="header-end" />
       </div>
     </header>
 
