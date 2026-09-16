@@ -131,6 +131,28 @@ what enforces it; "convention" means a reviewer does.
 10. **Failure output names the broken promise** — "agent `x` was created but
     never reached `running` within 90 s" — never a bare status comparison
     (convention, from #2336).
+11. **A credential-bound journey asks the INSTANCE, never the harness host.**
+    Rule 1's one sanctioned exception is a journey that needs a real model
+    answer (J03's first turn; J10's "I can read what they said" and "every
+    fan-out subtask completes"). It decides through the single helper
+    `tests/journeys/conftest.py::skip_unless_agent_can_answer`, which requires
+    **both** instance-side reads:
+    the **callee's own** `auth_mode` from
+    `GET /api/subscriptions/agents/{name}/auth` (which credential the agent is
+    routed to), **and** `claude_auth_configured` from
+    `GET /api/settings/feature-flags` (whether the instance actually holds one —
+    a non-empty platform key or a registered subscription). Either read alone is
+    insufficient, and each failure mode has been observed:
+    reading `ANTHROPIC_API_KEY` from the pytest process gates on the harness, so
+    a subscription-authenticated stack skipped permanently and invisibly
+    (#2812); gating on `GET /api/subscriptions` being non-empty describes the
+    instance rather than the callee, which would turn that permanent skip into a
+    false failure when a freshly created ephemeral agent never gets a
+    subscription assigned; and gating on `auth_mode` alone fails the journeys on
+    the credential-free CI stack, because `use_platform_api_key` is a per-agent
+    ROUTING FLAG — an agent reports `api_key` when there is no key to use.
+    A stack whose credential is present but INVALID passes both reads and FAILS
+    rather than skipping; that is rule 1, not an exception to it.
 
 ## Evidence bar for a test — it executes the path (#2829)
 
