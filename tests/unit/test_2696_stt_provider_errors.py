@@ -220,6 +220,17 @@ def test_endpoint_answers_with_the_category_message(monkeypatch, past_the_gate,
     assert exc.value.status_code != 500       # AC 5: fail-soft, never a 500
 
 
+def test_operator_detail_never_carries_the_key():
+    """The panel promises the key is never echoed. If a provider ever put it in
+    the prose that becomes `detail`, the stored row must not carry it — the
+    client half is a constant, so this is the ONLY place the body reaches an
+    operator surface (merge-train I1 on #2702)."""
+    prose = f"Unauthorized: bad token {KEY} rejected by upstream"
+    failure = stt.record_live_failure(KEY, 401, json.dumps({"detail": {"message": prose}}))
+    assert KEY not in (failure.detail or "")
+    assert KEY not in json.dumps(stt.read_last_failure(KEY))
+
+
 def test_endpoint_remembers_the_failure_for_the_operator(monkeypatch, past_the_gate):
     _stub_provider(monkeypatch, status=401, body=_body("missing_permissions"))
     with pytest.raises(ClientPortalError):

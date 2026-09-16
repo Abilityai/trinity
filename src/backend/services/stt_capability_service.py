@@ -50,7 +50,7 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from typing import Optional
 
 import httpx
@@ -433,6 +433,14 @@ def record_live_failure(api_key: str, status_code: int, body: str) -> SttFailure
     failure = classify_stt_failure(status_code, body)
     record_live_refusal(api_key, status_code, body)
     if api_key:
+        # The operator-facing `detail` is the provider's own status word (or up
+        # to 120 chars of its prose). ElevenLabs's documented bodies never echo
+        # the key, but the panel that shows this promises the key is "never
+        # echoed", so the promise is enforced here rather than assumed of a
+        # third party — the client-facing half never carries the body at all.
+        if failure.detail and api_key in failure.detail:
+            from utils.credential_sanitizer import scrub_secret
+            failure = replace(failure, detail=scrub_secret(failure.detail, api_key))
         k = _failure_row(api_key)
         payload = failure.to_json()
         _local_failures[k] = (time.monotonic() + TTL_LAST_FAILURE_SECONDS, payload)
