@@ -49,7 +49,8 @@ def test_feature_flags_does_not_carry_workspace_available(monkeypatch):
     import asyncio
     from types import SimpleNamespace
 
-    from routers import settings as settings_module
+    # #1028: `get_public_feature_flags` lives in the package's `flags` module.
+    from routers.settings import flags as settings_module
 
     stub_settings = SimpleNamespace(
         is_brain_orb_enabled=lambda: False,
