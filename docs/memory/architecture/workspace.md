@@ -794,6 +794,18 @@ it a second time). The scope word is load-bearing: only that one route is rewrit
 
 ## The compact header — Info as a rail tab, one paperclip, voice at the composer (ent#547, #2580)
 
+**Theme switch (trinity-enterprise#625).** The header's LAST control, in both the conversation
+and the room, is a `#header-end` slot that `views/Portal.vue` fills with
+`components/portal/PortalThemeSwitch.vue` — a trigger showing the RESOLVED theme (icon +
+"System · dark", icon-only below `sm`) over a popover holding `components/base/ThemeChoice.vue`,
+the one light/dark/system picker the NavBar's user menu now consumes too. It drives
+`useThemeStore` and nothing else (no auth/agents/clientPortal import — pinned), so an external
+client gets it; only the root `dark` class flips, and the slot carries no `:key`, so scroll,
+draft and thread survive a switch. The decidable half is `utils/themeSwitch.js`. Its spec is
+the frontend suite's first mounted component test: `vitest.config.js` registers
+`@vitejs/plugin-vue`, and a spec opts into jsdom per file (`// @vitest-environment jsdom`);
+the default environment stays `node`.
+
 The band is **compact**, and the three controls that were not about the conversation have
 left the header. Ruled by the operator on 2026-09-07 after testing `dev`.
 

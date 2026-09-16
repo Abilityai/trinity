@@ -272,6 +272,9 @@
           <template #rail-strip>
             <PortalRailStrip v-if="railVisible" :tabs="railTabs" :signals="railSignals" @open="railSheetOpen = true" />
           </template>
+          <template #header-end>
+            <PortalThemeSwitch />
+          </template>
         </PortalRoom>
 
         <!-- #2128: the URL names a room this instance cannot open. This branch
@@ -402,6 +405,13 @@
           </template>
           <template #rail-strip>
             <PortalRailStrip v-if="railVisible" :tabs="railTabs" :signals="railSignals" @open="railSheetOpen = true" />
+          </template>
+          <!-- ent#625: one switch, one store (`useThemeStore`), in every stage
+               state that renders the column — new chat, thread and agent
+               landing are all this branch since ent#523; the room above has
+               its own fill. The skeleton heads the chain and gets none. -->
+          <template #header-end>
+            <PortalThemeSwitch />
           </template>
         </PortalConversation>
 
@@ -703,6 +713,7 @@ import PortalAgentDetails from '@/components/portal/PortalAgentDetails.vue'
 import ColumnResizeHandle from '@/components/ColumnResizeHandle.vue'
 import { useColumnResize } from '@/composables/useColumnResize'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
+import PortalThemeSwitch from '@/components/portal/PortalThemeSwitch.vue'
 import PortalRail from '@/components/portal/PortalRail.vue'
 import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
 import PortalVoiceCanvas from '@/components/portal/PortalVoiceCanvas.vue'
