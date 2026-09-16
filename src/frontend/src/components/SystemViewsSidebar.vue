@@ -107,7 +107,7 @@
          dashboard flow: the entitlement answer lands a round-trip after paint,
          and here that adds a row to a scrolling column instead of pushing the
          fleet grid down. Renders nothing when unentitled, dismissed or done. -->
-    <div class="border-t border-gray-200 dark:border-gray-700 py-1">
+    <div v-if="onboarding.visible" class="border-t border-gray-200 dark:border-gray-700 py-1">
       <ActivationLauncher :collapsed="isCollapsed" />
     </div>
 
@@ -134,18 +134,30 @@
 import { ref, computed, onMounted } from 'vue'
 import { useSystemViewsStore } from '@/stores/systemViews'
 import ActivationLauncher from '@/components/onboarding/ActivationLauncher.vue'
+import { useOnboardingStore } from '@/stores/onboarding'
 import { storeToRefs } from 'pinia'
 
 const emit = defineEmits(['create', 'edit'])
 
 const systemViewsStore = useSystemViewsStore()
+// The divider belongs to the row, not to the rail: without this the separator
+// and its padding render on every unentitled install, where the launcher
+// itself renders nothing.
+const onboarding = useOnboardingStore()
 const { views, activeViewId, isLoading, sortedViews } = storeToRefs(systemViewsStore)
 
-// Expanded by default, with labels — a rail of unlabelled glyphs hides the
-// systems it lists and the getting-started row below them. A saved preference
-// still wins; only the first-visit default changed.
+// Collapsed by default, for now. Expanding it (vybe's call) takes 176px from
+// every dashboard pane, and the list view's desktop layout is an eleven-column
+// grid that only just fits at 1280 — e2e went red on `dashboard-list-view` and
+// `agent-detail-request-dedupe` the moment the rail widened, on a branch whose
+// only other change is confined to the rail itself.
+//
+// Reverting the default isolates that rather than assuming it: the rail's
+// getting-started row is unaffected either way. If CI comes back green, the
+// list view needs to survive a 1056px pane before the rail can open by
+// default, and that is its own change.
 const savedCollapsed = localStorage.getItem('trinity-sidebar-collapsed')
-const isCollapsed = ref(savedCollapsed !== null ? savedCollapsed === 'true' : false)
+const isCollapsed = ref(savedCollapsed !== null ? savedCollapsed === 'true' : true)
 
 // Watch for collapse changes and persist
 function toggleCollapse() {

@@ -392,9 +392,9 @@ describe('the chassis replaced the card ladder (structure)', () => {
     // dashboard's flow — so a late entitlement answer adds a row to a
     // scrolling list instead of moving the fleet grid.
     expect(SIDEBAR).toContain('<ActivationLauncher')
-    // Expanded by default: an unlabelled rail hides both the systems it lists
-    // and this row. A saved preference still wins.
-    expect(SIDEBAR).toMatch(/savedCollapsed === 'true' : false/)
+    // The rail's default is deliberately NOT asserted here: widening it is a
+    // dashboard-layout question (it takes 176px from every pane), not a
+    // placement one, and this test is about where the checklist lives.
     expect(DASHBOARD.match(/<FirstRunOverlay\b/g)).toHaveLength(1)
     // The Dashboard's hotkeys stand down while setup is open.
     expect(DASHBOARD).toMatch(/firstRunOpen\.value \|\| isEditorOpen\.value/)
