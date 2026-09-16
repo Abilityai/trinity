@@ -210,7 +210,7 @@ class TestItCanNeverPush:
 
     def test_the_merge_is_merge_tree_not_a_worktree_merge(self, job):
         runs = _runs(job)
-        assert "git merge-tree --write-tree" in runs
+        assert "merge-tree --write-tree" in runs  # `git -c core.quotePath=off merge-tree …`
         bare_merge = re.search(r"git merge(?!-tree)\b", runs)
         assert bare_merge is None, (
             "a working-tree `git merge` came back. merge-tree is not a style "
@@ -259,6 +259,16 @@ class TestItCanNeverPush:
         assert 'if [ -n "$in_versions" ]' in conflict_arm
         assert "write_verdict \"$n\" \"$head_sha\" conflict \"$in_versions\"" in conflict_arm
         assert 'elsewhere="$conflicted"' in conflict_arm
+        # The load-bearing line of #2828: the `unknown` arm must NOT swallow a
+        # leg the conflict arm already evaluated. Delete this guard and every
+        # unrelated-conflict leg falls back into `continue` — #2828 reinstated
+        # with every other assertion here still green.
+        assert 'evaluable_conflict=1' in conflict_arm
+        assert 'if [ "$rc" -ne 0 ] && [ -z "$evaluable_conflict" ]; then' in body
+        # C-quoted paths (core.quotePath) must still hit the version-line anchor,
+        # and merge-tree is asked not to quote in the first place.
+        assert "VERSION_LINES='^\"?src/backend/" in body
+        assert 'git -c core.quotePath=off merge-tree --write-tree HEAD "refs/watch/pr-$n"' in body
         assert "continue" in conflict_arm.split('if [ -n "$in_versions" ]')[1].split("fi")[0], (
             "a version-line conflict must still stop the leg"
         )

@@ -337,7 +337,14 @@ jobs:
 
           # The two directories the guard reads. A conflict ANYWHERE ELSE in the
           # repo does not change what is in them (#2828).
-          VERSION_LINES='^src/backend/(enterprise/backend/)?migrations/versions/'
+          # `^"?`: git C-quotes a path holding a non-ASCII, `"`, `\` or control
+          # byte (`core.quotePath`), printing it as `"src/…/0003_\303\251.py"`.
+          # Without the optional quote the anchor misses it, the leg is classed
+          # *elsewhere*, and the guard then runs over a tree whose revision file
+          # carries conflict markers — `check_alembic_heads.py` omits an
+          # unparseable file, so that reads PASS. Belt: the merge-tree call below
+          # also disables quoting, so the anchor is the second layer.
+          VERSION_LINES='^"?src/backend/(enterprise/backend/)?migrations/versions/'
 
           for n in $PR_NUMBERS; do
             echo "::group::PR #$n"
@@ -373,7 +380,7 @@ jobs:
             # SIGPIPE (rc=141) into the error arm. Redirecting to files removes
             # both, and keeps stderr for the warning instead of /dev/null-ing it.
             set +e
-            git merge-tree --write-tree HEAD "refs/watch/pr-$n" >"$mt_out" 2>"$mt_err"
+            git -c core.quotePath=off merge-tree --write-tree HEAD "refs/watch/pr-$n" >"$mt_out" 2>"$mt_err"
             rc=$?
             set -e
             tree=$(head -1 "$mt_out")
