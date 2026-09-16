@@ -63,7 +63,7 @@
       aria-label="Getting started"
       data-testid="activation-launcher-panel"
     >
-      <ActivationChecklist embedded @dismissed="open = false" />
+      <ActivationChecklist embedded @close="open = false" />
     </div>
   </div>
 </template>

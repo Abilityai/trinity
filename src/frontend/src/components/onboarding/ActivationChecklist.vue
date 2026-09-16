@@ -31,12 +31,19 @@
           {{ store.completedCount }} of {{ store.totalCount }} done — pick up where you left off.
         </p>
       </div>
+      <!--
+        Close, NOT dismiss. The X on a panel reads as "not now", and it used to
+        dismiss the checklist permanently — a destructive action behind the
+        least destructive-looking control on the card, with no way back: there
+        is no un-dismiss anywhere in the store or the UI. Retiring it for good
+        is its own labelled control below, which says so.
+      -->
       <button
-        @click="store.dismiss(); emit('dismissed')"
-        data-testid="activation-checklist-dismiss"
+        @click="emit('close')"
+        data-testid="activation-checklist-close"
         class="ml-3 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded"
-        title="Dismiss"
-        aria-label="Dismiss the getting-started checklist"
+        title="Close — this comes back next time"
+        aria-label="Close the getting-started checklist"
       >
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -87,6 +94,25 @@
         </button>
       </li>
     </ul>
+
+    <!--
+      The permanent one. It names its consequence rather than relying on an
+      icon, because it cannot be undone — nothing in the store or the UI
+      restores a dismissed checklist, so a user who meant "later" and got
+      "never" has no recovery. Quiet by default: this is the exit, not the
+      action the card is asking for.
+    -->
+    <div class="border-t border-gray-200 dark:border-gray-700 px-4 py-2">
+      <button
+        @click="store.dismiss(); emit('close')"
+        data-testid="activation-checklist-dismiss"
+        class="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200
+               rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
+        title="Hides these steps for good — they do not come back"
+      >
+        Don&rsquo;t show this again
+      </button>
+    </div>
   </div>
 </template>
 
@@ -99,7 +125,7 @@ defineProps({
   // Rendered inside the launcher popover rather than in the dashboard flow.
   embedded: { type: Boolean, default: false },
 })
-const emit = defineEmits(['dismissed'])
+const emit = defineEmits(['close'])
 
 const store = useOnboardingStore()
 const router = useRouter()
@@ -109,7 +135,7 @@ const nextKey = computed(() => store.items.find((i) => !i.done)?.key)
 
 const go = (item) => {
   if (item.action_route) router.push(item.action_route)
-  emit('dismissed')
+  emit('close')
 }
 
 onMounted(() => {
