@@ -69,7 +69,7 @@ ahead_main INTEGER DEFAULT 0
 behind_main INTEGER DEFAULT 0
 ahead_working INTEGER DEFAULT 0
 behind_working INTEGER DEFAULT 0
-git_dir_bytes INTEGER                    -- #1596: .git on-disk size
+git_dir_bytes BIGINT                     -- #1596: .git on-disk size (BIGINT since #2800: int4 on PG overflowed at 2 GiB)
 pack_count INTEGER                       -- #1595: packs (count-objects -v)
 loose_objects INTEGER                    -- #1595: loose objects
 maintenance_failures INTEGER DEFAULT 0   -- #1595: failed maintenance streak
