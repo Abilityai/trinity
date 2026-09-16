@@ -80,7 +80,11 @@ from services.compatibility.collector import (  # noqa: E402
     _MAX_SKILL_FILES,
 )
 from services.compatibility.static_checks import run_static  # noqa: E402
-from services.git_service import (  # noqa: E402
+# #1028: `services/git_service.py` is a package and deliberately re-exports no
+# private collaborator — a name mirrored on both the package and its owning
+# module gives one constant two homes and a patch can land on the wrong one.
+# These all belong to `gitignore`, so the import names it.
+from services.git_service.gitignore import (  # noqa: E402
     _GITIGNORE_BLOCK_BEGIN,
     _GITIGNORE_BLOCK_END,
     _GITIGNORE_FLOOR_BEGIN,

@@ -158,7 +158,8 @@ def test_an_agent_key_cannot_repoint_the_skills_library(monkeypatch):
     from fastapi import HTTPException
 
     try:
-        from routers import settings as settings_router
+        # #1028: the generic /{key} handlers live in the package's `generic` module.
+        from routers.settings import generic as settings_router
         from db_models import SystemSettingUpdate
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")
@@ -198,7 +199,8 @@ def test_the_same_write_still_works_for_a_human_admin(monkeypatch):
     import asyncio
 
     try:
-        from routers import settings as settings_router
+        # #1028: the generic /{key} handlers live in the package's `generic` module.
+        from routers.settings import generic as settings_router
         from db_models import SystemSettingUpdate
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")
@@ -251,7 +253,8 @@ def test_the_skills_library_key_is_refused_for_humans_too(monkeypatch):
     from fastapi import HTTPException
 
     try:
-        from routers import settings as settings_router
+        # #1028: the generic /{key} handlers live in the package's `generic` module.
+        from routers.settings import generic as settings_router
         from db_models import SystemSettingUpdate
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")

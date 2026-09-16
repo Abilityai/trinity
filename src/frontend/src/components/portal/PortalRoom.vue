@@ -80,6 +80,8 @@
           title="Add another agent to this conversation"
           @click="addOpen = !addOpen"
         >+ Add agent</button>
+        <!-- ent#625: the theme switch, filled by the shell (see PortalConversation). -->
+        <slot name="header-end" />
       </div>
     </header>
 

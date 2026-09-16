@@ -3012,3 +3012,56 @@ to localStorage in the clear.
 - **Tests**: `tests/unit/test_ent403_workspace_model.py`;
   `src/frontend/tests/unit/portalModelChoice.spec.js`.
 - **Flow**: `docs/memory/feature-flows/workspace-model-choice.md`
+### 5.33 Workspace — theme switch, light / dark / system (trinity-enterprise#625)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_THEME_SWITCH`
+- **Description**: The Workspace is styled for both themes and follows the global
+  `useThemeStore` (`stores/theme.js` toggles the root `dark` class from the
+  `trinity-theme` key), but its only control was the NavBar's appearance menu,
+  and the Workspace deliberately has no NavBar. A platform user who picked light
+  mode could not change it from the Workspace; an external client (no platform
+  session, no stored preference) got the OS answer and could not change it at
+  all. A **theme switch** now sits at the top right of the central column.
+- **AC-1 — placement**: the switch is the LAST control in the conversation header
+  and the room header (`PortalConversation.vue` / `PortalRoom.vue`), via a
+  `#header-end` slot the shell (`views/Portal.vue`) fills with
+  `PortalThemeSwitch` — present for a new chat, a thread, a room and the agent
+  landing (one branch since ent#523); the stage skeleton heads the branch chain
+  and gets none.
+- **AC-2 — one store**: the switch reads and writes `useThemeStore` — the same
+  `setTheme('light'|'dark'|'system')` the NavBar calls, the same `trinity-theme`
+  key. No portal-local key, no second store: a choice made here is what the
+  platform UI shows next, and vice versa.
+- **AC-3 — honest default**: with nothing stored the choice is `system` and the
+  trigger shows the RESOLVED state ("System · dark"); the trigger's icon follows
+  the resolved theme, never the choice (`utils/themeSwitch.js`).
+- **AC-4 — no session dependency**: `PortalThemeSwitch.vue` imports the theme
+  store only (pinned: never `stores/auth`, `agents` or `clientPortal`), so an
+  external client gets it.
+- **AC-5 — layout stability**: switching flips only the root class; the control
+  lives in a slot with no `:key`, so scroll, composer draft and the active thread
+  are untouched. The popover is absolutely positioned to the header's right
+  edge, so opening it widens nothing; below `sm` the label folds and the trigger
+  is icon-only, so it does not collide with the title band.
+- **AC-6 — both themes, tokens only**: the new files carry zero raw non-gray
+  palette classes and stay off the raw-colour baseline (the guard holds them to
+  zero); the NavBar's inline picker is REPLACED by the shared primitive, so its
+  baseline entry shrinks (35 → 23 non-gray) and is re-frozen exactly, scoped to
+  that one entry.
+- **AC-7 — keyboard + a11y**: the trigger carries `aria-label="Theme: <label>"`,
+  `aria-haspopup`/`aria-expanded`; the options are a `radiogroup` of
+  `role="radio"` buttons with `aria-checked` (the current choice is announced),
+  roving tabindex and arrow-key selection; Esc and click-outside close and
+  focus returns to the trigger.
+- **AC-8 — executed test**: `tests/unit/portalThemeSwitch.spec.js` MOUNTS the
+  component (`@vue/test-utils`, per-file `// @vitest-environment jsdom` — the
+  suite's first mounted component test; `vitest.config.js` gains the Vue
+  plugin) and drives it: renders "System · dark" from an empty store, opens to
+  three checked/unchecked radios, a click calls `setTheme('dark')`, writes the
+  shared key, flips the root class, closes and re-labels the trigger; a NavBar
+  choice is reflected here. Four mutations (click never reaches the store, label
+  hides the resolved state, Esc ignored, `aria-checked` frozen) each go red.
+- **Shared primitive**: `components/base/ThemeChoice.vue` (+ `ThemeIcon.vue`)
+  is the ONE light/dark/system picker, consumed by the NavBar's user menu and
+  the Workspace switch, so the two cannot drift.
+- **Flow**: `docs/memory/feature-flows/dark-mode-theme.md`

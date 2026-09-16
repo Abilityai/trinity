@@ -262,7 +262,7 @@ def test_a_success_still_returns_the_transcript(monkeypatch, past_the_gate):
 # ---- the operator surface ----------------------------------------------------
 
 def test_settings_state_carries_the_last_failure_for_admins_only_by_route(monkeypatch):
-    from routers import settings as settings_router
+    from routers.settings import integrations as settings_router  # #1028: package
 
     stt.record_live_failure(KEY, 401, _body("missing_permissions"))
     with patch("services.settings_service.settings_service.get_elevenlabs_api_key",
