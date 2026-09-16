@@ -22,6 +22,9 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+
+# #1028: gitignore-owned names read as data by these tests.
+from services.git_service import gitignore as gs_gitignore
 import yaml
 
 _project_root = Path(__file__).resolve().parents[2]
@@ -71,7 +74,10 @@ def _load_git_service():
     sys.modules["database"].AgentGitConfig = Mock
     sys.modules["database"].GitSyncResult = Mock
     sys.modules.pop("services.git_service", None)
-    import services.git_service as gs
+    # #1028: git_service is a package; the alias names the module that
+    # owns the functions under test, so patches land where the code looks.
+    import services.git_service.trinity_files as gs
+    from services.git_service import gitignore as gs_gitignore
 
     return gs
 
@@ -175,31 +181,31 @@ def test_materialize_plugins_does_not_touch_gitignore():
 
 def test_plugins_yaml_is_an_authored_path():
     gs = _load_git_service()
-    assert ".trinity/plugins.yaml" in gs._TRINITY_AUTHORED_PATHS
+    assert ".trinity/plugins.yaml" in gs_gitignore._TRINITY_AUTHORED_PATHS
 
 
 def test_plugins_yaml_is_re_included():
     gs = _load_git_service()
-    assert "!.trinity/plugins.yaml" in gs._GITIGNORE_PATTERNS
+    assert "!.trinity/plugins.yaml" in gs_gitignore._GITIGNORE_PATTERNS
 
 
 def test_plugins_yaml_is_exempt_from_rm_cached():
     gs = _load_git_service()
-    cmd = gs._build_rm_cached_ignored_command("/home/developer")
+    cmd = gs_gitignore._build_rm_cached_ignored_command("/home/developer")
     assert ":!.trinity/plugins.yaml" in cmd
 
 
 def test_claude_plugins_cache_stays_gitignored_and_not_re_included():
     """#1705 intact — the plugin CACHE must not be committed."""
     gs = _load_git_service()
-    assert ".claude/plugins/" in gs._GITIGNORE_PATTERNS
-    assert "!.claude/plugins/" not in gs._GITIGNORE_PATTERNS
-    assert ".claude/plugins/" not in gs._TRINITY_AUTHORED_PATHS
+    assert ".claude/plugins/" in gs_gitignore._GITIGNORE_PATTERNS
+    assert "!.claude/plugins/" not in gs_gitignore._GITIGNORE_PATTERNS
+    assert ".claude/plugins/" not in gs_gitignore._TRINITY_AUTHORED_PATHS
 
 
 def test_claude_json_stays_gitignored_and_not_re_included():
     """The raw Claude manifest (session state + secrets) must not be committed."""
     gs = _load_git_service()
-    assert ".claude.json" in gs._GITIGNORE_PATTERNS
-    assert "!.claude.json" not in gs._GITIGNORE_PATTERNS
-    assert ".claude.json" not in gs._TRINITY_AUTHORED_PATHS
+    assert ".claude.json" in gs_gitignore._GITIGNORE_PATTERNS
+    assert "!.claude.json" not in gs_gitignore._GITIGNORE_PATTERNS
+    assert ".claude.json" not in gs_gitignore._TRINITY_AUTHORED_PATHS

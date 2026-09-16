@@ -159,15 +159,37 @@ def find_violations(source: str, filename: str) -> list[tuple[str, int, str]]:
 # --------------------------------------------------------------------------- #
 # The guard over the live tree
 # --------------------------------------------------------------------------- #
+def _router_sources() -> list[Path]:
+    """Every router source, INCLUDING those in a package subdirectory.
+
+    `glob("*.py")` was correct while `routers/` was flat. #1028 made
+    `routers/settings/` the first subdirectory ever created there, and a
+    non-recursive glob silently stopped scanning its ten modules — 110 auth-gate
+    tokens dropping out of an Invariant #8 guard with the guard still green. It
+    fails open, which is why nothing caught it.
+
+    Files are keyed by path relative to `routers/` (`settings/generic.py`), not
+    by bare name: two modules in different packages can share a filename, and an
+    allowlist keyed on the ambiguous half would exempt both. Top-level files are
+    unaffected — their relative path IS their name — so the allowlist needs no
+    edit.
+    """
+    return sorted(
+        p for p in _ROUTERS.rglob("*.py")
+        if "__pycache__" not in p.parts
+    )
+
+
 def test_no_inline_auth_gates_in_routers():
     """No router carries an inline agent/admin gate that a shared helper should
     own — except the allowlisted intentional-404 designs and any individually
     reviewed `# noqa: inv8`-marked line (none remain in-tree after #1710)."""
     offenders: dict[str, list[tuple[str, int, str]]] = {}
-    for path in sorted(_ROUTERS.glob("*.py")):
-        v = find_violations(path.read_text(), path.name)
+    for path in _router_sources():
+        name = path.relative_to(_ROUTERS).as_posix()
+        v = find_violations(path.read_text(), name)
         if v:
-            offenders[path.name] = v
+            offenders[name] = v
     assert not offenders, (
         "Inline auth gate(s) that must move behind a dependencies.py helper "
         "(assert_admin / assert_agent_access / assert_agent_owner / "

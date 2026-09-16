@@ -490,7 +490,7 @@ class TestDegradesHonestly:
 
         assert any(
             p.search(f"{NO_CREDENTIAL_MARKER} host=github.com")
-            for p in gs._AUTH_PATTERNS
+            for p in gs.conflicts._AUTH_PATTERNS
         )
 
     def test_a_bare_403_is_NOT_treated_as_an_auth_failure(self):
@@ -505,7 +505,7 @@ class TestDegradesHonestly:
             "fatal: unable to access 'https://github.com/o/r/': "
             "The requested URL returned error: 403"
         )
-        assert not any(p.search(rate_limited) for p in gs._AUTH_PATTERNS)
+        assert not any(p.search(rate_limited) for p in gs.conflicts._AUTH_PATTERNS)
 
 
 class TestStoreAndEraseAreNoOps:
@@ -1000,11 +1000,17 @@ def gs_with_exec():
 
     def _install(helper_ok: int = 1, root_readable: int = 1) -> _RecordingExec:
         recorder = _RecordingExec(helper_ok=helper_ok, root_readable=root_readable)
-        ctx = patch.multiple(
-            gs,
-            execute_command_in_container=recorder,
-            _detect_git_dir=AsyncMock(return_value="/home/developer"),
-        )
+        # #1028: `git_service` is a package. Each sibling module binds
+        # `execute_command_in_container` at import, and `_detect_git_dir` lives
+        # in `gitignore` and is reached as `gitignore._detect_git_dir(...)` — so
+        # the recorder is installed on every module that execs, and the git-dir
+        # stub on the one module that owns it.
+        for mod in (gs.token_scrub, gs.remotes, gs.provisioning, gs.sync):
+            ctx = patch.object(mod, "execute_command_in_container", recorder)
+            ctx.start()
+            patches.append(ctx)
+        ctx = patch.object(gs.gitignore, "_detect_git_dir",
+                           AsyncMock(return_value="/home/developer"))
         ctx.start()
         patches.append(ctx)
         return recorder
@@ -1123,7 +1129,7 @@ class TestRotationWithoutARecreate:
 
     def test_the_env_write_never_logs_its_output(self):
         """That exec is editing `.env`; its output could echo the file."""
-        source = (_ROOT / "src/backend/services/git_service.py").read_text()
+        source = (_ROOT / "src/backend/services/git_service/token_scrub.py").read_text()
         fn_start = source.index("async def write_container_github_pat")
         fn_end = source.index("\ndef _alarm_git_token_scrub_refused")
         body = source[fn_start:fn_end]
@@ -1194,7 +1200,7 @@ class TestTheSweepIsBoundedAndSurvives:
         """
         gs = _git_service()
         assert gs._SCRUB_CONCURRENCY >= 1
-        source = (_ROOT / "src/backend/services/git_service.py").read_text()
+        source = (_ROOT / "src/backend/services/git_service/token_scrub.py").read_text()
         body = source[source.index("async def scrub_git_remote_tokens"):
                       source.index("def schedule_fleet_git_remote_token_sweep")]
         assert "async with _scrub_semaphore:" in body, (
@@ -1206,7 +1212,7 @@ class TestTheSweepIsBoundedAndSurvives:
         sleeps 20s before doing real work and runs once per boot, so a
         collected task is a remediation that silently never happened."""
         gs = _git_service()
-        source = (_ROOT / "src/backend/services/git_service.py").read_text()
+        source = (_ROOT / "src/backend/services/git_service/token_scrub.py").read_text()
         fn = source[source.index("def schedule_fleet_git_remote_token_sweep"):
                     source.index("def spawn_git_remote_token_scrub")]
         assert "global _fleet_scrub_task" in fn
@@ -1215,7 +1221,7 @@ class TestTheSweepIsBoundedAndSurvives:
 
     def test_the_per_agent_spawn_keeps_its_task_alive_too(self):
         gs = _git_service()
-        source = (_ROOT / "src/backend/services/git_service.py").read_text()
+        source = (_ROOT / "src/backend/services/git_service/token_scrub.py").read_text()
         fn = source[source.index("def spawn_git_remote_token_scrub"):
                     source.index("_inflight_token_scrub_tasks: set")]
         assert "_inflight_token_scrub_tasks.add(task)" in fn
@@ -1314,7 +1320,7 @@ class TestAnUnreadableSweepReachesAnOperator:
         gs_with_exec(helper_ok=1, root_readable=0)
         import asyncio
 
-        with patch.object(gs, "_alarm_git_token_scrub_unreadable") as alarm:
+        with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
             report = asyncio.run(gs.scrub_git_remote_tokens("a1"))
 
         assert report["root_readable"] == 0
@@ -1330,7 +1336,7 @@ class TestAnUnreadableSweepReachesAnOperator:
         gs_with_exec(helper_ok=1, root_readable=1)
         import asyncio
 
-        with patch.object(gs, "_alarm_git_token_scrub_unreadable") as alarm:
+        with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
             asyncio.run(gs.scrub_git_remote_tokens("a1"))
         assert not alarm.called
 

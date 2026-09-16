@@ -247,11 +247,24 @@ _ALLOWLIST = {
         "the applier's scrubbed output."
     ),
     (
-        "routers/public.py",
+        "services/public_chat_service.py",
         "_execute_public_chat_background",
     ): (
         "Writes content=result.response — the applier's already-scrubbed output. "
-        "Transitively covered."
+        "Transitively covered. (#1028 moved this function verbatim out of "
+        "routers/public.py; the write and the value are unchanged, so the "
+        "justification is re-homed rather than re-argued.)"
+    ),
+    (
+        "services/public_chat_service.py",
+        "run_public_chat",
+    ): (
+        "The extracted body of routers/public.py::public_chat (#1028), carrying "
+        "that entry's two writes verbatim: content=chat_request.message (the "
+        "USER's inbound text, which needs no scrub) and content=assistant_response "
+        "derived from the applier result (already scrubbed). Same grounds as the "
+        "routers/public.py::public_chat entry above, which the split left as the "
+        "thin HTTP wrapper."
     ),
     (
         "routers/sessions.py",

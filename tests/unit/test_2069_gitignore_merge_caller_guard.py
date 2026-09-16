@@ -26,7 +26,7 @@ gitignore auto-fix, #668) and is deliberately out of scope here — if the scan 
 ever widened beyond this file, allowlist it.
 
 Issue: abilityai/trinity#2069 (Epic #1045)
-Target: src/backend/services/git_service.py
+Target: src/backend/services/git_service/gitignore.py
 """
 
 from __future__ import annotations
@@ -39,7 +39,14 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_GIT_SERVICE_SRC = _PROJECT_ROOT / "src" / "backend" / "services" / "git_service.py"
+# #1028: git_service is a package. The single-source-of-truth contract spans
+# it — `initialize_git_in_container` (provisioning) calls the builder through
+# the sibling module object (`gitignore._build_gitignore_merge_command`), so
+# the guard walks EVERY module and matches both the bare and the qualified
+# call. A guard that scanned one file would silently lose a caller the moment
+# it moved, which is precisely the erosion it exists to prevent.
+_GIT_SERVICE_PKG = _PROJECT_ROOT / "src" / "backend" / "services" / "git_service"
+_GIT_SERVICE_SRC = _GIT_SERVICE_PKG / "gitignore.py"  # pattern-load half stays module-local
 
 _MERGE_BUILDER = "_build_gitignore_merge_command"
 _PATTERN_CONST = "_GITIGNORE_PATTERNS"
@@ -59,19 +66,23 @@ def _tree() -> ast.AST:
 
 
 def _fns_calling(target: str) -> set:
-    """Every function containing an `ast.Call` to a bare `target` name."""
-    tree = _tree()
+    """Every function in the PACKAGE containing a call to `target` — bare
+    (same-module) or qualified through a sibling module object
+    (`gitignore.<target>`, the #1028 cross-module call shape)."""
     found = set()
-    for fn in ast.walk(tree):
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for node in ast.walk(fn):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == target
-            ):
-                found.add(fn.name)
+    for path in sorted(_GIT_SERVICE_PKG.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                callee = node.func
+                if isinstance(callee, ast.Name) and callee.id == target:
+                    found.add(fn.name)
+                elif isinstance(callee, ast.Attribute) and callee.attr == target:
+                    found.add(fn.name)
     return found
 
 

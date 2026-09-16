@@ -30,7 +30,10 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 _PUBLIC_PY = _BACKEND / "routers" / "public.py"
-_SETTINGS_PY = _BACKEND / "routers" / "settings.py"
+# #1028: `routers/settings.py` is a package. The save path (`update_setting`) is
+# `generic.py`; the feature-flag surface is `flags.py`.
+_SETTINGS_PY = _BACKEND / "routers" / "settings" / "generic.py"
+_FLAGS_PY = _BACKEND / "routers" / "settings" / "flags.py"
 
 
 class _HTTPException(Exception):
@@ -251,7 +254,7 @@ def _put_public_url(monkeypatch, value: str):
     nothing about what the handler DOES, and passes just as happily if the guard
     is present but unreachable.
     """
-    import routers.settings as m
+    from routers.settings import generic as m  # #1028: package
 
     written: dict = {}
     repointed: list = []
@@ -347,5 +350,5 @@ def test_a_stamp_for_another_host_does_not_count(monkeypatch) -> None:
 def test_reachability_is_on_the_flag_surface() -> None:
     """The first-run step and Settings both read it from there, and it must be a
     boolean — that surface reaches every authenticated principal."""
-    src = _SETTINGS_PY.read_text()
+    src = _FLAGS_PY.read_text()
     assert '"public_url_reached": settings_service.is_public_url_reached()' in src
