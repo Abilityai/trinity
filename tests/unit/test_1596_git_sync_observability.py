@@ -43,6 +43,26 @@ class TestGitDirBytesRoundTrip:
         row = ops.get("a1")
         assert row["git_dir_bytes"] == 47244640256
 
+    def test_every_int_column_round_trips_its_own_maximum(self, db_backend):
+        """#2827 AC: the maximum the boundary admits for each of the eight int
+        columns persists on BOTH backends. On PostgreSQL this is the proof
+        that boundary and column agree — INT4_MAX in an int4 column, INT8_MAX
+        in the one BIGINT — where a mismatch is `NumericValueOutOfRange`."""
+        from services.sync_health_service import INT4_MAX, INT8_MAX
+        ops = _ops()
+        ops.upsert(
+            "a2", last_sync_status="success",
+            git_dir_bytes=INT8_MAX,
+            pack_count=INT4_MAX, loose_objects=INT4_MAX, maintenance_failures=INT4_MAX,
+            ahead_main=INT4_MAX, behind_main=INT4_MAX,
+            ahead_working=INT4_MAX, behind_working=INT4_MAX,
+        )
+        row = ops.get("a2")
+        assert row["git_dir_bytes"] == INT8_MAX
+        for col in ("pack_count", "loose_objects", "maintenance_failures",
+                    "ahead_main", "behind_main", "ahead_working", "behind_working"):
+            assert row[col] == INT4_MAX, col
+
     def test_git_dir_bytes_is_64_bit_on_postgres(self, db_backend):
         """#2800: the declared type, not just one value that happened to fit.
 
