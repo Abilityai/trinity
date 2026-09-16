@@ -12,13 +12,21 @@
  * `pruneQueueItemState`. One hung POST leaves that card's Send disabled and its
  * state unprunable for the life of the tab.
  *
- * Why not `axios.create()`: `stores/auth.js` authenticates by mutating
- * `axios.defaults.headers.common.Authorization` at login and deleting it at
- * logout. `create()` snapshots defaults at construction, so a module-level
- * instance would miss a later sign-in and keep a stale header after sign-out.
+ * Why not `axios.create()`: the credential is resolved PER REQUEST, by the
+ * global request interceptor `main.js` installs (#2791), and `create()` gives
+ * an instance its own interceptor chain that the global one never reaches. A
+ * module-level instance would therefore send no Authorization header at all.
  * These wrappers call the global per request, so the header, the base config
  * and the response interceptor all still resolve exactly as before — the only
  * thing added is a bound.
+ *
+ * (Until #2791 the reason was different and is worth recording, because the
+ * conclusion survived the mechanism: `stores/auth.js` used to authenticate by
+ * mutating `axios.defaults.headers.common.Authorization` at login and deleting
+ * it at logout, and `create()` snapshots defaults at construction — so an
+ * instance would have missed a later sign-in and kept a stale header after
+ * sign-out. That mutation no longer exists; the global is still the only thing
+ * that carries a live credential.)
  *
  * Why not `axios.defaults.timeout`: that is a process-wide mutation reaching
  * every other surface, including ones with legitimately long requests.

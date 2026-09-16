@@ -9,6 +9,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import axios from 'axios'
 import api from '../api'
+import { readStoredToken } from '../utils/platformSession'
 
 export const useNotificationsStore = defineStore('notifications', () => {
   // State
@@ -75,7 +76,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
     error.value = null
 
     try {
-      const token = localStorage.getItem('token')
+      const token = readStoredToken()
       const params = new URLSearchParams()
 
       const status = options.status ?? filters.value.status
@@ -122,7 +123,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
 
   async function fetchPendingCount() {
     try {
-      const token = localStorage.getItem('token')
+      const token = readStoredToken()
       // #1143: use the dedicated count endpoint — the list endpoint's `count`
       // is page-capped (len of returned page), so limit=1 clamped the badge to 1.
       const response = await axios.get('/api/notifications/count?status=pending', {
@@ -140,7 +141,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
 
   async function acknowledgeNotification(notificationId) {
     try {
-      const token = localStorage.getItem('token')
+      const token = readStoredToken()
       await axios.post(`/api/notifications/${notificationId}/acknowledge`, {}, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -162,7 +163,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
 
   async function dismissNotification(notificationId) {
     try {
-      const token = localStorage.getItem('token')
+      const token = readStoredToken()
       await axios.post(`/api/notifications/${notificationId}/dismiss`, {}, {
         headers: { Authorization: `Bearer ${token}` },
       })
