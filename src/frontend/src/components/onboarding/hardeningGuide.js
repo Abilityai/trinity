@@ -40,9 +40,13 @@ export function hardeningStage(installTlsPosture) {
  * surface you arrive through, and so the two cannot drift apart.
  */
 export const DOMAIN_BENEFIT =
-  'Trinity hands out this name instead of the IP, and the web server in front obtains a certificate for it.'
+  'People reach Trinity at your own address instead of a bare IP, with a proper certificate and no browser warning.'
+// No "see below" — this string renders on BOTH the first-run step and
+// Settings → General (`Settings.vue`), and the two surfaces have different
+// things below them. A pointer that resolves on one and dangles on the other
+// is the drift the shared constant exists to prevent.
 export const DOMAIN_PREREQUISITE =
-  'Point the domain at this server first — save it here before DNS resolves and the name has nothing to answer it.'
+  'Point the domain at this server first, then save it here.'
 
 /**
  * Saving this value re-points live integrations, immediately (#2691).
@@ -134,7 +138,7 @@ export const POSTURE_COPY = {
     headline:
       'Your domain is saved. The first visit to it is what proves the name works \u2014 until then Trinity cannot tell.',
     detail:
-      'Trinity now hands out the name rather than the IP. It issues no certificates itself: the web server in front asks Trinity whether a name is allowed, and obtains the certificate for it on the first request that actually arrives for that name. So nothing here confirms the domain until someone visits it \u2014 if DNS does not point at this server, the visit fails in the browser and Trinity never learns of it. The step below is about reach rather than address: unless something in front of this server already restricts it, it still answers anyone who finds the address.',
+      'Trinity now gives people this name instead of the IP address. The certificate for it is obtained on the first request that actually arrives for the name, so nothing here can confirm the domain until someone opens it. If DNS does not point at this server, that visit never gets here: the browser shows an error, and Trinity, which is not part of that exchange, carries on showing the name as saved. Open it in a browser to find out.',
   },
   // The one state in this file that rests on something OBSERVED rather than
   // parsed: a request for exactly this name arrived and a certificate followed.
@@ -144,9 +148,9 @@ export const POSTURE_COPY = {
     badge: 'Domain reached',
     badgeVariant: 'success',
     headline:
-      'Your domain is serving traffic. One step is left \u2014 a Cloudflare Tunnel can take this server off the public internet.',
+      'Your domain has been reached. One optional step is left \u2014 a Cloudflare Tunnel can take this server off the public internet.',
     detail:
-      'Step one is done, and confirmed: a request for your domain reached this server and a certificate was obtained for it. The step below is about reach rather than address \u2014 this server still answers anyone who finds the address. It is optional, but it is the difference between an instance anyone can knock on and one that is only reachable through Cloudflare. Skip it if you are evaluating; come back to it from Settings \u2192 General before this instance matters.',
+      'A request for your domain reached this server, and a certificate was obtained for it. One thing is left, and it is optional \u2014 this server still answers anyone who finds the address. A Cloudflare Tunnel closes that off, so the only way in is through Cloudflare. Fine to skip while you are trying Trinity out; worth doing from Settings \u2192 General before this instance matters.',
   },
 }
 
