@@ -106,13 +106,15 @@ def _executions_activity() -> list:
         known = set(agent_state.session_activity.get("by_execution", {}).keys())
     except Exception:  # noqa: BLE001
         return []
-    live_ids = []
+    # Prune against EVERY running id, not the capped slice: a 21st concurrent
+    # execution is still alive, and forgetting its slot here would reset it to
+    # "Thinking" on every beat for as long as the fleet stays that busy.
+    live_ids = [e.get("execution_id") for e in running if isinstance(e.get("execution_id"), str) and e.get("execution_id")]
     out = []
     for entry in running[:ACTIVITY_MAX_EXECUTIONS]:
         eid = entry.get("execution_id")
         if not isinstance(eid, str) or not eid:
             continue
-        live_ids.append(eid)
         slot = execution_activity(eid) or {}
         summary = slot.get("input_summary")
         if isinstance(summary, str) and len(summary) > ACTIVITY_SUMMARY_MAX:

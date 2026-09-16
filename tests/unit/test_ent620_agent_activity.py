@@ -166,6 +166,19 @@ def test_heartbeat_bounds_the_list_and_the_summary(monkeypatch):
     assert entries[0]["summary"].endswith("…")
 
 
+def test_a_run_past_the_cap_keeps_its_slot(monkeypatch):
+    """/review C1: the prune set must be every running id, not the capped
+    slice — otherwise the 21st concurrent run is forgotten on every beat and
+    reads "Thinking" forever while it is busy."""
+    many = [f"e{i}" for i in range(heartbeat.ACTIVITY_MAX_EXECUTIONS + 3)]
+    monkeypatch.setattr(heartbeat, "_list_running", lambda: _running(*many))
+    last = many[-1]
+    at.start_tool_execution("t-last", "Bash", {"command": "make"}, execution_id=last)
+    entries = heartbeat._executions_activity()
+    assert len(entries) == heartbeat.ACTIVITY_MAX_EXECUTIONS       # the wire stays bounded
+    assert at.execution_activity(last)["tool"] == "Bash"             # the slot survives the beat
+
+
 def test_heartbeat_activity_fails_open_to_an_empty_list(monkeypatch):
     def boom():
         raise RuntimeError("registry hiccup")

@@ -71,10 +71,6 @@ export function activityLine(activity) {
     const who = tool.includes(':') ? tool.slice(5) : 'an agent'
     return line(object ? `Delegating to ${who}: ${object}` : `Delegating to ${who}`, null, false)
   }
-  if (tool === 'Sync' || tool.toLowerCase() === 'git sync') {
-    return line(object ? `Syncing ${object}` : 'Syncing', object, false)
-  }
-
   // Two tools whose summary is a fixed phrase, not an object.
   if (tool === 'AskUserQuestion') return line('Asking a question', null, false)
   if (tool === 'TodoWrite') return line('Planning the next steps', null, false)
