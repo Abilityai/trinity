@@ -338,6 +338,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTick } from 'vue'
+import { readStoredToken } from '../utils/platformSession'
 import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 import { useAgentsStore } from '../stores/agents'
@@ -627,7 +628,7 @@ async function toggleAutonomy() {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token')}`
+        'Authorization': `Bearer ${readStoredToken()}`
       },
       body: JSON.stringify({ enabled: newState })
     })
@@ -669,7 +670,7 @@ async function toggleReadOnly() {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token')}`
+        'Authorization': `Bearer ${readStoredToken()}`
       },
       body: JSON.stringify({ enabled: newState })
     })
@@ -737,7 +738,7 @@ async function renameAgent(newName) {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token')}`
+        'Authorization': `Bearer ${readStoredToken()}`
       },
       body: JSON.stringify({ new_name: newName })
     })
