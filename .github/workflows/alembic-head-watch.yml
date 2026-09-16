@@ -322,13 +322,22 @@ jobs:
           mt_out="$mt/merge-tree.out"
           mt_err="$mt/merge-tree.err"
 
+          # $5 (optional): newline-separated paths the PR conflicts with dev on
+          # OUTSIDE the version line (#2828) — carried onto the verdict so the
+          # status/comment can say the evaluation was made despite them.
           write_verdict() {
             jq -n --argjson pr "$1" --arg head_sha "$2" --arg outcome "$3" \
-                  --arg detail "$4" --arg dev_head "${DEV_HEAD:-}" --arg run_url "$RUN_URL" \
+                  --arg detail "$4" --arg elsewhere "${5:-}" \
+                  --arg dev_head "${DEV_HEAD:-}" --arg run_url "$RUN_URL" \
               '{prNumber: $pr, headSha: $head_sha, outcome: $outcome,
-                detail: $detail, devHead: $dev_head, runUrl: $run_url}' \
+                detail: $detail, devHead: $dev_head, runUrl: $run_url,
+                conflictsElsewhere: ($elsewhere | split("\n") | map(select(length > 0)))}' \
               > "verdicts/pr-$1.json"
           }
+
+          # The two directories the guard reads. A conflict ANYWHERE ELSE in the
+          # repo does not change what is in them (#2828).
+          VERSION_LINES='^src/backend/(enterprise/backend/)?migrations/versions/'
 
           for n in $PR_NUMBERS; do
             echo "::group::PR #$n"
@@ -369,15 +378,40 @@ jobs:
             set -e
             tree=$(head -1 "$mt_out")
 
+            elsewhere=""
+            evaluable_conflict=""
             if [ "$rc" -eq 1 ] && [ -n "$tree" ]; then
-              # A conflicting PR shows ZERO checks anyway — GitHub cannot
-              # compute refs/pull/N/merge either. Report "cannot evaluate",
-              # never a verdict.
-              echo "PR #$n conflicts with dev — head check not evaluated."
-              write_verdict "$n" "$head_sha" conflict ""
-              echo "::endgroup::"; continue
+              # #2828: a conflict is NOT a reason to stop. `--write-tree` still
+              # writes the merged tree on exit 1 — conflicted files carry markers,
+              # every other path is the real three-way merge — and the guard
+              # reads only the two version-line directories. So the question is
+              # WHERE the conflict is, not whether there is one. On 2026-09-15
+              # four of nine open PRs conflicted with dev on `learnings.md`
+              # alone, two of them carrying a live two-heads fork this watch
+              # exists to catch; treating any conflict as "cannot evaluate"
+              # made it absent on exactly the days it mattered.
+              #
+              # merge-tree's stdout: line 1 the tree OID, then one
+              # `<mode> <oid> <stage>\t<path>` line per conflicted entry up to
+              # the first blank line, then prose. Only that section is read.
+              conflicted=$(sed -n '2,/^$/p' "$mt_out" | sed '/^$/d' | cut -f2- | sort -u)
+              in_versions=$(printf '%s\n' "$conflicted" | grep -E "$VERSION_LINES" || true)
+              if [ -n "$in_versions" ]; then
+                # The version line ITSELF conflicts — a revision file edited on
+                # both sides. That tree is not a graph anyone will apply, so this
+                # is the one conflict that genuinely cannot be evaluated; say so
+                # by name.
+                echo "PR #$n — the version line conflicts with dev; head check not evaluated:"
+                printf '%s\n' "$in_versions" | sed 's/^/  /'
+                write_verdict "$n" "$head_sha" conflict "$in_versions"
+                echo "::endgroup::"; continue
+              fi
+              echo "PR #$n conflicts with dev outside the version line — evaluating the version line anyway:"
+              printf '%s\n' "$conflicted" | sed 's/^/  /'
+              elsewhere="$conflicted"
+              evaluable_conflict=1
             fi
-            if [ "$rc" -ne 0 ]; then
+            if [ "$rc" -ne 0 ] && [ -z "$evaluable_conflict" ]; then
               # Exit 1 with no tree lands here too — an unresolvable ref, not a
               # conflict. "Cannot evaluate" is the honest answer for both.
               echo "::warning::PR #$n — git merge-tree exited $rc without a merged tree; no verdict written."
@@ -445,8 +479,8 @@ jobs:
             printf '%s\n' "$out"
 
             case "$grc" in
-              0) write_verdict "$n" "$head_sha" clean "" ;;
-              1) write_verdict "$n" "$head_sha" fork "$out" ;;
+              0) write_verdict "$n" "$head_sha" clean "" "$elsewhere" ;;
+              1) write_verdict "$n" "$head_sha" fork "$out" "$elsewhere" ;;
               *) echo "::warning::PR #$n — the guard exited $grc; no verdict written."
                  write_verdict "$n" "$head_sha" unknown "" ;;
             esac
