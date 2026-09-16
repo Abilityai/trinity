@@ -132,6 +132,55 @@ what enforces it; "convention" means a reviewer does.
     never reached `running` within 90 s" — never a bare status comparison
     (convention, from #2336).
 
+## Evidence bar for a test — it executes the path (#2829)
+
+The harness bar above is about *journeys*. This one is about every test in every
+tier, and it exists because three of five ejections on the 2026-09-15 merge
+train — the third train running — were tests that prove the code was
+**written** rather than that it **runs**. All had green CI; all were present,
+well-named and numerous. Nothing in the pipeline distinguishes "asserts the
+behaviour" from "asserts the source", so the reviewer sees coverage.
+
+Three spellings, all of which pass identically when the code above throws the
+result away:
+
+1. **Source-text regex** — `readFileSync` + `toContain`, `inspect.getsource`,
+   `read_text()` + `.index(...)`, a slice anchored on a comment string. #2811's
+   interceptors, `storage` listener and 401 handler were pinned this way;
+   restoring the reported bug left 2937 tests green.
+2. **A tautology** — a bound check parameterised at the one value where the two
+   candidate bounds coincide (`t + 310 >= t + 310`). #2817's marker test.
+3. **An unverified rationale** — a claim about what CI would do, asserted in a
+   docstring or a `learnings.md` entry, never negative-controlled. #2805's
+   SQLite rebuild ran a `DROP TABLE` at boot on every install for a guard that
+   a one-line control showed was blind.
+
+The rule, and what enforces it:
+
+- **Every changed value has a live consumer, and a test executes the path to
+  it.** Two greps decide nearly every case, and the second is the one that
+  matters: (a) `grep -nE 'readFileSync|inspect\.getsource|read_text\(\)|\.index\(|toContain\('`
+  over the changed test files says whether the assertions are source-text — a
+  *question*; (b) `grep -rn '<symbol>' src/` says whether anything outside the
+  definition and the test reads the value — "definition + test only" *is* the
+  finding. A frontend `ref` declared, bound to a child and never assigned is
+  conclusive from that grep alone (#2619). (`/review` Step 2.5, `/validate-pr`
+  §5.4.)
+- **A source-text test is a *guard*, and is fine, when its live consumer is CI
+  itself** — a workflow YAML, a vendored-copy parity, a route table. #2819 was
+  six substring matches and was correctly kept because an Actions run on the PR
+  proved the workflow registered; #2811 was the same shape over a module nothing
+  imports and was correctly ejected. The discriminator is the consumer, not the
+  assertion style.
+- **A bug fix's evidence is a mutation.** Revert the fix from a scratch copy
+  (never `git checkout --` over uncommitted work), run the new tests, show
+  which go red, restore byte-identical, name the test in the PR's `Mutation:`
+  line. A fix whose tests stay green with the fix reverted has no regression
+  test, whatever the file is named. (`.github/pull_request_template.md`;
+  `/implement`'s done-criteria.)
+- **A bound test asserts the relationship at a value where the bounds differ**,
+  never a literal at the coincidence.
+
 ## Pointers — what lives where
 
 | You are looking for | It lives in |
