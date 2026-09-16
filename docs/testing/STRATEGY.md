@@ -135,19 +135,24 @@ what enforces it; "convention" means a reviewer does.
     Rule 1's one sanctioned exception is a journey that needs a real model
     answer (J03's first turn; J10's "I can read what they said" and "every
     fan-out subtask completes"). It decides through the single helper
-    `tests/journeys/conftest.py::skip_unless_agent_can_answer`, which reads the
-    **callee's own** `auth_mode` from
-    `GET /api/subscriptions/agents/{name}/auth` — `subscription` or `api_key`
-    runs, `not_configured` skips with the reason allowlisted in
-    `tests/harness/audit_skips.py`. Two shapes are ruled out by construction:
-    reading `ANTHROPIC_API_KEY` from the pytest process gates on the harness
-    rather than the instance, so a subscription-authenticated stack skipped
-    permanently and invisibly (#2812); and gating on `GET /api/subscriptions`
-    being non-empty describes the instance rather than the callee, which would
-    turn that permanent skip into a false failure when a freshly created
-    ephemeral agent never gets a subscription assigned. A stack that advertises
-    a credential which cannot actually answer FAILS here rather than skipping —
-    that is rule 1, not an exception to it.
+    `tests/journeys/conftest.py::skip_unless_agent_can_answer`, which requires
+    **both** instance-side reads:
+    the **callee's own** `auth_mode` from
+    `GET /api/subscriptions/agents/{name}/auth` (which credential the agent is
+    routed to), **and** `claude_auth_configured` from
+    `GET /api/settings/feature-flags` (whether the instance actually holds one —
+    a non-empty platform key or a registered subscription). Either read alone is
+    insufficient, and each failure mode has been observed:
+    reading `ANTHROPIC_API_KEY` from the pytest process gates on the harness, so
+    a subscription-authenticated stack skipped permanently and invisibly
+    (#2812); gating on `GET /api/subscriptions` being non-empty describes the
+    instance rather than the callee, which would turn that permanent skip into a
+    false failure when a freshly created ephemeral agent never gets a
+    subscription assigned; and gating on `auth_mode` alone fails the journeys on
+    the credential-free CI stack, because `use_platform_api_key` is a per-agent
+    ROUTING FLAG — an agent reports `api_key` when there is no key to use.
+    A stack whose credential is present but INVALID passes both reads and FAILS
+    rather than skipping; that is rule 1, not an exception to it.
 
 ## Pointers — what lives where
 
