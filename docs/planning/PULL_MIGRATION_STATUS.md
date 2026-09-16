@@ -38,7 +38,8 @@ Dispatch topology, not policy. `pull_pilot.PULL_REACHABLE_TRIGGERS` is the sourc
 |---|---|---|
 | **On `dev` today** | `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop` | 6 of 9 |
 | **Adds with Phase 4** | `fan_out`, `a2a`, `operator_response` | → 9 of 9 |
-| **Deliberately excluded** | interactive chat / Session-tab turns | scope cut, see §4 item 5 |
+| **Pending** | interactive chat / Session-tab turns | joins the queue once #2842 + #2843 land (decided 2026-09-16, #1989) |
+| **Unreached, unclassified** | `retry` | in neither trigger set — #2845. 4.7% of `eu2` traffic; looks like an oversight, not a decision |
 
 `schedule` / `webhook` / `reminder` landed with #2391; `loop` with #2523. Before #2391 the pilot flag was
 inert for the fleet's dominant traffic class, so a cron-driven agent was not a viable pilot. It is now.
@@ -69,10 +70,13 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
 4. **Phase 5: flip default-ON and delete the legacy machinery** — the 9-path cleanup pyramid, the slot ZSET,
    the overflow LIST, the dispatch-breaker gate, canary S-01–S-03. Tracked as
    [#429](https://github.com/abilityai/trinity/issues/429). Until this lands, both systems run at once.
-5. **Decide whether interactive chat joins the queue** — [#1989](https://github.com/abilityai/trinity/issues/1989),
-   `TARGET_ARCHITECTURE.md` Open Question 7, *under consideration, not decided*. Until it is decided,
-   "everything is pull" is false **by design**, not by omission. One FIFO ordered by `queued_at` would park
-   a human turn behind autonomous work, which is why the cut exists.
+5. **Interactive chat joins the queue** — **DECIDED 2026-09-16**
+   ([#1989](https://github.com/abilityai/trinity/issues/1989)): the queue carries all traffic and the
+   synchronous push path is deleted afterwards. Two pieces gate the move —
+   [#2842](https://github.com/abilityai/trinity/issues/2842) (interactive turns jump the queue, so a person's
+   wait is no worse than today) and [#2843](https://github.com/abilityai/trinity/issues/2843) (one turn per
+   conversation at a time, so two workers never resume one transcript). Until both land, interactive turns
+   still run on the old path — that is a **migration state, not a design boundary**.
 
 ### The soak duration requirement is mis-cited — correct it when you touch it
 
