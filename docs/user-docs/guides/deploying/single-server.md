@@ -398,7 +398,13 @@ sudo ./scripts/deploy/start.sh --hosted
 `scripts/deploy/trinity-do-create.sh` gives you the 1-Click result from your own terminal, with the admin password chosen before the Droplet exists — so there is no claim window. It needs [`doctl`](https://docs.digitalocean.com/reference/doctl/how-to/install/) installed and signed in (`doctl auth init` with a write-scoped API token).
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/<release-tag>/scripts/deploy/trinity-do-create.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/scripts/deploy/trinity-do-create.sh)
+```
+
+It installs the newest Trinity release, which it looks up when you run it — there is no version to pick and nothing to keep in step. Release candidates are skipped, so you get the last blessed release rather than whatever was tagged most recently. To install a specific one instead, name it:
+
+```bash
+TRINITY_IMAGE_TAG=v0.9.5 bash <(curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/scripts/deploy/trinity-do-create.sh)
 ```
 
 It asks four questions and writes nothing to your computer:
