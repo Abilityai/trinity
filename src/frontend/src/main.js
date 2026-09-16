@@ -50,7 +50,16 @@ function handlePlatformUnauthorized(error) {
   // page with no login prompt. The portalHttp site gates on the same store.
   let portalTokenPresent = false
   try {
-    portalTokenPresent = !!useClientPortalStore().portalToken
+    // `platformFallbackSuppressed` is the tab's own "I am a client tab"
+    // declaration (#2261): `endSession({expired})` nulls the portal token and
+    // sets it in the same breath. Reading the token alone reopened the
+    // #2258/#2261 bounce for exactly that instant — a dead operator JWT in
+    // the client's browser 401s on the 5 s ticket retry, and with the token
+    // gone the verdict fell through to `logout` and threw the client from
+    // the OTP form onto the operator login. Per-tab sessionStorage, so it
+    // cannot reintroduce W1.
+    const portalStore = useClientPortalStore()
+    portalTokenPresent = !!portalStore.portalToken || !!portalStore.platformFallbackSuppressed
   } catch {
     /* Pinia not active yet — no client session can own a tab that has no store */
   }

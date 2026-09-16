@@ -357,7 +357,8 @@ describe('one credential source, one handler (source guards — wiring only)', (
   })
 
   it('the Workspace veto reads the per-tab store, not shared storage (W1)', () => {
-    expect(MAIN).toContain('useClientPortalStore().portalToken')
+    expect(MAIN).toContain('const portalStore = useClientPortalStore()')
+    expect(MAIN).toContain('portalTokenPresent = !!portalStore.portalToken || !!portalStore.platformFallbackSuppressed')
     expect(MAIN).not.toContain('localStorage.getItem(PORTAL_TOKEN_KEY)')
   })
 

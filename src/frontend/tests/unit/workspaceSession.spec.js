@@ -447,17 +447,26 @@ describe('who gets bounced to /login on a 401 (/review I1, rewritten for #2791)'
     }
   })
 
-  it('the verdict does not depend on the portal token racing away', () => {
-    // The first 401 drops the portal token (fetchRoster -> signOut). A second,
-    // concurrent 401 must reach the same answer as the first. For an OPERATOR
-    // (no portal token either way) that answer is stable by construction.
-    const before = sessionLostVerdict({
+  it('a client tab stays vetoed after its session expires', () => {
+    // The first 401 ends the client session (`endSession({expired})`: the
+    // portal token goes, `platformFallbackSuppressed` is set). The tab is
+    // still a client tab — main.js folds the suppression flag into
+    // `portalTokenPresent` — so the 5 s ticket retry's next 401 on the dead
+    // operator JWT must still `ignore`, not throw the client at the OTP form
+    // onto the operator login (#2258/#2261 class). The contrast case is what
+    // makes this fail: the same 401 with no client claim on the tab is `logout`.
+    const live = sessionLostVerdict({
+      failedToken: 'jwt', storedToken: 'jwt', portalTokenPresent: true, path: '/workspace',
+    })
+    const expired = sessionLostVerdict({
+      failedToken: 'jwt', storedToken: 'jwt', portalTokenPresent: true, path: '/workspace',
+    })
+    const operator = sessionLostVerdict({
       failedToken: 'jwt', storedToken: 'jwt', portalTokenPresent: false, path: '/workspace',
     })
-    const after = sessionLostVerdict({
-      failedToken: 'jwt', storedToken: 'jwt', portalTokenPresent: false, path: '/workspace',
-    })
-    expect(after).toBe(before)
+    expect(live).toBe('ignore')
+    expect(expired).toBe('ignore')
+    expect(operator).toBe('logout')
   })
 
   it('everywhere else keeps the normal bounce', () => {
