@@ -191,10 +191,16 @@ def invalidate(api_key: str) -> None:
         return
     k = cache_key(api_key)
     _local.pop(k, None)
+    # #2696: the key's last live failure goes with it. Re-saving a key after
+    # fixing it at the provider is the documented recovery, and leaving the
+    # pre-fix failure beside a fresh `capable` verdict for up to 24h would show
+    # the operator a problem they just solved.
+    fk = _failure_row(api_key)
+    _local_failures.pop(fk, None)
     r = _redis()
     if r is not None:
         try:
-            r.delete(k)
+            r.delete(k, fk)
         except Exception as e:  # noqa: BLE001
             logger.warning("stt capability cache delete failed-open (%s)", e)
 
@@ -363,6 +369,13 @@ _local_failures: dict[str, tuple[float, str]] = {}
 def _failure_row(api_key: str) -> str:
     return _LAST_FAILURE_PREFIX + cache_key(api_key)[len(_CACHE_PREFIX):]
 
+
+def _read_local_failure(k: str) -> Optional[str]:
+    hit = _local_failures.get(k)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+    return None
+
 _MSG_PERMISSION = ("Voice input is not enabled for this workspace: the speech "
                    "recognition key is missing the speech-to-text permission. "
                    "Ask your operator to update it — you can type instead.")
@@ -433,21 +446,29 @@ def record_live_failure(api_key: str, status_code: int, body: str) -> SttFailure
 
 
 def read_last_failure(api_key: str) -> Optional[dict]:
-    """The most recent live failure for THIS key, as stored — operator-facing."""
+    """The most recent live failure for THIS key, as stored — operator-facing.
+
+    Same rule as `read_cached` (#2695's cross-worker finding): Redis is the
+    authority whenever it ANSWERS — a hit is returned, a miss is a miss and
+    evicts this worker's local copy, because a row another worker deleted
+    (`invalidate`) or that expired is exactly what the local copy must not
+    resurrect. `_local_failures` is read only when Redis cannot be asked.
+    """
     if not api_key:
         return None
     k = _failure_row(api_key)
-    raw = None
     r = _redis()
-    if r is not None:
+    if r is None:
+        raw = _read_local_failure(k)
+    else:
         try:
             raw = r.get(k)
         except Exception as e:  # noqa: BLE001
             logger.warning("stt last-failure read failed-open (%s)", e)
-    if not raw:
-        hit = _local_failures.get(k)
-        if hit and hit[0] > time.monotonic():
-            raw = hit[1]
+            raw = _read_local_failure(k)
+        else:
+            if not raw:
+                _local_failures.pop(k, None)
     if not raw:
         return None
     try:
