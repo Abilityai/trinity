@@ -65,6 +65,13 @@
                 <span class="hidden md:inline">Create Agent</span>
               </button>
 
+              <!-- Getting-started launcher (ent#238). In the controls row, not
+                   the page flow: the checklist's entitlement answer arrives a
+                   round-trip after paint, and in a fixed-height row that can no
+                   longer push the fleet grid down. Renders nothing at all when
+                   the module is unentitled, dismissed or complete. -->
+              <ActivationLauncher />
+
               <!-- Quick Tag Filter Dropdown -->
               <div v-if="availableTags.length > 0" ref="tagDropdownRef" class="relative">
                 <button
@@ -246,14 +253,6 @@
             </div>
           </div>
         </div>
-
-        <!-- Getting-started checklist (ent#238). The ONLY first-run surface
-             left inline: it tracks first-value milestones over days, so the
-             first-run overlay (ent#581, below) deliberately does not absorb it —
-             a blocking sequence would turn a progress marker into a gate.
-             Renders nothing unless the enterprise onboarding module is entitled
-             AND the user still has an undone step. -->
-        <ActivationChecklist />
 
     <!-- Timeline View (only visible in timeline mode) -->
     <template v-if="isTimelineMode">
@@ -506,7 +505,7 @@ import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import FirstRunOverlay from '@/components/onboarding/FirstRunOverlay.vue'
-import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
+import ActivationLauncher from '@/components/onboarding/ActivationLauncher.vue'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'

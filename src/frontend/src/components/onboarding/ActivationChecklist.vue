@@ -15,7 +15,12 @@
   <div
     v-if="store.visible"
     data-testid="activation-checklist"
-    class="mx-4 mt-3 mb-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-sm"
+    :class="[
+      'rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800',
+      // Inline in the dashboard flow it needs its own gutters; inside the
+      // launcher's popover the panel owns the placement and the elevation.
+      embedded ? 'shadow-lg' : 'mx-4 mt-3 mb-3 shadow-sm',
+    ]"
   >
     <div class="flex items-start justify-between px-4 py-3">
       <div class="min-w-0">
@@ -27,7 +32,7 @@
         </p>
       </div>
       <button
-        @click="store.dismiss()"
+        @click="store.dismiss(); emit('dismissed')"
         data-testid="activation-checklist-dismiss"
         class="ml-3 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded"
         title="Dismiss"
@@ -90,6 +95,12 @@ import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useOnboardingStore } from '../../stores/onboarding'
 
+defineProps({
+  // Rendered inside the launcher popover rather than in the dashboard flow.
+  embedded: { type: Boolean, default: false },
+})
+const emit = defineEmits(['dismissed'])
+
 const store = useOnboardingStore()
 const router = useRouter()
 
@@ -98,6 +109,7 @@ const nextKey = computed(() => store.items.find((i) => !i.done)?.key)
 
 const go = (item) => {
   if (item.action_route) router.push(item.action_route)
+  emit('dismissed')
 }
 
 onMounted(() => {

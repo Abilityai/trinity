@@ -373,8 +373,28 @@ describe('the chassis replaced the card ladder (structure)', () => {
     }
   })
 
-  it('keeps ActivationChecklist inline and mounts the overlay once', () => {
-    expect(DASHBOARD).toContain('<ActivationChecklist />')
+  it('keeps the checklist out of the page flow, and mounts the overlay once', () => {
+    // ent#238's checklist STAYS (ruling on ent#581) — but not in the dashboard
+    // flow. It fetches in its own `onMounted` and renders on the result, so
+    // inline it could only ever appear one round-trip after paint, pushing the
+    // fleet grid down by ~150px. Nothing could reserve that space, because the
+    // entitlement answer is what decides whether a card exists at all, and
+    // reserving unconditionally would leave a permanent gap on every OSS build
+    // where the endpoint 404s.
+    //
+    // The launcher lives in the header's fixed-height controls row instead, so
+    // a late answer changes nothing below it — layout stability by
+    // construction rather than by timing (contract p.4/6).
+    expect(DASHBOARD).not.toContain('<ActivationChecklist')
+    expect(DASHBOARD).toContain('<ActivationLauncher />')
+    // In the controls row, ahead of the Tags dropdown it sits beside — not in
+    // the stage below, which is the flow this moved out of.
+    const launcher = DASHBOARD.indexOf('<ActivationLauncher />')
+    const tags = DASHBOARD.indexOf('Quick Tag Filter Dropdown')
+    const stage = DASHBOARD.indexOf('Timeline View')
+    expect(launcher).toBeGreaterThan(-1)
+    expect(launcher).toBeLessThan(tags)
+    expect(launcher).toBeLessThan(stage)
     expect(DASHBOARD.match(/<FirstRunOverlay\b/g)).toHaveLength(1)
     // The Dashboard's hotkeys stand down while setup is open.
     expect(DASHBOARD).toMatch(/firstRunOpen\.value \|\| isEditorOpen\.value/)
