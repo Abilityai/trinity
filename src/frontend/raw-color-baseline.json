@@ -568,6 +568,11 @@
       "raw_gray": 13,
       "hardcoded_colors": 0
     },
+    "src/frontend/src/components/onboarding/ActivationChecklist.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 16,
+      "hardcoded_colors": 0
+    },
     "src/frontend/src/components/operator/NotificationsPanel.vue": {
       "raw_nongray": 21,
       "raw_gray": 138,

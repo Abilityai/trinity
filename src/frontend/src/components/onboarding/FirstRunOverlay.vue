@@ -5,12 +5,7 @@
   be configured, walks a fixed order over the steps THIS install has, and never
   moves the page beneath it. It absorbs the hardening guide (#2380), the
   finish-setup card (#2381 / ent#437), the front desk (ent#319) and the ent#52
-  wizard. `ActivationChecklist` (ent#238) is gone from the dashboard too, but
-  NOT into here: its four milestones are observed from DB state during use, so
-  they cannot be true while a blocking setup overlay is up. AC #1 — nothing
-  first-run renders inline — is what it satisfies; the AC's "absorbs" wording
-  does not fit it. The milestones behind that checklist now have no surface;
-  where they live is a private-repo matter and is not named here.
+  wizard; `ActivationChecklist` (ent#238) deliberately stays inline.
 
   Every decision — which steps, when it opens, what counts as done, whether
   Continue is live — is in `firstRunSteps.js`, where the node-only spec can
