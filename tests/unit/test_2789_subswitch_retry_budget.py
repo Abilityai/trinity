@@ -508,7 +508,7 @@ def test_retry_budget_is_logged_with_its_cause(caplog):
         _log_retry_budget("agent-x", "subscription-switch", 3570, 3600, elapsed_s=30)
     assert [r.levelname for r in caplog.records] == ["INFO"], "elapsed time is not a clamp"
     assert "clamped" not in caplog.records[0].message
-    assert "30s the first attempt already spent" in caplog.records[0].message
+    assert "30s already spent" in caplog.records[0].message
 
     caplog.clear()
     with caplog.at_level(logging.INFO):

@@ -1199,8 +1199,8 @@ def _log_retry_budget(
         return
     line = (
         f"[TaskExecService] {agent_name}: {reason} retry budget {applied_timeout}s — "
-        f"the turn's {int(original_timeout)}s less the {int(elapsed_s)}s the first "
-        f"attempt already spent"
+        f"the turn's {int(original_timeout)}s less the {int(elapsed_s)}s already spent "
+        f"(every earlier attempt and settle delay)"
     )
     if applied_timeout < _AUTO_RETRY_MAX_TIMEOUT_S:
         logger.warning(line + " (under the reader-race ceiling; a re-run this short is likely hopeless and is still billed)")
