@@ -137,7 +137,25 @@ from .execution_classification import (  # noqa: F401
 # races fire fast; 5 min is plenty. We pass `min(effective_timeout, this)`
 # to the retry so a 30-min task that ate 28 min before failing doesn't get
 # another 30 min on top.
+#
+# **This ceiling belongs to the #678 reader-race path ONLY (#2789).** That
+# retry re-dispatches a turn that never really started, so a flat 5 minutes is
+# generous. The SUB-003 post-switch retry (#792/#2638) is a different animal —
+# a full re-run of the user's turn on a fresh subscription — and it is bounded
+# by the turn's REMAINING budget instead (see `_dispatch_with_retries`). It
+# shared this constant until #2789, which killed every honest turn longer than
+# five minutes that happened to hit a seat switch mid tool-use. Do not re-point
+# the SUB-003 path at this number: `client_portal.portal_attempt_ceiling_seconds`
+# imports it to size the Workspace in-flight marker and adds it exactly once,
+# on the reader-race path's behalf.
 _AUTO_RETRY_MAX_TIMEOUT_S = 300.0
+
+# The backend's HTTP read budget is deliberately wider than the agent-side
+# budget it dispatches, so the agent's own structured 504 wins the race and we
+# terminate with its error detail instead of a bare `ReadTimeout`. One number,
+# applied identically to the first dispatch and to every retry (#2789) — the
+# retries used to collapse the two onto the same instant.
+_AGENT_HTTP_SLACK_S = 10.0
 
 
 
@@ -1050,6 +1068,14 @@ class _AttemptState:
     """
 
     start_time: datetime
+    # #2789: the TURN's clock, never reset. `start_time` is re-stamped before
+    # each inline retry so `_handle_timeout` measures the attempt it is
+    # classifying; that makes it the wrong clock for a BUDGET. On the #678→#792
+    # interplay (502 → reader-race retry → 429 → switch) `start_time` had just
+    # been reset by the reader-race retry, so a SUB-003 budget derived from it
+    # measured only that retry and re-granted nearly the whole turn a third
+    # time — 6610s of slot time on a 3600s cap (merge-train review of #2817).
+    turn_started_at: Optional[datetime] = None
     retry_count: int = 0
     previous_attempt_cost: float = 0.0
     subscription_switch_attempted: bool = False
@@ -1058,6 +1084,19 @@ class _AttemptState:
     # or post-failure — carried onto `TaskExecutionResult` so a caller can say
     # "moved to <sub>, try again" instead of "not retryable". None = none.
     subscription_switch: Optional[dict] = None
+    # #2789: the agent-side budget actually in force for the LATEST attempt.
+    # `state.start_time` is reset before an inline retry, so `_handle_timeout`
+    # measures the retry's own elapsed time — it must judge that against the
+    # retry's own limit, not the turn's original `timeout_seconds`. Left None
+    # on the first attempt, where the two are the same thing by construction.
+    applied_timeout_seconds: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        # At construction the two clocks are the same instant; only the retries
+        # move `start_time`. Deriving here means a construction that names only
+        # `start_time` cannot silently anchor the turn budget on a reset clock.
+        if self.turn_started_at is None:
+            self.turn_started_at = self.start_time
 
 
 def _with_switch(
@@ -1114,6 +1153,65 @@ def _classify_timeout_failure(
         f"Task execution aborted after {elapsed_s}s of {limit_desc} allowed{detail}",
         TaskExecutionErrorCode.NETWORK,
     )
+
+
+def _turn_elapsed_seconds(state: "_AttemptState") -> float:
+    """Wall-clock spent by the WHOLE turn so far — every attempt and every
+    settle delay — from the clock that is never reset."""
+    return max(0.0, (datetime.utcnow() - state.turn_started_at).total_seconds())
+
+
+def _log_retry_budget(
+    agent_name: str,
+    reason: str,
+    applied_timeout: int,
+    original_timeout: Optional[int],
+    *,
+    ceiling: Optional[float] = None,
+    elapsed_s: float = 0.0,
+) -> None:
+    """#2789: state an inline retry's budget where it is decided.
+
+    The #2789 report had to infer a self-inflicted 300s cap from the phrase
+    "aborted after 300s of 3600 seconds allowed" — the applied budget appeared
+    in no log line at all. Two causes, two sentences, because they call for
+    different reactions:
+
+    * the #678 reader-race retry is CLAMPED by a deliberate ceiling — WARNING,
+      so a timeout at that point is read as the ceiling, not as an upstream
+      cutoff or the configured limit;
+    * the SUB-003 re-run is shorter only by what the first attempt already
+      SPENT — INFO with the breakdown, since that is arithmetic, not a clamp
+      (the first version of this helper called a 30s first attempt a "clamp"
+      on every seat switch). It escalates to WARNING only when what is left is
+      under the reader-race ceiling: a re-run with under five minutes is the
+      one an operator would want to know about, because it is likely hopeless
+      and is still billed.
+
+    Silent when nothing was taken away, so a healthy turn adds no noise.
+    """
+    if original_timeout is None or applied_timeout >= int(original_timeout):
+        return
+    # Keyed on the CAUSE the caller names, never inferred from `elapsed_s`: a
+    # zero elapsed on a spend-bounded retry is not a ceiling, and the first
+    # version of this branch would have called it one.
+    if ceiling is not None and applied_timeout <= ceiling:
+        logger.warning(
+            f"[TaskExecService] {agent_name}: {reason} retry budget clamped to "
+            f"{applied_timeout}s of the turn's {int(original_timeout)}s by the "
+            f"{int(ceiling)}s ceiling — a timeout at that point is this ceiling, "
+            f"not the configured limit"
+        )
+        return
+    line = (
+        f"[TaskExecService] {agent_name}: {reason} retry budget {applied_timeout}s — "
+        f"the turn's {int(original_timeout)}s less the {int(elapsed_s)}s already spent "
+        f"(every earlier attempt and settle delay)"
+    )
+    if applied_timeout < _AUTO_RETRY_MAX_TIMEOUT_S:
+        logger.warning(line + " (under the reader-race ceiling; a re-run this short is likely hopeless and is still billed)")
+    else:
+        logger.info(line)
 
 
 class TaskExecutionService:
@@ -1256,7 +1354,8 @@ class TaskExecutionService:
         # #678/#792 call-attempt bookkeeping, shared with the exception
         # handlers below (they read what the retries wrote). Created BEFORE the
         # try so no handler can NameError on a pre-dispatch exception.
-        state = _AttemptState(start_time=datetime.utcnow())
+        _now = datetime.utcnow()
+        state = _AttemptState(start_time=_now, turn_started_at=_now)
 
         # ---- #2391: does this dispatch belong on the durable queue? --------
         # Evaluated here, where every field the queued row needs is in scope.
@@ -1859,7 +1958,7 @@ class TaskExecutionService:
         object rather than in locals. Transport/HTTP errors propagate to
         those handlers exactly as they did inline.
         """
-        effective_timeout = float(timeout_seconds or 600) + 10
+        effective_timeout = float(timeout_seconds or 600) + _AGENT_HTTP_SLACK_S
 
         # #2638 AC#3: SUB-003 has always been reactive — dispatch, get refused,
         # switch, re-issue once (#792). Everything needed to skip that first
@@ -1954,6 +2053,18 @@ class TaskExecutionService:
                         f"retry on {agent_name} — skipping auto-retry"
                     )
                 else:
+                    # #2789: record what this attempt may actually spend, so a
+                    # terminal timeout is attributed against the ceiling that
+                    # applied rather than the operator's untouched configured
+                    # one. Inside the `else`, not above the CB gate: a retry the
+                    # breaker refuses never runs, and a budget claimed for it
+                    # would misattribute whatever terminal the original response
+                    # produces.
+                    state.applied_timeout_seconds = retry_agent_timeout
+                    _log_retry_budget(
+                        agent_name, "reader-race", retry_agent_timeout, timeout_seconds,
+                        ceiling=_AUTO_RETRY_MAX_TIMEOUT_S,
+                    )
                     state.retry_count = 1
                     prev_meta = inner_detail.get("metadata") or {}
                     num_turns_before = prev_meta.get("num_turns") or 0
@@ -2070,13 +2181,33 @@ class TaskExecutionService:
                     # isn't absorbed by the retry's success replacement.
                     state.previous_attempt_cost += _salvage_attempt_cost(switch_partial_meta)
                     # Cap the retry to the REMAINING original budget so a 429
-                    # after a long run can't balloon wall-clock / slot time.
-                    elapsed_s = (datetime.utcnow() - state.start_time).total_seconds()
-                    remaining_s = max(1.0, effective_timeout - elapsed_s)
-                    retry_http_timeout = min(remaining_s, _AUTO_RETRY_MAX_TIMEOUT_S)
-                    retry_agent_timeout = int(
-                        min(float(timeout_seconds or 600), retry_http_timeout)
-                    )
+                    # after a long run can't balloon wall-clock / slot time —
+                    # and to NOTHING ELSE (#2789).
+                    #
+                    # This retry is a full re-run of the user's turn on a fresh
+                    # subscription, so it earns the budget the turn was given.
+                    # It used to be clamped to `_AUTO_RETRY_MAX_TIMEOUT_S` as
+                    # well, which is the #678 reader-race ceiling for a turn
+                    # that never started: a 3600s agent got 300s, the agent
+                    # server killed its own process group at 300s mid tool-use,
+                    # and the turn was discarded after being billed. `remaining_s`
+                    # is already a hard wall-clock bound — `effective_timeout` is
+                    # the operator's own `execution_timeout_seconds` plus the HTTP
+                    # slack — so first attempt + retry can never exceed what
+                    # TIMEOUT-001 already promises. A second ceiling here bought
+                    # nothing and cost every turn longer than five minutes.
+                    #
+                    # The agent-side budget keeps the slack the first dispatch
+                    # has, so the agent's structured 504 still beats our own
+                    # ReadTimeout; without it the two land on the same instant
+                    # and the terminal loses the agent's error detail.
+                    # The budget is computed AFTER the settle delay below, from
+                    # the TURN clock (`turn_started_at`, never reset — see
+                    # `_AttemptState`): `start_time` may already have been
+                    # re-stamped by a reader-race retry, and the 3s settle is
+                    # wall-clock the turn spends too. Both were counted against
+                    # nothing before, and on the #678→#792 interplay the first
+                    # made this retry re-grant nearly the whole budget.
                     # #2638: the destination name is deliberately NOT
                     # interpolated. `_perform_auto_switch` logs "Auto-switching
                     # agent 'X' from 'A' to 'B'" one frame down, so this line
@@ -2119,6 +2250,19 @@ class TaskExecutionService:
                     # Small settle so a hot-reloaded token is live for the next
                     # subprocess; the retry call itself probes readiness.
                     await asyncio.sleep(_SWITCH_RETRY_DELAY_S)
+                    elapsed_s = _turn_elapsed_seconds(state)
+                    retry_http_timeout = max(1.0, effective_timeout - elapsed_s)
+                    retry_agent_timeout = max(1, int(min(
+                        float(timeout_seconds or 600),
+                        retry_http_timeout - _AGENT_HTTP_SLACK_S,
+                    )))
+                    # #2789: attribute a terminal timeout against the budget
+                    # that was actually in force for THIS attempt.
+                    state.applied_timeout_seconds = retry_agent_timeout
+                    _log_retry_budget(
+                        agent_name, "subscription-switch", retry_agent_timeout, timeout_seconds,
+                        elapsed_s=elapsed_s,
+                    )
                     retry_payload = {**payload, "timeout_seconds": retry_agent_timeout}
                     state.start_time = datetime.utcnow()
                     response = await agent_post_with_retry(
@@ -2281,10 +2425,23 @@ class TaskExecutionService:
         raised long before the configured limit is an upstream cutoff, not a
         schedule timeout, and must not be recorded as one."""
         elapsed = int((datetime.utcnow() - state.start_time).total_seconds())
-        error_msg, error_code = _classify_timeout_failure(
-            elapsed, timeout_seconds, exc=exc
+        # #2789: `state.start_time` is reset before an inline retry, so `elapsed`
+        # measures the RETRY. Judge it against the retry's own budget — the #678
+        # ceiling, or whatever the turn had left after a SUB-003 switch — or a
+        # retry that ran its full allowance reads as an upstream cutoff against
+        # an original limit it was never given. None on the first attempt.
+        effective_limit = (
+            state.applied_timeout_seconds
+            if state.applied_timeout_seconds is not None
+            else timeout_seconds
         )
-        logger.error(f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s (limit={timeout_seconds}s): {error_msg}")
+        error_msg, error_code = _classify_timeout_failure(
+            elapsed, effective_limit, exc=exc
+        )
+        logger.error(
+            f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s "
+            f"(limit={effective_limit}s, configured={timeout_seconds}s): {error_msg}"
+        )
 
         # Issue #61: Terminate the execution on the agent to prevent orphaned
         # Claude processes from accumulating. Best-effort — watchdog is safety net.
