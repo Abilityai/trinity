@@ -10,55 +10,63 @@
   was coming — and reserving it unconditionally would leave a permanent gap on
   every unentitled build, where the endpoint 404s and the card never renders.
 
-  Moving it behind a launcher removes the question rather than answering it.
-  The pill sits in the header's controls cluster, which is a fixed-height row,
-  so the checklist arriving late changes nothing below it. Layout stability by
-  construction instead of by timing (contract principles 4 and 6).
+  It now lives as a row in the systems sidebar, which is a fixed-width column
+  outside the dashboard's own flow: a late answer adds a row to a scrolling
+  list and moves nothing in the grid. Layout stability by construction rather
+  than by timing (contract principles 4 and 6).
 
   A popover, deliberately not a modal: ent#238's rule is that this is ambient —
   dismissible, gating nothing, hiding itself once the last milestone is done.
   A blocking dialog would turn a progress marker into the tour it must not be.
+  It opens to the RIGHT of the rail, because the panel is wider than the rail.
 
   Renders nothing at all when the store says so (OSS 404, unentitled 403,
-  dismissed, or complete), and its absence costs no space in the header.
+  dismissed, or complete), and its absence costs no space.
 -->
 <template>
   <div v-if="store.visible" ref="rootRef" class="relative">
     <button
       type="button"
       data-testid="activation-launcher"
-      class="flex items-center space-x-1.5 px-2 py-0.5 rounded text-xs font-medium transition-all whitespace-nowrap
-             bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300
-             hover:bg-gray-200 dark:hover:bg-gray-600
-             focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
+      :class="[
+        'w-full flex items-center px-3 py-2 text-sm transition-colors',
+        open
+          ? 'bg-gray-100 dark:bg-gray-700/60 text-gray-900 dark:text-gray-100'
+          : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50',
+      ]"
       :aria-expanded="open ? 'true' : 'false'"
       aria-haspopup="dialog"
       :aria-label="`Getting started — ${store.completedCount} of ${store.totalCount} done`"
+      :title="collapsed ? `Getting started — ${store.completedCount} of ${store.totalCount} done` : ''"
       @click="open = !open"
     >
-      <!-- The meter IS the label at narrow widths, so the control still says
-           how far along you are when the words are gone. -->
-      <span class="flex items-center space-x-0.5" aria-hidden="true">
-        <span
-          v-for="n in store.totalCount"
-          :key="n"
-          class="block w-1.5 h-1.5 rounded-full"
-          :class="n <= store.completedCount
-            ? 'bg-status-success-500'
-            : 'bg-gray-300 dark:bg-gray-500'"
-        ></span>
+      <!-- The meter takes the icon slot the other rows use, so collapsed the
+           row still says how far along you are rather than going mute. -->
+      <span class="w-5 h-5 flex items-center justify-center mr-2 flex-shrink-0" aria-hidden="true">
+        <span class="grid grid-cols-2 gap-0.5">
+          <span
+            v-for="n in store.totalCount"
+            :key="n"
+            class="block w-1.5 h-1.5 rounded-full"
+            :class="n <= store.completedCount ? 'bg-status-success-500' : 'bg-gray-300 dark:bg-gray-500'"
+          ></span>
+        </span>
       </span>
-      <span class="hidden md:inline">Getting started</span>
-      <span class="tabular-nums text-gray-500 dark:text-gray-400">
-        {{ store.completedCount }}/{{ store.totalCount }}
-      </span>
+
+      <template v-if="!collapsed">
+        <span class="truncate flex-1 text-left">Getting started</span>
+        <span class="ml-2 text-xs tabular-nums text-gray-400 dark:text-gray-400">
+          {{ store.completedCount }}/{{ store.totalCount }}
+        </span>
+      </template>
     </button>
 
-    <!-- Anchored to the trigger, right-aligned like the Tags dropdown beside
-         it, so the two read as one family of header controls. -->
+    <!-- Right of the rail, not below it: the rail is 224px and the panel is
+         304px, so opening downward would either clip or force a narrower
+         second rendering of a card that already exists. -->
     <div
       v-if="open"
-      class="absolute right-0 top-full mt-1 z-50 w-[19rem] max-w-[calc(100vw-2rem)]"
+      class="absolute left-full bottom-0 ml-1 z-50 w-[19rem] max-w-[calc(100vw-4rem)]"
       role="dialog"
       aria-label="Getting started"
       data-testid="activation-launcher-panel"
@@ -73,11 +81,17 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useOnboardingStore } from '../../stores/onboarding'
 import ActivationChecklist from './ActivationChecklist.vue'
 
+defineProps({
+  // The rail's own state. Collapsed, the row keeps its meter and drops the
+  // label, exactly as the view rows beside it do.
+  collapsed: { type: Boolean, default: false },
+})
+
 const store = useOnboardingStore()
 const open = ref(false)
 const rootRef = ref(null)
 
-// The launcher owns the read, so the pill knows whether to exist before the
+// The launcher owns the read, so the row knows whether to exist before the
 // panel is ever opened. `fetchChecklist` early-returns once loaded, so the
 // checklist's own mounted call stays a harmless no-op.
 onMounted(() => {
@@ -98,7 +112,6 @@ function onKey(e) {
 }
 
 // Finishing the last milestone (or dismissing) retires the whole control; an
-// open panel would otherwise be left anchored to a trigger that no longer
-// exists.
+// open panel would otherwise be left anchored to a row that no longer exists.
 watch(() => store.visible, (v) => { if (!v) open.value = false })
 </script>

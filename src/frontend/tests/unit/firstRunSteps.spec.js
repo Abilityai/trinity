@@ -357,6 +357,7 @@ describe('per-browser state', () => {
 describe('the chassis replaced the card ladder (structure)', () => {
   const DASHBOARD = read('../../src/views/Dashboard.vue')
   const OVERLAY = read('../../src/components/onboarding/FirstRunOverlay.vue')
+  const SIDEBAR = read('../../src/components/SystemViewsSidebar.vue')
 
   it('deletes the absorbed surfaces and the one-card-at-a-time rule', () => {
     for (const gone of [
@@ -386,15 +387,14 @@ describe('the chassis replaced the card ladder (structure)', () => {
     // a late answer changes nothing below it — layout stability by
     // construction rather than by timing (contract p.4/6).
     expect(DASHBOARD).not.toContain('<ActivationChecklist')
-    expect(DASHBOARD).toContain('<ActivationLauncher />')
-    // In the controls row, ahead of the Tags dropdown it sits beside — not in
-    // the stage below, which is the flow this moved out of.
-    const launcher = DASHBOARD.indexOf('<ActivationLauncher />')
-    const tags = DASHBOARD.indexOf('Quick Tag Filter Dropdown')
-    const stage = DASHBOARD.indexOf('Timeline View')
-    expect(launcher).toBeGreaterThan(-1)
-    expect(launcher).toBeLessThan(tags)
-    expect(launcher).toBeLessThan(stage)
+    expect(DASHBOARD).not.toContain('<ActivationLauncher')
+    // It lives in the systems rail — a fixed-width column outside the
+    // dashboard's flow — so a late entitlement answer adds a row to a
+    // scrolling list instead of moving the fleet grid.
+    expect(SIDEBAR).toContain('<ActivationLauncher')
+    // Expanded by default: an unlabelled rail hides both the systems it lists
+    // and this row. A saved preference still wins.
+    expect(SIDEBAR).toMatch(/savedCollapsed === 'true' : false/)
     expect(DASHBOARD.match(/<FirstRunOverlay\b/g)).toHaveLength(1)
     // The Dashboard's hotkeys stand down while setup is open.
     expect(DASHBOARD).toMatch(/firstRunOpen\.value \|\| isEditorOpen\.value/)

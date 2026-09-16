@@ -65,13 +65,6 @@
                 <span class="hidden md:inline">Create Agent</span>
               </button>
 
-              <!-- Getting-started launcher (ent#238). In the controls row, not
-                   the page flow: the checklist's entitlement answer arrives a
-                   round-trip after paint, and in a fixed-height row that can no
-                   longer push the fleet grid down. Renders nothing at all when
-                   the module is unentitled, dismissed or complete. -->
-              <ActivationLauncher />
-
               <!-- Quick Tag Filter Dropdown -->
               <div v-if="availableTags.length > 0" ref="tagDropdownRef" class="relative">
                 <button
@@ -505,7 +498,6 @@ import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import FirstRunOverlay from '@/components/onboarding/FirstRunOverlay.vue'
-import ActivationLauncher from '@/components/onboarding/ActivationLauncher.vue'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'

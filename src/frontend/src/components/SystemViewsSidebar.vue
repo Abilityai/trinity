@@ -103,6 +103,14 @@
       </button>
     </div>
 
+    <!-- Getting started (ent#238). A row in the rail rather than a card in the
+         dashboard flow: the entitlement answer lands a round-trip after paint,
+         and here that adds a row to a scrolling column instead of pushing the
+         fleet grid down. Renders nothing when unentitled, dismissed or done. -->
+    <div class="border-t border-gray-200 dark:border-gray-700 py-1">
+      <ActivationLauncher :collapsed="isCollapsed" />
+    </div>
+
     <!-- Create New View Button -->
     <div class="border-t border-gray-200 dark:border-gray-700 p-2">
       <button
@@ -125,6 +133,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useSystemViewsStore } from '@/stores/systemViews'
+import ActivationLauncher from '@/components/onboarding/ActivationLauncher.vue'
 import { storeToRefs } from 'pinia'
 
 const emit = defineEmits(['create', 'edit'])
@@ -132,9 +141,11 @@ const emit = defineEmits(['create', 'edit'])
 const systemViewsStore = useSystemViewsStore()
 const { views, activeViewId, isLoading, sortedViews } = storeToRefs(systemViewsStore)
 
-// Default to collapsed, but respect localStorage if set
+// Expanded by default, with labels — a rail of unlabelled glyphs hides the
+// systems it lists and the getting-started row below them. A saved preference
+// still wins; only the first-visit default changed.
 const savedCollapsed = localStorage.getItem('trinity-sidebar-collapsed')
-const isCollapsed = ref(savedCollapsed !== null ? savedCollapsed === 'true' : true)
+const isCollapsed = ref(savedCollapsed !== null ? savedCollapsed === 'true' : false)
 
 // Watch for collapse changes and persist
 function toggleCollapse() {
