@@ -256,12 +256,12 @@ jobs:
         # not a silent pass.
         run: |
           cd tests
-          timeout 1500 python -m pytest unit/ -m "not slow" \
-            --timeout=300 --timeout-method=thread \
+          python -m pytest unit/ -m "not slow" \
+            --timeout=300 --timeout-method=signal \
             -n auto --dist loadfile \
             -p randomly --randomly-seed=${{ matrix.seed }} \
             --junit-xml="$GITHUB_WORKSPACE/junit-${{ matrix.side }}-${{ matrix.seed }}.xml" \
-            --tb=short -v || true
+            --tb=no -q || true
 
       - name: Upload JUnit XML
         # always(): the timeout above should make an abnormal end unreachable,
