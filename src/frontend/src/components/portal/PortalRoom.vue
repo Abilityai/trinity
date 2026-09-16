@@ -160,6 +160,7 @@
               :item="it"
               show-agent
               :elapsed-seconds="elapsedOf(it)"
+              :live-step="stepOf(it)"
               :can-stop="it.can_stop"
               :stopping="workStore.stoppingIds.includes(it.id)"
               show-open-in-work
@@ -390,6 +391,7 @@ import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
 import { liveElapsedSeconds, liveItemsForRoom, soleStoppableItem } from './portalWork'
+import { resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
@@ -544,6 +546,11 @@ watch(() => roomLiveItems.value.length > 0, (on) => {
 }, { immediate: true })
 onBeforeUnmount(() => { if (clockTimer) clearInterval(clockTimer) })
 function elapsedOf(it) { return liveElapsedSeconds(it, { fetchedAtMs: workStore.fetchedAt, nowMs: clockMs.value }) }
+// trinity-enterprise#620: a room's cards carry the activity line too — the
+// room has no stream of its own, so every card reads the heartbeat feed.
+function stepOf(it) {
+  return resolveActivityText({ live: true, activity: workStore.activityFor(it), nowMs: clockMs.value })
+}
 
 // #2795 — stopping a room turn.
 //

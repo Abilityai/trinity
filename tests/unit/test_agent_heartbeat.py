@@ -118,7 +118,8 @@ def test_build_payload_shape(monkeypatch):
 
     payload = heartbeat._build_payload()
 
-    assert set(payload) == {"memory_mb", "active_executions", "uptime_s"}
+    # trinity-enterprise#620 added `executions` (per-execution activity).
+    assert set(payload) == {"memory_mb", "active_executions", "uptime_s", "executions"}
     assert payload["memory_mb"] == 42.0
     assert payload["active_executions"] == 3
     assert isinstance(payload["uptime_s"], float)
