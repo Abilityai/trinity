@@ -60,7 +60,6 @@ Click **Mute** on the orb, or press **M**, to silence your microphone mid-sessio
 |----------|-------------|---------|
 | `GEMINI_API_KEY` | API key for Gemini Live API. A key saved in **Settings → Integrations** takes precedence and applies without a restart | — (required) |
 | `VOICE_ENABLED` | Global toggle | `true` |
-| `WORKSPACE_ENABLED` | Legacy flag for the retired per-agent workspace page; it gates nothing in the voice path today | `false` |
 | `VOICE_MODEL` | Gemini model ID (leave unset to use the built-in default) | `models/gemini-3.1-flash-live-preview` |
 | `VOICE_MAX_DURATION` | Max session duration in seconds for the legacy per-agent start route | `300` |
 | `WORKSPACE_VOICE_MAX_DURATION` | Max call duration in seconds (Workspace voice mode) | `1800` |
