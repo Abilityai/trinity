@@ -1068,6 +1068,14 @@ class _AttemptState:
     """
 
     start_time: datetime
+    # #2789: the TURN's clock, never reset. `start_time` is re-stamped before
+    # each inline retry so `_handle_timeout` measures the attempt it is
+    # classifying; that makes it the wrong clock for a BUDGET. On the #678→#792
+    # interplay (502 → reader-race retry → 429 → switch) `start_time` had just
+    # been reset by the reader-race retry, so a SUB-003 budget derived from it
+    # measured only that retry and re-granted nearly the whole turn a third
+    # time — 6610s of slot time on a 3600s cap (merge-train review of #2817).
+    turn_started_at: Optional[datetime] = None
     retry_count: int = 0
     previous_attempt_cost: float = 0.0
     subscription_switch_attempted: bool = False
@@ -1140,12 +1148,20 @@ def _classify_timeout_failure(
     )
 
 
+def _turn_elapsed_seconds(state: "_AttemptState") -> float:
+    """Wall-clock spent by the WHOLE turn so far — every attempt and every
+    settle delay — from the clock that is never reset."""
+    anchor = state.turn_started_at or state.start_time
+    return max(0.0, (datetime.utcnow() - anchor).total_seconds())
+
+
 def _log_retry_budget(
     agent_name: str,
     reason: str,
     applied_timeout: int,
     original_timeout: Optional[int],
     *,
+    ceiling: Optional[float] = None,
     elapsed_s: float = 0.0,
 ) -> None:
     """#2789: state an inline retry's budget where it is decided.
@@ -1170,11 +1186,15 @@ def _log_retry_budget(
     """
     if original_timeout is None or applied_timeout >= int(original_timeout):
         return
-    if elapsed_s <= 0.0:
+    # Keyed on the CAUSE the caller names, never inferred from `elapsed_s`: a
+    # zero elapsed on a spend-bounded retry is not a ceiling, and the first
+    # version of this branch would have called it one.
+    if ceiling is not None and applied_timeout <= ceiling:
         logger.warning(
             f"[TaskExecService] {agent_name}: {reason} retry budget clamped to "
-            f"{applied_timeout}s of the turn's {int(original_timeout)}s — a timeout "
-            f"at that point is this ceiling, not the configured limit"
+            f"{applied_timeout}s of the turn's {int(original_timeout)}s by the "
+            f"{int(ceiling)}s ceiling — a timeout at that point is this ceiling, "
+            f"not the configured limit"
         )
         return
     line = (
@@ -1328,7 +1348,8 @@ class TaskExecutionService:
         # #678/#792 call-attempt bookkeeping, shared with the exception
         # handlers below (they read what the retries wrote). Created BEFORE the
         # try so no handler can NameError on a pre-dispatch exception.
-        state = _AttemptState(start_time=datetime.utcnow())
+        _now = datetime.utcnow()
+        state = _AttemptState(start_time=_now, turn_started_at=_now)
 
         # ---- #2391: does this dispatch belong on the durable queue? --------
         # Evaluated here, where every field the queued row needs is in scope.
@@ -2035,7 +2056,8 @@ class TaskExecutionService:
                     # produces.
                     state.applied_timeout_seconds = retry_agent_timeout
                     _log_retry_budget(
-                        agent_name, "reader-race", retry_agent_timeout, timeout_seconds
+                        agent_name, "reader-race", retry_agent_timeout, timeout_seconds,
+                        ceiling=_AUTO_RETRY_MAX_TIMEOUT_S,
                     )
                     state.retry_count = 1
                     prev_meta = inner_detail.get("metadata") or {}
@@ -2173,19 +2195,13 @@ class TaskExecutionService:
                     # has, so the agent's structured 504 still beats our own
                     # ReadTimeout; without it the two land on the same instant
                     # and the terminal loses the agent's error detail.
-                    elapsed_s = (datetime.utcnow() - state.start_time).total_seconds()
-                    retry_http_timeout = max(1.0, effective_timeout - elapsed_s)
-                    retry_agent_timeout = max(1, int(min(
-                        float(timeout_seconds or 600),
-                        retry_http_timeout - _AGENT_HTTP_SLACK_S,
-                    )))
-                    # #2789: attribute a terminal timeout against the budget
-                    # that was actually in force for THIS attempt.
-                    state.applied_timeout_seconds = retry_agent_timeout
-                    _log_retry_budget(
-                        agent_name, "subscription-switch", retry_agent_timeout, timeout_seconds,
-                        elapsed_s=elapsed_s,
-                    )
+                    # The budget is computed AFTER the settle delay below, from
+                    # the TURN clock (`turn_started_at`, never reset — see
+                    # `_AttemptState`): `start_time` may already have been
+                    # re-stamped by a reader-race retry, and the 3s settle is
+                    # wall-clock the turn spends too. Both were counted against
+                    # nothing before, and on the #678→#792 interplay the first
+                    # made this retry re-grant nearly the whole budget.
                     # #2638: the destination name is deliberately NOT
                     # interpolated. `_perform_auto_switch` logs "Auto-switching
                     # agent 'X' from 'A' to 'B'" one frame down, so this line
@@ -2228,6 +2244,19 @@ class TaskExecutionService:
                     # Small settle so a hot-reloaded token is live for the next
                     # subprocess; the retry call itself probes readiness.
                     await asyncio.sleep(_SWITCH_RETRY_DELAY_S)
+                    elapsed_s = _turn_elapsed_seconds(state)
+                    retry_http_timeout = max(1.0, effective_timeout - elapsed_s)
+                    retry_agent_timeout = max(1, int(min(
+                        float(timeout_seconds or 600),
+                        retry_http_timeout - _AGENT_HTTP_SLACK_S,
+                    )))
+                    # #2789: attribute a terminal timeout against the budget
+                    # that was actually in force for THIS attempt.
+                    state.applied_timeout_seconds = retry_agent_timeout
+                    _log_retry_budget(
+                        agent_name, "subscription-switch", retry_agent_timeout, timeout_seconds,
+                        elapsed_s=elapsed_s,
+                    )
                     retry_payload = {**payload, "timeout_seconds": retry_agent_timeout}
                     state.start_time = datetime.utcnow()
                     response = await agent_post_with_retry(

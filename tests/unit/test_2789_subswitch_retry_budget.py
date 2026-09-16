@@ -255,57 +255,170 @@ def test_reader_race_retry_keeps_its_300s_ceiling():
     ctx.switch.assert_not_awaited()
 
 
-def test_portal_attempt_ceiling_still_covers_one_worst_attempt():
-    """The Workspace marker/wait budget is derived from the #678 ceiling and must
-    keep covering the worst legitimate single attempt after #2789.
+class _Clock:
+    """A controllable `datetime.utcnow()` so a test can make an attempt take
+    3000s without waiting for it."""
 
-    The SUB-003 retry now genuinely is bounded by the remaining budget — which
-    is what `portal_attempt_ceiling_seconds`' docstring already claimed — so the
-    derivation needs no addend for it, and this pins that the two agree.
+    def __init__(self):
+        from datetime import datetime as _dt
+        self.now = _dt(2026, 9, 16, 12, 0, 0)
+
+    def advance(self, seconds: float):
+        from datetime import timedelta
+        self.now = self.now + timedelta(seconds=seconds)
+
+    def utcnow(self):
+        return self.now
+
+
+def _run_interplay_with_clock(*, timeout_seconds: int, attempt_seconds: list):
+    """502 (reader-race) → #678 retry → 429 → SUB-003 retry, with each agent
+    call advancing a fake clock by the next value in `attempt_seconds`. Returns
+    (clock_at_each_dispatch, http_timeout_at_each_dispatch, payload_timeouts)."""
+    from datetime import datetime as _real_dt
+    from services.task_execution_service import TaskExecutionService
+
+    clock = _Clock()
+
+    class _FakeDatetime(_real_dt):
+        @classmethod
+        def utcnow(cls):
+            return clock.utcnow()
+
+    mock_db = MagicMock()
+    mock_db.get_max_parallel_tasks.return_value = 3
+    mock_db.get_execution.return_value = MagicMock(id="exec-2789", status="running")
+    mock_db.update_execution_status.return_value = True
+    responses = [_resp_reader_race_502(), _resp_429(), _resp_200()]
+    dispatched_at, http_timeouts, agent_timeouts = [], [], []
+    durations = list(attempt_seconds)
+
+    async def _agent_post(agent_name, endpoint, payload, **kwargs):
+        dispatched_at.append((clock.utcnow() - _Clock().now).total_seconds())
+        http_timeouts.append(kwargs.get("timeout"))
+        agent_timeouts.append(payload.get("timeout_seconds"))
+        clock.advance(durations.pop(0) if durations else 0)
+        return responses.pop(0)
+
+    with (
+        patch("services.task_execution_service.datetime", _FakeDatetime),
+        patch("services.task_execution_service.db", mock_db),
+        patch("services.task_execution_service.get_capacity_manager",
+              return_value=MagicMock(acquire=AsyncMock(return_value=MagicMock(state="admitted")),
+                                     release=AsyncMock())),
+        patch("services.task_execution_service.activity_service",
+              MagicMock(track_activity=AsyncMock(return_value="act-2789"), complete_activity=AsyncMock())),
+        patch("services.task_execution_service.CircuitState", return_value=MagicMock(allow_request=lambda: True)),
+        patch("services.task_execution_service.agent_post_with_retry", side_effect=_agent_post),
+        patch("services.task_execution_service.dispatch_breaker_active", return_value=False),
+        patch("services.task_execution_service._record_dispatch_terminal", AsyncMock()),
+        patch("services.task_execution_service.platform_audit_service", MagicMock(log=AsyncMock())),
+        patch("services.task_execution_service._SWITCH_RETRY_DELAY_S", 0),
+        patch("services.subscription_auto_switch.handle_subscription_failure", AsyncMock(return_value=_SWITCHED)),
+    ):
+        svc = TaskExecutionService()
+        result = _await(svc.execute_task(
+            agent_name="test-agent", message="hello", triggered_by="schedule",
+            execution_id="exec-2789", timeout_seconds=timeout_seconds, model="sonnet",
+        ))
+    assert result.status == "success", result
+    assert len(dispatched_at) == 3, "expected attempt 1, the reader-race retry and the SUB-003 retry"
+    return dispatched_at, http_timeouts, agent_timeouts
+
+
+def test_the_interplay_cannot_outrun_the_turns_budget():
+    """THE wall-clock bound, executed on the path that broke it (merge-train
+    review C1 on #2817): 502 → reader-race retry → 429 → SUB-003 retry, where
+    the reader-race retry has just RESET `state.start_time`. A budget derived
+    from that clock measured only the reader-race retry and re-granted nearly
+    the whole turn a third time — 6610s of slot time on a 3600s cap.
+
+    Attempt 1 runs 3000s, the reader-race retry 5s. The SUB-003 retry may then
+    have at most what the TURN has left: 3610 − 3005 = 605s, not 3605s.
     """
-    from client_portal import service as svc
-    from services import task_execution_service as tes
+    from services.task_execution_service import _AGENT_HTTP_SLACK_S
 
-    for t in (60, 300, 3600, 7200):
-        # worst attempt = one full turn + HTTP slack + a whole reader-race retry
-        worst = t + int(tes._AGENT_HTTP_SLACK_S) + int(tes._AUTO_RETRY_MAX_TIMEOUT_S)
-        assert svc.portal_attempt_ceiling_seconds(t) >= worst
-        # ...and a SUB-003 retry, being remaining-bounded, adds nothing on top.
-        assert svc.portal_attempt_ceiling_seconds(t) >= t + int(tes._AGENT_HTTP_SLACK_S)
+    dispatched_at, http_timeouts, agent_timeouts = _run_interplay_with_clock(
+        timeout_seconds=3600, attempt_seconds=[3000, 5],
+    )
+    effective = 3600 + _AGENT_HTTP_SLACK_S
+    sub003_at, sub003_http = dispatched_at[2], http_timeouts[2]
+    assert sub003_at == pytest.approx(3005)
+    assert sub003_http <= effective - sub003_at + 1, (
+        f"SUB-003 retry granted {sub003_http}s at t={sub003_at}s; the turn's cap is {effective}s"
+    )
+    # ...and the whole turn — every attempt's wall-clock plus the last grant —
+    # stays inside the cap the slot lease, the watchdog and the portal marker are
+    # all sized on.
+    assert sub003_at + sub003_http <= effective + 1
+    assert agent_timeouts[2] <= sub003_http
+
+
+def test_the_portal_marker_covers_the_executed_worst_case():
+    """`portal_attempt_ceiling_seconds` is what the Workspace in-flight marker
+    is sized on. The previous test here asserted the derivation against its own
+    addends (a tautology). This one asserts it against the EXECUTED worst case:
+    attempt 1 runs to its cap, the reader-race retry runs to its ceiling, and
+    the SUB-003 retry gets what is left — the sum must fit the marker."""
+    from client_portal import service as svc
+    from services.task_execution_service import _AUTO_RETRY_MAX_TIMEOUT_S
+
+    t = 3600
+    dispatched_at, http_timeouts, _ = _run_interplay_with_clock(
+        timeout_seconds=t, attempt_seconds=[t, _AUTO_RETRY_MAX_TIMEOUT_S],
+    )
+    worst_wallclock = dispatched_at[2] + http_timeouts[2]
+    assert worst_wallclock <= svc.portal_attempt_ceiling_seconds(t), (
+        f"executed worst case {worst_wallclock}s exceeds the marker's "
+        f"{svc.portal_attempt_ceiling_seconds(t)}s"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Attribution + visibility
 # ---------------------------------------------------------------------------
 
-def test_timeout_after_a_retry_is_judged_against_the_retrys_own_budget():
-    """#2789's "Compounding" paragraph: `state.start_time` is reset before an
-    inline retry, so `_handle_timeout` measures the RETRY's elapsed time. It must
-    judge that against the retry's own limit.
-
-    Judging a 300s reader-race retry against the turn's untouched 3600s made
-    #2106 label a self-inflicted ceiling `NETWORK` — "Task execution aborted
-    after 300s of 3600 seconds allowed" — and every downstream consumer then
-    read an upstream fault where there was none.
-    """
-    from datetime import datetime
+def test_handle_timeout_judges_the_retry_against_its_applied_budget():
+    """#2789's "Compounding" paragraph, driven through `_handle_timeout` itself
+    (the previous version called the pure classifier with literals, which
+    survives every mutation of the wiring): a retry that ran its full applied
+    300s on a 3600s turn is a TIMEOUT against 300, not a NETWORK cutoff
+    against 3600."""
+    from datetime import datetime, timedelta
 
     from services.task_execution_service import (
-        TaskExecutionErrorCode,
-        _AttemptState,
-        _classify_timeout_failure,
+        TaskExecutionErrorCode, TaskExecutionService, _AttemptState,
     )
 
-    state = _AttemptState(start_time=datetime.utcnow())
-    assert state.applied_timeout_seconds is None  # first attempt: nothing applied
+    now = datetime.utcnow()
+    state = _AttemptState(start_time=now - timedelta(seconds=300), turn_started_at=now - timedelta(seconds=3300))
+    state.applied_timeout_seconds = 300
+    with (
+        patch("services.task_execution_service.terminate_execution_on_agent", new=AsyncMock()),
+        patch("services.task_execution_service._write_terminal_and_gate", new=AsyncMock()),
+        patch("services.task_execution_service.get_capacity_manager",
+              return_value=MagicMock(release=AsyncMock())),
+    ):
+        result = _await(TaskExecutionService()._handle_timeout(
+            agent_name="test-agent", execution_id="exec-2789", activity_id="act-2789",
+            timeout_seconds=3600, state=state, exc=None,
+        ))
+    assert result.error_code == TaskExecutionErrorCode.TIMEOUT.value or result.error_code == "timeout", result
+    assert "300 seconds" in result.error and "3600" not in result.error
 
-    # A retry that ran its full applied 300s, against a 3600s configured turn.
-    _msg, code = _classify_timeout_failure(300, 300, exc=None)
-    assert code == TaskExecutionErrorCode.TIMEOUT
-
-    # The old reading — same run, judged against the configured limit.
-    _msg_old, code_old = _classify_timeout_failure(300, 3600, exc=None)
-    assert code_old == TaskExecutionErrorCode.NETWORK
+    # First attempt: nothing applied — the configured limit is the judge.
+    state = _AttemptState(start_time=now - timedelta(seconds=300), turn_started_at=now - timedelta(seconds=300))
+    with (
+        patch("services.task_execution_service.terminate_execution_on_agent", new=AsyncMock()),
+        patch("services.task_execution_service._write_terminal_and_gate", new=AsyncMock()),
+        patch("services.task_execution_service.get_capacity_manager",
+              return_value=MagicMock(release=AsyncMock())),
+    ):
+        result = _await(TaskExecutionService()._handle_timeout(
+            agent_name="test-agent", execution_id="exec-2789", activity_id="act-2789",
+            timeout_seconds=3600, state=state, exc=None,
+        ))
+    assert result.error_code == "network" and "3600 seconds" in result.error
 
 
 def test_terminal_reports_the_retrys_limit_end_to_end():
@@ -380,9 +493,15 @@ def test_retry_budget_is_logged_with_its_cause(caplog):
     from services.task_execution_service import _log_retry_budget
 
     with caplog.at_level(logging.INFO):
-        _log_retry_budget("agent-x", "reader-race", 300, 3600)
+        _log_retry_budget("agent-x", "reader-race", 300, 3600, ceiling=300.0)
     assert [r.levelname for r in caplog.records] == ["WARNING"]
     assert "clamped to 300s" in caplog.records[0].message
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        # a spend-bounded retry with zero elapsed is NOT a clamp (review W4)
+        _log_retry_budget("agent-x", "subscription-switch", 3590, 3600, elapsed_s=0)
+    assert all("clamped" not in r.message for r in caplog.records)
 
     caplog.clear()
     with caplog.at_level(logging.INFO):

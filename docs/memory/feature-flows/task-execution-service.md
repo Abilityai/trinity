@@ -108,9 +108,17 @@
 > the budget the turn was given. A 3600s agent got 300s, the agent server killed its own process
 > group at exactly 300s mid tool-use (`stop_reason=tool_use`), and the turn was discarded after
 > being billed — so no turn honestly longer than five minutes could survive a seat switch.
-> `remaining_s` is already a hard wall-clock bound (`effective_timeout` = the operator's
-> `execution_timeout_seconds` + `_AGENT_HTTP_SLACK_S`), so first attempt + retry still cannot
-> exceed TIMEOUT-001; the second ceiling bought nothing. The agent-side budget keeps the same
+> `remaining_s` is a hard wall-clock bound (`effective_timeout` = the operator's
+> `execution_timeout_seconds` + `_AGENT_HTTP_SLACK_S`) **only when measured from the TURN's clock**
+> — `_AttemptState.turn_started_at`, never reset, read by `_turn_elapsed_seconds` after the
+> settle delay. `start_time` is re-stamped before each inline retry so `_handle_timeout` can
+> classify the attempt it measures, which makes it the wrong clock for a budget: on the
+> #678→#792 interplay (502 → reader-race retry → 429 → switch) a budget derived from it counted
+> only the reader-race retry and re-granted nearly the whole turn a third time (6610s of slot
+> time on a 3600s cap — the slot lease, the watchdog and the portal marker are all sized on the
+> cap). With the turn clock, first attempt + reader-race retry + SUB-003 retry cannot exceed
+> TIMEOUT-001 + the reader-race ceiling, which is what `portal_attempt_ceiling_seconds` derives;
+> `test_the_interplay_cannot_outrun_the_turns_budget` drives that path on a controlled clock. The agent-side budget keeps the same
 > 10s slack under the HTTP budget that the first dispatch has, so the agent's structured 504
 > still beats the backend's own `ReadTimeout` and the terminal keeps its error detail.
 > Attribution follows the applied budget: `state.applied_timeout_seconds` carries whichever
