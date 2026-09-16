@@ -6,17 +6,24 @@ issue stranded in `status-in-progress` with its fix already on `dev`. The run
 reported SUCCESS, because the refusal was a `core.warning`. It only ever bit
 external contributors.
 
-The fix is `pull_request_target`, which carries the base repo's write token —
-and which is the standard privilege-escalation footgun. These are static guards
-on the two properties that make it safe HERE, in the shape of
+The fix was `pull_request_target`, which carries the base repo's write token.
+#2822 replaced it with a `push` to `dev`, which carries the same token for the
+same reason and is registered from the branch that holds this file rather than
+from `main` — see `test_2822_issue_status_trigger_registration.py` for why the
+old trigger produced zero runs. What #2767 asserts is unchanged by that: the
+promotion must work for a fork author, and it must be safe.
+
+These are static guards on the two properties that made the write token safe
+next to untrusted PR text, in the shape of
 `test_1896_integration_nightly_workflow.py`:
 
   * the workflow never CHECKS OUT PR code;
   * the workflow never EXECUTES anything (`run:`).
 
-The escalation always needs both — fetch the stranger's code, then run it. If a
-future edit adds either, this file goes red and the trigger must go back to
-`pull_request` with a repo-scoped PAT for the label calls.
+The escalation always needs both — fetch the stranger's code, then run it. They
+still hold under `push` and are still worth pinning: the PR title and body are
+attacker-controlled whatever event delivers them. If a future edit adds either,
+this file goes red.
 """
 from __future__ import annotations
 
@@ -78,13 +85,15 @@ def _yaml_code() -> str:
 
 def test_the_trigger_carries_a_write_token_for_fork_prs():
     trig = _triggers(_doc())
-    assert "pull_request_target" in trig, (
+    assert "pull_request" not in trig, (
         "a fork PR's `pull_request` token is read-only, so label writes are refused"
     )
-    assert "pull_request" not in trig, "both triggers would double-run the promotion"
-    cfg = trig["pull_request_target"]
-    assert cfg["types"] == ["closed"]
-    assert cfg["branches"] == ["dev"]
+    assert "push" in trig, (
+        "the promotion must run on a base-repo event, whatever the merged PR's "
+        "origin — that is what supplies the write token (#2767) — and on one "
+        "registered from the branch that carries this file (#2822)"
+    )
+    assert trig["push"]["branches"] == ["dev"]
 
 
 def test_a_refused_label_write_turns_the_run_red():
@@ -152,7 +161,15 @@ def test_the_token_stays_minimal():
 
 
 def test_only_a_merged_pr_promotes_anything():
-    assert _doc()["jobs"]["mark-in-dev"]["if"] == "github.event.pull_request.merged == true"
+    """Was a job-level `if` on `pull_request.merged`; under `push` the same
+    condition is the filter that selects which associated PRs are read."""
+    src = _code()
+    assert "pr.merged_at" in src, "an unmerged PR must not promote anything"
+    assert "pr.base.ref === base" in src, (
+        "without the base filter, the open `dev` -> `main` release PR — whose "
+        "head contains every dev commit — would promote its whole close list "
+        "on every merge"
+    )
 
 
 def test_the_safety_argument_is_written_down_next_to_the_trigger():

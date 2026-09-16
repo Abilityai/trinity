@@ -133,9 +133,6 @@ async def get_public_feature_flags(
     - ``session_tab_enabled`` — gates the Session tab in AgentDetail.
       Reads through ``services.settings_service.is_session_tab_enabled()``
       so the resolution order (DB → env → False default) stays in one place.
-    - ``workspace_available`` — gates the Agent Workspace (voice + canvas).
-      Requires both voice infrastructure (VOICE_ENABLED + GEMINI_API_KEY) AND
-      ``WORKSPACE_ENABLED=true`` (or DB override). Defaults to False (#860).
 
     Auth required (any role) — these flags reveal nothing sensitive but we
     still keep them out of the unauthenticated surface.
@@ -165,9 +162,8 @@ async def get_public_feature_flags(
     return {
         "session_tab_enabled": settings_service.is_session_tab_enabled(),
         "voice_available": voice_available,
-        "workspace_available": voice_available and settings_service.is_workspace_enabled(),
-        # VoIP telephony (VOIP-001, #1056) — default OFF, mirrors workspace_available.
-        # Also requires a per-agent voip_bindings row to actually function.
+        # VoIP telephony (VOIP-001, #1056) — default OFF. Also requires a
+        # per-agent voip_bindings row to actually function.
         "voip_available": VOIP_ENABLED and gemini_key,
         # Brain Orb (#58, trinity-enterprise) — gates the per-agent /agents/:name/brain
         # route + tab. Static render needs no Gemini; the per-agent capability gate is

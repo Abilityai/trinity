@@ -389,7 +389,6 @@ def test_feature_flags_carries_canary_enabled(monkeypatch):
     stub_settings = SimpleNamespace(
         is_brain_orb_enabled=lambda: False,
         is_session_tab_enabled=lambda: False,
-        is_workspace_enabled=lambda: False,
         is_brain_orb_voice_enabled=lambda: False,
         is_brain_orb_write_enabled=lambda: False,
         get_elevenlabs_api_key=lambda: None,

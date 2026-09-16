@@ -1,5 +1,8 @@
 import { defineStore } from 'pinia'
 import axios from 'axios'
+import {
+  clearStoredSession, readStoredToken, readStoredUser, TOKEN_KEY,
+} from '@/utils/platformSession'
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
@@ -114,7 +117,7 @@ export const useAuthStore = defineStore('auth', {
       // First detect auth mode from backend
       await this.detectAuthMode()
 
-      const storedToken = localStorage.getItem('token')
+      const storedToken = readStoredToken()
       const storedUser = localStorage.getItem('auth0_user')
 
       if (storedToken && storedUser) {
@@ -140,8 +143,7 @@ export const useAuthStore = defineStore('auth', {
           }
         } catch (e) {
           console.warn('Failed to parse stored user, clearing credentials')
-          localStorage.removeItem('token')
-          localStorage.removeItem('auth0_user')
+          clearStoredSession()   // #2791 — one implementation
         }
       }
 
@@ -185,10 +187,85 @@ export const useAuthStore = defineStore('auth', {
     // exclusively. The clear-on-logout below stays so users carrying a
     // cookie from a pre-fix version get cleaned up on next logout (the
     // cookie's max-age=1800 also expires it within 30 minutes).
+    // #2791: this used to copy the token into
+    // `axios.defaults.headers.common['Authorization']`, which is the SECOND
+    // credential source the issue is about. A tab then had an in-memory copy
+    // that no other tab could correct, so after a re-login elsewhere it was half
+    // on the old session (bare-axios callers) and half on the new one
+    // (`api.js`, which re-reads localStorage per request).
+    //
+    // The copy is gone. `main.js` installs a global axios REQUEST interceptor
+    // that rebuilds the header from `readStoredToken()` on every request, so all
+    // ~368 bare-axios call sites get the current credential without being
+    // rewritten — and there is exactly one place a credential can come from.
+    //
+    // Kept as a named no-op rather than deleted at its three call sites: the
+    // sequencing those sites express ("the session is now established") is worth
+    // reading, and a future transport that genuinely needs a hook has somewhere
+    // to live.
     setupAxiosAuth() {
-      if (this.token) {
-        axios.defaults.headers.common['Authorization'] = `Bearer ${this.token}`
+      /* no-op — see the note above (#2791) */
+    },
+
+    // #2791 — adopt whatever platform session localStorage currently holds.
+    //
+    // Two callers, one rule: the `storage` listener (another tab logged in) and
+    // the `stale` arm of `sessionLostVerdict` (our in-memory token was
+    // superseded while a request was in flight). Both mean "the browser's
+    // session is not the one we were holding" and both want to CONVERGE on it
+    // rather than destroy it.
+    //
+    // Returns whether a session is now held, so a caller can branch without
+    // re-reading storage.
+    adoptStoredSession() {
+      // Belt for the one-source rule: nothing writes the axios defaults copy
+      // any more (a tree-wide guard says so), but if one ever reappears it would
+      // win over storage on every request — so converging on the browser's
+      // session drops any such copy first, and a tab can never be left riding
+      // a credential storage no longer holds (review W2).
+      delete axios.defaults.headers.common['Authorization']
+      const token = readStoredToken()
+      if (!token) {
+        this.applySessionEndedElsewhere()
+        return false
       }
+      const stored = readStoredUser()
+      if (this.token === token) {
+        // Same session. A sibling login writes `token` first and `auth0_user` a
+        // tick later, so the user may have landed since we adopted (review W6).
+        if (stored) this.user = { ...this.user, ...stored }
+        return true
+      }
+      this.token = token
+      if (stored) this.user = stored
+      this.isAuthenticated = true
+      this.authError = null
+      // The profile belongs to whoever this token is; until /api/users/me
+      // answers, role-gated UI must stay closed (#2198's rule).
+      this.profileVerified = false
+      this.fetchUserProfile()
+      return true
+    },
+
+    // #2791 — another tab ended the session. Forget it HERE, locally.
+    //
+    // Deliberately not `logout()`: that would fire a second server revoke for a
+    // token already revoked, and — the reason this issue exists — it writes to
+    // localStorage, so N background tabs reacting to one `storage` event would
+    // each clear storage again. This only drops the in-memory mirror.
+    //
+    // It also does not navigate. A background tab pushing `/login` is the noise
+    // the issue reports; the router guard and the next 401 handle the visible
+    // tab, and both read the state this sets.
+    applySessionEndedElsewhere() {
+      // Same belt as `adoptStoredSession`: a sibling tab's logout must not leave
+      // this tab transmitting an in-memory copy of the revoked JWT.
+      delete axios.defaults.headers.common['Authorization']
+      this.token = null
+      this.user = null
+      this.isAuthenticated = false
+      this.profileVerified = false
+      this.mfaChallenge = null
     },
 
     // Fetch the current user's profile from the backend and merge role/email
@@ -443,6 +520,9 @@ export const useAuthStore = defineStore('auth', {
       //     dashboard.
       // The revoke itself still carries the token: it rides the axios DEFAULT
       // header, which is deleted only after the call.
+      // #2791 — captured BEFORE the clear below, because it is what the
+      // server-side revoke is about (see the note beside the call).
+      const revoking = this.token
       this.token = null
       this.user = null
       this.isAuthenticated = false
@@ -453,18 +533,39 @@ export const useAuthStore = defineStore('auth', {
       this.profileVerified = false
       this.authError = null
       this.mfaChallenge = null
-      localStorage.removeItem('token')
-      localStorage.removeItem('auth0_user')
+      // #2791: ONE implementation of "forget the session locally", shared with
+      // the 401 path in `api.js`, which used to remove `token` and leave
+      // `auth0_user` behind.
+      clearStoredSession()
 
       // #187: revoke the token server-side so an exfiltrated copy stops
       // working immediately. Best-effort — never block local logout if the
       // call fails.
-      try {
-        await axios.post('/api/auth/logout')
-      } catch (e) {
-        // ignore — local state is already cleared
+      //
+      // #2791: the token is passed EXPLICITLY here, and that is now
+      // load-bearing rather than tidy. The revoke used to ride
+      // `axios.defaults.headers.common['Authorization']`, which this method
+      // deleted afterwards; with the defaults copy gone (see `setupAxiosAuth`)
+      // the global request interceptor builds the header from storage — and
+      // storage was cleared three lines ago, by #2258's ordering, which must not
+      // change. So the revoke would have gone out unauthenticated and silently
+      // stopped revoking anything. Captured before the clear, sent after it:
+      // the interceptor leaves an explicit header alone.
+      if (revoking) {
+        try {
+          await axios.post('/api/auth/logout', null, {
+            headers: { Authorization: `Bearer ${revoking}` },
+          })
+        } catch (e) {
+          // ignore — local state is already cleared
+        }
       }
 
+      // #2791: nothing writes this any more (see `setupAxiosAuth`), but a tab
+      // that loaded the PREVIOUS build still carries the copy in memory, and a
+      // deploy does not reload open tabs. Cleared on the way out for exactly the
+      // reason the legacy cookie below is — leftovers from a pre-fix version get
+      // cleaned up on the next logout rather than outliving the session.
       delete axios.defaults.headers.common['Authorization']
 
       // Clear the token cookie

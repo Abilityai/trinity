@@ -508,3 +508,129 @@ def mcp_as_caller(pair):
     call crosses the same `checkAgentAccess` gate a real playbook call does."""
     a, _ = pair
     return McpSession(agent_mcp_key(a))
+
+
+# ---------------------------------------------------------------------------
+# "Will a real model answer?" — decided by the INSTANCE, not the harness (#2812)
+# ---------------------------------------------------------------------------
+#
+# The gate this replaces read `ANTHROPIC_API_KEY` from the **pytest process**.
+# That is the harness host, not the instance under test. A stack whose agents
+# authenticate by subscription (SUB-003: `CLAUDE_CODE_OAUTH_TOKEN` inside the
+# container, rows in `subscription_credentials`) has no such variable on the
+# host yet answers normally — so on that stack the keyed journeys skipped
+# PERMANENTLY, and invisibly, because the reason is allowlisted in
+# `tests/harness/audit_skips.py`. A gate that cannot fail is worse than no
+# gate: #2336's per-PR journey-smoke and #2350's merge-enforced Journey Impact
+# declaration were both green while asserting nothing about a real model.
+#
+# The gate is a COMPOSITE of two reads, because neither alone is sufficient —
+# and the second was added after journey-smoke proved the first wrong:
+#
+#   1. The callee's OWN auth mode — `GET /api/subscriptions/agents/{name}/auth`
+#      → `auth_mode` ∈ {"subscription", "api_key", "not_configured"}. This is
+#      "what the callee will actually have" (#2812 AC 2) rather than what the
+#      instance has somewhere, which is why it is keyed per agent and not on
+#      `GET /api/subscriptions` being non-empty — a shape #2812 rejects by name,
+#      because it would turn a permanent skip into a false FAILURE when a
+#      freshly created ephemeral agent never gets a subscription assigned.
+#
+#   2. Whether the INSTANCE holds a usable Claude credential at all —
+#      `claude_auth_configured` on `GET /api/settings/feature-flags`, i.e. a
+#      non-empty platform Anthropic key OR any registered subscription
+#      (`subscription_service.is_claude_auth_configured`).
+#
+# Read 1 alone is NOT enough, and journey-smoke is the proof: `get_agent_auth_mode`
+# derives purely from DB state, and `use_platform_api_key` is a per-agent ROUTING
+# FLAG, not evidence a key exists. On the credential-free CI stack (`.env.example`
+# ships `ANTHROPIC_API_KEY=` empty) a fresh agent still reports `auth_mode="api_key"`
+# — it is configured to USE the platform key, there just isn't one. Gating on that
+# alone ran the keyed journeys against a keyless stack and failed them, which is
+# the same defect as #2812 pointing the other way. Read 2 is what distinguishes
+# "configured to use a credential" from "a credential exists".
+#
+# Both reads are instance-side. Neither reads the pytest host's environment, and
+# neither discloses a credential value.
+#
+# Residual, stated rather than hidden: an instance holding a credential that is
+# present but INVALID (a revoked key, or the literal `ANTHROPIC_API_KEY=placeholder`,
+# which the backend does not special-case) passes both reads, so the journey runs
+# and FAILS rather than skipping. The old host-side gate vetoed the placeholder
+# sentinel by string comparison; an instance-side gate cannot see the value and
+# should not. This tier's doctrine is that a stack which cannot deliver the promise
+# is a finding, not a silent pass — so that direction is deliberate. Only a real
+# turn could close it, which is #2812's other candidate signal (a session-scoped
+# probe) and a heavier change than this gate warrants.
+
+# Kept VERBATIM: `tests/harness/audit_skips.py` allowlists this exact substring
+# ("journey needs a real provider key"). Rewording it makes every skip here
+# unallowlisted and turns the skip audit red.
+MODEL_SKIP_REASON = "journey needs a real provider key"
+
+# One GET per agent per session, plus one for the instance read. The auth mode
+# is set at create and changed only by the auto-switch service, so re-reading it
+# per test buys nothing — and this tier is wall-clock budgeted.
+_AUTH_MODE_CACHE: dict = {}
+
+
+def agent_auth_mode(client, agent_name: str) -> str:
+    """This agent's Claude auth mode, as the instance reports it.
+
+    Returns `"unknown"` when the endpoint cannot be read, which the caller
+    treats as "cannot answer" — the same direction as the old missing-key gate,
+    so a harness that loses access degrades to a visible skip rather than a
+    confusing assertion failure deep inside a chat turn.
+    """
+    if agent_name in _AUTH_MODE_CACHE:
+        return _AUTH_MODE_CACHE[agent_name]
+    mode = "unknown"
+    try:
+        resp = client.get(f"/api/subscriptions/agents/{agent_name}/auth")
+        if resp.status_code == 200:
+            mode = (resp.json() or {}).get("auth_mode") or "unknown"
+    except Exception:  # noqa: BLE001 — a gate must never mask the test's own failure
+        mode = "unknown"
+    _AUTH_MODE_CACHE[agent_name] = mode
+    return mode
+
+
+def instance_has_claude_credential(client) -> bool:
+    """Whether this INSTANCE holds a usable Claude credential.
+
+    `claude_auth_configured` = a non-empty platform Anthropic key OR any
+    registered subscription — the single definition behind the feature flag and
+    ent#582's first-credential check, so "configured" cannot mean two things.
+    Unreadable ⇒ False, i.e. skip, matching the rest of this gate's direction.
+    """
+    if "instance" in _AUTH_MODE_CACHE:
+        return _AUTH_MODE_CACHE["instance"]
+    ok = False
+    try:
+        resp = client.get("/api/settings/feature-flags")
+        if resp.status_code == 200:
+            ok = bool((resp.json() or {}).get("claude_auth_configured"))
+    except Exception:  # noqa: BLE001 — a gate must never mask the test's own failure
+        ok = False
+    _AUTH_MODE_CACHE["instance"] = ok
+    return ok
+
+
+def skip_unless_agent_can_answer(client, agent_name: str) -> str:
+    """Skip with the allowlisted reason unless `agent_name` can reach a model.
+
+    The one helper both J03 and J10 use (#2812 AC 1), so there is a single
+    definition of "a real model will answer on this stack". J10 passes the
+    CALLEE — the agent that has to produce the words — not the caller.
+
+    Requires BOTH halves of the composite described above: the agent must be
+    routed to some credential, AND the instance must actually hold one.
+    """
+    mode = agent_auth_mode(client, agent_name)
+    if mode not in ("subscription", "api_key"):
+        pytest.skip(f"{MODEL_SKIP_REASON} — agent '{agent_name}' reports auth_mode={mode!r}")
+    if not instance_has_claude_credential(client):
+        pytest.skip(
+            f"{MODEL_SKIP_REASON} — agent '{agent_name}' is routed to {mode!r} but the "
+            f"instance reports claude_auth_configured=False (no platform key, no subscription)"
+        )
+    return mode

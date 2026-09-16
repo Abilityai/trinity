@@ -137,7 +137,7 @@
 - **Feature flag (default OFF)**: `voip_available` is exposed by
   `GET /api/settings/feature-flags` as
   `VOIP_ENABLED and bool(GEMINI_API_KEY)`. `VOIP_ENABLED` defaults to
-  `false` (mirrors `workspace_available` opt-in, #860). All VoIP
+  `false`. All VoIP
   endpoints 404 when the flag is off. The feature is additionally
   per-agent-gated: it only functions once a `voip_bindings` row exists.
 - **Transport**: Twilio Programmable Voice + bidirectional Media Streams

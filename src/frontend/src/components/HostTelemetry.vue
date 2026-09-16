@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import SparklineChart from './SparklineChart.vue'
+import { readStoredToken } from '../utils/platformSession'
 
 // Relative, same-origin API base (nginx/Vite proxy) — matches api.js baseURL: ''.
 // Intentionally not an env var: VITE_API_BASE was never set anywhere, so this was
@@ -30,7 +31,7 @@ function initHistory() {
 
 async function fetchStats() {
   try {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     if (!token) return
 
     const headers = { Authorization: `Bearer ${token}` }

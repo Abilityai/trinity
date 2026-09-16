@@ -46,5 +46,14 @@ jobs:
       - name: Build (typecheck)
         run: npm run build
 
+      # ent#628: `moduleResolution: bundler` (tsc) and tsx (npm test) both accept an
+      # extensionless relative import; Node ESM at runtime does not. A missing `.js`
+      # therefore passes build AND test and dies when the container starts — the
+      # exact "landed on dev, broke the deploy" class this workflow exists to catch.
+      # Importing the built server module resolves every static import for real;
+      # server.ts only defines createServer (no side effects), so nothing starts.
+      - name: Boot smoke (ESM resolution of the built output)
+        run: node --input-type=module -e "await import('./dist/server.js'); console.log('dist/server.js resolves')"
+
       - name: Unit tests
         run: npm test

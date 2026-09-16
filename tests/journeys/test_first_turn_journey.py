@@ -17,24 +17,25 @@ import os
 
 import pytest
 
-from .conftest import poll_until
+from .conftest import poll_until, skip_unless_agent_can_answer
 
 pytestmark = pytest.mark.journey
 
 FIRST_TURN_DEADLINE_S = float(os.getenv("JOURNEY_FIRST_TURN_DEADLINE_S", "180"))
 
 
-@pytest.mark.skipif(
-    not os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY") == "placeholder",
-    reason="journey needs a real provider key",
-)
 def test_first_chat_turn_returns_real_output(journey_client, journey_agent):
     """Send the first message and get a real answer back.
 
     Asserts the promise, not the plumbing: a non-empty response the platform
     persisted, reachable afterwards through the history the user would read.
+
+    #2812: the model gate asks THIS agent what credential it has, rather than
+    reading the pytest host's `ANTHROPIC_API_KEY` — which is the harness, not
+    the instance under test.
     """
     name = journey_agent["name"]
+    skip_unless_agent_can_answer(journey_client, name)
 
     resp = journey_client.post(
         f"/api/agents/{name}/chat",

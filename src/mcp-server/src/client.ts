@@ -29,6 +29,7 @@ import type {
   FanOutBatchStatus,
   FanOutDispatchResult,
   FanOutTimeoutReceipt,
+  LoopStatus,
 } from "./types.js";
 
 /**
@@ -2978,8 +2979,8 @@ export class TrinityClient {
     );
   }
 
-  async getLoopStatus(loopId: string): Promise<unknown> {
-    return this.request(
+  async getLoopStatus(loopId: string): Promise<LoopStatus> {
+    return this.request<LoopStatus>(
       "GET",
       `/api/loops/${encodeURIComponent(loopId)}`
     );

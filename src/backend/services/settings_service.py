@@ -461,33 +461,6 @@ class SettingsService:
         return True
 
     # =========================================================================
-    # Workspace feature flag (#860)
-    # =========================================================================
-
-    def is_workspace_enabled(self) -> bool:
-        """
-        Whether the Agent Workspace (voice + canvas) surface is exposed to users.
-
-        Resolves in this order:
-        1. system_settings row 'workspace_enabled' ("true"/"false")
-        2. WORKSPACE_ENABLED env var (only honored as "true"/"1"/"yes" to opt in)
-        3. Default: False (BETA — opt-in required)
-
-        Admins opt in by setting ``workspace_enabled=true`` in system_settings
-        or by exporting ``WORKSPACE_ENABLED=true``.
-
-        Note: workspace also requires voice to be available (VOICE_ENABLED +
-        GEMINI_API_KEY). The feature-flags endpoint combines both conditions.
-        """
-        stored = self.get_setting('workspace_enabled')
-        if stored is not None:
-            return str(stored).lower() in ("true", "1", "yes")
-        env_val = os.getenv('WORKSPACE_ENABLED', '').strip().lower()
-        if env_val in ("true", "1", "yes"):
-            return True
-        return False
-
-    # =========================================================================
     # Brain Orb feature flags (trinity-enterprise#58/#60/#61; admin-configurable #85)
     # =========================================================================
 

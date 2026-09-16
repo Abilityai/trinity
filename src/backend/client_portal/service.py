@@ -1594,10 +1594,17 @@ async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
         raise ClientPortalError(502, "Voice input failed — please type instead")
     if resp.status_code != 200:
         logger.warning("portal STT provider error %s: %s", resp.status_code, resp.text[:500])
-        # #2695: a real refusal is the best evidence there is — remember it so
-        # the next roster load hides the mic instead of offering it again.
-        stt_capability_service.record_live_refusal(elevenlabs_key, resp.status_code, resp.text)
-        raise ClientPortalError(422, "Could not transcribe the audio")
+        # #2696: say WHY. One category per provider condition — permission,
+        # rejected key, quota/plan, rate limit, bad audio, provider outage —
+        # each with its own client sentence and status, instead of one opaque
+        # 422 that made an operator read this log line to answer the question.
+        # The client sentence never carries the provider's body; the status
+        # word is remembered for the admin Settings panel. #2695: a 401/403
+        # also teaches the capability cache, so the next roster load hides
+        # the mic instead of offering it again.
+        failure = stt_capability_service.record_live_failure(
+            elevenlabs_key, resp.status_code, resp.text)
+        raise ClientPortalError(failure.http_status, failure.client_message)
     text = ((resp.json() or {}).get("text") or "").strip()
     if not text:
         logger.warning("portal STT empty transcript — provider body: %s", resp.text[:500])
@@ -3286,18 +3293,21 @@ def _inflight_exec_key(execution_id: str) -> str:
 def portal_attempt_ceiling_seconds(turn_timeout: int) -> int:
     """What ONE attempt can actually cost — which is not `timeout_seconds`:
 
-      + 10   `execute_task` dispatches with `timeout_seconds + 10` (HTTP slack)
+      + slack `execute_task` dispatches with `timeout_seconds + _AGENT_HTTP_SLACK_S` (HTTP slack)
       + cap  the #678 reader-race auto-retry runs a SECOND http call, capped at
              `_AUTO_RETRY_MAX_TIMEOUT_S`, ON TOP of whatever attempt 1 burned
-             (unlike the SUB-003 retry, which is capped to the remaining budget)
+             (unlike the SUB-003 retry, which is capped to the remaining budget
+             — true by construction only since #2789, which stopped that retry
+             sharing this ceiling; if it ever shares it again this derivation
+             under-counts by a whole ceiling and the marker expires mid-turn)
 
     The retry cap is IMPORTED, not copied, so it cannot drift — and imported
     function-locally, like every other service this module reaches for (the
     execution stack's import chain is heavier than this module's own cost, and
     ~19 test files import `client_portal.service` bare).
     """
-    from services.task_execution_service import _AUTO_RETRY_MAX_TIMEOUT_S
-    return turn_timeout + 10 + int(_AUTO_RETRY_MAX_TIMEOUT_S)
+    from services.task_execution_service import _AGENT_HTTP_SLACK_S, _AUTO_RETRY_MAX_TIMEOUT_S
+    return turn_timeout + int(_AGENT_HTTP_SLACK_S) + int(_AUTO_RETRY_MAX_TIMEOUT_S)
 
 
 def portal_max_turn_seconds(turn_timeout: int) -> int:

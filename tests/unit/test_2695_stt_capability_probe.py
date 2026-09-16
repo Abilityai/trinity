@@ -186,9 +186,12 @@ class _FakeRedis:
         self.rows[k] = v
         self.ttls[k] = ex
 
-    def delete(self, k):
-        self.rows.pop(k, None)
-        self.ttls.pop(k, None)
+    def delete(self, *keys):
+        # redis-py's DEL is variadic; `invalidate` passes the verdict row and
+        # the last-failure row together (#2696).
+        for k in keys:
+            self.rows.pop(k, None)
+            self.ttls.pop(k, None)
 
 
 def _load_worker(fake_redis, monkeypatch):
@@ -434,7 +437,7 @@ def test_a_live_refusal_teaches_the_cache(monkeypatch):
                   return_value=KEY):
         with pytest.raises(ClientPortalError) as exc:
             asyncio.run(_call())
-    assert exc.value.status_code == 422
+    assert exc.value.status_code == 503      # #2696: a named refusal, not the opaque 422
     assert stt.read_cached(KEY).verdict == stt.VERDICT_REFUSED
 
 
@@ -480,3 +483,38 @@ def test_settings_state_without_a_key_is_unconfigured(monkeypatch):
     assert state["key_configured"] is False
     assert state["stt_capability"] == stt.VERDICT_UNCONFIGURED
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# #2696 — the last-failure row obeys the same cross-worker rule as the verdict
+# ---------------------------------------------------------------------------
+
+def test_last_failure_redis_miss_is_a_miss_even_with_a_local_copy(two_workers):
+    """The #2695 finding, applied to the second reader: worker A recorded a live
+    failure (Redis + its own local copy); worker B's `invalidate` deleted the
+    Redis rows; worker A must then answer None, not its stale local copy."""
+    fake, a, b = two_workers
+    a.record_live_failure(KEY, 401, '{"detail": {"status": "missing_permissions"}}')
+    assert a.read_last_failure(KEY)["category"] == a.CATEGORY_PERMISSION
+    b.invalidate(KEY)
+    assert a._failure_row(KEY) not in fake.rows
+    assert a.read_last_failure(KEY) is None, "a Redis miss fell through to the local copy"
+
+
+def test_invalidate_forgets_the_last_failure_with_the_verdict(two_workers):
+    """Re-saving a key after fixing it at the provider is the documented
+    recovery; the panel must not keep showing the pre-fix failure beside a
+    fresh verdict."""
+    fake, a, _ = two_workers
+    a.store(KEY, a.SttCapability(a.VERDICT_REFUSED, detail="missing_permissions", checked_at=1.0))
+    a.record_live_failure(KEY, 401, '{"detail": {"status": "missing_permissions"}}')
+    a.invalidate(KEY)
+    assert a.read_cached(KEY) is None
+    assert a.read_last_failure(KEY) is None
+
+
+def test_last_failure_local_copy_is_used_only_when_redis_cannot_be_asked(two_workers, monkeypatch):
+    fake, a, _ = two_workers
+    a.record_live_failure(KEY, 429, "")
+    monkeypatch.setattr(a, "_redis", lambda: None)      # Redis cannot be asked
+    assert a.read_last_failure(KEY)["category"] == a.CATEGORY_RATE_LIMIT
