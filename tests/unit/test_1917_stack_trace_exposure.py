@@ -210,10 +210,16 @@ def test_system_agent_health_error_carries_no_raw_message(monkeypatch):
 
 @pytest.mark.parametrize(
     "module",
-    ["routers/ops.py", "routers/system_agent.py"],
+    [
+        "routers/ops.py",
+        "routers/system_agent.py",
+        # #1028 moved the ops handlers' bodies here; the ban follows the code.
+        "services/fleet_ops_service.py",
+        "services/ops_costs_service.py",
+    ],
 )
 def test_no_raw_str_e_remains_in_these_routers(module):
-    """`str(e)` in these two files is, without exception, the defect this issue
+    """`str(e)` in these files is, without exception, the defect this issue
     is about — every occurrence was a response field or an HTTPException detail.
     A plain ban is therefore the honest guard, and it fails loudly if a new one
     is added rather than waiting for the next CodeQL run.

@@ -61,6 +61,9 @@ if str(_BACKEND) not in sys.path:
 # the wrong one and silently detach), so they are reached through the module
 # that owns them.
 import services.agent_client as agent_client  # noqa: E402
+# #1028: `circuit` owns the CIRCUIT_* globals and `_get_circuit_redis`, and reads
+# its own copies. Patching the package re-export changes nothing, so every
+# patch and every read of those names goes through this module.
 from services.agent_client import circuit as _ac_circuit  # noqa: E402
 from services.agent_client import http_pool as _ac_http_pool  # noqa: E402
 
@@ -126,29 +129,29 @@ class TestStateMachine:
 
     def test_below_threshold_stays_closed(self, agent_name):
         cs = agent_client.CircuitState(agent_name)
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD - 1):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD - 1):
             assert cs.record_failure() == "closed"
         assert cs.state == "closed"
-        assert cs.failure_count == agent_client.CIRCUIT_FAILURE_THRESHOLD - 1
+        assert cs.failure_count == _ac_circuit.CIRCUIT_FAILURE_THRESHOLD - 1
 
     def test_threshold_reached_opens(self, agent_name):
         cs = agent_client.CircuitState(agent_name)
         last_state = None
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD):
             last_state = cs.record_failure()
         assert last_state == "open"
         assert cs.state == "open"
 
     def test_open_in_cooldown_denies(self, agent_name):
         cs = agent_client.CircuitState(agent_name)
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD):
             cs.record_failure()
         # Immediately after open, we're well before next_probe_at.
         assert cs.allow_request() is False
 
     def test_record_success_resets_to_closed(self, agent_name):
         cs = agent_client.CircuitState(agent_name)
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD):
             cs.record_failure()
         assert cs.state == "open"
         cs.record_success()
@@ -173,15 +176,15 @@ class TestBackoffSchedule:
         cs = agent_client.CircuitState(agent_name)
 
         # Push past the failure threshold.
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD):
             cs.record_failure()
 
         # First open transition: cooldown ≈ base * 2^0 = base.
         cooldown_first = self._read_next_probe(redis_client, agent_name) - time.time()
         assert (
-            agent_client.CIRCUIT_BASE_COOLDOWN_SECONDS - 2
+            _ac_circuit.CIRCUIT_BASE_COOLDOWN_SECONDS - 2
             <= cooldown_first
-            <= agent_client.CIRCUIT_BASE_COOLDOWN_SECONDS + 2
+            <= _ac_circuit.CIRCUIT_BASE_COOLDOWN_SECONDS + 2
         ), f"first open cooldown {cooldown_first} not near base"
 
         # Subsequent open-state failures should grow the cooldown until cap.
@@ -191,7 +194,7 @@ class TestBackoffSchedule:
         for _ in range(8):
             cs.record_failure()
             cd = self._read_next_probe(redis_client, agent_name) - time.time()
-            if cd >= agent_client.CIRCUIT_MAX_COOLDOWN_SECONDS - 5:
+            if cd >= _ac_circuit.CIRCUIT_MAX_COOLDOWN_SECONDS - 5:
                 capped = True
                 break
             assert cd >= prev_cd - 1, (
@@ -207,7 +210,7 @@ class TestDormantState:
 
     def test_enters_dormant_after_threshold_open_probes(self, agent_name, monkeypatch):
         # Tighten the dormant threshold so we don't slow the test down.
-        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
 
         cs = agent_client.CircuitState(agent_name)
         last = None
@@ -215,8 +218,8 @@ class TestDormantState:
         # each additional failure increments probe_count_since_open.
         # Total iterations = failure_threshold + dormant_threshold to cross the line.
         for _ in range(
-            agent_client.CIRCUIT_FAILURE_THRESHOLD
-            + agent_client.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
+            _ac_circuit.CIRCUIT_FAILURE_THRESHOLD
+            + _ac_circuit.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
             + 2
         ):
             last = cs.record_failure()
@@ -252,9 +255,9 @@ class TestDormantState:
         from unittest.mock import MagicMock
 
         # Faster transition into dormant.
-        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
-        monkeypatch.setattr(agent_client, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.01)
-        monkeypatch.setattr(agent_client, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.01)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.01)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.01)
 
         fake_db = MagicMock()
         fake_module = types.ModuleType("database")
@@ -270,8 +273,8 @@ class TestDormantState:
         cs = agent_client.CircuitState(agent_name)
         last = None
         for _ in range(
-            agent_client.CIRCUIT_FAILURE_THRESHOLD
-            + agent_client.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
+            _ac_circuit.CIRCUIT_FAILURE_THRESHOLD
+            + _ac_circuit.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
             + 2
         ):
             last = cs.record_failure()
@@ -295,7 +298,7 @@ class TestDormantState:
         assert item["context"]["transition"] == "dormant"
         assert (
             item["context"]["dormant_cooldown_seconds"]
-            == agent_client.CIRCUIT_DORMANT_COOLDOWN_SECONDS
+            == _ac_circuit.CIRCUIT_DORMANT_COOLDOWN_SECONDS
         )
 
         # Subsequent failures stay dormant (prior==new) — no transition,
@@ -309,19 +312,19 @@ class TestDormantState:
         admitted per worker race. Restores baseline recovery behaviour
         without requiring manual intervention."""
         # Tiny cooldown so the test elapses it without sleeping for an hour.
-        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_COOLDOWN_SECONDS", 0.05)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_DORMANT_COOLDOWN_SECONDS", 0.05)
         # Drive the breaker into dormant via failures (not the force-helper)
         # so next_probe_at is set by the failure Lua path with the new
         # CIRCUIT_DORMANT_COOLDOWN_SECONDS.
-        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
-        monkeypatch.setattr(agent_client, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.01)
-        monkeypatch.setattr(agent_client, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.01)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.01)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.01)
 
         cs = agent_client.CircuitState(agent_name)
         last = None
         for _ in range(
-            agent_client.CIRCUIT_FAILURE_THRESHOLD
-            + agent_client.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
+            _ac_circuit.CIRCUIT_FAILURE_THRESHOLD
+            + _ac_circuit.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
             + 2
         ):
             last = cs.record_failure()
@@ -348,16 +351,16 @@ class TestDormantState:
         retries via the open-state backoff curve, defeating the purpose."""
         # Wide gap between the two cooldown families so the assertion can
         # distinguish them: dormant=0.5s, open exp cap=0.001s.
-        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_COOLDOWN_SECONDS", 0.5)
-        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
-        monkeypatch.setattr(agent_client, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.001)
-        monkeypatch.setattr(agent_client, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.001)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_DORMANT_COOLDOWN_SECONDS", 0.5)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.001)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.001)
 
         cs = agent_client.CircuitState(agent_name)
         # Drive into dormant.
         for _ in range(
-            agent_client.CIRCUIT_FAILURE_THRESHOLD
-            + agent_client.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
+            _ac_circuit.CIRCUIT_FAILURE_THRESHOLD
+            + _ac_circuit.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
             + 2
         ):
             if cs.record_failure() == "dormant":
@@ -375,10 +378,10 @@ class TestDormantState:
         key = f"agent:circuit:{agent_name}"
         next_probe_at = float(redis_client.hget(key, "next_probe_at"))
         gap = next_probe_at - time.time()
-        assert agent_client.CIRCUIT_DORMANT_COOLDOWN_SECONDS - 0.1 <= gap <= agent_client.CIRCUIT_DORMANT_COOLDOWN_SECONDS + 0.1, (
-            f"expected gap ~{agent_client.CIRCUIT_DORMANT_COOLDOWN_SECONDS}s "
+        assert _ac_circuit.CIRCUIT_DORMANT_COOLDOWN_SECONDS - 0.1 <= gap <= _ac_circuit.CIRCUIT_DORMANT_COOLDOWN_SECONDS + 0.1, (
+            f"expected gap ~{_ac_circuit.CIRCUIT_DORMANT_COOLDOWN_SECONDS}s "
             f"(dormant cooldown), got {gap:.3f}s — open-state backoff would "
-            f"have yielded ~{agent_client.CIRCUIT_MAX_COOLDOWN_SECONDS}s"
+            f"have yielded ~{_ac_circuit.CIRCUIT_MAX_COOLDOWN_SECONDS}s"
         )
         # Still dormant, no state slide back to open.
         assert cs.state == "dormant"
@@ -395,14 +398,14 @@ class TestProbeLock:
 
     def test_only_one_worker_probes(self, agent_name, redis_client, monkeypatch):
         # Tiny cooldown so we can elapse it without sleeping for 30 s.
-        monkeypatch.setattr(agent_client, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.05)
-        monkeypatch.setattr(agent_client, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.05)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.05)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.05)
 
         worker_a = agent_client.CircuitState(agent_name)
         worker_b = agent_client.CircuitState(agent_name)
 
         # Drive to open via worker_a.
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD):
             worker_a.record_failure()
         assert worker_a.state == "open"
         # Worker B observes the same state — Redis is the single source of truth.
@@ -432,7 +435,7 @@ class TestTransitionLogging:
 
         with caplog.at_level(logging.WARNING, logger=_AC_LOGGER):
             # First two failures from A keep us closed (assuming threshold=3).
-            for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD - 1):
+            for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD - 1):
                 cs_a.record_failure()
             # The transition fires when failures hit the threshold. Whichever
             # worker tips it logs; the other (if it tips later) sees prior=open.
@@ -449,7 +452,7 @@ class TestTransitionLogging:
 
     def test_recovery_logs_closed(self, agent_name, caplog):
         cs = agent_client.CircuitState(agent_name)
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD):
             cs.record_failure()
 
         with caplog.at_level(logging.INFO, logger=_AC_LOGGER):
@@ -474,7 +477,7 @@ class TestOperatorHooks:
 
     def test_reset_clears_redis_state(self, agent_name, redis_client):
         cs = agent_client.CircuitState(agent_name)
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD):
             cs.record_failure()
         assert redis_client.exists(f"{_ac_circuit._CIRCUIT_HASH_PREFIX}{agent_name}")
 
@@ -490,7 +493,7 @@ class TestGetAllStates:
 
     def test_scan_returns_only_state_hashes(self, agent_name, redis_client):
         cs = agent_client.CircuitState(agent_name)
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD):
             cs.record_failure()
         # Manually plant a probe-lock so the scan would pick it up if the
         # filter was wrong.
@@ -509,7 +512,7 @@ class TestGetAllStates:
             )
             entry = states[agent_name]
             assert entry["state"] == "open"
-            assert entry["failure_count"] >= agent_client.CIRCUIT_FAILURE_THRESHOLD
+            assert entry["failure_count"] >= _ac_circuit.CIRCUIT_FAILURE_THRESHOLD
         finally:
             redis_client.delete(
                 f"{_ac_circuit._CIRCUIT_HASH_PREFIX}{agent_name}{_ac_circuit._CIRCUIT_PROBE_LOCK_SUFFIX}"
@@ -528,7 +531,7 @@ class TestFailOpen:
             raise _redis.exceptions.ConnectionError("simulated outage")
 
         # Force every redis op to error.
-        monkeypatch.setattr(agent_client, "_get_circuit_redis", lambda: None)
+        monkeypatch.setattr(_ac_circuit, "_get_circuit_redis", lambda: None)
 
         cs = agent_client.CircuitState(agent_name)
         assert cs.allow_request() is True
@@ -745,12 +748,12 @@ class TestFailureClassification:
                 self._drive(agent_name, soft_handler)
 
         # 3 hard failures → trip threshold (default 3)
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD):
             with pytest.raises(agent_client.AgentNotReachableError):
                 self._drive(agent_name, hard_handler)
 
         cs = agent_client.CircuitState(agent_name)
-        assert cs.failure_count == agent_client.CIRCUIT_FAILURE_THRESHOLD
+        assert cs.failure_count == _ac_circuit.CIRCUIT_FAILURE_THRESHOLD
         assert cs.state == "open"
 
     # ─── Pile-on guard ──────────────────────────────────────────────────
@@ -763,7 +766,7 @@ class TestFailureClassification:
             raise httpx.ConnectError("refused")
 
         # Drive to open via 3 ConnectErrors.
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD):
             with pytest.raises(agent_client.AgentNotReachableError):
                 self._drive(agent_name, hard_handler)
 
@@ -796,8 +799,8 @@ class TestFailureClassification:
         resets failures to 0 and closes the circuit.
         """
         # Shrink cooldown so the probe window opens almost immediately.
-        monkeypatch.setattr(agent_client, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.05)
-        monkeypatch.setattr(agent_client, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.05)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.05)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.05)
 
         def hard_handler(_req):
             raise httpx.ConnectError("refused")
@@ -806,7 +809,7 @@ class TestFailureClassification:
             return httpx.Response(200, json={"ok": True})
 
         # Drive to open.
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD):
             with pytest.raises(agent_client.AgentNotReachableError):
                 self._drive(agent_name, hard_handler)
         assert agent_client.CircuitState(agent_name).state == "open"
@@ -831,8 +834,8 @@ class TestFailureClassification:
         without tripping the hard-failure threshold) is intentionally
         out of scope for #474.
         """
-        monkeypatch.setattr(agent_client, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.05)
-        monkeypatch.setattr(agent_client, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.05)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.05)
+        monkeypatch.setattr(_ac_circuit, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.05)
 
         def hard_handler(_req):
             raise httpx.ConnectError("refused")
@@ -841,7 +844,7 @@ class TestFailureClassification:
             raise httpx.ReadTimeout("still busy")
 
         # Drive to open.
-        for _ in range(agent_client.CIRCUIT_FAILURE_THRESHOLD):
+        for _ in range(_ac_circuit.CIRCUIT_FAILURE_THRESHOLD):
             with pytest.raises(agent_client.AgentNotReachableError):
                 self._drive(agent_name, hard_handler)
 
@@ -854,7 +857,7 @@ class TestFailureClassification:
 
         cs = agent_client.CircuitState(agent_name)
         # Failures unchanged from when we drove to open.
-        assert cs.failure_count == agent_client.CIRCUIT_FAILURE_THRESHOLD
+        assert cs.failure_count == _ac_circuit.CIRCUIT_FAILURE_THRESHOLD
         # Still open (no advance, no recovery).
         assert cs.state == "open"
 
