@@ -8,6 +8,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied } from "../access.js";
 
 /**
  * Create execution query tools with the given client
@@ -100,10 +101,10 @@ export function createExecutionTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
         if (!accessCheck.allowed) {
           console.log(`[list_recent_executions] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const effectiveLimit = Math.min(Math.max(1, limit), 100);
@@ -153,10 +154,10 @@ export function createExecutionTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
         if (!accessCheck.allowed) {
           console.log(`[get_execution_result] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const execution = await apiClient.getExecution(agent_name, execution_id);
@@ -231,10 +232,10 @@ export function createExecutionTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
         if (!accessCheck.allowed) {
           console.log(`[get_fan_out_result] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const batch = await apiClient.getFanOutResult(agent_name, fan_out_id);
@@ -279,10 +280,10 @@ export function createExecutionTools(
           const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
           if (!accessCheck.allowed) {
             console.log(`[get_agent_activity_summary] Access denied: ${accessCheck.reason}`);
-            return JSON.stringify({
+            return accessDenied(context, {
               error: "Access denied",
               reason: accessCheck.reason,
-            }, null, 2);
+            });
           }
         }
 
