@@ -1091,6 +1091,13 @@ class _AttemptState:
     # on the first attempt, where the two are the same thing by construction.
     applied_timeout_seconds: Optional[int] = None
 
+    def __post_init__(self) -> None:
+        # At construction the two clocks are the same instant; only the retries
+        # move `start_time`. Deriving here means a construction that names only
+        # `start_time` cannot silently anchor the turn budget on a reset clock.
+        if self.turn_started_at is None:
+            self.turn_started_at = self.start_time
+
 
 def _with_switch(
     result: TaskExecutionResult, state: "_AttemptState"
@@ -1151,8 +1158,7 @@ def _classify_timeout_failure(
 def _turn_elapsed_seconds(state: "_AttemptState") -> float:
     """Wall-clock spent by the WHOLE turn so far — every attempt and every
     settle delay — from the clock that is never reset."""
-    anchor = state.turn_started_at or state.start_time
-    return max(0.0, (datetime.utcnow() - anchor).total_seconds())
+    return max(0.0, (datetime.utcnow() - state.turn_started_at).total_seconds())
 
 
 def _log_retry_budget(
