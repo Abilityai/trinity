@@ -55,7 +55,6 @@ export const useSessionsStore = defineStore('sessions', {
     featureFlagsFailed: false,
     sessionTabEnabled: false,
     voiceAvailable: false,
-    workspaceAvailable: false,
     voipAvailable: false,
     brainOrbAvailable: false,      // trinity-enterprise#58 — Brain Orb platform flag
     a2aAvailable: false,           // trinity-enterprise#158 — A2A config tab (enterprise_features)
@@ -138,12 +137,11 @@ export const useSessionsStore = defineStore('sessions', {
         // #2559: no reader in `src/` since the Agent Detail voice overlay was
         // retired — the Talk door is ungated and the Workspace asks the roster
         // for its own capability. Kept because this is a free parse of a payload
-        // already fetched for six other flags, and the backend key is
-        // load-bearing server-side (`settings.py` derives `workspace_available`
-        // from it). Registered on the same follow-up as the now caller-less
+        // already fetched for the other flags. (The former `workspace_available`
+        // derivation is gone: ent#438 retired the surface it named.) Registered
+        // on the same follow-up as the now caller-less
         // `/api/agents/{name}/voice/*` routes.
         this.voiceAvailable = !!r.data?.voice_available
-        this.workspaceAvailable = !!r.data?.workspace_available
         this.voipAvailable = !!r.data?.voip_available
         this.brainOrbAvailable = !!r.data?.brain_orb_available
         this.brainOrbVoiceAvailable = !!r.data?.brain_orb_voice_available
@@ -177,7 +175,6 @@ export const useSessionsStore = defineStore('sessions', {
         this.featureFlagsFailed = true
         this.sessionTabEnabled = false
         this.voiceAvailable = false
-        this.workspaceAvailable = false
         this.voipAvailable = false
         this.brainOrbAvailable = false
         this.brainOrbVoiceAvailable = false
