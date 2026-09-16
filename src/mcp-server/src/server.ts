@@ -32,6 +32,7 @@ import { createFileTools } from "./tools/files.js";
 import { createPipelineTools } from "./tools/pipelines.js";
 import { createMemoryTools } from "./tools/memory.js";
 import { createLoopTools } from "./tools/loops.js";
+import { policyFor, resolveClient, withAgentAccess, type ToolAccessPolicy } from "./access.js";
 import { createReminderTools } from "./tools/reminders.js";
 import { createOperatorQueueTools } from "./tools/operator_queue.js";
 import { createConnectorTools } from "./tools/connector.js";
@@ -564,11 +565,25 @@ export async function createServer(config: ServerConfig = {}) {
   function addToolWithAudit(
     tool: any,
     canAccess?: (auth: any) => boolean,
-    auditTargetId?: string
+    auditTargetId?: string,
+    explicitPolicy?: ToolAccessPolicy
   ): void {
+    // ent#628: every tool declares how it treats an agent target, and the
+    // declaration is checked against the tool's real parameters HERE — a tool
+    // with no row in TOOL_ACCESS_POLICY (or an explicit policy, for dynamic
+    // tools) cannot register. `enforce` rows run the permission edge before
+    // `execute`; the gate sits inside the audit span so a denial is a recorded
+    // call (#2807 decides how it is labelled).
+    const policy = policyFor(tool, explicitPolicy);
+    const execute =
+      policy.kind === "enforce"
+        ? withAgentAccess(tool.name, tool.execute, policy, (ctx) =>
+            resolveClient(client, requireApiKey, ctx?.session)
+          )
+        : tool.execute;
     const wrapped: any = {
       ...tool,
-      execute: withAudit(tool.name, tool.execute, auditTargetId),
+      execute: withAudit(tool.name, execute, auditTargetId),
     };
     // ent#46: per-auth tool visibility. FastMCP filters the advertised tool
     // list per session by canAccess(authContext). A tool's own canAccess (if
@@ -655,9 +670,12 @@ export async function createServer(config: ServerConfig = {}) {
   function registerDynamicTool(
     tool: any,
     canAccess: (auth: any) => boolean,
-    auditTargetId: string
+    auditTargetId: string,
+    policy: ToolAccessPolicy
   ): void {
-    addToolWithAudit(tool, canAccess, auditTargetId);
+    // A computed tool name has no row in TOOL_ACCESS_POLICY, so the policy is
+    // an argument: a dynamic tool cannot register without declaring one either.
+    addToolWithAudit(tool, canAccess, auditTargetId, policy);
     dynamicToolNames.add(tool.name);
   }
   function unregisterDynamicTool(name: string): void {

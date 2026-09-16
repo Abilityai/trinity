@@ -33,7 +33,13 @@ deliberately credential-free (`integration-nightly.yml` states why).
 **Findings carried as `strict=True` xfails, each with its own issue:**
 - #2806 — no chain-depth guard on agent-to-agent chat chains
 - #2807 — a denied call is audited as a successful tool call
-- abilityai/trinity-enterprise#628 — `run_agent_loop` skips the permission gate
+
+**Closed here:** abilityai/trinity-enterprise#628 — `run_agent_loop` skipped the
+permission gate. Since that fix the MCP server gates it at registration
+(`src/mcp-server/src/access.ts`, `TOOL_ACCESS_POLICY`), and the loop-id tools
+resolve the loop's agent before answering; both are asserted below. The gate is
+a tool-surface gate — the REST route behind it is still owner-equivalent, which is
+the ent#629 question above.
 
 Invariants cited, never restated: P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03.
 """
@@ -50,6 +56,7 @@ from .conftest import (
     agent_activities,
     agent_executions,
     agent_status,
+    clear_edges,
     ensure_running,
     permitted_agents,
     poll_until,
@@ -466,11 +473,6 @@ def test_every_fan_out_subtask_completes(pair, mcp_as_caller, journey_client):
 # Loops: the permission boundary, and the budget
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="abilityai/trinity-enterprise#628 — run_agent_loop never calls checkAgentAccess, "
-           "so an agent key can start a loop on any same-owner agent without an edge",
-)
 def test_without_permission_an_agent_cannot_start_a_loop_on_another(
     pair, mcp_as_caller, journey_client,
 ):
@@ -494,6 +496,47 @@ def test_without_permission_an_agent_cannot_start_a_loop_on_another(
     finally:
         if loop_id:
             journey_client.post(f"/api/loops/{loop_id}/stop")
+
+
+def test_without_permission_an_agent_cannot_read_or_stop_a_loop_on_another(
+    pair, mcp_as_caller, journey_client,
+):
+    """A loop is addressed by id, so the agent it belongs to is known only after the
+    resolve. With an edge A starts a loop on B; the edge is removed; A can neither
+    read nor stop it, and the refusal does not say whose loop it is — the id was
+    A's only input. The owner still can: that is the escape hatch the refusal names."""
+    a, b = pair
+    add_edge(journey_client, a, b)
+    res = mcp_as_caller.call(
+        "run_agent_loop", agent_name=b, message=_unique("Reply with the single word: pong"),
+        max_runs=1, timeout_per_run=30, max_duration_seconds=60, on_failure="continue",
+    )
+    body = res.data if isinstance(res.data, dict) else {}
+    loop_id = body.get("loop_id")
+    assert res.ok and body.get("success") is True and loop_id, (
+        f"'{a}' could not start a loop on '{b}' with permission: {res.error or res.text[:300]!r}"
+    )
+    try:
+        clear_edges(journey_client, a)
+        for tool in ("get_loop_status", "stop_loop"):
+            r = mcp_as_caller.call(tool, loop_id=loop_id)
+            rb = r.data if isinstance(r.data, dict) else {}
+            assert rb.get("success") is not True, (
+                f"'{a}' lost its edge to '{b}' and {tool} still answered: {r.text[:200]!r}"
+            )
+            assert "not found or not accessible" in r.text.lower(), (
+                f"{tool} did not refuse with the compound reason: {r.text[:200]!r}"
+            )
+            assert b not in r.text, (
+                f"{tool}'s refusal names the loop's agent '{b}' — the caller supplied only an id: "
+                f"{r.text[:200]!r}"
+            )
+        stop = journey_client.post(f"/api/loops/{loop_id}/stop")
+        assert stop.status_code == 200, (
+            f"the owner could not stop loop {loop_id}: {stop.status_code} {stop.text[:200]}"
+        )
+    finally:
+        journey_client.post(f"/api/loops/{loop_id}/stop")
 
 
 def test_a_loop_stops_by_itself_within_its_budget(pair, mcp_as_caller, journey_client):
