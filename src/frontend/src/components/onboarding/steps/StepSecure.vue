@@ -74,6 +74,28 @@
       </form>
       <InlineError v-if="saveError" :message="saveError" @dismiss="saveError = ''" />
 
+      <!--
+        The save's own confirmation. Without it the only signals are the field
+        emptying and the posture badge changing, which is too little for an
+        action that re-points every live Telegram and WhatsApp webhook.
+
+        It states the half that is known (the value is stored) and the half
+        that is not (nothing has arrived at the name), because those are
+        genuinely different facts here and the second is what the operator
+        will otherwise assume. It is NOT a claim that the domain works —
+        `postureCopy` owns that, and only once a request has landed.
+      -->
+      <p
+        v-if="savedUrl"
+        class="text-[12.5px] leading-[1.5] text-status-success-700 dark:text-status-success-300"
+        data-testid="first-run-public-url-saved"
+        role="status"
+      >
+        Saved. Nothing has reached
+        <span class="font-mono">{{ savedUrl }}</span>
+        yet — open it in a browser to confirm it works.
+      </p>
+
       <!-- Native <details>: keyboard-accessible, no JS, no state. The reasoning
            has to be reachable, not unavoidable. -->
       <details data-testid="first-run-secure-why">
@@ -210,6 +232,8 @@ const url = ref('')
 const saving = ref(false)
 const fieldError = ref('')
 const saveError = ref('')
+// The saved value, kept so the confirmation can name it after the field clears.
+const savedUrl = ref('')
 
 async function save() {
   const value = url.value.trim().replace(/\/+$/, '')
@@ -228,6 +252,7 @@ async function save() {
   saving.value = true
   try {
     await settingsStore.updateSetting('public_chat_url', value)
+    savedUrl.value = value
     url.value = ''
     // The chassis re-reads the flags, which re-derives `install_tls_posture`.
     emit('complete')
