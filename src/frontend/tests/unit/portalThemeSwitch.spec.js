@@ -159,6 +159,14 @@ describe('ThemeChoice (mounted)', () => {
     expect(w2.emitted('select')).toEqual([['system']])
   })
 
+  it('focus travels with the arrow key, so the roving tabindex never strands the keyboard', async () => {
+    const w = mount(ThemeChoice, { props: { theme: 'light' }, attachTo: document.body })
+    w.findAll('[role="radio"]')[0].element.focus()
+    await w.get('[role="radiogroup"]').trigger('keydown', { key: 'ArrowRight' })
+    expect(document.activeElement?.dataset?.themeOption).toBe('dark')
+    w.unmount()
+  })
+
   it('only the checked option is in the tab order (roving tabindex)', () => {
     const w = mount(ThemeChoice, { props: { theme: 'dark' } })
     expect(w.findAll('[role="radio"]').map((r) => r.attributes('tabindex'))).toEqual(['-1', '0', '-1'])
