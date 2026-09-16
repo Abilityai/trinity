@@ -60,13 +60,16 @@ from .conftest import (
     ensure_running,
     permitted_agents,
     poll_until,
+    skip_unless_agent_can_answer,
     stop_agent_and_wait,
 )
 
 pytestmark = pytest.mark.journey
 
-_HAS_MODEL_KEY = bool(os.getenv("ANTHROPIC_API_KEY")) and os.getenv("ANTHROPIC_API_KEY") != "placeholder"
-needs_model = pytest.mark.skipif(not _HAS_MODEL_KEY, reason="journey needs a real provider key")
+# #2812: the model gate is decided per CALLEE by the instance, in
+# `conftest.skip_unless_agent_can_answer`, and is called at the top of each
+# keyed test — a collection-time `skipif` cannot ask a live stack about an
+# agent that does not exist yet.
 
 # IA-03's signal is 5 s server-side (measured 0.16 s on a live instance). This is
 # end to end through the MCP hop on whatever runner we are on; the elapsed time
@@ -210,11 +213,12 @@ def test_with_permission_a_call_reaches_the_other_agent_and_is_recorded(
     )
 
 
-@needs_model
 def test_i_can_read_what_they_said(pair, mcp_as_caller, journey_client):
     """B's real answer comes back to A, and the operator can read it afterwards
     on B's execution record — the words, not just a 200."""
     a, b = pair
+    # B is the one that has to produce words, so B is what the gate asks about.
+    skip_unless_agent_can_answer(journey_client, b)
     add_edge(journey_client, a, b)
     rows_before = _ids(agent_executions(journey_client, b))
 
@@ -438,13 +442,13 @@ def test_a_fan_out_is_bounded_and_lands_as_one_batch(pair, mcp_as_caller, journe
     )
 
 
-@needs_model
 def test_every_fan_out_subtask_completes(pair, mcp_as_caller, journey_client):
     """With a real model behind B, all 12 subtasks of A's fan-out come back
     completed. Its own test rather than a conditional inside the batch test, so
     that on a keyless stack it shows up as the allowlisted SKIP the skip audit
     can see — a silently-skipped assertion is the shape that audit exists to catch."""
     a, b = pair
+    skip_unless_agent_can_answer(journey_client, b)
     add_edge(journey_client, a, b)
     tasks = [{"id": f"t{i}", "message": _unique(f"Reply with the number {i}")} for i in range(FAN_OUT_TASKS)]
     res = mcp_as_caller.call("fan_out", agent_name=b, tasks=tasks, max_concurrency=3)

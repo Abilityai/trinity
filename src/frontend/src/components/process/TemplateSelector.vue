@@ -199,6 +199,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import axios from 'axios'
+import { readStoredToken } from '../../utils/platformSession'
 import {
   PlusIcon,
   CheckCircleIcon,
@@ -258,7 +259,7 @@ async function fetchTemplates() {
   loading.value = true
   loadError.value = ''
   try {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await axios.get('/api/process-templates', {
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -273,7 +274,7 @@ async function fetchTemplates() {
 
 async function fetchCategories() {
   try {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await axios.get('/api/process-templates/categories', {
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -297,7 +298,7 @@ function getCategoryBadgeClass(category) {
 
 async function showPreview(template) {
   try {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await axios.get(`/api/process-templates/${template.id}`, {
       headers: { Authorization: `Bearer ${token}` },
     })

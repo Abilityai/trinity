@@ -97,7 +97,17 @@ GIT_DIR_ALERT_BYTES = int(os.getenv("GIT_DIR_ALERT_BYTES", str(10 * 1024**3)))
 MAINTENANCE_FAILURES_ALERT_THRESHOLD = 3
 
 
-def _coerce_nonneg_int(value) -> Optional[int]:
+# PostgreSQL column ceilings. `Integer` is int4 there (SQLite's INTEGER is 64-bit
+# either way, which is how #2800 shipped): a value the boundary admits but the
+# column cannot hold makes the whole upsert raise `NumericValueOutOfRange`, and
+# the agent's sync health goes dark. So the boundary's ceiling MUST match the
+# column's (#2827): int4 for the counters, int8 only for the one byte count that
+# was widened.
+INT4_MAX = 2**31 - 1
+INT8_MAX = 2**63 - 1
+
+
+def _coerce_nonneg_int(value, *, ceiling: int = INT4_MAX) -> Optional[int]:
     """Boundary guard for agent-supplied numbers (#1595).
 
     `sync-state.json` is agent-writable: a compromised/prompt-injected agent
@@ -105,12 +115,33 @@ def _coerce_nonneg_int(value) -> Optional[int]:
     accept strings/objects silently. Same posture as `/health clone_status`
     (enum only, never agent-supplied strings). bool is an int subclass —
     rejected explicitly.
+
+    `ceiling` is the destination's own bound (#2827). It shipped as a flat
+    `< 2**63` for every caller while seven of the eight `agent_sync_state`
+    columns it feeds are int4 — so an agent writing `2**40` into `pack_count`
+    made every upsert for it raise on PostgreSQL, exactly the #2800 class one
+    column over. The default is the int4 column bound because that is what
+    almost every consumer is; a caller with a wider destination says so.
     """
     if isinstance(value, bool):
         return None
-    if isinstance(value, int) and 0 <= value < 2**63:
+    if isinstance(value, int) and 0 <= value <= ceiling:
         return value
     return None
+
+
+def _coerce_counter(payload: dict, *keys: str) -> int:
+    """An agent-supplied ahead/behind counter, coerced, defaulting to 0 (#2827).
+
+    The first key present wins (`ahead_main`, else the legacy `ahead`). These
+    four used to be passed UNCOERCED into int4 columns — a stranger to the
+    `_coerce_nonneg_int` guard two lines above them.
+    """
+    for key in keys:
+        if key in payload and payload[key] is not None:
+            coerced = _coerce_nonneg_int(payload[key])
+            return coerced if coerced is not None else 0
+    return 0
 
 
 # #2742: an explicit UTC offset, which `startup.sh` always writes (`...Z`).
@@ -191,8 +222,9 @@ def _coerce_lock_stuck(value):
     """
     if not isinstance(value, dict):
         return None
+    # Log-only ints, never a column: the wide ceiling is honest here.
     coerced = {
-        key: _coerce_nonneg_int(value.get(key))
+        key: _coerce_nonneg_int(value.get(key), ceiling=INT8_MAX)
         for key in ("age_seconds", "stable_for_seconds", "sightings", "size_bytes")
     }
     if all(v is None for v in coerced.values()):
@@ -397,7 +429,8 @@ class SyncHealthService:
         ) or 0
 
         # #1595: agent-supplied ints coerced at the boundary (see helper).
-        git_dir_bytes = _coerce_nonneg_int(sync_state.get("git_dir_bytes"))
+        # #2827: each at ITS column's ceiling — git_dir_bytes is the one BIGINT.
+        git_dir_bytes = _coerce_nonneg_int(sync_state.get("git_dir_bytes"), ceiling=INT8_MAX)
         pack_count = _coerce_nonneg_int(sync_state.get("pack_count"))
         loose_objects = _coerce_nonneg_int(sync_state.get("loose_objects"))
         maintenance_failures = _coerce_nonneg_int(
@@ -411,10 +444,11 @@ class SyncHealthService:
             last_error_summary=last_error_summary,
             last_remote_sha_main=payload.get("last_remote_sha_main"),
             last_remote_sha_working=local_head_sha,
-            ahead_main=payload.get("ahead_main") or payload.get("ahead") or 0,
-            behind_main=payload.get("behind_main") or payload.get("behind") or 0,
-            ahead_working=payload.get("ahead_working") or 0,
-            behind_working=payload.get("behind_working") or 0,
+            # #2827: coerced like their siblings — these four went in raw.
+            ahead_main=_coerce_counter(payload, "ahead_main", "ahead"),
+            behind_main=_coerce_counter(payload, "behind_main", "behind"),
+            ahead_working=_coerce_counter(payload, "ahead_working"),
+            behind_working=_coerce_counter(payload, "behind_working"),
             git_dir_bytes=git_dir_bytes,  # #1596 bloat observability
             pack_count=pack_count,  # #1595
             loose_objects=loose_objects,  # #1595

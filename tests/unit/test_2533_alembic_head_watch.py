@@ -210,7 +210,7 @@ class TestItCanNeverPush:
 
     def test_the_merge_is_merge_tree_not_a_worktree_merge(self, job):
         runs = _runs(job)
-        assert "git merge-tree --write-tree" in runs
+        assert "merge-tree --write-tree" in runs  # `git -c core.quotePath=off merge-tree …`
         bare_merge = re.search(r"git merge(?!-tree)\b", runs)
         assert bare_merge is None, (
             "a working-tree `git merge` came back. merge-tree is not a style "
@@ -241,6 +241,49 @@ class TestItCanNeverPush:
             "unresolvable ref (exit 1, empty stdout) is reported to the author "
             "as a merge conflict"
         )
+
+    def test_an_unrelated_conflict_no_longer_stops_the_evaluation(self, job):
+        """#2828: on 2026-09-15 four of nine open PRs conflicted with dev on
+        `learnings.md` alone, two carrying a live two-heads fork, and the
+        watch answered "not evaluated" for all four. `--write-tree` writes the
+        merged tree on exit 1 too; the guard reads two directories. The
+        conflict arm must therefore ask WHERE the conflict is."""
+        body = _step_run(job, "Merge each PR in memory")
+        assert "VERSION_LINES=" in body and "migrations/versions/" in body
+        assert "in_versions=" in body and 'grep -E "$VERSION_LINES"' in body, (
+            "the conflict arm must scope its refusal to the version-line paths"
+        )
+        # The refusal is INSIDE the version-line test, and a conflict outside
+        # it falls through to the guard with the paths carried on the verdict.
+        conflict_arm = body[body.index('[ "$rc" -eq 1 ] && [ -n "$tree" ]'):body.index('if [ "$rc" -ne 0 ]')]
+        assert 'if [ -n "$in_versions" ]' in conflict_arm
+        assert "write_verdict \"$n\" \"$head_sha\" conflict \"$in_versions\"" in conflict_arm
+        assert 'elsewhere="$conflicted"' in conflict_arm
+        # The load-bearing line of #2828: the `unknown` arm must NOT swallow a
+        # leg the conflict arm already evaluated. Delete this guard and every
+        # unrelated-conflict leg falls back into `continue` — #2828 reinstated
+        # with every other assertion here still green.
+        assert 'evaluable_conflict=1' in conflict_arm
+        assert 'if [ "$rc" -ne 0 ] && [ -z "$evaluable_conflict" ]; then' in body
+        # C-quoted paths (core.quotePath) must still hit the version-line anchor,
+        # and merge-tree is asked not to quote in the first place.
+        assert "VERSION_LINES='^\"?src/backend/" in body
+        assert 'git -c core.quotePath=off merge-tree --write-tree HEAD "refs/watch/pr-$n"' in body
+        assert "continue" in conflict_arm.split('if [ -n "$in_versions" ]')[1].split("fi")[0], (
+            "a version-line conflict must still stop the leg"
+        )
+        assert 'clean "" "$elsewhere"' in body and 'fork "$out" "$elsewhere"' in body, (
+            "the unrelated-conflict paths must reach the verdict, or a green "
+            "status hides a PR the author still cannot merge"
+        )
+
+    def test_the_conflicted_paths_are_read_from_merge_trees_own_section(self, job):
+        """merge-tree's stdout is the tree OID, then `<mode> <oid> <stage>\t<path>`
+        lines up to the first blank line, then prose. Only that section is a
+        list of paths; reading the prose (`CONFLICT (content): …`) would be
+        parsing a message."""
+        body = _step_run(job, "Merge each PR in memory")
+        assert "sed -n '2,/^$/p' \"$mt_out\"" in body and "cut -f2-" in body
 
     def test_the_merge_tree_exit_code_does_not_come_through_a_pipe(self, job):
         """`tree=$(git merge-tree … | head -1); rc=$?` reads merge-tree's exit
@@ -620,15 +663,54 @@ class TestTheVerdictLogicIsAModuleATestCanRun:
         assert not re.search(r"^export\s+(function|const)", src, re.MULTILINE)
 
     @needs_node
-    def test_a_conflict_publishes_no_status(self):
+    def test_a_version_line_conflict_is_a_visible_error_not_silence(self):
+        """RE-ANCHORED by #2828. This used to pin "a conflict publishes no
+        status" (#2029) — while `conflict` meant *any* conflict, a status
+        would have blamed the PR for a `learnings.md` collision. The workflow
+        now evaluates straight through an unrelated conflict, so `conflict`
+        is only ever a revision file edited on both sides: genuinely
+        unevaluable, and the author must act. Silence there is what let two
+        forks ride to the 2026-09-15 train green; `error` is GitHub's
+        "could not run" state — neither the all-clear `success` nor the
+        this-PR-forks `failure`."""
         v = _node(
-            "return verdictFor({prNumber: 1, headSha: 'abc', outcome: 'conflict'});"
+            "return verdictFor({prNumber: 1, headSha: 'abc', outcome: 'conflict',"
+            " detail: 'src/backend/migrations/versions/0062_x.py'});"
         )
-        assert v["status"] is None, (
-            "a conflicting PR was never evaluated. `success` is a false "
-            "all-clear (#2029) and `failure` blames it for the wrong thing"
-        )
+        assert v["status"]["state"] == "error"
+        assert "not evaluated" in v["status"]["description"]
         assert v["comment"] is not None and v["createIfMissing"] is True
+        assert "0062_x.py" in v["comment"]["body"]
+        assert "learnings.md" in v["comment"]["body"], (
+            "the comment must say this is NOT the usual unrelated-file collision"
+        )
+
+    @needs_node
+    def test_an_unrelated_conflict_does_not_change_the_verdict_but_is_named(self):
+        """#2828 direction 1: the version line was evaluated through a conflict
+        elsewhere. The verdict stands (clean stays `success`, fork stays
+        `failure`) and the unrelated paths are named on the surface, never
+        hidden behind a green tick."""
+        clean = _node(
+            "return verdictFor({prNumber: 1, headSha: 'abc', outcome: 'clean',"
+            " devHead: '0062_y', conflictsElsewhere: ['docs/memory/learnings.md']});"
+        )
+        assert clean["status"]["state"] == "success"
+        assert "unrelated" in clean["status"]["description"]
+        assert "learnings.md" in clean["comment"]["body"]
+        fork = _node(
+            "return verdictFor({prNumber: 1, headSha: 'abc', outcome: 'fork',"
+            " detail: 'resolves to 2 heads', conflictsElsewhere: ['docs/memory/learnings.md']});"
+        )
+        assert fork["status"]["state"] == "failure"
+        assert "learnings.md" in fork["comment"]["body"]
+        # ...and a pathological list is capped, not rendered whole.
+        many = ", ".join(f"'f{i}.md'" for i in range(60))
+        capped = _node(
+            "return verdictFor({prNumber: 1, headSha: 'abc', outcome: 'clean',"
+            f" devHead: '0062_y', conflictsElsewhere: [{many}]}});"
+        )
+        assert "and 40 more" in capped["comment"]["body"]
 
     @needs_node
     def test_an_unknown_outcome_publishes_nothing_at_all(self):

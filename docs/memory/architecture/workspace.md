@@ -39,6 +39,35 @@ session that *expires* on a browser which later gained a platform login, and the
 token's server-side validity post-sign-out (no self-service revoke; ent#281's primitive
 is per-email).
 
+**One platform credential, one 401 verdict, one handler (#2791).** The paragraph above
+describes *which session a tab is in*; this is the layer under it. The platform JWT used
+to live in two places that could disagree — the in-memory
+`axios.defaults.headers.common['Authorization']` copy and `localStorage['token']` re-read
+per request — with **no** `storage` listener anywhere under `src/frontend/src` and three
+separate 401 handlers. Because the Workspace opens in its own tab (ent#456) and polls
+every 20s, a stale Workspace tab could log a freshly re-established platform session out
+within seconds: its poll went out on the OLD token, 401'd, and the handler called
+`authStore.logout()`, deleting the NEW session's token. `utils/platformSession.js` is now
+the only reader (`readStoredToken`), the only verdict (`sessionLostVerdict` →
+`ignore | stale | logout`, where **stale** means *the credential that failed has already
+been replaced, so adopt the current session rather than destroy it*) and the only handler
+registry; `main.js` installs a global axios **request** interceptor so every bare-`axios`
+caller derives the header per request, and a `storage` listener so a login or logout in
+one tab reaches every other. The `axios.defaults` copy is written nowhere — a **tree-wide**
+source guard says so, because the first cut of this fix guarded `auth.js` alone while
+`App.vue` still wrote it on every boot, and axios merges that default into the request
+*before* the interceptor chain runs, so the per-request rebuild was inert for the life of
+the tab (the merge-train review's C1); the two sync actions and `logout()` delete it as a
+belt. The reaction itself (`reactToPlatformUnauthorized`), the storage listener
+(`reactToStorageEvent`) and the request rebuild (`applyRequestCredential`) are functions
+of their collaborators, executed by unit tests with fakes — `main.js` is wiring only. The
+logout revoke carries its token **explicitly**, because #2258's clear-before-revoke
+ordering means storage is already empty by then. The Workspace veto in the verdict reads
+the **per-tab** portal token from the store, not shared `localStorage`, so a client
+signing in in another tab cannot strand an operator's Workspace tab on an expired JWT.
+Full model and the verdict table:
+[workspace-session-signout.md](../feature-flows/workspace-session-signout.md).
+
 **Membership is a DB fact; container state is a projection onto the card (#2196).** The
 roster is built from `agent_ownership` / `agent_sharing` and is **never** filtered by
 whether a container exists. A live ownership row with no container is a routine state
