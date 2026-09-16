@@ -40,3 +40,31 @@ describe('describeSttCapability', () => {
     expect(describeSttCapability({ key_configured: true }).tone).toBe(STT_TONE.unverified)
   })
 })
+
+import { describeSttLastFailure } from '../../src/utils/sttCapability.js'
+
+// #2696 — the operator half of a client's "voice input failed".
+describe('describeSttLastFailure', () => {
+  it('is silent with nothing to report', () => {
+    expect(describeSttLastFailure(null)).toBeNull()
+    expect(describeSttLastFailure({})).toBeNull()
+  })
+
+  it("names the category and the provider's own status word", () => {
+    const d = describeSttLastFailure({ category: 'permission', provider_status: 401, detail: 'missing_permissions', at: 1700000000 })
+    expect(d.text).toBe('Last voice-input failure: the key is missing the speech-to-text permission (HTTP 401 missing_permissions).')
+    expect(d.at).toBe(1700000000)
+  })
+
+  it('distinguishes quota from auth from audio', () => {
+    expect(describeSttLastFailure({ category: 'quota', provider_status: 401, detail: 'quota_exceeded' }).text).toMatch(/out of credits/)
+    expect(describeSttLastFailure({ category: 'auth', provider_status: 401, detail: 'invalid_api_key' }).text).toMatch(/rejected/)
+    expect(describeSttLastFailure({ category: 'audio', provider_status: 400, detail: 'invalid_audio' }).text).toMatch(/recording was rejected/)
+  })
+
+  it('an unknown category still says the provider failed, never nothing', () => {
+    const d = describeSttLastFailure({ category: 'something_new', provider_status: 418 })
+    expect(d.text).toMatch(/unrecognised error \(HTTP 418\)/)
+    expect(d.at).toBeNull()
+  })
+})
