@@ -101,14 +101,14 @@
           </div>
         </template>
       </button>
-    </div>
 
-    <!-- Getting started (ent#238). A row in the rail rather than a card in the
-         dashboard flow: the entitlement answer lands a round-trip after paint,
-         and here that adds a row to a scrolling column instead of pushing the
-         fleet grid down. Renders nothing when unentitled, dismissed or done. -->
-    <div v-if="onboarding.visible" class="border-t border-gray-200 dark:border-gray-700 py-1">
-      <ActivationLauncher :collapsed="isCollapsed" />
+      <!-- Getting started (ent#238). In the rail rather than the dashboard
+           flow: the entitlement answer lands a round-trip after paint, and here
+           that extends a scrolling column instead of pushing the fleet grid
+           down. Always under the view labels, however many there are, and gone
+           with them when the rail is collapsed. Renders nothing when
+           unentitled, dismissed or done. -->
+      <ActivationChecklist v-if="!isCollapsed" />
     </div>
 
     <!-- Create New View Button -->
@@ -133,31 +133,20 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useSystemViewsStore } from '@/stores/systemViews'
-import ActivationLauncher from '@/components/onboarding/ActivationLauncher.vue'
-import { useOnboardingStore } from '@/stores/onboarding'
+import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
 import { storeToRefs } from 'pinia'
 
 const emit = defineEmits(['create', 'edit'])
 
 const systemViewsStore = useSystemViewsStore()
-// The divider belongs to the row, not to the rail: without this the separator
-// and its padding render on every unentitled install, where the launcher
-// itself renders nothing.
-const onboarding = useOnboardingStore()
 const { views, activeViewId, isLoading, sortedViews } = storeToRefs(systemViewsStore)
 
-// Collapsed by default, for now. Expanding it (vybe's call) takes 176px from
-// every dashboard pane, and the list view's desktop layout is an eleven-column
-// grid that only just fits at 1280 — e2e went red on `dashboard-list-view` and
-// `agent-detail-request-dedupe` the moment the rail widened, on a branch whose
-// only other change is confined to the rail itself.
-//
-// Reverting the default isolates that rather than assuming it: the rail's
-// getting-started row is unaffected either way. If CI comes back green, the
-// list view needs to survive a 1056px pane before the rail can open by
-// default, and that is its own change.
+// Expanded by default (vybe's call), with labels — a collapsed rail hides the
+// systems it lists and the getting-started checklist below them. A saved
+// preference still wins. Open, it takes 176px from every dashboard pane, and
+// the list view's eleven-column grid only just fits at 1280.
 const savedCollapsed = localStorage.getItem('trinity-sidebar-collapsed')
-const isCollapsed = ref(savedCollapsed !== null ? savedCollapsed === 'true' : true)
+const isCollapsed = ref(savedCollapsed !== null ? savedCollapsed === 'true' : false)
 
 // Watch for collapse changes and persist
 function toggleCollapse() {

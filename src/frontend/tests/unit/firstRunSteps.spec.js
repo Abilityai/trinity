@@ -358,6 +358,7 @@ describe('the chassis replaced the card ladder (structure)', () => {
   const DASHBOARD = read('../../src/views/Dashboard.vue')
   const OVERLAY = read('../../src/components/onboarding/FirstRunOverlay.vue')
   const SIDEBAR = read('../../src/components/SystemViewsSidebar.vue')
+  const CHECKLIST = read('../../src/components/onboarding/ActivationChecklist.vue')
 
   it('deletes the absorbed surfaces and the one-card-at-a-time rule', () => {
     for (const gone of [
@@ -382,19 +383,23 @@ describe('the chassis replaced the card ladder (structure)', () => {
     // entitlement answer is what decides whether a card exists at all, and
     // reserving unconditionally would leave a permanent gap on every OSS build
     // where the endpoint 404s.
-    //
-    // The launcher lives in the header's fixed-height controls row instead, so
-    // a late answer changes nothing below it — layout stability by
-    // construction rather than by timing (contract p.4/6).
     expect(DASHBOARD).not.toContain('<ActivationChecklist')
-    expect(DASHBOARD).not.toContain('<ActivationLauncher')
     // It lives in the systems rail — a fixed-width column outside the
-    // dashboard's flow — so a late entitlement answer adds a row to a
-    // scrolling list instead of moving the fleet grid.
-    expect(SIDEBAR).toContain('<ActivationLauncher')
-    // The rail's default is deliberately NOT asserted here: widening it is a
-    // dashboard-layout question (it takes 176px from every pane), not a
-    // placement one, and this test is about where the checklist lives.
+    // dashboard's flow — so a late entitlement answer extends a scrolling list
+    // instead of moving the fleet grid. It sits after the view rows (under the
+    // labels, however many) and goes away with them when the rail collapses.
+    expect(SIDEBAR).toContain('<ActivationChecklist v-if="!isCollapsed" />')
+    expect(SIDEBAR.indexOf('<ActivationChecklist')).toBeGreaterThan(
+      SIDEBAR.indexOf('v-for="view in sortedViews"'),
+    )
+    expect(SIDEBAR.indexOf('<ActivationChecklist')).toBeLessThan(
+      SIDEBAR.indexOf('Create New View Button'),
+    )
+    // The checklist itself opens expanded on first start; a saved collapse wins.
+    expect(CHECKLIST).toMatch(/getItem\(EXPANDED_KEY\) !== 'false'/)
+    // Expanded by default: an unlabelled rail hides both the systems it lists
+    // and the checklist. A saved preference still wins.
+    expect(SIDEBAR).toMatch(/savedCollapsed === 'true' : false/)
     expect(DASHBOARD.match(/<FirstRunOverlay\b/g)).toHaveLength(1)
     // The Dashboard's hotkeys stand down while setup is open.
     expect(DASHBOARD).toMatch(/firstRunOpen\.value \|\| isEditorOpen\.value/)
