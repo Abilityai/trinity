@@ -47,14 +47,26 @@ def _restore_sys_modules():
                 sys.modules[name] = value
 
 
-for _mod in list(sys.modules):
-    if _mod == "agent_server" or _mod.startswith("agent_server."):
-        sys.modules.pop(_mod, None)
-
-_stub = types.ModuleType("agent_server")
-_stub.__path__ = [str(_BASE_IMAGE / "agent_server")]  # type: ignore[attr-defined]
-_stub.__package__ = "agent_server"
-sys.modules["agent_server"] = _stub
+# Evict ONLY when the registered `agent_server` is not the real base-image
+# package (the `test_git_status_dual_ahead_behind.py` guard). An unconditional
+# eviction here is a runner-killer: this file sorts after `test_drain_bounded.py`,
+# which binds `_drain_bounded` at collection and patches `_drain_reader_threads`
+# by dotted string at test time — a fresh module copy makes that patch land
+# on the wrong object, the REAL drain runs, and its cgroup orphan sweep takes
+# the CI runner down with it ("The runner has received a shutdown signal";
+# the #728 regression class).
+_existing = sys.modules.get("agent_server")
+_real_path = str(_BASE_IMAGE / "agent_server")
+if _existing is None or not any(
+    _real_path in p for p in (getattr(_existing, "__path__", None) or [])
+):
+    for _mod in list(sys.modules):
+        if _mod == "agent_server" or _mod.startswith("agent_server."):
+            sys.modules.pop(_mod, None)
+    _stub = types.ModuleType("agent_server")
+    _stub.__path__ = [_real_path]  # type: ignore[attr-defined]
+    _stub.__package__ = "agent_server"
+    sys.modules["agent_server"] = _stub
 
 from agent_server import heartbeat  # noqa: E402
 from agent_server.services import activity_tracking as at  # noqa: E402

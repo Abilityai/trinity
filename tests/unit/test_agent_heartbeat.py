@@ -61,14 +61,26 @@ def _restore_sys_modules():
 # base-image package as a *namespace* package (no __init__.py exec). This
 # resolves `from .state import agent_state` via __path__ without booting the
 # FastAPI app (which needs python-multipart etc.). Same shim conftest uses.
-for _mod in list(sys.modules):
-    if _mod == "agent_server" or _mod.startswith("agent_server."):
-        sys.modules.pop(_mod, None)
-
-_stub = types.ModuleType("agent_server")
-_stub.__path__ = [str(_BASE_IMAGE / "agent_server")]  # type: ignore[attr-defined]
-_stub.__package__ = "agent_server"
-sys.modules["agent_server"] = _stub
+# Evict ONLY when the registered `agent_server` is not the real base-image
+# package. An unconditional eviction here re-registers the package under a
+# fresh module object, and any earlier-collected file that bound a function
+# from the old copy and later patches by dotted string (test_drain_bounded.py)
+# patches the wrong copy — the REAL drain then runs and its cgroup orphan
+# sweep kills the CI runner / a developer's desktop session (#728 class,
+# trinity-enterprise#620). Guarded pattern: test_git_status_dual_ahead_behind.py;
+# enforced by tests/lint_sys_modules.py.
+_existing = sys.modules.get("agent_server")
+_real_path = str(_BASE_IMAGE / "agent_server")
+if _existing is None or not any(
+    _real_path in p for p in (getattr(_existing, "__path__", None) or [])
+):
+    for _mod in list(sys.modules):
+        if _mod == "agent_server" or _mod.startswith("agent_server."):
+            sys.modules.pop(_mod, None)
+    _stub = types.ModuleType("agent_server")
+    _stub.__path__ = [_real_path]  # type: ignore[attr-defined]
+    _stub.__package__ = "agent_server"
+    sys.modules["agent_server"] = _stub
 
 from agent_server import heartbeat  # noqa: E402
 
