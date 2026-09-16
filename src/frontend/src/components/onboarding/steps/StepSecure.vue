@@ -106,18 +106,18 @@
               other name. Still no verdict on the live connection.
             -->
             <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
-              Point a domain’s A record at this server, then save it as the
+              Point your domain’s A record at this server, then save it as the
               <span class="text-gray-600 dark:text-gray-300">Public URL</span>
               above (it also lives in Settings → General). Trinity does not issue certificates
-              itself, but whatever terminates TLS in front of it is configured to obtain one for
-              the name you save, the first time someone visits it — so the domain gets an
-              ordinary long-lived certificate instead of a short-lived IP one, and Trinity hands
-              out the name instead of the IP. Only the name you save is allowed, so nobody else
-              can point a domain here and have certificates issued. Point the domain at this
-              server before you save: the certificate is obtained on the first request that
-              arrives for the name, so if the record is missing or points elsewhere, that
-              request never gets here — the visitor sees a certificate error and Trinity,
-              which is not in that conversation, carries on showing the name as saved.
+              itself — the web server in front of it is configured to obtain one for the name
+              you save, the first time someone visits. After that Trinity hands out the name
+              instead of the IP. Only the name you save is allowed, so nobody else can point a
+              domain here and have certificates issued. Point the domain at this server before
+              you save: the certificate is
+              obtained on the first request that arrives for the name, so if the record is
+              missing or points elsewhere, that request never gets here — the visitor sees a
+              certificate error, and Trinity, which is not part of that exchange, carries on
+              showing the name as saved.
             </p>
           </div>
 
@@ -136,16 +136,11 @@
             <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
               <template v-if="stage === 'address'">With that domain on Cloudflare, a</template><template v-else>With your domain on Cloudflare, a</template>
               tunnel lets this server stop listening on the public internet altogether:
-              <span class="font-mono text-gray-600 dark:text-gray-300">cloudflared</span>
-              connects outward to Cloudflare, and traffic arrives back through that
-              connection. Inbound integrations — Telegram, WhatsApp, VoIP, public agent
-              links, webhook triggers — keep working, because they still reach a public
-              hostname. Trinity ships the service behind the
-              <span class="font-mono text-gray-600 dark:text-gray-300">tunnel</span>
-              compose profile, driven by
-              <span class="font-mono text-gray-600 dark:text-gray-300">TUNNEL_TOKEN</span>
-              in <span class="font-mono text-gray-600 dark:text-gray-300">.env</span>, so that
-              last step happens on the host rather than from this page.
+              Cloudflare holds a connection open from the inside, and visitors arrive
+              through it. Telegram, WhatsApp, voice calls, public agent links and webhooks
+              keep working, because they still reach a public address. Setting it up takes a
+              few minutes on the server itself, so it happens on the host rather than from
+              this page — the guide below walks through it.
             </p>
           </div>
 

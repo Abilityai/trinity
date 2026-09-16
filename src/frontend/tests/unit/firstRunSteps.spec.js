@@ -368,13 +368,20 @@ describe('the chassis replaced the card ladder (structure)', () => {
       expect(existsSync(here(gone)), gone).toBe(false)
     }
     expect(DASHBOARD).not.toMatch(/onboarding-stack/)
-    for (const name of ['OnboardingWizard', 'HardeningGuide', 'FrontDeskPanel', 'FinishSetupCard']) {
+    // ActivationChecklist joins the list: ent#581's absorb-AC names all five,
+    // and it was the one left rendering inline. It is not folded INTO the
+    // overlay — its four milestones (first_chat, first_schedule_created,
+    // first_channel_connected) are observed from DB state during use and
+    // cannot be true while a blocking setup overlay is still up. The AC's
+    // "absorbs" wording is wrong for this one surface; the resolution is that
+    // no first-run card renders inline, which is AC #1. Restore the component
+    // from git history if the milestones get a home later.
+    for (const name of ['OnboardingWizard', 'HardeningGuide', 'FrontDeskPanel', 'FinishSetupCard', 'ActivationChecklist']) {
       expect(DASHBOARD, name).not.toContain(`<${name}`)
     }
   })
 
-  it('keeps ActivationChecklist inline and mounts the overlay once', () => {
-    expect(DASHBOARD).toContain('<ActivationChecklist />')
+  it('mounts the overlay once, as the only first-run surface', () => {
     expect(DASHBOARD.match(/<FirstRunOverlay\b/g)).toHaveLength(1)
     // The Dashboard's hotkeys stand down while setup is open.
     expect(DASHBOARD).toMatch(/firstRunOpen\.value \|\| isEditorOpen\.value/)

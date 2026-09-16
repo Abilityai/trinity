@@ -1,6 +1,6 @@
 # Hardening a Marketplace Install
 
-Take a one-click Trinity droplet from a bare public IP to an instance you would leave running: a real domain, then either a Cloudflare Tunnel or a private network, with the public ports closed behind you.
+Take a one-click Trinity droplet from a bare public IP to an instance you would leave running: a real domain, then a Cloudflare Tunnel or a private network, with the public ports closed behind you — and, if the web interface should not answer strangers either, an identity gate in front of the tunnel.
 
 ## When to Run This
 
@@ -19,7 +19,7 @@ Not for you if Trinity already runs on a private network — the managed fleet's
 | Container ports | Not reachable from off-box. Docker publishes past ordinary firewall rules, so Trinity installs its own rules that drop anything arriving at a container from outside. The backend, MCP server and log collector are reachable only through Caddy, or from the droplet itself |
 | Admin account | None until someone claims it in a browser — **whoever opens it first becomes the admin** |
 
-So the exposure is not "everything is open". It is that the web UI and the API answer anyone on the internet who finds the address, protected by your login alone.
+Everything except the web interface is already closed. What stays open is Trinity itself: the web UI and the API answer anyone on the internet who finds the address, and your login is the only thing in the way.
 
 ## Pre-flight
 
@@ -27,6 +27,7 @@ So the exposure is not "everything is open". It is that the web UI and the API a
 - [ ] **You own a domain** and can edit its DNS records.
 - [ ] **For the tunnel path:** that domain's DNS is hosted by Cloudflare, and you can sign in to the Cloudflare Zero Trust dashboard.
 - [ ] **For the private-network path:** you have confirmed nothing outside needs to call your instance — see the comparison in [Step 2](#step-2-choose-how-it-is-reached).
+- [ ] **For the identity-gate path (2c):** you accept owning a bypass list for every inbound integration, and re-checking it whenever you add a channel.
 - [ ] **Shell access to the droplet** for Step 2 — over SSH, or the provider's web console.
 
 ## Procedure
@@ -52,7 +53,7 @@ The certificate is obtained on the first request that arrives for the name, so *
 
 ### Step 2: Choose how it is reached
 
-Both options reach the same outcome — nothing listening on the public interface — and differ in one way that decides it for you.
+Both options close the public ports. They do **not** reach the same posture, and the difference is who can still reach Trinity once they are closed.
 
 | | Cloudflare Tunnel | Private network (Tailscale) |
 |---|---|---|
@@ -62,7 +63,11 @@ Both options reach the same outcome — nothing listening on the public interfac
 | Slack | Works | Works — Trinity connects outward over a WebSocket |
 | Needs | A domain on Cloudflare | A Tailscale account and a device to connect from |
 
-Everything in the broken column is a third party making a request **to** your instance, and a private network is precisely what prevents that. Choose the tunnel unless nothing outside needs to call in.
+Everything in the broken column is a third party making a request **to** your instance, and a private network is precisely what prevents that. So this row, not the security level, is what decides it: choose the tunnel if anything outside needs to call in.
+
+**Read the first row again before you pick.** A tunnel closes the ports; it does not make Trinity private. The web UI still answers anyone who has the address, with your login as the only thing in the way — the same sentence as [What You Start With](#what-you-start-with). That is a genuine improvement: no open ports, no exposed origin IP, and Cloudflare absorbing traffic before it reaches you. It is not privacy, and it is worth being clear with yourself about which one you wanted.
+
+If you want both — callbacks working **and** the UI not answering strangers — the tunnel needs an identity gate in front of it: [Step 2c](#step-2c-put-an-identity-gate-on-the-tunnel).
 
 ### Step 2a: Cloudflare Tunnel
 
@@ -155,6 +160,24 @@ The rule matches the **source address of the connection**, not a header, so a re
 
 **Why you cannot just browse the container port.** Trinity's container firewall drops anything reaching a container from off-box, tailnet traffic included, so `http://<tailnet-ip>:8081` is dropped. Ports 80 and 443 work because the web server in front is a host process, and host ports never pass through those rules.
 
+### Step 2c: Put an identity gate on the tunnel
+
+Only if you took the tunnel and want the web interface private as well. Trinity ships no integration for this — it is configured entirely on the Cloudflare side, in front of the hostname your tunnel publishes.
+
+The shape: Cloudflare authenticates the visitor before the request is allowed down the tunnel, so a stranger with your address gets an identity challenge instead of the Trinity login page. Your login stops being the only thing in the way. Cloudflare's own documentation owns the steps; this guide does not restate them, because they change.
+
+**The part that will bite you is the bypass list.** Every inbound integration is a machine with no identity to present — the same callers in the broken column above. Gate them and they break exactly as they would on a private network:
+
+- Telegram, WhatsApp and VoIP callbacks
+- Slack's OAuth return
+- Public chat links, agent websites, paid chat
+- Webhook triggers, inbound agent-to-agent
+- MCP clients that are not people in a browser
+
+So the gate goes on the human surface and those paths are excluded. Get it wrong in either direction and it is quiet: too broad and nothing is protected, too narrow and bots stop delivering with no error on this end. Re-check it after adding any new channel, and treat [Verify](#verify) as mandatory rather than optional here.
+
+If maintaining that list is not something you want to own, the honest choice is one of the two simpler postures: a tunnel and accept that the UI is public behind your login, or a private network and accept that nothing can call in.
+
 ### Step 3: Close the public ports
 
 Once the tunnel is connected, or you can reach the instance over the tailnet, add a cloud firewall blocking inbound 80 and 443. Leave 22 reachable from your own address only, or use the provider's console for shell access.
@@ -194,6 +217,7 @@ The full six-probe check is in [Monitoring](monitoring.md) — run it if anythin
 - The marketplace default is for **evaluation**. It answers anyone who finds the address.
 - Add a domain as soon as the instance is more than a test, and confirm it by loading the site.
 - Keep a real instance off the open internet: a tunnel if anything needs to call in, a private network if not.
+- A tunnel closes the ports but leaves the UI answering anyone with the address. Add an identity gate in front of it if that is not what you wanted.
 - Closing 80 and 443 afterwards is the step that makes it real.
 
 ## See Also

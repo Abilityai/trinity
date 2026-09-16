@@ -330,8 +330,15 @@ describe('the two paths are complementary, not alternatives', () => {
     // guard that stops it coming back.
     const prose = withoutComments(GUIDE_SFC)
     expect(prose).toMatch(/Cloudflare/)
-    expect(prose).toMatch(/cloudflared/)
-    expect(prose).toMatch(/TUNNEL_TOKEN/)
+    // #2691 AC 3: plain language, no security jargon. The tunnel's MECHANISM is
+    // still named ("stop listening on the public internet", "Cloudflare holds a
+    // connection open from the inside"); its IMPLEMENTATION is not. `cloudflared`,
+    // the `tunnel` compose profile and `TUNNEL_TOKEN` in `.env` were asserted here
+    // and are now deliberately absent: they are host-shell detail a first-run
+    // reader cannot act on from this page, and naming an env var was the single
+    // most-cited jargon hit when this screen was walked on a fresh droplet. The
+    // docs link carries them.
+    expect(prose).not.toMatch(/TUNNEL_TOKEN|cloudflared|compose profile|\.env\b/)
     expect(prose).not.toMatch(/Tailscale/)
     expect(prose.toLowerCase()).not.toMatch(/\bvpn\b/)
   })
@@ -371,7 +378,13 @@ describe('the two paths are complementary, not alternatives', () => {
     expect(prose).not.toMatch(/90-day certificate then replaces/)
     expect(prose).not.toMatch(/certificate then replaces|replaces the short-lived/)
     expect(prose).toContain('Trinity does not issue certificates itself')
-    expect(prose).toMatch(/whatever terminates TLS in front of it/)
+    // The ACTOR must still be named — the claim is that something else obtains
+    // the certificate, not Trinity. "whatever terminates TLS in front of it" was
+    // the old spelling and is now banned by the jargon rule below; "the web
+    // server in front of it" makes the same attribution in words a non-engineer
+    // reads. The assertion is on the attribution, not on the phrasing.
+    expect(prose).toMatch(/the web server in front of it is configured to obtain one/)
+    expect(prose).not.toMatch(/terminates TLS/)
     expect(prose).toMatch(/hands out the name instead of the IP/)
     // What CHANGED (#2380 follow-up): the sentence used to end "...picks up the
     // name", implying the proxy reconfigures itself from a Trinity setting. It
