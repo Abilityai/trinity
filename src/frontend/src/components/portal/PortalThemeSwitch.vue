@@ -66,8 +66,16 @@ function choose(value) {
 function onDocumentClick(event) {
   if (open.value && root.value && !root.value.contains(event.target)) open.value = false
 }
+// Escape protocol (#2582 / #2598): the conversation's document listener
+// cancels an in-flight turn, or ends a live call, on any Escape it sees
+// unclaimed. An open menu owns the keystroke, so claim it in the CAPTURE phase
+// with `preventDefault()` — the conversation's shared rule reads
+// `defaultPrevented` — and honour an earlier owner that already claimed it.
+// Closed, the switch owns nothing and lets Escape through.
 function onKeydown(event) {
+  if (event.defaultPrevented) return
   if (event.key === 'Escape' && open.value) {
+    event.preventDefault()
     open.value = false
     trigger.value?.focus()
   }
@@ -75,10 +83,10 @@ function onKeydown(event) {
 // Armed at mount, above every await (design-system principle 23).
 onMounted(() => {
   document.addEventListener('click', onDocumentClick)
-  document.addEventListener('keydown', onKeydown)
+  document.addEventListener('keydown', onKeydown, { capture: true })
 })
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocumentClick)
-  document.removeEventListener('keydown', onKeydown)
+  document.removeEventListener('keydown', onKeydown, { capture: true })
 })
 </script>

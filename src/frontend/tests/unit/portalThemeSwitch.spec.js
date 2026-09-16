@@ -29,6 +29,7 @@ import {
 import PortalThemeSwitch from '../../src/components/portal/PortalThemeSwitch.vue'
 import ThemeChoice from '../../src/components/base/ThemeChoice.vue'
 import { useThemeStore } from '../../src/stores/theme'
+import { shouldCancelOnEscape, shouldEndCallOnEscape } from '../../src/utils/turnCancel'
 
 const src = (rel) => stripComments(readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8'))
 
@@ -110,6 +111,9 @@ describe('PortalThemeSwitch (mounted)', () => {
   it('clicking an option calls setTheme with that value, closes, and the trigger reflects it', async () => {
     const w = mountSwitch()
     const setTheme = vi.spyOn(store, 'setTheme')
+    // `system` already resolved dark in beforeEach, so clear the class first —
+    // otherwise the `dark` assertion below would hold before the click too.
+    document.documentElement.classList.remove('dark')
     await w.get('[data-testid="portal-theme-switch"]').trigger('click')
     await w.get('[data-theme-option="dark"]').trigger('click')
     expect(setTheme).toHaveBeenCalledWith('dark')
@@ -145,6 +149,56 @@ describe('PortalThemeSwitch (mounted)', () => {
     document.body.click()
     await nextTick()
     expect(w.find('[data-testid="portal-theme-menu"]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  // The conversation's Escape handler is a bubble-phase `document` listener
+  // that asks these two shared rules. Register the same shape and record what
+  // it would decide for the very keystroke that closed the menu.
+  function escapeFromBody() {
+    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    document.body.dispatchEvent(event)
+    return event
+  }
+  function conversationDecisions() {
+    const seen = []
+    const listener = (e) => seen.push({
+      cancelTurn: shouldCancelOnEscape(e, { inFlight: true, cancelling: false, overlays: [] }),
+      endCall: shouldEndCallOnEscape(e, { callActive: true }),
+    })
+    document.addEventListener('keydown', listener)
+    return { seen, stop: () => document.removeEventListener('keydown', listener) }
+  }
+
+  it('the Escape that closes the menu is claimed, so it neither cancels a turn nor ends a call', async () => {
+    const w = mountSwitch()
+    const conversation = conversationDecisions()
+    await w.get('[data-testid="portal-theme-switch"]').trigger('click')
+
+    const whileOpen = escapeFromBody()
+    await nextTick()
+    expect(whileOpen.defaultPrevented).toBe(true)
+    expect(conversation.seen).toEqual([{ cancelTurn: false, endCall: false }])
+    expect(w.find('[data-testid="portal-theme-menu"]').exists()).toBe(false)
+
+    // Closed, the switch owns nothing: Escape still reaches the conversation.
+    const whileClosed = escapeFromBody()
+    expect(whileClosed.defaultPrevented).toBe(false)
+    expect(conversation.seen[1]).toEqual({ cancelTurn: true, endCall: true })
+
+    conversation.stop()
+    w.unmount()
+  })
+
+  it('an Escape an earlier owner already claimed leaves the menu open', async () => {
+    const w = mountSwitch()
+    await w.get('[data-testid="portal-theme-switch"]').trigger('click')
+    const earlier = (e) => e.preventDefault()
+    window.addEventListener('keydown', earlier, { capture: true })
+    escapeFromBody()
+    await nextTick()
+    window.removeEventListener('keydown', earlier, { capture: true })
+    expect(w.find('[data-testid="portal-theme-menu"]').exists()).toBe(true)
     w.unmount()
   })
 })
