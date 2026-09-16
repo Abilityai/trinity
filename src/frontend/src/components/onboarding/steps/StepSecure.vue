@@ -249,6 +249,9 @@ async function save() {
   }
   fieldError.value = ''
   saveError.value = ''
+  // A new attempt retires the previous confirmation, or a failure would show
+  // an error next to a success that no longer describes anything.
+  savedUrl.value = ''
   saving.value = true
   try {
     await settingsStore.updateSetting('public_chat_url', value)

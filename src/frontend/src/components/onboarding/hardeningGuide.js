@@ -41,8 +41,12 @@ export function hardeningStage(installTlsPosture) {
  */
 export const DOMAIN_BENEFIT =
   'People reach Trinity at your own address instead of a bare IP, with a proper certificate and no browser warning.'
+// No "see below" — this string renders on BOTH the first-run step and
+// Settings → General (`Settings.vue`), and the two surfaces have different
+// things below them. A pointer that resolves on one and dangles on the other
+// is the drift the shared constant exists to prevent.
 export const DOMAIN_PREREQUISITE =
-  'Point the domain at this server first, then save it here. The guide below shows how.'
+  'Point the domain at this server first, then save it here.'
 
 /**
  * Saving this value re-points live integrations, immediately (#2691).

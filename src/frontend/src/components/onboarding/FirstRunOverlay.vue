@@ -9,8 +9,8 @@
   NOT into here: its four milestones are observed from DB state during use, so
   they cannot be true while a blocking setup overlay is up. AC #1 — nothing
   first-run renders inline — is what it satisfies; the AC's "absorbs" wording
-  does not fit it. The enterprise `_activation.py` milestones now have no
-  surface (ent#238).
+  does not fit it. The milestones behind that checklist now have no surface;
+  where they live is a private-repo matter and is not named here.
 
   Every decision — which steps, when it opens, what counts as done, whether
   Continue is live — is in `firstRunSteps.js`, where the node-only spec can

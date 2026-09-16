@@ -425,6 +425,38 @@ describe('step one is finishable from the browser (#2380, on-demand TLS)', () =>
     expect(GUIDE_SFC).not.toMatch(/set-domain\.sh/)
   })
 
+  it('confirms the save, naming the value and what is still unknown', () => {
+    // Before this, pressing Save emptied the field and changed a badge — the
+    // whole feedback for a write that also re-registers every live Telegram
+    // webhook. The confirmation has to survive the field clearing, so it reads
+    // from its own ref rather than from `url`.
+    const body = GUIDE_SFC
+    expect(body).toContain('data-testid="first-run-public-url-saved"')
+    expect(body).toMatch(/v-if="savedUrl"/)
+    expect(body).toMatch(/\{\{ savedUrl \}\}/)
+    // Announced, not merely shown.
+    expect(body).toMatch(/data-testid="first-run-public-url-saved"[\s\S]{0,80}role="status"/)
+
+    // Set from the value that was saved, AFTER the write resolves and BEFORE
+    // the field is cleared — the ordering is what makes the message truthful.
+    const save = body.slice(body.indexOf('async function save()'))
+    const wrote = save.indexOf("updateSetting('public_chat_url'")
+    const remembered = save.indexOf('savedUrl.value = value')
+    const cleared = save.indexOf("url.value = ''")
+    expect(wrote).toBeGreaterThan(-1)
+    expect(remembered).toBeGreaterThan(wrote)
+    expect(cleared).toBeGreaterThan(remembered)
+    // Cleared when a new attempt starts, so a failed save cannot leave the
+    // previous success standing next to an error.
+    expect(save).toMatch(/savedUrl\.value = ''[\s\S]{0,120}saving\.value = true/)
+
+    // It states the write, and refuses to state that the domain works — that
+    // claim belongs to `postureCopy` and waits for a request to arrive.
+    expect(body).toMatch(/Saved\./)
+    expect(body).toMatch(/Nothing has reached/)
+    expect(body).not.toMatch(/Your domain is working|is now live|successfully configured/)
+  })
+
   it('says the certificate is obtained for the saved name, without claiming to do it', () => {
     const prose = withoutComments(GUIDE_SFC).replace(/\s+/g, ' ')
     expect(prose).toContain('Trinity does not issue certificates itself')
