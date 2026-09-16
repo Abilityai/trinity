@@ -830,6 +830,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { readStoredToken } from '../utils/platformSession'
 import { formatCostCompact } from '../composables/useFormatters'
 import { useNotification } from '../composables/useNotification'
 import { useAgentsStore } from '../stores/agents'
@@ -1157,7 +1158,7 @@ async function handleReadOnlyToggle(agent) {
   const newState = !agent.read_only_enabled
 
   try {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await axios.put(`/api/agents/${agent.name}/read-only`, {
       enabled: newState
     }, {

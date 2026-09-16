@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import axios from 'axios'
+import { readStoredToken } from './platformSession'
 import { useAgentsStore } from '../stores/agents'
 import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
@@ -44,7 +45,7 @@ export function useWebSocket() {
   const connect = async () => {
     if (ws.value) return
 
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     if (!token) {
       console.log('WebSocket: No auth token, skipping connection')
       return

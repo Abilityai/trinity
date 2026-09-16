@@ -3208,6 +3208,14 @@ def _migrate_agent_sync_state_git_dir_bytes(cursor, conn):
         "git_dir_bytes",
         "ALTER TABLE agent_sync_state ADD COLUMN git_dir_bytes INTEGER",
     )
+    # #2800 widened this column to BIGINT on PostgreSQL (Alembic
+    # `0063_agent_sync_state_git_dir_bytes_bigint`) and in `schema.py`. There is
+    # deliberately NO SQLite migration for it: INTEGER and BIGINT are the same
+    # 64-bit INTEGER affinity here, so an upgraded file declaring INTEGER and a
+    # fresh one declaring BIGINT store identical values — and the schema-parity
+    # suite cannot tell them apart anyway (both of its fixtures build from
+    # empty, so `init_schema` creates this table in both snapshots). A
+    # rename-swap rebuild of a live table at boot buys nothing on this track.
 
 def _migrate_agent_sync_state_gc_signals(cursor, conn):
     """Add pack_count / loose_objects / maintenance_failures to agent_sync_state (#1595).

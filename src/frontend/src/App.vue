@@ -40,8 +40,8 @@
 <script setup>
 import { onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import axios from 'axios'
 import { useAuthStore } from './stores/auth'
+import { readStoredToken } from './utils/platformSession'
 import { useThemeStore } from './stores/theme'
 import { useWebSocket } from './utils/websocket'
 import HelpChatWidget from './components/HelpChatWidget.vue'
@@ -55,13 +55,20 @@ onMounted(async () => {
   // Initialize theme immediately to prevent flash
   themeStore.initTheme()
 
-  // Check if user is authenticated
-  const token = localStorage.getItem('token')
+  // Seed the store SYNCHRONOUSLY from storage so router guards keying on
+  // `isAuthenticated` are satisfied before `initializeAuth`'s first await lands;
+  // `initializeAuth` (dispatched from main.js) restores the user and verifies
+  // the profile. This block used to ALSO write
+  // `axios.defaults.headers.common['Authorization']` — the second credential
+  // source #2791 removes. Axios merges that default into every request BEFORE
+  // the interceptor chain runs, so the copy written here won over storage for
+  // the life of the tab and the per-request interceptor in `main.js` was inert
+  // on every boot with a token. Requests get their credential from
+  // `applyRequestCredential` now; nothing writes the default.
+  const token = readStoredToken()
   if (token) {
     authStore.token = token
     authStore.isAuthenticated = true
-    // Set axios default authorization header
-    axios.defaults.headers.common['Authorization'] = `Bearer ${token}`
     // Connect to WebSocket for real-time updates
     connect()
   }

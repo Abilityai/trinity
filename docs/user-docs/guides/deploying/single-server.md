@@ -484,7 +484,6 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `VOICE_ENABLED` | dev · prod · hosted | Voice chat platform-wide (default on). |
 | `VOICE_MODEL` (commented) | dev · prod · hosted | Gemini Live model override. Keep commented unless overriding. |
 | `WORKSPACE_VOICE_MAX_DURATION` | dev · prod · hosted | Max length of one Workspace voice call, seconds (default 1800). |
-| `WORKSPACE_ENABLED` | dev · prod · hosted | Voice Workspace canvas beta flag. |
 | `VOIP_ENABLED` | dev · prod · hosted | Outbound phone calls via Twilio (default off; also needs a per-agent binding). |
 | `A2A_OUTBOUND_ENABLED` | dev · prod · hosted | Let agents task external A2A agents (default off; also needs registered endpoints). |
 | `VOIP_MAX_CALL_DURATION` / `VOIP_DEFAULT_DAILY_CALL_CAP` / `VOIP_CALL_RATE_LIMIT` / `VOIP_CALL_RATE_WINDOW` / `VOIP_TICKET_TTL_SECONDS` / `VOIP_INTENT_TTL_SECONDS` | dev · prod · hosted | Telephony spend and abuse controls. |
