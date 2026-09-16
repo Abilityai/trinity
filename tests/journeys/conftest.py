@@ -508,3 +508,81 @@ def mcp_as_caller(pair):
     call crosses the same `checkAgentAccess` gate a real playbook call does."""
     a, _ = pair
     return McpSession(agent_mcp_key(a))
+
+
+# ---------------------------------------------------------------------------
+# "Will a real model answer?" — decided by the INSTANCE, not the harness (#2812)
+# ---------------------------------------------------------------------------
+#
+# The gate this replaces read `ANTHROPIC_API_KEY` from the **pytest process**.
+# That is the harness host, not the instance under test. A stack whose agents
+# authenticate by subscription (SUB-003: `CLAUDE_CODE_OAUTH_TOKEN` inside the
+# container, rows in `subscription_credentials`) has no such variable on the
+# host yet answers normally — so on that stack the keyed journeys skipped
+# PERMANENTLY, and invisibly, because the reason is allowlisted in
+# `tests/harness/audit_skips.py`. A gate that cannot fail is worse than no
+# gate: #2336's per-PR journey-smoke and #2350's merge-enforced Journey Impact
+# declaration were both green while asserting nothing about a real model.
+#
+# The signal is the callee's OWN auth mode, read from the instance:
+# `GET /api/subscriptions/agents/{name}/auth` → `auth_mode` ∈
+# {"subscription", "api_key", "not_configured"}. That is "what the callee will
+# actually have" (#2812 AC 2) rather than what the instance has somewhere —
+# which is why this is keyed per agent and not on `GET /api/subscriptions`
+# being non-empty. #2812 calls out that instance-wide shape by name: it would
+# turn today's permanent skip into a false FAILURE on a stack where a freshly
+# created ephemeral agent never gets a subscription assigned. Asking the agent
+# cannot make that mistake. The endpoint reports the MODE and never the value.
+#
+# Deliberate behaviour change, called out so it is reviewed rather than
+# discovered: a stack that advertises a credential which cannot actually answer
+# (the classic case being a literal `ANTHROPIC_API_KEY=placeholder`, which the
+# backend does not special-case) now FAILS the journey instead of skipping it.
+# The old host-side gate vetoed that sentinel by string comparison; an
+# instance-side gate cannot see the value, and should not. This tier's stated
+# doctrine is that a stack which cannot deliver the promise is a finding, not a
+# silent pass — so failing is the right direction, and the failure names the
+# agent and its auth mode.
+
+# Kept VERBATIM: `tests/harness/audit_skips.py` allowlists this exact substring
+# ("journey needs a real provider key"). Rewording it makes every skip here
+# unallowlisted and turns the skip audit red.
+MODEL_SKIP_REASON = "journey needs a real provider key"
+
+# One GET per agent per session. The auth mode is set at create and changed
+# only by the auto-switch service, so re-reading it per test buys nothing.
+_AUTH_MODE_CACHE: dict = {}
+
+
+def agent_auth_mode(client, agent_name: str) -> str:
+    """This agent's Claude auth mode, as the instance reports it.
+
+    Returns `"unknown"` when the endpoint cannot be read, which the caller
+    treats as "cannot answer" — the same direction as the old missing-key gate,
+    so a harness that loses access degrades to a visible skip rather than a
+    confusing assertion failure deep inside a chat turn.
+    """
+    if agent_name in _AUTH_MODE_CACHE:
+        return _AUTH_MODE_CACHE[agent_name]
+    mode = "unknown"
+    try:
+        resp = client.get(f"/api/subscriptions/agents/{agent_name}/auth")
+        if resp.status_code == 200:
+            mode = (resp.json() or {}).get("auth_mode") or "unknown"
+    except Exception:  # noqa: BLE001 — a gate must never mask the test's own failure
+        mode = "unknown"
+    _AUTH_MODE_CACHE[agent_name] = mode
+    return mode
+
+
+def skip_unless_agent_can_answer(client, agent_name: str) -> str:
+    """Skip with the allowlisted reason unless `agent_name` has a model credential.
+
+    The one helper both J03 and J10 use (#2812 AC 1), so there is a single
+    definition of "a real model will answer on this stack". J10 passes the
+    CALLEE — the agent that has to produce the words — not the caller.
+    """
+    mode = agent_auth_mode(client, agent_name)
+    if mode in ("subscription", "api_key"):
+        return mode
+    pytest.skip(f"{MODEL_SKIP_REASON} — agent '{agent_name}' reports auth_mode={mode!r}")

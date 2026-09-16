@@ -131,6 +131,23 @@ what enforces it; "convention" means a reviewer does.
 10. **Failure output names the broken promise** — "agent `x` was created but
     never reached `running` within 90 s" — never a bare status comparison
     (convention, from #2336).
+11. **A credential-bound journey asks the INSTANCE, never the harness host.**
+    Rule 1's one sanctioned exception is a journey that needs a real model
+    answer (J03's first turn; J10's "I can read what they said" and "every
+    fan-out subtask completes"). It decides through the single helper
+    `tests/journeys/conftest.py::skip_unless_agent_can_answer`, which reads the
+    **callee's own** `auth_mode` from
+    `GET /api/subscriptions/agents/{name}/auth` — `subscription` or `api_key`
+    runs, `not_configured` skips with the reason allowlisted in
+    `tests/harness/audit_skips.py`. Two shapes are ruled out by construction:
+    reading `ANTHROPIC_API_KEY` from the pytest process gates on the harness
+    rather than the instance, so a subscription-authenticated stack skipped
+    permanently and invisibly (#2812); and gating on `GET /api/subscriptions`
+    being non-empty describes the instance rather than the callee, which would
+    turn that permanent skip into a false failure when a freshly created
+    ephemeral agent never gets a subscription assigned. A stack that advertises
+    a credential which cannot actually answer FAILS here rather than skipping —
+    that is rule 1, not an exception to it.
 
 ## Pointers — what lives where
 
