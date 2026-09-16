@@ -213,6 +213,8 @@ const ctx = computed(() => ({
   isAdmin: auth.profileVerified && auth.role === 'admin',
   marketplaceInstall: sessions.hardeningGuideEligible,
   tlsPosture: sessions.installTlsPosture,
+  // #2691: observed, not advertised — see `hardeningGuide.js::postureCopy`.
+  publicUrlReached: sessions.publicUrlReached,
   hasEmail: !!auth.userEmail,
   userEmail: auth.userEmail,
   claudeAuthConfigured: sessions.claudeAuthConfigured,

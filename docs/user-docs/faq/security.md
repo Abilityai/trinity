@@ -103,6 +103,10 @@ Two admin-only surfaces, both off by default. The ask is the **Usage sharing** s
 
 Make sure the admin account exists and complete first-run setup while still behind a VPN or firewall, with a strong admin password (on a provisioned DigitalOcean droplet, the **Secure this instance** step of first-run setup walks you through a domain and then a tunnel). Prefer the Cloudflare Tunnel approach — it opens no inbound firewall ports and only forwards the path prefixes you list, so unlisted routes are rejected at the edge before reaching your server. Then harden the surfaces you actually expose: enable signature authentication on webhooks, review the email whitelist so only intended addresses can log in, and keep the tunnel token in your gitignored `.env`. If everyone who needs access can reach the server over a private network like Tailscale, you may not need public exposure at all. See [Public Access](../guides/deploying/public-access.md).
 
+## My instance came from a cloud marketplace and answers on a bare IP — how do I lock it down?
+
+Three stages, in order: add a domain, then either a Cloudflare Tunnel or a private network, then close ports 80 and 443 with a cloud firewall. A one-click droplet is reachable from the moment it boots because no provider in that channel can attach a private network at create time, so the default is fine for evaluation and not for an instance holding real work. Choose the tunnel if anything outside has to call in — Telegram, WhatsApp, VoIP, public links, webhook triggers — and a private network only if nothing does. See [Hardening a Marketplace Install](../guides/deploying/hardening.md).
+
 ## Who controls which users can access an agent?
 
 Access is governed by Trinity's role and sharing model: owners share agents with specific users, admins see everything, and roles gate who can create agents at all. That model is covered in its own documentation rather than here. See [Roles and Permissions](../getting-started/roles-and-permissions.md) and [Access Control](../sharing-and-access/access-control.md).

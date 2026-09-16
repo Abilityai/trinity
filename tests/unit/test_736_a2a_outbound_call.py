@@ -247,7 +247,15 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
             state["last"] = kwargs
             return _Result()
 
+    # #2524: the inbound bridge goes through the sync edge adapter now (it is
+    # `execute_task` plus a wait when the dispatch queues). Forwarding double, so
+    # the loopback still asserts the same kwargs on the shared path.
+    async def _adapter(**kwargs):
+        kwargs.pop("wait_timeout", None)
+        return await _Svc().execute_task(**kwargs)
+
     monkeypatch.setattr(a2a, "get_task_execution_service", lambda: _Svc())
+    monkeypatch.setattr(a2a, "dispatch_and_await_terminal", _adapter)
 
     class _Idem:
         def begin(self, scope, key):

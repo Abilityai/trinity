@@ -510,8 +510,8 @@ Every `fan_out_id` groups at most `MAX_TASKS` (= 50, `models.py`) rows, and ever
 Signal: `SELECT fan_out_id FROM schedule_executions WHERE fan_out_id IS NOT NULL GROUP BY fan_out_id HAVING count(*) > 50 OR count(DISTINCT agent_name) > 1` → no rows.
 
 **IA-03** A stopped callee fails fast, and leaves no row *(Tier A, 🟡)*
-A call to an agent whose container is not running returns `503 {"detail": "Agent is not running"}` on `/api/agents/{name}/chat` (`chat_execution_service`, surfaced verbatim through `chat_with_agent`) or `409` on the A2A `message/send` route (`routers/a2a.py`) within the connect timeout — never a hang to `execution_timeout_seconds`, never a `schedule_executions` row. Measured on a live instance at 0.16 s (#2337 analysis, 2026-09-12).
-Signal: HTTP — status ∈ {503, 409} within 5 s, AND `SELECT count(*) FROM schedule_executions WHERE agent_name = <callee> AND started_at > <call time>` = 0.
+A call to an agent whose container is not running returns `503 {"detail": "Agent is not running"}` on `/api/agents/{name}/chat` (`chat_execution_service`, surfaced verbatim through `chat_with_agent`) within the connect timeout — never a hang to `execution_timeout_seconds`, never a `schedule_executions` row. Measured on a live instance at 0.16 s (#2337 analysis, 2026-09-12); asserted end to end by J10 (#2349). **The A2A half is unverified and the earlier `409` claim was wrong (#2349, 2026-09-15):** the inbound `message/send` route (`routers/a2a.py`) converts a failed dispatch into a JSON-RPC error on HTTP 200 — its only `409` is the outbound `/a2a/call` effect-in-progress — so whether a stopped callee fails fast and row-less on that path is not something any harness has measured.
+Signal: HTTP — `/chat` status 503 within 5 s, AND `SELECT count(*) FROM schedule_executions WHERE agent_name = <callee> AND started_at > <call time>` = 0.
 
 ---
 

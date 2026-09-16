@@ -479,7 +479,9 @@ class TestApiKeyValidation:
         )
         assert_status(response, 400)
         data = response.json()
-        assert "format" in data.get("detail", "").lower() or "invalid" in data.get("detail", "").lower()
+        detail = data.get("detail", "").lower()
+        # #2715 reworded this to "That doesn't look like an Anthropic API key…"
+        assert "format" in detail or "invalid" in detail or "doesn't look like" in detail, detail
 
     def test_missing_api_key_field_rejected(self, api_client: TrinityApiClient):
         """PUT /api/settings/api-keys/anthropic rejects missing api_key field."""

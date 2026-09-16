@@ -240,20 +240,41 @@ browser → https://trinity.example.com
    │  Caddy: no site for that name → catch-all `https://` site, tls { on_demand }
    ▼
 GET http://127.0.0.1:8000/api/public/tls-allowed?domain=trinity.example.com
-   │  routers/public.py:50-102   (unauthenticated — Caddy holds no credential)
-   │  requested = domain.strip().strip('.').lower()
-   │  allowed   = urlparse(settings_service.get_public_chat_url()).hostname
+   │  routers/public.py   (unauthenticated — Caddy holds no credential)
+   │  requested = canonical_host(domain)
+   │  allowed   = canonical_host(urlparse(get_public_chat_url()).hostname)
    │              (the saved row, else PUBLIC_CHAT_URL)
    ▼  200 iff requested == allowed; 404 otherwise
+   │  on 200, and only for Caddy's own ask: latch `<iso>|<host>` (#2691)
 Caddy obtains an ordinary Let's Encrypt certificate and serves the name
 ```
 
-- **Exact host, parsed** — never a substring match, so `evil-example.com` cannot
-  ride on `example.com`.
+- **Exact host, parsed and canonicalised** — never a substring match, so
+  `evil-example.com` cannot ride on `example.com`; and both sides go through
+  `canonical_host` (#2691), because SNI is ASCII so Caddy always asks about the
+  A-label while an operator saves the name as they read it. Lower-casing alone
+  left those unequal, and an internationalised domain was refused forever —
+  silently, on every visitor's page load, with the UI still reporting it as set.
+- **Reaching it is the proof** — an authorised call is the one thing this
+  instance can observe about the name: DNS resolves here, traffic arrives, a
+  certificate follows. Only Caddy's own `ask` counts: the route is also
+  reachable through the public front door (Caddy → frontend → nginx `/api/`),
+  and the domain is not a secret, so a public caller is answered but never
+  latches. It is latched and surfaced as `public_url_reached`, which
+  is what earns the first-run step its tick (PROV-016). It stays true behind a
+  proxy, a load balancer or a reserved IP, where comparing the name's DNS answer
+  against this instance's own address would say the opposite.
 - **Fails closed** — 404 on no domain, no configured URL, a failed settings read,
   or a mismatch. `on_demand` without a working gate makes the instance request
   certificates for any name anyone points at it, until the ACME account is
   rate-limited and the operator's own renewals fail.
+- **A private network gets plain HTTP, opt-in** (#2692) — `PRIVATE_NETWORK_CIDRS`
+  renders an `@private remote_ip` matcher into the `http://` site that serves
+  those sources instead of redirecting them, because a VPN already encrypts the
+  transport and a private address can never obtain a public certificate. Source
+  address, never the `Host` header, which is caller-supplied. Empty by default;
+  `--caddy-only` re-renders without redoing the site phase (which would re-stamp
+  `FRONTEND_URL` and provenance).
 - **Moves no privilege** — Trinity is containerised and cannot rewrite the
   Caddyfile or reload Caddy. Caddy asking Trinity keeps the operator out of a
   root shell. The route discloses only whether a guessed hostname matches, which

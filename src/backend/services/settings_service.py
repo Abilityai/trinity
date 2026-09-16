@@ -88,6 +88,15 @@ OPS_SETTINGS_DESCRIPTIONS = {
 
 
 # --- Remote template registry keys (TMPL-002, trinity-enterprise#14) -------
+# #2691: set the first time a real request arrives for the saved public URL and
+# a certificate is obtained for it (written by the on-demand-TLS gate in
+# `routers/public.py`, stored as `<iso>|<host>`). Never cleared: a change of host
+# makes the stamp stop matching on read (`is_public_url_reached`). It is the only
+# evidence this instance can hold that the name an operator typed actually
+# works — everything else here is what the instance ADVERTISES, not what was
+# observed.
+PUBLIC_URL_REACHED_KEY = "public_url_reached_at"
+
 TEMPLATE_REGISTRY_URL_KEY = "template_registry_url"
 TEMPLATE_REGISTRY_ENABLED_KEY = "template_registry_enabled"
 TEMPLATE_REGISTRY_GENERATION_KEY = "template_registry_generation"
@@ -595,6 +604,46 @@ class SettingsService:
         from config import HARDENING_GUIDE_INSTALL_SOURCES
 
         return self.get_install_source() in HARDENING_GUIDE_INSTALL_SOURCES
+
+    def is_public_url_reached(self) -> bool:
+        """Has the saved public URL ever actually served a request? (#2691)
+
+        The companion to `get_install_tls_posture`, and deliberately a different
+        KIND of statement. The posture describes what this instance advertises —
+        a string an admin typed, which nothing verifies. This describes something
+        that was observed: the web server in front asked whether it could obtain
+        a certificate for that exact name, which only happens when a real request
+        for it arrives here.
+
+        So the first-run step can say "saved" the moment it is saved, and claim
+        the domain is actually serving only once this is true. A domain typed
+        with a typo, or one whose DNS record was never created, never flips it.
+
+        The row records WHICH host was reached (`<iso>|<host>`), and this
+        compares it to the host configured right now. That comparison, rather
+        than clearing the row on save, is what makes a stale row harmless: a
+        restored backup, a direct edit or a writer that never learned to clear
+        leaves a row describing a name that no longer matches, and it reads as
+        not-reached instead of showing a tick over a domain nobody has visited.
+
+        Guarded like the posture read, and for the same reason: this feeds
+        `/api/settings/feature-flags`, where a raise zeroes every flag. Boolean
+        rather than the timestamp — that surface reaches every authenticated
+        principal, and the answer to "is my setup finished" is a yes or a no.
+        """
+        try:
+            from urllib.parse import urlsplit
+
+            from utils.url_validation import canonical_host
+
+            stamped = (db.get_setting_value(PUBLIC_URL_REACHED_KEY, "") or "").strip()
+            if not stamped:
+                return False
+            reached_host = stamped.rsplit("|", 1)[-1].strip().lower()
+            configured = canonical_host(urlsplit(self.get_public_chat_url() or "").hostname or "")
+            return bool(configured) and reached_host == configured
+        except Exception:
+            return False
 
     def get_install_tls_posture(self) -> str:
         """What this instance ADVERTISES itself as reachable at (#2380).
