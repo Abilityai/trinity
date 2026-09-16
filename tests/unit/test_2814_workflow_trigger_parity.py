@@ -102,11 +102,6 @@ DEFAULT_BRANCH_REGISTERED_EVENTS: frozenset[str] = frozenset({
 # itself at the release cut instead of rotting. Expect that test to go red on
 # `main`'s push CI once the release lands: that is the prune order, by design.
 ACCEPTED_UNTIL_RELEASE: dict[tuple[str, str], str] = {
-    ("issue-status-on-merge.yml", "pull_request_target"): (
-        "#2814 / #2769: the fork-safe trigger. Decided 2026-09-15 to let it land "
-        "with the next release cut rather than hotfix `main`; until then a merged "
-        "`Fixes #N` promotes nothing and the issue is relabelled by hand."
-    ),
     ("deploy-dev.yml", "schedule"): (
         "the nightly --no-cache rebuild floor; the file's own comment records that "
         "this cron is a SUPPLEMENT to the push trigger and starts at the next release"
