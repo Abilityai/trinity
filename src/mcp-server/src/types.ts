@@ -137,6 +137,19 @@ export interface AgentAccessCheckResult {
   reason?: string;       // Denial reason if not allowed
 }
 
+/**
+ * The backend's `LoopStatusResponse` (routers/loops.py), as far as the MCP
+ * layer relies on it. `agent_name` is the field the loop-id tools gate on
+ * (ent#628): a loop is addressed by id, so the agent it belongs to is only
+ * known after the resolve. Everything else is passed through untouched.
+ */
+export interface LoopStatus {
+  loop_id: string;
+  agent_name: string;
+  status: string;
+  [key: string]: unknown;
+}
+
 // Agent Template Info Types
 
 export interface AgentCommand {
