@@ -1,6 +1,6 @@
 # Hardening a Marketplace Install
 
-Take a one-click Trinity droplet from a bare public IP to an instance you would leave running: a real domain, then a Cloudflare Tunnel or a private network, with the public ports closed behind you — and, if the web interface should not answer strangers either, an identity gate in front of the tunnel.
+Take a one-click Trinity droplet from a bare public IP to an instance you would leave running: a real domain, then a Cloudflare Tunnel and a private network — together, not instead of each other — with the public ports closed behind you.
 
 ## When to Run This
 
@@ -26,8 +26,8 @@ Everything except the web interface is already closed. What stays open is Trinit
 - [ ] **The instance is claimed** — if nobody has created the admin account yet, do that first.
 - [ ] **You own a domain** and can edit its DNS records.
 - [ ] **For the tunnel path:** that domain's DNS is hosted by Cloudflare, and you can sign in to the Cloudflare Zero Trust dashboard.
-- [ ] **For the private-network path:** you have confirmed nothing outside needs to call your instance — see the comparison in [Step 2](#step-2-choose-how-it-is-reached).
-- [ ] **For the identity-gate path (2c):** you accept owning a bypass list for every inbound integration, and re-checking it whenever you add a channel.
+- [ ] **For tailnet-only:** you have confirmed nothing outside needs to call your instance — see the comparison in [Step 2](#step-2-choose-how-it-is-reached). If anything does, you want both rather than this.
+- [ ] **For both (2c):** you accept owning the list of paths the tunnel publishes, and re-checking it whenever you add a channel.
 - [ ] **Shell access to the droplet** for Step 2 — over SSH, or the provider's web console.
 
 ## Procedure
@@ -53,21 +53,24 @@ The certificate is obtained on the first request that arrives for the name, so *
 
 ### Step 2: Choose how it is reached
 
-Both options close the public ports. They do **not** reach the same posture, and the difference is who can still reach Trinity once they are closed.
+A tunnel and a private network are **not two options to pick between**. They solve different halves, they run side by side on the same server, and running both is the posture worth aiming at. All three columns end with no public ports open.
 
-| | Cloudflare Tunnel | Private network (Tailscale) |
-|---|---|---|
-| Web UI, Workspace, MCP | Anyone you give the address to | Your devices only, after one setting — see [Reaching the UI over the tailnet](#reaching-the-ui-over-the-tailnet) |
-| Telegram, WhatsApp, VoIP | Work | **Broken** |
-| Public chat links, agent websites, webhook triggers, paid chat, inbound agent-to-agent | Work | **Broken** |
-| Slack | Works | Works — Trinity connects outward over a WebSocket |
-| Needs | A domain on Cloudflare | A Tailscale account and a device to connect from |
+| | Tunnel only | Tailnet only | **Both** |
+|---|---|---|---|
+| Web UI, Workspace, MCP | Anyone with the address | Your devices only | **Your devices only** |
+| Telegram, WhatsApp, VoIP | Work | Broken | **Work** |
+| Public chat links, agent websites, webhook triggers, paid chat, inbound agent-to-agent | Work | Broken | **Work** |
+| Slack | Works | Works — Trinity connects outward over a WebSocket | Works |
+| Public ports open | None | None | None |
+| Needs | A domain on Cloudflare | A Tailscale account and a device to connect from | Both |
 
-Everything in the broken column is a third party making a request **to** your instance, and a private network is precisely what prevents that. So this row, not the security level, is what decides it: choose the tunnel if anything outside needs to call in.
+**A tunnel is not privacy.** It closes the ports and hides the origin IP, and Cloudflare absorbs traffic before it reaches you — all real. But the hostname it publishes still answers anyone who has it, with your login as the only thing in the way: the same sentence as [What You Start With](#what-you-start-with). If that is what you wanted, tunnel-only is a fine place to stop.
 
-**Read the first row again before you pick.** A tunnel closes the ports; it does not make Trinity private. The web UI still answers anyone who has the address, with your login as the only thing in the way — the same sentence as [What You Start With](#what-you-start-with). That is a genuine improvement: no open ports, no exposed origin IP, and Cloudflare absorbing traffic before it reaches you. It is not privacy, and it is worth being clear with yourself about which one you wanted.
+**Everything Broken in the tailnet column is a third party calling *in*,** and a private network is precisely what prevents that. Which is why tailnet-only suits an instance nothing calls into, and why it is the wrong column to read as a verdict on private networks generally — the Both column is the same tailnet with the callbacks routed around it.
 
-If you want both — callbacks working **and** the UI not answering strangers — the tunnel needs an identity gate in front of it: [Step 2c](#step-2c-put-an-identity-gate-on-the-tunnel).
+> **Telegram's Broken is ours, not Telegram's.** Trinity drives Telegram by webhook, so Telegram's servers have to reach your instance. The Bot API also offers outbound long polling, which would survive a tailnet exactly as Slack's Socket Mode does; Trinity does not implement it. Tracked as a gap, not a limitation: [#2849](https://github.com/abilityai/trinity/issues/2849).
+
+**Where to go:** [Step 2a](#step-2a-cloudflare-tunnel) for the tunnel, [Step 2b](#step-2b-private-network-tailscale) for the tailnet, and [Step 2c](#step-2c-both-the-tunnel-carries-the-callbacks-the-tailnet-carries-you) to combine them — which is 2a and 2b plus one change to what the tunnel publishes.
 
 ### Step 2a: Cloudflare Tunnel
 
@@ -160,23 +163,19 @@ The rule matches the **source address of the connection**, not a header, so a re
 
 **Why you cannot just browse the container port.** Trinity's container firewall drops anything reaching a container from off-box, tailnet traffic included, so `http://<tailnet-ip>:8081` is dropped. Ports 80 and 443 work because the web server in front is a host process, and host ports never pass through those rules.
 
-### Step 2c: Put an identity gate on the tunnel
+### Step 2c: Both — the tunnel carries the callbacks, the tailnet carries you
 
-Only if you took the tunnel and want the web interface private as well. Trinity ships no integration for this — it is configured entirely on the Cloudflare side, in front of the hostname your tunnel publishes.
+The posture worth aiming at, and it needs no Trinity change. Do [Step 2a](#step-2a-cloudflare-tunnel) and [Step 2b](#step-2b-private-network-tailscale) as written, then make one change to what the tunnel publishes.
 
-The shape: Cloudflare authenticates the visitor before the request is allowed down the tunnel, so a stranger with your address gets an identity challenge instead of the Trinity login page. Your login stops being the only thing in the way. Cloudflare's own documentation owns the steps; this guide does not restate them, because they change.
+**The one change.** Step 2a's simplest setup is a single catch-all rule routing the whole hostname to the frontend, which publishes the web UI along with everything else. Instead, publish only the paths third parties actually call — the *"Narrower: path-split rules"* table in [Public Access](public-access.md#2-configure-public-hostnames) lists them — and **leave out the `/` catch-all row**. Without it the tunnel carries webhooks, public chat links, agent websites and MCP, and simply has no route for the admin UI.
 
-**The part that will bite you is the bypass list.** Every inbound integration is a machine with no identity to present — the same callers in the broken column above. Gate them and they break exactly as they would on a private network:
+Then reach the UI over the tailnet exactly as Step 2b describes, with `PRIVATE_NETWORK_CIDRS` set. Both paths terminate at the same Caddy on the same droplet; they differ only in how a request arrives.
 
-- Telegram, WhatsApp and VoIP callbacks
-- Slack's OAuth return
-- Public chat links, agent websites, paid chat
-- Webhook triggers, inbound agent-to-agent
-- MCP clients that are not people in a browser
+The result is the third column of the table in [Step 2](#step-2-choose-how-it-is-reached): callbacks working, the UI answering your devices only, and nothing listening on the public interface.
 
-So the gate goes on the human surface and those paths are excluded. Get it wrong in either direction and it is quiet: too broad and nothing is protected, too narrow and bots stop delivering with no error on this end. Re-check it after adding any new channel, and treat [Verify](#verify) as mandatory rather than optional here.
+**What this costs you.** An allowlist you own. Add a channel that introduces a new inbound path and you must publish that path, or it silently stops delivering — no error on this end, because the request never arrives. That is the safe direction to fail (a missing entry breaks one integration loudly rather than exposing the UI quietly), but it is still a list, and [Verify](#verify) is how you find out.
 
-If maintaining that list is not something you want to own, the honest choice is one of the two simpler postures: a tunnel and accept that the UI is public behind your login, or a private network and accept that nothing can call in.
+**If you would rather the UI stayed public but gated**, Cloudflare Access sits in front of the tunnel hostname and challenges a visitor for identity before the request is allowed down it. Trinity ships no integration for it; it is configured entirely on the Cloudflare side, and their documentation owns the steps. The same allowlist problem applies in mirror image — every machine caller needs a bypass, or it is challenged and fails.
 
 ### Step 3: Close the public ports
 
@@ -216,8 +215,8 @@ The full six-probe check is in [Monitoring](monitoring.md) — run it if anythin
 
 - The marketplace default is for **evaluation**. It answers anyone who finds the address.
 - Add a domain as soon as the instance is more than a test, and confirm it by loading the site.
-- Keep a real instance off the open internet: a tunnel if anything needs to call in, a private network if not.
-- A tunnel closes the ports but leaves the UI answering anyone with the address. Add an identity gate in front of it if that is not what you wanted.
+- Keep a real instance off the open internet. A tunnel and a private network are not a choice — run both: the tunnel carries what has to call in, the tailnet carries you.
+- A tunnel alone closes the ports but leaves the UI answering anyone with the address. A tailnet alone makes the UI yours but breaks every inbound integration. Only together do you get both.
 - Closing 80 and 443 afterwards is the step that makes it real.
 
 ## See Also

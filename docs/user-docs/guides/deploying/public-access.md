@@ -59,7 +59,10 @@ In the Cloudflare dashboard, add a public hostname for your tunnel under the **P
 | `/chat/*` | `http://trinity-frontend:8080` | Public chat UI |
 | `/site/*` | `http://trinity-backend:8000` | Agent website proxy |
 | `/assets/*` | `http://trinity-frontend:8080` | Static assets |
-| `/` (catch-all) | `http://trinity-frontend:8080` | SPA root and web UI |
+
+**Leave the web UI off this list deliberately.** Adding a `/` catch-all row routing to `http://trinity-frontend:8080` publishes the admin SPA and undoes the narrowing — the result is the catch-all setup above, reached the long way. Add it only if you want the UI publicly reachable; if you want it private, omit it and reach the UI over a private network instead, as in [Hardening → Step 2c](hardening.md#step-2c-both-the-tunnel-carries-the-callbacks-the-tailnet-carries-you).
+
+A missing entry fails in the safe direction: one integration stops delivering, visibly, rather than the UI being exposed quietly. Re-check the list whenever you add a channel.
 
 ### 3. Add the DNS record
 
