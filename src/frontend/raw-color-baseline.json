@@ -415,7 +415,7 @@
     },
     "src/frontend/src/components/SystemViewsSidebar.vue": {
       "raw_nongray": 16,
-      "raw_gray": 29,
+      "raw_gray": 31,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/TagsEditor.vue": {
