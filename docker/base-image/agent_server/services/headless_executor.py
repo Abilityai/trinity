@@ -1016,6 +1016,7 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
                         ctx.metadata,
                         ctx.tool_start_times,
                         ctx.response_parts,
+                        execution_id=ctx.task_session_id,
                     )
 
                     # #970 early-completion: a result line ends a `claude --print`

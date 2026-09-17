@@ -2625,11 +2625,43 @@ class SshAccessRequest(BaseModel):
 # =============================================================================
 
 
+# trinity-enterprise#620: the per-execution activity the Workspace Work card
+# shows. Bounds are enforced HERE, not trusted from the agent: the payload is
+# agent-authored and is later rendered to people, so every string is capped
+# and every id shape-checked. Anything over the caps 422s the whole beat —
+# the 30s monitor stays authoritative for liveness (#307), so a refused beat
+# costs a card line, never a health verdict.
+HEARTBEAT_ACTIVITY_MAX_EXECUTIONS = 20
+HEARTBEAT_ACTIVITY_SUMMARY_MAX = 120
+HEARTBEAT_ACTIVITY_TOOL_MAX = 64
+_HEARTBEAT_EXECUTION_ID_RE = r"^[A-Za-z0-9_\-]{1,128}$"
+
+
+class HeartbeatExecutionActivity(BaseModel):
+    """What ONE running execution is doing right now (trinity-enterprise#620).
+
+    `tool` is the agent's display name for the tool (`Read`, `Bash`,
+    `mcp:trinity`, `Task:explore`) — `None` between tools ("Thinking");
+    `summary` is the agent's bounded human summary of the input (a shortened
+    path, a quoted pattern, the head of a command), never the raw input.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: str = Field(pattern=_HEARTBEAT_EXECUTION_ID_RE)
+    tool: Optional[str] = Field(default=None, max_length=HEARTBEAT_ACTIVITY_TOOL_MAX)
+    summary: Optional[str] = Field(default=None, max_length=HEARTBEAT_ACTIVITY_SUMMARY_MAX)
+    since: Optional[str] = Field(default=None, max_length=40)
+
+
 class HeartbeatPayload(BaseModel):
     """Lightweight liveness payload POSTed by the agent every ~5s."""
     memory_mb: Optional[float] = None
     active_executions: Optional[int] = None
     uptime_s: Optional[float] = None
+    # trinity-enterprise#620 — optional so a pre-#620 image's beat still lands.
+    executions: Optional[List[HeartbeatExecutionActivity]] = Field(
+        default=None, max_length=HEARTBEAT_ACTIVITY_MAX_EXECUTIONS
+    )
 
 
 # =============================================================================

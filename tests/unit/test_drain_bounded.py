@@ -37,6 +37,34 @@ from agent_server.services.subprocess_lifecycle import (  # noqa: E402
 )
 
 
+def _patch(monkeypatch, name: str, value) -> None:
+    """Patch a name in the globals the imported `_drain_bounded` ACTUALLY reads.
+
+    Never by dotted string: `monkeypatch.setattr("agent_server.services...", …)`
+    resolves through `sys.modules`, and a later-collected file that evicts and
+    re-registers the `agent_server` package leaves a SECOND module copy there.
+    The patch then lands on the copy while the `_drain_bounded` bound above
+    keeps its original globals — so the REAL drain runs, and its
+    `terminate_process_group` + cgroup orphan sweep SIGKILL whatever real
+    process group `pid=99999` resolves to and everything in the host's root
+    cgroup. That took down a developer desktop session twice and the CI runner
+    on every shard ("The runner has received a shutdown signal") before it was
+    understood (trinity-enterprise#620 / #728 class). `__globals__` is the
+    one dict the function reads regardless of how many copies exist.
+    """
+    monkeypatch.setitem(_drain_bounded.__globals__, name, value)
+
+
+@pytest.fixture(autouse=True)
+def _never_signal_a_real_process(monkeypatch):
+    """The budget-exceeded branch calls `_terminate_process_group(process, 0,
+    pgid=pgid)`. With the MagicMock process (`pid=99999`) and `pgid=None`
+    that is `os.getpgid(99999)` + `os.killpg(...)` on whatever REAL process
+    happens to hold that pid on the host. Stub it for every test here; a test
+    that wants to observe the call re-patches with its own mock on top."""
+    _patch(monkeypatch, "_terminate_process_group", MagicMock())
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -58,13 +86,9 @@ def test_drain_bounded_returns_within_budget_when_drain_hangs(monkeypatch):
     async def _hanging_drain(*args, **kwargs):
         await asyncio.sleep(600)  # simulate indefinite block
 
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._drain_reader_threads",
-        _hanging_drain,
+    _patch(monkeypatch, "_drain_reader_threads", _hanging_drain,
     )
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._DRAIN_BUDGET_SECONDS",
-        2,
+    _patch(monkeypatch, "_DRAIN_BUDGET_SECONDS", 2,
     )
 
     process = _make_fake_process()
@@ -89,18 +113,12 @@ def test_drain_bounded_kills_group_on_budget_exceeded(monkeypatch):
     async def _hanging_drain(*args, **kwargs):
         await asyncio.sleep(600)
 
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._drain_reader_threads",
-        _hanging_drain,
+    _patch(monkeypatch, "_drain_reader_threads", _hanging_drain,
     )
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._DRAIN_BUDGET_SECONDS",
-        1,
+    _patch(monkeypatch, "_DRAIN_BUDGET_SECONDS", 1,
     )
     kill = MagicMock()
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._terminate_process_group",
-        kill,
+    _patch(monkeypatch, "_terminate_process_group", kill,
     )
 
     process = _make_fake_process()
@@ -119,13 +137,9 @@ def test_drain_bounded_budget_exceed_kill_failure_is_swallowed(monkeypatch):
     async def _hanging_drain(*args, **kwargs):
         await asyncio.sleep(600)
 
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._drain_reader_threads", _hanging_drain)
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._DRAIN_BUDGET_SECONDS", 1)
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._terminate_process_group",
-        MagicMock(side_effect=OSError("boom")))
+    _patch(monkeypatch, "_drain_reader_threads", _hanging_drain)
+    _patch(monkeypatch, "_DRAIN_BUDGET_SECONDS", 1)
+    _patch(monkeypatch, "_terminate_process_group", MagicMock(side_effect=OSError("boom")))
 
     outcome = _drain_bounded(_make_fake_process(), MagicMock(spec=threading.Thread), pgid=1)
     assert outcome == "budget_exceeded"  # still returns cleanly
@@ -140,9 +154,7 @@ def test_drain_bounded_completes_fast_when_drain_is_quick(monkeypatch):
     async def _fast_drain(*args, **kwargs):
         call_log.append("drain_called")
 
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._drain_reader_threads",
-        _fast_drain,
+    _patch(monkeypatch, "_drain_reader_threads", _fast_drain,
     )
 
     process = _make_fake_process()
@@ -174,9 +186,7 @@ def test_drain_bounded_forwards_grace_and_pgid(monkeypatch):
         received["grace"] = grace
         received["pgid"] = pgid
 
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._drain_reader_threads",
-        _recording_drain,
+    _patch(monkeypatch, "_drain_reader_threads", _recording_drain,
     )
 
     process = _make_fake_process()
@@ -202,9 +212,7 @@ def test_drain_bounded_returns_completed_on_clean_drain(monkeypatch):
     async def _fast_drain(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._drain_reader_threads",
-        _fast_drain,
+    _patch(monkeypatch, "_drain_reader_threads", _fast_drain,
     )
 
     assert _drain_bounded(_make_fake_process(), grace=5, pgid=None) == "completed"
@@ -217,13 +225,9 @@ def test_drain_bounded_returns_budget_exceeded_on_hang(monkeypatch):
     async def _hanging_drain(*args, **kwargs):
         await asyncio.sleep(600)
 
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._drain_reader_threads",
-        _hanging_drain,
+    _patch(monkeypatch, "_drain_reader_threads", _hanging_drain,
     )
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._DRAIN_BUDGET_SECONDS",
-        1,
+    _patch(monkeypatch, "_DRAIN_BUDGET_SECONDS", 1,
     )
 
     assert _drain_bounded(_make_fake_process(), grace=1, pgid=None) == "budget_exceeded"
@@ -236,9 +240,7 @@ def test_drain_bounded_returns_errored_and_logs_when_drain_raises(monkeypatch, c
     async def _raising_drain(*args, **kwargs):
         raise RuntimeError("boom in drain")
 
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._drain_reader_threads",
-        _raising_drain,
+    _patch(monkeypatch, "_drain_reader_threads", _raising_drain,
     )
 
     with caplog.at_level("ERROR"):
@@ -259,9 +261,7 @@ def test_drain_bounded_returns_leaked_when_reader_survives(monkeypatch):
     async def _fast_drain(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(
-        "agent_server.services.subprocess_lifecycle._drain_reader_threads",
-        _fast_drain,
+    _patch(monkeypatch, "_drain_reader_threads", _fast_drain,
     )
 
     # A real, still-alive reader thread (the leaked case).
