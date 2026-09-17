@@ -76,7 +76,7 @@ def _row(**over):
 # ---------------------------------------------------------------------------
 
 def test_heartbeat_payload_accepts_the_activity_list_and_a_pre_620_beat():
-    from models import HeartbeatPayload, HEARTBEAT_ACTIVITY_MAX_EXECUTIONS
+    from models import HeartbeatPayload, HEARTBEAT_ACTIVITY_MAX_EXECUTIONS, HEARTBEAT_ACTIVITY_TOOL_MAX
     old = HeartbeatPayload(memory_mb=1.0, active_executions=1, uptime_s=2.0)
     assert old.executions is None
     new = HeartbeatPayload(memory_mb=1.0, executions=[
@@ -86,6 +86,8 @@ def test_heartbeat_payload_accepts_the_activity_list_and_a_pre_620_beat():
     assert [e.execution_id for e in new.executions] == ["exec-1", "exec-2"]
     assert new.model_dump(exclude_none=True)["executions"][1] == {"execution_id": "exec-2"}
     assert HEARTBEAT_ACTIVITY_MAX_EXECUTIONS == 20
+    # heartbeat.py ACTIVITY_TOOL_MAX cuts the agent side to this same ceiling.
+    assert HEARTBEAT_ACTIVITY_TOOL_MAX == 64
 
 
 @pytest.mark.parametrize("bad", [

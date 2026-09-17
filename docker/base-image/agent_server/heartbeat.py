@@ -83,6 +83,10 @@ def _count_active_executions() -> int:
 # these counts. 120 chars matches the Work read's title bound.
 ACTIVITY_MAX_EXECUTIONS = 20
 ACTIVITY_SUMMARY_MAX = 120
+# The backend's HeartbeatExecutionActivity.tool max_length. The name is not
+# bounded at its source (a codex MCP tool is `server.tool`, `Task:<type>` comes
+# from the model), and one over-long name would 422 the WHOLE beat.
+ACTIVITY_TOOL_MAX = 64
 
 
 def _executions_activity() -> list:
@@ -119,9 +123,12 @@ def _executions_activity() -> list:
         summary = slot.get("input_summary")
         if isinstance(summary, str) and len(summary) > ACTIVITY_SUMMARY_MAX:
             summary = summary[: ACTIVITY_SUMMARY_MAX - 1] + "…"
+        tool = slot.get("tool")
+        if isinstance(tool, str) and len(tool) > ACTIVITY_TOOL_MAX:
+            tool = tool[: ACTIVITY_TOOL_MAX - 1] + "…"
         out.append({
             "execution_id": eid,
-            "tool": slot.get("tool"),
+            "tool": tool if isinstance(tool, str) else None,
             "summary": summary if isinstance(summary, str) else None,
             "since": slot.get("since") or entry.get("started_at"),
         })

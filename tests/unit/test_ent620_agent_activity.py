@@ -178,6 +178,19 @@ def test_heartbeat_bounds_the_list_and_the_summary(monkeypatch):
     assert entries[0]["summary"].endswith("…")
 
 
+def test_heartbeat_bounds_the_tool_name_to_the_backend_ceiling(monkeypatch):
+    """An unbounded tool name (a codex `server.tool`, a model-chosen
+    `Task:<type>`) past the backend's max_length would 422 the whole beat and
+    read as a lost heartbeat. The builder cuts it to the same ceiling."""
+    monkeypatch.setattr(heartbeat, "_list_running", lambda: _running("e0"))
+    at.start_tool_execution("t1", "Read", {"file_path": "/x/y/z.py"}, execution_id="e0")
+    agent_state.session_activity["by_execution"]["e0"]["tool"] = "mcp:" + "s" * 200
+
+    entry = heartbeat._executions_activity()[0]
+    assert len(entry["tool"]) == heartbeat.ACTIVITY_TOOL_MAX
+    assert entry["tool"].startswith("mcp:sss") and entry["tool"].endswith("…")
+
+
 def test_a_run_past_the_cap_keeps_its_slot(monkeypatch):
     """/review C1: the prune set must be every running id, not the capped
     slice — otherwise the 21st concurrent run is forgotten on every beat and
