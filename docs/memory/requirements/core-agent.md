@@ -3065,3 +3065,69 @@ to localStorage in the clear.
   is the ONE light/dark/system picker, consumed by the NavBar's user menu and
   the Workspace switch, so the two cannot drift.
 - **Flow**: `docs/memory/feature-flows/dark-mode-theme.md`
+### 5.34 Workspace Work card — the activity line, and the chat scrolls to the card on your own send (trinity-enterprise#620)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_WORK_ACTIVITY_LINE`
+- **Description**: While an agent works, the Work card (in the chat and in the
+  rail's Work tab) says **what it is doing right now** in one short line —
+  "Reading `.../routers/agents.py`", "Running `pytest tests/unit …`",
+  "Searching for `"sync_health"`", "Fetching docs.example.com",
+  "Using github", "Delegating to scout: Map the Work card", "Thinking" — for
+  the chat's own turn AND for delegated, scheduled and room runs. The line is
+  one row of fixed height that slides up when it changes. When the person's
+  own message starts work, the transcript scrolls so the live card is in view.
+- **Why it was invisible**: the card had a "current step" slot fed by the
+  ent#286 stream, but the handler matched `evt.type === 'tool_use'` — a shape
+  the raw stream-json frames never carry (`type:'assistant'`,
+  `message.content[].type`) — so only the backend-injected `error` ever
+  labelled; and no run other than the chat's own had any live path at all.
+- **AC-1 — one vocabulary**: `src/frontend/src/utils/workActivity.js`
+  composes the line from two facts, `tool` (the agent's display name:
+  `Read`, `Bash`, `mcp:trinity`, `Task:explore`, null between tools) and
+  `summary` (the agent's bounded input summary, never the raw input). The
+  operator Chat tab (`execution-status.js`) and Agent Detail
+  (`useSessionActivity`) compose from it too — three vocabularies became one.
+  The stream path summarises client-side with a port of the agent server's
+  `get_input_summary`, held to parity by `tests/fixtures/tool_input_summary.json`
+  (asserted by pytest and vitest).
+- **AC-2 — fixed row, slide, no re-animation**: `PortalWorkCard.vue` reserves a
+  `h-4 overflow-hidden` row for the card's whole live life; a keyed
+  `<Transition>` slides the new line up over the old (a swap under
+  `prefers-reduced-motion`); `createActivityLineQueue` keys the row on the
+  TEXT, so an identical line never re-keys; text truncates with an ellipsis.
+- **AC-3 — every live card, honest silence**: the agent server tracks the
+  active tool **per execution** (`session_activity.by_execution`, keyed by the
+  backend execution id at both live parse sites and the Codex parser) and the
+  5 s heartbeat carries `executions: [{execution_id, tool, summary, since}]`
+  for the process registry's running set. The Work read folds it onto a live,
+  non-stale row of a rostered agent as `WorkItem.activity`; a cheap sibling
+  read `GET …/work/activity?agents=` (Redis only) is polled every 2.5 s while a
+  card is live. No beat, an old image, a stale row, an off-roster agent → no
+  line, never an invented one; the existing three-state steps rule is untouched.
+- **AC-4 — no flicker, never stuck**: minimum display 700 ms per line, a burst
+  collapses to its latest member, a quiet run keeps its last line with the
+  clock moving; a heartbeat-fed line older than 30 s (server `age_seconds` +
+  time since the read) is dropped, the beat itself expires in 15 s, and a
+  finished run leaves the heartbeat by construction (registry intersection).
+- **AC-5 — scroll on your own send only**: after `deliver()` flips `sending`,
+  one `nextTick` + `pinToBottom()` **guarded by `following`** — an incoming
+  message while the reader is scrolled up never moves the transcript (#2624).
+- **AC-6 — disclosure**: the line never rides the unfiltered `/ws`; both reads
+  are roster-scoped (set membership, off-roster dropped), the summary passes
+  the SAME `sanitize_text` + bound as titles, a delegation to an off-roster
+  agent reads "another agent", and the heartbeat model bounds the payload
+  (≤20 entries, summary ≤120, tool ≤64, id shape-checked, extra keys refused).
+  `execution_log`, `tool_calls`, `response` stay out of the payload.
+- **AC-7 — both themes, reduced motion**: gray ink ladder only; the slide is
+  `transition: none` under `prefers-reduced-motion: reduce`.
+- **AC-8 — terminal unchanged**: the row renders only while `isLive`; the
+  queue is cleared at terminal and the ent#525 verdict rendering is untouched.
+- **Tests**: `tests/unit/test_ent620_agent_activity.py` (per-execution slot,
+  the heartbeat builder, pruning, bounds, fail-open), `test_ent620_work_activity.py`
+  (model bounds/refusals, the read, the fold's gates, sanitiser + mask, age
+  ceiling, the `/activity` route's 404/422/rate limit, the projection still
+  excludes the log), `test_ent620_summary_parity.py`;
+  `src/frontend/tests/unit/workActivity.spec.js` (vocabulary, the real frame
+  shape, parity, queue rules, resolver, placement guards). Mutations: eight,
+  each red.
+- **Flow**: `docs/memory/feature-flows/workspace-work.md`

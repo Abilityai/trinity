@@ -832,6 +832,9 @@ class _CodexParseState:
     response_parts: List[str]
     model: Optional[str] = None
     seen_tool_ids: set = field(default_factory=set)
+    # trinity-enterprise#620: keys the per-execution activity slot the
+    # heartbeat reports; None on the batch parse (no live execution).
+    execution_id: Optional[str] = None
 
 
 def _tool_display_name(item: dict, item_type: str) -> str:
@@ -879,7 +882,7 @@ def _record_tool_use(state: _CodexParseState, tool_id: str, item: dict, item_typ
         )
     )
     try:
-        start_tool_execution(tool_id, name, tool_input)
+        start_tool_execution(tool_id, name, tool_input, execution_id=state.execution_id)
     except Exception:  # noqa: BLE001 - activity tracking is best-effort
         logger.debug("[Codex] start_tool_execution failed for %s", tool_id, exc_info=True)
 
@@ -1221,6 +1224,7 @@ class CodexRuntime(AgentRuntime):
             metadata=metadata,
             response_parts=response_parts,
             model=model,
+            execution_id=execution_id,
         )
         stderr_lines: List[str] = []
 
