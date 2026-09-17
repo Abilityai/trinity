@@ -968,7 +968,7 @@ class SubscriptionUsageWindow(BaseModel):
 
 class HeadroomWindow(BaseModel):
     """One rolling-limit window from the anthropic-ratelimit-unified-* headers (#471)."""
-    utilization_pct: Optional[float] = None  # 0..100
+    utilization_pct: Optional[float] = None  # percent of the cap; past 100 on an overage plan (#2419)
     resets_at: Optional[str] = None          # ISO-Z
     status: Optional[str] = None             # provider's per-window status (e.g. "allowed")
 

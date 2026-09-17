@@ -101,6 +101,14 @@
           </div>
         </template>
       </button>
+
+      <!-- Getting started (ent#238). In the rail rather than the dashboard
+           flow: the entitlement answer lands a round-trip after paint, and here
+           that extends a scrolling column instead of pushing the fleet grid
+           down. Always under the view labels, however many there are, and gone
+           with them when the rail is collapsed. Renders nothing when
+           unentitled, dismissed or done. -->
+      <ActivationChecklist v-if="!isCollapsed" />
     </div>
 
     <!-- Create New View Button -->
@@ -125,6 +133,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useSystemViewsStore } from '@/stores/systemViews'
+import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
 import { storeToRefs } from 'pinia'
 
 const emit = defineEmits(['create', 'edit'])
@@ -132,9 +141,12 @@ const emit = defineEmits(['create', 'edit'])
 const systemViewsStore = useSystemViewsStore()
 const { views, activeViewId, isLoading, sortedViews } = storeToRefs(systemViewsStore)
 
-// Default to collapsed, but respect localStorage if set
+// Expanded by default (vybe's call), with labels — a collapsed rail hides the
+// systems it lists and the getting-started checklist below them. A saved
+// preference still wins. Open, it takes 176px from every dashboard pane, and
+// the list view's eleven-column grid only just fits at 1280.
 const savedCollapsed = localStorage.getItem('trinity-sidebar-collapsed')
-const isCollapsed = ref(savedCollapsed !== null ? savedCollapsed === 'true' : true)
+const isCollapsed = ref(savedCollapsed !== null ? savedCollapsed === 'true' : false)
 
 // Watch for collapse changes and persist
 function toggleCollapse() {

@@ -46,5 +46,16 @@ export default {
   },
   plugins: [
     require('@tailwindcss/typography'),
+    // `list-wide:` — the Dashboard list's desktop grid (AgentListPanel.vue)
+    // switches on the LIST's width, not the window's. Its non-name tracks need
+    // about 920px; with the systems rail open (the first-launch default) a
+    // viewport `lg:` left the name track ~70px at a 1280 window. At 68rem the
+    // name track keeps about 168px; below it the tablet layout renders. 68,
+    // not 72: a 1440 window with the rail open leaves 1152px, less a classic
+    // scrollbar on Linux, and must still get the grid. The container is the
+    // wrapper around the grid.
+    function ({ addVariant }) {
+      addVariant('list-wide', '@container agent-list (min-width: 68rem)')
+    },
   ],
 }

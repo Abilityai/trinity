@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 130 tools across 33 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 125 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
+Trinity's MCP server exposes 129 tools across 33 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 124 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -95,7 +95,7 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `a2a.ts` | 7 | A2A management plane — per-agent exposure and card, inbound allow-list, outbound endpoint registry (entitlement-gated; see [A2A Protocol](a2a-protocol.md)) |
 | `a2a_call.ts` | 2 | `call_a2a_agent`, `get_a2a_task` — task a registered external A2A agent by endpoint name and poll it |
 | `credential_vault.ts` | 2 | `list_available_credentials`, `fetch_credential` — pull a granted vault credential by name at runtime (see [Credential Management](../credentials/credential-management.md#credential-vault)) |
-| `assignments.ts` | 1 | `get_agent_assignments` — read who an agent works for (read-only; degrades to a not-available result where unsupported) |
+| `assignments.ts` | 0 (fenced) | `get_agent_assignments` is built but **not registered** in 0.9.5 — it returns with the assignments layer (trinity-enterprise#500) |
 | `connector.ts` | 3 | `list_playbooks`, `run_playbook`, `ask` — the consumption-only set a **connector key** sees; operator tools stay hidden from connector keys |
 | `auth.ts` | 2 | `request_login`, `verify_login` — registered only when inline email auth is on, advertised only to keyless sessions |
 
