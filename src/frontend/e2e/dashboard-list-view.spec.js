@@ -33,16 +33,19 @@ async function gotoList(page) {
 
 test.describe('dashboard list view (trinity-enterprise#260)', () => {
   test('@smoke mode toggle shows List and renders the system agent row', async ({ page }) => {
-    // 1440, not the 1280 default: with the systems rail open the lg grid's
-    // name track at 1280 is too narrow to show the name link.
-    await page.setViewportSize({ width: 1440, height: 900 })
+    // The 1280 default with the systems rail open (its first-launch state) is
+    // the case this guards: the list is too narrow for the desktop grid there,
+    // so the tablet layout renders, and the name must still show. The row
+    // carries one name link per layout; assert on the one that renders.
     await gotoList(page)
 
     const sysRow = page.locator('[data-agent="trinity-system"]')
     await expect(sysRow).toBeVisible({ timeout: 15000 })
     await expect(sysRow).toContainText('SYSTEM')
     // Name links to the agent detail page.
-    await expect(sysRow.locator('a[href="/agents/trinity-system"]').first()).toBeVisible()
+    await expect(
+      sysRow.locator('a[href="/agents/trinity-system"]').filter({ visible: true }).first()
+    ).toBeVisible()
 
     // List-mode toolbar furniture (name search, status filter, sort).
     await expect(page.getByRole('button', { name: 'Running', exact: true })).toBeVisible()
@@ -179,6 +182,14 @@ async function expectColumnsAligned(page, note) {
 
 test.describe('dashboard list column alignment + identity (#2358)', () => {
   test.describe.configure({ mode: 'serial' })
+
+  // These tests measure the DESKTOP grid, which renders when the list is at
+  // least 68rem wide (`list-wide:`), not at a window width. The systems rail
+  // opens by default and would leave a 1280 window with the tablet layout, so
+  // collapse it: 1280 and 1440 then both get the grid, as the tests assume.
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('trinity-sidebar-collapsed', 'true'))
+  })
 
   let fixtureAgent = null
   let priorLabel = null
