@@ -33,6 +33,9 @@ async function gotoList(page) {
 
 test.describe('dashboard list view (trinity-enterprise#260)', () => {
   test('@smoke mode toggle shows List and renders the system agent row', async ({ page }) => {
+    // 1440, not the 1280 default: with the systems rail open the lg grid's
+    // name track at 1280 is too narrow to show the name link.
+    await page.setViewportSize({ width: 1440, height: 900 })
     await gotoList(page)
 
     const sysRow = page.locator('[data-agent="trinity-system"]')
