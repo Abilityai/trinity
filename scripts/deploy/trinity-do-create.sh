@@ -21,30 +21,7 @@ SIZE='s-4vcpu-8gb'      # 4 vCPU / 8 GB, $48/month — Trinity's recommended siz
 IMAGE='ubuntu-24-04-x64'
 DEFAULT_REGION='fra1'
 DEFAULT_NAME='trinity'
-# Resolved, never hardcoded (#2380). This one string feeds BOTH
-# `git clone --branch` and `docker pull`, so it has to be a real git tag —
-# `latest` is a Docker tag and not a git ref, which is why the obvious
-# "default to latest" does not work here and a resolver is needed instead.
-#
-# `releases/latest` is the right endpoint precisely because it EXCLUDES
-# pre-releases, and `/release` cuts every RC with `--prerelease`. So an RC is
-# published, its images reach GHCR, a marketplace snapshot can be built from
-# it — and this installer keeps handing operators the last blessed release
-# until the full cut promotes it. That is the same rule `publish-images.yml`
-# applies when it withholds the `latest` image tag from a hyphenated version.
-#
-# Fails loudly rather than falling back to a baked-in tag: a stale fallback is
-# the exact defect this replaces — a successful install of the wrong release,
-# invisible to the operator and to CI.
-resolve_latest_release_tag() {
-    local tag
-    tag=$(curl -fsSL --max-time 20 \
-        -H 'Accept: application/vnd.github+json' \
-        https://api.github.com/repos/abilityai/trinity/releases/latest 2>/dev/null \
-        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-        | head -1)
-    [ -n "$tag" ] && printf '%s' "$tag"
-}
+TRINITY_IMAGE_TAG="${TRINITY_IMAGE_TAG:-v0.9.5-rc4}"
 
 fail() { printf '\n%s\n\n' "$1" >&2; exit 1; }
 ask()  { printf '%s' "$1" >&2; }
@@ -63,22 +40,6 @@ doctl account get >/dev/null 2>&1 || fail \
     https://cloud.digitalocean.com/account/api/tokens
 (give it Write access), then run:
     doctl auth init"
-
-# Resolved here, with the other checks, so it fails BEFORE the operator has
-# typed two secrets — the same "checks first, questions second" rule as above.
-if [ -z "${TRINITY_IMAGE_TAG:-}" ]; then
-    TRINITY_IMAGE_TAG="$(resolve_latest_release_tag || true)"
-fi
-[ -n "${TRINITY_IMAGE_TAG:-}" ] || fail \
-"Could not work out which Trinity release to install.
-
-The newest release is read from
-    https://api.github.com/repos/abilityai/trinity/releases/latest
-which did not answer — usually no network, or GitHub's unauthenticated rate
-limit (60 requests an hour per address).
-
-Pick a release from https://github.com/abilityai/trinity/releases and name it:
-    TRINITY_IMAGE_TAG=v0.9.5 bash trinity-do-create.sh"
 
 # Where the droplet's setup file will live is a doctl question, not a taste
 # question, and it is decided HERE because one possible answer is "nowhere".
