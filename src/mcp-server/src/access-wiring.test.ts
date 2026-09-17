@@ -16,6 +16,12 @@
  * receives. Without an edge the count stays at zero and the caller reads the denial;
  * with an edge the loop starts. Pattern: `inline-auth-transport.test.ts` (#2035).
  *
+ * #2807: the same stub backend now RECORDS every `POST /api/internal/audit` the
+ * server fires, so the last two cases prove the composition end to end over the
+ * wire: a refused call's row says `denied`, and the permitted call that follows
+ * on the SAME session carries no stale marker. The audit POST is fire-and-forget
+ * and may land after the client already holds its result, so the row is awaited.
+ *
  * Runner: node:test → `node --import tsx --test src/*.test.ts`.
  */
 import { strict as assert } from "node:assert";
@@ -41,10 +47,10 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
   const loopPosts: string[] = [];
   /** Permission-edge reads — a self loop must not pay one. */
   let permissionReads = 0;
+  /** Every audit row the MCP server posted (#2807): the label the operator reads. */
+  const auditRows: any[] = [];
 
   before(async () => {
-    process.env.INTERNAL_API_SECRET = "test-internal-secret";
-
     backend = createHttpServer((req, res) => {
       let body = "";
       req.on("data", (c) => (body += c));
@@ -84,7 +90,11 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
             on_failure: "abort",
           });
         }
-        return send(200, {}); // health probe, audit posts, anything else
+        if (url === "/api/internal/audit" && req.method === "POST") {
+          auditRows.push(JSON.parse(body));
+          return send(200, { event_id: `ev_${auditRows.length}`, status: "logged" });
+        }
+        return send(200, {}); // health probe, anything else
       });
     });
     await new Promise<void>((r) => backend.listen(0, "127.0.0.1", () => r()));
@@ -99,6 +109,9 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
       trinityApiUrl: `http://127.0.0.1:${backendPort}`,
       requireApiKey: true,
       port: mcpPort,
+      // #2807: the audit wrapper posts to `trinityApiUrl` with this secret — the
+      // stub above records the rows, so the label is observable here.
+      internalApiSecret: "test-internal-secret",
     });
     await server.start({
       transportType: "httpStream",
@@ -135,6 +148,17 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
     loopPosts.length = 0;
   };
 
+  /** The first audit row for `tool` posted after index `after` — awaited, because the POST is fire-and-forget. */
+  const auditRowFor = async (tool: string, after: number, timeoutMs = 5000): Promise<any> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const row = auditRows.slice(after).find((r) => r?.details?.tool === tool);
+      if (row) return row;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error(`no audit row for ${tool} arrived within ${timeoutMs}ms; rows seen: ${JSON.stringify(auditRows.slice(after))}`);
+  };
+
   it("an agent key with no edge is refused at the REGISTERED tool, and no loop starts", async () => {
     reset([]);
     const { client, call } = await asAgent("628-no-edge");
@@ -165,6 +189,46 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
     assert.equal(out.success, true, `expected a self loop to start, got: ${JSON.stringify(out)}`);
     assert.deepEqual(loopPosts, [CALLER]);
     assert.equal(permissionReads, before, "a self loop paid a permission-edge read");
+    await client.close();
+  });
+
+  it("#2807: a refused loop start is audited as a refusal, not as a successful call", async () => {
+    reset([]);
+    const seen = auditRows.length;
+    const { client, call } = await asAgent("2807-refused");
+    const out = await call("run_agent_loop", { agent_name: SIBLING, ...START });
+    assert.equal(out.error, "Access denied");
+
+    const row = await auditRowFor("run_agent_loop", seen);
+    assert.equal(row.details.success, false, `the refusal was audited as a success: ${JSON.stringify(row.details)}`);
+    assert.equal(row.details.denied, true);
+    assert.match(String(row.details.error), new RegExp(`Agent '${CALLER}' is not permitted to communicate with '${SIBLING}'`));
+    assert.equal(row.target_id, SIBLING);
+    assert.equal(row.actor_agent_name, CALLER);
+    assert.equal(row.mcp_scope, "agent");
+    assert.deepEqual(loopPosts, [], "the backend received a loop start the gate should have stopped");
+    await client.close();
+  });
+
+  it("#2807: deny then allow on ONE session leaves no stale marker on the permitted call", async () => {
+    reset([]);
+    const { client, call } = await asAgent("2807-same-session");
+
+    let seen = auditRows.length;
+    const refused = await call("run_agent_loop", { agent_name: SIBLING, ...START });
+    assert.equal(refused.error, "Access denied");
+    const first = await auditRowFor("run_agent_loop", seen);
+    assert.equal(first.details.denied, true);
+
+    permitted = [SIBLING];
+    seen = auditRows.length;
+    const ok = await call("run_agent_loop", { agent_name: SIBLING, ...START });
+    assert.equal(ok.success, true, `expected the loop to start, got: ${JSON.stringify(ok)}`);
+    const second = await auditRowFor("run_agent_loop", seen);
+    assert.equal(second.details.success, true, `the permitted call inherited a stale refusal: ${JSON.stringify(second.details)}`);
+    assert.equal(second.details.denied, undefined);
+    assert.equal(second.details.error, undefined);
+    assert.deepEqual(loopPosts, [SIBLING]);
     await client.close();
   });
 });

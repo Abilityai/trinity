@@ -40,6 +40,7 @@
 import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied } from "../access.js";
 
 export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean) {
   const getClient = (authContext?: McpAuthContext): TrinityClient => {
@@ -170,9 +171,9 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
       ) => {
         const access = checkSelf(context?.session, params.agent_name);
         if (!access.allowed) {
-          return JSON.stringify(
+          return accessDenied(
+            context,
             { success: false, error: "Access denied", reason: access.reason, not_authorized: true },
-            null, 2,
           );
         }
         try {
@@ -211,9 +212,9 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
       ) => {
         const access = checkSelf(context?.session, params.agent_name);
         if (!access.allowed) {
-          return JSON.stringify(
+          return accessDenied(
+            context,
             { success: false, error: "Access denied", reason: access.reason, not_authorized: true },
-            null, 2,
           );
         }
         try {

@@ -96,7 +96,7 @@ the request-id correlation are the only new behaviour.
   - **`request()`** gains an optional `requestId` param → sets the `X-Request-ID` header; threaded through the reauth-retry recursion.
   - Six proxy methods: `getGitStatus`, `gitSync`, `getGitLog`, `gitPull`, `getGitSyncState`, `resetToMainPreserveState` — each takes `requestId?` last.
 - **`src/mcp-server/src/audit.ts`**
-  - **`ToolCallContext`** (new, exported) — `{session?: McpAuthContext, requestId?: string}` replaces the old inline `{session?}` context type in `withAudit`. A tool stamps `requestId` here; the wrapper reads it **after** `execute` (so a tool that mints it mid-call is captured).
+  - **`ToolCallContext`** (new, exported) — `{session?: McpAuthContext, requestId?: string}` replaces the old inline `{session?}` context type in `withAudit`. A tool stamps `requestId` here; the wrapper reads it **after** `execute` (so a tool that mints it mid-call is captured). Since #2807 it also carries `outcome?: ToolOutcome` — a deny site stamps it through `access.ts::accessDenied` and the wrapper reads it the same way, labelling the row `success: false`, `denied: true`.
   - **`resolveTargetId(params)`** (new, exported) — returns `params.agent_name ?? params.name` when a string, else `undefined`. Defensive so non-agent tools log no target.
   - `logToolCall(...)` gains `targetId?` + `requestId?`, setting `target_type:"agent"`/`target_id`/`request_id` on the `mcp_operation` entry — both fields were previously dropped ("we don't have params here").
 - **`src/mcp-server/src/server.ts`** — registers `createGitTools(client, requireApiKey)` in the tool group list.

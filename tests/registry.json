@@ -3102,6 +3102,18 @@
         "subscriptions"
       ],
       "description": "The unified utilization header is a fraction of the cap and is honoured past 1.0 (#2419): parser table (1.2 -> 120.0, a percent-shaped 42.5 reads loud-wrong as 4250.0, nan/inf/1e307/negative -> None, -0.0 -> 0.0), synthetic overage header set through the REAL chain (parse -> _to_model -> classify_headroom SATURATED, selection_verdict 120.0, ranker sorts it last, decide_tier CRIT, _history_row passthrough), and the [#2419] INFO arrival log in _probe that records the raw header strings when a window reads past 100%. Direct imports + attribute monkeypatching, no backend."
+    },
+    {
+      "file": "mcp-server/src/audit-denial.test.ts",
+      "feature": "#2807",
+      "added": "2026-09-16",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "audit",
+        "unit"
+      ],
+      "description": "A denial every MCP gate RETURNS (the `{error: \"Access denied\"}` envelope agents parse) was audited as `success: true`, because withAudit labels by throw/no-throw. The deny sites now serialise through access.ts::accessDenied, which stamps `context.outcome = {kind: denied, reason}` on the per-call context, and the wrapper reads it after execute: `success: false`, `denied: true`, `error: <reason>`; a thrown backend 403 is marked too. Pins the row for chat_with_agent, a dedicated chat_with_<slug> tool, fan_out, get_report's uniform refusal and the ent#628 enforce wrapper (audit POST captured through a fetch stub, envelopes byte-identical), that the stamp lives on the root context and never on the shared session object, that a stamp-then-throw and a plain throw are labelled correctly -- and, the mechanism half, that every `!allowed` branch and every `error: \"Access denied\"` envelope under src/ reaches the helper."
     }
   ]
 }
