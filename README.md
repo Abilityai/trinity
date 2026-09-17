@@ -116,7 +116,7 @@ More recordings — agent dev pipelines, GitHub-backed agents, an ops agent that
 
 | | |
 |---|---|
-| **01 · Deploy an instance** | Self-host with one command, or run a managed instance on any cloud you control. |
+| **01 · Deploy an instance** | Self-host with one command — your own machine, any server you control, or a DigitalOcean Droplet in about ten minutes. |
 | **02 · Connect Claude Code** | Install the [abilities plugins](https://github.com/abilityai/abilities) — scaffold, connect, and deploy agents over MCP. |
 | **03 · Run in production** | Scheduled, multi-user, audited — inside your own perimeter. |
 
@@ -183,7 +183,7 @@ For a fully non-interactive bring-up, run `./scripts/deploy/start.sh --unattende
 - **API Docs**: http://localhost:8000/docs
 - **MCP Server**: http://localhost:8080/mcp
 
-> **Don't want to self-host?** Trinity also runs as a managed instance on any cloud you control. [Talk to an engineer →](mailto:hello@ability.ai) — an engineer reads this, not a CRM. Reply in one business day, your time zone.
+> **Don't want to run it on your laptop?** Trinity is self-hosted, and the least work is a server of your own: the guided **[DigitalOcean install](https://docs.ability.ai/getting-started/deploying/digitalocean)** gets you a Droplet behind HTTPS in about ten minutes. Questions about a deployment? [Talk to an engineer →](mailto:hello@ability.ai) — an engineer reads this, not a CRM. Reply in one business day, your time zone.
 
 > **On DigitalOcean?** The guided installer (`scripts/deploy/trinity-do-create.sh`) takes a few steps and about ten minutes. You install `doctl`, create a Claude subscription token, choose an admin password, and run one command. The result is Trinity on its own Droplet behind HTTPS. See [Deploy on DigitalOcean](https://docs.ability.ai/getting-started/deploying/digitalocean).
 
@@ -804,7 +804,7 @@ git push origin cli-v1.0.0
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE) — free for any use, commercial included, with an explicit patent grant. Run it on your own infrastructure, any cloud, or a managed instance.
+This project is licensed under the [Apache License 2.0](LICENSE) — free for any use, commercial included, with an explicit patent grant. Run it on your own infrastructure or any cloud you control.
 
 Optional **enterprise modules** (SSO, user management, SIEM export, and more) are available under a separate commercial license. Contact [hello@ability.ai](mailto:hello@ability.ai) for enterprise licensing.
 
