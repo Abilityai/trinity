@@ -24,7 +24,22 @@
 </p>
 
 > [!NOTE]
-> **📦 Just released — [v0.9.0](docs/releases/0.9.0.md)** (August 17, 2026): **Workspace** — the client-facing surface, now in every build — plus fresh-install provisioning (remote template registry, GitHub import wizard, manifest install UI, guided credentials), the multi-source skills library and Library page, bidirectional A2A, dashboard List view + grid data tiles, automatic database backups, and a large reliability & security sweep. [Watch the release review →](https://youtu.be/fia2qa4YcLg) · [What's new overview →](https://docs.ability.ai/whats-new/v0.9.0) · [Full release notes →](docs/releases/0.9.0.md)
+> **📦 Just released: [v0.9.5](docs/releases/0.9.5.md)** (September 17, 2026). **Workspace** is where the work happens now:
+> - chats per topic
+> - a conversation rail
+> - live execution cards
+> - agents that ask you questions
+> - a canvas for every agent
+> - real-time **voice mode**
+>
+> Also new:
+> - prebuilt images and a guided **[DigitalOcean install](https://docs.ability.ai/getting-started/deploying/digitalocean)**
+> - first-run setup in the browser
+> - subscription usage and headroom you can see
+> - opt-in instance telemetry
+> - credentials encrypted at rest
+>
+> [What's new overview →](https://docs.ability.ai/whats-new/v0.9.5) · [Full release notes →](docs/releases/0.9.5.md) · Previous: [v0.9.0 release review video →](https://youtu.be/fia2qa4YcLg)
 
 <p align="center">
   <a href="https://youtu.be/fia2qa4YcLg">
@@ -158,10 +173,9 @@ For a fully non-interactive bring-up, run `./scripts/deploy/start.sh --unattende
 
 **First-time setup**
 
-1. Open http://localhost — you'll be redirected to the setup wizard
-2. Enter your **admin email** — this becomes your sign-in identity — and an **admin password** (minimum 12 characters, with upper- and lowercase, a digit, and a special character)
-3. Log in with that email (or the username `admin`) and your password
-4. Go to **Settings** → **Integrations** → **API Keys** to configure your Anthropic API key
+1. Open http://localhost and log in with the username `admin` and the `ADMIN_PASSWORD` from `.env`.
+2. **First-run setup** opens on the Dashboard. The one required step is **Connect Claude**: paste a Claude subscription token or an Anthropic API key, and Trinity checks it before saving.
+3. Optional steps follow: GitHub, email-provider and Gemini keys, then your first agent. Anything you skip is under **Settings → Integrations** later.
 
 **Access**
 
@@ -170,6 +184,10 @@ For a fully non-interactive bring-up, run `./scripts/deploy/start.sh --unattende
 - **MCP Server**: http://localhost:8080/mcp
 
 > **Don't want to self-host?** Trinity also runs as a managed instance on any cloud you control. [Talk to an engineer →](mailto:hello@ability.ai) — an engineer reads this, not a CRM. Reply in one business day, your time zone.
+
+> **On DigitalOcean?** The guided installer (`scripts/deploy/trinity-do-create.sh`) takes a few steps and about ten minutes. You install `doctl`, create a Claude subscription token, choose an admin password, and run one command. The result is Trinity on its own Droplet behind HTTPS. See [Deploy on DigitalOcean](https://docs.ability.ai/getting-started/deploying/digitalocean).
+
+> **Prebuilt images:** `./scripts/deploy/start.sh --hosted` pulls the published GHCR images instead of building from source. Pin `TRINITY_IMAGE_TAG` (for example `v0.9.5`) on any instance you keep.
 
 > **Deploying to a remote server?** `/trinity:deploy-new-instance` from the [abilities marketplace](https://github.com/abilityai/abilities) provisions Trinity on any server you can SSH into — and scaffolds the [Trinity Ops Agent](https://github.com/abilityai/trinity-ops-public) to manage it (health, logs, updates, rollback, and SQLite→PostgreSQL migration).
 
@@ -190,8 +208,8 @@ Most of the Trinity workflow lives in the **[abilities plugin marketplace](https
 
 # 3. Scaffold an agent — or start from any existing Claude Code agent directory
 /create-agent:create
-#    → Pick a wizard (prospector, chief-of-staff, recon, ghostwriter, kb-agent, …)
-#      or /create-agent:custom for a blank canvas
+#    → /create-agent:custom scaffolds any agent from scratch;
+#      /create-agent:website and /create-agent:clone cover the other paths
 
 # 4. Deploy it to Trinity
 /trinity:onboard
@@ -279,6 +297,7 @@ The full feature set is below and in the [documentation](#documentation).
 - **List View** — The fleet as a sortable, filterable roster with inline run/autonomy toggles; `/` type-to-filter works across all dashboard views
 - **Grid Data Tiles** — Fleet info tiles alongside agent tiles (executions by trigger, recent failures), an org overlay of departments and reporting lines
 - **Timeline View** — Gantt-style execution timeline with trigger-based color coding (manual, scheduled, MCP, agent-triggered, public, paid)
+- **Subscription Usage** — 5-hour and 7-day usage per Claude subscription with a per-agent breakdown and rate-limit history, a Subscription pressure tile, headroom history, and an alert at 75% of the weekly limit
 - **Host Telemetry** — Real-time CPU, memory, and disk monitoring in the dashboard header
 - **Fleet Health Monitoring** — Multi-layer health checks (Docker, network, business) with alerting and WebSocket updates
 - **OpenTelemetry Metrics & Tracing** — Cost, token usage, and productivity tracking exportable to Grafana/Datadog; distributed traces across multi-agent calls
@@ -287,7 +306,7 @@ The full feature set is below and in the [documentation](#documentation).
 
 - **Isolated Docker Containers** — Each agent runs in its own container with dedicated resources
 - **Multi-Runtime Support** — Choose between Claude Code (Anthropic), OpenAI Codex, or Gemini CLI (Google) per agent
-- **Model Selection** — Choose which Claude model (Opus, Sonnet, Haiku) per task or schedule
+- **Model Selection** — Choose which Claude model (Fable, Opus, Sonnet, Haiku) per task or schedule
 - **Agent Overview** — Per-agent Overview tab with activity trends, success rate, duration, and health over a 7/14/30-day window
 - **Compatibility Report** — Advisory validation of a running agent's workspace against 88 best-practice checks in 12 categories, with one-click fixes for common issues
 - **Agent Dashboard** — Custom dashboards defined via `dashboard.yaml` with 11 widget types, historical tracking, and sparkline visualization
@@ -317,7 +336,14 @@ The full feature set is below and in the [documentation](#documentation).
 - **Voice** — Spoken voice replies (text-to-speech) on Slack, Telegram, and WhatsApp, plus opt-in outbound phone calls over Twilio telephony
 - **Unified Access Control** — Verified-email allow-list governs access across web, Slack, and Telegram with per-agent `require_email` / `open_access` policies (#311)
 - **Proactive Messaging** — Agents initiate user conversations via `send_message` / `send_group_message` MCP tools (#321, #349)
-- **Workspace** — A client-facing surface at `/workspace` for the people your agents serve: verified-email sign-in, chats with one or more agents, agent pages, skill hints, streaming turns, file uploads — one click away for platform users
+- **Workspace** — Where people work with agents, at `/workspace`, with verified-email sign-in for the people your agents serve:
+  - several chats per agent as tabs, and multi-agent rooms
+  - a conversation rail with Info, Loops, Files and Canvas tabs
+  - live execution cards in the chat, and loops you start and stop from the chat
+  - agents that ask a named person a question
+  - deliverables and ratings, and a canvas for every agent
+  - real-time **voice mode** over the current chat
+- **Canvas** — A rich block vocabulary (charts, images, diagrams) rendered the same in chat and during a call, with a design kit, read-only share links, PDF export, and the open canvas as shared context for the agent
 - **Agent Reports** — Agents publish structured reports (KPI, table, markdown, timeline) rendered on the dashboard, exportable to Excel/PDF, searchable, and readable back over MCP
 
 ### Operations
@@ -329,6 +355,7 @@ The full feature set is below and in the [documentation](#documentation).
 - **Subscription Management** — Centralized Claude Max/Pro subscription tokens shared across agents
 - **Platform Audit Log** — Append-only cross-cutting audit trail for lifecycle, auth, and MCP events (SEC-001, admin-only API)
 - **Role Hierarchy** — 4-tier RBAC (`user` < `operator` < `creator` < `admin`) with whitelist-driven role on first login
+- **Machine Identities** — Service credentials for admin and ops APIs that keep working when two-factor sign-in is enforced for people
 - **Agent Tags & System Views** — Organize agents with tags and saved filter views for fleet management
 - **Live Execution Streaming** — Real-time streaming of execution logs to the web UI
 - **Execution Termination** — Stop running executions gracefully via SIGINT/SIGKILL
@@ -340,8 +367,10 @@ The full feature set is below and in the [documentation](#documentation).
 - **Public Agent Links** — Shareable links for unauthenticated agent access with session persistence and Slack integration
 - **Paid Agent Access (x402)** — Per-agent monetization via Nevermined x402 payment protocol
 - **Mobile Admin PWA** — Standalone mobile admin at `/m`, installable as a home screen app
-- **First-Time Setup Wizard** — Guided setup for admin password and API key configuration
+- **First-Run Setup** — A browser setup sequence on the Dashboard: connect Claude (checked before saving), GitHub, email and Gemini keys, and a first agent, all without a terminal. A Marketplace droplet's admin is claimed in the browser.
+- **Prebuilt Images & DigitalOcean Install** — Published GHCR images (`start.sh --hosted`), an unattended cloud-init first boot, and a guided DigitalOcean installer
 - **Automatic Database Backups** — Nightly verified recovery points for SQLite and PostgreSQL, plus a pre-migration copy at boot
+- **Opt-in Instance Telemetry** — Anonymised operational signal, sent only after an admin consents, with a send log showing where each share went
 
 ## Architecture
 
@@ -503,7 +532,7 @@ Abilities structures agent work as a four-step lifecycle:
                          /agent-dev:add-backlog        (or: trinity deploy .)    /create-agent:adjust
 ```
 
-**Scaffold** — wizards like `/create-agent:prospector` or `/create-agent:custom` produce a fully configured, Trinity-compatible agent: `CLAUDE.md`, initial skills, `template.yaml`, a metrics dashboard, and an onboarding tracker.
+**Scaffold** — `/create-agent:custom` (or `/create-agent:website`) produces a fully configured, Trinity-compatible agent: `CLAUDE.md`, initial skills, `template.yaml`, a metrics dashboard, and an onboarding tracker.
 
 **Develop** — `/agent-dev:create-playbook` adds capabilities, `/agent-dev:add-memory` adds persistence (file index, knowledge graph, JSON state, or workspace tracking), `/agent-dev:add-backlog` wires a GitHub Issues workflow.
 
@@ -515,7 +544,7 @@ The 5 plugins:
 
 | Plugin | What it does |
 |--------|-------------|
-| **create-agent** | Agent scaffolding: a `/create-agent:create` discovery entry point + 12 wizards (prospector, chief-of-staff, webmaster, recon, receptionist, ghostwriter, kb-agent, doctor, website, custom, clone, adjust) |
+| **create-agent** | Agent scaffolding: a `/create-agent:create` entry point, the `custom` and `website` scaffolds, `clone`, and `review` / `adjust` for improving an existing agent |
 | **agent-dev** | Extend existing agents: playbooks, memory systems, git-sync hooks, GitHub backlog workflow, grooming, sprints, agent-owned pipelines, autonomous work loops |
 | **trinity** | The platform workflow: `connect`, `onboard`, `sync`, `loop`, `create-dashboard`, `deploy-new-instance` |
 | **dev-methodology** | Documentation-driven development for any codebase: implementation, testing, security audits, PR validation, release, architecture/schema/config validation |
