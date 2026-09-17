@@ -137,6 +137,11 @@ class AgentState:
         return {
             "status": "idle",
             "active_tool": None,
+            # trinity-enterprise#620: the active tool PER EXECUTION, keyed by
+            # the backend execution id. `active_tool` above is one slot per
+            # agent process, so a chat turn and a delegated run on the same
+            # agent overwrite each other; this is what the heartbeat reports.
+            "by_execution": {},
             "tool_counts": {},
             "timeline": [],
             "totals": {

@@ -32,7 +32,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from ..model_context import pick_context_window
 from ..models import CompactEvent, ExecutionLogEntry, ExecutionMetadata
@@ -314,10 +314,15 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
 
 
 def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metadata: ExecutionMetadata,
-                         tool_start_times: Dict[str, datetime], response_parts: List[str]) -> None:
+                         tool_start_times: Dict[str, datetime], response_parts: List[str],
+                         execution_id: Optional[str] = None) -> None:
     """
     Process a single line of stream-json output in real-time.
     Updates session activity, execution_log, metadata, and response_parts in place.
+
+    `execution_id` (trinity-enterprise#620) keys the per-execution activity
+    slot the heartbeat reports, so concurrent runs on one agent do not share
+    the single `active_tool`. Optional: the batch parser has no execution.
     """
     if not line.strip():
         return
@@ -524,7 +529,7 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
                 ))
 
                 # Update session activity in real-time
-                start_tool_execution(tool_id, tool_name, tool_input)
+                start_tool_execution(tool_id, tool_name, tool_input, execution_id=execution_id)
                 logger.debug(f"Tool started: {tool_name} ({tool_id})")
 
             elif block_type == "tool_result":

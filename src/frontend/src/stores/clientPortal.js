@@ -1694,6 +1694,18 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // trinity-enterprise#620: the live activity lines alone — what each
+    // running execution of these agents is doing right now, from the agents'
+    // heartbeats. Polled every few seconds by the Work store ONLY while a
+    // card is live; the full `fetchWork` stays at its 12 s cadence.
+    async fetchWorkActivity(agentNames) {
+      const { data } = await portalHttp.get('/api/enterprise/client-portal/work/activity', {
+        headers: this.authHeader,
+        params: { agents: (agentNames || []).filter(Boolean).join(',') },
+      })
+      return data
+    },
+
     // Answer one ask. The row is removed from local state on success rather than
     // patched: the server's answer is authoritative, and a client that keeps a
     // stale "pending" copy would offer to answer it twice.

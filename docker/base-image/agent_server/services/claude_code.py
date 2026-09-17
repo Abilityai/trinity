@@ -387,7 +387,8 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                                     f"publish_log_entry failed (continuing): {pub_err}"
                                 )
                         sanitized_line = sanitize_subprocess_line(line)
-                        process_stream_line(sanitized_line, execution_log, metadata, tool_start_times, response_parts)
+                        process_stream_line(sanitized_line, execution_log, metadata, tool_start_times, response_parts,
+                                            execution_id=execution_id)
                     except Exception as line_err:  # noqa: BLE001
                         logger.warning(
                             f"Per-line stdout processing error (continuing): {line_err}"
