@@ -458,8 +458,24 @@ class TestApiKeyFallback:
 
     @pytest.mark.asyncio
     async def test_it_never_raises(self, wired, monkeypatch):
+        """A raising settings read must not raise out of the fallback.
+
+        The setting read fails OPEN (see `is_api_key_fallback_enabled`), so the
+        function keeps going past the mocked `db` into two ambient reads it
+        makes at call time: the agent's container and the platform API key.
+        Pin both — this test used to leave them to whatever the process
+        happened to hold, and under one pytest-randomly order on CI a platform
+        key leaked in from an earlier test, the fallback ran for real, and the
+        `is None` below failed on a PR that never touched this code. The
+        premise stated explicitly: no key configured ⇒ nothing to fall back
+        onto ⇒ `None`, and no exception either way.
+        """
         auto_switch, db = wired
         db.get_setting_value.side_effect = RuntimeError("boom")
+        import services.docker_service as docker_service
+        import services.settings_service as settings_service
+        monkeypatch.setattr(docker_service, "get_agent_container", lambda name: None)
+        monkeypatch.setattr(settings_service, "get_anthropic_api_key", lambda: "")
         assert await auto_switch.fallback_to_api_key("scribe") is None
 
     def test_the_setting_defaults_on_and_fails_open(self, monkeypatch):
