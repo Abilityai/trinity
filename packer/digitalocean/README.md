@@ -86,15 +86,43 @@ doctl compute ssh-key list --format ID,Name --no-header \
 Check `doctl compute droplet list` too — a failure later in the build can leave
 the build droplet running.
 
-## Per-release update runbook
+## Submitting the listing
 
-1. Cut the Trinity release; confirm the `v*` tag published all five images and
-   that each package is public.
-2. `packer build` with the new `image_tag` (above).
-3. **Have another team member QA a droplet built from that snapshot.** Nothing is
-   submitted on the strength of a green build — see "Submission gate" below.
-4. Submit the snapshot for review, either from the Vendor Portal (the Trinity
-   listing → submit) or by letting the build do it:
+**The first submission and every later one take different routes.** The
+Vendor Portal's listing form has a required **System Image** field whose
+picker lists the snapshots on your account, so the listing is built *around*
+an existing snapshot — and the `app_id` only exists once that listing does,
+read from its URL. There is no `app_id` to supply beforehand, which is why
+`mp-submit.sh` and `TRINITY_DO_APP_ID` cannot make the first submission.
+
+Nothing about the snapshot changes between the two routes. `TRINITY_DO_APP_ID`
+is read by an optional post-processor at the *end* of a build; unset, the build
+simply does not submit, and the image it produced carries no listing identifier
+either way.
+
+> **Submitting consumes the snapshot.** The picker states it: *"the selected
+> snapshot will no longer be available once the listing is submitted."* It
+> leaves your account and will not appear in `doctl compute snapshot list`
+> afterwards. Build a snapshot for the submission rather than spending one you
+> still want to boot droplets from.
+
+### First submission
+
+1. Cut the release; confirm the `v*` tag published all five images and that
+   each package is public.
+2. `packer build` with the new `image_tag` (above). Leave `TRINITY_DO_APP_ID`
+   unset.
+3. QA a droplet created from that snapshot — see "Submission gate" below.
+4. In the Vendor Portal, create the listing, choose that snapshot under
+   **System Image**, tick both acknowledgements, and submit. Catalog copy lives
+   in [`listing.md`](listing.md), not only in the portal.
+5. Note the `app_id` from the listing URL once it exists. Later releases need it.
+
+### Later releases
+
+1. Cut the release; confirm the images published, as above.
+2. `packer build` with the new `image_tag`, either plain — then attach the
+   snapshot in the portal as before — or letting the build submit for you:
 
    ```bash
    TRINITY_DO_APP_ID=<app_id> \
@@ -104,27 +132,30 @@ the build droplet running.
        trinity.pkr.hcl
    ```
 
-   `app_id` comes from the listing URL in the Vendor Portal. The `manifest` +
-   `shell-local` post-processors read the snapshot id from the build's own
-   record and `PATCH` it to
-   `https://api.digitalocean.com/api/v1/vendor-portal/apps/<app_id>`. Without
-   `TRINITY_DO_APP_ID` the build simply does not submit.
+   The `manifest` + `shell-local` post-processors read the snapshot id from the
+   build's own record and `PATCH` it to
+   `https://api.digitalocean.com/api/v1/vendor-portal/apps/<app_id>`.
 
    The payload carries `imageId` (**required**), `reasonForUpdate`, `osVersion`
    and `softwareIncluded[]`. A `null` field leaves the existing value alone; a
    blank string clears it. `.../apps/<app_id>/versions/<version>` is deprecated
    — do not use it.
 
-5. Update the listing's version string and any changed sizing guidance.
-   Catalog copy lives in [`listing.md`](listing.md), not only in the portal.
+3. QA a droplet from the snapshot before submitting, exactly as on the first.
+4. Update the listing's version string and any changed sizing guidance.
 
 ### Submission gate
 
-**Nothing is submitted for review until another member of the team has QA'd a
-droplet created from that snapshot.** Not the author, and not "the build was
-green": `img_check.sh` validates DigitalOcean's *image* requirements — no baked
+**Nothing is submitted for review on the strength of a green build.**
+`img_check.sh` validates DigitalOcean's *image* requirements — no baked
 secrets, firewall on, no pending security updates — and knows nothing about
-whether Trinity comes up, serves HTTPS, or can create an agent.
+whether Trinity comes up, serves HTTPS, or can create an agent. A human boots
+a droplet from the snapshot and uses it first.
+
+Prefer someone other than whoever built it. On a team of one that is not
+available, and the gate is then a QA pass by the operator rather than a second
+pair of eyes — a real reduction in cover, recorded here rather than left
+implied. It is not a reason to skip the pass.
 
 ### The state that blocks a resubmission
 

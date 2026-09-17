@@ -109,6 +109,31 @@ describe('availability', () => {
     await store.fetchChecklist(true)
     expect(api.get).toHaveBeenCalledTimes(2)
   })
+
+  // The component forces a read on every mount, sidebar expand and fleet-size
+  // change. An absent (404) or unentitled (403) surface does not change within
+  // a session, so forcing must not re-ask it. A genuine failure stays retryable.
+  it.each([404, 403])('never re-forces after a %i', async (status) => {
+    api.get.mockRejectedValueOnce({ response: { status } })
+
+    await store.fetchChecklist(true)
+    await store.fetchChecklist(true)
+
+    expect(api.get).toHaveBeenCalledTimes(1)
+  })
+
+  it('still retries a forced read after a real failure', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    api.get.mockRejectedValueOnce({ response: { status: 500 } })
+    api.get.mockResolvedValueOnce({ data: payload(1) })
+
+    await store.fetchChecklist(true)
+    await store.fetchChecklist(true)
+
+    expect(api.get).toHaveBeenCalledTimes(2)
+    expect(store.available).toBe(true)
+    console.warn.mockRestore()
+  })
 })
 
 describe('visibility', () => {

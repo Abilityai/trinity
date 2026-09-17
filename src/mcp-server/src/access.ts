@@ -386,8 +386,9 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- credential_vault.ts ---
   list_available_credentials: { kind: "none", why: "the calling agent's own grants (ent#279)" },
   fetch_credential: { kind: "none", why: "`name` is a credential; the backend scopes it to the calling agent (ent#279)" },
-  // --- assignments.ts ---
-  get_agent_assignments: { kind: "baselined", owner: ENT629 + "; the route's 404 is uniform (ent#500)" },
+  // --- assignments.ts --- get_agent_assignments is FENCED (not registered; 0.9.5 F1) —
+  // the totality test forbids a row for an unregistered tool. Restore with the registration:
+  //   get_agent_assignments: { kind: "baselined", owner: ENT629 + "; the route's 404 is uniform (ent#500)" },
   // --- connector.ts (connector / anonymous tiers) ---
   list_playbooks: { kind: "baselined", owner: CONNECTOR_SCOPE },
   run_playbook: { kind: "baselined", owner: CONNECTOR_SCOPE },

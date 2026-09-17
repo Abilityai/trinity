@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -1301,11 +1301,16 @@ async def set_operator_resume_endpoint(
     body: OperatorResumeUpdate,
     current_user: CurrentUser,
 ):
-    """Enable/disable respond→resume for this agent (ent#329). Owner-only.
+    """Enable/disable respond→resume for this agent (ent#329). Owner-only, human-only.
 
     Owner-only rather than accessible-to-sharers because flipping it on means
     "answers to this agent may now spend money", and the bill lands on the owner.
+    Human-only on top of that: an agent-scoped key resolves to its OWNER on REST,
+    so `OwnedAgentByName` alone is satisfied by the agent's own injected key and
+    the agent could switch on its own paid wake-ups. Same grant-vs-use line as
+    the ent#223 consent toggle — the GET (a use) stays agent-reachable.
     """
+    reject_agent_principal(current_user)
     if not db.set_operator_resume_enabled(agent_name, body.enabled):
         raise HTTPException(status_code=404, detail="Agent not found")
 

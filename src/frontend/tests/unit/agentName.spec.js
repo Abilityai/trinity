@@ -238,23 +238,23 @@ describe('structural: the lg list is ONE column sizing context (#2358)', () => {
   it('declares the track template exactly once — on the list container', () => {
     // Two copies of a template string is the defect itself: each grid resolves
     // its own `auto` tracks and the `1fr` name track absorbs the difference.
-    const templates = PANEL.match(/lg:grid-cols-\[/g) || []
+    const templates = PANEL.match(/list-wide:grid-cols-\[/g) || []
     expect(templates).toHaveLength(1)
     expect(PANEL).toContain(
-      'lg:grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto_auto]'
+      'list-wide:grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto_auto]'
     )
   })
 
   it('makes the header AND the row subgrid items spanning every track', () => {
-    expect((PANEL.match(/lg:grid-cols-subgrid/g) || [])).toHaveLength(2)
-    const header = classAttrsContaining(PANEL, 'lg:grid-cols-subgrid').find((a) =>
-      a.includes('hidden lg:grid')
+    expect((PANEL.match(/list-wide:grid-cols-subgrid/g) || [])).toHaveLength(2)
+    const header = classAttrsContaining(PANEL, 'list-wide:grid-cols-subgrid').find((a) =>
+      a.includes('hidden list-wide:grid')
     )
     expect(header, 'the header is a subgrid item').toBeTruthy()
-    expect(header).toContain('lg:col-span-full')
-    const row = classAttrsContaining(PANEL, 'lg:grid lg:grid-cols-subgrid')[0]
+    expect(header).toContain('list-wide:col-span-full')
+    const row = classAttrsContaining(PANEL, 'list-wide:grid list-wide:grid-cols-subgrid')[0]
     expect(row, 'the row is a subgrid item').toBeTruthy()
-    expect(row).toContain('lg:col-span-full')
+    expect(row).toContain('list-wide:col-span-full')
   })
 
   it('places the CapacityMeter definitely in BOTH axes — track 10, rows 1–2', () => {
@@ -264,17 +264,17 @@ describe('structural: the lg list is ONE column sizing context (#2358)', () => {
     // makes it `grid-row: 1 / span 2` — Tailwind emits gridRow before
     // gridRowStart.
     const meters = PANEL.match(/<CapacityMeter[\s\S]*?\/>/g) || []
-    const placed = meters.filter((m) => m.includes('lg:col-start-10'))
+    const placed = meters.filter((m) => m.includes('list-wide:col-start-10'))
     expect(placed).toHaveLength(1)
-    expect(placed[0]).toContain('lg:row-start-1')
-    expect(placed[0]).toContain('lg:row-span-2')
+    expect(placed[0]).toContain('list-wide:row-start-1')
+    expect(placed[0]).toContain('list-wide:row-span-2')
   })
 
   it('places the secondary line definitely on row 2, under the name column', () => {
-    const lines = classAttrsContaining(PANEL, 'lg:row-start-2')
+    const lines = classAttrsContaining(PANEL, 'list-wide:row-start-2')
     expect(lines).toHaveLength(1)
-    expect(lines[0]).toContain('lg:col-start-4')
-    expect(lines[0]).toContain('lg:col-end-10')
+    expect(lines[0]).toContain('list-wide:col-start-4')
+    expect(lines[0]).toContain('list-wide:col-end-10')
     // No-wrap contract: a long slug + badges + tags must never open a third row.
     expect(lines[0]).toContain('flex-nowrap')
     expect(lines[0]).toContain('overflow-hidden')
@@ -284,15 +284,15 @@ describe('structural: the lg list is ONE column sizing context (#2358)', () => {
   it('gives no subgrid item horizontal padding — insets are item margins', () => {
     // A subgrid item's own horizontal padding is laid out INSIDE its first and
     // last tracks (CSS Grid L2 §7.1); re-adding `pl-8` here would silently make
-    // alignment depend on that corner again. `lg:ml-8` / `lg:mr-4` on the first
+    // alignment depend on that corner again. `list-wide:ml-8` / `list-wide:mr-4` on the first
     // and last cells are ordinary L1 margins and contribute identically on the
     // header and every row.
-    const subgridItems = classAttrsContaining(PANEL, 'lg:grid-cols-subgrid')
+    const subgridItems = classAttrsContaining(PANEL, 'list-wide:grid-cols-subgrid')
     for (const attr of subgridItems) {
-      expect(attr).not.toMatch(/lg:p[xlr]-/)
+      expect(attr).not.toMatch(/(?:lg|list-wide):p[xlr]-/)
     }
-    expect(PANEL).toContain('lg:ml-8')
-    expect(PANEL).toContain('lg:mr-4')
+    expect(PANEL).toContain('list-wide:ml-8')
+    expect(PANEL).toContain('list-wide:mr-4')
   })
 })
 
@@ -304,7 +304,7 @@ describe('structural: the lg list is ONE column sizing context (#2358)', () => {
  * 2, the meter in track 10 spanning both). Every one of those numbers is load
  * bearing and none of them is visible in a class string, so a source regex
  * cannot see them — and neither could the rest of this file: adding a twelfth
- * child to the `lg:contents` wrapper leaves the whole suite green while the
+ * child to the `list-wide:contents` wrapper leaves the whole suite green while the
  * new cell auto-places into row 2, column 1, in the row's left gutter, and
  * widens track 1 for the header and every row with it.
  *
@@ -362,16 +362,16 @@ const elementChildren = (node) => (node.children || []).filter((c) => c.type ===
 
 describe('structural: the lg row is ten tracks and eleven items (#2358)', () => {
   const container = () =>
-    findElement(PANEL, (n) => declaredClasses(n).includes('lg:grid-cols-['))
+    findElement(PANEL, (n) => declaredClasses(n).includes('list-wide:grid-cols-['))
   const header = () => findElement(PANEL, (n) => staticAttr(n, 'data-testid') === 'list-header')
-  const lgCells = () => findElement(PANEL, (n) => declaredClasses(n).includes('lg:contents'))
+  const lgCells = () => findElement(PANEL, (n) => declaredClasses(n).includes('list-wide:contents'))
 
   it('gives the header exactly one cell per declared track', () => {
     // The header's spacer widths no longer decide alignment, but its CELL
     // COUNT still does: an eleventh header cell auto-places onto a second
     // header row instead of erroring, and a tenth track with only nine cells
     // leaves the last column unlabelled and unmeasured by the e2e.
-    const tracks = declaredClasses(container()).match(/lg:grid-cols-\[([^\]]+)\]/)
+    const tracks = declaredClasses(container()).match(/list-wide:grid-cols-\[([^\]]+)\]/)
     expect(tracks, 'the container declares the track template').toBeTruthy()
     expect(tracks[1].split('_')).toHaveLength(10)
     expect(elementChildren(header())).toHaveLength(10)
@@ -381,7 +381,7 @@ describe('structural: the lg row is ten tracks and eleven items (#2358)', () => 
     const children = elementChildren(lgCells())
     expect(children, 'the lg wrapper holds exactly eleven items').toHaveLength(11)
 
-    const placed = children.filter((c) => /lg:(row|col)-start-/.test(declaredClasses(c)))
+    const placed = children.filter((c) => /list-wide:(row|col)-start-/.test(declaredClasses(c)))
     // Exactly two: the secondary line (row 2, columns 4-9) and the meter
     // (column 10, rows 1-2). A third would mean someone placed a cell by hand
     // instead of letting the tracks do it; a first-through-ninth that auto-
@@ -398,7 +398,7 @@ describe('structural: the lg row is ten tracks and eleven items (#2358)', () => 
     // track. Definitely-placed items are exempt — their track is named, so a
     // `v-if` there leaves a hole rather than a shift.
     for (const cell of elementChildren(lgCells())) {
-      if (/lg:(row|col)-start-/.test(declaredClasses(cell))) continue
+      if (/list-wide:(row|col)-start-/.test(declaredClasses(cell))) continue
       expect(
         directiveNames(cell),
         `the ${cell.tag} cell must not be conditional or repeated`
@@ -484,5 +484,58 @@ describe('structural: the Grid tile shows the same two names (#2358 AC #3)', () 
     expect(rule[0]).toContain('text-overflow: ellipsis')
     expect(rule[0]).toContain('color: var(--gv-muted)')
     expect(rule[0]).toContain('max-width')
+  })
+})
+
+describe('structural: the desktop grid switches on the list width, not the window (#2854)', () => {
+  // With the systems rail open on first launch, a viewport `lg:` switch left
+  // the `1fr` name track ~70px at a 1280 window, and the system agent's name
+  // disappeared behind its badge. The grid now switches on the list's own
+  // width. The rendered behaviour is covered by the dashboard-list-view e2e
+  // smoke test at the 1280 default; these pin the mechanism it depends on.
+  const CONFIG = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../../tailwind.config.js'),
+    'utf8'
+  )
+  const isGrid = (n) => declaredClasses(n).includes('list-wide:grid-cols-[')
+
+  it('defines `list-wide:` as a container query on `agent-list`', () => {
+    expect(CONFIG).toMatch(
+      /addVariant\(\s*'list-wide',\s*'@container agent-list \(min-width: 68rem\)'\s*\)/
+    )
+  })
+
+  it('makes the grid\'s direct parent the `agent-list` query container', () => {
+    // A container query never matches the container itself, so the container
+    // must be the grid's parent, and it must not be the panel root, whose
+    // fixed-position toast would then be laid out against it.
+    let parent = null
+    eachElement(templateAst(PANEL), (n) => {
+      if (parent === null && elementChildren(n).some(isGrid)) parent = n
+    })
+    expect(parent, 'the grid has a parent element').not.toBeNull()
+    const classes = declaredClasses(parent)
+    expect(classes).toContain('[container-type:inline-size]')
+    expect(classes).toContain('[container-name:agent-list]')
+  })
+
+  it('leaves no viewport `lg:` switch inside the list', () => {
+    // The root's `lg:px-8` is page padding and stays viewport-based. Any other
+    // `lg:` would reintroduce a layout decision that ignores the rail.
+    const lg = (PANEL.split('<script')[0].match(/(?<![\w-])lg:[\w[\]-]+/g) || []).filter(
+      (c) => c !== 'lg:px-8'
+    )
+    expect(lg).toEqual([])
+  })
+
+  it('hides the tablet layout with the stacked `md:list-wide:hidden`', () => {
+    // Tailwind 3 emits screen variants after custom ones, so a bare
+    // `list-wide:hidden` loses to `md:flex`. The tablet block then renders
+    // inside the desktop row as an extra subgrid item and widens track 1 by
+    // hundreds of pixels, which is what the first cut of this change did.
+    const tablet = classAttrsContaining(PANEL, 'md:flex md:flex-col')
+    expect(tablet).toHaveLength(1)
+    expect(tablet[0]).toContain('md:list-wide:hidden')
+    expect(tablet[0]).not.toMatch(/(?<!md:)list-wide:hidden/)
   })
 })

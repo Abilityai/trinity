@@ -74,6 +74,28 @@
       </form>
       <InlineError v-if="saveError" :message="saveError" @dismiss="saveError = ''" />
 
+      <!--
+        The save's own confirmation. Without it the only signals are the field
+        emptying and the posture badge changing, which is too little for an
+        action that re-points every live Telegram and WhatsApp webhook.
+
+        It states the half that is known (the value is stored) and the half
+        that is not (nothing has arrived at the name), because those are
+        genuinely different facts here and the second is what the operator
+        will otherwise assume. It is NOT a claim that the domain works —
+        `postureCopy` owns that, and only once a request has landed.
+      -->
+      <p
+        v-if="savedUrl"
+        class="text-[12.5px] leading-[1.5] text-status-success-700 dark:text-status-success-300"
+        data-testid="first-run-public-url-saved"
+        role="status"
+      >
+        Saved. Nothing has reached
+        <span class="font-mono">{{ savedUrl }}</span>
+        yet — open it in a browser to confirm it works.
+      </p>
+
       <!-- Native <details>: keyboard-accessible, no JS, no state. The reasoning
            has to be reachable, not unavoidable. -->
       <details data-testid="first-run-secure-why">
@@ -106,18 +128,18 @@
               other name. Still no verdict on the live connection.
             -->
             <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
-              Point a domain’s A record at this server, then save it as the
+              Point your domain’s A record at this server, then save it as the
               <span class="text-gray-600 dark:text-gray-300">Public URL</span>
               above (it also lives in Settings → General). Trinity does not issue certificates
-              itself, but whatever terminates TLS in front of it is configured to obtain one for
-              the name you save, the first time someone visits it — so the domain gets an
-              ordinary long-lived certificate instead of a short-lived IP one, and Trinity hands
-              out the name instead of the IP. Only the name you save is allowed, so nobody else
-              can point a domain here and have certificates issued. Point the domain at this
-              server before you save: the certificate is obtained on the first request that
-              arrives for the name, so if the record is missing or points elsewhere, that
-              request never gets here — the visitor sees a certificate error and Trinity,
-              which is not in that conversation, carries on showing the name as saved.
+              itself — the web server in front of it is configured to obtain one for the name
+              you save, the first time someone visits. After that Trinity hands out the name
+              instead of the IP. Only the name you save is allowed, so nobody else can point a
+              domain here and have certificates issued. Point the domain at this server before
+              you save: the certificate is
+              obtained on the first request that arrives for the name, so if the record is
+              missing or points elsewhere, that request never gets here — the visitor sees a
+              certificate error, and Trinity, which is not part of that exchange, carries on
+              showing the name as saved.
             </p>
           </div>
 
@@ -136,16 +158,11 @@
             <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
               <template v-if="stage === 'address'">With that domain on Cloudflare, a</template><template v-else>With your domain on Cloudflare, a</template>
               tunnel lets this server stop listening on the public internet altogether:
-              <span class="font-mono text-gray-600 dark:text-gray-300">cloudflared</span>
-              connects outward to Cloudflare, and traffic arrives back through that
-              connection. Inbound integrations — Telegram, WhatsApp, VoIP, public agent
-              links, webhook triggers — keep working, because they still reach a public
-              hostname. Trinity ships the service behind the
-              <span class="font-mono text-gray-600 dark:text-gray-300">tunnel</span>
-              compose profile, driven by
-              <span class="font-mono text-gray-600 dark:text-gray-300">TUNNEL_TOKEN</span>
-              in <span class="font-mono text-gray-600 dark:text-gray-300">.env</span>, so that
-              last step happens on the host rather than from this page.
+              Cloudflare holds a connection open from the inside, and visitors arrive
+              through it. Telegram, WhatsApp, voice calls, public agent links and webhooks
+              keep working, because they still reach a public address. Setting it up takes a
+              few minutes on the server itself, so it happens on the host rather than from
+              this page — the guide below walks through it.
             </p>
           </div>
 
@@ -215,6 +232,8 @@ const url = ref('')
 const saving = ref(false)
 const fieldError = ref('')
 const saveError = ref('')
+// The saved value, kept so the confirmation can name it after the field clears.
+const savedUrl = ref('')
 
 async function save() {
   const value = url.value.trim().replace(/\/+$/, '')
@@ -230,9 +249,13 @@ async function save() {
   }
   fieldError.value = ''
   saveError.value = ''
+  // A new attempt retires the previous confirmation, or a failure would show
+  // an error next to a success that no longer describes anything.
+  savedUrl.value = ''
   saving.value = true
   try {
     await settingsStore.updateSetting('public_chat_url', value)
+    savedUrl.value = value
     url.value = ''
     // The chassis re-reads the flags, which re-derives `install_tls_posture`.
     emit('complete')

@@ -393,6 +393,10 @@ CADDY
         rm -f /etc/caddy/Caddyfile.new
         return 1
     fi
+    # A new file takes the caller's umask, and the 1-Click first boot runs with
+    # 077: a 0600 root file the `caddy` service user cannot read, so the restart
+    # fails and the droplet never serves. It holds no secrets.
+    chmod 0644 /etc/caddy/Caddyfile.new
     mv -f /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
     systemctl enable caddy
     systemctl restart caddy
