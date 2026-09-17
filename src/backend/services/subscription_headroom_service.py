@@ -47,7 +47,12 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 import httpx
 
 from database import db
-from db_models import HeadroomWindow, SubscriptionHeadroom, SubscriptionUsage
+from db_models import (
+    EnforcingLimit,
+    HeadroomWindow,
+    SubscriptionHeadroom,
+    SubscriptionUsage,
+)
 from redis_breaker_util import get_breaker_redis, SingleFlightLock
 from utils.helpers import parse_iso_timestamp, utc_now_iso
 
@@ -145,6 +150,155 @@ def _parse_reset(raw: Optional[str]) -> Optional[str]:
         return None
 
 
+# Abilityai/lilu#74 — header segments under `_H` that are NOT a rolling window.
+# `overage-status` / `overage-reason` / `representative-claim` / `fallback-*`
+# all share the `<segment>-<field>` shape, so generic window discovery has to
+# know what is not a window. Kept as a small, named blocklist AND backed by the
+# structural rule below (a window must report a utilization or a reset), so a
+# future non-window family that carries neither is excluded even if nobody adds
+# it here.
+_NON_WINDOW_SEGMENTS = frozenset({"overage", "representative", "fallback"})
+
+_WINDOW_FIELDS = ("utilization", "reset", "status")
+
+# Provider shorthand → the canonical names already on the wire (the
+# `representative-claim` header itself emits `five_hour`), so a claim string
+# and a window key are directly comparable.
+_WINDOW_ALIASES = {"5h": "five_hour", "7d": "seven_day"}
+
+
+def canonical_window_name(segment: str) -> str:
+    """`5h` → `five_hour`, `7d` → `seven_day`, `7d-opus` → `seven_day_opus`.
+
+    Only the FIRST token is translated; the rest is carried through with `_`
+    separators. That keeps a qualified window (a model-specific weekly bucket,
+    say) recognisable as the weekly family it belongs to, and keeps the key
+    equal to the string the provider uses in `representative-claim`.
+    """
+    head, _, tail = segment.partition("-")
+    head = _WINDOW_ALIASES.get(head, head)
+    return f"{head}_{tail.replace('-', '_')}" if tail else head
+
+
+def _discover_windows(headers) -> Dict[str, dict]:
+    """Every `anthropic-ratelimit-unified-<window>-<field>` family present.
+
+    Discovery is generic **by design**. This used to read two hardcoded
+    prefixes (`5h`, `7d`), which meant a window the provider reports but this
+    code has never heard of was parsed into nothing — not "unknown", nothing —
+    so the payload could show `allowed` across both known windows while a third
+    one was refusing every request (Abilityai/lilu#74). A window we cannot name
+    is still reported under whatever the provider called it.
+    """
+    raw: Dict[str, Dict[str, Optional[str]]] = {}
+    for key in headers.keys():
+        name = str(key).lower()
+        if not name.startswith(_H):
+            continue
+        rest = name[len(_H):]
+        segment, _, field = rest.rpartition("-")
+        if not segment or field not in _WINDOW_FIELDS:
+            continue
+        if segment.split("-", 1)[0] in _NON_WINDOW_SEGMENTS:
+            continue
+        raw.setdefault(segment, {})[field] = headers.get(key)
+
+    out: Dict[str, dict] = {}
+    for segment, fields in raw.items():
+        if all(fields.get(f) is None for f in _WINDOW_FIELDS):
+            continue
+        # Structural rule for a family nobody has named: a rolling window
+        # reports a number or a reset, so one carrying ONLY a `-status` is
+        # some other kind of flag and is not admitted as a window.
+        # The two KNOWN windows are exempt, and that exemption is load-bearing
+        # rather than cautious: a 429 reports a window status with NO figure
+        # (see `insert_headroom_history`), and dropping it would delete the
+        # very signal `_headroom_indicates_limited` reads off that response.
+        if (
+            segment not in _WINDOW_ALIASES
+            and fields.get("utilization") is None
+            and fields.get("reset") is None
+        ):
+            continue
+        out[canonical_window_name(segment)] = {
+            "utilization_pct": _parse_utilization(fields.get("utilization")),
+            "resets_at": _parse_reset(fields.get("reset")),
+            "status": fields.get("status"),
+        }
+    return out
+
+
+def _is_blocking(status: Optional[str]) -> bool:
+    """A window status that is present and not on the served-requests allowlist.
+
+    Same direction as `NON_BLOCKING_WINDOW_STATUSES` (#2396): an unrecognised
+    status reads as blocking. `None` is *absence of a verdict*, not a verdict,
+    so it is not blocking.
+    """
+    return status is not None and status not in NON_BLOCKING_WINDOW_STATUSES
+
+
+def select_enforcing_window(
+    windows: Dict[str, dict], representative_claim: Optional[str] = None
+) -> Optional[dict]:
+    """Which reported window is actually binding, and on what evidence.
+
+    Order matters, and it is not the obvious one:
+
+    1. **A window that is refusing.** If any window carries a blocking status,
+       that window IS the enforcement, whatever the provider nominates as
+       representative. This arm is first because it is the only one that is a
+       direct observation rather than an inference.
+    2. **The provider's `representative-claim`**, when it names a window we
+       actually received.
+    3. **The fullest window by utilization** — the nearest wall, when nothing
+       above resolved.
+
+    Returns ``None`` when there is nothing to choose from: no windows, or none
+    of them blocking, claimed, or carrying a number. Absent, never a
+    fabricated 0 — the caller must be able to tell "no enforcing figure" from
+    "plenty of room" (the ent#100 rule).
+    """
+    if not windows:
+        return None
+
+    def shape(name: str, basis: str) -> dict:
+        w = windows[name]
+        util = w.get("utilization_pct")
+        return {
+            "window": name,
+            "basis": basis,
+            "utilization_pct": util,
+            # Derived, but only where there is something to derive from.
+            "remaining_pct": (
+                round(max(0.0, 100.0 - float(util)), 1) if isinstance(util, (int, float)) else None
+            ),
+            "resets_at": w.get("resets_at"),
+            "status": w.get("status"),
+        }
+
+    def fullest(names: Sequence[str]) -> Optional[str]:
+        numbered = [n for n in names if isinstance(windows[n].get("utilization_pct"), (int, float))]
+        if not numbered:
+            return None
+        # Name as the tiebreak so the choice is deterministic across probes.
+        return max(numbered, key=lambda n: (windows[n]["utilization_pct"], n))
+
+    blocking = sorted(n for n in windows if _is_blocking(windows[n].get("status")))
+    if blocking:
+        # Among several blockers, the fullest is the honest headline; if none
+        # of them reported a number, the first by name still names the limit.
+        return shape(fullest(blocking) or blocking[0], "blocking_status")
+
+    if representative_claim:
+        claimed = canonical_window_name(str(representative_claim).strip().lower().replace("_", "-"))
+        if claimed in windows:
+            return shape(claimed, "representative_claim")
+
+    top = fullest(sorted(windows))
+    return shape(top, "highest_utilization") if top else None
+
+
 def parse_unified_headers(headers) -> Optional[dict]:
     """Build a snapshot dict from a response's unified rate-limit headers.
 
@@ -158,18 +312,18 @@ def parse_unified_headers(headers) -> Optional[dict]:
     if not any(h(n) is not None for n in ("5h-utilization", "7d-utilization", "status")):
         return None
 
-    def window(prefix: str) -> Optional[dict]:
-        util = _parse_utilization(h(f"{prefix}-utilization"))
-        reset = _parse_reset(h(f"{prefix}-reset"))
-        status = h(f"{prefix}-status")
-        if util is None and reset is None and status is None:
-            return None
-        return {"utilization_pct": util, "resets_at": reset, "status": status}
+    windows = _discover_windows(headers)
+    claim = h("representative-claim")
 
     return {
-        "five_hour": window("5h"),
-        "seven_day": window("7d"),
-        "representative_claim": h("representative-claim"),
+        # The fixed pair, unchanged: every existing consumer reads these two by
+        # name and they must keep meaning exactly what they meant.
+        "five_hour": windows.get("five_hour"),
+        "seven_day": windows.get("seven_day"),
+        # Abilityai/lilu#74 — the complete set, plus the one that binds.
+        "windows": windows,
+        "enforcing": select_enforcing_window(windows, claim),
+        "representative_claim": claim,
         "overage_status": h("overage-status"),
         "unified_status": h("status"),
     }
@@ -343,15 +497,62 @@ def _to_model(snapshot: Optional[dict]) -> Optional[SubscriptionHeadroom]:
     def win(d: Optional[dict]) -> Optional[HeadroomWindow]:
         return HeadroomWindow(**d) if d else None
 
+    # Abilityai/lilu#74 — snapshots live in Redis for up to 7 days, so for a
+    # week after this ships most reads are of dicts written by the OLD parser,
+    # which has no `windows` key. Reconstructing it from the fixed pair keeps
+    # those snapshots exactly as capable as they were: the predicates below
+    # iterate `windows`, and an empty map would make every cached snapshot
+    # read as "no windows reported" — `_headroom_indicates_healthy` returns
+    # False on that, which would re-pin a stale LIMIT badge (the #447 bug) on
+    # every subscription until the cache turned over.
+    raw_windows = snapshot.get("windows")
+    if not isinstance(raw_windows, dict) or not raw_windows:
+        raw_windows = {
+            name: snapshot.get(name)
+            for name in ("five_hour", "seven_day")
+            if snapshot.get(name)
+        }
+
+    windows = {k: win(v) for k, v in raw_windows.items() if v}
+
+    enforcing_raw = snapshot.get("enforcing")
+    if not isinstance(enforcing_raw, dict):
+        # Same back-compat path: derive it from whatever windows we have.
+        enforcing_raw = select_enforcing_window(
+            {k: v for k, v in raw_windows.items() if v},
+            snapshot.get("representative_claim"),
+        )
+
     return SubscriptionHeadroom(
         five_hour=win(snapshot.get("five_hour")),
         seven_day=win(snapshot.get("seven_day")),
+        windows=windows,
+        enforcing=EnforcingLimit(**enforcing_raw) if enforcing_raw else None,
         representative_claim=snapshot.get("representative_claim"),
         overage_status=snapshot.get("overage_status"),
         fetched_at=snapshot.get("fetched_at"),
         snapshot_age_seconds=_snapshot_age_seconds(snapshot),
         status=snapshot.get("status", "ok"),
     )
+
+
+def reported_windows(headroom: Optional[SubscriptionHeadroom]) -> List[HeadroomWindow]:
+    """Every window a snapshot carries — the complete set, not the fixed pair.
+
+    The ONE place the predicates below get their window list
+    (Abilityai/lilu#74). They each iterated the literal
+    ``(five_hour, seven_day)``, which is why a third window family that the
+    provider was actively refusing on could not move a single badge.
+
+    For any snapshot reporting only the two known windows — i.e. every snapshot
+    on every install today — this returns exactly that pair, so the predicates'
+    behaviour is unchanged (pinned by test).
+    """
+    if headroom is None:
+        return []
+    if headroom.windows:
+        return list(headroom.windows.values())
+    return [w for w in (headroom.five_hour, headroom.seven_day) if w is not None]
 
 
 # Strong refs for background refreshes — an asyncio.Task held only by the event
@@ -600,6 +801,13 @@ def _headroom_indicates_limited(headroom: Optional[SubscriptionHeadroom]) -> boo
     HTTP 429 sets the top-level ``status`` and is caught FIRST, above any window
     status — so the window arm is the weaker, secondary signal, and the db
     predicate in ``resolve_rate_limited_now`` is a third, independent one.
+
+    The window arm iterates ``reported_windows`` — EVERY window the provider
+    named, not the fixed ``(five_hour, seven_day)`` pair it read before
+    (Abilityai/lilu#74). Unrecognised *statuses* already read as blocking; an
+    unrecognised *window* did not exist at all, so a third family refusing
+    every request left this predicate saying `False`. For a snapshot carrying
+    only the two known windows the iteration is identical.
     """
     if headroom is None:
         return False
@@ -608,7 +816,7 @@ def _headroom_indicates_limited(headroom: Optional[SubscriptionHeadroom]) -> boo
         return False
     if headroom.status == "rate_limited":
         return True
-    for w in (headroom.five_hour, headroom.seven_day):
+    for w in reported_windows(headroom):
         if w and w.status and w.status not in NON_BLOCKING_WINDOW_STATUSES:
             return True
     return False
@@ -651,7 +859,7 @@ def _headroom_indicates_healthy(headroom: Optional[SubscriptionHeadroom]) -> boo
         return False
     if headroom.status != "ok":
         return False
-    windows = [w for w in (headroom.five_hour, headroom.seven_day) if w is not None]
+    windows = reported_windows(headroom)
     if not windows:
         return False
     return all(

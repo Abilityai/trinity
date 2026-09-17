@@ -973,6 +973,26 @@ class HeadroomWindow(BaseModel):
     status: Optional[str] = None             # provider's per-window status (e.g. "allowed")
 
 
+class EnforcingLimit(BaseModel):
+    """The window that is actually binding, named (Abilityai/lilu#74).
+
+    `five_hour`/`seven_day` report two windows side by side and say nothing
+    about which one the provider will refuse on. A reader that picks one
+    (`/experiment` Step 0b picked the weekly) can report `allowed` at 16% while
+    every turn is being rejected on a *different* weekly bucket with a
+    different reset — two windows, two resets, opposite verdicts.
+
+    This block answers "which limit, and when does IT reset". It is absent
+    whenever the provider gave nothing to choose from — never a fabricated 0.
+    """
+    window: str                                  # canonical key into `windows`
+    basis: str                                   # blocking_status | representative_claim | highest_utilization
+    utilization_pct: Optional[float] = None      # 0..100, as reported
+    remaining_pct: Optional[float] = None        # 100 - utilization_pct; None when unreported
+    resets_at: Optional[str] = None              # ISO-Z — the reset THIS limit runs on
+    status: Optional[str] = None
+
+
 class SubscriptionHeadroom(BaseModel):
     """Provider-truth headroom snapshot for one subscription (#471).
 
@@ -981,6 +1001,14 @@ class SubscriptionHeadroom(BaseModel):
     """
     five_hour: Optional[HeadroomWindow] = None
     seven_day: Optional[HeadroomWindow] = None
+    # Abilityai/lilu#74: EVERY window family the provider reported, keyed by
+    # canonical name — including ones this code has never heard of. The two
+    # fields above are a fixed pair and stay exactly as they are (consumers
+    # read them today); a provider window outside that pair used to be parsed
+    # into nothing and was therefore invisible to every surface, which is how
+    # an enforced weekly limit could sit behind an `allowed` reading.
+    windows: Dict[str, HeadroomWindow] = Field(default_factory=dict)
+    enforcing: Optional[EnforcingLimit] = None
     representative_claim: Optional[str] = None  # which window binds ("five_hour"/"seven_day")
     overage_status: Optional[str] = None
     fetched_at: Optional[str] = None            # ISO-Z of the probe
