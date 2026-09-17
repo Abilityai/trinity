@@ -1,4 +1,5 @@
 const colors = require('tailwindcss/colors')
+const plugin = require('tailwindcss/plugin')
 
 /** @type {import('tailwindcss').Config} */
 export default {
@@ -46,5 +47,12 @@ export default {
   },
   plugins: [
     require('@tailwindcss/typography'),
+    // `list-lg:` — the dashboard List pane's own width, not the viewport's
+    // (AgentListPanel.vue is the `agent-list` container). 68rem is the
+    // ten-track row grid's fixed tracks and gaps plus a name track that still
+    // shows a system agent's name and badge.
+    plugin(({ addVariant }) => {
+      addVariant('list-lg', '@container agent-list (min-width: 68rem)')
+    }),
   ],
 }

@@ -83,28 +83,30 @@ components/AgentListPanel.vue  (props-driven; root owns scroll: h-full
            · sticky bulk toolbar (sticky top-0 inside the panel's scroll)
            · toasts · data-agent="<slug>" row hooks for e2e
 
-lg row anatomy (#2358) — ONE sizing context:
+lg row anatomy (#2358) — ONE sizing context. `list-lg:` is a container query on
+the panel root (`agent-list`, 68rem), not the viewport `lg:` — the systems rail
+decides how wide the pane is:
   list container  flex flex-col gap-y-1.5
-                  lg:grid lg:grid-cols-[auto auto auto 1fr 46px 22rem 180px auto auto auto]
-                  lg:gap-x-4                      ← the template is declared HERE, once
-   ├─ header  hidden lg:grid lg:grid-cols-subgrid lg:col-span-full items-center py-2
+                  list-lg:grid list-lg:grid-cols-[auto auto auto 1fr 46px 22rem 180px auto auto auto]
+                  list-lg:gap-x-4                      ← the template is declared HERE, once
+   ├─ header  hidden list-lg:grid list-lg:grid-cols-subgrid list-lg:col-span-full items-center py-2
    │            data-testid="list-header"; cells 1-3 / 9 / 10 are spacers; the five
    │            labelled cells carry data-col="name|status|controls|success|stats"
-   └─ row ×N  … lg:grid lg:grid-cols-subgrid lg:col-span-full lg:items-center
-                lg:gap-y-1 lg:py-3                ← still the visual box (bg/rounded/
+   └─ row ×N  … list-lg:grid list-lg:grid-cols-subgrid list-lg:col-span-full list-lg:items-center
+                list-lg:gap-y-1 list-lg:py-3                ← still the visual box (bg/rounded/
                                                      hover/border-l, avatar's abs parent)
-         ├─ <div class="hidden lg:contents">      ← one breakpoint switch, adds no box
+         ├─ <div class="hidden list-lg:contents">      ← one breakpoint switch, adds no box
          │     9 row-1 cells (same data-col hooks as the header)
-         │     + secondary line  lg:row-start-2 lg:col-start-4 lg:col-end-10
+         │     + secondary line  list-lg:row-start-2 list-lg:col-start-4 list-lg:col-end-10
          │           flex-nowrap min-w-0 overflow-hidden, meta ink on the container
          │           slug(code, select-all, truncate max-w-1/2) · pressure · runtime · tags · +N
-         │     + CapacityMeter  lg:col-start-10 lg:row-start-1 lg:row-span-2 lg:mr-4
+         │     + CapacityMeter  list-lg:col-start-10 list-lg:row-start-1 list-lg:row-span-2 list-lg:mr-4
          ├─ md layout   (display:none at lg — never a grid item)
          └─ base layout (display:none at lg)
   Neither the header nor the row carries ANY horizontal padding at lg — not even
-  an explicit `lg:px-0`, which the structural guard rejects along with the rest
-  of `lg:p[xlr]-`. Edge insets are ITEM MARGINS (checkbox lg:ml-8, meter
-  lg:mr-4), identical on the header and every row.
+  an explicit `list-lg:px-0`, which the structural guard rejects along with the rest
+  of `list-lg:p[xlr]-`. Edge insets are ITEM MARGINS (checkbox list-lg:ml-8, meter
+  list-lg:mr-4), identical on the header and every row.
 
 router: /agents ─fn-redirect(query-preserving, view:'list')→ /
         (exact segment — /agents/:name and deeper untouched)
