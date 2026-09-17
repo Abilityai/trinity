@@ -72,6 +72,16 @@ A sync `/task` that fails, times out, or is cancelled releases its `Idempotency-
 
 `POST /chat` and `POST /task` accept a `files` array of `{name, mimetype, size, data_base64}` (raw base64 or a `data:` URI). Images are passed to the agent as vision content; other files land in `/home/developer/uploads/` inside the container. Accepted: images, plain text, CSV, JSON, and **ZIP** (stored unextracted — the agent unpacks it itself). Rejected: PDF, tar/gzip/rar, audio, video. Web limits: 3 files per message, 5 MB per file, 10 MB of images in total.
 
+#### Model override
+
+`POST /chat`, `POST /task`, and `POST /api/agents/{name}/sessions/{id}/message` (see [Agent Sessions](../agents/agent-session.md)) accept an optional `model`. The value is checked before anything is dispatched:
+
+- Empty, whitespace, or omitted means the agent's default model.
+- Otherwise it must start with a known model family, ignoring case: a short alias (`sonnet`, `opus`, `haiku`, `fable`) or a full id (`claude-…`, `gemini-…`, `gpt-…`, `codex…`). Suffixes such as `[1m]` are kept.
+- Anything else is refused with **422**, and the error names the value: `'<value>' is not a model id. Use a short alias (sonnet, opus, haiku, fable) or a full id such as '…'.`
+
+A refused request starts no execution. It does not use up its `Idempotency-Key`, and a refused session turn leaves no unanswered message in the session. The check is on the shape only: an id with a valid prefix that the provider does not serve still fails when the run starts.
+
 #### Deprecated: per-task `timeout_seconds`
 
 The `timeout_seconds` field on the task request body is **deprecated** and will be removed in a future release. The agent's execution timeout (`GET/PUT /api/agents/{name}/timeout`) is authoritative.

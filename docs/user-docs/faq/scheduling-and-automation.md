@@ -40,7 +40,11 @@ Each agent has an execution timeout cap (default 60 minutes, configurable from 1
 
 ## Do failed scheduled runs retry automatically?
 
-Yes, by default. Each schedule has `max_retries` (default 1, range 0–5) and `retry_delay_seconds` (default 60, range 30–600); set `max_retries: 0` to disable retries. Rate-limit errors use double the delay, capped at 300 seconds. Each retry creates a new execution record linked to the original via `retry_of_execution_id`, and the execution list groups retries under their parent run. See [Scheduling](../automation/scheduling.md).
+Only if you turn retries on. Each schedule has `max_retries` (range 0–5) and `retry_delay_seconds` (default 60, range 30–600). A schedule created in the UI or over the REST API starts with retries off (`max_retries: 0`); one created with the `create_agent_schedule` MCP tool starts with 1 retry. Rate-limit errors use double the delay, capped at 300 seconds. Each retry creates a new execution record linked to the original via `retry_of_execution_id`, and the execution list groups retries under their parent run. See [Scheduling](../automation/scheduling.md).
+
+## Can Trinity check that a scheduled run actually did its job?
+
+Yes, with post-run validation. Set `validation_enabled: true` on the schedule over the API, or with `create_agent_schedule` / `update_agent_schedule`; the schedule form has no field for it. After each successful run, the same agent runs one extra execution in a clean context that audits the result, and the run's `business_status` becomes `validated` or `failed_validation`. A fail or partial verdict raises one high-priority **Validation Failed** alert in the Operations queue, but it does not trigger a retry. Each validation pass is a real execution, so it costs a run; `validation_prompt` and `validation_timeout_seconds` (30–600, default 120) tune it. See [Scheduling](../automation/scheduling.md#post-run-validation).
 
 ## What happens to the execution history if I delete a schedule?
 
@@ -102,9 +106,13 @@ Loops have several independent brakes. `max_runs` (required, capped at 100) is t
 
 That's set by the loop's failure policy, `on_failure`. The default is `abort`: the loop fails fast, stopping the moment an iteration errors. Switch to `continue` and the loop tolerates a failed iteration and moves on to the next run — but it still aborts if failures pile up, once it hits `max_consecutive_failures` (default 3) errors in a row; a successful run resets that streak. A continue-mode loop that finishes with some tolerated failures reports a `completed_with_errors` status. See [Agent Loops](../automation/agent-loops.md).
 
+## Can an agent start a loop on another agent it has no permission for?
+
+No. `run_agent_loop` applies the same permission rule as `chat_with_agent`: an agent can loop on itself, and on another agent only if it has been granted permission to call it. Without a grant, the tool refuses before any loop starts and returns an `Access denied` result. `get_loop_status` and `stop_loop` look up the loop's agent and apply the same rule, answering `Loop '<id>' not found or not accessible` on a refusal. If an agent's permission is removed while its loop runs, the agent's owner can still stop the loop from the **Loops** tab. See [Agent Loops](../automation/agent-loops.md#permission-checks-on-the-loop-tools).
+
 ## How do I run many tasks in parallel on one agent?
 
-Use fan-out: it dispatches 1–50 independent tasks to an agent concurrently (up to `max_concurrency`, default 3, max 10), waits for all of them to complete or hit the overall deadline, and returns aggregated results in input order. It's available via the `fan_out` MCP tool or `POST /api/agents/{name}/fan-out` — there is no UI, and it currently works only on the calling agent itself. Every batch gets a server-minted `fan_out_id`; each subtask is its own execution record stamped with that id and consumes one of the agent's parallel slots, and a batch can be read back while it's still running with `get_fan_out_result` or `GET /api/agents/{name}/fan-out/{fan_out_id}`. See [Fan-Out](../automation/fan-out.md).
+Use fan-out: it dispatches 1–50 independent tasks to an agent concurrently (up to `max_concurrency`, default 3, max 10), waits for all of them to finish, and returns aggregated results in input order. `timeout_seconds` only limits the wait — tasks still open at the deadline keep running — and `async_mode: true` skips the wait entirely and returns the `fan_out_id` to poll. It's available via the `fan_out` MCP tool or `POST /api/agents/{name}/fan-out` — there is no UI, and it currently works only on the calling agent itself. Every batch gets a server-minted `fan_out_id`; each subtask is its own execution record stamped with that id and consumes one of the agent's parallel slots, and a batch can be read back while it's still running with `get_fan_out_result` or `GET /api/agents/{name}/fan-out/{fan_out_id}`. See [Fan-Out](../automation/fan-out.md).
 
 ## What are skills and playbooks, and how do I run one?
 
@@ -122,6 +130,14 @@ Yes. Each skill card on the Library's Skills tab has an **Assign to…** control
 ## Can a skill be a whole folder of files instead of a single markdown file?
 
 Yes. A skill is a full-directory package, not just one markdown file: alongside the `SKILL.md` instructions it can carry scripts, templates, and any resource files the capability needs. When the skill is assigned, Trinity injects the entire directory into the agent, versioned by the folder's content so re-syncs only push real changes. This lets a skill ship helper code and assets, not only prose. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
+## Why does my playbook say "No description available"?
+
+The Playbooks tab, the `/` popup, and the chat empty state take a skill's description from the `description:` field in its `SKILL.md` frontmatter, so first check that the field is there. On an agent running an older base image, one unreadable frontmatter field blanked the whole record — most often Claude Code's comma-separated `allowed-tools: Read, Bash` — and the skill showed only its folder name. Current agent images read each field on its own, accept both the comma-separated and the list form of `allowed-tools`, and drop only the bad field, with one warning in the agent log naming the file and field. To pick that up on an existing agent, rebuild or re-pull the agent base image and start the agent cold. See [Skills and Playbooks](../automation/skills-and-playbooks.md#skill-frontmatter-and-dependency-checks).
+
+## Does a skill's `allowed-tools` frontmatter limit what the agent can do?
+
+Not in Trinity. The agent reads the field — in Claude Code's comma-separated form (`Read, Bash, Bash(git:*)`) or as a YAML list — and reports it in its skill listing, but nothing in Trinity enforces it. To restrict the tools a run may use, set allowed tools on the schedule, loop, or task that runs it. See [Skills and Playbooks](../automation/skills-and-playbooks.md#skill-frontmatter-and-dependency-checks).
 
 ## How do I assign skills to an agent, and do I need to restart it?
 

@@ -4,7 +4,7 @@
 
 ## What's New
 
-- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.9.0](whats-new/v0.9.0.md), illustrated)
+- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.9.5](whats-new/v0.9.5.md) latest; [v0.9.0](whats-new/v0.9.0.md) illustrated)
 
 ## FAQ
 
@@ -17,6 +17,7 @@
 ## Guides
 
 - [Deploying Trinity](guides/deploying-trinity.md) — Cloud vs self-hosted setup, step-by-step
+- [Deploy on DigitalOcean](guides/deploying/digitalocean.md) — One command from your terminal to an HTTPS Droplet: doctl, a Claude subscription token, an optional domain
 - [Using Trinity](guides/using-trinity.md) — UI tour: dashboard, agents, monitoring
 - [Building Agents](guides/building-agents.md) — Create, develop, deploy with Claude Code + abilities
 

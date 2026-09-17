@@ -78,7 +78,7 @@ Password login is rate-limited: five failed attempts on one account within 15 mi
 
 On a fresh install the Dashboard opens **first-run setup**: one sequence over a dashboard that does not move underneath it. A rail on the left lists the steps this install actually needs — steps that do not apply to you never appear — and marks each one done as you go. The order is fixed, and you can go back:
 
-- **Secure this instance** -- Only on an install provisioned onto a cloud VM at a bare IP (the DigitalOcean 1-Click, or the `trinity-do-create.sh` installer), for admins, until a domain is configured. Set a domain here, then serve it through a Cloudflare Tunnel. See [Single Server → DigitalOcean 1-Click](../guides/deploying/single-server.md#digitalocean-marketplace-1-click).
+- **Secure this instance** -- Only on an install provisioned onto a cloud VM at a bare IP (the DigitalOcean 1-Click, or the [`trinity-do-create.sh` installer](../guides/deploying/digitalocean.md)), for admins, until a domain is configured. Point a domain at the server, enter it as the **Public URL** and click **Save domain**, then optionally serve it through a Cloudflare Tunnel. Saving completes the step. Its badge reads **Domain saved** until the first visit to that name reaches the server, then **Domain reached**. **Why this matters** explains both stages and links the full [hardening guide](../guides/deploying/hardening.md). See [Single Server → DigitalOcean 1-Click](../guides/deploying/single-server.md#digitalocean-marketplace-1-click).
 - **Sign-in email** -- Only when the admin account has no email yet, so you can log in with email + password. An install you claimed in the browser collected it at `/setup`, so this step does not appear. Also at **Settings → General → Admin sign-in email**.
 - **Connect Claude** -- The one required step. Paste a Claude subscription token or an Anthropic API key; it is checked with Anthropic before it is saved, and the first credential is handed to the agents that had none. Until this is done, no agent can run.
 - **Other keys** -- Optional: a GitHub token, an email-provider key (needed for email sign-in codes), and a Gemini key (voice features and generated agent avatars). Each says what skipping it costs, and all of them live at **Settings → Integrations** afterwards.
@@ -87,7 +87,11 @@ On a fresh install the Dashboard opens **first-run setup**: one sequence over a 
 
 Every step except **Connect Claude** is skippable, and skipping tells you where to find it later. **Finish later** closes the whole sequence; nothing re-opens it on its own. To pick it up again, use **Settings → General → First-run setup → Re-run setup**, or add `?onboarding=1` to the Dashboard URL — completed steps stay complete.
 
-The one card that still lives on the Dashboard is **Getting started**, a checklist that ticks off your first milestones over your first days and hides itself when the last one is done. It appears only on instances with the matching enterprise entitlement.
+After setup, a **Getting started** checklist can keep you going. It ticks off your first milestones over your first days and hides itself when the last one is done. It appears only on instances with the matching enterprise entitlement.
+
+- **Where it is** -- In the Dashboard's left **Systems** sidebar, under the list of views and above **New View**. It is not in the Dashboard body, so it never pushes the fleet down. The sidebar opens expanded unless you collapsed it earlier in this browser. Collapsing it hides the checklist along with the view labels.
+- **How it works** -- Its header shows your progress (for example `1/4`) and collapses or expands the list. Your browser remembers that choice. Only the next unfinished item has an action button. The list refreshes whenever you return to the Dashboard, so a milestone you reach on another page shows up without a reload.
+- **Retiring it** -- **Don't show this again** hides the checklist for good. Nothing brings it back, so collapse the header instead if you only mean "not now".
 
 ### Your Starter Fleet
 
@@ -193,5 +197,6 @@ The following endpoints do not require authentication:
 
 - [Quick Start](quick-start.md) -- Create your first agent, or let first-run setup do it.
 - [Deploying Trinity](../guides/deploying-trinity.md) -- Local, server, prebuilt-image and DigitalOcean 1-Click installs.
+- [Deploy on DigitalOcean](../guides/deploying/digitalocean.md) -- One command from your terminal to an HTTPS Droplet.
 - [Overview](overview.md) -- Platform overview and core concepts.
 - [Creating Agents](../agents/creating-agents.md) -- Deploy your first agent.

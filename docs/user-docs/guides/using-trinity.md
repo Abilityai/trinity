@@ -35,7 +35,7 @@ The Dashboard gives you a bird's-eye view of your agent fleet in three interchan
 
 Shared controls across all three: press `/` to type-filter the fleet by name, press `v` to cycle the view, plus tag filter, owner filter, time range, and **Create Agent**.
 
-On a fresh install the Dashboard opens **first-run setup** — one guided sequence (connect Claude, optional keys, your first agent, usage sharing) that you can re-run from **Settings → General → First-run setup** or with `?onboarding=1`. See [First-Time Setup → Your First Dashboard](../getting-started/setup.md#your-first-dashboard).
+On a fresh install the Dashboard opens **first-run setup** — one guided sequence (connect Claude, optional keys, your first agent, usage sharing) that you can re-run from **Settings → General → First-run setup** or with `?onboarding=1`. After that, on instances that have it, a **Getting started** checklist sits in the Dashboard's left **Systems** sidebar, under the view list, until your first milestones are done. See [First-Time Setup → Your First Dashboard](../getting-started/setup.md#your-first-dashboard).
 
 See [Dashboard](../operations/dashboard.md) for the full reference.
 

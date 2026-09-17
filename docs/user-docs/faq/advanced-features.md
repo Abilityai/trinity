@@ -30,6 +30,10 @@ Both are per-agent settings. Each agent has a persisted Gemini voice (default **
 
 Yes, on your side. A speaker button above the composer — **Speak replies aloud** — reads each reply in the agent's ElevenLabs voice; click it again to mute. It appears only when the agent has a voice configured, and it is hidden during a voice call, when the orb owns playback. It is a viewer-side choice, not something the agent opts into — unlike voice notes on Telegram, Slack and WhatsApp, which the agent chooses per reply with `send_voice_reply` (see the [Channels FAQ](channels-and-messaging.md)). The ElevenLabs voice is unrelated to the Gemini voice a call speaks with. See [Voice Replies](../advanced/voice-replies.md#limitations).
 
+## Can I dictate a message in the Workspace instead of typing?
+
+Yes, with the microphone in the composer (**Speak your message**). It types what you say into the message field and sends nothing until you press Enter. It is not a voice call and needs no Gemini key, and clients signed in with an email code get it too. Trinity transcribes a recorded clip through ElevenLabs when the platform's ElevenLabs key is allowed to call speech-to-text. Otherwise the browser's own speech engine is used, and where neither can work, the microphone is not shown. An admin can check the key under **Settings → General → Voice (ElevenLabs)**: **can transcribe**, **cannot transcribe — *reason***, or **transcription not verified**. The same panel shows the last failed transcription and its cause. See [Workspace → Dictation](../sharing-and-access/workspace.md#dictation).
+
 ## What happened to Workspace Mode?
 
 It was a separate full-page voice surface at `/agents/{name}/workspace`. That page is gone — its address now redirects to `/workspace?agent={name}` — and its two valuable halves live on in better places. The **canvas** — where the agent paints formatted text, Mermaid diagrams, images and static HTML layouts while it talks — is now the agent's own durable canvas, shown beside the orb during a call and on the Canvas tab afterwards. The **call** is now the Workspace's voice mode, inside a real chat. The **Workspace** button in the agent header opens the Workspace, and **Talk** beside it opens it with the call starting. All canvas content is still sanitized, and HTML panels still render as static layout only — agent-supplied scripts never execute. See [Voice Chat](../advanced/voice-chat.md#voice-mode-in-the-workspace).
@@ -84,7 +88,11 @@ Source mode (the default) is pull-only: the agent pulls from the repo but never 
 
 ## Does my agent push its changes to GitHub automatically?
 
-In Working Branch mode, yes: an auto-sync heartbeat inside the agent stages, commits, and pushes in-container changes about every 15 minutes, and you can toggle it per agent. Trinity also polls sync health every 60 seconds — after 3 consecutive failures (broken remote, expired PAT, upstream divergence) an alert appears in the Operating Room's Needs Response tab, and the fleet dashboard shows a per-agent sync health indicator. You can always trigger a manual **Pull** or **Sync** from the agent detail page. See [GitHub Sync](../integrations/github-sync.md) and [Operating Room](../operations/operating-room.md).
+In Working Branch mode, yes: an auto-sync heartbeat inside the agent stages, commits, and pushes in-container changes about every 15 minutes, and you can toggle it per agent. Trinity also polls sync health every 60 seconds by default (`SYNC_HEALTH_POLL_INTERVAL_SECONDS` changes it) without taking the agent's git index lock — after 3 consecutive failures (broken remote, expired PAT, upstream divergence) an alert appears in the Operating Room's Needs Response tab, and the fleet dashboard shows a per-agent sync health indicator. You can always trigger a manual **Pull** or **Sync** from the agent detail page. See [GitHub Sync](../integrations/github-sync.md) and [Operating Room](../operations/operating-room.md).
+
+## Can my agent run `git push` or `gh` from its own terminal?
+
+Yes, as long as a GitHub token resolves for it. Git gets the token from Trinity's credential helper on each fetch or push — the remote URL itself carries no token — and the `gh` CLI and REST calls read `GH_TOKEN`/`GITHUB_TOKEN`, which Trinity sets from the same token. A rotated or newly added token reaches git on its next operation, with no restart. An agent with no token is pull-only: its push URL is deliberately disabled, so a push fails immediately with an error telling you to fork to own or add a GitHub token. See [GitHub PAT Setup](../integrations/github-pat-setup.md#how-git-gets-the-token).
 
 ## What is a fork-to-own template?
 
