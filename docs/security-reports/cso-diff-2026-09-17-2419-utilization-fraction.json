@@ -51,8 +51,8 @@
       "where": "src/backend/services/subscription_headroom_service.py parse_unified_headers (overage_status, unified_status); the status predicates _headroom_indicates_limited/_healthy read per-window status + the probe HTTP status only",
       "exploit": "none — a mis-badge (LIMIT shown for a serving subscription, or an overage invisible), not a boundary crossing",
       "impact": "Operator-facing truthfulness of the badge/alert on overage-enabled plans; unobserved until a real overage sample arrives (the diff's arrival log is the capture path)",
-      "note": "Not introduced by this diff (surfaced by the independent strategy review). Registered as a follow-up issue after the PR (approved at the 2026-09-17 plan gate, Choice 3).",
-      "tracking": "follow-up issue, filed after PR"
+      "note": "Not introduced by this diff (surfaced by the independent strategy review). Registered as abilityai/trinity#2865 (approved at the 2026-09-17 plan gate, Choice 3).",
+      "tracking": "abilityai/trinity#2865"
     }
   ],
   "supply_chain_summary": {

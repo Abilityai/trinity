@@ -19,7 +19,7 @@ Key clearances: the log line cannot carry the token (response headers only, by c
 ## Appendix — pre-existing, tracked
 | # | Sev | Conf | Item | Tracking |
 |---|-----|------|------|----------|
-| A1 | LOW | 8 | `overage_status`/`unified_status` are parsed and persisted but read by no predicate; a subscription serving on overage may carry `unified-status: rejected` + `overage-status: allowed` — a truthfulness gap on the badge/alert, not a boundary crossing | follow-up issue, filed after the PR (plan-gate ruling 2026-09-17) |
+| A1 | LOW | 8 | `overage_status`/`unified_status` are parsed and persisted but read by no predicate; a subscription serving on overage may carry `unified-status: rejected` + `overage-status: allowed` — a truthfulness gap on the badge/alert, not a boundary crossing | abilityai/trinity#2865 (plan-gate ruling 2026-09-17) |
 
 ## STRIDE (headroom service, diff-scoped)
 - **Spoofing**: n/a — the probe authenticates with the operator's own token, unchanged. **Tampering**: the parser now rejects malformed numbers instead of storing them. **Repudiation**: a past-cap reading is now logged with its raw inputs. **Information disclosure**: the new log line names a subscription UUID and rate-limit figures — INTERNAL data, no credential. **DoS**: none (hard exclusion #1; a probe is ≥60 s apart per subscription). **Elevation**: none — no auth surface touched.
