@@ -157,8 +157,6 @@ def _payload(triggered_by: str):
         user_email="u@x",
         subscription_id=None,
         x_source_agent=None,
-        x_mcp_key_id=None,
-        x_mcp_key_name=None,
         triggered_by=triggered_by,
         collaboration_activity_id=None,
     )
@@ -181,32 +179,45 @@ class TestPullOwnsDispatch:
 
         assert pull_owns_dispatch("bob", "schedule") is False
 
-    @pytest.mark.parametrize("trigger", ["agent", "event"])
+    @pytest.mark.parametrize(
+        "trigger",
+        ["agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
+         "a2a", "operator_response"],
+    )
     def test_pilot_owns_the_autonomous_triggers_dispatch_can_deliver(self, pilot, trigger):
-        """Narrowed from "every autonomous trigger" by #2048.
+        """Narrowed by #2048, re-widened by #2391 and #2523.
 
-        This case used to parametrize all seven of ``_AUTONOMOUS_TRIGGERS`` and
-        assert True for each — encoding reach the system never had. Only
-        ``POST /task`` dispatches with ``overflow_policy="queue_persistent"``,
-        which is the sole path on which ``capacity_manager`` consults this
-        predicate at all, and that route can only emit ``agent`` / ``event`` from
-        the autonomous set. The old assertion passed only because it called the
-        predicate directly, outside the context that constrains it. See
-        ``test_2048_pull_pilot_reach.py``.
+        This case originally parametrized all seven of ``_AUTONOMOUS_TRIGGERS``
+        and asserted True for each — encoding reach the system did not have; it
+        passed only because it called the predicate directly, outside the context
+        that constrains it. #2048 cut it to what ``POST /task`` can emit. #2391
+        then gave ``task_execution_service`` a pilot-gated ``queue_persistent``
+        policy, so the scheduler's async-polled triggers genuinely reach the
+        queue and belong here; #2523 added ``loop`` by making its driver
+        terminal-driven, and #2524 added ``fan_out`` (aggregate as a query) plus
+        ``a2a`` and ``operator_response`` (the sync edge adapter). The set is
+        now every autonomous trigger. See ``test_2048_pull_pilot_reach.py``.
         """
         from services.agent_service.pull_mode import pull_owns_dispatch
 
         assert pull_owns_dispatch("alice", trigger) is True
 
-    @pytest.mark.parametrize(
-        "trigger", ["schedule", "webhook", "loop", "fan_out", "reminder"]
-    )
-    def test_pilot_does_not_own_a_trigger_dispatch_cannot_deliver(self, pilot, trigger):
-        """The #2048 correction as a positive assertion: declaring a trigger
-        autonomous gives the durable queue no way to receive it."""
+    def test_pilot_does_not_own_a_trigger_the_reach_set_omits(self, pilot, monkeypatch):
+        """The #2048 correction as a positive assertion.
+
+        #2524 emptied the stranded set — every autonomous trigger reaches the
+        queue now — so this drives the narrowing itself against a synthetic
+        omission. That is the behaviour worth keeping: the next trigger declared
+        autonomous must be classified, not inherit reach.
+        """
+        import services.pull_pilot as pp
         from services.agent_service.pull_mode import pull_owns_dispatch
 
-        assert pull_owns_dispatch("alice", trigger) is False
+        monkeypatch.setattr(
+            pp, "PULL_REACHABLE_TRIGGERS", pp.PULL_REACHABLE_TRIGGERS - {"schedule"}
+        )
+        assert pull_owns_dispatch("alice", "schedule") is False
+        assert pull_owns_dispatch("alice", "agent") is True
 
     @pytest.mark.parametrize("trigger", ["manual", "user", "chat", "voip", "voice", None])
     def test_pilot_does_not_own_interactive_triggers(self, pilot, trigger):
@@ -283,6 +294,8 @@ class TestProducerGate:
     def test_non_pilot_autonomous_work_unchanged(
         self, capacity, slot_service, backlog_service, pilot
     ):
+        """`bob` is not in the allowlist, so `schedule` admits normally even
+        though #2391 made that trigger reachable for a pilot."""
         result = asyncio.run(
             capacity.acquire(
                 agent_name="bob",

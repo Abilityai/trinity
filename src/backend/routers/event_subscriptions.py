@@ -1,3 +1,4 @@
+# mcp: events.ts (emit_event, subscribe_to_event, list_event_subscriptions, delete_event_subscription)
 """
 Agent Event Subscriptions Router (EVT-001).
 
@@ -356,7 +357,16 @@ async def emit_event(
 
     # Trigger matching subscriptions (fire-and-forget)
     for sub in matching_subs:
-        asyncio.create_task(event_dispatch_service.trigger_subscription(sub, event))
+        asyncio.create_task(
+            event_dispatch_service.trigger_subscription(
+                sub,
+                event,
+                # ent#614: `source_agent` above is the agent's own name for an
+                # agent-scoped key and the caller's USERNAME for a JWT human;
+                # only the former may be vouched to the subscriber.
+                agent_originated=bool(current_user.agent_name),
+            )
+        )
 
     # Broadcast event via WebSocket
     await _broadcast_event(event, len(matching_subs))
@@ -401,7 +411,22 @@ async def emit_event_for_agent(
     )
 
     for sub in matching_subs:
-        asyncio.create_task(event_dispatch_service.trigger_subscription(sub, event))
+        asyncio.create_task(
+            event_dispatch_service.trigger_subscription(
+                sub,
+                event,
+                # ent#614: this endpoint is `AuthorizedAgent`-gated — READ access,
+                # not ownership — so `name` is a value a human accessor (or a
+                # sibling agent's key, which resolves to the owner) CHOSE. The
+                # event row still records it, but the loopback must not certify
+                # it: a vouched claim would hand the subscriber's execution
+                # `triggered_by='agent'`, an `actor_type='agent'` SEC-001 row and
+                # an AGENT_COLLABORATION edge on `name` — the exact primitive
+                # this issue removes, re-minted one level up and now signed by
+                # the backend. Vouch only when the emitter IS the agent.
+                agent_originated=current_user.agent_name == name,
+            )
+        )
 
     await _broadcast_event(event, len(matching_subs))
 

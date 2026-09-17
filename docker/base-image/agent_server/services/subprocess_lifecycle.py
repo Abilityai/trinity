@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 # and die with the container.
 _DRAIN_BUDGET_SECONDS = 90
 
+from ..utils.thread_diagnostics import dump_all_threads as _dump_all_threads
+
 
 def _drain_bounded(
     process: subprocess.Popen,
@@ -126,6 +128,18 @@ def _drain_bounded(
             "deadlocked with reader thread's TextIOWrapper lock; reader threads are "
             "leaked daemon threads (pid=%s). Issue #728.",
             _DRAIN_BUDGET_SECONDS, process.pid,
+        )
+        # #2455: the EARLIEST moment we know something is wedged — dump here as
+        # well as in the post-kill branch, because the two are minutes apart and
+        # the thread can move between them. Note what this log line does NOT
+        # say and #2455 proves: the daemon thread running the drain is
+        # ABANDONED here, not stopped, so it keeps joining and eventually
+        # force-closes the pipes on its own schedule (observed: this budget
+        # expired at 90s and that thread logged its verdict at 603.7s). Both
+        # dumps are needed to see whether it is the same stack twice.
+        _dump_all_threads(
+            "drain budget exceeded — reader wedged, drain thread abandoned",
+            context=f"pid={process.pid} pgid={pgid} budget={_DRAIN_BUDGET_SECONDS}s",
         )
         # #1502: #728 unblocked the executor thread but LEFT THE PROCESS GROUP
         # ALIVE. The leaked reader is blocked reading a pipe a grandchild still

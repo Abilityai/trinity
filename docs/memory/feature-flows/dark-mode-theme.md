@@ -8,7 +8,8 @@ As a user, I want to switch between light, dark, and system theme modes so that 
 
 ## Entry Points
 - **UI (Quick Toggle)**: `src/frontend/src/components/NavBar.vue:81-98` - Theme icon button in navbar
-- **UI (Full Selector)**: `src/frontend/src/components/NavBar.vue:135-168` - Theme selector in user dropdown menu
+- **UI (Full Selector)**: `src/frontend/src/components/NavBar.vue:135-168` - Theme selector in user dropdown menu (since trinity-enterprise#625 the three buttons are the shared `components/base/ThemeChoice.vue`)
+- **UI (Workspace)**: `src/frontend/src/components/portal/PortalThemeSwitch.vue` — top right of the Workspace's central column, filled into the `#header-end` slot of `PortalConversation.vue` and `PortalRoom.vue` by `views/Portal.vue` (trinity-enterprise#625; see "Workspace switch" below)
 
 ## Frontend Layer
 
@@ -142,6 +143,35 @@ const setTheme = (theme) => {
   themeStore.setTheme(theme)
 }
 ```
+
+## Workspace switch (trinity-enterprise#625)
+
+The Workspace is standalone — no NavBar — so until ent#625 it followed the global
+theme with no way to change it, and an external client with no stored preference
+had no control at all. The switch is deliberately **not** a second store:
+
+- `components/base/ThemeChoice.vue` — the ONE light / dark / system picker
+  (`role="radiogroup"`, `role="radio"` + `aria-checked`, roving tabindex, arrow
+  keys), consumed by the NavBar's user menu **and** the Workspace switch.
+- `components/portal/PortalThemeSwitch.vue` — trigger (icon = the RESOLVED theme,
+  label `hidden sm:inline` reading "System · dark" / "Light" / "Dark") + a popover
+  holding `ThemeChoice`; Esc and click-outside close, focus returns to the trigger.
+  Imports `useThemeStore` only — never auth/agents/clientPortal — so it works for
+  a client session.
+- `utils/themeSwitch.js` — the decidable half (`THEME_OPTIONS`, `resolvedTheme`,
+  `themeSwitchLabel`, `themeSwitchIcon`, `themeSwitchAriaLabel`), executed by tests.
+- Placement: a `#header-end` slot at the tail of both column headers
+  (`PortalConversation.vue`, `PortalRoom.vue`); `views/Portal.vue` fills both with
+  `<PortalThemeSwitch />`. The stage skeleton heads the branch chain and has no
+  header, so it gets none by construction.
+- Layout stability: only the root `dark` class flips; the switch sits in a slot
+  with no `:key`, so scroll, draft and active thread are untouched.
+
+**Test**: `tests/unit/portalThemeSwitch.spec.js` — the suite's first MOUNTED
+component test (`@vue/test-utils`, `// @vitest-environment jsdom` per file;
+`vitest.config.js` registers `@vitejs/plugin-vue` so an SFC can be imported).
+It drives the click all the way to `setTheme`, the shared `trinity-theme` key and
+the root class, and checks that a NavBar choice is reflected in the Workspace.
 
 ## CSS Application Pattern
 

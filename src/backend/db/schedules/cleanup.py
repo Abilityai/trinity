@@ -135,7 +135,14 @@ class ScheduleCleanupMixin:
                 # strictly past it is swept (mirrors the canary E-01 tolerance).
                 if age_s <= effective_s:
                     continue
-                duration_ms = int(age_s * 1000)
+                # #2434: the sweep is INVENTING this row's end time — `now` is when
+                # the watchdog noticed, not when the work stopped. A fabricated
+                # duration is not a measurement, so record NULL rather than a
+                # number no reader can distinguish from a real one. Past 24.8
+                # days it is not even storable: duration_ms is a PostgreSQL
+                # INTEGER, and because this whole loop shares ONE transaction the
+                # first overflow rolls back every row in the batch, leaving the
+                # fleet's stale rows `running` forever.
                 error_msg = (
                     f"Marked as failed by cleanup: exceeded {int(effective_s)}s "
                     f"stale timeout"
@@ -153,7 +160,7 @@ class ScheduleCleanupMixin:
                     .values(
                         status=TaskExecutionStatus.FAILED,
                         completed_at=now,
-                        duration_ms=duration_ms,
+                        duration_ms=None,  # #2434 — fabricated, not measured
                         error=error_msg,
                     )
                 )
@@ -219,11 +226,8 @@ class ScheduleCleanupMixin:
             if not no_session_rows:
                 return 0
 
-            completed_at = parse_iso_timestamp(now)
             failed = 0
             for row in no_session_rows:
-                started_at = parse_iso_timestamp(row["started_at"])
-                duration_ms = int((completed_at - started_at).total_seconds() * 1000)
                 # RELIABILITY-005: guard the UPDATE so a SUCCESS that arrived
                 # between the SELECT and this UPDATE is never overwritten.
                 result = conn.execute(
@@ -237,7 +241,7 @@ class ScheduleCleanupMixin:
                     .values(
                         status=TaskExecutionStatus.FAILED,
                         completed_at=now,
-                        duration_ms=duration_ms,
+                        duration_ms=None,  # #2434 — fabricated, not measured
                         error=error_msg,
                     )
                 )
@@ -290,10 +294,6 @@ class ScheduleCleanupMixin:
             if not row:
                 return False
 
-            completed_at = parse_iso_timestamp(now)
-            started_at = parse_iso_timestamp(row["started_at"])
-            duration_ms = int((completed_at - started_at).total_seconds() * 1000)
-
             result = conn.execute(
                 update(schedule_executions)
                 .where(
@@ -306,7 +306,7 @@ class ScheduleCleanupMixin:
                 .values(
                     status=TaskExecutionStatus.FAILED,
                     completed_at=now,
-                    duration_ms=duration_ms,
+                    duration_ms=None,  # #2434 — fabricated, not measured
                     error=error,
                 )
             )
@@ -389,7 +389,10 @@ class ScheduleCleanupMixin:
         """
         now = utc_now_iso()
         with get_engine().begin() as conn:
-            # Get started_at for duration calculation
+            # #2434: this SELECT no longer feeds a duration — it is an existence
+            # probe, so a missing row returns False instead of reporting a CAS
+            # loss. Reading started_at at all is now vestigial but harmless; not
+            # parsing it removes a crash path on a malformed timestamp.
             row = conn.execute(
                 select(schedule_executions.c.started_at).where(
                     schedule_executions.c.id == execution_id
@@ -397,10 +400,6 @@ class ScheduleCleanupMixin:
             ).mappings().first()
             if not row:
                 return False
-
-            completed_at = parse_iso_timestamp(now)
-            started_at = parse_iso_timestamp(row["started_at"])
-            duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
             result = conn.execute(
                 update(schedule_executions)
@@ -413,7 +412,7 @@ class ScheduleCleanupMixin:
                 .values(
                     status=TaskExecutionStatus.FAILED,
                     completed_at=now,
-                    duration_ms=duration_ms,
+                    duration_ms=None,  # #2434 — fabricated, not measured
                     error=error_message,
                 )
             )

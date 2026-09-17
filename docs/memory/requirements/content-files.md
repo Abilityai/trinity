@@ -25,13 +25,14 @@
 ### 13.4 Agent Dashboard
 - **Status**: ✅ Implemented (2026-01-12, Updated 2026-02-23)
 - **Description**: Agent-defined dashboard via `dashboard.yaml` with widget system
-- **Key Features**: 11 widget types (metric, status, progress, table, etc.), auto-refresh, historical tracking with sparklines (DASH-001), platform metrics injection
+- **Key Features**: 11 widget types — the closed set `metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer` (no chart/badge/countdown type exists — #2110; trends are DASH-001 sparklines on metric/progress widgets keyed by a stable `id`), auto-refresh, historical tracking with sparklines (DASH-001), platform metrics injection
 - **DASH-001 Enhancements** (2026-02-23):
   - Historical value tracking in `agent_dashboard_values` table
   - Sparkline charts showing metric trends
   - Trend indicators (up/down/stable with percentage)
   - Auto-injected platform metrics section (Tasks 24h, Success Rate, Cost, Health)
   - Query params: `include_history`, `history_hours`, `include_platform_metrics`
+- **Allowlist parity** (#2110): the backend D-002 set, the agent-server gate that strips unknown widgets, and the renderer chain are pinned together by `tests/unit/test_2110_widget_type_parity.py`
 - **Flow**: `docs/memory/feature-flows/agent-dashboard.md`
 
 ### 13.5 Tasks Tab
@@ -88,7 +89,7 @@
   - `share_file` MCP tool (agent-scoped) — publishes a file and returns a download URL
   - Internal endpoint `POST /api/internal/agent-files/share` (agent-server path, `X-Internal-Secret` auth)
   - MCP-path endpoint `POST /api/agents/{name}/shared-files` (owner/admin or agent-scoped key)
-  - Public download endpoint `GET /api/files/{file_id}?sig={token}` — 192-bit signed token, constant-time compare, streaming, `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, audit logged as `file_share_download`
+  - Public download endpoint `GET /api/files/{file_id}?sig={token}` (+ `HEAD`) — 192-bit signed token, constant-time compare, streaming, `X-Content-Type-Options: nosniff`, audit logged as `file_share_download`. **Disposition is an allowlist decided by the server** (ent#461): `inline` only for `_INLINE_SAFE_TYPES` (audio/video/image/PDF), `attachment` for everything else — `text/html`, `application/xhtml+xml` and `image/svg+xml` included. A requester may pass **`?download=1`, which is ONE-WAY**: it can only force `attachment` (#2582), never `inline`. Parsed tolerantly (`Optional[str]` + truthy check), so a malformed `?download=` on a link opened from Telegram/iOS is ignored rather than 422'd
   - List / revoke endpoints for the owner (`GET` / `DELETE /api/agents/{name}/shared-files[/{id}]`)
   - UI panel in Agent Detail → Sharing tab (toggle, quota, table, copy URL, revoke)
   - File validation: relative path only, no `..` escapes, 50 MB per file, 500 MB per-agent quota, magic-byte MIME detection with executable blocklist (PE/ELF/Mach-O/shebang)
@@ -301,7 +302,8 @@ follow-up (fragile, couples to Claude's moving internal files, may be subsumed b
   private marketplace needs a git credential at install time, resolved from the
   agent's `GITHUB_PAT` env, never the manifest). It reads current state via
   `claude plugin [marketplace] list --json`, adds missing marketplaces
-  (`marketplace add`) and installs missing plugins (`install --yes`), and runs
+  (`marketplace add`) and installs missing plugins (`install`, with `--yes`
+  passed only when the CLI's `--help` advertises it — #2305), and runs
   **zero** subprocesses when the declared set is already present (volume-persisting
   restart). Non-fatal; each action logged (`installed`/`skipped`/`withheld:<reason>`).
 
@@ -333,3 +335,49 @@ follow-up (fragile, couples to Claude's moving internal files, may be subsumed b
 - **Supply chain:** `plugin@marketplace` pins identity, not a commit — a
   re-install re-fetches the marketplace's current content (the #192
   `auto_update: on` behaviour); a pinned mode is a documented follow-up.
+
+### 42.5 Platform-provided plugin set — deploy-as-is, onboard-in-place (ent#411)
+
+- **Status**: ✅ Implemented (2026-08-18)
+- **Problem**: §42 reads the plugin set from a declaration, which is chicken-and-egg
+  for the agent that most needs it. A bare `github:owner/repo` with no
+  `template.yaml` declares nothing → nothing installs → `trinity@abilityai`, whose
+  `/trinity:onboard` would *write* that `template.yaml`, is absent. The only escape
+  was a prose instruction telling the agent to run the CLI itself — the
+  prose-dispatch anti-pattern the playbook-call rule exists to remove. `create_agent`
+  already tolerates a missing `template.yaml`, so *deploy-as-is* worked and only
+  *onboard-in-place* was blocked.
+- **Pre-install**: `docker/base-image/Dockerfile` registers the `abilityai`
+  marketplace and installs `trinity@abilityai` at build (`ARG
+  TRINITY_PREINSTALL_PLUGINS=1`). Never fatal — an unreachable marketplace at build
+  time logs and the image still builds, because the boot hook is the reconciler.
+  Docker populates an empty named volume from the image on first mount, so a NEW
+  agent inherits the pre-install and boots with **zero subprocesses**; an agent whose
+  volume predates the image self-heals through the hook instead.
+- **Ensured every boot**: `plugins_reinstall.merge_platform_defaults` unions the
+  platform set into whatever is declared, so an undeclared agent still gets it
+  (`status: platform_defaults_only`).
+- **Additive, never subtractive**: a `plugins:` block that omits `trinity@abilityai`
+  does not uninstall it. Nothing in this module ever uninstalls anything — reconcile
+  means "install what is missing", not "make the set match".
+- **The platform marketplace name is pinned to its source**: the manifest is on the
+  agent-writable volume, so a declaration that re-points `abilityai` at another repo
+  is ignored (with a log). A redefinable platform marketplace would turn a
+  self-healing boot step into an arbitrary-code-fetch primitive.
+- **Operator opt-out**: `TRINITY_PLATFORM_PLUGINS=0` at runtime (status stays
+  `no_manifest`, distinct from a failure) and `--build-arg TRINITY_PREINSTALL_PLUGINS=0`
+  for an air-gapped build.
+- **Honest status**: each reconcile is recorded to `~/.trinity/plugins-state.json`
+  (`status`, `platform_defaults_enabled`, installed / skipped / withheld-with-reason),
+  surfaced by compatibility check **I-006** (INFO). "The marketplace was unreachable"
+  and "the operator never wanted it" are different facts, and a bare presence flag
+  cannot separate them. The file is agent-writable, so I-006 cross-checks the claim
+  against the recorded lists rather than trusting a free-text status, and a missing
+  file is a SKIP (image/boot predates the mechanism), not a failure.
+- **Ordering caveat**: an agent on a base image built before this change lacks the
+  pre-install and pays one install at next boot — the same caveat as #1704's hook.
+- **Out of scope here** (owned by the marketplace, `abilityai/abilities`):
+  `/trinity:onboard`'s in-place mode itself — detect-in-container, write the files,
+  push back or emit a patch, verify via `get_agent_compatibility_report`.
+- **Guide**: `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` → "Deploy as-is, then onboard
+  in place".

@@ -109,8 +109,6 @@
             @change-subscription="changeSubscription"
             :has-avatar-prompt="!!avatarIdentityPrompt"
             :emotion-avatar-url="emotionAvatarUrl"
-            :voice-available="sessionsStore.voiceAvailable"
-            :workspace-available="sessionsStore.workspaceAvailable"
             :brain-available="sessionsStore.brainOrbAvailable && hasBrainOrb"
           />
 
@@ -152,8 +150,14 @@
                 <span class="text-xs text-gray-500 dark:text-gray-400">
                   Stateless chat — each message starts fresh.
                 </span>
+                <!-- ent#456: opens a new tab, so the agent page you were on is
+                     still here when you come back. The ?tab=session REDIRECT
+                     below deliberately stays same-tab — it rewrites a navigation
+                     already in flight rather than starting one. -->
                 <router-link
                   :to="{ path: '/workspace', query: { agent: agent.name } }"
+                  target="_blank"
+                  rel="noopener"
                   class="text-xs font-medium text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-400 dark:hover:text-action-primary-300"
                   title="The Workspace keeps one continuous conversation — memory, tool results and reasoning carry across turns."
                 >
@@ -230,6 +234,11 @@
             <!-- Reports Tab Content (#918) -->
             <div v-if="activeTab === 'reports'">
               <ReportsPanel :agent-name="agent.name" :can-delete="agent.can_share" />
+            </div>
+
+            <!-- Canvas Tab Content (ent#438) -->
+            <div v-if="activeTab === 'canvas'">
+              <AgentCanvasTab :agent-name="agent.name" :can-manage="agent.can_share" />
             </div>
 
             <!-- Loops Tab Content (#1106 / #740 Phase 2) -->
@@ -329,11 +338,13 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTick } from 'vue'
+import { readStoredToken } from '../utils/platformSession'
 import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'  // SESSION_TAB_2026-04 Phase 3
+import { emotionCacheVersion, emotionAvatarUrl as buildEmotionUrl } from '../utils/avatarEmotion'
 import NavBar from '../components/NavBar.vue'
 
 // Component name for KeepAlive matching
@@ -350,6 +361,7 @@ import OverviewPanel from '../components/OverviewPanel.vue'
 import SchedulesPanel from '../components/SchedulesPanel.vue'
 import LoopsPanel from '../components/LoopsPanel.vue'
 import ReportsPanel from '../components/ReportsPanel.vue'
+import AgentCanvasTab from '../components/canvas/AgentCanvasTab.vue'
 import TasksPanel from '../components/TasksPanel.vue'
 import GitPanel from '../components/GitPanel.vue'
 import InfoPanel from '../components/InfoPanel.vue'
@@ -509,6 +521,7 @@ const avatarHasReference = ref(false)
 // Emotion avatar cycling state (AVATAR-002)
 const availableEmotions = ref([])
 const emotionAvatarUrl = ref(null)
+const emotionVersion = ref(null)   // #2374: stamp from GET /avatar/emotions
 const emotionCycleTimer = ref(null)
 
 const taskPrefillMessage = ref('')
@@ -615,7 +628,7 @@ async function toggleAutonomy() {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token')}`
+        'Authorization': `Bearer ${readStoredToken()}`
       },
       body: JSON.stringify({ enabled: newState })
     })
@@ -657,7 +670,7 @@ async function toggleReadOnly() {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token')}`
+        'Authorization': `Bearer ${readStoredToken()}`
       },
       body: JSON.stringify({ enabled: newState })
     })
@@ -725,7 +738,7 @@ async function renameAgent(newName) {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token')}`
+        'Authorization': `Bearer ${readStoredToken()}`
       },
       body: JSON.stringify({ new_name: newName })
     })
@@ -892,6 +905,10 @@ function buildTabs({
 
   tabs.push(
     { id: 'reports', label: 'Reports' },  // #918 agent-published reports
+    // ent#438 — the canvas is Reports' living sibling: same agent output,
+    // one surface kept current instead of a record that accumulates. Next
+    // to it deliberately, so the choice is visible where it is made.
+    { id: 'canvas', label: 'Canvas' },
     { id: 'schedules', label: 'Schedules' },
     { id: 'loops', label: 'Loops' },
     { id: 'playbooks', label: 'Playbooks' },
@@ -1041,8 +1058,12 @@ async function loadAvailableEmotions() {
   try {
     const response = await axios.get(`/api/agents/${agent.value.name}/avatar/emotions`)
     availableEmotions.value = response.data.emotions || []
+    // #2374: carried alongside the list, so a regeneration landing between polls
+    // re-keys the URLs instead of being masked by the 24h cache.
+    emotionVersion.value = response.data.version || null
   } catch (err) {
     availableEmotions.value = []
+    emotionVersion.value = null
   }
 }
 
@@ -1052,8 +1073,19 @@ function cycleEmotion() {
     return
   }
   const emotion = availableEmotions.value[Math.floor(Math.random() * availableEmotions.value.length)]
-  const avatarVersion = agent.value.avatar_url?.split('v=')[1] || '1'
-  emotionAvatarUrl.value = `/api/agents/${agent.value.name}/avatar/emotion/${emotion}?v=${avatarVersion}`
+  // #2374: the version comes from the emotions endpoint's own stamp (the newest
+  // variant file's mtime), not from parsing `avatar_url` with a constant `'1'`
+  // fallback. That fallback pinned every emotion URL to ONE cache entry, and
+  // the variants are served `max-age=86400` — so a regenerated avatar kept
+  // showing the previous face for up to 24 hours.
+  emotionAvatarUrl.value = buildEmotionUrl(
+    agent.value.name,
+    emotion,
+    emotionCacheVersion({
+      emotionsVersion: emotionVersion.value,
+      avatarUrl: agent.value.avatar_url,
+    }),
+  )
 }
 
 function startEmotionCycling() {

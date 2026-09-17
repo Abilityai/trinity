@@ -125,24 +125,52 @@ def _interpolate_template(template: str, payload: dict) -> str:
     return re.sub(r"\{\{(payload(?:\.[a-zA-Z0-9_]+)+)\}\}", replacer, template)
 
 
-def _get_internal_token() -> str:
-    """Get a JWT token for internal API calls."""
+def _get_internal_token(source_agent: Optional[str] = None) -> str:
+    """Mint the JWT for the EVT-001 loopback (ent#614).
+
+    ``sub: "admin"`` as before, plus ``scope: EVENT_LOOPBACK_SCOPE`` — the claim
+    ``get_current_user`` fences to ``POST /api/agents/{name}/task`` — and, ONLY
+    for an agent-originated event, ``source_agent``: the value the backend
+    derived and therefore vouches for. ``dependencies.resolve_source_agent``
+    honours the loopback's ``X-Source-Agent`` header when it equals this claim
+    and nothing else, so a subscriber's audit row / execution origin can no
+    longer be pinned on a human's username (``emit_event`` writes one into
+    ``agent_events.source_agent`` for a JWT caller) — that dispatch simply
+    carries no source agent.
+
+    SECRET_KEY-signed on purpose: unlike ``INTERNAL_API_SECRET`` (C-003), which
+    the scheduler and the MCP server also hold, only the backend can mint this.
+    """
     from jose import jwt
     from config import SECRET_KEY, ALGORITHM
     from datetime import datetime, timedelta
+    from dependencies import EVENT_LOOPBACK_SCOPE
 
     payload = {
         "sub": "admin",
+        "scope": EVENT_LOOPBACK_SCOPE,
         "exp": datetime.utcnow() + timedelta(minutes=5),
     }
+    if source_agent:
+        payload["source_agent"] = source_agent
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
-async def trigger_subscription(subscription, event):
+async def trigger_subscription(subscription, event, *, agent_originated: bool):
     """
     Send an async task to the subscribing agent with the interpolated message.
 
     Uses the backend's internal task endpoint to avoid circular MCP calls.
+
+    ``agent_originated`` (ent#614, keyword-only so every caller states it): True
+    when ``event.source_agent`` names the agent that actually emitted — an
+    agent-scoped key on ``emit_event``, the ``{name}`` of ``emit_event_for_agent``
+    (that endpoint's own contract), or a #1578 system-emitted terminal. Only then
+    does the loopback carry ``X-Source-Agent`` plus the JWT ``source_agent`` claim
+    that lets the subscriber's ``/task`` honour it. A human-emitted event
+    (``emit_event`` on a JWT writes the caller's USERNAME into ``source_agent``)
+    carries neither: the subscriber's task runs as an ordinary MCP-triggered
+    execution instead of an agent-to-agent call from a phantom agent.
 
     #1578 recursion-break: when the dispatched event is in the reserved
     ``agent.task.*`` namespace, stamp the loopback ``/task`` with the
@@ -162,11 +190,15 @@ async def trigger_subscription(subscription, event):
         f"{message}"
     )
 
+    vouched = event.source_agent if agent_originated else None
     headers = {
-        "Authorization": f"Bearer {_get_internal_token()}",
-        "X-Source-Agent": event.source_agent,
+        "Authorization": f"Bearer {_get_internal_token(vouched)}",
         "X-Via-MCP": "true",
     }
+    if vouched:
+        # ent#614: the header is the loopback's stated INTENT; the JWT claim is
+        # the proof `resolve_source_agent` checks it against.
+        headers["X-Source-Agent"] = vouched
     # #1578: tag reserved-namespace dispatches so the spawned task's terminal is
     # suppressed by the recursion-break (no A→B→A auto-emit loop). The tag is
     # authenticated as backend-internal via the C-003 `X-Internal-Secret` so an
@@ -345,7 +377,9 @@ async def emit_task_terminal_event(
         )
 
         for sub in matching_subs:
-            _spawn_emit_dispatch(trigger_subscription(sub, event))
+            # ent#614: a #1578 terminal is system-emitted for the execution's
+            # own agent — backend-derived, so the loopback may vouch for it.
+            _spawn_emit_dispatch(trigger_subscription(sub, event, agent_originated=True))
     except Exception as e:  # noqa: BLE001 — fail-open: never affect the billed terminal
         logger.warning(
             "[#1578] emit_task_terminal_event failed for %s/%s: %s",
@@ -371,25 +405,69 @@ def spawn_task_terminal_event(
     duration_ms: Optional[int] = None,
     cost: Optional[float] = None,
 ) -> None:
-    """Fire ``emit_task_terminal_event`` fire-and-forget from a sync-or-async site.
+    """Fan an execution terminal out to everything that reacts to one.
 
     Every CAS-won terminal writer calls this one wrapper — it needs no ``await``
     and no per-module spawner. Requires a running event loop (every caller runs
     inside one: the async terminal writers and the async router handlers that
-    drive the pull sink). Fail-open: if no loop is running the emit is skipped
+    drive the pull sink). Fail-open: if no loop is running the work is skipped
     (logged), never raised.
+
+    Two consumers today, spawned independently so neither can delay or break the
+    other:
+
+    * ``emit_task_terminal_event`` (#1578) — the agent.task.* pub/sub emit.
+    * ``_terminal_side_effects`` — the orchestration primitives that used to hold
+      their state in a coroutine and now react to terminals instead: the loop
+      advance (#2523) and the fan-out join (#2524).
+
+    Both hang HERE rather than inside the emit, because the emit returns early
+    when no event subscription matches — the common case — so anything nested
+    inside it would almost never run.
     """
-    coro = emit_task_terminal_event(
-        agent_name,
-        execution_id,
-        terminal_status=terminal_status,
-        summary_or_error=summary_or_error,
-        duration_ms=duration_ms,
-        cost=cost,
+    _spawn_named(
+        "#1578",
+        emit_task_terminal_event(
+            agent_name,
+            execution_id,
+            terminal_status=terminal_status,
+            summary_or_error=summary_or_error,
+            duration_ms=duration_ms,
+            cost=cost,
+        ),
     )
+    _spawn_named("#2523/#2524", _terminal_side_effects(execution_id))
+
+
+async def _terminal_side_effects(execution_id: Optional[str]) -> None:
+    """React to one execution terminal on behalf of the orchestrators.
+
+    Lazy-import shim: ``loop_service`` and ``fan_out_service`` both import
+    ``task_execution_service``, which imports THIS module — a top-level import
+    either way would close the cycle. Each consumer is guarded separately so a
+    fault in one cannot skip the other, and neither can raise: this runs on the
+    path of an already-billed terminal.
+    """
+    if not execution_id:
+        return
+    try:
+        from services.loop_service import advance_loop_on_terminal
+
+        await advance_loop_on_terminal(execution_id)
+    except Exception as e:  # noqa: BLE001 — never affect the billed terminal
+        logger.warning("[#2523] loop advance failed for %s: %s", execution_id, e)
+    try:
+        from services.fan_out_service import join_fan_out_on_terminal
+
+        await join_fan_out_on_terminal(execution_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[#2524] fan-out join failed for %s: %s", execution_id, e)
+
+
+def _spawn_named(tag: str, coro: "Any") -> None:
     try:
         _spawn_emit_dispatch(coro)
     except RuntimeError as e:
         # No running loop — close the un-awaited coroutine to avoid a warning.
         coro.close()
-        logger.debug("[#1578] spawn_task_terminal_event skipped (no loop): %s", e)
+        logger.debug("%s terminal fan-out skipped (no loop): %s", tag, e)

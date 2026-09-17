@@ -12,6 +12,7 @@ from enum import Enum
 
 from utils.helpers import parse_iso_timestamp, to_utc_iso
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
+from db_models import SubscriptionCredential
 
 
 # Fork-to-own destination: "owner/name". Owner per GitHub rules (alphanumeric +
@@ -312,6 +313,92 @@ class AgentStatus(BaseModel):
         }
 
 
+class AgentSubscriptionPressure(BaseModel):
+    """One agent's subscription-pressure row for the Dashboard batch endpoint
+    (#471). `auth_mode` reuses the `AgentAuthStatus` vocabulary verbatim
+    ("subscription" | "api_key" | "not_configured") — never a third enum.
+    An explicit response_model allow-list (ent#334): the payload is
+    disclosure-bearing (subscription names to shared accessors, matching the
+    per-agent `AgentAuthStatus` gate), so nothing extra may ride along."""
+    agent_name: str
+    auth_mode: str
+    subscription_name: Optional[str] = None
+    failure_events_24h: int = 0
+    # #2352: the auth-kind slice of the total above. `failure_events_24h` cannot
+    # tell a 429 from a rejected token, and since the display predicate was
+    # narrowed to real 429s, a dead-token subscription is no longer
+    # `rate_limited_now` — without this field the badge would just swap one
+    # wrong word for another.
+    auth_failures_24h: int = 0
+    rate_limited_now: bool = False
+    # #2352: the provider probe's own verdict — "ok" | "invalid_token" |
+    # "rate_limited" | "error", or None when no snapshot exists at all. A
+    # rejected token is the most actionable state this payload can carry and is
+    # otherwise indistinguishable from "no provider data".
+    token_status: Optional[str] = None
+    utilization_5h_pct: Optional[float] = None  # provider-truth when fresh, else None
+    headroom_source: str = "observed"           # "anthropic" | "observed"
+
+
+class SubscriptionPressureResponse(BaseModel):
+    """Batch payload for `GET /api/agents/subscription-pressure` (#471)."""
+    agents: List[AgentSubscriptionPressure] = []
+
+
+class HeadroomHistoryWindow(BaseModel):
+    """One rolling-limit window inside a history bucket (ent#433).
+
+    `utilization_pct` is nullable INDEPENDENTLY of `status`: a 429 reports
+    `status='rate_limited'` with no figure. A consumer must render that as an
+    outage, never as 0% — coercing the NULL inverts the single most important
+    sample in the series.
+    """
+    utilization_pct: Optional[float] = None
+    resets_at: Optional[str] = None
+    status: Optional[str] = None
+
+
+class HeadroomHistoryBucket(BaseModel):
+    """The LAST probe in one time bucket (ent#433).
+
+    `last`, not `max`: probes are demand-driven, so a max is biased by how often
+    anyone looked; the 5h and 7d windows peak at different instants so a
+    two-column max has no single owning row; and a max over `utilization_pct`
+    silently drops rate-limited samples that carry no figure.
+
+    BOTH timestamps are load-bearing and neither substitutes for the other:
+    `bucket_start` is the logical slot (what makes a gap detectable — a real
+    timestamp alone cannot distinguish sample jitter from a missing bucket), and
+    `fetched_at` is when the provider was actually asked. Buckets with no sample
+    are simply absent; consumers render gaps as gaps and never interpolate.
+    """
+    bucket_start: str
+    fetched_at: str
+    status: str
+    samples: int = 0
+    five_hour: HeadroomHistoryWindow = Field(default_factory=HeadroomHistoryWindow)
+    seven_day: HeadroomHistoryWindow = Field(default_factory=HeadroomHistoryWindow)
+    representative_claim: Optional[str] = None
+    overage_status: Optional[str] = None
+    unified_status: Optional[str] = None
+
+
+class SubscriptionHeadroomHistory(BaseModel):
+    """Windowed headroom series for one subscription (ent#433).
+
+    `coverage_pct` states how much of the window was actually observed
+    (buckets holding a sample ÷ buckets elapsed). It exists so a thin series
+    REPORTS ITSELF as thin rather than rendering as a confident flat line —
+    the structural form of the honest-gaps rule, and the reason a sparse chart
+    must never become an argument for probing more often.
+    """
+    subscription_id: str
+    window: str          # "24h" | "7d" | "30d"
+    bucket: str          # "hour" | "day"
+    buckets: List[HeadroomHistoryBucket] = []
+    coverage_pct: float = 0.0
+
+
 class User(BaseModel):
     """Authenticated user."""
     id: int
@@ -347,19 +434,55 @@ class User(BaseModel):
     # credential-rotation row cannot distinguish "the owner from a browser" from
     # "the owner's leaked MCP key".
     mcp_scope: Optional[str] = None
+    # #2323: WHICH credential this principal presented. `validate_mcp_api_key`
+    # has always returned these; `get_current_user` dropped them, so an admin
+    # action taken with a machine key audited byte-identically to the owner in a
+    # browser — and `routers/a2a.py` read `mcp_key_id` off this model via
+    # `getattr` in two places that have therefore never worked (one of them the
+    # A2A idempotency SCOPE, where the fallback to username collapses two
+    # agent-scoped keys of one owner into a shared `messageId` namespace).
+    # None on the JWT branch, which is the honest "no credential" answer.
+    mcp_key_id: Optional[str] = None
+    mcp_key_name: Optional[str] = None
+    # ent#614: the source agent the BACKEND vouches for. Set only on an EVT-001
+    # loopback JWT (`scope == dependencies.EVENT_LOOPBACK_SCOPE`, minted by
+    # `event_dispatch_service._get_internal_token`), and only when the event
+    # was agent-originated — `emit_event` writes a JWT caller's USERNAME into
+    # `agent_events.source_agent`, and that must never be certified as an agent.
+    # `dependencies.resolve_source_agent` treats it as the principal's identity,
+    # exactly like `agent_name` for an agent-scoped key, so the loopback's
+    # `X-Source-Agent` header is honoured for this one value and nothing else.
+    # None on every other branch, JWT humans included.
+    vouched_source_agent: Optional[str] = None
 
 
 class Token(BaseModel):
-    """JWT token response.
+    """OAuth2 password-grant response for ``POST /token``.
 
-    Normally carries ``access_token``. When enterprise 2FA (#5) requires a
-    second factor, the login endpoint instead returns ``mfa_required`` +
-    ``challenge_token`` and no ``access_token`` — the client completes the
-    flow at ``/api/enterprise/2fa/login/*`` to obtain the real token. The 2FA
-    fields are always absent in OSS-only builds.
+    Two mutually exclusive shapes, and the routes serialize with
+    ``response_model_exclude_none=True`` so each carries **only** its own
+    fields (#2322):
+
+    * **Grant issued** — ``access_token`` + ``token_type``. The 2FA fields are
+      absent, which is what makes this docstring's old claim ("absent in
+      OSS-only builds") true; before #2322 every successful login, OSS
+      included, carried all four of them as ``null``.
+    * **Second factor pending** (enterprise 2FA, #5) — ``mfa_required`` +
+      ``challenge_token`` (+ the two flags), and **no** ``access_token`` and
+      **no** ``token_type``. The caller completes the flow at
+      ``/api/enterprise/2fa/login/*`` to obtain the real token.
+
+    ``token_type`` is the load-bearing part of that second bullet and the
+    reason it is ``Optional`` rather than a plain ``str`` default. A password
+    grant that did not issue a session must not describe itself as a bearer
+    grant: it made a refusal indistinguishable from a success for every
+    client that reads the token field without checking it (our own MCP client
+    and CLI both did), turning a login refusal into unexplained 401s much
+    later. Both success paths set it explicitly, so the wire format of a real
+    grant is unchanged.
     """
     access_token: Optional[str] = None
-    token_type: str = "bearer"
+    token_type: Optional[str] = None
     mfa_required: Optional[bool] = None
     mfa_enrolled: Optional[bool] = None
     enrollment_required: Optional[bool] = None
@@ -520,6 +643,275 @@ def _validate_iso8601(value: Optional[str]) -> Optional[str]:
     return value
 
 
+# ---------------------------------------------------------------------------
+# Agent canvas (ent#438)
+# ---------------------------------------------------------------------------
+
+# A canvas id lands in a URL and is half a primary key, so it is
+# charset-validated the way #919's pipeline ids are, not merely length-capped.
+CANVAS_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+# Serialized blocks ceiling. An order of magnitude under the report cap by
+# intent: a report is an archive that may legitimately carry a large table,
+# whereas a canvas is a surface re-sent in full on every update and re-read on
+# every page load.
+CANVAS_BLOCKS_MAX_BYTES = 512 * 1024  # 512 KiB
+CANVAS_MAX_BLOCKS = 50
+
+# ent#553 — the bound on the number of canvases ONE agent may hold.
+#
+# `agent_canvases` is bounded per canvas by its composite key (a write replaces
+# the row), but `canvas_id` is agent-chosen, so an agent writing one canvas per
+# run grows the table without limit. ent#438 read the first fact and concluded
+# the table needed no retention; the unbounded axis was missed, not decided.
+#
+# A CAP rather than a retention window, by operator ruling 2026-09-08: a window
+# deletes a person's surfaces on a timer, which is the failure direction #1638
+# established, whereas a cap refuses a WRITE and never destroys anything. The
+# refusal is named and tells the agent to retire a canvas (`clear_canvas`).
+# Generous on purpose — it is a runaway guard, not a budget anyone should feel.
+CANVAS_MAX_PER_AGENT = int(os.getenv("CANVAS_MAX_PER_AGENT", "100"))
+
+# ent#553 — how many canvases one bulk delete may name. A separate constant
+# from the per-agent cap: this bounds ONE request's `IN (...)` clause, that
+# bounds the table.
+CANVAS_BULK_DELETE_MAX = 100
+
+CANVAS_RATE_LIMIT = int(os.getenv("CANVAS_RATE_LIMIT", "60"))
+CANVAS_RATE_WINDOW = int(os.getenv("CANVAS_RATE_WINDOW", "60"))
+
+# ent#536 — the ONE default canvas an agent and its voice mode both write to.
+# Named canvases remain for everything else; this is the id the MCP tools and
+# the voice panel tools fall back to, so both writers land on the same surface.
+DEFAULT_CANVAS_ID = "main"
+
+# Per-kind ceilings (ent#536), stated to the agent in the MCP description and the
+# platform prompt. The 512 KiB block cap alone is too loose for two inputs whose
+# cost is not proportional to their size: an inline image is bytes the browser
+# must decode on every read, and Mermaid parse time is superlinear on hostile
+# source.
+CANVAS_IMAGE_INLINE_MAX_BYTES = 64 * 1024   # data: URI length cap
+CANVAS_IMAGE_SRC_MAX_CHARS = 2048           # any other image src
+CANVAS_DIAGRAM_MAX_CHARS = 20_000           # Mermaid source
+
+# A block id shares the canvas id charset: it is addressed by `patch_canvas`
+# and lands in a named error, so it carries the same guard.
+CANVAS_BLOCK_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+# ent#537 — starter layouts. A canvas may declare ONE template by name; each
+# names the slots its blocks may fill. A layout never hides a block: an
+# unslotted block, or one naming a slot the layout does not know, renders
+# after the layout — so an unknown SLOT is not refused (losing content to a
+# typo is the worse failure), while an unknown TEMPLATE is (there is nothing
+# to fall back to but stacked, and silently stacking teaches the wrong name).
+# Keep in step with `CANVAS_TEMPLATES` in `canvas.ts` and `LAYOUTS` in the
+# frontend `canvasLayouts.js`; `test_ent537_canvas_design_kit.py` pins them.
+CANVAS_LAYOUT_SLOTS: Dict[str, List[str]] = {
+    "dashboard": ["header", "kpis", "main", "side", "footer"],
+    "report": ["header", "summary", "body", "figures", "appendix"],
+    "brief": ["header", "key-points", "body"],
+    "status-board": ["header", "status", "issues", "next", "log"],
+}
+CANVAS_TEMPLATES = tuple(CANVAS_LAYOUT_SLOTS)
+CanvasTemplate = Literal["dashboard", "report", "brief", "status-board"]
+# A slot name is a short lowercase token: it lands in a CSS grid-area name.
+CANVAS_SLOT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+# Block kinds. The first five delegate to the shared `components/reports/`
+# dispatch — reused, never forked, because those renderer keys are CI-pinned as
+# the canonical contract (`test_1535_report_prompt_guidance.py`). `chart`,
+# `html`, `image` and `diagram` are the canvas's own (ent#438, widened by
+# ent#536); the report `display_hint` enum is deliberately NOT widened, because
+# a canvas is a superset of a report's rendering rather than a change to what a
+# report is.
+CanvasBlockKind = Literal[
+    "table", "kpi", "markdown", "timeline", "json", "chart", "html", "image", "diagram",
+]
+
+# `operator` (default) is fail-closed: a canvas reaches a Workspace client only
+# because the agent explicitly said `roster`.
+CanvasAudience = Literal["operator", "roster"]
+
+
+class CanvasBlock(BaseModel):
+    """One rendered block on a canvas (ent#438)."""
+    kind: CanvasBlockKind
+    # Optional on a full write — `set_canvas` assigns `b1..bN` to id-less
+    # blocks so every stored block is addressable by `patch_canvas` (ent#536).
+    id: Optional[str] = Field(None, pattern=CANVAS_BLOCK_ID_RE.pattern)
+    title: Optional[str] = Field(None, max_length=300)
+    # ent#537 — which slot of the canvas's `template` this block fills. A
+    # rendering hint that travels with the block (so `patch_canvas` keeps it),
+    # never a capability — which is why it may live inside the block while
+    # `audience` may not.
+    slot: Optional[str] = Field(None, pattern=CANVAS_SLOT_RE.pattern)
+    # Free-form per kind, byte-capped as a whole at the router. A dict OR a
+    # list, because `table` rows and `kpi` tiles are naturally arrays and
+    # forcing a wrapper object on the agent buys nothing.
+    payload: Union[Dict, List] = Field(default_factory=dict)
+
+
+class CanvasPatchBlock(CanvasBlock):
+    """A block in a `patch_canvas` write — the id is what names the target (ent#536)."""
+    id: str = Field(..., pattern=CANVAS_BLOCK_ID_RE.pattern)
+
+
+class CanvasPatch(BaseModel):
+    """Request body for replacing only the named blocks of a canvas (ent#536).
+
+    Order is kept and unknown ids are refused by name: the agent says what
+    changes, and the surface never silently gains or loses a block (the #438
+    rule that there is no append — restated for a partial write).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    blocks: List[CanvasPatchBlock] = Field(..., min_length=1, max_length=CANVAS_MAX_BLOCKS)
+    execution_id: Optional[str] = Field(None, max_length=128)
+
+
+class CanvasWrite(BaseModel):
+    """Request body for an agent writing its canvas (ent#438).
+
+    The agent is resolved server-side from the auth context, never from this
+    body, and `audience` is a validated field rather than a key inside a block
+    — `blocks` is agent-authored free-form content, so an audience buried there
+    would let a prompt-injected agent choose who reads it (the ent#364 rule).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    title: Optional[str] = Field(None, max_length=300)
+    blocks: List[CanvasBlock] = Field(default_factory=list, max_length=CANVAS_MAX_BLOCKS)
+    audience: CanvasAudience = "operator"
+    # ent#537 — a starter layout by name; None keeps the stacked default.
+    template: Optional[CanvasTemplate] = None
+    # The turn this write came from. Validated against the agent
+    # (`resolve_and_validate_execution`, the MEM-001 rule) — provenance, and
+    # what makes the derived staleness claim checkable.
+    execution_id: Optional[str] = Field(None, max_length=128)
+
+
+class CanvasSummary(BaseModel):
+    """List-response model — metadata only, never carries ``blocks`` (ent#438)."""
+    agent_name: str
+    canvas_id: str
+    title: Optional[str] = None
+    audience: str
+    schema_version: Optional[int] = 1
+    created_at: str
+    updated_at: str
+    updated_by_execution_id: Optional[str] = None
+    # ent#537 — the starter layout, or None for stacked blocks.
+    template: Optional[str] = None
+    # Derived, never stored: the agent has run since this canvas was written.
+    # Computed but NOT rendered since #2734 — kept so the derivation stays
+    # recoverable, and still counting the writing run as a run "since".
+    stale: bool = False
+    # ent#553 — a human's pin. Stored, unlike `stale`, and never agent-written.
+    pinned: bool = False
+    # Derived, never stored. A `Field(description=...)` and not a bare comment
+    # on purpose: a comment is invisible to `model_fields`, so nothing can
+    # assert it, and it never reaches the OpenAPI schema the MCP consumer reads.
+    agent_last_run_at: Optional[str] = Field(
+        default=None,
+        description=(
+            "When the agent last FINISHED a run (db.last_completed_execution_at). "
+            "Null both when it never has and when that read failed — the header "
+            "omits the fact rather than asserting either, because 'we could not "
+            "read it' must never render as 'it never ran'."
+        ),
+    )
+
+
+class Canvas(CanvasSummary):
+    """Detail-response model — summary plus the blocks (ent#438)."""
+    blocks: List[Dict] = Field(default_factory=list)
+
+
+class CanvasWriteResult(Canvas):
+    """Write-response model — the canvas, plus whether the writer can be seen (#2577).
+
+    A SUBCLASS rather than a wrapper: the MCP tool echoes this object back as
+    `canvas`, and nesting it under a new key would change that shape for every
+    existing caller to no benefit. `list`/`get` keep the narrower `Canvas` —
+    they answer about a canvas, not about a requester, so a verdict there would
+    be a claim with no session to make it about.
+
+    Both fields are three-state, and default to "no claim". Widening a canvas to
+    `roster` publishes it to everyone the agent is shared with, so a wrong
+    `False` costs an over-share — "could not tell" must stay distinguishable
+    from "no" (#2196). A write with no resolvable `execution_id` therefore
+    answers `None` and says nothing.
+    """
+    #: True / False when the writing session's reader is known, else None.
+    visible_to_requester: Optional[bool] = None
+    #: Present only when there is something actionable to say.
+    visibility_note: Optional[str] = None
+
+
+class CanvasPinRequest(BaseModel):
+    """Pin or unpin one canvas (ent#553).
+
+    `pinned` is required-but-explicit rather than a toggle: a toggle round-trips
+    the client's stale idea of the current state, so two people pinning at once
+    get whichever order the requests landed in. Stating the target value makes
+    the write idempotent and the intent readable in the audit row.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    pinned: bool
+
+
+class CanvasShareCreate(BaseModel):
+    """Mint a share link for one canvas (ent#554).
+
+    `scope` defaults to the NARROW one. Sharing must never widen the ent#438
+    audience by accident, so reaching further than "the people who could
+    already see it" is an explicit value a caller has to type.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["authorized", "public"] = "authorized"
+    expires_at: Optional[str] = Field(None, max_length=64)
+
+
+class CanvasShare(BaseModel):
+    """A share link as its owner sees it."""
+    id: str
+    agent_name: str
+    canvas_id: str
+    token: str
+    scope: str
+    url: Optional[str] = None
+    created_at: str
+    expires_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+    last_viewed_at: Optional[str] = None
+    view_count: int = 0
+
+
+class CanvasBulkDelete(BaseModel):
+    """Remove several canvases in one action (ent#553).
+
+    Bounded because the ids land in one `IN (...)` clause, and named explicitly
+    rather than reusing the block cap — these count different things.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    canvas_ids: List[str] = Field(..., min_length=1, max_length=CANVAS_BULK_DELETE_MAX)
+
+
+class CanvasBulkDeleteResult(BaseModel):
+    """What a bulk delete actually removed (ent#553).
+
+    `deleted` is the ids that existed, not the ids that were asked for, so the
+    UI can say "3 of 5 removed" honestly — and `requested` keeps the caller's
+    count visible beside it rather than making the client remember what it sent.
+    """
+    agent_name: str
+    requested: int
+    deleted: List[str]
+
+
 class ReportCreate(BaseModel):
     """Request body for an agent publishing a structured report (#918).
 
@@ -533,6 +925,31 @@ class ReportCreate(BaseModel):
     schema_version: int = Field(1, ge=1, le=1000)
     period_start: Optional[str] = None
     period_end: Optional[str] = None
+    # ent#365 — who the report is FOR. Absent = operator-only, which is what
+    # every report published before this field meant. The address is checked at
+    # the router against the agent's own roster: an agent may hand a report to
+    # someone it already talks to, never to an arbitrary address.
+    audience_email: Optional[str] = Field(None, max_length=320)
+    # The turn the agent is publishing from. Used ONLY to resolve which
+    # Workspace chat the deliverable card belongs in, server-side — the session
+    # is never accepted from the agent, or a report could be posted into a
+    # conversation the agent was never part of.
+    execution_id: Optional[str] = Field(None, max_length=128)
+
+    @field_validator("audience_email")
+    @classmethod
+    def _normalize_audience(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip().lower()
+        # Shape only — reachability is the router's check, and it is the one
+        # that matters. Rejecting the empty string here means "unaddressed" has
+        # exactly one spelling (absent), so the audience column never holds ''.
+        if not v:
+            return None
+        if "@" not in v or " " in v:
+            raise ValueError("audience_email must be an email address")
+        return v
 
     @field_validator("report_type")
     @classmethod
@@ -567,6 +984,32 @@ class TelemetrySharingUpdate(BaseModel):
     backfill_days: Optional[int] = Field(None, ge=0, le=3650)
 
 
+class OperatorIntakeUpdate(BaseModel):
+    """PUT body for the operator-intake Settings surface (ent#463).
+
+    Three intents share the endpoint, distinguished by ``enabled`` and the
+    presence of contact fields:
+
+    * **Opt-in and submit** — ``enabled=true`` with an ``email``: writes the
+      durable consent flag and, on a fresh install, fires the at-most-once
+      hosted intake POST via the existing service.
+    * **Opt-in without submitting** — ``enabled=true`` on an install that has
+      already submitted: records durable consent, no re-send (marker preserved).
+    * **Opt-out** — ``enabled=false``: records durable decline, no rollback of a
+      prior submission (the record was sent; contact support to request
+      deletion).
+
+    Field constraints mirror ``SetupPasswordRequest`` for the operator-profile
+    fields so the two producers can't diverge on shape.
+    """
+    enabled: bool
+    email: Optional[str] = Field(None, max_length=254)
+    company: Optional[str] = Field(None, max_length=200)
+    name: Optional[str] = Field(None, max_length=200)
+    role: Optional[str] = Field(None, max_length=200)
+    use_case: Optional[str] = Field(None, max_length=500)
+
+
 class ProductEventCreate(BaseModel):
     """Request body for a local product-event beacon (ent#184).
 
@@ -589,6 +1032,10 @@ class ReportSummary(BaseModel):
     period_start: Optional[str] = None
     period_end: Optional[str] = None
     created_at: str
+    # ent#365: who the report was produced for (NULL = operator-facing). On the
+    # access-controlled REST surfaces only — deliberately NOT on the `/ws`
+    # broadcast, which is SCOPE_ALL and unfiltered (the #918 rule).
+    addressed_to: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -794,6 +1241,11 @@ class SystemManifest(BaseModel):
     # nothing. Warned, never rejected — rejecting would 400 manifests that
     # deploy today.
     unknown_keys: List[str] = []
+    # #2373: the same record, one level down. `parse_manifest` reads five
+    # per-agent keys and dropped the rest in silence, so `agents.x.credentials:`
+    # / `skills:` / `display_label:` vanished with no warning while a top-level
+    # typo already warned. {agent short name: [unknown keys]}
+    unknown_agent_keys: Dict[str, List[str]] = {}
 
 
 class SystemDeployRequest(BaseModel):
@@ -919,11 +1371,33 @@ class VersioningInfo(BaseModel):
     new_version: str
 
 
+class DeployManifestEntry(BaseModel):
+    """One entry of the embedded deploy integrity manifest (#2060).
+
+    The caller computes `.trinity-manifest.json` from the disk tree and ships
+    it INSIDE the archive; the backend verifies the extracted tree against it
+    (post-extract AND post-copy). Regular files carry `sha256`, symlinks carry
+    `link_target` (exactly one of the two — enforced at parse in
+    `deploy._load_manifest`, not here, so the parse error is a named 400
+    `MANIFEST_INVALID` rather than a generic validation shape). Directories
+    are omitted. Paths are relative to the agent root.
+    """
+    path: str
+    sha256: Optional[str] = None
+    link_target: Optional[str] = None
+
+
 class DeployLocalRequest(BaseModel):
     """Request to deploy a local agent."""
     archive: str  # Base64-encoded tar.gz
     name: Optional[str] = None  # Override name from template.yaml
     credentials: Optional[Dict[str, str]] = None  # Optional credentials to inject {KEY: value}
+    # #2060: when true, an archive without an embedded .trinity-manifest.json
+    # is refused (400 MANIFEST_REQUIRED). The MCP tool sets this in tool CODE
+    # (not a model-controlled parameter); the raw HTTP default stays False so
+    # manifest-less legacy deploys (shipped CLI, abilities plugin) keep working
+    # with `verified: false` + a warning.
+    require_manifest: Optional[bool] = False
 
 
 # Maximum credentials allowed per deploy-local request
@@ -940,6 +1414,12 @@ class DeployLocalResponse(BaseModel):
     warnings: List[str] = []  # Advisory deploy-time warnings (e.g. MCP credential gaps)
     error: Optional[str] = None
     code: Optional[str] = None  # Error code for machine-readable errors
+    # #2060 evidence fields — a deploy must prove what landed.
+    verified: bool = False  # True only when a manifest was present AND both verification points passed
+    files_expected: Optional[int] = None   # manifest regular-file entries (None = no manifest)
+    files_deployed: Optional[int] = None   # regular files at the deployed template (manifest member excluded)
+    symlinks_deployed: Optional[int] = None
+    compatibility_hard_count: Optional[int] = None  # post-deploy #668 STATIC report; None = unavailable (fail-open)
 
 
 # ============================================================================
@@ -1325,7 +1805,15 @@ class FleetExecutionSummary(BaseModel):
     fan_out_id: Optional[str] = None
     business_status: Optional[str] = None
     validation_execution_id: Optional[str] = None
+    # Turn-integrity flags (#2467) — small JSON object; NULL = no evidence
+    turn_integrity: Optional[str] = None
     queued_at: Optional[datetime] = None
+    # ent#525: `get_fleet_executions` also selects `source_channel`,
+    # `source_channel_chat_id` and `loop_id` for the Workspace Work read
+    # (`client_portal/work/`), which projects the raw rows itself. They are
+    # deliberately NOT fields here — pydantic drops the extra keys — so the
+    # operator dashboard's payload gains no channel destination ids
+    # (`test_ent525_portal_work.py` pins it).
 
     class Config:
         from_attributes = True
@@ -1427,6 +1915,15 @@ class EvaluationResponse(BaseModel):
     judge: Optional[Any] = None
     evaluator: str
     created_at: str
+    # ent#366 — a one-click Workspace rating carries what was rated and, for a
+    # negative one, the person's words. `comment_withheld` says the text exists
+    # but was not shown to THIS caller (the rated agent), so a reader can tell
+    # "no comment" from "not yours to read".
+    target_kind: Optional[str] = None
+    target_id: Optional[str] = None
+    comment: Optional[str] = None
+    comment_withheld: bool = False
+    updated_at: Optional[str] = None
 
 
 class CircuitBreakerConfigUpdate(BaseModel):
@@ -1434,6 +1931,20 @@ class CircuitBreakerConfigUpdate(BaseModel):
 
     Per-agent opt-in for the dispatch breaker. Gated again by the global
     DISPATCH_BREAKER_ENABLED master switch — both must be on to engage.
+    """
+    enabled: bool
+
+
+class OperatorResumeUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/operator-resume (ent#329).
+
+    Per-agent opt-in: when enabled, answering one of this agent's parked
+    operator-queue items dispatches a turn so the agent acts on the answer
+    instead of waiting for a next tick it may never have.
+
+    Per-agent rather than per-item deliberately — a dispatch spends money, and an
+    agent-declared per-item flag would let the agent make answering costly for
+    whoever answers, including an external Workspace client (ent#430 AC #3).
     """
     enabled: bool
 
@@ -1598,7 +2109,7 @@ class AgentMcpKeyVerifyEntry(BaseModel):
     here.
     """
     server_name: str
-    # ok | foreign_user_key | foreign_agent_key | unknown_key
+    # ok | foreign_user_key | foreign_ops_key | foreign_agent_key | unknown_key
     verdict: str
     key_scope: Optional[str] = None
     key_prefix: Optional[str] = None
@@ -1608,7 +2119,7 @@ class AgentMcpKeyVerifyEntry(BaseModel):
 class AgentMcpKeyVerifyResult(BaseModel):
     """Response for POST /api/agents/{name}/mcp-key/verify — container truth."""
     agent_name: str
-    # ok | foreign_user_key | foreign_agent_key | unknown_key | not_configured
+    # ok | foreign_user_key | foreign_ops_key | foreign_agent_key | unknown_key | not_configured
     # | shadow_entry | unavailable
     verdict: str
     message: Optional[str] = None
@@ -1713,7 +2224,18 @@ class ExecutionResultEnvelope(BaseModel):
     metadata: Optional[Dict] = None
     execution_log: Optional[List] = None
     session_id: Optional[str] = None
-    execution_time_ms: Optional[int] = None
+    # #2434: agent-supplied and previously unbounded — it arrives on the #1083
+    # async result callback (`routers/agents.py`), the one duration on this
+    # surface a caller chooses rather than the backend measuring. Today it lands
+    # only in JSON (the activity `details` blob and the #1578 event payload):
+    # `schedule_executions.duration_ms` is recomputed from `started_at`, and the
+    # `execution_time_ms` int4 columns (`chat_messages`,
+    # `agent_session_messages`) are written from the backend's own in-request
+    # measurement, never from this field. So this is a boundary check, not a
+    # live overflow path: it is bounded HERE, at the contract, so a future
+    # writer that does persist it inherits the guarantee instead of rediscovering
+    # the int4 ceiling in production. A bad value is a clean 422.
+    execution_time_ms: Optional[int] = Field(None, ge=0, le=2**31 - 1)
 
 
 # =============================================================================
@@ -2103,11 +2625,43 @@ class SshAccessRequest(BaseModel):
 # =============================================================================
 
 
+# trinity-enterprise#620: the per-execution activity the Workspace Work card
+# shows. Bounds are enforced HERE, not trusted from the agent: the payload is
+# agent-authored and is later rendered to people, so every string is capped
+# and every id shape-checked. Anything over the caps 422s the whole beat —
+# the 30s monitor stays authoritative for liveness (#307), so a refused beat
+# costs a card line, never a health verdict.
+HEARTBEAT_ACTIVITY_MAX_EXECUTIONS = 20
+HEARTBEAT_ACTIVITY_SUMMARY_MAX = 120
+HEARTBEAT_ACTIVITY_TOOL_MAX = 64
+_HEARTBEAT_EXECUTION_ID_RE = r"^[A-Za-z0-9_\-]{1,128}$"
+
+
+class HeartbeatExecutionActivity(BaseModel):
+    """What ONE running execution is doing right now (trinity-enterprise#620).
+
+    `tool` is the agent's display name for the tool (`Read`, `Bash`,
+    `mcp:trinity`, `Task:explore`) — `None` between tools ("Thinking");
+    `summary` is the agent's bounded human summary of the input (a shortened
+    path, a quoted pattern, the head of a command), never the raw input.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: str = Field(pattern=_HEARTBEAT_EXECUTION_ID_RE)
+    tool: Optional[str] = Field(default=None, max_length=HEARTBEAT_ACTIVITY_TOOL_MAX)
+    summary: Optional[str] = Field(default=None, max_length=HEARTBEAT_ACTIVITY_SUMMARY_MAX)
+    since: Optional[str] = Field(default=None, max_length=40)
+
+
 class HeartbeatPayload(BaseModel):
     """Lightweight liveness payload POSTed by the agent every ~5s."""
     memory_mb: Optional[float] = None
     active_executions: Optional[int] = None
     uptime_s: Optional[float] = None
+    # trinity-enterprise#620 — optional so a pre-#620 image's beat still lands.
+    executions: Optional[List[HeartbeatExecutionActivity]] = Field(
+        default=None, max_length=HEARTBEAT_ACTIVITY_MAX_EXECUTIONS
+    )
 
 
 # =============================================================================
@@ -2428,15 +2982,21 @@ class FanOutRequest(BaseModel):
     """Request model for fan-out parallel task execution."""
     tasks: List[FanOutTask]
     agent: str = "self"
-    # Optional overall fan-out deadline. When None, no outer deadline is
-    # applied — each sub-task is still bounded by the target agent's
-    # configured execution_timeout_seconds (TIMEOUT-001).
+    # Optional deadline on WAITING for the batch (#2524) — reaching it returns
+    # `deadline_exceeded` without stopping the subtasks. When None, the wait
+    # covers the whole batch: ceil(N / concurrency) × the agent's
+    # execution_timeout_seconds (TIMEOUT-001), plus a buffer.
     timeout_seconds: Optional[int] = None
     max_concurrency: int = 3
     policy: str = "best-effort"
     model: Optional[str] = None
     system_prompt: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
+    # #2524: return `{fan_out_id, status="accepted"}` immediately, without
+    # holding the connection for the whole batch. The caller polls
+    # `GET /api/agents/{name}/fan-out/{fan_out_id}`. Default False keeps the
+    # blocking contract every existing caller depends on.
+    async_mode: Optional[bool] = False
 
     @field_validator("tasks")
     @classmethod
@@ -2497,6 +3057,55 @@ class FanOutResponse(BaseModel):
     completed: int
     failed: int
     results: List[FanOutTaskResponse]
+
+
+# --- #2670: the batch's read surface ----------------------------------------
+#
+# `FanOutResponse` is built in memory and returned exactly once. A caller whose
+# HTTP call was killed by its own gateway timeout therefore has nothing to read,
+# while N executions keep running. These two models are what the batch looks
+# like when it is read back out of `schedule_executions` instead.
+#
+# Deliberately NOT a reuse of `FanOutResponse`: the aggregate has states the
+# dispatch response cannot have (`running` — some rows are still going) and
+# loses one it does have (`deadline_exceeded` is the DISPATCHER's verdict on its
+# own outer deadline, not a property of any row). Two different questions, two
+# shapes; making one serve both would mean a status vocabulary where half the
+# values are unreachable depending on which way you arrived.
+
+class FanOutBatchTask(BaseModel):
+    """One subtask of a batch, as recorded on its execution row."""
+    execution_id: str
+    # The caller's own `FanOutTask.id`, persisted on the row as
+    # `fan_out_task_id` since #2524. NULL on rows written before that column.
+    task_id: Optional[str] = None
+    status: str
+    # The dispatched message — the only link back to the task the caller named
+    # on rows that predate `task_id`.
+    message: Optional[str] = None
+    response: Optional[str] = None
+    error: Optional[str] = None
+    cost: Optional[float] = None
+    context_used: Optional[int] = None
+    duration_ms: Optional[int] = None
+    model_used: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class FanOutBatchStatus(BaseModel):
+    """A fan-out batch read back from its execution rows (#2670)."""
+    agent_name: str
+    fan_out_id: str
+    # `running` while any row is non-terminal; else `completed` when every row
+    # succeeded, `partial` when some did, `failed` when none did. An empty batch
+    # is unreachable here — the route 404s rather than reporting a batch of zero.
+    status: str
+    total: int
+    completed: int
+    failed: int
+    running: int
+    results: List[FanOutBatchTask]
 
 
 # =============================================================================
@@ -2587,6 +3196,13 @@ class InternalTaskExecutionRequest(BaseModel):
     schedule_cron: Optional[str] = None
     schedule_next_run: Optional[str] = None
     attempt: Optional[int] = None
+    # ent#498: deliver this run's output into the named person's Main Workspace
+    # chat with the agent. The scheduler carries only the ADDRESS — it cannot
+    # import the portal package to resolve a session, and it always sends
+    # `execution_id`, so channel columns passed as kwargs would be inert
+    # (#2426). `execute_task_internal` resolves and stamps the pre-created row
+    # before dispatch.
+    deliver_to_workspace_email: Optional[str] = None
 
 
 class ValidateExecutionRequest(BaseModel):
@@ -3046,6 +3662,26 @@ class ScheduleUpdateRequest(BaseModel):
     validation_enabled: Optional[bool] = None
     validation_prompt: Optional[str] = None
     validation_timeout_seconds: Optional[int] = None
+    # ent#498. The handler uses `exclude_unset=True`, so omitting the field
+    # leaves it alone while an explicit `null` CLEARS the delivery target — the
+    # only way to turn delivery off, and the reason this is not `= Field(...)`.
+    deliver_to_workspace_email: Optional[str] = None
+
+    @field_validator("deliver_to_workspace_email")
+    @classmethod
+    def _normalize_delivery_email(cls, v: Optional[str]) -> Optional[str]:
+        """Same normalisation as `ScheduleCreate` — see `db_models.py` for why.
+
+        Deliberately re-stated rather than imported: `models.py` is the API
+        contract layer and `db_models.py` the persistence layer, and the one
+        import between them today runs the other way. Pinned equal by
+        `tests/unit/test_ent498_workspace_delivery.py`, which drives BOTH models
+        over one table of inputs, so a divergence fails rather than shipping an
+        update path laxer than the create path.
+        """
+        from db_models import ScheduleCreate
+
+        return ScheduleCreate._normalize_delivery_email(v)
 
 
 class ScheduleResponse(BaseModel):
@@ -3070,6 +3706,10 @@ class ScheduleResponse(BaseModel):
     validation_enabled: bool = False
     validation_prompt: Optional[str] = None
     validation_timeout_seconds: int = 120
+    # ent#498: surfaced so an API/MCP caller can read back what it set. Without
+    # it the field is silently dropped from every response — `ScheduleResponse`
+    # is built with `**schedule.model_dump()`, and pydantic ignores extra keys.
+    deliver_to_workspace_email: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -3111,6 +3751,8 @@ class ExecutionSummary(BaseModel):
     validation_execution_id: Optional[str] = None
     # Auto-compact observability (Bundle B) - small JSON list
     compact_metadata: Optional[str] = None
+    # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
+    turn_integrity: Optional[str] = None
 
     # EXCLUDED (large fields - fetch via /executions/{id}):
     # - response: Optional[str]      # Full response text
@@ -3163,6 +3805,8 @@ class ExecutionResponse(BaseModel):
     validates_execution_id: Optional[str] = None
     # Auto-compact observability (Bundle B)
     compact_metadata: Optional[str] = None
+    # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
+    turn_integrity: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -3224,6 +3868,30 @@ class ApiKeyUpdate(BaseModel):
 class ApiKeyTest(BaseModel):
     """Request body for testing an API key."""
     api_key: str
+
+
+class ResendKeyRequest(BaseModel):
+    """Body for PUT and POST …/test on /api/settings/api-keys/resend (ent#582).
+
+    ``from_address`` is the sender Resend must be willing to send from (a
+    verified domain). Omitted → the address currently in force (setting →
+    ``SMTP_FROM`` env) is kept and checked.
+    """
+    api_key: str
+    from_address: Optional[str] = None
+
+
+class SubscriptionTokenTest(BaseModel):
+    """Body for POST /api/subscriptions/test (ent#582) — a token to validate
+    BEFORE it is registered. Never persisted, never echoed."""
+    token: str
+
+
+class SubscriptionRegistration(SubscriptionCredential):
+    """POST /api/subscriptions response: the subscription plus how many agents
+    it just connected as the install's FIRST Claude credential (ent#582; 0
+    otherwise). The first-run Claude step reads `connected_agents` as an int."""
+    connected_agents: int = 0
 
 
 class OpsSettingsUpdate(BaseModel):
@@ -3447,6 +4115,34 @@ class UserRoleUpdate(BaseModel):
 
 class UpdateMyEmailRequest(BaseModel):
     email: str
+
+
+class UserPreferenceWrite(BaseModel):
+    """Request body for `PUT /api/users/me/preferences/{key}` (trinity-enterprise#413).
+
+    `base_updated_at` is REQUIRED and tri-state by omission being an error:
+    `null` = "insert only — I believe no row exists" (409 if one does), a
+    string = "replace only if the row still carries this `updated_at`" (409
+    otherwise). There is no unconditional client write: every save states what
+    it believes the server holds, so an older tab cannot silently overwrite a
+    newer save. The 409 detail carries the live record.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    value: Dict[str, Any]
+    base_updated_at: Optional[str] = Field(..., max_length=64)
+
+
+class UserPreferenceRecord(BaseModel):
+    """One stored preference (trinity-enterprise#413)."""
+    key: str
+    value: Dict[str, Any]
+    updated_at: str
+
+
+class UserPreferencesResponse(BaseModel):
+    """`GET /api/users/me/preferences` — every stored key of the caller."""
+    preferences: Dict[str, UserPreferenceRecord]
 
 
 # =============================================================================
@@ -3729,6 +4425,14 @@ class SkillAssignmentsResponse(BaseModel):
     """
     assignments: Dict[str, List[SkillAssignmentAgent]] = Field(default_factory=dict)
     scope: str = "accessible"
+    # ent#386 — the agents this caller may assign TO, which is a strictly
+    # different set from the holders above: holders are owned ∪ shared, while
+    # the skill write routes are owner-or-admin. A shared agent therefore shows
+    # as a holder and is correctly absent here. Server-computed rather than
+    # derived client-side, because deriving it client-side means a second copy
+    # of an authorization predicate, free to drift from the one the write route
+    # enforces. Ghosts excluded, exactly as in `assignments`.
+    assignable_agents: List[SkillAssignmentAgent] = Field(default_factory=list)
 
 
 # ============================================================================
@@ -3838,3 +4542,18 @@ class A2AOutboundEndpointUpsert(BaseModel):
                 "the token again without surrounding whitespace."
             )
         return SecretStr(raw)
+
+
+class FirstRunState(BaseModel):
+    """First-run state for the front-desk surface (ent#319, epic ent#54).
+
+    `first_run` stays true while every agent the caller can see is one Trinity
+    seeded on their behalf — seeding (ent#124) made "zero agents" permanently
+    false, so the surface it used to gate needed a predicate that survives it.
+    `demo_agent` is the seeded agent the "Show me" door opens, or None when the
+    install seeded nothing (seeding disabled) and there is nothing to show yet.
+    """
+    first_run: bool
+    seeded_agents: List[str] = []
+    own_agent_count: int = 0
+    demo_agent: Optional[str] = None

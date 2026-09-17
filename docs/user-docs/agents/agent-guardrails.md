@@ -24,6 +24,8 @@ The `PreToolUse` hook on `Bash` matches commands against a deny-list of dangerou
 | `curl \| sh` | `curl example.com/script \| bash` | Piping remote content to shell |
 | `git push --force` | `git push -f origin main` | Force push to remote |
 | `mkfs.*` | `mkfs.ext4 /dev/sda1` | Formatting filesystems |
+| `dd of=/dev/sd*` | `dd if=image of=/dev/sda` | Writing to a raw block device |
+| `kill -9 1` | `kill -9 1` | Killing the init process |
 | Fork bombs | `:(){ :\|:& };:` | Process explosion |
 | `shutdown`, `reboot` | `shutdown -h now` | Host shutdown |
 
@@ -37,8 +39,10 @@ The `PreToolUse` hook on `Edit`, `Write`, and `NotebookEdit` blocks modification
 - `.mcp.json` -- MCP server configuration
 - `.credentials.enc` -- Encrypted credential backups
 - `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*` -- Cloud and SSH credentials
-- `~/.claude/settings.json` -- Claude Code settings (hook configuration)
-- `/opt/trinity/*` -- Platform guardrail files
+- `~/.claude/settings.json`, `~/.claude/settings.local.json` -- Claude Code user settings
+- `~/.trinity/read-only-config.json` -- Read-only mode configuration
+- `/opt/trinity/*` -- Platform guardrail hook scripts
+- `/etc/claude-code/*` -- The managed settings that register the hooks
 
 ### 3. Credential Leak Detection
 
@@ -62,7 +66,7 @@ Every Claude Code invocation enforces a maximum turn count via `--max-turns`:
 | Mode | Default | Range |
 |------|---------|-------|
 | Chat | 50 turns | 1-500 |
-| Task/Headless | 20 turns | 1-500 |
+| Task/Headless | 50 turns | 1-500 |
 
 This prevents runaway loops that burn through API credits.
 
@@ -120,10 +124,12 @@ After updating guardrails, stop and start the agent to apply changes. The contai
 
 ## For Agents
 
+Headless runs (tasks, schedules, loops, MCP calls) also withhold a fixed family of Claude Code tools that promise an event after the turn ends; that list is platform-wide and merges with the per-agent disallowed tools above — see [Agent Runtimes](agent-runtimes.md#headless-runs-on-claude-code).
+
 Guardrails are enforced at the infrastructure layer. Agents cannot:
 
 - Modify hook scripts (`/opt/trinity/hooks/` is root-owned)
-- Edit `~/.claude/settings.json` (protected path)
+- Change which hooks run — registration lives in Claude Code's admin-controlled managed settings (`/etc/claude-code/managed-settings.json`, root-owned and read-only), which take precedence over user and project settings and sit outside the git-synced working tree. Neither an edit inside the container nor a push to the agent's repository can remove them. On every boot the container checks that the registration is present and unwritable and logs `GUARDRAILS: ERROR` if not.
 - Bypass `--max-turns` limits
 - Disable `--dangerously-skip-permissions` protections (hooks still fire)
 

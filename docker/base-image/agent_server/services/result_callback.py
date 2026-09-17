@@ -340,6 +340,12 @@ async def _run_and_report(request, backend_url: str, mcp_key: str, dispatch_mono
             "terminal_reason": "error",
             "metadata": {},
         }
+    finally:
+        # #2433: the pending entry was registered by `try_spawn_async` (before
+        # this task even existed); promoted at spawn, dropped here if it never
+        # spawned. Deliberately NOT the handler's job — the handler returned 202
+        # long ago.
+        get_process_registry().discard_pending(execution_id)
 
     # #679: a graceful exit-0 OR a SIGKILL→504 for a turn the operator cancelled
     # must be relabelled `cancelled` so the backend writes CANCELLED — never a
@@ -401,6 +407,15 @@ def try_spawn_async(request) -> bool:
     backend_url = os.getenv("TRINITY_BACKEND_URL")
     mcp_key = os.getenv("TRINITY_MCP_API_KEY")
     dispatch_monotonic = time.monotonic()
+    # #2433: register as ACCEPTED synchronously, BEFORE the detached task exists
+    # — the 202 goes out now and the watchdog may sweep before the task's first
+    # tick. The task's own `finally` discards the entry; `register()` promotes it
+    # at spawn.
+    get_process_registry().register_pending(
+        request.execution_id,
+        timeout_seconds=request.timeout_seconds or 900,
+        metadata={"type": "task", "async": True},
+    )
     task = asyncio.create_task(
         _run_and_report(request, backend_url, mcp_key, dispatch_monotonic)
     )

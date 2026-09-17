@@ -65,8 +65,6 @@ class BacklogService:
         user_email: Optional[str],
         subscription_id: Optional[str],
         x_source_agent: Optional[str],
-        x_mcp_key_id: Optional[str],
-        x_mcp_key_name: Optional[str],
         triggered_by: str,
         collaboration_activity_id: Optional[str],
         is_self_task: bool = False,
@@ -106,8 +104,13 @@ class BacklogService:
             "user_email": user_email,
             "subscription_id": subscription_id,
             "x_source_agent": x_source_agent,
-            "x_mcp_key_id": x_mcp_key_id,
-            "x_mcp_key_name": x_mcp_key_name,
+            # #2389: the credential that authorised this request is NOT written
+            # here. It used to arrive as the unvalidated `X-MCP-Key-Id` /
+            # `X-MCP-Key-Name` headers, and `_spawn_drain` never read either key
+            # back — so the blob durably recorded a forgeable value that nothing
+            # consumed, while G-04 scanned it and #1449 scrubbed it. Provenance
+            # now comes from the validated bearer on `User` at the one place it
+            # is persisted (`create_task_execution`).
             "triggered_by": triggered_by,
             "collaboration_activity_id": collaboration_activity_id,
             "is_self_task": is_self_task,

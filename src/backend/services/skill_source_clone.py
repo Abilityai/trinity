@@ -46,6 +46,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from services.git_credential_helper import git_auth_env
 from utils.safe_yaml import (
     AliasPolicy,
     HardenedYamlError,
@@ -149,9 +150,11 @@ def canonical_remote(url: str) -> str:
     """Comparable form of a git remote: no credentials, no `.git`, no trailing /.
 
     Used only to answer "is the checkout's `origin` still the repo this source
-    is configured for". Userinfo is dropped because the stored URL never carries
-    a PAT while the on-disk `origin` always does for a private source, so a raw
-    comparison would report a repoint on every sync. Scheme and host are
+    is configured for". Userinfo is dropped defensively: since ent#615 neither
+    side carries a PAT (the credential travels in the git child's environment,
+    never in the URL), but an `origin` written before that fix is still on disk
+    on every existing install, and a raw comparison against it would report a
+    repoint — and therefore a full re-clone — on every sync. Scheme and host are
     case-folded; the PATH is not, since a local-filesystem remote (the shape the
     tests use) is case-sensitive on Linux.
     """
@@ -190,6 +193,21 @@ class SkillSourceClone:
         # True when the probe found SKILL.md evidence under BOTH skills/ and
         # .claude/skills/ with no catalog.yaml to decide — surfaced in status.
         self.dual_layout = False
+        # ent#615: auth for the CURRENT `sync` call, carried as `http.extraHeader`
+        # in the child's environment. Set for the duration of `sync` and cleared
+        # after, so a read path (`current_commit`, `archive`) never carries a
+        # credential it has no use for.
+        self._auth: Dict[str, str] = {}
+
+    def _git_env(self) -> Optional[Dict[str, str]]:
+        """Environment for a git child: inherited, plus env-carried auth.
+
+        ``None`` when there is no auth, so git inherits normally and nothing
+        about the common case changes.
+        """
+        if not self._auth:
+            return None
+        return {**os.environ, **self._auth}
 
     @property
     def quarantine_path(self) -> Path:
@@ -200,14 +218,34 @@ class SkillSourceClone:
     # Sync
     # =========================================================================
 
-    def sync(self, auth_url: str, expected_sha: Optional[str] = None) -> Dict[str, Any]:
+    def sync(
+        self,
+        url: str,
+        expected_sha: Optional[str] = None,
+        github_pat: str = "",
+    ) -> Dict[str, Any]:
         """Clone or update this source's checkout.
 
         `expected_sha` is the SHA recorded at the previous successful sync. For
         a **tag** source it is a pin check: same tag name resolving to a
         different commit means the tag was moved, which is refused. It is
         ignored for branch sources, where movement is the point.
+
+        ent#615: `url` is CREDENTIAL-LESS and `github_pat` travels in the git
+        child's environment (`http.extraHeader`). It used to be spliced into
+        the URL, which put the platform PAT on the backend's git argv AND — via
+        the `origin` git writes at clone time — at rest in
+        `/data/skills-library/*/.git/config`, i.e. on the `~/trinity-data` HOST
+        BIND MOUNT, and therefore in every backup and snapshot of it. Same bug
+        class as the agent remotes this issue is about, one layer out.
         """
+        self._auth = git_auth_env(github_pat)
+        try:
+            return self._sync(url, expected_sha)
+        finally:
+            self._auth = {}
+
+    def _sync(self, auth_url: str, expected_sha: Optional[str] = None) -> Dict[str, Any]:
         try:
             repointed = False
             if (self.path / ".git").exists() and not self._origin_matches(auth_url):
@@ -379,7 +417,10 @@ class SkillSourceClone:
             "--depth", "1",
             "--", auth_url, str(self.path),
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_CLONE_TIMEOUT)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_CLONE_TIMEOUT,
+            env=self._git_env(),
+        )
         if proc.returncode != 0:
             return {"success": False, "error": f"clone failed: {redact(proc.stderr)}"}
         logger.info("cloned skill source %s (%s %s)", self.source_id, self.ref_type, self.ref)
@@ -409,6 +450,15 @@ class SkillSourceClone:
         up as a fetch failure rather than a silent adoption. The explicit SHA
         comparison below is the belt to that suspenders — it catches the same
         condition on a fresh clone where no local tag ref exists yet to conflict.
+
+        The comparison resolves the tag PEELED (`^{commit}`), never bare. The
+        recorded SHA is `current_commit()` — HEAD, i.e. the commit — while a
+        bare `rev-parse refs/tags/<ref>` on an ANNOTATED tag yields the tag
+        object, so an unmoved tag compared unequal and was refused as moved on
+        every sync after the first (#2550). Every `trinity-skills` release tag
+        is annotated, so the bundled source hit this on its second sync. Peeling
+        is the identity for a lightweight tag, and a tag that really moved still
+        resolves to a different commit — the refusal itself is unchanged.
         """
         fetch = self._git(
             [*_GIT_HTTP_UA_ARGS, "fetch", "origin", "tag", self.ref],
@@ -429,7 +479,7 @@ class SkillSourceClone:
                 }
             return {"success": False, "error": f"fetch failed: {stderr}"}
 
-        resolved = self._resolve(f"refs/tags/{self.ref}")
+        resolved = self._resolve(f"refs/tags/{self.ref}^{{commit}}")
         if resolved is None:
             return {"success": False, "error": f"tag {self.ref!r} not found upstream"}
         if expected_sha and not resolved.startswith(expected_sha):
@@ -736,4 +786,5 @@ class SkillSourceClone:
         return subprocess.run(
             ["git", *args], cwd=self.path,
             capture_output=True, text=text, timeout=timeout,
+            env=self._git_env(),
         )

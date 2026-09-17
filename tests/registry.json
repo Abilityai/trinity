@@ -1342,6 +1342,32 @@
       "description": "Static guard: every durable container Trinity creates has a bounded log (#1871). Exists because of the named bug class in docs/memory/learnings.md (2026-07-10) - 'the create path is never one call site'. Scans BOTH docker-py creation entry points - containers_run(...) AND <client>.containers.create(...) - because covering only the first was the guard's own first blind spot (deploy.py already used the second). Rule: pass log_config (durable -> capped), or remove=True (ephemeral -> Docker deletes the log with the container), or be allowlisted with a stated reason (a create/teardown pair like deploy.py's finally: remove(force=True), which a static scan cannot distinguish from a durable create). Uses the AST, not a regex, so a MENTION of containers_run( in a comment or docstring is never a call site (lifecycle.py's own comments do exactly that, and a regex draft flagged them). A 'containers' substring pre-filter keeps the guard interpreter-agnostic - an unrelated file using syntax newer than the running Python (except* under a 3.9 venv) is skipped rather than reported - while staying fail-closed for any unparseable file that could contain a call; the token is deliberately 'containers' and not 'create', which matches half the codebase and re-lights those false positives. Meta-tested on the guard's own machinery: planted violations for both call forms, a capped create, an ephemeral helper, unrelated .create() on volumes/networks/services, a mixed file where only one of two calls is capped, prose/newer-syntax skips, pre-filter-covers-every-call-form, and allowlisted-paths-still-exist - so neither the scan nor its exemptions can rot into a no-op."
     },
     {
+      "file": "unit/test_2541_restart_policy_parity.py",
+      "feature": "#2541",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "agents",
+        "unit",
+        "reliability",
+        "guard"
+      ],
+      "description": "Static guard: every durable container Trinity creates is born restarting (#2541). Docker's default restart policy is `no`, so before this only trinity-system survived a host reboot - the 2026-09-04 power-off brought back 11 of 19 agents (exactly the cohort a manual `docker update` had patched after the FIRST occurrence, 2026-07-23) and left 8 dead ~42h. Second property to prove the learnings.md (2026-07-10) 'the create path is never one call site' class after #1871's log_config, which is why it ships with a guard rather than three edits. Three deliberate departures from #1871's otherwise-identical scan, each with a reason. (1) VALUE, not presence: the argument must be ast.Name('AGENT_RESTART_POLICY') and a separate test reads the constant out of capabilities.py's AST and pins it to {'Name': 'unless-stopped'} - a presence check would admit {'Name': 'always'}, which breaks RESTART-002 outright, because Trinity stops agents through container.stop() (which sets Docker's manual-stop flag) and `always` resurrects a deliberately quarantined agent while `unless-stopped` honours the flag. (2) A THIRD creation form: <x>.containers.run(...), docker-py's raw high-level API and the form services/docker_utils.py itself uses, which #1871's _is_container_create does NOT match - an omission that also makes #1871's _HELPER_LAYER exemption dead code; a dedicated test asserts the exemption is load-bearing here (docker_utils.py must still produce a matched call when scanned as if unexempt) so it cannot rot into reassurance. (3) BOTH directions: a remove=True create must carry NO policy, and that reverse is protective rather than decorative - a DETACHED remove=True create is rejected by the daemon (400 can't create 'AutoRemove' container with restart policy), but ALL FIVE of Trinity's transient helpers are non-detached, where docker-py never sets auto_remove, so the daemon ACCEPTS the create, the helper exits, the policy restarts it, the post-wait() remove() 409s, and a forever-restarting orphan leaks (reproduced against a live daemon while planning). Pins the three known create sites by name (crud.py, lifecycle.py's shared recreate tail, system_agent_service.py) plus #1871's meta-tests: planted violations for the durable, transient-with-policy, literal-dict and `always` shapes, a correct create, an ephemeral helper, unrelated .run()/.create() on volumes/networks/services/subprocess, a mixed file where only one of two calls is correct, prose and newer-syntax skips, fail-closed on an unparseable file that mentions a creation call, pre-filter-covers-every-call-form, and allowlist/helper-layer paths still exist. Proved against the real tree both ways before merge: removing crud.py's kwarg reports 'crud.py:2009 (durable, no policy)', adding one to the alpine chown helper reports 'crud.py:1862 (transient WITH a policy)'. Pure static - no docker, no fastapi, no DB."
+    },
+    {
+      "file": "unit/test_2541_restart_policy_effects.py",
+      "feature": "#2541",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "agents",
+        "unit",
+        "reliability",
+        "infrastructure"
+      ],
+      "description": "The CONSEQUENCES of #2541, asserted rather than discovered in production. (1) RESTART-005: `restarting` becomes a reachable Docker state for every agent - most visibly as the transient state during the very host-reboot recovery the change exists to produce, i.e. exactly when an operator is watching - and both of docker_service.py's copy-pasted normalizers (get_agent_status_from_container and the inline twin in list_all_agents_fast) map it to `stopped`. Passed through verbatim it matched NEITHER of the frontend's exact-equality filters in stores/agents.js, so a restarting agent appeared in neither runningAgents nor stoppedAgents - a loud failure rendered invisible; a source-level twin assertion catches a fix applied to one normalizer only, and a third assertion pins that agent_container_states (the #2196 tri-state reader, which always called such a container stopped) still agrees. (2) RESTART-006: the two RestartCount branches in monitoring_service (the 'High restart count (N)' health issue and alert_high_restart_count) have effectively never executed for a regular agent, because Docker increments RestartCount only under a restart policy; their thresholds are pinned so 'it started alerting' is a known consequence. (3) RESTART-008: every long-lived service in ALL THREE compose files declares restart: unless-stopped, with *-init one-shots required to declare \"no\" EXPLICITLY (an omission there is indistinguishable from an oversight). The base docker-compose.yml - the file start.sh uses without --hosted, i.e. the README quickstart and the source install - was missing it on backend, frontend and redis while prod and hosted were correct, because test_2280_hosted_compose_parity guards prod<->hosted wholesale and compares the base file to nothing."
+    },
+    {
       "file": "unit/test_297_ops_settings_validation.py",
       "feature": "trinity-enterprise#297",
       "added": "2026-07-30",
@@ -1610,7 +1636,7 @@
         "infrastructure",
         "credentials"
       ],
-      "description": "A global GitHub PAT rotation must actually reach running agents (#1967). The #211 auto-propagation reported success while updating nothing, for two independent reasons, both caused by the global path and the per-agent path (#1264) having drifted apart. (1) The eligibility gate was .env-shaped: _propagate_to_agent passed add_if_missing=False, so an agent with no /home/developer/.env - which is EVERY agent provisioned from a GitHub template, since those ship .env.example - returned skipped_no_pat; on such a fleet 100% skipped and the endpoint still answered success:true. (2) .env is not where git authenticates from: clones are created as https://oauth2:<PAT>@github.com/... and that URL is persisted in .git/config on the workspace volume, so rewriting .env changes nothing for the running git process - only git_service.update_remote_pat restores fetch/push before a restart, and only the per-agent path called it. Observed: agents on a revoked token for 11-13 days with nothing in the UI saying so. Covers both halves: an agent with a git config but no .env is now updated (add_if_missing derived per agent, not hard-coded), and the live remote is re-templated with remotes_updated reported SEPARATELY from updated (updated alone overstates the fix - an agent whose .env was rewritten but whose remote was not is still broken for git until restart, which would repeat this issue's own mistake of reporting success for a partial effect). Critically also pins what the fix must NOT be: the issue suggests add_if_missing=True unconditionally, which would spray the global token into every running container including agents that never touched GitHub - the module docstring says the original gate existed to prevent exactly that - so eligibility moved to the git config and a non-GitHub agent keeps the conservative behaviour, with an explicit no-regression test that an agent carrying GITHUB_PAT for the gh CLI with no Trinity-managed repo is STILL rotated (the new gate is a union with the old, not a replacement). Plus: per-agent-PAT agents still skipped and never contacted, stopped agents neither counted nor contacted, one failing agent does not stop the fleet, a git-config read that raises degrades to the conservative gate instead of taking down the rotation, a zero-reach rotation WARNs in the platform log (the failure was silent for weeks; a Settings panel nobody is watching during an incident is not sufficient), and two structural guards that both paths share one _apply_pat_to_agent body and that add_if_missing=False is not reintroduced - the drift IS the bug."
+      "description": "A global GitHub PAT rotation must actually reach running agents (#1967). The #211 auto-propagation reported success while updating nothing, for two independent reasons, both caused by the global path and the per-agent path (#1264) having drifted apart. (1) The eligibility gate was .env-shaped: _propagate_to_agent passed add_if_missing=False, so an agent with no /home/developer/.env - which is EVERY agent provisioned from a GitHub template, since those ship .env.example - returned skipped_no_pat; on such a fleet 100% skipped and the endpoint still answered success:true. (2) .env was not where git authenticated from: clones were created as https://oauth2:<PAT>@github.com/... and that URL was persisted in .git/config on the workspace volume, so rewriting .env changed nothing for the running git process - only git_service.update_remote_pat restored fetch/push before a restart, and only the per-agent path called it. (ent#615 INVERTED that premise: remotes now carry no credential and the trinity credential helper resolves .env FIRST, precisely so a rotation takes effect without a recreate. update_remote_pat is still the load-bearing half, but its job flipped - it places the credential and makes the URL credential-less.) Observed: agents on a revoked token for 11-13 days with nothing in the UI saying so. Covers both halves: an agent with a git config but no .env is now updated (add_if_missing derived per agent, not hard-coded), and the live remote is re-templated with remotes_updated reported SEPARATELY from updated (updated alone overstates the fix - an agent whose .env was rewritten but whose remote was not is still broken for git until restart, which would repeat this issue's own mistake of reporting success for a partial effect). Critically also pins what the fix must NOT be: the issue suggests add_if_missing=True unconditionally, which would spray the global token into every running container including agents that never touched GitHub - the module docstring says the original gate existed to prevent exactly that - so eligibility moved to the git config and a non-GitHub agent keeps the conservative behaviour, with an explicit no-regression test that an agent carrying GITHUB_PAT for the gh CLI with no Trinity-managed repo is STILL rotated (the new gate is a union with the old, not a replacement). Plus: per-agent-PAT agents still skipped and never contacted, stopped agents neither counted nor contacted, one failing agent does not stop the fleet, a git-config read that raises degrades to the conservative gate instead of taking down the rotation, a zero-reach rotation WARNs in the platform log (the failure was silent for weeks; a Settings panel nobody is watching during an incident is not sufficient), and two structural guards that both paths share one _apply_pat_to_agent body and that add_if_missing=False is not reintroduced - the drift IS the bug."
     },
     {
       "file": "unit/test_1984_audit_verify_unverifiable.py",
@@ -1789,7 +1815,7 @@
         "reliability",
         "pull-migration"
       ],
-      "description": "PULL_MODE_PILOT_AGENTS can only route agent-to-agent work (#2048). _AUTONOMOUS_TRIGGERS declares seven triggers autonomous and pull_owns_dispatch consulted all seven, but capacity_manager only offers a row to the durable queue when its producer passed overflow_policy='queue_persistent', and exactly one of the three producers does: task_execution_service uses 'reject' (scheduler/ALL cron + fan-out), dispatch_admission_service uses 'queue_in_memory' (sequential chat, human chat), only chat_execution_service (POST /task) uses 'queue_persistent'. So on a cron-driven agent the pilot flag is INERT and #1766's soak measures nothing - silently, because the gate sits behind an overflow_policy short-circuit, so for a schedule row pull_owns_dispatch is never called at all and the row is pushed indistinguishably from the flag being unset, while PULL_MIGRATION_TESTING.md section 9 M1 told the operator to go check an env var that is present and correct. Issue decision was Option 1 (make the reach honest, do not extend it). Corrects the issue's own table: the reachable set is {agent, event}, not {agent} - #1578's task-completion loopback POSTs to the same /task route and is tagged 'event' via an internal-secret-gated X-Event-Trigger, with no capacity bypass. Tests pin: the reach set derived from what _derive_task_trigger can emit rather than hardcoded; every autonomous trigger classified as reachable or stranded so a new one cannot join the stranded set unreviewed; the narrowing is a runtime NO-OP over the only producer that consults the predicate (it stops a false claim, it does not change a verdict); and note_unreachable_pull_trigger reports a stranded row once per (agent, trigger), never for a non-pilot / reachable / interactive trigger, and never raises. A structural guard asserts the three producers' overflow_policy literals, so implementing the deferred Option 2 (wiring cron to queue_persistent) fails this test and forces PULL_REACHABLE_TRIGGERS and section 9's prose to be revisited in the same change - a silently-stale reach set being exactly the bug. Also updates test_1766: its 'pilot owns EVERY autonomous trigger' case asserted reach the system never had (it passed only by calling the predicate outside the context that constrains it), and its producer-gate case drove a queue_persistent acquire carrying 'schedule' - a combination production cannot produce - now driven with 'agent', the shape that actually occurs."
+      "description": "PULL_MODE_PILOT_AGENTS can only route agent-to-agent work (#2048). _AUTONOMOUS_TRIGGERS declares seven triggers autonomous and pull_owns_dispatch consulted all seven, but capacity_manager only offers a row to the durable queue when its producer passed overflow_policy='queue_persistent', and exactly one of the three producers does: task_execution_service uses 'reject' (scheduler/ALL cron + fan-out), dispatch_admission_service uses 'queue_in_memory' (sequential chat, human chat), only chat_execution_service (POST /task) uses 'queue_persistent'. So on a cron-driven agent the pilot flag is INERT and #1766's soak measures nothing - silently, because the gate sits behind an overflow_policy short-circuit, so for a schedule row pull_owns_dispatch is never called at all and the row is pushed indistinguishably from the flag being unset, while PULL_MIGRATION_TESTING.md section 9 M1 told the operator to go check an env var that is present and correct. Issue decision was Option 1 (make the reach honest, do not extend it). Corrects the issue's own table: the reachable set is {agent, event}, not {agent} - #1578's task-completion loopback POSTs to the same /task route and is tagged 'event' via an internal-secret-gated X-Event-Trigger, with no capacity bypass. Tests pin: the reach set derived from what _derive_task_trigger can emit rather than hardcoded; every autonomous trigger classified as reachable or stranded so a new one cannot join the stranded set unreviewed; the narrowing is a runtime NO-OP over the only producer that consults the predicate (it stops a false claim, it does not change a verdict); and note_unreachable_pull_trigger reports a stranded row once per (agent, trigger), never for a non-pilot / reachable / interactive trigger, and never raises. A structural guard asserts the three producers' overflow_policy literals, so implementing the deferred Option 2 (wiring cron to queue_persistent) fails this test and forces PULL_REACHABLE_TRIGGERS and section 9's prose to be revisited in the same change - a silently-stale reach set being exactly the bug. Also updates test_1766: its 'pilot owns EVERY autonomous trigger' case asserted reach the system never had (it passed only by calling the predicate outside the context that constrains it), and its producer-gate case drove a queue_persistent acquire carrying 'schedule' - a combination production cannot produce - now driven with 'agent', the shape that actually occurs. SUPERSEDED IN PART BY #2391: the structural guard fired as designed when Option 2 landed and was re-derived, not relaxed - task_execution_service now carries BOTH 'reject' and 'queue_persistent', and a second assertion pins that the wider one is reachable only through pull_owns_dispatch, which is the property #2048 could not assert and the one that keeps the blast radius equal to the pilot allowlist. The reachable set is now {agent, event, schedule, webhook, reminder} and the stranded set {loop, fan_out, a2a, operator_response}; see unit/test_2391_scheduled_pull_reach.py."
     },
     {
       "file": "unit/test_2052_scrubber_authority_parity.py",
@@ -2380,6 +2406,714 @@
         "reliability"
       ],
       "description": "Calendar-rot detector (#2247). Re-runs the calendar-sensitive test files in a subprocess under tests/clockshift.py with the clock +7 days and -365 days, so a fixture pinned to a literal date inside a RELATIVE window fails on the first run instead of on some future Tuesday — the failure mode that left five ent#96 tests red on dev for two days with no red check anywhere (invisible on PRs because base and head fail identically, invisible on pushes because the diff job does not run there). A subprocess because the shift must be installed before the module binds `from datetime import datetime`, which an autouse fixture cannot do. Also guards the detector's own no-op failure mode: it asserts the plugin exists AND that importing it actually moves `datetime.now()`, since a vanished plugin would make every shifted run pass by shifting nothing. Proven to detect: reverting the ent#96 fixture to its pre-#2243 state turns both directions red. ~37s, almost all pytest boot; the file list is short for that reason and excludes the ~176s test_1771c_schedules_analytics_edges."
+    },
+    {
+      "file": "unit/test_2246_oss_only_deploy_is_loud.py",
+      "feature": "#2246",
+      "added": "2026-08-17",
+      "categories": [
+        "ci",
+        "unit",
+        "infrastructure",
+        "deployment"
+      ],
+      "description": "Dev deploy must not ship OSS-only silently (#2246). Behavioural half: runs scripts/ci/classify-submodule-failure.sh over the verbatim output of the real failure and asserts CLASS: host-key — plus, crucially, that the host-key remedy does NOT mention read access / deploy keys / org membership, which is what the old unconditional diagnostic said while the clone was dying one layer earlier at SSH host-key verification (follow that hint and you install a deploy key and get the identical warning). Also pins that a genuine credential failure still says access, that a DNS failure is neither — host-key output also contains 'Could not read from remote repository', so ordering is load-bearing — that silence is its own class (an `update = none` submodule is SKIPPED and exits 0, #1443), and that an unrecognised shape is admitted rather than guessed. Static half over deploy-dev.yml: the not-mounted branch EXISTS (the #2068 ::error:: assertions sit inside `if [ -f …/enterprise/backend/__init__.py ]`, so they structurally cannot fire on the state the VM was actually in), it fails the run rather than warning (direction, not presence — a ::warning:: is exactly how this hid across 200 consecutive runs), the escape hatch is an opt-in repo variable, the clone output is captured and classified, the optional PAT transport uses `git -c … insteadOf` so no token persists to the VM's .git/config, and the submodule step contains no `exit 1` — failing there would leave the VM half-updated after the pull."
+    },
+    {
+      "file": "unit/test_2317_pull_envelope_parity.py",
+      "feature": "#2317",
+      "added": "2026-08-19",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "regression",
+        "guard"
+      ],
+      "description": "Pull claim envelope <-> push drain parity on backlog_metadata (#2317). The envelope read a nested `task_overrides` key no producer writes, so every pull-claimed turn dropped the row's model / allowed_tools / max_turns / timeout_seconds, and `session_id` was read from a key the producer never writes (it records `resume_session_id`). Every test runs off ONE fixture built by the REAL producer (`BacklogService.enqueue`): exhaustive classification of the keys enqueue writes into runtime-facing vs backend-only (a new key reds the suite until classified); both consumers resolve the same keys to the same values, and to the producer's own recorded values; #1629/#1633 system-prompt composition preserved (caller_prompt threaded from the flat key, ent#243 model tier); session_id sourced from resume_session_id and never from the chat_session_id row id; nested task_overrides still overlays for forward-compat; absent settings omitted, not nulled. No live backend, no DB harness."
+    },
+    {
+      "file": "unit/test_471_subscription_usage_observability.py",
+      "feature": "#471",
+      "added": "2026-08-19",
+      "categories": [
+        "backend",
+        "subscriptions",
+        "database"
+      ],
+      "description": "Subscription usage observability (#471): failure_kind persisted + 24h/kind counters (NULL→unknown, 24h boundary, per-sub grouping); get_subscription_usage carries counters + 2h rate_limited_now + model defaults keep old constructors valid; per-agent breakdown merged across chat/exec ranked by cost desc; batch agent→subscription map (soft-delete excluded, scoped/empty); derive_auth_mode truth table; record-before-gate (event recorded with auto-switch disabled, kind threaded); headroom unified-header parsing against the 2026-08-19 spike payload + freshness-gated limited verdict; static pins (pressure route before /{agent_name}, assert_admin on new endpoints). sqlite3 temp DB + attribute monkeypatching (no sys.modules stubs)."
+    },
+    {
+      "file": "unit/test_433_headroom_history.py",
+      "feature": "ent#433",
+      "added": "2026-08-20",
+      "categories": [
+        "backend",
+        "db",
+        "retention",
+        "subscriptions"
+      ],
+      "description": "Subscription headroom history (ent#433): live round-trip of all 13 columns against a migrated DB (the ONLY test exercising db/tables.py — schema-parity never imports it); DatabaseManager delegations (no __getattr__); last-per-bucket selection, not max (observer-effect bias, two-peak ambiguity, NULL-utilization 429s); bucket_start vs fetched_at so gaps are decidable from jitter; PostgreSQL dialect compilation pinning ROW_NUMBER over a bare-column GROUP BY; probe-path invariants (Redis-before-DB ordering, to_thread off the event loop, failure never changes the probe result, no row when the probe never ran); no_windows classification; both retention windows registered, range-validated, guard-gated, and absent from the community seed; explicit cascade on subscription delete; coverage_pct reporting a thin series as thin."
+    },
+    {
+      "file": "unit/test_2322_mfa_challenge_response.py",
+      "feature": "#2322",
+      "added": "2026-08-20",
+      "categories": [
+        "backend",
+        "auth",
+        "2fa",
+        "api-contract",
+        "unit"
+      ],
+      "description": "POST /token had ONE response shape for two outcomes. With a second factor pending it answered HTTP 200 carrying access_token: null AND token_type: 'bearer' — a grant that issued no session describing itself as a bearer grant — so any client reading the token field without checking it (our own MCP client and CLI both did) stored nothing, reported success, and produced unexplained 401s on its next call, far from the cause. Two of the three mfa_gate consumers (the email route, the enterprise SSO redirect) already omitted the token fields; /token was the outlier. Pins BOTH shapes because the fix moved both: the challenge carries no access_token and no token_type, and a real grant carries no 2FA fields (before this every successful login — OSS-only builds included — carried all four as null, contradicting Token's own docstring). Both trigger arms covered: user enrolled, and the worse one, policy-required-but-not-yet-enrolled, where one admin toggle defers every unattended admin/creator credential before anyone has enrolled. Edition-agnostic — the provider is registered through the OSS mfa_gate seam, so it runs with no enterprise submodule present. Also pins /api/auth/email/verify, the consumer that was ALREADY correct: three documents and the commit message cite it as the reference behaviour, and adding a response_model there later would silently reintroduce the bug on the one route that never had it (mutation-verified: response_model=Token turns 2 tests red). The stub holds (enrolled, required) as independent booleans rather than deriving either from mfa_gate (learnings 2026-08-02)."
+    },
+    {
+      "file": "mcp-server/src/auth-challenge.test.ts",
+      "feature": "#2322",
+      "added": "2026-08-20",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "auth",
+        "unit"
+      ],
+      "description": "TrinityClient.authenticate() checked only response.ok, so a 200 carrying a 2FA challenge and no access_token set this.token = undefined and every later request 401'd with nothing pointing back at the login — Trinity shipping the exact broken-machine-client pattern #2322 describes. Pins that a session-less 200 throws at the login call (distinct message when a second factor is the cause) and that a real grant still authenticates."
+    },
+    {
+      "file": "unit/test_ent434_headroom_alerts.py",
+      "feature": "abilityai/trinity-enterprise#434",
+      "added": "2026-08-26",
+      "categories": [
+        "backend",
+        "subscriptions",
+        "monitoring",
+        "unit"
+      ],
+      "description": "Weekly-subscription-headroom alerts. Pins the three-state classifier (a genuinely saturated subscription must not read as 'no evidence' the way _headroom_indicates_healthy does — #2396's docstring wrongly named this feature as that predicate's consumer), the projection that decides urgency from the operator's own burn rate rather than a configured time gap, and the deterministic reset-day alert id that IS the state machine (edge-trigger, cross-worker dedup and re-arm with no durable memo, possible because the 7d window was measured fixed-with-reset, not rolling). Also pins the empty-fleet guard (all([]) is True), that an alert-path bug cannot stop #447 recovery detection, and the three registries a platform emitter must appear in."
+    },
+    {
+      "file": "unit/test_2409_headroom_ranked_switch.py",
+      "feature": "#2409",
+      "added": "2026-08-27",
+      "categories": [
+        "backend",
+        "subscriptions",
+        "unit"
+      ],
+      "description": "Auto-switch ranks alternative subscriptions by cached provider headroom (#2409). Pins: the 2h failure filter stays a db-layer FILTER that runs first and is kind-blind (#444/#2352); survivors are ranked furthest-from-the-nearest-wall first (the fuller of the 5h/7d windows, banded to 10 points so agent_count still spreads a storm), a FRESH provider refusal is dropped and a stale one is merely unknown; one MGET, never a probe, tri-state on Redis; every failure of the ranking half degrades to today's order WITH a warning (poisoned-import fail-open beside a positive real-import proof); classify_headroom stays byte-identical to a frozen pre-#2409 copy over the full age x status x window x threshold product; the switch surfaces destination_headroom + a clause; new-agent auto-assign rides the same ranker with one decrypt in the common case."
+    },
+    {
+      "file": "unit/test_2433_process_registry_pending.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "agent-server",
+        "process-registry",
+        "watchdog"
+      ],
+      "description": "#2433: agent-side pending registration (accepted-not-spawned), cancel-while-pending consumed by register(), recently-completed covers the post-exit drain window."
+    },
+    {
+      "file": "unit/test_2433_task_handler_pending.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "agent-server",
+        "routers",
+        "watchdog"
+      ],
+      "description": "#2433: /api/task, /api/chat and the #1083 async spawn register pending before any queue and discard in finally; /api/executions/running carries pending_ids."
+    },
+    {
+      "file": "unit/test_2433_headless_executor.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "agent-server",
+        "headless-executor"
+      ],
+      "description": "#2433: headless runs use a dedicated 32-thread pool pinned to the backend fleet ceiling; pre-spawn cancel raises 409 without Popen."
+    },
+    {
+      "file": "unit/test_2433_gemini_registers.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#2433: Gemini registers/unregisters its subprocess with the process registry (it never did)."
+    },
+    {
+      "file": "unit/test_2433_limiter_inflight.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "backend",
+        "agent-call-limiter",
+        "watchdog"
+      ],
+      "description": "#2433: in-flight dispatch registry + single refresher (fakeredis), tri-state verdicts, cancel at grant, on_granted re-anchor, both-branch queue warning."
+    },
+    {
+      "file": "unit/test_2433_slot_renew.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "backend",
+        "capacity"
+      ],
+      "description": "#2433: SlotService.renew_slot re-anchors a held slot lease (score + hash TTL together, S-03-safe)."
+    },
+    {
+      "file": "unit/test_2433_db_restamp.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "backend",
+        "db",
+        "schema"
+      ],
+      "description": "#2433: restamp_execution_dispatch CAS (RUNNING, NULL lease) moves started_at to dispatch and keeps admission in queued_at (real schema via db_harness)."
+    },
+    {
+      "file": "unit/test_2433_dispatch_wiring.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "backend",
+        "task-execution",
+        "chat"
+      ],
+      "description": "#2433: agent_post_with_retry tracks the whole call in-flight, re-anchors at grant, raises cancelled-while-parked; terminate cancels a parked row without the agent."
+    },
+    {
+      "file": "unit/test_2433_watchdog_inflight.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "backend",
+        "cleanup",
+        "watchdog"
+      ],
+      "description": "#2433: watchdog/Phase-3/startup withhold orphan recovery for a live (or unverifiable) backend dispatcher; pending_ids proof-of-life; honest orphan string."
+    },
+    {
+      "file": "unit/test_2433_limiter_packaging.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "packaging",
+        "config"
+      ],
+      "description": "#2433: BACKEND_AGENT_CALL_* forwarded in prod + hosted compose and documented in .env.example; limiter docstring default matches code."
+    },
+    {
+      "file": "unit/test_2433_review_fixes.py",
+      "feature": "#2433",
+      "added": "2026-08-31",
+      "categories": [
+        "backend",
+        "agent-server",
+        "watchdog",
+        "concurrency",
+        "regression",
+        "static-guard"
+      ],
+      "description": "PR #2435 review + re-review: the cross-worker cancel may not act on a marker phase that predates its own cancel write (parked->calling is published in the same round-trip that reads the cancel key; the Redis-error residual is recorded, not claimed closed); the exited-but-registered set is TTL-bounded from first observation of the exit; a DISCOVERING guard walks every agent_server module that drives the process registry and requires each stdin.write to be paired with unregister either locally or at its caller (an enumerating list missed the live headless_executor site); the dispatch re-stamp runs off the event loop; /api/chat discards its pending entry on a cancelled lock wait; Phase 3 batches its verdict read."
+    },
+    {
+      "file": "unit/test_2467_turn_integrity.py",
+      "feature": "#2467",
+      "added": "2026-09-01",
+      "categories": [
+        "backend",
+        "executions",
+        "observability",
+        "regression"
+      ],
+      "description": "#2467 backend fix: services/execution_integrity derives structured kill records + a response notice from the transcript's task lifecycle events at terminal write (apply_result), persisted to schedule_executions.turn_integrity. Covers: both incident shapes (tool-timeout promotion vs run_in_background), the AC-6 negative control (completed task never flags), the ledger-drain trap (detection keys on kill events, not snapshots), dedupe, kill-without-snapshot, notification-stopped-only belt, malformed-shape degradation, charset validation + entry cap (forged-stream containment, #640), the #2127 privacy rule (no description/output_file persisted), waited-path pending_at_exit riding the same column without a second notice, and apply_result golden kwargs (turn_integrity conditional; healthy path byte-identical; old-image envelope -> NULL)."
+    },
+    {
+      "file": "unit/test_2467_bg_kill_agent_negative_controls.py",
+      "feature": "#2467",
+      "added": "2026-09-01",
+      "categories": [
+        "backend",
+        "agent-server",
+        "regression"
+      ],
+      "description": "#2467 agent-side negative controls (permanent): the fix is backend-side by design, so these pin that the agent stays byte-identical - the #2127 marker stays scoped to waited types, no agent-side field or notice for a killed shell, the kill lifecycle events ARE present sanitized in raw_messages (the backend scan's input), and the ledger-widening 'fix' is provably inert (the CLI drains the ledger before exiting). Uses a _NaturalExitPopen harness that exits only when stdout is exhausted - the natural-exit path the #2127 fakes cannot express."
+    },
+    {
+      "file": "unit/test_ent467_ws_agent_scope.py",
+      "feature": "ent#467",
+      "added": "2026-09-02",
+      "categories": [
+        "backend",
+        "security",
+        "websocket",
+        "regression"
+      ],
+      "description": "ent#467 /ws agent scope: `/ws` was SCOPE_ALL and unfiltered, so any authenticated user could mint a ticket and read every tenant's agent names, execution ids and activity types (plus another user's email on agent_shared/agent_unshared). Pins the visibility rule (every agent a payload names must be accessible; admins short-circuit; an agent-less event stays fleet-visible), the payload agent-identity vocabulary against the live broadcast shapes, that BOTH delivery paths filter (live fan-out and the last-event-id replay, structurally), unchanged SCOPE_SCOPED (/ws/events) semantics, fail-closed identity resolution (unknown/suspended/db-error close the socket; emailless non-admin resolves to an empty roster), stream-driven roster refresh on access-changing events, and an AST discovery guard requiring every /ws broadcast payload in the OSS tree to be agent-keyed or explicitly allowlisted as fleet-level with a reason."
+    },
+    {
+      "file": "unit/test_2468_headless_tool_audit.py",
+      "feature": "#2468",
+      "added": "2026-09-01",
+      "categories": [
+        "backend",
+        "agent-server",
+        "prompt",
+        "regression"
+      ],
+      "description": "#2468 headless tool audit: PLATFORM_DENIED_TOOLS family (11 tools measured on claude 2.1.235) + PLATFORM_KEPT_TOOLS data + AUDIT_CLI_VERSION; every denied name has a recorded reason with verbatim description fragments; DENIED ∪ KEPT exactly covers the measured init list; CORE_TOOLS never-denied guard; guardrails merge/dedupe (AC 5); reverse vocabulary guard (prompt family paragraph ⊆ deny tuple); 'Nothing survives the end of your turn' counterweight registered always-tier, survives every tier/runtime, quotes the Bash promise, stays truthful about waited subagents and names the foreground wait idiom."
+    },
+    {
+      "file": "unit/test_2391_scheduled_pull_reach.py",
+      "feature": "#2391",
+      "added": "2026-09-03",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "pull-migration",
+        "scheduler"
+      ],
+      "description": "Scheduled work reaches the durable pull queue (#2391 - the Option 2 deferred by #2048). task_execution_service - the producer behind the scheduler, i.e. ALL cron plus webhooks, reminders, loops and fan-out - dispatched with overflow_policy='reject' unconditionally, and capacity_manager only offers a row to the durable queue when its producer passed 'queue_persistent', so PULL_MODE_PILOT_AGENTS was structurally inert for the fleet's dominant traffic class. It now passes 'queue_persistent' when - and only when - pull_owns_dispatch says a pilot owns the trigger, which widens PULL_REACHABLE_TRIGGERS from {agent, event} to {agent, event, schedule, webhook, reminder}. Tests pin the whole risk surface: with the flag OFF (the fleet default) the real acquire call still receives 'reject' with no payload for every trigger and a CapacityFull still writes the same 'Agent at capacity (N/N parallel tasks running)' FAILED terminal - verified against the call, not assumed; with the flag ON a schedule/webhook/reminder row returns TaskExecutionStatus.QUEUED without calling the agent, releasing a slot or writing the dispatch marker, and the payload carries the row's model/allowed_tools/timeout/resume_session_id plus the CALLER's uncomposed system_prompt (the claim path rebuilds the platform prompt around it, #1629); a full backlog names max_backlog_depth rather than parallel slots, because the pull branch never asks for a slot; loop/fan_out/a2a/operator_response stay pushed (each has a caller that reads the returned TaskExecutionResult - the first three structurally, operator_response by choice since it records result.status as the ent#329 dispatch receipt); interactive triggers are untouched (Open Question 7's scope cut); the payload builder refuses without an execution_id (the enqueue is a CAS RUNNING->QUEUED on an existing row) and when slot_already_held (queueing under a held slot leaks it for the lease TTL); #1083 fire-and-forget does not stack - pull wins by construction because a queued row is never dispatched, so no 202 can arrive, while a non-pilot's async_result dispatch is unchanged. An end-to-end class drives the REAL CapacityManager + BacklogService + _build_claim_response so 'it enqueued' is not mistaken for 'a worker can run it' (the #2317 failure mode). Scheduler side: 'queued' is NOT a terminal - _poll_execution_completion treated anything but 'running' as an outcome, so a queued row would have published schedule_execution_completed(status=queued), been classified a failure and handed to _maybe_schedule_retry, duplicating work that was queued and about to run; ExecutionStatus.QUEUED and _NON_TERMINAL_POLL_STATES fix that and are pinned here."
+    },
+    {
+      "file": "unit/test_ent437_telemetry_consent.py",
+      "feature": "ent#437",
+      "added": "2026-09-03",
+      "categories": [
+        "backend",
+        "telemetry",
+        "security"
+      ],
+      "description": "Opt-in instance telemetry (ent#437, the second cut of the ent#12 Tier-2 channel). Service level, db + httpx mocked: the schema-v2 aggregate validates and carries install_source + release version; it NEVER carries installation_id and the builder never reads it (a preview mints nothing, shows the placeholder id); outcome mix projects the timeline shaper's rows to telemetry-owned wire keys with an `other` catch-all and drops cost/context_used; by_status folds unknown statuses; provider_failures sums rate_limit/auth across subscriptions and asks the unconditional-cutoff reader for a WIDE window at window_days=0 (never 0 = since-now); a fully stubbed db degrades every field to a valid payload. Validator rejects unknown keys, wrong types, installation_id, non-UUID ids, out-of-vocabulary buckets, missing keys and a stale schema_version; parity tests pin every db trigger bucket to a wire key and derive the funnel schema from _FUNNEL_STEPS. share_now refuses + records a schema violation without constructing an HTTP client, records a 404 with receiver_hint receiver_not_live (recorded against the default origin) vs receiver_404 (any other or unrecorded origin), decided from the entry's recorded destination and never from the URL configured at read time (#2571: every entry and the last-shared stamp carry the origin they went to, scheme+host+port after credential stripping, total over every URL shape; a credential never reaches the store; the sink-200-then-default-restored scenario reads as a mismatch; a legacy or corrupt host is unknown and never a mismatch; share_url is scrubbed), stamps last_shared_at + backfill_delivered_at on 2xx and posts the minted share id, logs transport errors by class only; the send log is bounded at 5 and a corrupt row reads as []. Backfill is re-sent until first delivery then windows are cumulative. Share-id lifecycle (mint / keep / delete on revoke / re-mint different / self-heal after manual DELETE), dismissed marker first-wins and stamped by consent, first-value memo derived once, public_flags fail hidden-direction, tick marker dedupes a second worker for half the interval via fakeredis and fails open without Redis. Router: dismiss + status GET 403 an agent-scoped principal; ?preview=0 skips the aggregate; dismiss is idempotent + audited; the consent audit carries sharing_id_rotated as a bool and never the id; feature-flags carry the four booleans."
+    },
+    {
+      "file": "unit/test_ent438_agent_canvas.py",
+      "feature": "ent#438",
+      "added": "2026-09-02",
+      "categories": [
+        "backend",
+        "frontend",
+        "workspace",
+        "regression"
+      ],
+      "description": "ent#438 agent canvas + workspace merge: audience defaults to operator and an unrecognised stored value reads as operator (allowlist, so a canvas never widens who sees agent output); the Workspace read narrows IN THE QUERY; staleness is derived (agent finished a run after the write) not a clock, never claims more than it observed, and is computed once per agent; canvas ids are charset-validated with a named 400 and the pattern is anchored; blocks are count- AND byte-capped; writes are self-gated while reads are not; a foreign execution_id degrades rather than refusing (provenance, not authorization); the retired /agents/:name/workspace route still resolves and carries its agent, the page is gone and nothing references it; every advertised block kind has a renderer and the five shared ones delegate to the CI-pinned components/reports/ dispatch without widening the report display_hint enum; agent-authored html is DOMPurify-sanitised; the voice panel writes the durable canvas at operator audience and still has a caller; dual-track migration present and the table is AGENT_REFS-registered."
+    },
+    {
+      "file": "unit/test_ent536_canvas_vocabulary.py",
+      "feature": "ent#536",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "frontend",
+        "workspace",
+        "security",
+        "regression"
+      ],
+      "description": "ent#536 one rich canvas block vocabulary: the backend enum, MCP BLOCK_KINDS and frontend CANVAS_BLOCK_KINDS are one set (image + diagram added, report display_hint untouched) and DEFAULT_CANVAS_ID is one string across models.py, canvas.ts, canvasUtils.js and the voice service (no 'voice' silo); id-less blocks are assigned b1..bN without shadowing declared ids, duplicate or malformed ids are refused by name, CanvasPatch requires ids; classify_image_src is one gate for both writers (https, data:image/(png|jpeg|gif|webp);base64 under the inline cap, workspace paths normalised under /home/developer; svg, other schemes, protocol-relative, control chars, traversal and sibling-prefix refused) and image payloads are normalised to {src, src_kind} at write; diagram source is required and capped; patch_blocks replaces in place keeping order, refuses unknown ids and id-less canvases with the fix spelled out, replaces stored duplicates everywhere; map_panel_tool maps each voice verb onto one block kind on the voice* ids (show_* replaces where the first voice block stood, append coalesces into the trailing voice html block, clear removes voice blocks only, refusals return no blocks); audience_within never widens; write_canvas assigns ids, normalises audience closed, resolves provenance, enforces the byte cap and REQUIRES audience; patch_canvas keeps title/audience and restamps provenance; the router declares its # mcp: header and a self-gated PATCH route with no router-side upsert; the panel endpoint serves the canvas row; CanvasMarkdown never imports the dispatcher and mermaid is lazy + sanitised."
+    },
+    {
+      "file": "unit/test_ent536_canvas_prompt_guidance.py",
+      "feature": "ent#536",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "prompt",
+        "regression"
+      ],
+      "description": "ent#536 '### Your Canvas' platform-prompt guidance, the sibling of test_1535: documents set_canvas / patch_canvas / get_canvas and the default canvas 'main'; Codex build uses bare names and its orientation lists the canvas tools; every kind in the MCP BLOCK_KINDS enum is documented with a payload; the chart keys (series/points/ts/value/type/label/unit), the diagram key (mermaid), the image keys (src/caption) and the report-shared keys match the frontend rules; every CHART_TYPES entry and the four rich fences are taught; the four ceilings are interpolated from models.py with no marker leaked; the block stays within its context budget; the trigger phrase, the report hand-off and the no-JavaScript rule are stated; the section is registered as MINIMAL-droppable tool guidance; the Publishing Reports block is not swallowed by its new neighbour."
+    },
+    {
+      "file": "unit/test_2523_loops_terminal_driven.py",
+      "feature": "#2523",
+      "added": "2026-09-04",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "pull-migration",
+        "loops"
+      ],
+      "description": "Loops run off execution terminals instead of an in-process for loop (#2523). LoopService._run used to be one long-lived asyncio.Task per loop that awaited execute_task inside a for over iterations and kept every cross-iteration value (previous response, accumulated cost, consecutive failures, the #1157 fingerprints, the stop flag, the inter-run sleep) in Python locals. That made the loop structurally push-only - a pull-claimed row returns no TaskExecutionResult - so 'loop' sat in the stranded half of PULL_REACHABLE_TRIGGERS (#2048); and it made a loop unable to survive a restart, so cleanup_service flipped every in-flight loop to 'interrupted'. test_loop_service.py still covers the behaviour that had to stay identical (the seven stop conditions and their precedence, template substitution, cost budget, failure policy); this file covers what a terminal-driven driver newly has to get right. The advance is idempotent under at-least-once delivery - db.claim_loop_advance is a CAS on runs_completed from N-1 to N, so a re-delivered pull terminal cannot double-fire iteration N+1, an unknown execution is ignored, and a late terminal cannot resurrect a finalized loop. A QUEUED dispatch (the pull path) does NOT advance - the worker's terminal does - and agent_loop_runs.execution_id is stamped before dispatch so the advance can find its iteration from an execution id. The terminal fan-out actually reaches the advance: it hangs off event_dispatch_service.spawn_task_terminal_event, the wrapper every CAS-won terminal writer already calls, and NOT inside emit_task_terminal_event, which returns early when no event subscription matches (the common case); a broken advance never breaks the already-billed terminal. A fast-fail dispatch still advances - a raise, and execute_task's capacity/circuit-open/ephemeral returns, write a FAILED row without reaching a terminal writer, so without the direct advance in _run_and_advance the loop would stall forever with one open run row. And the due-loop sweep (the replacement for asyncio.sleep(delay_seconds), a parked agent_loops.next_run_at plus a 5s tick) dispatches a parked loop exactly once: not before it is due, once across two workers sweeping the same row (the claim is a CAS on the exact next_run_at), re-evaluating rather than dispatching blind so a stop that arrived while parked wins, and one bad loop does not stall the rest of the sweep."
+    },
+    {
+      "file": "unit/test_2578_deploy_fetch_never_recurses.py",
+      "feature": "#2578",
+      "added": "2026-09-08",
+      "categories": [
+        "ci",
+        "unit",
+        "infrastructure",
+        "deployment"
+      ],
+      "description": "Dev deploy's superproject fetch never recurses into a submodule (#2578). Deploy to Dev went red on every commit that moved the src/backend/enterprise gitlink: git's default fetch.recurseSubmodules=on-demand fetched the submodule over its stored SSH URL before the PAT transport block ran, died at host-key, and set -e stopped the script in === Pull === — self-healing on the next push (the refs advance before the recursion), which is why it never had a ticket. Static half: every git fetch/pull/checkout in the deploy script carries --no-recurse-submodules (tokenised scan over the WHOLE script, comments never count, git remote update absent), the pull keeps --ff-only, the Pull-block comment names the class, a STALE enterprise tree fails the run after the health check (flag raised in the submodule block, error printed before the registration greps, exit at the END of the script after the #2204 seeding check and the error check (review I1), no DEPLOY_ALLOW_OSS_ONLY hatch, classifier runs in the stale branch with the `stale` tree state (review I3)), and the auto-filed incident names the enterprise stages — plus an 11-way mutation meta-test. Behavioural half: real git in tmp_path, a VM-shaped superproject+submodule fixture (populated submodule, SSH remote, the real .gitmodules stanza incl. update = none), a fake ssh that logs every dial, and the workflow's OWN Pull block run verbatim via bash -e against a pointer bump (default config and submodule.recurse=true): exit 0, gitlink moved, submodule untouched, ssh never dialled — with an in-clone control proving the same fixture still reproduces the class, the self-heal pinned, the submodule block's insteadOf form syncing HAVE==WANT, and a failed sync leaving the STALE state without wedging the next deploy. GitHub's 21,000-character expression cap, which the #2578 comments tripped (#2625), is guarded workflow-wide in unit/test_2625_workflow_expression_cap.py."
+    },
+    {
+      "file": "unit/test_2625_workflow_expression_cap.py",
+      "feature": "#2625",
+      "added": "2026-09-08",
+      "categories": [
+        "ci",
+        "unit",
+        "infrastructure",
+        "deployment"
+      ],
+      "description": "GitHub evaluates a workflow string that contains any ${{ }} as ONE expression and refuses the file at parse time above 21,000 characters (#2625: deploy-dev.yml's ssh script embeds three expressions; the #2578 comments took it from 17,837 to 21,923, the first dev push after #2622 came up as a run named after the file with zero jobs, and the notify-failure job that files the #2204 incident never ran — PyYAML and bash -n accept such a file and a dev-push-only workflow is never parsed before merge). Walks EVERY string in EVERY workflow (.yml and .yaml) and composite-action manifest, measured as the parsed scalar in UTF-8 bytes, and fails any expression-bearing one past 20,000 (1,000 in hand), with a vacuity check that the deploy script is found and carries expressions, mutations proving the guard rejects the deploy script padded back past the cap and an expression-bearing string wherever it sits (run, with-input, env), and that a long string WITHOUT an expression is left alone. Structural fix (no expression in the script at all) is #2626."
+    },
+    {
+      "file": "unit/test_lilu20_claude_install_layer.py",
+      "feature": "Abilityai/lilu#20",
+      "added": "2026-09-06",
+      "categories": [
+        "docker",
+        "build",
+        "agents"
+      ],
+      "description": "The base image cannot ship a Claude Code CLI that does not run (Abilityai/lilu#20). `npm install -g @anthropic-ai/claude-code` exits 0 when the ~214 MB platform-native optionalDependency fails to fetch or unpack — npm downgrades an optional-dep failure to `npm warn tar TAR_ENTRY_ERROR` — and the package's own postinstall install.cjs then returns (also exit 0), leaving bin/claude.exe as the 500-byte shebang-less stub. The layer succeeded, the image was tagged `latest`, and the first symptom was a 503 at an agent's first turn on the arm64 DGX. Static Dockerfile assertions over the three defences the install layer now carries: (a) --include=optional and --no-ignore-scripts are passed explicitly, since npm config precedence puts CLI flags above any npmrc or NPM_CONFIG_* a future base image could introduce; (b) a failed install is retried with the platform-native package as a DIRECT, non-optional target, whose failure npm cannot swallow (measured: exit 0 as an optional dep, exit 1 as a direct target, same ENOSPC) — including executing the layer's own node platform-key expression, so a typo cannot make it silently empty; (c) a bare, unconditional, arch-neutral `claude --version` is the layer's terminal command in the SAME RUN, un-maskable by $(...) and not separately cacheable. Mutation-checked against the pre-fix one-liner, a $(...) mask, and dropped flags. No Docker, no network, no live backend."
+    },
+    {
+      "file": "unit/test_ent537_canvas_design_kit.py",
+      "feature": "ent#537",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "frontend",
+        "workspace",
+        "security",
+        "regression"
+      ],
+      "description": "ent#537 canvas design kit + starter layouts: the four templates and their slot map are one set across models.py, canvas.ts and canvasLayouts.js and every layout/slot has a grid-area rule in CanvasKit.vue; `slot` survives the REST round trip (CanvasBlock field + validate_blocks) and a malformed slot is a named 400 while an unknown slot is not refused; an unknown template is refused by the Literal and by name in the service; write_canvas stores the template and defaults to None, patch_canvas and the voice panel write carry the stored one, and a voice verb leaves a slotted block untouched; CanvasSummary/empty_canvas carry template; _SUMMARY_COLUMNS appends template LAST and _row_to_summary/_row_to_full read stable positions; the DDL pair exists on both tracks (schema.py, tables.py, migrations.py, Alembic 0054 revising 0053); every class the prompt and the voice HTML rule teach is in KIT_CLASSES and every KIT_CLASSES entry has a rule in the stylesheet; the prompt teaches each layout with its slots, one worked example, the skill and the <style> rule; the MCP tool advertises template + slot; canvas components use only the canvas-mode sanitiser entry points, every markdown/html path forbids <style> via BASE_CONFIG, the hook reads the per-call canvasKit flag from its third argument, and only the SVG path keeps DOMPurify's default tag list."
+    },
+    {
+      "file": "unit/test_ent534_workspace_voice.py",
+      "feature": "ent#534",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "workspace",
+        "voice",
+        "security",
+        "regression"
+      ],
+      "description": "ent#534 Workspace voice mode: the portal-principal start route (one uniform 404, the Workspace session shape), write-as-you-go transcript persistence into enterprise_portal_messages (per-row call id, strictly increasing stamps, no tombstone for a silent call, scrubbed), the history readers (labelled + budgeted spoken rows, dedup ignores spoken rows), the roster realtime_voice field, and the voice service's session lifetime (compression + resumption, go_away reconnect, the cap's spoken/written notice, Redis round-trip of the Workspace fields, the SETNX save claim)."
+    },
+    {
+      "file": "unit/test_2582_download_flag.py",
+      "feature": "#2582",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "files",
+        "security",
+        "unit"
+      ],
+      "description": "The one-way ?download=1 flag on GET/HEAD /api/files/{id}, and the counter split (#2582). Proves the ASYMMETRY rather than the feature: the flag can force attachment and NO input can force inline (?download=0 on text/html stays attachment) — asserted both on the pure helper AND through the mounted route on a NOT-inline-safe row, because a helper test cannot tell you the handler passed it the right inline=, because inline is ent#461's XSS allowlist. Tolerance: ?download= / ?download=x / a repeated pair never 422 — the route is the public link Telegram/WhatsApp/iOS open and it ignores unrecognised query pairs today, so a bool annotation would trade an outage for a type. HEAD agrees with GET (a probe that disagrees mis-plans the player). The sig stays valid (a stored bearer token compared with compare_digest, not an HMAC over the URL). Every other ent#461 header (nosniff, Accept-Ranges, CORP, Cache-Control) survives, and the flag rides the 206 branch. Counter: a ranged PREFIX read (the Workspace preview, which starts at byte 0) is audited with ranged_prefix:true but does NOT bump download_count; a full-file range and a plain GET do; a mid-file seek does neither; HEAD never counts. Also pins that portal_documents appends the flag and build_download_url does not — two base URLs, one flagged. FastAPI TestClient, no Docker."
+    },
+    {
+      "file": "unit/test_2582_portal_uploads.py",
+      "feature": "#2582",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "files",
+        "packaging",
+        "security",
+        "unit",
+        "workspace"
+      ],
+      "description": "Reading back and deleting a Workspace client's own uploads (#2582). A client upload has no DB row, so listing needs a docker exec, reading needs extract_from_agent, deleting needs rm, and the MIME is guessed — everything here follows from that. Gate order: an off-roster agent 404s before any docker work (the ent#287 rule extended). Traversal: an unaddressable filename is the SAME uniform 404 as an unknown agent, never a 400 — asserted at the handler AND through the mounted route, with a positive control, because %2F shapes never match the route while %2E%2E does reach the handler and a status-only test cannot tell gated from unroutable. ent#308's collision restated on the read side (two emails that slug alike read different inboxes). Download: attachment + nosniff + no-store, 409 on a stopped agent and 502 on a missing one (deliberate — _read_inbox returns [] for a stopped agent, so the list is empty anyway), extract_from_agent's exceptions translated so its 404 detail cannot echo the container path, audited with actor_email (a PortalPrincipal is not a User). Delete: rm -f -- with shlex.quote proven by a name that needs quoting, idempotent, a failing exec is a named 502. Limiters: both tiers bind, the hourly one is the real bound, download is tighter than upload and delete is on its own looser counter. Redis forced off; docker stubbed via sys.modules. Also guards the LIMITER PACKAGING (#1056/#2433 class, caught at the /validate-pr gate): all three knobs must be forwarded by docker-compose.yml, .prod.yml and .hosted.yml, with defaults agreeing across the three AND with the module default — they shipped read-by-code and documented-in-.env.example while forwarded by none, and prod/hosted launch standalone so dev wiring would not carry."
+    },
+    {
+      "file": "unit/test_ent548_portal_share_delete.py",
+      "feature": "ent#548",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "workspace",
+        "files",
+        "security",
+        "database",
+        "unit"
+      ],
+      "description": "The Workspace delete permission matrix and the per-viewer dismissal (ent#548). Ownership is session-type dependent by construction: include_owned IS principal.is_platform (ent#358), so a non-owner admin is a viewer AND an owner on a magic-link portal token is a viewer — both pinned, because both look like bugs to a reader who has not met the rule. portal_owns_agent is the same membership _roster_rows tags onto the card, so the button and the gate cannot drift. Revoke is ACCESS-FIRST (roster 404 -> owner 403 -> row 404): the row must not be read before the caller is authorized, proven with a call-recording monkeypatch, or a viewer's 404-vs-403 would be an enumeration oracle; a cross-agent id is the same 404 and never reaches the revoke primitive; the deliberate 404-where-the-operator-sibling-204s divergence is pinned in the docstring. Dismissal hides the file from ONE viewer, leaves the share and every other viewer untouched, is idempotent, does NOT validate the file_id (an existence oracle — the set_chat_star fork, resolved the same way) and is row-capped, which is the other half of that pair. Both purge paths delete the rows in the same transaction, the AgentRef registration is asserted directly, and both migration tracks plus the PK's leading column are pinned. Real SQLite over six tables, seeded idempotently for the shared-database tier."
+    },
+    {
+      "file": "unit/test_2524_fanout_async_join.py",
+      "feature": "#2524",
+      "added": "2026-09-04",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "pull-migration",
+        "fan-out"
+      ],
+      "description": "A fan-out batch is joined from the DB instead of gathered in a coroutine (#2524 - #1081 Phase 4's async fan-out join + sync edge adapter). The sync aggregate is rebuilt from the batch's schedule_executions rows (fan_out_id + the caller's fan_out_task_id) rather than from execute_task return values, which a pull dispatch never fills. Pinned: the join wakes the caller only when no row is open, is idempotent under re-delivery, costs one PK read and no batch COUNT on non-fan-out terminals, and is reached from spawn_task_terminal_event with a guard independent of #2523's loop advance. A row is created at SLOT GRANT, never up front (#2524 review): a pre-created RUNNING row waiting behind the semaphore is bulk-FAILed by the #106 no-session sweep, and a QUEUED one is claimable by the backlog drain / pull workers while the service also dispatches it. The row carries the SUB-004 subscription snapshot. A QUEUED return leaves the batch open, and a sync call waits on the rows and answers with the worker's result. max_concurrency still paces push. execute_task's error_code reaches the aggregate (no column holds it). A deadline reports the undispatched tail as running, not failed, and never cancels the dispatch. The default wait budget covers ceil(N / min(max_concurrency, max_parallel_tasks)) waves. A raised dispatch is closed by a proper terminal writer (activity close + terminal event on a won CAS, nothing on a lost one). Also covers task_execution_service.dispatch_and_await_terminal, the sync edge adapter that unstranded a2a and operator_response: a push dispatch is returned untouched, a QUEUED one waits and rebuilds from the row, a timed-out wait returns FAILED/TIMEOUT without raising, and a vanished row falls back to the dispatch result."
+    },
+    {
+      "file": "unit/test_2524_fanout_real_schema.py",
+      "feature": "#2524",
+      "added": "2026-09-15",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "fan-out"
+      ],
+      "description": "The fan-out batch SQL against the real db_harness schema (SQLite; PostgreSQL when TEST_POSTGRES_URL is set), not the in-memory double the service tests use: fan_out_task_id and subscription_id round-trip through create_task_execution, get_fan_out_executions is scoped by agent, count_fan_out_open counts exactly queued/running/pending_retry, and a just-created fan-out row aged 60s is swept by the #106 no-session sweep - the reason FanOutService creates each row at slot grant rather than up front."
+    },
+    {
+      "file": "unit/test_2618_heartbeat_dueness.py",
+      "feature": "#2618",
+      "added": "2026-09-09",
+      "categories": [
+        "backend",
+        "telemetry",
+        "reliability",
+        "unit"
+      ],
+      "description": "The sharing heartbeat's dueness comes from the persisted last-share stamp, not from process age (#2618). Pre-fix the loop slept the whole 24h interval from process start and then sent unconditionally, so an install that restarted inside every window shared its consent-time backfill once and never again (a dev instance sat 45h past its last share with five reloads a day while Settings reported sharing as on). Pure dueness matrix over empty / unparseable / future / exact / offset / naive stamps and a 1h interval (due unless the stamp is provably inside the interval); one wake on a store without sleeping (the consent and hard-disable gates run before any stamp read or Redis touch, with a positive control); three boots over one store driven through _loop with a fake clock the sleep stub advances (nothing sends inside the window, exactly one send lands past it, a further restart stays silent); sleep-first pinned on an ordered sleep/send timeline with the jitter fixed; the tick marker on fakeredis (TTL keyed to the send cadence at both 1h and 24h, a fresh SETNX per claim, released on the STORE after a failed send so a sibling retries at the next wake, kept after an acknowledged send even when the stamp write raises — share_now True means the receiver acknowledged — release touching only this tick's lock, fail-open, released on a cancellation mid-send); retry at the next wake with a 2xx-only stamp; an unreadable store never sends while a stamp read that alone raises reads as due; the persisted retry cap (the rule, honoured before the claim, and ten wakes against a dead receiver costing five attempts then one per half-interval); a tick that raises does not end the loop; a raise ahead of the POST is recorded in the send log and throttled like any failed attempt while a raise after an acknowledgement neither duplicates the entry nor turns True into False; _days_since pinned across every stamp shape the column has held; and a guard that the module never again says the marker is never released. Harness mirrors test_ent437 (real write-once settings store, fake httpx, asyncio.run under the unit island's strict asyncio mode)."
+    },
+    {
+      "file": "unit/test_operator_intake.py",
+      "feature": "ent#38 / #1593 / ent#545",
+      "added": "2026-06-23",
+      "categories": [
+        "backend",
+        "telemetry",
+        "security",
+        "unit"
+      ],
+      "description": "Operator intake (ent#38): never fires unless enabled, never double-submits (the marker is claimed before the POST), never raises, never fires without an email; delivery-failure observability (#1593): a non-2xx logs at WARNING with a coded detail only, a connect failure at INFO, the email never reaches a log line. ent#545: the non-minting read twin get_installation_id (None on a fresh store with a store that refuses every write, the stored id verbatim, blank/non-string as not minted, a read failure propagated rather than rendered as not minted, writer and reader as one key), the writers' mint as a write-once claim (a worker whose claim loses returns the winner's id, never an upsert), and the self-heal of a corrupt row (blank, whitespace, non-string) on both the FakeDB and the real SettingsOperations layer."
+    },
+    {
+      "file": "unit/test_2669_minting_accessor_callers.py",
+      "feature": "#2669",
+      "added": "2026-09-10",
+      "categories": [
+        "backend",
+        "telemetry",
+        "security",
+        "static-guard",
+        "unit"
+      ],
+      "description": "Static AST guard (#2669): every use of an identity-minting accessor -- get_or_create_installation_id, get_or_mint_sharing_id, get_instance_label -- sits at a (path, enclosing qualname, name) listed with the reason that site needs the identity to exist; a read-shaped path must use the non-minting twin. An import is a binding that feeds a per-file alias map, so an aliased or re-bound call is a hit at the CALL. The identity keys (installation_id, telemetry_sharing_id) are written only by their home modules. The read twin get_installation_id is pinned to exist. OSS tree only (the private twin is trinity-enterprise#575); token-prefiltered on case-folded bytes so unrelated files never trip an interpreter-skew parse failure, while a token-bearing file that cannot be parsed fails closed naming the interpreter. Self-tests drive every spelling family, the scope attribution (nested/async/class/lambda/decorator), the key-write detector and the judge in both directions through the same scan the live tree uses."
+    },
+    {
+      "file": "unit/test_ent614_source_agent_attribution.py",
+      "feature": "abilityai/trinity-enterprise#614",
+      "added": "2026-09-14",
+      "categories": [
+        "backend",
+        "security",
+        "audit",
+        "static-guard",
+        "unit"
+      ],
+      "description": "ent#614: X-Source-Agent is honoured only for a principal that can prove it names itself. The resolve_source_agent matrix (agent key naming itself / mismatch 403 / event-loopback vouched name / every non-agent principal refused with a named 403 / falsy header before any getattr); the /task, /chat and /fan-out routers rebind the header before any consumer so a human cannot forge an actor_type=agent audit row, a triggered_by=agent execution or an AGENT_COLLABORATION activity on a foreign agent; the attribution-only routers (loops, reminders, schedules) record the validated key first; the loopback JWT round-trips its scope and vouched claim through get_current_user and is fenced to POST /api/agents/{name}/task; trigger_subscription carries the header and claim only for agent_originated events and every caller states the flag; the MCP schedules tool gates the header on agent scope like chat.ts; and an AST guard over the OSS tree fails any function that reads x_source_agent without routing every use through the helper, plus a literal scan for the header name."
+    },
+    {
+      "file": "unit/test_2694_voice_thread_window.py",
+      "feature": "#2694",
+      "added": "2026-09-10",
+      "categories": [
+        "backend",
+        "client-portal",
+        "voice",
+        "unit"
+      ],
+      "description": "#2694 read side: the thread window is counted in TYPED turns (the spoken rows of the calls among them ride along) under a row ceiling that reports `truncated`, so a 180-row voice call can no longer push the typed turns before it off the screen; typed->call->typed->call->typed reads back as the timeline through the real writers; the resend-dedup read keeps row semantics; equal stamps order deterministically; the platform-rows-since-last-reply delta is cursored on the newest typed ASSISTANT row (survives a failed typed turn); the history route accepts a bounded `limit` for the poll's narrow read and nothing that widens the window."
+    },
+    {
+      "file": "unit/test_2694_voice_delta_context.py",
+      "feature": "#2694",
+      "added": "2026-09-10",
+      "categories": [
+        "backend",
+        "client-portal",
+        "voice",
+        "unit"
+      ],
+      "description": "#2694 turn side: a RESUMED Workspace turn is prefixed with what the live session never heard (spoken rows labelled as spoken, the call's label as a bracketed marker, never `You:`); the cold replay carries the same rows in the same form and the delta is not added on top (no double-send on a cold retry); one total spoken-char budget across calls trimmed oldest-first with every cut named; newlines inside a replayed row cannot forge a labelled line; the delta is read before the user row persists and a read failure never blocks the turn; a voice call is refused (409) while a typed reply is in flight, after the uniform 404, and a typed turn is refused (409) while a call is on. #2700: the live-call marker is an OWNED LEASE — `owner` is keyword-only and required on both primitives, a release from a different call does not free a live thread, the pre-#2700 `\"1\"` value is releasable, the real lease/tick/slack constants and the >=4x TTL:tick ratio are pinned here, the renewer ticks and stops at the call's own cap, `start_workspace_voice` no longer arms the thread before a socket exists, and a start whose socket never opens leaves the thread writable (the orphan shape, with the armed-lease positive control).",
+      "updated": "2026-09-14"
+    },
+    {
+      "file": "unit/test_2703_skill_assign_delivery.py",
+      "feature": "#2703",
+      "added": "2026-09-11",
+      "categories": [
+        "backend",
+        "skills",
+        "websocket",
+        "unit"
+      ],
+      "description": "Skill assignment delivers (#2703): deliver_assigned runs the start-path injection (all assigned, force=False - a subset rewrites CLAUDE.md), stopped -> pending_start, Docker unreadable -> not_delivered/docker_unavailable, busy -> one retry, over budget -> in_progress with the work kept + WS on completion; under-lock re-read is opt-in; routes stay 200 with `delivery` in the body and fire the thin agent_skills_changed trigger; 404/422 fire before any write."
+    },
+    {
+      "file": "unit/test_2337_invariant_namespace.py",
+      "feature": "#2337",
+      "added": "2026-09-12",
+      "categories": [
+        "backend",
+        "reliability",
+        "guard",
+        "unit"
+      ],
+      "description": "One invariant namespace (Rail R3): the catalog's **X-NN** definitions, the canary registry (INVARIANTS keys + every module's INVARIANT_ID) and the catalog's Canary mapping table agree — read via ast/regex through tests/unit/_invariant_catalog.py, never imported; exact per-family pins; Signal: mandatory on the new families with a shrink-only allowlist for the 54 legacy prose-only entries; synthetic-markdown self-tests prove a bold prose mention, a dagger row and a table row are not definitions."
+    },
+    {
+      "file": "unit/test_2339_testing_docs_consolidated.py",
+      "feature": "#2339",
+      "added": "2026-09-13",
+      "categories": [
+        "docs",
+        "guard",
+        "unit"
+      ],
+      "description": "Testing docs consolidation (Rail R5): the git-tracked top level of docs/testing is exactly STRATEGY.md + the orchestration invariant catalog + the generated JOURNEYS.md, with phases/ and ui-sweep/ the only subdirectories; STRATEGY carries the required sections, every relative link in the live set and the four entry points resolves, STRATEGY links its pointer targets and is linked from AGENTS.md, README.md and both test READMEs, copies no 4-line run from the READMEs or the catalog, defines no invariant and cites only resolvable ids, names every run-full.sh tier and every test-running workflow; every archived file is indexed in docs/archive/README.md; no live tracked file references a retired testing path (bytes scan over git ls-files, both link forms, self-match-proof)."
+    },
+    {
+      "file": "journeys/test_first_turn_journey.py",
+      "feature": "#2336",
+      "added": "2026-08-28",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J03 (first turn): a person's first turn with a freshly created agent produces real model output. Credential-bound by design, so it runs on a developer's stack and in the nightly, never in the per-PR smoke; polls against a deadline, never sleeps; fails rather than skips when the stack or the agent is not there."
+    },
+    {
+      "file": "journeys/test_j11_brief_delivery_journey.py",
+      "feature": "#2565",
+      "added": "2026-09-07",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J11 (brief delivery): a schedule that names one Workspace user lands its output as a turn in that person's Main chat without them asking. A deliberate strict=True xfail skeleton asserting the journey's invariants (E-01, E-05, L-03) until the delivery half ships; the shape #2350's Journey Impact gate accepts as a declared promise."
+    },
+    {
+      "file": "journeys/test_j10_agent_calls_agent_journey.py",
+      "feature": "#2349",
+      "added": "2026-09-15",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J10 (agent calls agent): agent A drives the MCP server with its own agent-scoped key against agent B. Credential-free on every PR: the permission boundary (P-02) denies without an edge and admits with one, the platform records who called whom (IA-01, AC-01), a stopped callee fails fast with 'Agent is not running' and leaves no row (IA-03), a fan-out is capped at 50 and lands as one batch on one agent (IA-02), a loop stops at its budget, and deleting the callee leaves no dangling edge (L-03, P-01). Keyed stacks also assert B's real answer. Three strict=True xfails carry the findings (no chain-depth guard; denials audited as success; run_agent_loop skips the permission gate)."
+    },
+    {
+      "file": "unit/test_voice_auth.py",
+      "feature": "#600 / #2700",
+      "added": "2026-09-14",
+      "categories": [
+        "backend",
+        "voice",
+        "unit"
+      ],
+      "description": "The voice WebSocket + REST ownership gates (#600): `/ws/voice/{id}` and `POST .../voice/stop` reject a JWT user who does not own the session (4001 no/invalid token, 4004 unknown session, 4003 wrong user, admin bypass, JWT verified before the session lookup), the `/panel` read gate (ent#536), and the #705 audit-attribution kwargs. Plus the Workspace live-call lease (#2700, `TestWorkspaceLiveCallMarker`): the bridge arms a 60 s owned lease at connect and releases it on EVERY exit — normal close, `end_session` returning None, a raising close-out (which no longer skips the gemini cancel, the `saved` frame or the socket close), and task cancellation — the renewer is bounded at the call's `max_duration` + slack and does not outlive the bridge, an Agent Detail call never arms a thread marker, and the REST `/stop` release is owner-matched."
+    },
+    {
+      "file": "unit/test_2744_skills_adoption_alert_idempotency.py",
+      "feature": "#2744",
+      "added": "2026-09-14",
+      "categories": [
+        "backend",
+        "skills",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "Legacy skills-library adoption alert idempotency (#2744): the terminal 'already has sources' refusal mints a STABLE URL-derived request_id (sha256[:12], reserved family prefix) at priority low + logger.info, so N syncs collapse to one operator-queue row and an operator's dismissal sticks; a different refused URL still gets its own item; the validation-reject and adoption-exception branches keep priority high and timestamped repeat-visible ids; the echoed URL is credential-scrubbed so a PAT-bearing setting never reaches the log or operator_queue.context."
+    },
+    {
+      "file": "unit/test_2792_room_work_chat_id.py",
+      "feature": "#2792",
+      "added": "2026-09-14",
+      "categories": [
+        "backend",
+        "workspace",
+        "rooms",
+        "unit"
+      ],
+      "description": "A room turn is stamped with the room as its source chat under its own channel value (`config.ROOM_SOURCE_CHANNEL = \"room\"`, `source_channel_chat_id = room_id`, `source_channel_client`), on a first wake and a chained one; `report_completion` never resolves a room row (parent or delegated child — no resolver for the value, pinned with a spy over every existing resolver); the voice-reply route answers `not_a_channel_turn` for both; and the Workspace work projection exposes the room as `chat_id` (turn → `room`, child → `delegated`) while a Telegram stamp still projects none. The frontend half (`liveItemsForRoom` + the executed `PortalRoom.vue` selection line) is `src/frontend/tests/unit/roomWorkChatId.spec.js`."
+    },
+    {
+      "file": "unit/test_ent615_token_free_remotes.py",
+      "feature": "trinity-enterprise#615",
+      "added": "2026-09-13",
+      "categories": [
+        "backend",
+        "security",
+        "credentials",
+        "guard",
+        "unit"
+      ],
+      "description": "The fleet PAT stops being readable inside every agent container (ent#615). Trinity persisted every remote as <scheme>://oauth2:<PAT>@<host>/<org>/<repo>.git, so the fleet-wide token sat at rest in .git/config on the workspace volume AND - because git expands the stored URL into git-remote-https's argv - in the process table roughly twice a minute from the 60s sync-health poll alone, from where ps -> the orphan sweep's reaped-cmdline logging -> Vector -> the host log files -> the logs API carried it into ANOTHER AGENT'S LLM CONTEXT (ent#292 sanitized that last hop and was rated P0; this closes the cause). MOST OF THIS FILE EXECUTES SHELL, deliberately: the helper and the sweep are shell scripts, and a Python assertion over their source text passes against a script that cannot run - which is exactly the headline failure. Proven by execution against git 2.50.1: registered as `trinity` the helper answers, registered as its FILENAME git resolves `git-credential-git-credential-trinity` and the helper SILENTLY NEVER RUNS (with credential-less URLs that is a fleet-wide fetch/push outage no source-only CI can see); host scoping is exact protocol+host INCLUDING PORT, so the self-hosted `host:port` form is served, a lookalike and a foreign host get nothing, and a gitea install does not serve github.com; the ladder is .env -> baked env -> the harvest file, the INVERSE of startup.sh's, because a rotation (#1967) does not recreate the container so Config.Env stays frozen on the REVOKED token while .env carries the new one; .env is PARSED not sourced (a $(touch) line in it does not execute) and the parse agrees with startup.sh's; a silent helper plus GIT_TERMINAL_PROMPT=0 yields 'could not read Username ... terminal prompts disabled', a shape _AUTH_PATTERNS ALREADY matched, so AC4 needed only the TRINITY_GIT_NO_CREDENTIAL discriminator and explicitly NOT a bare 403 (classify_conflict evaluates auth patterns first, so a secondary-rate-limit / SAML-SSO / archived-repo 403 would be relabelled 'no write credentials'); store/erase are no-ops so nothing writes ~/.git-credentials. The sweep is run against real repos: an orphan is HARVESTED BEFORE its URL is stripped and REFUSES (URL left byte-identical, refused=1) when the replacement cannot be placed - the one class that a strip-first sweep strands permanently, since POST /{agent}/git/initialize writes a git-config row and pushes with the resolved platform PAT while baking no env, persisting no row and writing no .env; idempotent; a foreign host is neither harvested nor stripped; the ent#123 pushurl sentinel is untouched; NESTED submodule configs are reached (a .git/modules/*/config glob misses .git/modules/<a>/modules/<b>/config); a url.<base>.insteadOf SUBSECTION is renamed rather than left; a token in the TRACKED .gitmodules is reported (it is already committed and pushed, which turns 'rotate after adoption' into a requirement); a competing helper is reported because helper lists COMPOSE and one answering first masks the probe; and NO credential ever crosses the exec boundary - the probe is by EXIT CODE because git credential fill prints the credential on stdout and this output reaches logger.warning(result['output'][:200]) and GitInitResult.error. startup.sh's functions are EXTRACTED AND EXECUTED (verify-local's agent stage boots local:test-echo, so its clone path and configure_push_remote never run there): the origin rewrite is conditional, an orphan's URL is PRESERVED with a named marker, a credential-less URL is still rewritten (ent#123 unchanged), and configure_push_remote's widened gate unblackholes exactly the harvested agent and nothing else - with the CRIT-4 regression pinned, that a tokenless agent is still blackholed after a sweep and that the sweep never writes .env, the name startup.sh exports as GH_TOKEN/GITHUB_TOKEN (the ent#162 grant class). The backend half asserts the credential reaches the container in the exec ENVIRONMENT and never argv, that those execs run as ROOT (a same-uid process reads /proc/<pid>/environ for the life of the exec, and the agent runs as developer), that origin is re-pointed credential-less and NOT re-pointed at all when nothing resolves, that the sweep is bounded in-container as well as by wait_for (execute_command_in_container accepts a timeout and forwards it nowhere, so wait_for alone leaves the _docker_executor pool thread pinned), and that initialize_git_in_container SEEDS before it writes a remote and fails honestly - but does not fail a tokenless ent#123 agent. Plus the AC1 source guard over BOTH trees (src/backend and docker/base-image, the ent#314 two-tree lesson) with ZERO allowlist entries, matching the PRODUCING shape - a secret interpolated into URL userinfo - rather than the literal 'oauth2:', which would flag the scrubbers this change deliberately KEEPS because every pre-existing volume still holds a token. Plus the two /review blockers this branch shipped and then fixed: [C1] a sweep on a hardened install (agent_full_capabilities=false withholds DAC_OVERRIDE, and the home is 0700 developer-owned) could READ but not WRITE, so both `|| true` config writes failed while the scrubbed counter incremented anyway - a FALSE remotes_scrubbed is worse than a refusal because the operator acts on it and stops looking; and when it could not traverse the tree at all the report was all-zeros with exit 0, which is exactly what a healthy already-clean agent reports, so `root_readable` is the discriminator and an unreadable pass files its OWN operator alert family (sharing the refusal's daily-stable id would let whichever fired first suppress the other all day). Both arms carry a positive control, and the permission-bit tests skip under uid 0 where the bits mean nothing. [C2] a source guard over src/backend + docker + docs/memory that the sudo-falsified claim \"the agent cannot rewrite what platform git executes\" is not reintroduced - `developer` holds NOPASSWD:ALL, so root ownership buys no ACCIDENTAL rewrite, not a boundary - with a companion test that fails if the sudo grant is ever removed, which would make the corrected wording the stale one."
+    },
+    {
+      "file": "unit/test_ent615_credential_helper_parity.py",
+      "feature": "trinity-enterprise#615",
+      "added": "2026-09-13",
+      "categories": [
+        "backend",
+        "security",
+        "guard",
+        "unit"
+      ],
+      "description": "Invariant #5 parity for the ent#615 git credential helper. The helper is a shell script the base image installs at /usr/local/bin/git-credential-trinity; the backend carries a byte-identical copy as services.git_credential_helper.HELPER_SCRIPT so it can push the helper into a container running an OLDER base image, which is the remediation path for the existing fleet. The agent image ships as its own image and structurally cannot import src/backend, so the policy is copied rather than imported. Per the ent#314 lesson - a guard that walks only one of the two trees is not a guard, which is how six bare yaml.safe_load calls survived a scan whose allowlist was empty - this also asserts no THIRD copy exists in either tree, since a second home nothing pins is how the next divergence ships. Also pins the registered NAME as a string in both the installer and the Dockerfile: git prepends git-credential- to any helper value that is not an absolute path, so registering the filename resolves to git-credential-git-credential-trinity and the helper never runs - proven by execution in test_ent615_token_free_remotes.py, pinned here because two files must spell it the same way."
+    },
+    {
+      "file": "unit/test_2742_sync_health_leader_lock.py",
+      "feature": "#2742",
+      "added": "2026-09-13",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "reliability"
+      ],
+      "description": "Cross-worker leader election on the sync-health poll loop (#2742): distinct worker ids; only one of two workers leads; the holder refreshes and keeps leadership; Redis-down and Redis-error fail OPEN to leader (the feed that raises sync_failing must not go dark when infra is degraded); graceful release hands off immediately; release only deletes its OWN lease and does so as a single compare-and-delete EVAL, never a bare DEL (a GET-then-DEL lets an expired worker delete a sibling's fresh grant = two pollers for a cycle); release never raises; TTL expiry lets a sibling take over; stop() releases; _leader_ttl() floor 30 / 180 at the 60 s default; _poll_cycle lists agents and issues agent HTTP iff leader. Plus the TD5 cadence knob: SYNC_HEALTH_POLL_INTERVAL_SECONDS read at CALL time, default UNCHANGED at 60 s, garbage/non-positive degrading to the default, and an explicit poll_interval=0 constructor value winning over the env. FakeRedis (models eval), agent_client + database stubbed; no real Redis, no DB. The alert-timing consequence (~90 s to ~180 s time-to-sync_failing) needs the real upsert increment and lives in test_sync_health_service.py::TestLeaderLeaseAlertTiming. Plus TestPollIntervalReachesTheContainer: the knob is wired into BOTH compose files and .env.example in the ${VAR:-60} pass-through form (asserted as FORM, not presence, so unset and empty both land on the 60 s default), and the compose default is pinned against DEFAULT_POLL_INTERVAL rather than a literal — the #1056 packaging class, caught by /validate-pr on this very branch with all three files missing."
+    },
+    {
+      "file": "unit/test_2742_git_status_lock_free.py",
+      "feature": "#2742",
+      "added": "2026-09-13",
+      "categories": [
+        "agent-server",
+        "git-sync",
+        "reliability",
+        "regression"
+      ],
+      "description": "The sync-health poll must not take, or orphan, .git/index.lock (#2742, agent-server). AC1: the status read issues `git --no-optional-locks status --porcelain` and never the plain argv; the flag is scoped to exactly ONE call site (the auto-sync cycle's status keeps the index-refreshing form); a busy-poll sampler sees the plain argv holding index.lock and the flagged argv never (asserted as a SIGHTING, never as an index rewrite — git's racily-clean rule makes a rewrite assertion fail once fixture setup crosses ~1s, ordinary under CI's -n auto); the read leaves .git/index byte-identical; every status child is sweep-registered with paired add/remove and a raising subprocess.run proves no bare child survives; the LOCKED sync/pull/409 paths register their helper children too; a tokenized non-github.com origin comes back with no userinfo; an oversized agent-authored sync-state.json degrades to defaults without being parsed. AC2: five concurrent callers share ONE git fetch and ONE to_thread (the #2433 starvation guard — routing followers through the default executor is what it forbids); shield keeps the leader alive through follower cancellation; a leader exception fans out to every waiter as 504 and clears the slot; the follower bound maps to 504 without killing the computation; a missing .git short-circuits before claiming the slot; computed_at is stamped; the path-keyed slot never cross-serves two repos. AC3: the SHIPPED startup.sh reap block is extracted and run against fixtures (the verify-local agent stage boots local:test-echo, so startup.sh never executes there) — it removes and announces, stays quiet on a clean boot, drops the marker, and reaps submodule/worktree index.locks that nothing covered before; the marker becomes sync_state.last_lock_recovery WITHOUT faking a sync (last_sync_at untouched, counters untouched, no .tmp left), is consumed once, and never raises on a malformed payload; a stable lock is REPORTED and STILL THERE afterwards; a changing inode is never reported however old it looks; 0 bytes alone is not evidence; a forward wall-clock jump cannot manufacture a wedge (the detector runs on time.monotonic); the ledger forgets a vanished lock; the observer resolves a `gitdir:` FILE, finds modules/* and worktrees/* locks, skips a symlinked .git, takes no repo lock, and cannot 500 the read. AC4 in three phases, strongest first: a DETERMINISTIC and genuinely concurrent SIGSTOP freeze of a real `git status` child holding the real lock, against which the agent's own `git add` fails rc!=0 with index.lock in stderr (10/10 locally) and whose flagged twin cannot be caught at all; then the threaded witness through the real get_git_status() route, whose control arm must reproduce a failure IN-RUN or pytest.skip — it can never pass without having shown it can fail. Real throwaway git repos (local + bare remote so `git fetch origin` works offline), real OS threads, real process signals; no Docker."
+    },
+    {
+      "file": "unit/test_2419_utilization_fraction.py",
+      "feature": "#2419",
+      "added": "2026-09-17",
+      "categories": [
+        "backend",
+        "subscriptions"
+      ],
+      "description": "The unified utilization header is a fraction of the cap and is honoured past 1.0 (#2419): parser table (1.2 -> 120.0, a percent-shaped 42.5 reads loud-wrong as 4250.0, nan/inf/1e307/negative -> None, -0.0 -> 0.0), synthetic overage header set through the REAL chain (parse -> _to_model -> classify_headroom SATURATED, selection_verdict 120.0, ranker sorts it last, decide_tier CRIT, _history_row passthrough), and the [#2419] INFO arrival log in _probe that records the raw header strings when a window reads past 100%. Direct imports + attribute monkeypatching, no backend."
+    },
+    {
+      "file": "mcp-server/src/audit-denial.test.ts",
+      "feature": "#2807",
+      "added": "2026-09-16",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "audit",
+        "unit"
+      ],
+      "description": "A denial every MCP gate RETURNS (the `{error: \"Access denied\"}` envelope agents parse) was audited as `success: true`, because withAudit labels by throw/no-throw. The deny sites now serialise through access.ts::accessDenied, which stamps `context.outcome = {kind: denied, reason}` on the per-call context, and the wrapper reads it after execute: `success: false`, `denied: true`, `error: <reason>`; a thrown backend 403 is marked too. Pins the row for chat_with_agent, a dedicated chat_with_<slug> tool, fan_out, get_report's uniform refusal and the ent#628 enforce wrapper (audit POST captured through a fetch stub, envelopes byte-identical), that the stamp lives on the root context and never on the shared session object, that a stamp-then-throw and a plain throw are labelled correctly -- and, the mechanism half, that every `!allowed` branch and every `error: \"Access denied\"` envelope under src/ reaches the helper."
     }
   ]
 }

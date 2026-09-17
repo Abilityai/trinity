@@ -1,3 +1,4 @@
+# mcp: agents.ts (rename_agent)
 """Agent rename endpoint (RENAME-001)."""
 import re
 import json

@@ -1,9 +1,14 @@
 <template>
   <div class="space-y-6">
     <!-- Loading State -->
-    <div v-if="loading" class="text-center py-8">
-      <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
-      <p class="text-gray-500 dark:text-gray-400 mt-2">Loading git status...</p>
+    <!-- #1921: shaped like the status block it becomes, so the tab does not
+         jump when git status lands. `firstLoad` rather than a bare `loading`:
+         a background poll with status already on screen must not blank it. -->
+    <div v-if="firstLoad" class="space-y-3 py-2" aria-busy="true">
+      <div class="h-4 w-1/3 rounded bg-gray-200 dark:bg-gray-800 animate-pulse motion-reduce:animate-none"></div>
+      <div class="h-3 w-2/3 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+      <div class="h-3 w-1/2 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+      <span class="sr-only">Loading git status…</span>
     </div>
 
     <!-- Git Not Enabled -->
@@ -350,8 +355,10 @@
         </div>
 
         <!-- Loading PAT status -->
-        <div v-else class="text-center py-4">
-          <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-action-primary-500 mx-auto"></div>
+        <!-- #1921: the PAT-status line, placeholder-shaped. -->
+        <div v-else class="py-4" aria-busy="true">
+          <div class="h-3 w-1/2 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+          <span class="sr-only">Loading…</span>
         </div>
       </div>
 
@@ -466,6 +473,10 @@ const agentsStore = useAgentsStore()
 
 const loading = ref(false)
 const gitStatus = ref(null)
+
+// #1921 / #1927: "no data yet", not "fetch in flight" — a poll with git status
+// already on screen must not blank the tab back to a placeholder.
+const firstLoad = computed(() => loading.value && !gitStatus.value)
 const gitLog = ref(null)
 
 // Initialize GitHub modal state

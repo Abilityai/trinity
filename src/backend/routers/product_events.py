@@ -1,3 +1,4 @@
+# mcp: none — browser-side product-event capture (ent#184)
 """
 Local product-event capture — activation funnel, Tier-1 (ent#184).
 

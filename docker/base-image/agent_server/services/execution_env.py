@@ -78,7 +78,29 @@ PROTECTED_KEYS = frozenset({
     # execution on the next fetch/push the agent runs.
     "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_PAGER",
     "GIT_EDITOR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT",
+    # ent#615. `GIT_CONFIG_COUNT` was already here but its SLOTS were not, so
+    # the guard covered the count and left the payload writable — and a slot
+    # can set `core.sshCommand`, `core.pager`, `diff.external` or
+    # `credential.helper`, i.e. the same execution vectors as the names above,
+    # by another route.
+    #
+    # `GIT_CONFIG_NOSYSTEM` becomes load-bearing with ent#615: `/etc/gitconfig`
+    # is now where the credential helper is registered (alongside the #1595 gc
+    # guards), so ONE `.env` line would disable both — and a helper that
+    # silently stops running is a fetch/push outage with no error that names it.
+    # `GIT_ASKPASS`/`GIT_PROXY_COMMAND` are the other two git-executes-this
+    # names.
+    "GIT_CONFIG_NOSYSTEM", "GIT_ASKPASS", "GIT_PROXY_COMMAND",
 })
+
+# Prefix-matched companions to PROTECTED_KEYS: `GIT_CONFIG_KEY_<n>` /
+# `GIT_CONFIG_VALUE_<n>` are an unbounded family, so they cannot be listed.
+PROTECTED_KEY_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+
+
+def is_protected_key(key: str) -> bool:
+    """True when `.env` may not set ``key`` (exact name or protected family)."""
+    return key in PROTECTED_KEYS or key.startswith(PROTECTED_KEY_PREFIXES)
 
 # NOTE (#1999, revised by #2023): the parsing below WAS byte-faithful to the export
 # loop this replaces. That loop's exact quirks are a published contract — the
@@ -309,7 +331,7 @@ def build_execution_env(
 
     file_env = parse_env_file(env_file)
     for key, value in file_env.items():
-        if key in PROTECTED_KEYS:
+        if is_protected_key(key):
             logger.warning(
                 "ignoring %s from .env: it controls what the runtime executes "
                 "or loads and is not settable from credentials", key,
@@ -325,7 +347,7 @@ def build_execution_env(
             # A force-unset that swallows a value `.env` supplied is worth one
             # WARNING (names only, #2114) — per key and actively invalidated,
             # so a key removed from `.env` and later re-added warns again.
-            suppressed_from_file = key in file_env and key not in PROTECTED_KEYS
+            suppressed_from_file = key in file_env and not is_protected_key(key)
             if suppressed_from_file:
                 if key not in _SPAWN_SUPPRESS_WARNED:
                     logger.warning(
@@ -368,7 +390,7 @@ def sync_process_env(env_file: Path = ENV_FILE) -> Dict[str, int]:
     """
     file_env = {
         k: v for k, v in parse_env_file(env_file).items()
-        if k not in PROTECTED_KEYS
+        if not is_protected_key(k)
     }
 
     stale = sorted(_MIRRORED_KEYS - set(file_env))

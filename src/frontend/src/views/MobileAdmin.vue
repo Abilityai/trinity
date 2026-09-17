@@ -84,9 +84,30 @@
             />
           </div>
 
-          <!-- Agent list -->
-          <div v-if="loading.agents" class="loading-state">Loading agents...</div>
-          <div v-else-if="filteredAgents.length === 0" class="empty-state">No agents found</div>
+          <!-- Agent list. #1927: the 15s poll swaps values in place; the
+               "Loading…" copy shows only before the first data, a failed first
+               fetch is the failed state (never "No agents found"), and a failed
+               refresh with data on screen is the SIBLING stale banner. -->
+          <InlineError
+            v-if="agentsView.stale"
+            class="mb-3"
+            :message="staleBannerMessage('agents', lastLoadedAt.agents)"
+            :detail="fetchError.agents"
+            retryable
+            @retry="fetchAgents"
+            @dismiss="fetchError.agents = ''"
+          />
+          <div v-if="agentsView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading agents...</span></div>
+          <LoadFailed
+            v-else-if="agentsView.state === 'failed'"
+            dense
+            title="Couldn't load agents"
+            message="The agent list didn't load. Try again or pull down to refresh."
+            :detail="fetchError.agents"
+            :retrying="loading.agents"
+            @retry="fetchAgents"
+          />
+          <div v-else-if="agentsView.state === 'empty'" class="empty-state">No agents found</div>
           <div v-else class="agent-list">
             <div
               v-for="agent in filteredAgents"
@@ -186,26 +207,105 @@
 
           <!-- Queue items -->
           <div v-if="activeOpsTab === 'queue'" class="ops-section">
-            <div v-if="loading.queue" class="loading-state">Loading queue...</div>
-            <div v-else-if="queueItems.length === 0" class="empty-state">No pending items</div>
+            <InlineError
+              v-if="queueView.stale"
+              class="mb-3"
+              :message="staleBannerMessage('the queue', lastLoadedAt.queue)"
+              :detail="fetchError.queue"
+              retryable
+              @retry="fetchQueue"
+              @dismiss="fetchError.queue = ''"
+            />
+            <div v-if="queueView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading queue...</span></div>
+            <LoadFailed
+              v-else-if="queueView.state === 'failed'"
+              dense
+              title="Couldn't load the queue"
+              message="We can't tell whether your agents need you. Try again."
+              :detail="fetchError.queue"
+              :retrying="loading.queue"
+              @retry="fetchQueue"
+            />
+            <div v-else-if="queueView.state === 'empty'" class="empty-state">No pending items</div>
             <div v-else class="ops-list">
-              <div v-for="item in queueItems" :key="item.id" class="ops-card">
+              <div
+                v-for="item in queueItems"
+                :key="item.id"
+                class="ops-card"
+                data-testid="queue-card"
+                :data-item-id="item.id"
+              >
                 <div class="ops-card-header">
                   <span class="ops-agent-name" :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))">{{ item.agent_name }}</span>
                   <span class="ops-priority" :class="'priority-' + item.priority">{{ item.priority }}</span>
                 </div>
-                <div class="ops-card-type">{{ item.request_type }}</div>
+                <!-- The API field is `type`; a read of a misnamed field here rendered a blank line for months (issue 2370). -->
+                <div class="ops-card-type" data-testid="queue-type">{{ queueTypeLabel(item.type) }}</div>
+                <p v-if="item.title && item.title !== item.question" class="ops-card-title" data-testid="queue-title">{{ item.title }}</p>
                 <p class="ops-card-message">{{ item.message || item.question || item.description }}</p>
-                <div v-if="item.options && item.options.length" class="ops-options">
+                <!-- Controls switch on the item TYPE (desktop parity), and an
+                     approval is never answered on one tap: select → restated
+                     consequence → optional note → explicit Send. The decision
+                     rides `response`, the note rides `response_text`, and the
+                     body comes from utils/operatorQueue.js — the same builder
+                     the desktop store uses (the hand-built body here used to
+                     send a hard-coded literal decision for every tap).
+                     This inline step is deliberately p19-shaped — named verb,
+                     restated consequence, the safe action first and focused —
+                     and is NOT a confirm overlay (see the note on #1924). -->
+                <template v-if="queueResponseKind(item) === 'approval'">
+                  <div class="ops-options" role="group" aria-label="Options">
+                    <button
+                      v-for="(opt, idx) in optionsOf(item)"
+                      :key="idx + ':' + opt"
+                      type="button"
+                      class="ops-option-btn"
+                      data-testid="queue-option"
+                      :aria-pressed="selectedOptions[item.id] === opt ? 'true' : 'false'"
+                      :disabled="respondingItems[item.id]"
+                      @click="selectOption(item.id, opt)"
+                    >{{ opt }}</button>
+                  </div>
+                  <div v-if="selectedOptions[item.id]" class="ops-approval-form" data-testid="queue-approval-form">
+                    <p class="ops-card-body" role="status" data-testid="queue-consequence">
+                      Sending <strong>{{ selectedOptions[item.id] }}</strong> to {{ item.agent_name }} — it reads this as your decision on its next run.
+                    </p>
+                    <input
+                      v-model="responseTexts[item.id]"
+                      type="text"
+                      enterkeyhint="done"
+                      placeholder="Add a note (optional)..."
+                      class="ops-response-input"
+                      data-testid="queue-note"
+                      :disabled="respondingItems[item.id]"
+                    />
+                    <div class="ops-response-row">
+                      <button
+                        type="button"
+                        class="ops-ack-btn"
+                        data-testid="queue-cancel"
+                        :ref="(el) => registerCancelButton(item.id, el)"
+                        :disabled="respondingItems[item.id]"
+                        @click="clearSelection(item.id)"
+                      >Cancel</button>
+                      <button
+                        type="button"
+                        class="ops-respond-btn ops-send-btn"
+                        data-testid="queue-send"
+                        :disabled="respondingItems[item.id]"
+                        @click="submitApproval(item)"
+                      >Send: {{ selectedOptions[item.id] }}</button>
+                    </div>
+                  </div>
+                </template>
+                <div v-else-if="queueResponseKind(item) === 'acknowledge'" class="ops-card-footer ops-ack-only">
                   <button
-                    v-for="opt in item.options"
-                    :key="opt"
-                    @click="respondToQueueItem(item.id, opt)"
-                    class="ops-option-btn"
+                    type="button"
+                    class="ops-ack-btn"
+                    data-testid="queue-ack"
                     :disabled="respondingItems[item.id]"
-                  >
-                    {{ opt }}
-                  </button>
+                    @click="acknowledgeQueueItem(item)"
+                  >Got it</button>
                 </div>
                 <div v-else class="ops-response-row">
                   <input
@@ -213,15 +313,23 @@
                     type="text"
                     placeholder="Type response..."
                     class="ops-response-input"
-                    @keyup.enter="respondToQueueItem(item.id, responseTexts[item.id])"
+                    data-testid="queue-answer"
+                    @keyup.enter="submitAnswer(item)"
                   />
                   <button
-                    @click="respondToQueueItem(item.id, responseTexts[item.id])"
+                    type="button"
                     class="ops-respond-btn"
-                    :disabled="respondingItems[item.id] || !responseTexts[item.id]"
-                  >
-                    Send
-                  </button>
+                    data-testid="queue-answer-send"
+                    :disabled="respondingItems[item.id] || !String(responseTexts[item.id] || '').trim()"
+                    @click="submitAnswer(item)"
+                  >Send</button>
+                </div>
+                <div v-if="respondErrors[item.id]" class="mt-2" data-testid="queue-respond-error">
+                  <InlineError
+                    :message="respondErrors[item.id].message"
+                    :detail="respondErrors[item.id].detail"
+                    @dismiss="dismissRespondError(item.id)"
+                  />
                 </div>
               </div>
             </div>
@@ -229,8 +337,26 @@
 
           <!-- Notifications -->
           <div v-if="activeOpsTab === 'notifications'" class="ops-section">
-            <div v-if="loading.notifications" class="loading-state">Loading...</div>
-            <div v-else-if="notifications.length === 0" class="empty-state">No notifications</div>
+            <InlineError
+              v-if="notificationsView.stale"
+              class="mb-3"
+              :message="staleBannerMessage('notifications', lastLoadedAt.notifications)"
+              :detail="fetchError.notifications"
+              retryable
+              @retry="fetchNotifications"
+              @dismiss="fetchError.notifications = ''"
+            />
+            <div v-if="notificationsView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading...</span></div>
+            <LoadFailed
+              v-else-if="notificationsView.state === 'failed'"
+              dense
+              title="Couldn't load notifications"
+              message="The notification list didn't load. Try again."
+              :detail="fetchError.notifications"
+              :retrying="loading.notifications"
+              @retry="fetchNotifications"
+            />
+            <div v-else-if="notificationsView.state === 'empty'" class="empty-state">No notifications</div>
             <div v-else class="ops-list">
               <div v-for="notif in notifications" :key="notif.id" class="ops-card">
                 <div class="ops-card-header">
@@ -259,7 +385,25 @@
           <!-- Fleet Health Summary -->
           <div class="system-section">
             <h2 class="section-title">Fleet Health</h2>
-            <div v-if="loading.fleet" class="loading-state">Loading...</div>
+            <InlineError
+              v-if="fleetView.stale"
+              class="mb-3"
+              :message="staleBannerMessage('fleet health', lastLoadedAt.fleet)"
+              :detail="fetchError.fleet"
+              retryable
+              @retry="fetchFleetHealth"
+              @dismiss="fetchError.fleet = ''"
+            />
+            <div v-if="fleetView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading...</span></div>
+            <LoadFailed
+              v-else-if="fleetView.state === 'failed'"
+              dense
+              title="Couldn't load fleet health"
+              message="The fleet summary didn't load. Try again."
+              :detail="fetchError.fleet"
+              :retrying="loading.fleet"
+              @retry="fetchFleetHealth"
+            />
             <div v-else class="health-grid">
               <div class="health-card">
                 <div class="health-value text-white">{{ fleetSummary.total }}</div>
@@ -449,11 +593,18 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, reactive, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
-import axios from 'axios'
+import { http } from '../utils/boundedHttp'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
 import { apiErrorMessage } from '../utils/apiError'
+import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
+import {
+  optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel,
+  QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending,
+} from '../utils/operatorQueue'
+import LoadFailed from '../components/LoadFailed.vue'
+import InlineError from '../components/InlineError.vue'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -498,6 +649,11 @@ const queueItems = ref([])
 const notifications = ref([])
 const responseTexts = reactive({})
 const respondingItems = reactive({})
+// #2370 — per-card answer state, keyed by item id (cards are keyed the same
+// way, so a poll that swaps the list keeps a half-typed answer in place).
+const selectedOptions = reactive({})   // approval cards: the tapped option
+const respondErrors = reactive({})     // a failed send, shown NEXT TO the control (p18)
+const cancelButtons = {}               // item id → Cancel element (focused on reveal, p19)
 
 // System
 const fleetSummary = ref({ total: 0, running: 0, stopped: 0, high_context: 0 })
@@ -510,18 +666,41 @@ const actionResult = ref(null)
 const actionError = ref('')
 const actionErrorDetail = ref('')
 
-// Loading states
+// Loading states — `loading.*` stays "a fetch is in flight" (drives Retry
+// labels). #1927: what the templates GATE on is "no data yet" — `hasLoaded.*`
+// flips on the first SUCCEEDED fetch of each dataset, so the 15s poll swaps
+// values in place instead of re-flashing "Loading…" every cycle (design-system
+// p13/p14). `fetchError.*` with data on screen is the stale banner; with none it
+// is the failed state — never the empty copy (p15).
 const loading = reactive({
   agents: false,
   queue: false,
   notifications: false,
   fleet: false
 })
+const hasLoaded = reactive({ agents: false, queue: false, notifications: false, fleet: false })
+const fetchError = reactive({ agents: '', queue: '', notifications: '', fleet: '' })
+const lastLoadedAt = reactive({ agents: null, queue: null, notifications: null, fleet: null })
 
 // Polling
 let pollInterval = null
 
 // ─── Computed ────────────────────────────────────────────────────────────────
+
+// #1927: one rule (utils/loadingState.js) decides loading / failed / empty /
+// ready + stale per dataset; the templates read these, never the raw flags.
+const agentsView = computed(() => viewState({
+  loading: loading.agents, hasLoaded: hasLoaded.agents, error: fetchError.agents, count: filteredAgents.value.length,
+}))
+const queueView = computed(() => viewState({
+  loading: loading.queue, hasLoaded: hasLoaded.queue, error: fetchError.queue, count: queueItems.value.length,
+}))
+const notificationsView = computed(() => viewState({
+  loading: loading.notifications, hasLoaded: hasLoaded.notifications, error: fetchError.notifications, count: notifications.value.length,
+}))
+const fleetView = computed(() => viewState({
+  loading: loading.fleet, hasLoaded: hasLoaded.fleet, error: fetchError.fleet,
+}))
 
 const filteredAgents = computed(() => {
   let list = agents.value.filter(a => !a.is_system)
@@ -569,6 +748,7 @@ async function handleLogin() {
 function handleLogout() {
   authStore.logout()
   stopPolling()
+  resetQueueItemState()
 }
 
 // ─── Data Loading ────────────────────────────────────────────────────────────
@@ -576,50 +756,95 @@ function handleLogout() {
 async function fetchAgents() {
   loading.agents = true
   try {
-    const [fleetRes, autonomyRes, statsRes] = await Promise.all([
-      axios.get('/api/ops/fleet/status'),
-      axios.get('/api/agents/autonomy-status'),
-      axios.get('/api/agents/execution-stats', { params: { include_7d: true } })
+    // #1927: fleet + autonomy are REQUIRED (autonomy feeds the rendered toggle);
+    // execution stats are decorative, so a failing stats call must not fail the
+    // tab. `allSettled` instead of `all` for exactly that split.
+    const [fleetRes, autonomyRes, statsRes] = await Promise.allSettled([
+      http.get('/api/ops/fleet/status'),
+      http.get('/api/agents/autonomy-status'),
+      http.get('/api/agents/execution-stats', { params: { include_7d: true } })
     ])
-    const autonomyMap = autonomyRes.data || {}
-    const agentList = (fleetRes.data.agents || []).map(a => ({
+    if (fleetRes.status !== 'fulfilled') throw fleetRes.reason
+    if (autonomyRes.status !== 'fulfilled') throw autonomyRes.reason
+    const autonomyMap = autonomyRes.value.data || {}
+    const agentList = (fleetRes.value.data.agents || []).map(a => ({
       ...a,
       autonomy_enabled: autonomyMap[a.name]?.autonomy_enabled || false
     }))
     agents.value = agentList
-    fleetSummary.value = fleetRes.data.summary || { total: 0, running: 0, stopped: 0, high_context: 0 }
-    // Build execution stats map
-    const statsMap = {}
-    for (const stat of (statsRes.data || [])) {
-      statsMap[stat.name] = stat
+    fleetSummary.value = fleetRes.value.data.summary || { total: 0, running: 0, stopped: 0, high_context: 0 }
+    // Both datasets this response writes are now loaded (the System tab's fleet
+    // summary has two writers — every writer marks it, or its first poll strobes).
+    hasLoaded.agents = true
+    hasLoaded.fleet = true
+    lastLoadedAt.agents = Date.now()
+    lastLoadedAt.fleet = lastLoadedAt.agents
+    fetchError.agents = ''
+    if (statsRes.status === 'fulfilled') {
+      // The endpoint returns {agents:[…]} — this loop used to iterate the object
+      // itself and throw on every poll (after the list was already written).
+      const statsMap = {}
+      for (const stat of listFrom(statsRes.value.data, 'agents')) {
+        statsMap[stat.name] = stat
+      }
+      executionStats.value = statsMap
+    } else {
+      console.error('Failed to fetch execution stats:', statsRes.reason)
     }
-    executionStats.value = statsMap
   } catch (e) {
     console.error('Failed to fetch agents:', e)
+    // Data already on screen stays; the template renders failed (no data) or the
+    // stale banner (data) from this field.
+    fetchError.agents = apiErrorMessage(e, 'Request failed')
   } finally {
     loading.agents = false
   }
 }
 
+// #2370: a poll issued BEFORE an answer's POST can complete AFTER the
+// success-path refetch and rewrite the list with the answered card still
+// pending. Only the newest fetch may write — and that holds on EVERY exit,
+// not just the success one: a superseded poll that rejects on a transient
+// blip would otherwise paint "couldn't refresh" over a list the newer fetch
+// just proved fresh, and drop `loading.queue` while that newer request is
+// still outstanding.
+let queueFetchSeq = 0
+
 async function fetchQueue() {
+  const seq = ++queueFetchSeq
   loading.queue = true
   try {
-    const res = await axios.get('/api/operator-queue', { params: { limit: 100 } })
-    queueItems.value = (res.data || []).filter(i => i.status === 'pending')
+    const res = await http.get('/api/operator-queue', { params: { limit: 100 } })
+    if (seq !== queueFetchSeq) return // a newer fetch owns the list now
+    // The endpoint returns {items, count}; `(res.data || []).filter` on that
+    // object threw on every poll, so this tab always read "No pending items".
+    queueItems.value = listFrom(res.data, 'items').filter(i => i.status === 'pending')
+    pruneQueueItemState(queueItems.value)
+    hasLoaded.queue = true
+    lastLoadedAt.queue = Date.now()
+    fetchError.queue = ''
   } catch (e) {
+    if (seq !== queueFetchSeq) return // superseded — its failure is not news
     console.error('Failed to fetch queue:', e)
+    fetchError.queue = apiErrorMessage(e, 'Request failed')
   } finally {
-    loading.queue = false
+    // The newest fetch owns the spinner; a superseded one leaves it to the
+    // request that is still running (`return` in try/catch runs this block).
+    if (seq === queueFetchSeq) loading.queue = false
   }
 }
 
 async function fetchNotifications() {
   loading.notifications = true
   try {
-    const res = await axios.get('/api/notifications', { params: { status: 'pending', limit: 100 } })
-    notifications.value = res.data.notifications || []
+    const res = await http.get('/api/notifications', { params: { status: 'pending', limit: 100 } })
+    notifications.value = listFrom(res.data, 'notifications')
+    hasLoaded.notifications = true
+    lastLoadedAt.notifications = Date.now()
+    fetchError.notifications = ''
   } catch (e) {
     console.error('Failed to fetch notifications:', e)
+    fetchError.notifications = apiErrorMessage(e, 'Request failed')
   } finally {
     loading.notifications = false
   }
@@ -628,10 +853,14 @@ async function fetchNotifications() {
 async function fetchFleetHealth() {
   loading.fleet = true
   try {
-    const res = await axios.get('/api/ops/fleet/status')
+    const res = await http.get('/api/ops/fleet/status')
     fleetSummary.value = res.data.summary || { total: 0, running: 0, stopped: 0, high_context: 0 }
+    hasLoaded.fleet = true
+    lastLoadedAt.fleet = Date.now()
+    fetchError.fleet = ''
   } catch (e) {
     console.error('Failed to fetch fleet health:', e)
+    fetchError.fleet = apiErrorMessage(e, 'Request failed')
   } finally {
     loading.fleet = false
   }
@@ -639,7 +868,7 @@ async function fetchFleetHealth() {
 
 async function fetchAgentLogs(name) {
   try {
-    const res = await axios.get(`/api/agents/${name}/logs`, { params: { tail: 30 } })
+    const res = await http.get(`/api/agents/${name}/logs`, { params: { tail: 30 } })
     agentLogs[name] = res.data.logs || 'No logs available'
   } catch (e) {
     agentLogs[name] = 'Failed to load logs'
@@ -684,9 +913,9 @@ async function toggleAgent(name, currentStatus) {
   togglingAgents[name] = true
   try {
     if (currentStatus === 'running') {
-      await axios.post(`/api/agents/${name}/stop`)
+      await http.post(`/api/agents/${name}/stop`)
     } else {
-      await axios.post(`/api/agents/${name}/start`)
+      await http.post(`/api/agents/${name}/start`)
     }
     await fetchAgents()
   } catch (e) {
@@ -700,7 +929,7 @@ async function toggleAutonomy(agent) {
   togglingAutonomy[agent.name] = true
   try {
     const newState = !agent.autonomy_enabled
-    await axios.put(`/api/agents/${agent.name}/autonomy`, { enabled: newState })
+    await http.put(`/api/agents/${agent.name}/autonomy`, { enabled: newState })
     agent.autonomy_enabled = newState
   } catch (e) {
     // The toggle reverts to the server value, so without this the switch just
@@ -748,7 +977,7 @@ function startNewChat() {
 
 async function loadChatSessions() {
   try {
-    const res = await axios.get(`/api/agents/${chatAgent.value}/chat/sessions`)
+    const res = await http.get(`/api/agents/${chatAgent.value}/chat/sessions`)
     chatSessions.value = res.data.sessions || []
   } catch (e) {
     chatSessions.value = []
@@ -759,7 +988,7 @@ async function selectSession(session) {
   chatSessionId.value = session.id
   showSessions.value = false
   try {
-    const res = await axios.get(`/api/agents/${chatAgent.value}/chat/sessions/${session.id}`)
+    const res = await http.get(`/api/agents/${chatAgent.value}/chat/sessions/${session.id}`)
     chatMessages.value = res.data.messages || []
     scrollChatToBottom()
   } catch (e) {
@@ -809,7 +1038,7 @@ async function sendChatMessage() {
       async_mode: true
     }
 
-    const submitRes = await axios.post(`/api/agents/${chatAgent.value}/task`, payload)
+    const submitRes = await http.post(`/api/agents/${chatAgent.value}/task`, payload)
     const executionId = submitRes.data.execution_id
 
     // Poll for completion
@@ -851,7 +1080,7 @@ async function pollExecution(agentName, executionId) {
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, 5000))
     try {
-      const res = await axios.get(`/api/agents/${agentName}/executions/${executionId}`)
+      const res = await http.get(`/api/agents/${agentName}/executions/${executionId}`)
       const exec = res.data
       if (exec.status && exec.status !== 'running' && exec.status !== 'pending') {
         return exec
@@ -879,27 +1108,135 @@ function autoResizeInput(e) {
 
 // ─── Ops Actions ─────────────────────────────────────────────────────────────
 
-async function respondToQueueItem(id, response) {
-  if (!response) return
-  respondingItems[id] = true
-  try {
-    await axios.post(`/api/operator-queue/${id}/respond`, {
-      response: 'approved',
-      response_text: response
-    })
-    responseTexts[id] = ''
-    await fetchQueue()
-  } catch (e) {
-    // Critical: the operator believes they answered the agent. They did not.
-    reportActionFailure(e, 'send your response — the agent is still waiting')
-  } finally {
-    respondingItems[id] = false
+// #2370 — queue answers. `response` carries the DECISION (the tapped option,
+// the typed answer, or `acknowledged`); a note rides `response_text`. The body
+// comes from utils/operatorQueue.js — the builder the desktop store uses —
+// because this view used to hand-build it with a hard-coded literal decision
+// ('approved', whatever was tapped) and so recorded a Deny as an approval.
+
+function registerCancelButton(id, el) {
+  if (el) cancelButtons[id] = el
+  else delete cancelButtons[id]
+}
+
+function selectOption(id, opt) {
+  if (respondingItems[id]) return
+  selectedOptions[id] = opt
+  delete respondErrors[id]
+  // p19: the safe action is focused first. Focusing a button pops no keyboard
+  // and draws no ring after a touch (:focus-visible), so this is invisible on
+  // a phone and load-bearing for keyboard / screen-reader users.
+  nextTick(() => cancelButtons[id]?.focus({ preventScroll: true }))
+}
+
+function clearSelection(id) {
+  if (respondingItems[id]) return
+  delete selectedOptions[id]
+}
+
+function dismissRespondError(id) {
+  delete respondErrors[id]
+}
+
+function clearQueueItemState(id) {
+  delete selectedOptions[id]
+  delete responseTexts[id]
+  delete respondErrors[id]
+  delete respondingItems[id]
+}
+
+// Drop per-card state for cards that left the list (answered elsewhere,
+// expired, cancelled) so a long-lived PWA tab does not accumulate it.
+//
+// A card whose POST is still outstanding is NEVER pruned. `respondingItems` is
+// the in-flight guard `sendQueueResponse` checks, and the GET is a `limit: 100`
+// window ordered status → priority → created_at: on a busy queue an item can be
+// pushed out of that window by newer high-priority arrivals and return once
+// they are answered. Clearing its guard mid-flight re-enables Send under an
+// outstanding POST — the server 400s the loser, so nothing is mis-recorded, but
+// the operator is told an answer that WAS recorded was not. The selection and
+// note are held for the same reason: the retryable-failure path keeps them for
+// a second attempt.
+function pruneQueueItemState(items) {
+  const live = new Set(items.map(i => i.id))
+  for (const map of [selectedOptions, responseTexts, respondErrors, respondingItems]) {
+    for (const id of Object.keys(map)) {
+      if (live.has(id) || respondingItems[id] === true) continue
+      delete map[id]
+    }
   }
+}
+
+// Logout forgets everything, in-flight included — the session is over, and a
+// guard surviving into the next sign-in would leave that card's Send disabled
+// with no way to clear it. It therefore clears the maps directly instead of
+// delegating to the prune above, which would inherit that exemption: this is a
+// wipe, not a reconcile against a served list.
+function resetQueueItemState() {
+  for (const map of [selectedOptions, responseTexts, respondErrors, respondingItems]) {
+    for (const id of Object.keys(map)) delete map[id]
+  }
+}
+
+async function sendQueueResponse(item, body) {
+  const id = item.id
+  if (!body || respondingItems[id]) return false
+  respondingItems[id] = true
+  delete respondErrors[id]
+  try {
+    await http.post(`/api/operator-queue/${id}/respond`, body)
+  } catch (e) {
+    console.error('Failed to send queue response:', e?.response?.status ?? e?.message ?? e)
+    respondingItems[id] = false
+    if (respondRefusedAsNotPending(e)) {
+      // 409 (somebody else resolved it first, #1017), 400 (already terminal)
+      // or 404 (row gone): the answer was NOT recorded and the item is not
+      // waiting for it, so drop the card now (the server said so — a failed
+      // refetch must not leave it tappable under the notice) and put the
+      // notice on the persistent page-level banner, brought into view — a
+      // per-card message would vanish with the card.
+      queueItems.value = queueItems.value.filter(i => i.id !== id)
+      clearQueueItemState(id)
+      actionError.value = QUEUE_RESPONSE_NOT_RECORDED
+      actionErrorDetail.value = apiErrorMessage(e, 'Request failed')
+      scrollContainer.value?.scrollTo?.({ top: 0, behavior: 'smooth' })
+      await fetchQueue()
+    } else {
+      // The operator believes they answered the agent. They did not — say so
+      // NEXT TO the control (p18) and keep the selection + note for a retry.
+      // No "nothing was changed" claim: a timed-out POST may have landed.
+      respondErrors[id] = {
+        message: "Couldn't send your response — the agent is still waiting. Try again.",
+        detail: apiErrorMessage(e, 'Request failed'),
+      }
+    }
+    return false
+  }
+  // Success: drop the card NOW. `fetchQueue` swallows its own errors, so a
+  // failed refetch must never leave an answered card looking pending.
+  queueItems.value = queueItems.value.filter(i => i.id !== id)
+  clearQueueItemState(id)
+  await fetchQueue()
+  return true
+}
+
+function submitApproval(item) {
+  return sendQueueResponse(item, buildQueueResponse({
+    kind: 'approval', option: selectedOptions[item.id], note: responseTexts[item.id],
+  }))
+}
+
+function submitAnswer(item) {
+  return sendQueueResponse(item, buildQueueResponse({ kind: 'question', answer: responseTexts[item.id] }))
+}
+
+function acknowledgeQueueItem(item) {
+  return sendQueueResponse(item, buildQueueResponse({ kind: 'acknowledge' }))
 }
 
 async function acknowledgeNotification(id) {
   try {
-    await axios.post(`/api/notifications/${id}/acknowledge`)
+    await http.post(`/api/notifications/${id}/acknowledge`)
     await fetchNotifications()
   } catch (e) {
     reportActionFailure(e, 'acknowledge that notification')
@@ -946,13 +1283,13 @@ async function executeAction(action) {
   try {
     let res
     if (action === 'emergency-stop') {
-      res = await axios.post('/api/ops/emergency-stop')
+      res = await http.post('/api/ops/emergency-stop')
     } else if (action === 'fleet-restart') {
-      res = await axios.post('/api/ops/fleet/restart')
+      res = await http.post('/api/ops/fleet/restart')
     } else if (action === 'pause-schedules') {
-      res = await axios.post('/api/ops/schedules/pause')
+      res = await http.post('/api/ops/schedules/pause')
     } else if (action === 'resume-schedules') {
-      res = await axios.post('/api/ops/schedules/resume')
+      res = await http.post('/api/ops/schedules/resume')
     }
     actionResult.value = { success: true, message: res.data.message || 'Action completed' }
     await fetchFleetHealth()
@@ -1558,7 +1895,7 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
 
 .ops-card-type {
   font-size: 12px;
-  color: #6b7280;
+  color: #9ca3af; /* issue 2370: gray-500 is the dark-ink floor, never meta text */
   margin-bottom: 6px;
 }
 
@@ -1589,10 +1926,52 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
   color: white;
   font-size: 14px;
   cursor: pointer;
+  /* issue 2370: options are agent-authored and may be sentence-length — wrap, never clip */
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .ops-option-btn:active {
   background: #4b5563;
+}
+
+/* issue 2370: an option button SELECTS, it never sends. The selected state is
+   colour-free (an inset ring in currentColor — the raw-colour ratchet allows no
+   new literal here) and uses box-shadow so `outline` stays the focus indicator. */
+.ops-option-btn[aria-pressed="true"] {
+  box-shadow: inset 0 0 0 2px currentColor;
+  font-weight: 600;
+}
+
+.ops-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  margin-bottom: 4px;
+}
+
+.ops-approval-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* actions right-aligned, safe choice first (left), destructive last */
+.ops-approval-form .ops-response-row {
+  justify-content: flex-end;
+}
+
+.ops-send-btn {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.ops-card-footer.ops-ack-only {
+  justify-content: flex-end;
 }
 
 .ops-response-row {
@@ -1930,6 +2309,29 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
 }
 
 /* ─── States ────────────────────────────────────────────────────────────── */
+
+/* #1921: row-shaped placeholders instead of bare "Loading…" text. `/m` is plain
+   CSS, not Tailwind, so the recipe is spelled out here: pulse in the chrome fill,
+   static under reduced motion, and a footprint close to the rows it becomes. */
+.skeleton-rows { padding: 8px 0; }
+.skeleton-row {
+  height: 44px;
+  margin: 8px 0;
+  border-radius: 8px;
+  background: #f3f4f6;
+  animation: skeleton-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-color-scheme: dark) {
+  .skeleton-row { background: #1f2937; }
+}
+@keyframes skeleton-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .55 } }
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-row { animation: none; }
+}
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 
 .loading-state, .empty-state {
   text-align: center;

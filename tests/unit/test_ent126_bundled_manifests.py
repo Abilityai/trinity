@@ -48,7 +48,7 @@ IDS = [p.name for p in MANIFEST_FILES]
 def _user():
     return types.SimpleNamespace(
         id=1, username="admin", role="admin", email="admin@example.com",
-        agent_name=None, connector_agent=None,
+        agent_name=None, connector_agent=None, mcp_scope=None,
     )
 
 

@@ -1,3 +1,4 @@
+# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files)
 """Agent file management, info, and folder endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, Request
 

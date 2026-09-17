@@ -69,7 +69,7 @@ ahead_main INTEGER DEFAULT 0
 behind_main INTEGER DEFAULT 0
 ahead_working INTEGER DEFAULT 0
 behind_working INTEGER DEFAULT 0
-git_dir_bytes INTEGER                    -- #1596: .git on-disk size
+git_dir_bytes BIGINT                     -- #1596: .git on-disk size (BIGINT since #2800: int4 on PG overflowed at 2 GiB)
 pack_count INTEGER                       -- #1595: packs (count-objects -v)
 loose_objects INTEGER                    -- #1595: loose objects
 maintenance_failures INTEGER DEFAULT 0   -- #1595: failed maintenance streak
@@ -133,8 +133,22 @@ merge_gitignore_after_clone(name)   monotonic deadline _MERGE_READY_TIMEOUT_SECO
   non-source `github:`+PAT ghosts included** (the DB-flag block excludes them, but they
   still bake `GIT_SYNC_AUTO` and are never Pushed). Source-mode excluded (the uncommitted
   `.gitignore` would block a pull-only agent's next `git pull`).
-- **Idempotent (#953)**: `grep -qxF` gate → no `M .gitignore` drift for an already-compliant
-  template; a stale wholesale `.trinity/` line gets a legitimate supersede→append (#2070).
+- **Two managed regions, not one block (#2529)**: the merge is a normalize-and-rebuild —
+  `[defaults block][the agent's own rules, original order][protected floor]`. The defaults
+  block sits ABOVE the agent's rules so an agent negation (`!.env.example`,
+  `!.claude/settings.json`) wins without having to be the file's last line; the floor —
+  the seven credential patterns (incl. `.ssh/`) with `!.env.example`/`!.mcp.json.template`, plus `.trinity/*`
+  and its 8 derived `!` re-includes — sits BELOW them and cannot be overridden. One block
+  provably cannot carry both: hoisting would turn every currently-inert `!.env` in the fleet
+  live in one unattended Push, and would let a user `*.sh` beat `!.trinity/setup.sh`
+  (ent#76 / #1704, failing quietly). `_GITIGNORE_PROTECTED` is a filter over
+  `_GITIGNORE_PATTERNS`, so the floor cannot drift from the list.
+- **Idempotent (#953, #2529)**: idempotent by CONTENT — a second run computes byte-identical
+  output and `cmp` leaves the file (and its mtime) untouched, so an already-compliant
+  template shows no `M .gitignore` drift and the 15-min auto-sync loop has nothing to
+  re-commit. The 14 bundled templates are regenerated as this merge's own **fixed point**
+  (#1908 byte-identity), because a flat canonical list is no longer one. A stale wholesale
+  `.trinity/` line gets a legitimate supersede (#2070).
 - **Fleet remediation (T1)**: `start_agent_internal` fires the same spawn (gated on the DB
   `auto_sync_enabled` flag — ghosts never recreate), so existing leakers converge on their
   next base-image-drift recreate/restart. No behaviour change on Push (`sync_to_github`).
@@ -248,7 +262,54 @@ _run_auto_sync_once (worker thread, repo lock held)
 - **Startup reap:** `startup.sh` removes `index.lock`, `gc.pid`,
   `objects/maintenance.lock`, and ref/reflog `*.lock` at container start
   (provably no live git process) — a stale `index.lock` from a killed op
-  froze three production agents for ~12 days.
+  froze three production agents for ~12 days. **#2742 makes it speak.** It
+  was `rm -f`: silent whether or not it removed anything, so the one moment
+  the platform reliably heals a wedge produced no evidence that it had. It
+  now tests-then-removes, echoes a line per lock actually cleared (Vector
+  captures it), and drops `~/.trinity/lock-recovery.json`, which the agent
+  server folds into `sync_state.last_lock_recovery` → the `lock_recovery`
+  field on `GET /api/git/status` → a one-shot backend WARNING. Container
+  start is also the ONLY context where "no process holds this lock" is
+  provable for free (the PID namespace is empty), which is why recovery
+  lives here and not in the running container. It also reaps `index.lock`
+  under `<gitdir>/modules/*` and `<gitdir>/worktrees/*` — covered by nothing
+  before, so a submodule or linked-worktree wedge survived every restart.
+- **Runtime stuck-lock report (#2742) — observe, never delete.** The status
+  read reports a currently-present `index.lock` as `index_lock_stuck`
+  (`{path, age_seconds, stable_for_seconds, sightings, size_bytes}` — the
+  backend keeps only the ints and drops the agent-composed path) and a backend
+  WARNING; it does **not**
+  unlink it. Three measurements decide this:
+  - `st_size == 0` is the signature of a **live** writer, not an abandoned
+    one — git creates the lock with `O_EXCL` *before* walking the worktree
+    and writes the new index into it only at the very end. A healthy
+    `git add -A` held a 0-byte lock for 100 % of its life: 3.9 s on 450 MB,
+    **29 s at 60 000 files**, **155 s** with a `clean` filter configured.
+  - `st_mtime` is stamped at create and never advances, so **age measures
+    the in-flight operation**, not abandonment — and a forward NTP step or
+    a live-migration ages every existing lock at once, forging staleness in
+    the one direction that makes a delete *more* likely.
+  - A wrong unlink is worse than the wedge it repairs and is **permanent**:
+    git renames by *path*, so after the unlink a second git owns the path
+    and the first git's closing `rename(index.lock, index)` promotes the
+    second's in-flight file onto `.git/index` — the corrupting process
+    exits rc=0 with empty stderr, and the resulting 0-byte `.git/index`
+    is cleared by neither `startup.sh`, nor `_reap_stale_git_litter`, nor
+    `git reset`.
+
+  Detection is therefore a **two-point inode-stability** observation, not a
+  one-tick age gate: the same `(st_ino, st_mtime_ns, st_size)` must be seen
+  unchanged across ≥3 ticks spanning ≥15 min before anything is reported.
+  The observer resolves the real gitdir (`.git` is a **file** for a linked
+  worktree or a submodule) and covers `<gitdir>/index.lock`,
+  `<gitdir>/modules/*/index.lock` and `<gitdir>/worktrees/*/index.lock`;
+  uses `lstat` + `S_ISREG` and skips a symlinked `.git`; takes **no** repo
+  lock (an `lstat` needs none, and taking one would make a status poll a
+  new source of 409 `agent_busy`); and is wrapped in its own
+  `except OSError` — it lives inside the `try` whose tail is
+  `HTTPException(500)`, and a 500 makes the poller write nothing at all, so
+  an observability path that can darken the feed it feeds is worse than no
+  observability path.
 - **Rollout:** everything ships in the base image — existing fleets need a
   base-image rebuild + agent recreate; pre-existing bloat recovery is
   ops-side (trinity-ops-agent#127) using `GIT_MAINTENANCE_TIMEOUT_SECONDS`.
@@ -256,7 +317,8 @@ _run_auto_sync_once (worker thread, repo lock held)
 ### 2. Backend poller
 
 ```
-SyncHealthService._poll_loop (60 s)
+SyncHealthService._poll_loop (SYNC_HEALTH_POLL_INTERVAL_SECONDS, default 60 s)
+    ├── acquire synchealth:leader (SET NX, fail-open) — non-leaders return  [#2742]
     ├── for each git-enabled agent:
     │     ├── GET http://agent:8000/api/git/status (via AgentClient)
     │     │     response contains sync_state + dual ahead/behind
@@ -268,10 +330,49 @@ SyncHealthService._poll_loop (60 s)
     │     ├── if consecutive_failures crossed 3:
     │     │     └── db.create_operator_queue_item(
     │     │           type='sync_failing', priority='high', …)
-    │     └── #1595 git_bloat alerts (same edge-trigger pattern):
-    │           ├── git_dir_bytes crossed GIT_DIR_ALERT_BYTES (10 GiB)
-    │           └── maintenance_failures crossed 3
+    │     ├── #1595 git_bloat alerts (same edge-trigger pattern):
+    │     │     ├── git_dir_bytes crossed GIT_DIR_ALERT_BYTES (10 GiB)
+    │     │     └── maintenance_failures crossed 3
+    │     └── #2742 WARNING on a newly observed lock_recovery / index_lock_stuck
+    │           (log line only — no operator-queue item, no DB column)
 ```
+
+### 2a. Agent status handler (#2742)
+
+```
+GET /api/git/status  (poller 10 s · UI git panel 60 s · MCP get_git_status)
+    └── get_git_status()                     <- async, thin, ON THE LOOP
+          ├── .git missing -> {"git_enabled": false}
+          ├── _STATUS_INFLIGHT live?  --yes--> await wait_for(shield(fut), 35 s)
+          └── no -> ensure_future(to_thread(_compute_git_status, home_dir))
+                      ^^^ exactly ONE default-pool thread per in-flight run
+                          (the #2433 starvation class: that pool also carries
+                           ctx.terminate, auto-sync and pipe-close)
+                └── _compute_git_status()                  (worker thread)
+                      rev-parse / log / merge-base / remote -> run_registered
+                      git --no-optional-locks status --porcelain -> NO index.lock
+                      git fetch origin (30 s)               -> run_registered
+                      lstat index.lock -> index_lock_stuck  (REPORT, never unlink)
+                      + computed_at, lock_recovery
+```
+
+Two bounds, deliberately distinct. `_STATUS_FOLLOWER_WAIT_SECONDS = 35` is a
+**caller** bound, set at or just past the point every real client has already
+given up (poller 10 s, backend `git_service` 30 s) — a follower waiting longer
+can only produce work nobody awaits, and times out as `504`. The leader carries
+its own **computation** bound (`_STATUS_LEADER_DEADLINE_SECONDS = 90`) because
+the child timeouts sum to ~130 s nominal (10 `rev-parse` + 10 `status` + 10
+`log` + **30 `fetch`** + 10 `merge-base` + 10 `log` + 10 `remote get-url`, plus
+10 `_persist_last_remote_sha` + 10 `_get_pull_branch` + 10‥20
+`_dual_ahead_behind_payload`, before `run_registered`'s post-`killpg` drain), and
+a wedged leader would otherwise hold the in-flight slot for all of it.
+
+Coalescing **is** bounded staleness and the doc says so rather than denying it:
+a follower arriving at t=29 s of a 30 s leader run is served a 29-second-old
+snapshot, which an operator can see as "1 ahead" straight after a successful
+push. `computed_at` (ISO-Z, stamped inside the computation) makes that legible.
+Serving late followers a fresh run was explicitly rejected — it reintroduces the
+overlapping `git fetch` this change exists to remove.
 
 Emission is **edge-triggered** — a new entry appears only on the
 transition from `N-1 < 3` to `N >= 3` (or below-ceiling → above-ceiling
@@ -348,11 +449,13 @@ the data-loss setup.
 | `db/schedules.py` | `set_git_auto_sync_enabled`, `set_freeze_schedules_if_sync_failing`, `find_duplicate_bindings` |
 | `db_models.py` | Two new fields on `AgentGitConfig` |
 | `database.py` | Delegation to `SyncStateOperations` + the two new flags + duplicate query |
-| `services/sync_health_service.py` | Background poller + operator-queue emitter |
+| `services/sync_health_service.py` | Background poller + operator-queue emitter. #2742: `synchealth:leader` lease (fail-open, compare-and-delete release), the `SYNC_HEALTH_POLL_INTERVAL_SECONDS` knob, and `_coerce_lock_recovery` / `_coerce_lock_stuck` + the one-shot recovery WARNING |
 | `services/fleet_audit_service.py` | `build_fleet_sync_audit()` aggregation |
 | `services/agent_service/crud.py` | Sets `GIT_SYNC_AUTO` env + `auto_sync_enabled=1` for non-source-mode agents; `_apply_github_env` gates on `git_service._git_auto_sync_baked` (#2069, single owner of the bake predicate); `_materialize_agent_files` fires `spawn_gitignore_merge_after_clone` on the same predicate (#2069 creation seed) |
 | `services/agent_service/lifecycle.py` | `_apply_git_env_from_db` re-derives `GIT_SYNC_AUTO` on every container rebuild as `auto_sync_enabled` OR the baked env — derive-only, never writing the column back (ent#109); `start_agent_internal` fires `spawn_gitignore_merge_after_clone` on the DB `auto_sync_enabled` flag (#2069 T1 fleet remediation) |
 | `services/git_service.py` | `merge_gitignore_after_clone` (readiness-gated poll-then-merge, reusing `_build_gitignore_merge_command`), `spawn_gitignore_merge_after_clone` (fire-and-forget, Semaphore-capped), `_git_auto_sync_baked` (the `GIT_SYNC_AUTO`-bake predicate) — #2069 creation-time seed |
+| `services/git_service.py` | `_GITIGNORE_PROTECTED` + the four `_GITIGNORE_BLOCK_*`/`_GITIGNORE_FLOOR_*` markers, the rebuilt `_build_gitignore_merge_command`, the reporting probes on `_build_rm_cached_ignored_command`, `GitignoreSweep`/`_parse_gitignore_sweep`/`_shadowed_negations`/`_coerce_sweep`/`_with_sweep`, `_emit_gitignore_untracked_alert`, `_augment_commit_message` — #2529 precedence + honest sweep reporting |
+| `db_models.py`, `routers/git.py`, `src/mcp-server/src/tools/git.ts`, `src/frontend/src/composables/useGitSync.js` | the three sweep fields on `GitSyncResult` and their five surfaces (#2529) |
 | `routers/git.py` | `/git/auto-sync`, `/git/freeze-schedules-if-failing`, `/git/sync-state` |
 | `routers/agents.py` | `GET /api/agents/sync-health` (batch) |
 | `routers/fleet.py` | `GET /api/fleet/sync-audit` (new router) |
@@ -365,7 +468,8 @@ the data-loss setup.
 |------|---------|
 | `agent_server/auto_sync.py` | `run_auto_sync_loop`, env-gate helpers, FastAPI startup hook |
 | `agent_server/main.py` | Calls `schedule_auto_sync_if_enabled(app)` |
-| `agent_server/routers/git.py` | `_compute_ahead_behind`, `_dual_ahead_behind_payload`, `_run_auto_sync_once`, `_read_sync_state_file`, `_write_sync_state_file`. `get_git_status()` now returns both tuples + merges the persisted sync-state. |
+| `agent_server/routers/git.py` | `_compute_ahead_behind`, `_dual_ahead_behind_payload`, `_run_auto_sync_once`, `_read_sync_state_file`, `_write_sync_state_file`. `get_git_status()` now returns both tuples + merges the persisted sync-state. #2742: `get_git_status()` is a thin loop-level single-flight over `_compute_git_status()` (one `to_thread` worker per in-flight run); `--no-optional-locks` on the status read; the seven status children plus `_compute_ahead_behind` / `_get_pull_branch` / `_persist_last_remote_sha` route through `run_registered`; `_record_lock_recovery` + `_index_lock_stuck` (observe-only); `remote_url` unconditionally `redact_url_userinfo`-d; `_read_sync_state_file` size-gated at 64 KiB. |
+| `docker/base-image/startup.sh` | #2742: the #1595 boot lock reap becomes test-then-remove, echoes each lock it cleared, and writes `~/.trinity/lock-recovery.json`. |
 
 ### Frontend
 
@@ -391,8 +495,56 @@ backend):
 - `tests/unit/test_fleet_sync_audit.py` — `find_duplicate_bindings`
   (source-mode exclusion + mixed-mode), `build_fleet_sync_audit`
   (clean agent, duplicate flagged, ahead_working, filter).
+- `tests/unit/test_2742_git_status_lock_free.py` — #2742 agent-server:
+  the flagged argv on the status path and the plain argv absent; the real
+  route never rewrites `.git/index` and is never observed holding
+  `.git/index.lock` while the legacy argv is (the control asserts the
+  **sighting**, never a rewrite — git's racily-clean rule makes a rewrite
+  assertion fail once fixture setup crosses ~1 s, which is ordinary under
+  CI's `-n auto`); every status child is sweep-registered, including on the
+  locked `sync`/`pull` paths; five concurrent callers ⇒ one `git fetch`, one
+  `to_thread`, five identical payloads; `shield` keeps the leader alive
+  through follower cancellation; leader exception fans out and clears the
+  slot; the stuck-lock observer reports without deleting, never reports a
+  *changing* candidate, resolves a `gitdir:` file, skips a symlinked `.git`,
+  takes no repo lock, and cannot 500 the read; a tokenized non-`github.com`
+  origin comes back with no userinfo. **AC4** ships in three phases,
+  strongest first: a deterministic-and-concurrent SIGSTOP freeze of a real
+  `git status` child holding the lock (the gate), a lock-sighting sampler,
+  and a threaded witness whose control arm must reproduce a failure in-run
+  or `pytest.skip` — it must never pass without having demonstrated it can
+  fail.
+- `tests/unit/test_2742_sync_health_leader_lock.py` — #2742 backend:
+  distinct worker ids, one leader of two, own-lease refresh, Redis-down and
+  Redis-error fail **open**, release hands off and only deletes its own
+  lease, TTL expiry lets a sibling take over, `_leader_ttl()` floor, the
+  poll cycle lists agents iff leader — **plus the alert-timing test the
+  lease owes**: with one leader a failing agent crosses `ALERT_THRESHOLD`
+  after 3 cycles, i.e. ~180 s where two unleased workers took ~90 s.
 
 Baseline: 75 passing tests added across the two PRs.
+
+The `.gitignore` half of §0 has its own real-git suites (no Docker either — they
+run the SHIPPED builder commands against throwaway repositories, because the
+defects live in git's own last-match-wins and dir-descent semantics):
+
+- `tests/unit/test_2069_gitignore_at_creation.py` — the creation-time seed:
+  readiness gate, merge-only (no rm-cached), the ENV predicate, and the #953
+  no-drift contract (now: *already in block shape ⇒ no drift*).
+- `tests/unit/test_2069_gitignore_merge_caller_guard.py` — the AST writer-SET
+  guard: exactly three callers of `_build_gitignore_merge_command`, and
+  `_GITIGNORE_PATTERNS` read by that builder alone.
+- `tests/unit/test_2070_trinity_authored_paths.py` — the authored-vs-runtime
+  `.trinity/` split survives a Push sweep.
+- `tests/unit/test_2529_gitignore_precedence.py` — precedence over two
+  consecutive Pushes, the protected floor, merge-command hardening (CRLF, NUL
+  byte, unreadable file, no line-gluing), and the three report fields, including
+  AC-1 as the universal `before − after == set(removed_paths)`.
+- `tests/unit/test_1908_bundled_template_gitignore.py` — the 14 bundled
+  templates are byte-identical to the merge's fixed point.
+- `src/frontend/tests/unit/gitSyncSweepToast.spec.js` and
+  `src/mcp-server/src/tools/git.test.ts` — the sweep report on the UI and MCP
+  surfaces (Invariant #13).
 
 ## Operator Controls
 
@@ -403,6 +555,8 @@ Baseline: 75 passing tests added across the two PRs.
 | Fleet kill-switch | `GIT_SYNC_AUTO` env var (if missing/false the loop never starts) | `true` if the backend set it at creation **or** `auto_sync_enabled = 1` — re-derived as the OR of both on every container rebuild (ent#109) |
 | Freeze schedules when sync failing | `PUT /api/agents/{name}/git/freeze-schedules-if-failing` | `false` (opt-in) |
 | Alert threshold | Hardcoded in `SyncHealthService.ALERT_THRESHOLD` | 3 consecutive failures |
+| Sync-health poll cadence (#2742) | `SYNC_HEALTH_POLL_INTERVAL_SECONDS` env var on the backend — read at **call** time (a property, not an import-time copy), and wired into `docker-compose.yml`, `docker-compose.prod.yml` and `.env.example` as `${VAR:-60}`. Prod compose launches standalone (no base merge, no `env_file:`), so the explicit `environment:` list is the only route in; `/validate-pr` caught all three missing on this branch (the #1056 packaging class), and `test_2742_sync_health_leader_lock.py::TestPollIntervalReachesTheContainer` now pins the form so unset and empty both land on the default | 60 s (**unchanged** — the knob ships, the default does not move) |
+| Stuck-lock report sensitivity (#2742) | `_STUCK_LOCK_MIN_SIGHTINGS` / `_STUCK_LOCK_MIN_AGE_SECONDS` module constants in `agent_server/routers/git.py` — deliberately **not** an env var: the tunable is the number of stable sightings, not a wall-clock age, because age measures the in-flight operation | 3 sightings / 900 s |
 
 ## Known Limitations
 
@@ -431,10 +585,61 @@ Baseline: 75 passing tests added across the two PRs.
   churn — the opt-in history-squash policy and/or geometric repack
   (`--geometric=2` + midx) remain the deferred follow-up that fixes the
   long-run cost curve.
-- **`/api/git/status` still blocks the agent event loop** (~30s worst case
-  per 60s poll on a bloated repo — `git fetch` + ~8 subprocesses on the
-  loop thread). Pre-existing; evidence filed to #1505 rather than threading
-  it here (a threaded status needs a busy-path design vs the repo lock).
+- **Ref-lock litter is covered by no reaper at all — not even at startup
+  (#2742 residual).** `startup.sh`'s `find` is scoped to `.git/refs` and
+  `.git/logs`, so `.git/FETCH_HEAD.lock` and `.git/packed-refs.lock` sit
+  directly in `.git/` and are removed by nothing. `run_registered` on the
+  status children makes a sweep-killed *poll* stop producing them, but a
+  sweep-killed **operator** op still can. AC1 measures `index.lock` only —
+  the class is narrowed, not closed. Adjacent to #1505; do not read the
+  flow as claiming otherwise.
+- **A genuinely wedged lock is now *reported* and still needs a restart or
+  one `rm` (#2742).** The report is the half of the acceptance criterion
+  that was missing — the operator complaint was silence, not the wedge. The
+  race-free automatic recovery is a backend-initiated container restart
+  (after which the boot reap runs with the PID namespace empty); it is
+  deliberately **not** built yet, because it would be new automation firing
+  on a signal never once observed in production. Let one release of the
+  report say how often it fires first.
+- **Neither reaper covers `<gitdir>/modules/*` or `<gitdir>/worktrees/*`
+  (#2742).** The new *observer* does, but `startup.sh` and
+  `_reap_stale_git_litter` do not — so a submodule lock wedge is permanent
+  and survives every restart. Filed separately; not absorbed here.
+- **Coalescing is bounded staleness (#2742).** A follower can be served a
+  snapshot up to one leader-run old; `computed_at` makes it legible rather
+  than denied. TTL caching was rejected — it would reintroduce the
+  overlapping `git fetch`.
+- **`--no-optional-locks` is not free, and the cost is governed by content
+  bytes, not file count (#2742).** The index writeback the flag suppresses
+  is also what caches the stat results, so a stat-dirty tree re-hashes on
+  every poll instead of once. Re-measured inside a real agent container
+  (ext4 workspace volume, git 2.39.5), each tree made stat-dirty then run
+  eight times back-to-back:
+
+  | tree | plain, steady | flagged | ratio |
+  |---|---|---|---|
+  | 42 491 files / ~1 MB content | 0.08 s | 0.08 s | **~1×** |
+  | 1 500 files / 294 MB content | 0.001 s | 0.389 s | **~390×** |
+
+  So the penalty is driven by how many **bytes** git must re-hash, not by
+  index size: a big-but-light tree pays essentially nothing, while a
+  byte-heavy one pays ~0.39 s of CPU on **every** poll where plain would
+  settle to ~0.001 s. The absolute number is the one to reason about —
+  ~0.39 s per agent per 60 s poll, worst for exactly the auto-sync-off
+  agents whose index nothing else ever refreshes. (An earlier single "29×"
+  figure, taken outside the fleet, sat between these two regimes and
+  described neither.) The settling is visible in the raw series: plain runs
+  0.395 / 0.390 / 0.392 s and only then drops to 0.001 s — git's
+  racily-clean rule, which is also why the obvious mitigation
+  (`git update-index --refresh` on a low cadence) did **not** restore the
+  fast path in measurement, so it is deliberately *not* in the code. AC1 is
+  not negotiable and the flag is the only thing that satisfies it; the cost
+  is open, quantified and owned, not silently accepted.
+- **Older base images keep the old handler until recreate (#2742).** The
+  agent-server half ships in the base image, so the fleet converges via
+  `build-base-image.sh` + agent recreate — which is also what clears every
+  already-orphaned lock in the installed base, through the boot reap. The
+  backend lease alone halves exposure immediately.
 
 ## Related Flows
 

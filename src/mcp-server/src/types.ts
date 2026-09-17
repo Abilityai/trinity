@@ -67,8 +67,11 @@ export interface Template {
 }
 
 export interface TokenResponse {
-  access_token: string;
-  token_type: string;
+  /** Absent when a second factor is pending (#2322) — always check before use. */
+  access_token?: string;
+  token_type?: string;
+  mfa_required?: boolean;
+  challenge_token?: string;
 }
 
 // Agent-to-Agent Collaboration Types
@@ -97,7 +100,7 @@ export interface McpAuthContext extends Record<string, unknown> {
   // "user-scoped keys see all accessible agents" branch. Keep this union
   // exhaustive against `mcp_api_keys.scope`; anything not listed must be
   // treated as least-privileged, never as `user`.
-  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous";
+  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
 
   // --- #848 inline email auth (anonymous scope only) ---------------------
@@ -132,6 +135,32 @@ export interface AgentAccessInfo {
 export interface AgentAccessCheckResult {
   allowed: boolean;
   reason?: string;       // Denial reason if not allowed
+}
+
+/**
+ * #2807: the outcome a tool RETURNED rather than threw, stamped on the
+ * per-call tool context by `access.ts::accessDenied` and read by the audit
+ * wrapper after `execute` — the same seam #905 uses for `requestId`. `denied`
+ * is the only kind today; a returned non-denial failure is the registered
+ * follow-up and adds a kind here, not a second field.
+ */
+export interface ToolOutcome {
+  kind: "denied";
+  /** What the AUDIT row records — by default the reason the caller was given. */
+  reason: string;
+}
+
+/**
+ * The backend's `LoopStatusResponse` (routers/loops.py), as far as the MCP
+ * layer relies on it. `agent_name` is the field the loop-id tools gate on
+ * (ent#628): a loop is addressed by id, so the agent it belongs to is only
+ * known after the resolve. Everything else is passed through untouched.
+ */
+export interface LoopStatus {
+  loop_id: string;
+  agent_name: string;
+  status: string;
+  [key: string]: unknown;
 }
 
 // Agent Template Info Types
@@ -202,6 +231,15 @@ export interface Schedule {
   timeout_seconds: number;
   allowed_tools?: string[];
   model?: string;
+  // Validation configuration (VALIDATE-001). The backend has returned these
+  // on every read since the feature landed; they were missing from the write
+  // surface only. #2759
+  validation_enabled?: boolean;
+  validation_prompt?: string;
+  validation_timeout_seconds?: number;
+  // ent#498: deliver this schedule's output into that person's Workspace
+  // conversation with the agent. Absent = no delivery.
+  deliver_to_workspace_email?: string;
 }
 
 export interface ScheduleCreate {
@@ -217,6 +255,13 @@ export interface ScheduleCreate {
   // RETRY-001: Retry configuration
   max_retries?: number;
   retry_delay_seconds?: number;
+  // VALIDATE-001: Post-execution validation configuration
+  validation_enabled?: boolean;
+  validation_prompt?: string;
+  validation_timeout_seconds?: number;
+  // ent#498: deliver this schedule's output into that person's Workspace
+  // conversation with the agent. Absent = no delivery.
+  deliver_to_workspace_email?: string;
 }
 
 export interface ScheduleUpdate {
@@ -232,6 +277,13 @@ export interface ScheduleUpdate {
   // RETRY-001: Retry configuration
   max_retries?: number;
   retry_delay_seconds?: number;
+  // VALIDATE-001: Post-execution validation configuration
+  validation_enabled?: boolean;
+  validation_prompt?: string;
+  validation_timeout_seconds?: number;
+  // ent#498: `null` CLEARS the delivery target (the handler uses exclude_unset,
+  // so omitting keeps it) — hence nullable here and not merely optional.
+  deliver_to_workspace_email?: string | null;
 }
 
 export interface ScheduleExecution {
@@ -262,10 +314,83 @@ export interface ScheduleExecution {
   // recovery to scope the executions lookup to the calling key.
   source_mcp_key_id?: string;
   source_mcp_key_name?: string;
+  // FANOUT-001: the batch this subtask belongs to. Written on every row of a
+  // fan-out at dispatch, which is what makes #2670's gateway-timeout receipt
+  // resolvable — one id shared by N rows, so finding ANY row finds the batch.
+  fan_out_id?: string;
   // RETRY-001: Retry tracking
   attempt_number?: number;
   retry_of_execution_id?: string;
   retry_scheduled_at?: string;
+}
+
+/** The aggregated result a completed `POST /fan-out` returns. */
+export interface FanOutDispatchResult {
+  fan_out_id: string;
+  status: string;
+  total: number;
+  completed: number;
+  failed: number;
+  results: Array<{
+    id: string;
+    status: string;
+    response?: string;
+    error?: string;
+    error_code?: string;
+    execution_id?: string;
+    cost?: number;
+    context_used?: number;
+    duration_ms?: number;
+  }>;
+}
+
+/**
+ * #2670: what a `fan_out` call answers with when the MCP server aborts its own
+ * fetch before the gateway does. The batch keeps running; this is what to poll.
+ *
+ * `fan_out_id` rather than `execution_id` — the #914/#2661 receipts name one
+ * row, and a batch is N rows sharing one id, so the aggregate is the only thing
+ * a single id can honestly point at.
+ */
+export interface FanOutTimeoutReceipt {
+  status: "fan_out_timeout";
+  agent: string;
+  fan_out_id: string;
+  /** The subtask rows found at abort time. May be a SUBSET — a slot-starved
+   *  subtask has no row yet — so it is evidence, never a manifest. */
+  execution_ids: string[];
+  task_count: number;
+  message: string;
+}
+
+/** #2670: one fan-out batch read back from its execution rows. */
+export interface FanOutBatchStatus {
+  agent_name: string;
+  fan_out_id: string;
+  /** `running` while any subtask can still change; then `completed` | `partial` | `failed`. */
+  status: string;
+  total: number;
+  completed: number;
+  failed: number;
+  running: number;
+  results: Array<{
+    execution_id: string;
+    /** The caller's own task id (#2524); absent on rows written before it was persisted. */
+    task_id?: string;
+    /** The EXECUTION status verbatim (`queued`/`running`/`success`/…), not the
+     * dispatch response's two-value `completed`/`failed` pair — a live batch has
+     * to distinguish "waiting for a slot" from "running". */
+    status: string;
+    message?: string;
+    response?: string;
+    error?: string;
+    cost?: number;
+    context_used?: number;
+    duration_ms?: number;
+    model_used?: string;
+    started_at?: string;
+    completed_at?: string;
+  }>;
 }
 
 // Execution Query Types (MCP-007)

@@ -60,6 +60,9 @@ _FIXED_FILES = [
     (".trinity/setup.sh", True),
     (".trinity/pre-check", True),
     (".trinity/post-check", True),
+    # ent#411: the last plugin reconcile, written by the boot hook. Agent-writable
+    # like everything else here, so I-006 reads it defensively.
+    (".trinity/plugins-state.json", True),
 ]
 
 # The in-container script body. ROOT and the config are prepended at runtime.

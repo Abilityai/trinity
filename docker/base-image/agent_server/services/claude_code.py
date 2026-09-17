@@ -32,6 +32,7 @@ from ._runtime_config import (
     _DEFAULT_EXECUTION_TIMEOUT_SEC,
     _DEFAULT_MAX_TURNS_CHAT,
     _load_guardrails,
+    merged_disallowed_tools,
 )
 from .execution_env import build_execution_env
 from .error_classifier import (
@@ -227,10 +228,11 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         max_turns_chat = int(guardrails.get("max_turns_chat") or _DEFAULT_MAX_TURNS_CHAT)
         cmd.extend(["--max-turns", str(max_turns_chat)])
         logger.info(f"[Chat] Limiting to {max_turns_chat} agentic turns")
-        disallowed_tools = guardrails.get("disallowed_tools") or []
+        # GUARD-003 deny-list ∪ the platform denials (#2454).
+        disallowed_tools = merged_disallowed_tools(guardrails)
         if disallowed_tools:
             cmd.extend(["--disallowedTools", ",".join(disallowed_tools)])
-            logger.info(f"[Chat] Guardrails disallow tools: {disallowed_tools}")
+            logger.info(f"[Chat] Disallowed tools: {disallowed_tools}")
         # GUARD-003 (#313): wall-clock cap so a stuck claude subprocess
         # (billing error, stalled stream, max-turns evasion) doesn't hang
         # the chat session until the container is killed externally.
@@ -332,9 +334,19 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
             "pgid": process_pgid,
         })
 
-        # Write prompt to stdin and close it
-        process.stdin.write(prompt)
-        process.stdin.close()
+        # Write prompt to stdin and close it.
+        # #2433 review: the `finally: registry.unregister()` further down starts
+        # after this write, so a BrokenPipeError here (the `register()` above
+        # SIGKILLs the group when a cancel landed while the execution was
+        # pending) leaks the entry — which since #2433 is reported to the
+        # backend as agent-known for a full RECENTLY_COMPLETED TTL, blocking
+        # orphan recovery for that row. Same guard as the Gemini paths.
+        try:
+            process.stdin.write(prompt)
+            process.stdin.close()
+        except BaseException:
+            registry.unregister(execution_id)
+            raise
 
         stderr_lines: List[str] = []
 
@@ -375,7 +387,8 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                                     f"publish_log_entry failed (continuing): {pub_err}"
                                 )
                         sanitized_line = sanitize_subprocess_line(line)
-                        process_stream_line(sanitized_line, execution_log, metadata, tool_start_times, response_parts)
+                        process_stream_line(sanitized_line, execution_log, metadata, tool_start_times, response_parts,
+                                            execution_id=execution_id)
                     except Exception as line_err:  # noqa: BLE001
                         logger.warning(
                             f"Per-line stdout processing error (continuing): {line_err}"

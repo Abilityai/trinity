@@ -306,16 +306,23 @@ class TestTaskPersistence:
 
 
 class TestAgentToAgentTask:
-    """Tests for agent-to-agent task execution via X-Source-Agent header."""
+    """ent#614: X-Source-Agent is honoured only for an agent-scoped key naming itself.
+
+    The two tests that used to live here asserted the DEFECT — a user token sending the
+    header was accepted and its execution recorded `triggered_by='agent'` — so a permitted
+    human could attribute their action to any agent in the SEC-001 audit log and forge a
+    collaboration edge. They are inverted, not deleted: the same request is now refused
+    with a named 403 before anything is dispatched.
+    """
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
-    def test_task_with_source_agent_header(
+    def test_user_token_with_source_agent_header_is_refused(
         self,
         api_client: TrinityApiClient,
         created_agent
     ):
-        """Task with X-Source-Agent header is accepted."""
+        """A user token sending X-Source-Agent gets a 403 that names the rule."""
         response = api_client.post(
             f"/api/agents/{created_agent['name']}/task",
             json={"message": "Agent-to-agent test"},
@@ -326,17 +333,18 @@ class TestAgentToAgentTask:
         if response.status_code == 503:
             pytest.skip("Agent server not ready")
 
-        # Should work - 200 or 202
-        assert_status_in(response, [200, 202])
+        assert_status(response, 403)
+        assert "agent-scoped" in response.text
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
-    def test_agent_task_has_agent_trigger(
+    def test_user_token_cannot_produce_an_agent_triggered_execution(
         self,
         api_client: TrinityApiClient,
         created_agent
     ):
-        """Task with X-Source-Agent has triggered_by='agent'."""
+        """Nothing is dispatched for the refused request: no execution with that message
+        exists afterwards, so no row can read triggered_by='agent' for a human caller."""
         unique_id = uuid.uuid4().hex[:8]
         task_message = f"Agent trigger test {unique_id}"
 
@@ -350,21 +358,15 @@ class TestAgentToAgentTask:
         if response.status_code == 503:
             pytest.skip("Agent server not ready")
 
-        assert_status(response, 200)
+        assert_status(response, 403)
         time.sleep(2)
 
-        # Get executions
         exec_response = api_client.get(f"/api/agents/{created_agent['name']}/executions")
         assert_status(exec_response, 200)
         executions = exec_response.json()
 
-        # Find our task
         matching = [e for e in executions if task_message in e.get("message", "")]
-        assert len(matching) > 0, "Should find our task"
-
-        execution = matching[0]
-        assert execution.get("triggered_by") == "agent", \
-            f"Expected triggered_by='agent', got '{execution.get('triggered_by')}'"
+        assert matching == [], "A refused request must not leave an execution row"
 
 
 class TestExecutionOrdering:

@@ -51,6 +51,7 @@ def test_the_fence_is_a_single_route_not_a_prefix():
         ("GET", "/api/users"),                                     # other humans
         ("POST", "/api/agents/atlas/chat"),                        # chat as the owner
         ("GET", "/api/enterprise/client-portal/my-agents"),        # the portal itself
+        ("GET", "/api/enterprise/client-portal/briefings"),        # #2163 — fenced by construction
         ("GET", "/api/enterprise/client-portal/agents/a/history"), # someone's history
         ("POST", "/api/mcp/keys"),                                 # minting more keys
         ("GET", "/api/enterprise/client-portal/auth/exchange"),    # right path, wrong method
@@ -84,13 +85,13 @@ def test_minting_the_scope_is_admin_only_and_human_only():
 
     d = _deps()
     non_admin = SimpleNamespace(id=2, username="bob", role="user",
-                                agent_name=None, connector_agent=None)
+                                agent_name=None, connector_agent=None, mcp_scope=None)
     with pytest.raises(HTTPException) as exc:
         d.assert_admin(non_admin)
     assert exc.value.status_code == 403
 
     agent_principal = SimpleNamespace(id=1, username="admin", role="admin",
-                                      agent_name="atlas", connector_agent=None)
+                                      agent_name="atlas", connector_agent=None, mcp_scope=None)
     with pytest.raises(HTTPException) as exc:
         d.reject_agent_principal(agent_principal)
     assert exc.value.status_code == 403

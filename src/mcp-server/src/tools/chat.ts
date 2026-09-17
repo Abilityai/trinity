@@ -9,6 +9,7 @@ import { z } from "zod";
 import { createHash } from "crypto";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext, AgentAccessCheckResult } from "../types.js";
+import { accessDenied, checkAgentEdge, resolveClient, uniformDenial } from "../access.js";
 
 /**
  * RELIABILITY-006 (#525): derive a deterministic Idempotency-Key for an MCP
@@ -50,34 +51,17 @@ async function checkAgentAccess(
     return { allowed: true };
   }
 
-  // Phase 11.1: System-scoped keys bypass ALL permission checks
-  // System agent can communicate with any agent
-  if (authContext.scope === "system") {
-    console.log(`[System Agent Access] ${authContext.agentName || "system"} -> ${targetAgentName} (bypassing permissions)`);
-    return { allowed: true };
+  // System and agent scopes: the canonical edge gate (ent#628, ../access.ts) —
+  // one implementation of P-02 shared with every tool the registration wrapper
+  // gates, so the reason a caller reads is the same on every tool.
+  if (authContext.scope === "system" || authContext.scope === "agent") {
+    return checkAgentEdge(client, authContext, targetAgentName);
   }
 
-  // Phase 9.10: Agent-scoped keys use permission system
-  if (authContext.scope === "agent" && authContext.agentName) {
-    const callerAgentName = authContext.agentName;
-
-    // Self-call is always allowed
-    if (callerAgentName === targetAgentName) {
-      return { allowed: true };
-    }
-
-    // Check if target is in permitted list
-    const isPermitted = await client.isAgentPermitted(callerAgentName, targetAgentName);
-    if (isPermitted) {
-      return { allowed: true };
-    }
-
-    // Not permitted
-    return {
-      allowed: false,
-      reason: `Permission denied: Agent '${callerAgentName}' is not permitted to communicate with '${targetAgentName}'. ` +
-        `Configure permissions in the Trinity UI.`
-    };
+  // #2323: an allowlist, not a fallthrough. Only a user key gets the ownership /
+  // sharing rule below; a scope this code has not heard of is least-privileged.
+  if (authContext.scope !== "user") {
+    return uniformDenial(targetAgentName);
   }
 
   // User-scoped keys: use existing ownership/sharing rules
@@ -117,29 +101,8 @@ async function checkAgentAccess(
   return uniformDenied;
 }
 
-/**
- * Resolve the Trinity client for a request.
- * When requireApiKey is true, REQUIRES the MCP API key from the auth context.
- * When requireApiKey is false, uses the base client (backward compatibility).
- *
- * Module-level so both createChatTools and the dedicated-tool path
- * (runAgentChat, #846) share one implementation.
- */
-function resolveClient(
-  baseClient: TrinityClient,
-  requireApiKey: boolean,
-  authContext?: McpAuthContext
-): TrinityClient {
-  if (requireApiKey) {
-    if (!authContext?.mcpApiKey) {
-      throw new Error("MCP API key authentication required but no API key found in request context");
-    }
-    const userClient = new TrinityClient(baseClient.getBaseUrl());
-    userClient.setToken(authContext.mcpApiKey);
-    return userClient;
-  }
-  return baseClient;
-}
+// resolveClient lives in ../access.ts (ent#628) — one implementation shared by
+// every tool module and by the registration-time gate in server.ts.
 
 /**
  * Parameters for a single chat_with_agent-style call (agent name bound
@@ -203,12 +166,12 @@ export async function runAgentChat(
 
   if (!accessCheck.allowed) {
     console.log(`[Access Denied] ${authContext?.agentName || authContext?.userId || "unknown"} -> ${agent_name}: ${accessCheck.reason}`);
-    return JSON.stringify({
+    return accessDenied(context, {
       error: "Access denied",
       reason: accessCheck.reason,
       caller: authContext?.agentName || authContext?.userId,
       target: agent_name,
-    }, null, 2);
+    });
   }
 
   // Pass source agent for collaboration tracking
@@ -299,6 +262,14 @@ export async function runAgentChat(
       mcpKeyInfo,
       idempotencyKey
     );
+
+    // #2661: the parallel branch surfaces the gateway-timeout receipt exactly
+    // as the sequential branch does below. Without the log line the two routes
+    // are indistinguishable in the MCP server's own output, which is how the
+    // 2026-09-08 cascade read as "chat_with_agent just fails sometimes".
+    if ('status' in response && response.status === 'queued_timeout') {
+      console.log(`[Task Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#2661)`);
+    }
     return JSON.stringify(response, null, 2);
   }
 
@@ -392,13 +363,20 @@ export function createChatTools(
         "Best for independent tasks, batch processing, orchestrator delegation.\n" +
         "- `async=true` (with parallel=true): Fire-and-forget mode. Returns immediately with execution_id. " +
         "Poll GET /api/agents/{name}/executions/{execution_id} for results." +
-        "\n\n**#914 Gateway-Timeout Receipt (sync chat mode only):** " +
+        "\n\n**Gateway-Timeout Receipt (EVERY sync mode — #914 sequential, #2661 parallel):** " +
         "If the MCP-server's synchronous fetch to the backend takes longer than `MCP_CHAT_TIMEOUT_MS` " +
         "(default 25s, set under the typical 30-60s MCP gateway ceiling), the call returns " +
         "`{status: \"queued_timeout\", agent, execution_id, message}` instead of a generic `fetch failed`. " +
+        "This applies to `parallel=false` AND `parallel=true` sync calls. " +
         "The task IS still running on the agent — call `get_execution_result(execution_id)` to poll for the " +
         "result instead of retrying. Retrying will duplicate-queue and Trinity's concurrent-duplicate guard " +
-        "will kill mid-execution, burning budget. For tasks you know will exceed the gateway timeout, prefer " +
+        "will kill mid-execution, burning budget. **Never re-send a reworded variant** after any failure you " +
+        "cannot confirm: an identical re-send is deduplicated server-side and answers with the original " +
+        "`execution_id`, but a REWORDED one derives a different idempotency key and dispatches a second " +
+        "execution. If no execution can be attributed to your call, the error says so explicitly and names " +
+        "`list_recent_executions` — check it before retrying. " +
+        "In sync `parallel=true` mode `timeout_seconds` bounds only the agent-side run, not how long this " +
+        "call waits. For tasks you know will exceed the gateway timeout, prefer " +
         "`parallel=true, async=true` from the start.",
       parameters: z.object({
         agent_name: z.string().describe("The name of the agent to chat with"),
@@ -595,8 +573,22 @@ export function createChatTools(
         "any workload that is embarrassingly parallel. " +
         "\n\n**Concurrency:** Controlled by max_concurrency (default 3, max 10). " +
         "Tasks beyond the limit queue internally until a slot frees up. " +
-        "\n\n**Timeout:** Overall deadline for the entire fan-out. Tasks still running " +
-        "when the deadline hits are marked as failed with timeout error.",
+        "\n\n**Timeout:** `timeout_seconds` bounds how long the backend WAITS for the batch, " +
+        "not the tasks. Tasks still open at the deadline report status `running` (batch status " +
+        "`deadline_exceeded`) and keep running — poll `get_fan_out_result` for their outcome." +
+        "\n\n**async_mode:** set `async_mode: true` to get `{fan_out_id, status: 'accepted', total}` " +
+        "back immediately and poll `get_fan_out_result(agent_name, fan_out_id)` instead of waiting. " +
+        "Match results to your task ids by `task_id`." +
+        "\n\n**Gateway timeout (#2670) — READ THIS BEFORE RETRYING.** A fan-out runs " +
+        "longer than any single task in it, so this call is the most likely of all the " +
+        "dispatch tools to outlive the MCP gateway. When it does, the tool returns " +
+        "`{status: 'fan_out_timeout', agent, fan_out_id, execution_ids, task_count, message}` " +
+        "instead of results — the batch is STILL RUNNING and nothing was lost. Poll " +
+        "`get_fan_out_result(agent_name, fan_out_id)` for the aggregate. " +
+        "\n\nDo not re-send to 'try again': an IDENTICAL re-send is deduplicated " +
+        "server-side and answers with the same batch, but a REWORDED one derives a " +
+        "different idempotency key and dispatches all N tasks a second time — N more " +
+        "executions, N more times the cost, against an agent already working.",
       parameters: z.object({
         agent_name: z
           .string()
@@ -615,9 +607,9 @@ export function createChatTools(
           .number()
           .optional()
           .describe(
-            "Overall deadline in seconds for the entire fan-out (max: 3600). " +
-            "If omitted, no outer deadline is applied — each sub-task is still " +
-            "bounded by the target agent's configured execution_timeout_seconds."
+            "Deadline in seconds for waiting on the fan-out (max: 3600). Reaching it " +
+            "does not stop the tasks. If omitted, the backend waits out the whole batch " +
+            "(each sub-task is bounded by the target agent's execution_timeout_seconds)."
           ),
         max_concurrency: z
           .number()
@@ -636,6 +628,13 @@ export function createChatTools(
           .array(z.string())
           .optional()
           .describe("Restrict which tools subtasks can use"),
+        async_mode: z
+          .boolean()
+          .optional()
+          .describe(
+            "Return {fan_out_id, status: 'accepted'} immediately instead of waiting; " +
+            "poll get_fan_out_result for the outcome (default: false)"
+          ),
       }),
       execute: async (
         {
@@ -646,6 +645,7 @@ export function createChatTools(
           model,
           system_prompt,
           allowed_tools,
+          async_mode,
         }: {
           agent_name: string;
           tasks: Array<{ id: string; message: string }>;
@@ -654,6 +654,7 @@ export function createChatTools(
           model?: string;
           system_prompt?: string;
           allowed_tools?: string[];
+          async_mode?: boolean;
         },
         context: any
       ) => {
@@ -663,10 +664,10 @@ export function createChatTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
         if (!accessCheck.allowed) {
           console.log(`[Access Denied] ${authContext?.agentName || authContext?.userId || "unknown"} -> ${agent_name}: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const sourceAgent = authContext?.scope === "agent" ? authContext.agentName : undefined;
@@ -685,6 +686,9 @@ export function createChatTools(
           "fan_out",
           model,
           JSON.stringify(tasks),
+          // #2524: an async call's replay snapshot is the ACCEPTED receipt, so
+          // a sync call with the same tasks must not share its key.
+          ...(async_mode ? ["async"] : []),
         ]);
 
         const response = await apiClient.fanOut(
@@ -696,6 +700,7 @@ export function createChatTools(
             model,
             system_prompt,
             allowed_tools,
+            async_mode,
           },
           sourceAgent,
           mcpKeyInfo,

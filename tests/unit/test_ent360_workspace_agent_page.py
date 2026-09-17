@@ -22,6 +22,11 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+# ent#365: the report read is scoped to who is asking, so every call names a
+# reader. These suites keep their own subjects (agent isolation, row windowing);
+# the audience rule itself is pinned in test_ent365_report_audience.py.
+CLIENT_EMAIL = "client@example.com"
+
 AGENT = "scribe"
 OTHER = "recon"
 EMAIL = "alice@example.com"
@@ -61,56 +66,18 @@ def test_recent_work_carries_no_message_cost_or_model(monkeypatch):
     }
 
 
-def test_asks_exclude_platform_alerts(monkeypatch):
-    """`alert` items are platform-generated ops telemetry — sync-failing,
-    git-bloat, breaker dormancy — not something an agent is asking a person.
-    Surfacing them on a client's page is both noise and disclosure."""
-    from client_portal import agent_page
-
-    monkeypatch.setattr(agent_page.db, "list_operator_queue_items", lambda **k: [
-        {"id": "1", "type": "alert", "title": "sync failing", "question": "n/a"},
-        {"id": "2", "type": "question", "title": "Which invoice?", "question": "A or B?"},
-        {"id": "3", "type": "approval", "title": "Send it?", "question": "ok?"},
-    ])
-
-    got = agent_page._asks(AGENT)
-
-    assert [a["id"] for a in got] == ["2", "3"]
-
-
-def test_asks_never_carry_context(monkeypatch):
-    """`context` is free-form agent JSON and a known credential-leak surface
-    (canary G-04 exists because secrets have turned up in agent-authored
-    metadata). It is not filtered in the UI — it never leaves the service."""
-    from client_portal import agent_page
-
-    monkeypatch.setattr(agent_page.db, "list_operator_queue_items", lambda **k: [{
-        "id": "1", "type": "question", "title": "t", "question": "q",
-        "context": {"api_key": "sk-live-should-never-appear"},
-    }])
-
-    ask = agent_page._asks(AGENT)[0]
-
-    assert "context" not in ask
-    assert "sk-live" not in repr(ask)
-
-
-# ---------------------------------------------------------------------------
-# Cross-agent isolation on the report read
-# ---------------------------------------------------------------------------
-
 def test_a_report_belonging_to_another_agent_is_not_readable(monkeypatch):
     """Report ids are global. The roster gate only proves the caller may reach
     THIS agent, so without the ownership check its page becomes a reader for
     every report in the install."""
     from client_portal import agent_page
 
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: {
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: {
         "id": rid, "agent_name": OTHER, "title": "someone else's numbers",
         "payload": {"secret": 1},
     })
 
-    assert agent_page.report_detail(AGENT, "r1") is None
+    assert agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL) is None
 
 
 def test_a_missing_report_and_a_foreign_one_are_indistinguishable(monkeypatch):
@@ -118,12 +85,12 @@ def test_a_missing_report_and_a_foreign_one_are_indistinguishable(monkeypatch):
     test whether a report id exists (invariant #8)."""
     from client_portal import agent_page
 
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: None)
-    missing = agent_page.report_detail(AGENT, "nope")
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: None)
+    missing = agent_page.report_detail(AGENT, "nope", client_email=CLIENT_EMAIL)
 
-    monkeypatch.setattr(agent_page.db, "get_report",
-                        lambda rid: {"id": rid, "agent_name": OTHER, "payload": {}})
-    foreign = agent_page.report_detail(AGENT, "r1")
+    monkeypatch.setattr(agent_page.db, "get_report_for_client",
+                        lambda rid, _email: {"id": rid, "agent_name": OTHER, "payload": {}})
+    foreign = agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL)
 
     assert missing is None and foreign is None
 
@@ -131,13 +98,13 @@ def test_a_missing_report_and_a_foreign_one_are_indistinguishable(monkeypatch):
 def test_the_agents_own_report_is_returned(monkeypatch):
     from client_portal import agent_page
 
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: {
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: {
         "id": rid, "agent_name": AGENT, "title": "Weekly", "payload": {"rows": []},
         "report_type": "recon.weekly", "display_hint": "table",
         "period_start": None, "period_end": None, "created_at": "2026-08-13T00:00:00Z",
     })
 
-    got = agent_page.report_detail(AGENT, "r1")
+    got = agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL)
 
     assert got["id"] == "r1" and got["payload"] == {"rows": []}
 
@@ -172,7 +139,10 @@ def test_a_failing_data_source_degrades_that_section_only(monkeypatch):
 
     page = agent_page.build_page(EMAIL, AGENT, {"description": "d"}, window="7d")
 
-    assert page["asks"] == [] and page["recent_work"] == []
+    # #2449: `asks` left this payload — the page renders them from `/asks`
+    # through `PortalAsks`, one projection instead of two.
+    assert "asks" not in page
+    assert page["recent_work"] == []
     assert page["header"]["health"]["status"] == "unknown"
     assert page["stats"]["unavailable"] is True
     assert page["header"]["description"] == "d"   # what IS known still renders

@@ -357,7 +357,7 @@ After testing:
 - Requirements: `requirements.md` section 10.8
 - Collector Config: `config/otel-collector.yaml`
 - Observability Store: `src/frontend/src/stores/observability.js`
-- Observability Panel: `src/frontend/src/components/ObservabilityPanel.vue`
+- Observability Panel: `src/frontend/src/components/ObservabilityPanel.vue` (deleted in #2492 — the panel was unreferenced; observability data is verified via the API below)
 
 ---
 

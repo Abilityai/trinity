@@ -76,6 +76,12 @@ def _reminder_outcome_unknown(exc: BaseException) -> bool:
 _POLL_DEADLINE_WHEN_NULL = 7200
 
 
+# #2391: statuses `_poll_execution_completion` must poll THROUGH rather than
+# treat as an outcome. `queued` joined `running` when the scheduler's dispatch
+# became able to land on the durable pull queue.
+_NON_TERMINAL_POLL_STATES = (ExecutionStatus.RUNNING, ExecutionStatus.QUEUED)
+
+
 class SchedulerService:
     """
     Manages scheduled task execution for agents.
@@ -1143,6 +1149,7 @@ class SchedulerService:
                 timeout_seconds=schedule.timeout_seconds,
                 allowed_tools=schedule.allowed_tools,
                 execution_id=execution.id,
+                deliver_to_workspace_email=schedule.deliver_to_workspace_email,
             )
 
             status = result.get("status", ExecutionStatus.FAILED)
@@ -1320,6 +1327,7 @@ class SchedulerService:
         timeout_seconds: Optional[int] = None,
         allowed_tools: Optional[list] = None,
         execution_id: Optional[str] = None,
+        deliver_to_workspace_email: Optional[str] = None,
     ) -> dict:
         """
         Execute a task via the backend's internal TaskExecutionService endpoint.
@@ -1362,6 +1370,14 @@ class SchedulerService:
             payload["allowed_tools"] = allowed_tools
         if execution_id:
             payload["execution_id"] = execution_id
+        if deliver_to_workspace_email:
+            # ent#498. The scheduler carries the ADDRESS only: it creates the
+            # execution row itself and always sends `execution_id`, so the
+            # backend's channel-persisting branch (`if not execution_id:`) can
+            # never run for a cron fire — channel columns passed as kwargs would
+            # be silently inert (#2426). The backend resolves the session and
+            # stamps the pre-created row before dispatch.
+            payload["deliver_to_workspace_email"] = deliver_to_workspace_email
 
         # Step 1: Dispatch with the configured deadline (#1022 — was a 30s
         # literal). The async endpoint normally returns ~instantly; reaching
@@ -1461,7 +1477,14 @@ class SchedulerService:
                 logger.warning(f"Execution {execution_id} not found in DB during polling (poll #{poll_count})")
                 continue
 
-            if execution.status != ExecutionStatus.RUNNING:
+            # #2391: `queued` is NOT a terminal. A pull-pilot agent's scheduled
+            # row is handed to the durable queue and sits there until a worker
+            # claims it back to `running`; treating that as "completed" would
+            # publish a bogus schedule_execution_completed(status=queued),
+            # classify it as a failure (anything != success is), and hand it to
+            # `_maybe_schedule_retry` — a duplicate run of work that is queued
+            # and about to run. Poll through it like `running`.
+            if execution.status not in _NON_TERMINAL_POLL_STATES:
                 logger.info(
                     f"Execution {execution_id} completed: status={execution.status} "
                     f"(polled {poll_count} times)"
@@ -1478,7 +1501,10 @@ class SchedulerService:
 
             if poll_count % 6 == 0:  # Log every ~60s at default 10s interval
                 elapsed = int(time.monotonic() - (deadline - effective_timeout - 60))
-                logger.info(f"Execution {execution_id} still running ({elapsed}s elapsed, poll #{poll_count})")
+                logger.info(
+                    f"Execution {execution_id} still {execution.status} "
+                    f"({elapsed}s elapsed, poll #{poll_count})"
+                )
 
         raise Exception(
             f"Polling deadline exceeded for execution {execution_id} "
@@ -1568,15 +1594,18 @@ class SchedulerService:
             logger.error(f"Background poll for execution {execution_id} failed: {e}")
             # Check if backend already finalized the execution
             current = self.db.get_execution(execution_id)
-            if current and current.status != ExecutionStatus.RUNNING:
+            if current and current.status not in _NON_TERMINAL_POLL_STATES:
                 logger.info(
                     f"Execution {execution_id} already finalized as '{current.status}' "
                     "— background poll error is benign"
                 )
             else:
-                # Execution stuck in running state - cleanup service will recover
+                # #2391: name the state we actually saw. A row still `queued` is
+                # waiting for a pull worker, and its owner is the lease reaper /
+                # backlog maintenance, not `cleanup_service`'s stale-running sweep.
                 logger.warning(
-                    f"Execution {execution_id} may be stuck in 'running' state — "
+                    f"Execution {execution_id} may be stuck in "
+                    f"'{current.status if current else 'unknown'}' state — "
                     "cleanup service will recover within 5 minutes"
                 )
 

@@ -22,8 +22,11 @@
     <div class="it-body">
       <!-- Loading is an honest skeleton, never a spinner over stale numbers:
            a tile that looks live while showing last week's figures is worse
-           than one that admits it is loading (ent#325 AC). -->
-      <div v-if="state === 'loading'" class="it-skel" role="status" aria-label="Loading">
+           than one that admits it is loading (ent#325 AC).
+           A tile that passes `owns-loading` renders its own loading face in the
+           default slot instead (ent#449) — the chassis cannot draw a scanline
+           over a zone only the tile knows the shape of. -->
+      <div v-if="state === 'loading' && !ownsLoading" class="it-skel" role="status" aria-label="Loading">
         <span class="l l1"></span><span class="l l2"></span><span class="l l3"></span>
       </div>
 
@@ -97,6 +100,20 @@ defineProps({
   linkTo: { type: [String, Object], default: null },
   linkLabel: { type: String, default: 'Open' },
   onRetry: { type: Function, default: null },
+  /**
+   * The tile renders its own loading face inside the default slot — one
+   * persistent `ScanlineReveal` around its data zone (ent#449). The chassis
+   * then renders the slot for `loading` AND `ready` and never shows `.it-skel`
+   * for this tile, so the tile's instance is PATCHED across the loading→ready
+   * edge rather than remounted (a remount re-inits the phase machine from
+   * `loading = false` and the reveal never plays).
+   *
+   * A tile owns its loading face ONLY: `error` and `empty` still replace the
+   * slot with the chassis message, so a terminal can never end up drawn under
+   * a loading track. Default off — every tile that has not adopted keeps the
+   * skeleton, and `.it-skel` stays until the last consumer adopts.
+   */
+  ownsLoading: { type: Boolean, default: false },
 })
 </script>
 

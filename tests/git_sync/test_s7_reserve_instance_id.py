@@ -106,6 +106,10 @@ _ensure_module_stubs()
 # the implementation.
 sys.modules.pop("services.git_service", None)
 from services import git_service  # noqa: E402  (after sys.path tweak)
+# #1028: `reserve_and_generate_instance_id` lives in `provisioning` and reads
+# `check_remote_branch_exists` and `db` from that module's globals, so the
+# patches go there. Calls still go through the package re-export.
+from services.git_service import provisioning as git_provisioning  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +316,8 @@ class TestReserveAndGenerateInstanceId:
             return False
 
         fake_db = _FakeDb()
-        monkeypatch.setattr(git_service, "check_remote_branch_exists", _no_collision)
-        monkeypatch.setattr(git_service, "db", fake_db, raising=False)
+        monkeypatch.setattr(git_provisioning, "check_remote_branch_exists", _no_collision)
+        monkeypatch.setattr(git_provisioning, "db", fake_db, raising=False)
 
         instance_id, working_branch = _run(
             git_service.reserve_and_generate_instance_id(
@@ -337,9 +341,9 @@ class TestReserveAndGenerateInstanceId:
 
         fake_db = _FakeDb()
         monkeypatch.setattr(
-            git_service, "check_remote_branch_exists", _collide_twice_then_clear
+            git_provisioning, "check_remote_branch_exists", _collide_twice_then_clear
         )
-        monkeypatch.setattr(git_service, "db", fake_db, raising=False)
+        monkeypatch.setattr(git_provisioning, "db", fake_db, raising=False)
 
         instance_id, working_branch = _run(
             git_service.reserve_and_generate_instance_id(
@@ -359,8 +363,8 @@ class TestReserveAndGenerateInstanceId:
             return True
 
         fake_db = _FakeDb()
-        monkeypatch.setattr(git_service, "check_remote_branch_exists", _always_collide)
-        monkeypatch.setattr(git_service, "db", fake_db, raising=False)
+        monkeypatch.setattr(git_provisioning, "check_remote_branch_exists", _always_collide)
+        monkeypatch.setattr(git_provisioning, "db", fake_db, raising=False)
 
         with pytest.raises(RuntimeError) as exc_info:
             _run(
@@ -406,8 +410,8 @@ class TestReserveAndGenerateInstanceId:
                 return types.SimpleNamespace(**kwargs)
 
         flaky = _FlakyDb()
-        monkeypatch.setattr(git_service, "check_remote_branch_exists", _no_collision)
-        monkeypatch.setattr(git_service, "db", flaky, raising=False)
+        monkeypatch.setattr(git_provisioning, "check_remote_branch_exists", _no_collision)
+        monkeypatch.setattr(git_provisioning, "db", flaky, raising=False)
 
         instance_id, working_branch = _run(
             git_service.reserve_and_generate_instance_id(

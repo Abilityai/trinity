@@ -6,6 +6,15 @@ A dedicated **Chat** tab in the Agent Detail page that provides a simple, clean 
 
 **Spec**: `docs/requirements/AUTHENTICATED_CHAT_TAB.md`
 
+> **This tab is text only (#2559).** It used to carry a second front door for
+> voice — a mic in the composer, an orb over the thread, and a transcript written
+> back into *this* chat. That is retired: the call lives in the Workspace
+> conversation, and the header's **Talk** button is a door into it
+> (`/workspace?agent=<name>&voice=1`). Voice rows already written into these
+> chats still render, badged as spoken — `ChatBubble` reads
+> `source === 'voice'` and is deliberately untouched. See
+> [voice-chat.md](voice-chat.md).
+
 ## User Story
 
 As an authenticated user, I want a simple chat interface with my agents that:
@@ -536,6 +545,11 @@ src/frontend/src/components/chat/
 - Enter to submit, supports v-model
 - Send button disabled when empty or loading
 - Exposes `focus()` method
+- Emits exactly `update:modelValue`, `submit`, `cancel` — the `voice` emit and its
+  `voiceAvailable`/`voiceActive` props went with the mic (#2559)
+
+*(The line counts and control lists in this section predate several changes to
+these components; treat them as orientation, not as a current inventory.)*
 
 **ChatLoadingIndicator.vue**
 - Three bouncing dots with staggered animation delays (0ms, 150ms, 300ms)

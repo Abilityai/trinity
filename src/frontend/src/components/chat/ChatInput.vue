@@ -163,25 +163,37 @@
         </svg>
       </button>
 
-      <!-- Voice button (VOICE-004) -->
+      <!-- The composer mic is gone (#2559). A mic here promised "speak into
+           this chat", which is exactly the parallel-surface promise the voice
+           retirement removes: the call lives in the Workspace and its transcript
+           lands there. The affordance moved to `AgentHeader`'s Talk button,
+           which is a door to that call — glyph included. -->
+
+      <!-- Send / Stop (ent#155). One control, not two: while a turn is in
+           flight Send is disabled anyway (`disabled` is the panel's `loading`),
+           so a second always-present button would be a dead control most of the
+           time and a competing target the rest. The swap also makes the
+           affordance impossible to miss — it occupies the place the user's
+           hand is already going. -->
       <button
-        v-if="voiceAvailable"
+        v-if="cancellable"
         type="button"
-        @click="$emit('voice')"
-        :disabled="disabled || voiceActive"
-        class="p-2 rounded-lg transition-colors shrink-0"
-        :class="voiceActive
-          ? 'bg-status-danger-500 hover:bg-status-danger-600 text-white'
-          : 'bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300 hover:bg-action-primary-100 dark:hover:bg-action-primary-900/30 hover:text-action-primary-600 dark:hover:text-action-primary-400 disabled:opacity-50'"
-        :title="voiceActive ? 'Voice session active' : 'Start voice conversation'"
+        @click="$emit('cancel')"
+        :disabled="cancelling"
+        class="p-2 bg-status-danger-600 hover:bg-status-danger-700 disabled:bg-status-danger-400 text-white rounded-lg transition-colors shrink-0"
+        :title="cancelling ? 'Stopping…' : 'Stop this turn (Esc)'"
+        aria-label="Stop this turn"
       >
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z" />
+        <svg v-if="cancelling" class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>
+        <svg v-else class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <rect x="7" y="7" width="10" height="10" rx="1.5" stroke-width="2" />
         </svg>
       </button>
-
-      <!-- Send button -->
       <button
+        v-else
         type="submit"
         :disabled="disabled || (!localMessage.trim() && pendingFiles.length === 0)"
         class="p-2 bg-action-primary-600 hover:bg-action-primary-700 disabled:bg-action-primary-400 text-white rounded-lg transition-colors shrink-0"
@@ -247,17 +259,18 @@ const props = defineProps({
     type: String,
     default: 'stopped'
   },
+  // ent#155: a turn is in flight and this composer owns the Stop control.
+  cancellable: {
+    type: Boolean,
+    default: false
+  },
+  cancelling: {
+    type: Boolean,
+    default: false
+  },
   publicToken: {
     type: String,
     default: null
-  },
-  voiceAvailable: {
-    type: Boolean,
-    default: false
-  },
-  voiceActive: {
-    type: Boolean,
-    default: false
   },
   // #2198 — playbooks supplied by the parent, so this component does not fetch
   // them a second time. ChatPanel already loads the identical list (same
@@ -276,7 +289,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['update:modelValue', 'submit', 'voice'])
+const emit = defineEmits(['update:modelValue', 'submit', 'cancel'])
 
 const authStore = useAuthStore()
 const ac = usePlaybookAutocomplete()

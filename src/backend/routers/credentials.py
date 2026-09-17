@@ -1,3 +1,4 @@
+# mcp: agents.ts (get_credential_status, inject_credentials, export_credentials, import_credentials, get_credential_encryption_key)
 """
 Credential management routes for the Trinity backend.
 

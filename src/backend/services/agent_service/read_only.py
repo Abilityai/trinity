@@ -6,7 +6,9 @@ source code, instructions, or configuration files while allowing
 output to designated directories.
 
 The guard is baked into the base image at /opt/trinity/hooks/read-only-guard.py
-and registered in ~/.claude/settings.json (claude-settings.json).  The
+and registered in /etc/claude-code/managed-settings.json (ent#345 — root-owned,
+outside the agent's HOME and outside the git-synced tree; it used to be the
+agent-writable ~/.claude/settings.json).  The
 platform controls whether the guard is active by writing (or clearing)
 ~/.trinity/read-only-config.json inside the agent container.
 

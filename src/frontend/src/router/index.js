@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { setBaseTitle } from '@/utils/tabTitle'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'
@@ -72,18 +73,22 @@ export const routes = [
     meta: { requiresAuth: true, title: (to) => agentTabTitle(to.params.name) }
   },
   {
+    // ent#438 — the per-agent workspace is retired. It was a voice orb beside a
+    // canvas panel, gated behind WORKSPACE_ENABLED && GEMINI_API_KEY, and by the
+    // time this landed it had no capability of its own left: ent#440 put voice
+    // conversation inside the Workspace, and the canvas became a durable
+    // surface rendered on the agent's Workspace page and Agent Detail. Two
+    // things called "workspace" was the confusion this issue opens with.
+    //
+    // Function form so query and hash survive (the ent#381 shape). `?agent=`
+    // is the Workspace's own agent-selection param, so a bookmark to one
+    // agent's workspace still lands on that agent rather than a generic index.
     path: '/agents/:name/workspace',
-    name: 'AgentWorkspace',
-    component: () => import('../views/AgentWorkspace.vue'),
-    meta: { requiresAuth: true, title: (to) => `${agentTabTitle(to.params.name)} · Workspace` },
-    beforeEnter: async (to, from) => {
-      const sessionsStore = useSessionsStore()
-      await sessionsStore.loadFeatureFlags()
-      if (!sessionsStore.workspaceAvailable) {
-        return { name: 'AgentDetail', params: { name: to.params.name } }
-      }
-      return true
-    },
+    redirect: to => ({
+      path: '/workspace',
+      query: { ...to.query, agent: to.params.name },
+      hash: to.hash,
+    }),
   },
   {
     // #58/#60 (trinity-enterprise) — Brain Orb: capability-gated per-agent page.
@@ -229,6 +234,17 @@ export const routes = [
     // in one click. Standalone (no NavBar / platform chrome), no requiresAuth:
     // the external path must stay reachable without an account. Backend 404s in
     // OSS/unentitled builds; the page shows its sign-in / unavailable state.
+    // ent#554 — a shared canvas at a stable link. No `requiresAuth` for the
+    // same reason the Workspace has none: a `public` share must open with no
+    // account at all. An `authorized` share answers 401 from the API and the
+    // view offers a sign-in — the SERVER decides which, never the router, since
+    // a guard here would turn every public link into a login wall.
+    path: '/canvas/s/:token',
+    name: 'shared-canvas',
+    component: () => import('../views/SharedCanvas.vue'),
+    meta: { title: 'Shared canvas', hideHelpWidget: true }
+  },
+  {
     path: '/workspace',
     name: 'Workspace',
     component: () => import('../views/Portal.vue'),
@@ -261,7 +277,16 @@ export const routes = [
     path: '/workspace/a/:agentName',
     name: 'WorkspaceAgent',
     component: () => import('../views/Portal.vue'),
-    meta: { title: 'Workspace', hideHelpWidget: true }
+    // ent#556: the one Workspace route whose subject the ROUTE knows, so it is
+    // the one that can name it. Keeps the surface in the title — a bare agent
+    // name would lose "Workspace" — and reuses `agentTabTitle`, so an operator
+    // (warm agents store) sees the display name and a client session, which
+    // never populates that store, falls back to the slug. Threads and rooms
+    // cannot do this: their subject lives in component state, not the route.
+    meta: {
+      title: (to) => `Workspace · ${agentTabTitle(to.params.agentName)}`,
+      hideHelpWidget: true,
+    }
   },
   // ent#357 legacy paths. Function form so query AND hash survive the hop —
   // these URLs were handed to real clients by email, and a client landing on a
@@ -333,6 +358,17 @@ router.beforeEach(async (to, from) => {
     await authStore.waitForInit()
   }
 
+  // #2381: keep visitors off the setup page once the instance is provisioned.
+  // This check must run for the setup route ITSELF, which is why it sits above
+  // (and outside) the `!to.meta.isSetup` block below. It used to live inside
+  // that block, where it was unreachable dead code by construction — `/setup`
+  // carries `meta.isSetup: true`, so the only route the branch tested for was
+  // the one route the block skipped. Navigating straight to /setup rendered the
+  // full wizard on a completed install; only the backend 403 stopped a submit.
+  if (to.meta.isSetup && (await checkSetupStatus())) {
+    return '/login'
+  }
+
   // Check setup status for login and protected routes
   if (!to.meta.isSetup) {
     const setupCompleted = await checkSetupStatus()
@@ -344,11 +380,6 @@ router.beforeEach(async (to, from) => {
         return true
       }
       return '/setup'
-    }
-
-    // If setup completed and trying to access setup page, redirect to login
-    if (to.path === '/setup') {
-      return '/login'
     }
   }
 
@@ -404,7 +435,13 @@ const BASE_TITLE = 'Trinity'
 router.afterEach((to) => {
   const raw = to.meta?.title
   const label = typeof raw === 'function' ? raw(to) : raw
-  document.title = label ? `${BASE_TITLE} — ${label}` : `${BASE_TITLE} — Agent Orchestration`
+  // ent#557: routed THROUGH `setBaseTitle` rather than assigned here. The
+  // Workspace's unread count is a prefix on this string and changes on its own
+  // schedule, so with two direct writers the last one to fire would erase the
+  // other's half — a navigation would drop the count, a count update would drop
+  // the label. `utils/tabTitle.js` holds both halves and renders the whole
+  // string; this line still owns what the LABEL says.
+  setBaseTitle(label ? `${BASE_TITLE} — ${label}` : `${BASE_TITLE} — Agent Orchestration`)
 })
 
 // Clear setup cache on successful setup

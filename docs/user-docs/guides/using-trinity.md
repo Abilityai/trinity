@@ -6,7 +6,7 @@ A quick tour of the web UI — dashboard, agent management, chat, and day-to-day
 
 ## Logging In
 
-- **Admin login** — Enter username `admin` and the password set via `ADMIN_PASSWORD` in `.env` before first boot (self-hosted) or the one chosen at signup (cloud). There is no first-visit password wizard.
+- **Admin login** — Enter username `admin` (or your admin email) and the password set via `ADMIN_PASSWORD` in `.env` before first boot (self-hosted), the one chosen at signup (cloud), or — on an install booted without `ADMIN_PASSWORD`, such as a marketplace one-click droplet — the one you chose on the first-visit "Create your admin account" screen.
 - **Email login** — Enter your email to receive a 6-digit code (requires email service configuration).
 
 ## Top Navigation
@@ -17,8 +17,11 @@ A quick tour of the web UI — dashboard, agent management, chat, and day-to-day
 | **Library** | Everything installable: agent templates, systems, and skills |
 | **Operations** | Operator queue, notifications, health, executions |
 | **Settings** | Platform configuration (all users see MCP Keys; admins see every tab) |
+| **Workspace** | The chat app — one continuous conversation per agent, voice, files, loops, and the agent's canvas. Opens in its own browser tab so the console page you were on stays put |
 
 One more entry appears only on entitled installations: **Enterprise** (the entitled-feature catalogue). Shared multi-agent rooms are not a nav entry — they open from the Workspace when you `@mention` a second agent in a chat.
+
+See [Workspace](../sharing-and-access/workspace.md) for the full tour of that surface.
 
 There is no separate Agents page — it is now the Dashboard's List mode, and `/agents` redirects there.
 
@@ -30,7 +33,9 @@ The Dashboard gives you a bird's-eye view of your agent fleet in three interchan
 - **Grid** — A draggable tile canvas, optionally overlaid with department zones and reporting lines.
 - **List** — A sortable, filterable row list with inline toggles and bulk tag actions.
 
-Shared controls across all three: press `/` to type-filter the fleet by name, plus tag filter, owner filter, time range, and **Create Agent**.
+Shared controls across all three: press `/` to type-filter the fleet by name, press `v` to cycle the view, plus tag filter, owner filter, time range, and **Create Agent**.
+
+On a fresh install the Dashboard opens **first-run setup** — one guided sequence (connect Claude, optional keys, your first agent, usage sharing) that you can re-run from **Settings → General → First-run setup** or with `?onboarding=1`. After that, on instances that have it, a **Getting started** checklist sits in the Dashboard's left **Systems** sidebar, under the view list, until your first milestones are done. See [First-Time Setup → Your First Dashboard](../getting-started/setup.md#your-first-dashboard).
 
 See [Dashboard](../operations/dashboard.md) for the full reference.
 
@@ -44,7 +49,7 @@ See [Dashboard](../operations/dashboard.md) for the full reference.
 
 The active tab lives in the URL, so a tab is linkable and survives a refresh. Switching tabs doesn't push browser history, so Back leaves the page rather than walking you through the tabs you visited. Each tab loads independently, so a failure in one never blanks the others.
 
-Skills are still *assigned* from an agent's own Skills tab. What the Library adds is the fleet-wide read: per skill, the agents that hold it, plus a list of assignments whose skill has since left the library.
+Each skill card carries an **Assigned to** list of the agents that hold it, an **Assign to…** picker to add another, and an × on each holder chip to unassign — so the page that tells you a skill is unused is the page that fixes it. A separate block lists assignments whose skill has since left the library; those packages stay on each agent until removed from that agent's Skills tab. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
 
 ## Agent Management
 
@@ -53,24 +58,32 @@ Click any agent to open its detail page. Tabs appear based on what the agent has
 | Tab | Purpose |
 |-----|---------|
 | **Overview** | Landing tab — trends, health, needs-attention count, footprint |
-| **Tasks** / **Chat** | Send work to the agent; conversation history |
+| **Tasks** / **Chat** | Send work to the agent. Chat here is stateless — each message starts fresh; **Continue in Workspace →** opens the continuous conversation |
+| **Dashboard** | The agent's own YAML-defined dashboard (only when the agent ships one) |
+| **Brain** | The Brain Orb mind page (only when enabled for the agent) |
 | **Reports** | Structured reports the agent has published |
+| **Canvas** | The surface the agent keeps current — its living sibling to Reports |
 | **Schedules** | Cron jobs, trigger history, next run times |
 | **Loops** | Bounded sequential task runs |
 | **Playbooks** | Reusable prompts the agent exposes |
 | **Credentials** | Per-agent credential setup and status |
+| **Payments** | Nevermined payment configuration |
 | **Access** / **Sharing** / **Permissions** | Who can reach the agent, and which agents it may call |
+| **A2A** | Inbound A2A exposure (owner-only, entitled installations) |
 | **Git** | Repository binding, sync status, and history |
-| **Files** | Browse agent workspace, download files |
+| **Files** / **Folders** | Browse the agent workspace, download files, shared folders |
 | **Skills** | Assign and sync skills from the library |
-| **Settings** | Autonomy, resources, timeouts, runtime options |
+| **Settings** | Guardrails, autonomy, resources, timeouts, runtime options |
 | **Info** | Template metadata and "what you can ask" |
 
-Key actions:
+Header actions:
 
 - **Start/Stop** — Toggle agent container state.
 - **Autonomy** — Enable/disable proactive (scheduled) operation. Turning it off holds schedules and reminders without erasing their individual on/off state, so turning it back on restores exactly what you had.
-- **Terminal** — SSH-style access to the agent container.
+- **Workspace** — Open this agent in the Workspace.
+- **Talk** — Start a voice call with the agent. The call opens in the Workspace and the conversation lives there, not in this page's chat.
+
+There is no browser terminal on this page. Direct shell access is by SSH — see [Agent Terminal](../agents/agent-terminal.md).
 
 ## Creating Agents from the UI
 
@@ -84,12 +97,13 @@ Importing an existing GitHub repository runs a compatibility check inline and le
 
 ## Operations
 
-**Operations** in the top nav is your control center for real-time oversight — one page at `/operations` with five tabs:
+**Operations** in the top nav is your control center for real-time oversight — one page at `/operations` with six tabs:
 
 - **Needs Response** — Agent questions and approval requests waiting on you.
 - **Notifications** — Agent alerts and status changes.
 - **Health** (admin only) — Fleet health status; the monitoring loop is off by default and must be enabled explicitly, and the setting persists across restarts.
 - **Executions** — All task runs across your fleet, with filters and live stats.
+- **Reports** — Structured reports published by your agents, fleet-wide.
 - **Resolved** — Previously handled items.
 
 The nav entry carries a single badge counting pending queue items and notifications; it pulses when something critical is waiting. Each operator tab has a **Clear All** button for bulk cleanup.
@@ -100,14 +114,14 @@ Settings is visible to every authenticated user, but most tabs are admin-only. N
 
 | Tab | Who | Purpose |
 |-----|-----|---------|
-| **General** | Admin | Platform-wide options and feature flags |
-| **Access** | Admin | Email whitelist, roles, who can log in |
-| **Integrations** | Admin | Slack, Telegram, WhatsApp, and other channel connections |
-| **MCP Keys** | Everyone | Create and revoke your own MCP API keys |
-| **Agents** | Admin | GitHub template sources, skill sources, fleet defaults |
-| **Retention** | Admin | How long executions, logs, health checks, and soft-deleted records are kept |
+| **General** | Admin | **First-run setup** (re-run the guided sequence), **Usage sharing** (opt-in telemetry), **Security & product updates** (operator contact), admin sign-in email, platform options and feature flags, proactive message limits, Brain Orb, voice, Trinity prompt, build info, default avatars |
+| **Access** | Admin | Email whitelist, user management and roles, **SSH Access** toggle |
+| **Integrations** | Admin | Platform keys set in the browser (Anthropic, GitHub, email provider, Gemini), Slack, OAuth credentials, subscriptions (Claude subscription pool with live headroom), transport connection |
+| **MCP Keys** | Everyone | Create and revoke your own MCP API keys; your personal GitHub token |
+| **Agents** | Admin | GitHub templates, **Template registry**, **Skills Library** sources, agent quotas, automation defaults |
+| **Retention** | Admin | How long executions, logs, health checks, and soft-deleted records are kept; **Workspace sessions** policy; **Room budgets** |
 
-Additional tabs (**Agent Permissions**, **Security**, **SSO**, **Activation**) appear only when the corresponding capability is enabled on your installation.
+Additional tabs (**Agent Permissions**, **Security**, **SSO**, **Vault**, **Activation**) appear only when the corresponding capability is enabled on your installation.
 
 Retention windows have exactly one validated write path — values are type- and range-checked, the change is audit-logged, and an unusually large deletion is held for explicit approval rather than run silently. See [Monitoring](../operations/monitoring.md).
 

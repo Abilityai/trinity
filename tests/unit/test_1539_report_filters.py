@@ -34,23 +34,20 @@ sys.path.insert(0, _BACKEND_STR)
 
 
 def _make_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE agent_reports (
-            id TEXT PRIMARY KEY,
-            agent_name TEXT NOT NULL,
-            user_id INTEGER,
-            report_type TEXT NOT NULL,
-            title TEXT NOT NULL,
-            payload TEXT NOT NULL,
-            display_hint TEXT,
-            schema_version INTEGER DEFAULT 1,
-            period_start TEXT,
-            period_end TEXT,
-            created_at TEXT NOT NULL
-        )
-        """
-    )
+    """Create `agent_reports` from the SAME metadata the code uses.
+
+    This used to be a hand-copied `CREATE TABLE`, i.e. a second declaration of a
+    table that already has one — and it broke the moment ent#365 added the
+    audience columns, with an error about the FIXTURE rather than about the
+    filters this suite exists to test. Deriving it means the next column arrives
+    here for free, and a filter test can never pass against a table shape the
+    product does not have.
+    """
+    from sqlalchemy.schema import CreateTable
+    from sqlalchemy.dialects import sqlite as sqlite_dialect
+    from db.tables import agent_reports
+
+    conn.execute(str(CreateTable(agent_reports).compile(dialect=sqlite_dialect.dialect())))
     conn.commit()
 
 

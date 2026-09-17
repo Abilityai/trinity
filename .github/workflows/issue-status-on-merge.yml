@@ -1,8 +1,73 @@
 name: Issue Status on PR Merge
 
+# `push` to `dev` — not `pull_request_target` (#2822), not `pull_request` (#2767).
+#
+# WHY NOT `pull_request_target` (#2822 — this file produced ZERO runs)
+#
+# GitHub reads a `pull_request_target` workflow from the DEFAULT branch of the
+# base repository, not from the pull request's base branch: the event's
+# `GITHUB_REF` is the default branch and `GITHUB_SHA` is the last commit on it.
+# #2769 changed the trigger here on `dev`, where the file lands first, so
+# neither branch could start a run — `main` still said `pull_request`, and
+# `dev`'s copy was never consulted for registration. `pull_request` was equally
+# dead by then: it is read from the PR's merge ref, which resolves against
+# `dev`, and `dev` no longer declared it. Measured 2026-09-15: 17 PRs merged
+# into `dev` after that commit, 10 of them naming 11 issues with a closing
+# keyword, and every one of those issues was relabelled by hand.
+#
+# `push` is read from the ref being pushed — the docs are explicit that this
+# "includes workflows that are not merged into the default branch" — so a
+# trigger change to this file takes effect on the merge that lands it and can
+# never go dark waiting for a release cut. That is the property #2822 asks for,
+# not merely a way to restore today's promotion.
+#
+# It is also the one trigger already PROVEN live on `dev` in this repo, in the
+# same window: `deploy-dev.yml` and fifteen other workflows declare
+# `push: branches: [dev]` and ran on every merge that this file missed
+# (measured 2026-09-15: 100+ push runs on `dev` since `b8a790b2`, against 0
+# here). Same branch, same merges, same release-cut lag — the difference is
+# only which ref the trigger is read from.
+#
+# WHY IT STILL FIXES #2767 (fork PRs)
+#
+# On `pull_request` a PR opened from a FORK gets a READ-ONLY `GITHUB_TOKEN`, so
+# every label write was refused with "Resource not accessible by integration"
+# and the issue stranded in `status-in-progress` after its fix had already
+# landed. That only ever bit external contributors — the PRs nobody is watching
+# the label on. A `push` to `dev` is a base-repo event whatever the merged PR's
+# origin, so the token carries exactly the `permissions:` block below and a
+# fork's issue is promoted like anyone else's.
+#
+# WHY THIS IS SAFE, AND WHAT WOULD MAKE IT UNSAFE
+#
+# The privilege-escalation footgun that came with `pull_request_target` — a
+# write token handed to a workflow a stranger's PR can start — is gone: a push
+# to `dev` only happens after a maintainer merges. The two properties that
+# bounded it are kept anyway, because they are what makes the untrusted PR text
+# harmless:
+#
+#   * there is NO `actions/checkout` — no PR code is ever fetched;
+#   * there are NO `run:` steps — nothing from the PR is ever executed;
+#   * the only untrusted values read are `pull_request.title` and `.body`, and
+#     they reach exactly one regex that extracts `\d+`. Nothing is interpolated
+#     into a shell, and nothing is `eval`'d.
+#
+# The residual capability is bounded to what the feature does anyway: a merged
+# PR can name which issue numbers get relabelled. That requires a maintainer to
+# MERGE it first, affects labels only, and is recorded in the issue's timeline.
+#
+# If you add a checkout or a `run:` step, or use the PR's text beyond the number
+# regex, re-derive that argument — `tests/unit/test_2767_issue_status_fork_prs.py`
+# fails the build if any of it stops holding, and
+# `tests/unit/test_2822_issue_status_trigger_registration.py` fails if the
+# trigger moves back to one that is registered from `main`.
+#
+# Keeping `push` also takes this file out of the scope of
+# `tests/unit/test_2814_workflow_trigger_parity.py`: that check exists for events
+# GitHub registers from the default branch, and it asserts `push` is not one of
+# them. The divergence it was written to catch is the one this change removes.
 on:
-  pull_request:
-    types: [closed]
+  push:
     branches: [dev]
 
 permissions:
@@ -11,15 +76,57 @@ permissions:
 
 jobs:
   mark-in-dev:
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Mark referenced issues as status-in-dev
         uses: actions/github-script@v9
         with:
           script: |
-            const pr = context.payload.pull_request;
-            const haystack = `${pr.title || ''}\n${pr.body || ''}`;
+            const base = context.ref.replace('refs/heads/', '');
+
+            // A `push` payload carries no pull request, so the merged PR is
+            // resolved from the commits the push landed. A squash merge is one
+            // commit, and every PR here is squash-merged; the loop is for the
+            // multi-commit push (an admin back-merge) that would otherwise
+            // promote only the tip's PR. `head_commit` is null for a branch
+            // deletion, which `dev`'s branch protection makes unreachable.
+            const shas = (context.payload.commits || []).map(c => c.id);
+            if (shas.length === 0 && context.payload.head_commit) {
+              shas.push(context.payload.head_commit.id);
+            }
+            if (shas.length === 0) {
+              core.info('Push carried no commits — nothing to promote.');
+              return;
+            }
+
+            const prs = new Map();
+            for (const sha of shas) {
+              const { data } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: sha,
+              });
+              // BOTH filters are load-bearing, and neither is hypothetical.
+              // The endpoint documents that for a commit "not present in the
+              // default branch" — which every `dev` commit is until a release
+              // cut — it returns "merged AND OPEN pull requests associated
+              // with the commit". Measured on `b8a790b2`: six PRs come back,
+              // one merged and five OPEN, every one of them `base: dev`,
+              // because any branch cut from `dev` afterwards contains the
+              // commit. So `merged_at` is what stops an open PR's close list
+              // being promoted the moment someone else merges, and `base.ref`
+              // is what stops the `dev` -> `main` release PR — whose body
+              // closes every issue in the release — from doing the same.
+              for (const pr of data) {
+                if (pr.merged_at && pr.base && pr.base.ref === base) {
+                  prs.set(pr.number, pr);
+                }
+              }
+            }
+
+            const haystack = [...prs.values()]
+              .map(pr => `${pr.title || ''}\n${pr.body || ''}`)
+              .join('\n');
 
             // Match Fixes/Fixed/Closes/Closed/Resolves/Resolved #N (case-insensitive)
             const pattern = /\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s+#(\d+)/gi;
@@ -32,6 +139,14 @@ jobs:
 
             core.info(`Promoting ${issues.length} issue(s) to status-in-dev: ${issues.join(', ')}`);
 
+            // #2767: collected, not thrown at the first miss. Every issue is
+            // still attempted — one unlabelable issue must not strand the
+            // others — and the run goes RED at the end. A refused write used
+            // to be a `core.warning` on a SUCCESSFUL run, which is how this
+            // stayed invisible: the job was green while the issue sat in
+            // `status-in-progress` with its fix already on dev.
+            const failures = [];
+
             for (const num of issues) {
               try {
                 await github.rest.issues.addLabels({
@@ -42,7 +157,7 @@ jobs:
                 });
                 core.info(`#${num}: added status-in-dev`);
               } catch (e) {
-                core.warning(`#${num}: failed to add status-in-dev — ${e.message}`);
+                failures.push(`#${num}: could not add status-in-dev — ${e.message}`);
                 continue;
               }
 
@@ -55,9 +170,19 @@ jobs:
                 });
                 core.info(`#${num}: removed status-in-progress`);
               } catch (e) {
-                // Label may not be present; that's fine.
-                if (e.status !== 404) {
-                  core.warning(`#${num}: failed to remove status-in-progress — ${e.message}`);
+                // A 404 means the label was not on the issue — the normal case
+                // for an issue that was never picked up, and not a failure.
+                if (e.status === 404) {
+                  core.info(`#${num}: status-in-progress was not present`);
+                } else {
+                  failures.push(`#${num}: could not remove status-in-progress — ${e.message}`);
                 }
               }
+            }
+
+            if (failures.length > 0) {
+              core.setFailed(
+                `${failures.length} issue label write(s) were refused — the issues below are ` +
+                `still mislabelled and need a manual fix:\n` + failures.join('\n')
+              );
             }

@@ -28,7 +28,7 @@ from typing import Optional, Dict, Any
 from sqlalchemy import select, insert, update, delete, func, or_, and_
 
 from .engine import get_engine
-from .tables import agent_shared_files
+from .tables import agent_shared_files, portal_file_dismissals
 from utils.helpers import utc_now_iso, iso_cutoff
 
 
@@ -154,6 +154,14 @@ class AgentSharedFilesOperations:
             conn.execute(
                 delete(agent_shared_files).where(agent_shared_files.c.id.in_(ids))
             )
+            # #2582 — the per-viewer dismissals of the shares we just purged, in
+            # the SAME transaction (this whole block is one `begin()`), so the
+            # rows cannot survive the ids they name.
+            conn.execute(
+                delete(portal_file_dismissals).where(
+                    portal_file_dismissals.c.file_id.in_(ids)
+                )
+            )
             return stored
 
     def delete_for_agent(self, agent_name: str) -> list:
@@ -181,6 +189,14 @@ class AgentSharedFilesOperations:
             conn.execute(
                 delete(agent_shared_files).where(
                     agent_shared_files.c.agent_name == agent_name
+                )
+            )
+            # #2582 — the other purge path, and the one the AgentRef
+            # registration exists for. Deleting the shares without this leaves
+            # every dismissal of them orphaned with nothing to join back to.
+            conn.execute(
+                delete(portal_file_dismissals).where(
+                    portal_file_dismissals.c.agent_name == agent_name
                 )
             )
             return stored

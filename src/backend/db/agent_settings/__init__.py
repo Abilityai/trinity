@@ -11,6 +11,7 @@ Each module provides a mixin class that AgentOperations inherits from:
 - GitPATMixin: Per-agent GitHub PAT management (#347)
 - FileSharingMixin: Per-agent outbound file-sharing toggle (FILES-001)
 - McpExposureMixin: Per-agent MCP-exposure toggle (#846)
+- OperatorResumeMixin: Per-agent respond→resume opt-in (ent#329)
 - A2AExposureMixin: Per-agent A2A inbound-server exposure toggle (ent#157)
 """
 
@@ -25,6 +26,7 @@ from .git_pat import GitPATMixin
 from .file_sharing import FileSharingMixin
 from .display_label import DisplayLabelMixin
 from .mcp_exposure import McpExposureMixin
+from .operator_resume import OperatorResumeMixin
 from .a2a_exposure import A2AExposureMixin
 from .tts import TtsMixin
 from .ephemeral import EphemeralMixin
@@ -40,6 +42,7 @@ __all__ = [
     'GitPATMixin',
     'FileSharingMixin',
     'McpExposureMixin',
+    'OperatorResumeMixin',
     'A2AExposureMixin',
     'TtsMixin',
     'EphemeralMixin',

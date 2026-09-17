@@ -60,6 +60,7 @@ def owner_user():
     u.role = "user"
     u.connector_agent = None  # #1310: not a connector principal
     u.agent_name = None  # ent#293: not an agent-scoped key
+    u.mcp_scope = None  # #2323: the admin gate allowlists `mcp_scope`; an absent field fails CLOSED (a `None` default would make it the privileged JWT value). None = interactive human.
     return u
 
 
@@ -70,6 +71,7 @@ def admin_user():
     u.role = "admin"
     u.connector_agent = None  # #1310: not a connector principal
     u.agent_name = None  # ent#293: not an agent-scoped key
+    u.mcp_scope = None  # #2323: the admin gate allowlists `mcp_scope`; an absent field fails CLOSED (a `None` default would make it the privileged JWT value). None = interactive human.
     return u
 
 
@@ -253,14 +255,22 @@ class TestManualReassignHotReload:
 def register_env(monkeypatch):
     """Stub the db + the key-rollover fan-out for the register/upsert endpoint."""
     import routers.subscriptions as rs  # lazy: see module docstring
+    from datetime import datetime, timezone
+    from db_models import SubscriptionCredential
 
     fake_db = MagicMock()
     fake_db.get_user_by_username.return_value = {"id": 1}
-    created = MagicMock()
-    created.id = "sub-x"
-    created.name = "sub-X"
+    # A real model, not a MagicMock: since ent#582 the route returns it copied
+    # into `SubscriptionRegistration` (+ `connected_agents`).
+    now = datetime.now(timezone.utc)
+    created = SubscriptionCredential(id="sub-x", name="sub-X", owner_id=1, created_at=now, updated_at=now)
     fake_db.create_subscription.return_value = created
     monkeypatch.setattr(rs, "db", fake_db)
+    # Not the install's first credential: keeps the ent#582 first-credential
+    # connect (pinned in test_ent582_platform_keys.py) off the real test DB.
+    import importlib
+    monkeypatch.setattr(importlib.import_module("services.subscription_service"),
+                        "is_claude_auth_configured", lambda: True)
 
     # register_subscription 503s without an encryption key configured.
     monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "0" * 64)
@@ -275,8 +285,29 @@ def register_env(monkeypatch):
 
     monkeypatch.setattr(auto_switch, "reload_subscription_for_all_agents", _fanout)
 
+    # #2572: the endpoint also fires the credential-less adoption sweep. This
+    # file is about the #1089 rollover fan-out, so neutralize it here (its own
+    # behaviour is covered by tests/unit/test_2572_credentialless_adoption.py).
+    import services.subscription_service as _ss
+
+    async def _no_adopt(**_kwargs):
+        return {}
+
+    monkeypatch.setattr(_ss, "adopt_for_credentialless_agents", _no_adopt)
+
     return types.SimpleNamespace(
-        rs=rs, db=fake_db, created=created, fanout_calls=fanout_calls, auto_switch=auto_switch
+        rs=rs, db=fake_db, created=created, fanout_calls=fanout_calls,
+        auto_switch=auto_switch, http_request=_stub_http_request(),
+    )
+
+
+def _stub_http_request():
+    """The injected `Request` `register_subscription` now takes (#2572) — it is
+    read only for audit context (client IP / path / request id)."""
+    return types.SimpleNamespace(
+        client=types.SimpleNamespace(host="127.0.0.1"),
+        url=types.SimpleNamespace(path="/api/subscriptions"),
+        state=types.SimpleNamespace(request_id="req-1"),
     )
 
 
@@ -290,9 +321,11 @@ class TestRegisterKeyRollover:
 
         request = SubscriptionCredentialCreate(name="sub-X", token="sk-ant-oat01-rolled")
 
-        result = await register_env.rs.register_subscription(request, current_user=admin_user)
+        result = await register_env.rs.register_subscription(
+            request, http_request=register_env.http_request, current_user=admin_user
+        )
 
-        assert result is register_env.created
+        assert result.id == register_env.created.id and result.connected_agents == 0
         assert register_env.fanout_calls == ["sub-x"]  # fanned out to the upserted sub id
 
     @pytest.mark.asyncio
@@ -308,9 +341,11 @@ class TestRegisterKeyRollover:
 
         request = SubscriptionCredentialCreate(name="sub-X", token="sk-ant-oat01-rolled")
 
-        result = await register_env.rs.register_subscription(request, current_user=admin_user)
+        result = await register_env.rs.register_subscription(
+            request, http_request=register_env.http_request, current_user=admin_user
+        )
 
-        assert result is register_env.created  # upsert NOT failed by the fan-out error
+        assert result.id == register_env.created.id  # upsert NOT failed by the fan-out error
 
     @pytest.mark.asyncio
     async def test_non_admin_rejected(self, register_env, owner_user):
@@ -322,7 +357,9 @@ class TestRegisterKeyRollover:
         request = SubscriptionCredentialCreate(name="sub-X", token="sk-ant-oat01-rolled")
 
         with pytest.raises(HTTPException) as exc:
-            await register_env.rs.register_subscription(request, current_user=owner_user)
+            await register_env.rs.register_subscription(
+                request, http_request=register_env.http_request, current_user=owner_user
+            )
 
         assert exc.value.status_code == 403
         assert register_env.fanout_calls == []  # never reached the rollover fan-out

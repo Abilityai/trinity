@@ -72,6 +72,12 @@ def _expected_records(model_catalog) -> list[dict]:
             "publicChannel": m.public_channel,
             "adminDefaultSelectable": m.admin_default_selectable,
             "recommended": m.recommended,
+            # ent#403 — appended last, like the dataclass fields and the
+            # `_JS_KEY_MAP` rows. This dict IS the key-set assertion: the
+            # structural compare below is an equality, so a new emitted key that
+            # is not listed here turns this file red.
+            "workspace": m.workspace,
+            "workspaceTier": m.workspace_tier,
         }
         for m in model_catalog.MODEL_CATALOG
     ]
@@ -153,6 +159,69 @@ def test_opus_5_is_present_and_selectable_end_to_end():
     ), "PUT /api/agents/{name}/public-channel-model would still 422 claude-opus-5"
 
 
+# --- fable-5.1 selectable end-to-end (#2726, the headline AC) ---------------
+
+
+def test_fable_5_1_is_present_and_selectable_end_to_end():
+    """#2726: the current Fable tier must be selectable everywhere the catalog feeds.
+
+    Undated id (AC 4) — never a date-suffixed variant. The 422->200 assertion is
+    the one that actually bites: PUBLIC_CHANNEL_MODELS is a *validation* set, so a
+    missing model is rejected by the API, not merely absent from a dropdown.
+    """
+    model_catalog = _catalog()
+    by_id = {m.id: m for m in model_catalog.MODEL_CATALOG}
+    assert "claude-fable-5-1" in by_id, "claude-fable-5-1 missing from the catalog"
+    entry = by_id["claude-fable-5-1"]
+    assert entry.public_channel and entry.admin_default_selectable
+    assert not entry.recommended, "AC 7: the platform default does NOT move"
+    from services.settings_service import is_valid_public_channel_model
+
+    assert is_valid_public_channel_model(
+        "claude-fable-5-1"
+    ), "PUT /api/agents/{name}/public-channel-model would still 422 claude-fable-5-1"
+
+
+def test_at_most_one_latest_marker_per_family_and_fable_is_5_1():
+    """#2726 AC 2, as a GENERAL invariant rather than a one-off id check.
+
+    The bug this ticket fixes is precisely "two entries in one tier both claim
+    (latest)" — Fable 5 kept the marker after Fable 5.1 shipped. Asserting the
+    *rule* catches the same mistake on the next refresh, in any family; the
+    single pinned id below is the AC-specific half on top of it.
+    """
+    import re
+
+    model_catalog = _catalog()
+    latest_by_family: dict[str, str] = {}
+    for m in model_catalog.MODEL_CATALOG:
+        if "(latest)" not in m.note:
+            continue
+        fam = re.match(r"claude-([a-z]+)-", m.id)
+        assert fam, f"unparseable model id: {m.id}"
+        family = fam.group(1)
+        assert family not in latest_by_family, (
+            f"two '(latest)' markers in the {family} tier: "
+            f"{latest_by_family[family]} and {m.id} — only the current "
+            "generation carries it (#2726)"
+        )
+        latest_by_family[family] = m.id
+
+    by_id = {m.id: m for m in model_catalog.MODEL_CATALOG}
+    assert (
+        "(latest)" in by_id["claude-fable-5-1"].note
+    ), "AC 2: Claude Fable 5.1 must carry the '(latest)' marker in its tier"
+    assert (
+        "(latest)" not in by_id["claude-fable-5"].note
+    ), "AC 2: Claude Fable 5 is no longer the latest in its tier (#2726)"
+    assert latest_by_family.get("fable") == "claude-fable-5-1", (
+        "the Fable tier's '(latest)' marker must sit on claude-fable-5-1. This "
+        "pin is DELIBERATELY brittle: when the next Fable ships you MUST "
+        "consciously edit this line — that is the point, not an inconvenience "
+        "(the test_ent243 `_MINIMAL_PREFIXES` idiom)."
+    )
+
+
 # --- Per-flag assertions (independent flags, NOT a subset lattice) ----------
 
 
@@ -168,23 +237,38 @@ def test_per_model_flags():
     )
 
     # Legacy picker-only: neither public-channel nor admin-default.
-    for legacy in ("claude-opus-4-5-20251101", "claude-sonnet-4-5-20250929"):
+    legacy_ids = ("claude-opus-4-5-20251101", "claude-sonnet-4-5-20250929")
+    for legacy in legacy_ids:
         assert not by_id[legacy].public_channel
         assert not by_id[legacy].admin_default_selectable
 
-    # Claude-5 family + prior Opus generation: both flags True (the #1660 lists).
-    for current in (
+    # Claude-5 / 5.1 families + prior Opus generation: both flags True (#1660 lists).
+    current = (
         "claude-opus-5",
+        "claude-fable-5-1",
         "claude-fable-5",
         "claude-sonnet-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
-    ):
-        assert by_id[current].public_channel, f"{current} must be public-channel"
+    )
+    for model_id in current:
+        assert by_id[model_id].public_channel, f"{model_id} must be public-channel"
         assert by_id[
-            current
-        ].admin_default_selectable, f"{current} must be admin-default"
+            model_id
+        ].admin_default_selectable, f"{model_id} must be admin-default"
+
+    # Guard the guard (#2726): every catalog id must fall in one of the groups
+    # above, or a future entry is silently unchecked by this test. Before #2726
+    # this named 9 of the catalog's 10 entries — `claude-sonnet-4-6` sat in no
+    # group — so an 11th could be added and go entirely unasserted while green.
+    from services.settings_service import PLATFORM_DEFAULT_MODEL_VALUE
+
+    checked = {haiku.id, *legacy_ids, *current} | {PLATFORM_DEFAULT_MODEL_VALUE}
+    assert checked == set(by_id), (
+        f"models not covered by any flag group: {sorted(set(by_id) - checked)} — "
+        "add each to the group that states its intended policy"
+    )
 
 
 def test_derived_sets_are_subsets_of_the_picker():
@@ -225,3 +309,42 @@ def test_backend_public_channel_set_derives_from_catalog():
     assert set(backend_set) == {
         m.id for m in model_catalog.MODEL_CATALOG if m.public_channel
     }, "settings_service.PUBLIC_CHANNEL_MODELS drifted from the catalog re-export"
+
+
+# --- the Workspace subset (ent#403) -----------------------------------------
+
+
+def test_workspace_models_are_a_subset_of_the_public_channel_allow_list():
+    """The Workspace composer must never offer a model the #894 route would 422.
+
+    The Workspace validates its own field against `WORKSPACE_MODELS`, but the
+    value it accepts is resolved through the SAME ladder the operator route
+    writes (`is_valid_public_channel_model`). A workspace-only id would be taken
+    at the composer and refused wherever the two meet — the "two sources
+    silently disagree" ent#403's AC 5 exists to kill.
+
+    `model_catalog.py` asserts this at import; asserting it here too is what
+    makes the failure legible in CI rather than a collection error somewhere
+    unrelated (every module that imports `settings_service` imports this).
+    """
+    model_catalog = _catalog()
+
+    assert model_catalog.WORKSPACE_MODELS, "the curated Workspace set must not be empty"
+    assert model_catalog.WORKSPACE_MODELS <= model_catalog.PUBLIC_CHANNEL_MODELS
+    assert model_catalog.WORKSPACE_MODELS == {
+        m.id for m in model_catalog.MODEL_CATALOG if m.workspace
+    }, "WORKSPACE_MODELS drifted from the `workspace` flag it is derived from"
+
+
+def test_every_workspace_model_carries_a_plain_language_tier():
+    """The option's PRIMARY text is the tier, not the label — a workspace entry
+    with an empty tier renders a blank option. Import-time-asserted; pinned here
+    so the reason survives."""
+    model_catalog = _catalog()
+
+    tiers = [m.workspace_tier for m in model_catalog.MODEL_CATALOG if m.workspace]
+    assert all(t.strip() for t in tiers), "a workspace model with no tier renders blank"
+    assert len(set(tiers)) == len(tiers), (
+        "two options leading with the same words are not a choice — the reason "
+        "`workspace_tier` exists instead of reusing `note`"
+    )

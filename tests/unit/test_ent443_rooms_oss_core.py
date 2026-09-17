@@ -289,14 +289,15 @@ def test_the_room_revision_chains_off_the_hotfix_line_and_numbers_uniquely():
 
 
 def test_the_bootstrap_helper_owns_no_ddl():
-    """`shared_sessions/schema.py` is a test/bootstrap applier over the canonical
-    OSS statements (the `client_portal/schema.py` shape). A second copy of the
-    DDL here is how the two sources drift."""
+    """The test-side schema applier (`conftest.ensure_schema_tables`, which
+    replaced the `shared_sessions/schema.py` shim in #2493) applies the
+    canonical `db/schema.py` statements. A second copy of the DDL there is how
+    two sources drift."""
     import inspect
 
-    from shared_sessions import schema
+    import conftest
 
-    src = inspect.getsource(schema)
+    src = inspect.getsource(conftest.ensure_schema_tables)
     assert "CREATE TABLE" not in src, "the helper re-declares DDL"
     assert "from db.schema import" in src
 
@@ -308,11 +309,11 @@ def test_schema_helper_is_idempotent(tmp_path, monkeypatch):
 
     from sqlalchemy import inspect as sa_inspect
 
+    from conftest import ensure_schema_tables
     from db.engine import get_engine
-    from shared_sessions.schema import init_shared_sessions_schema
 
-    init_shared_sessions_schema()
-    init_shared_sessions_schema()  # second call must not raise
+    ensure_schema_tables("enterprise_rooms", "enterprise_room_participants", "enterprise_room_messages")
+    ensure_schema_tables("enterprise_rooms", "enterprise_room_participants", "enterprise_room_messages")  # second call must not raise
 
     present = set(sa_inspect(get_engine()).get_table_names())
     assert set(ROOM_TABLES) <= present
@@ -376,11 +377,11 @@ def test_rename_rekeys_the_agent_participant_and_leaves_humans_alone(
 
     from sqlalchemy import text
 
+    from conftest import ensure_schema_tables
     from db.agent_cleanup import cascade_rename
     from db.engine import get_engine
-    from shared_sessions.schema import init_shared_sessions_schema
 
-    init_shared_sessions_schema()
+    ensure_schema_tables("enterprise_rooms", "enterprise_room_participants", "enterprise_room_messages")
     engine = get_engine()
 
     with engine.begin() as conn:

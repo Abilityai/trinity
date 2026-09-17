@@ -6,6 +6,11 @@
     replaces it. Variants:
       - rows  : stacked shimmer bars (timeline rows, lists, cards)
       - nodes : scattered node-card placeholders (collaboration graph)
+
+    #1921 AC 5: `motion-reduce:animate-none` on both variants. The sanctioned
+    primitive was itself the one thing the sweep is meant to spread and did not
+    honour `prefers-reduced-motion` — every surface converted to it would have
+    inherited the violation.
   -->
   <div
     class="skeleton-loader w-full"
@@ -18,7 +23,7 @@
       <div
         v-for="n in count"
         :key="n"
-        class="animate-pulse bg-gray-200 dark:bg-gray-700 rounded-md w-full"
+        class="animate-pulse motion-reduce:animate-none bg-gray-200 dark:bg-gray-700 rounded-md w-full"
         :style="{ height }"
       ></div>
     </div>
@@ -31,7 +36,7 @@
       <div
         v-for="n in count"
         :key="n"
-        class="flex flex-col items-center gap-2 animate-pulse"
+        class="flex flex-col items-center gap-2 animate-pulse motion-reduce:animate-none"
       >
         <div
           class="rounded-full bg-gray-200 dark:bg-gray-700"

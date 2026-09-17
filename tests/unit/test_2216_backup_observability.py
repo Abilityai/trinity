@@ -45,7 +45,12 @@ def _load_isolated(name: str, relpath: str):
     return mod
 
 
-_RS = _load_isolated("backup_observability_settings_isolated", "routers/settings.py")
+# #1028: `routers/settings.py` is now the package `routers/settings/`. This
+# isolated load points at the module that owns the handler under test —
+# the split moved the code, not its behaviour.
+_RS = _load_isolated("backup_observability_settings_isolated", "routers/settings/retention.py")
+# `update_setting` lives in the generic `/{key}` module; this test drives both.
+_RS_GENERIC = _load_isolated("backup_observability_generic_isolated", "routers/settings/generic.py")
 
 pytestmark = pytest.mark.unit
 
@@ -55,6 +60,7 @@ def _admin():
     u.role = "admin"
     u.connector_agent = None
     u.agent_name = None
+    u.mcp_scope = None  # #2323: the admin gate allowlists `mcp_scope`; an absent field fails CLOSED (a `None` default would make it the privileged JWT value). None = interactive human.
     return u
 
 
@@ -171,7 +177,7 @@ class TestWritePath:
         from database import SystemSettingUpdate
         with pytest.raises(HTTPException) as exc:
             asyncio.run(
-                _RS.update_setting(
+                _RS_GENERIC.update_setting(
                     key="backup_retention_days",
                     body=SystemSettingUpdate(value="7"),
                     request=MagicMock(),

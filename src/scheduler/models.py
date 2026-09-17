@@ -13,6 +13,11 @@ from enum import Enum
 
 class ExecutionStatus(str, Enum):
     """Status of a schedule execution."""
+    # #2391: a dispatch the backend handed to the durable pull queue instead of
+    # pushing (pull-pilot agents only). NON-terminal — the agent's worker claims
+    # the row back to `running` — so `_poll_execution_completion` must keep
+    # polling through it, exactly as it does through `running`.
+    QUEUED = "queued"
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
@@ -59,6 +64,11 @@ class Schedule:
     validation_enabled: bool = False  # Enable post-execution validation
     validation_prompt: Optional[str] = None  # Custom auditor instructions
     validation_timeout_seconds: int = 120  # Timeout for validation task
+    # ent#498: deliver this schedule's output into one person's Workspace
+    # conversation. The scheduler carries the ADDRESS and nothing more — it is a
+    # separate process that cannot import the portal package, so which SESSION
+    # the brief lands in is resolved backend-side at dispatch.
+    deliver_to_workspace_email: Optional[str] = None
 
 
 @dataclass

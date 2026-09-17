@@ -18,18 +18,58 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from config import ROOM_SOURCE_CHANNEL
+from services.platform_prompt_service import build_user_facing_room_prompt
 from utils.helpers import utc_now_iso
 
 from . import db
 
 logger = logging.getLogger(__name__)
 
+# RETIRED as a gate (#2620). ent#443 moved rooms into OSS core: `main.py`
+# mounts both routers unconditionally, the routes dropped
+# `requires_entitlement`, and nothing registers this id any more — so
+# `isEntitled("shared_sessions")` is False on every build, OSS and enterprise
+# alike. A frontend gate on it therefore hides a working capability, which is
+# exactly what happened to the Room budget defaults panel for the whole life of
+# the OSS move.
+#
+# Kept rather than deleted only because the private enterprise submodule is not
+# visible from here and may still import the name; it is NOT an entitlement id.
+# Do not gate on it. Guarded by
+# `src/frontend/tests/unit/retiredEntitlementGates.spec.js`.
 FEATURE_ID = "shared_sessions"
 
 # Budgets — bounded by construction (the epic's measured reason: broadcast rooms
 # are quadratic in agents x rounds).
-DEFAULT_MAX_MESSAGES = 60
-DEFAULT_TTL_HOURS = 24
+#
+# 60 → 200 (#2620, operator ruling 2026-09-08): 60 turned out to be a working
+# session, not a runaway. Reaching it CLOSES the room permanently (`close_room`
+# is a one-way CAS with no reopen path), so the cap was ending real
+# conversations rather than catching abuse, and the only remedy — raising the
+# default — was behind a Settings panel that did not render.
+#
+# Worth knowing when tuning this: there is deliberately no default cost cap, so
+# THIS is the only hard spend bound a room has, and a message is not a unit of
+# spend — one @mention of three agents costs three turns. The time bound
+# (`DEFAULT_TTL_HOURS`) is the other backstop. Raising it further is an
+# operator decision about money, not a UI preference; `MAX_MESSAGES_CEILING`
+# (500) is the limit an admin may set from Settings → Retention.
+DEFAULT_MAX_MESSAGES = 200
+# 24h → 1 week (#2620, operator ruling 2026-09-08). The TTL is NOT a cost
+# control: an idle room costs nothing (agents run only when @mentioned), and
+# total spend is bounded by `DEFAULT_MAX_MESSAGES` regardless of when it is
+# spent. What it actually buys is hygiene, plus a bound on how long an old
+# room's remaining budget stays spendable by whoever can still reach it.
+#
+# 24h was ending working conversations overnight — the same complaint as the
+# 60-message cap, and the second of a room's two irreversible deaths
+# (`close_room` is a one-way CAS, so neither is undoable). A week outlives a
+# working week without leaving rooms open forever.
+#
+# `0` remains a supported explicit opt-out meaning NEVER expires (`_expiry`
+# returns None for `hours <= 0`), settable per install in Settings → Retention.
+DEFAULT_TTL_HOURS = 168
 
 # --- Operator budget defaults (ent#387) -----------------------------------
 #
@@ -109,6 +149,48 @@ def _user_identity(current_user) -> str:
 #
 # `kind` is free TEXT with no CHECK, so this needs no migration.
 WORKSPACE_KIND = "workspace_user"
+
+# Participant kinds that do NOT make a room client-facing.
+#
+# trinity-enterprise#363 says "a room containing a **workspace user**", and the
+# fleet-internal kinds are the complement of that. `user` is a PLATFORM account —
+# the operator and their team — and is deliberately here: an operator's own ops
+# room is not a customer-facing room, and telling its agents to keep costs,
+# infrastructure and queue plumbing out of it muzzles them on exactly the subject
+# the room was opened for.
+#
+# That matters more than it looks, because `create_room` always seats its creator
+# and the only removal path is `kind="agent"` — so a human participant can never
+# leave, and treating `user` as client-facing would make every room client-facing
+# and the else-branch below unreachable. An earlier revision of this did exactly
+# that: it generalised the ticket's "workspace user" to "any non-agent kind" and
+# shipped a test pinning the generalisation.
+#
+# An UNRECOGNISED kind still counts as a reader. That half of the complement is
+# right: ent#171's external A2A sender is the one already anticipated in
+# `db.count_budget_messages`, and a new kind is far likelier to be an outside
+# person than a machine.
+FLEET_INTERNAL_PARTICIPANT_KINDS = frozenset({"agent", "system", "user"})
+
+
+def room_is_user_facing(participants: list[dict]) -> bool:
+    """Is a CLIENT — someone outside the operator's own organisation — in this room?
+
+    Pure, so the rule is testable without a DB, and the ONE place the question is
+    answered (trinity-enterprise#363 AC 2: the signal is set by the platform from
+    MEMBERSHIP, never asserted by a participant — nothing a participant can write
+    reaches this).
+
+    A participant who has left (`left_at`) does not count: they cannot read what
+    is written after they go, and treating a departed client as present would
+    make the signal permanent for the life of the room.
+    """
+    for p in participants or []:
+        if p.get("left_at"):
+            continue
+        if str(p.get("kind") or "").strip() not in FLEET_INTERNAL_PARTICIPANT_KINDS:
+            return True
+    return False
 
 
 def _workspace_identity(principal) -> str:
@@ -459,10 +541,19 @@ def list_rooms(current_user) -> dict:
     room_ids = [r["id"] for r in rooms]
     participants_by_room = db.list_participants_for_rooms(room_ids)
     counts_by_room = db.count_messages_for_rooms(room_ids)
+    # ent#491: real recency for a room. Without it the Workspace sorts a room by
+    # when it was CREATED, so a busy month-old room ranks below one opened this
+    # morning and never used — the opposite of "most recent collaboration first".
+    # Same batching as the counts above: one more GROUP BY on the same table, not
+    # a per-room read.
+    last_by_room = db.last_message_for_rooms(room_ids)
 
     for r in rooms:
         participants = participants_by_room.get(r["id"], [])
         r["message_count"] = counts_by_room.get(r["id"], 0)
+        # Absent for an empty room; the client already falls back to `created_at`,
+        # which for a room nobody has spoken in is the honest answer.
+        r["last_message_at"] = last_by_room.get(r["id"])
         r["participant_count"] = len(participants)
         # ent#359: the Workspace sidebar draws a room's participant avatars, so
         # a room row is visually distinct from a 1:1. This list already loads
@@ -474,6 +565,32 @@ def list_rooms(current_user) -> dict:
             if p.get("kind") == "agent" and not p.get("left_at")
         ]
     return {"rooms": rooms}
+
+
+def rename_room(current_user, room_id: str, name) -> dict:
+    """A person titles a room (ent#473). Membership first — a non-member gets
+    the uniform 404, never a 403 that confirms the room exists — then a person
+    check: a member AGENT is reachable through its own MCP key and is a
+    prompt-injection surface, and a room's name is what every participant
+    reads it by, so an agent may talk in the room but not rename it (the
+    ent#220 line, one notch below `_require_moderator`, since a rename is not
+    a lifecycle or roster change and any human in the room may make it).
+    Validated through the shared leaf so a thread and a room refuse the same
+    titles for the same reasons, with the same named 400."""
+    from services.chat_title import chat_title_problem, normalize_chat_title
+
+    _require_membership(room_id, current_user)
+    kind, _identity = _caller(current_user)
+    if kind == "agent":
+        raise RoomError(403, "not_a_person", "Only a person can rename a room")
+    clean, reason = normalize_chat_title(name)
+    if clean is None:
+        raise RoomError(400, "invalid_title", chat_title_problem(reason, name), reason=reason)
+    db.rename_room(room_id, clean)
+    # A thin trigger carrying identifiers only (#918): listeners refetch the
+    # room through the membership-scoped read, so the name never rides `/ws`.
+    _broadcast("room_renamed", {"room_id": room_id})
+    return {"room_id": room_id, "name": clean}
 
 
 def close_room(current_user, room_id: str, reason: str = "user_closed") -> dict:
@@ -684,12 +801,23 @@ def _format_delta(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: bool) -> str:
+def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: bool,
+                       user_facing: bool = False) -> str:
+    # The old header claimed "Other agents and people are in this room"
+    # UNCONDITIONALLY — false in an agent-only room, and far too weak in front of
+    # a customer to count as a disclosure (trinity-enterprise#363). It now says
+    # what is actually true; the load-bearing signal is the system-prompt block,
+    # this is only scene-setting that no longer contradicts it.
+    who = ("Other agents are in this room, and so is at least one person from "
+           "outside the fleet who can read everything written here."
+           if user_facing else
+           "Other agents are in this room.")
     header = (
         f"You are participating in the Trinity room \"{room['name']}\""
         + (f" — topic: {room['topic']}" if room.get("topic") else "")
         + ".\n\n"
-        "Other agents and people are in this room. You were @mentioned, so it is "
+        + who
+        + " You were @mentioned, so it is "
         "your turn to reply. Reply with your message only — it will be posted to "
         "the room as you. To bring in another participant, @mention them by name.\n\n"
     )
@@ -699,6 +827,53 @@ def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: boo
     else:
         header += "[New messages since your last turn]\n"
     return header + _format_delta(delta)
+
+
+async def _room_inbox_context(agent_name: str, email: str | None,
+                              delta: list[dict]) -> tuple[str, list[dict]]:
+    """What this agent should be told about the client's files, for this wake.
+
+    #2794. A room turn used to be built from the transcript and nothing else, so
+    an agent @mentioned about a picture the client had just sent it replied — in
+    good faith — "I don't see any image attached", about a file sitting in its
+    own inbox. Every part of the delivery already worked: the drop fans out to
+    every participating agent, the bytes land in each agent's
+    ``~/inbox/<client>/``, the rail lists them. Only the *telling* was missing,
+    and it was missing because the sentence that does it was written inline in
+    the 1:1 chat path and never existed anywhere else.
+
+    So this is a thin adapter onto the ONE composer
+    (``client_portal.service.collect_inbox_context``) — deliberately not a
+    second implementation of the manifest. The import is local for the same
+    reason ``agent_on_roster`` is: rooms lean on the portal at a handful of
+    points and neither module may import the other at module scope.
+
+    Two decisions worth stating, because neither is obvious:
+
+    * **Whose inbox.** The posting principal's. A portal inbox is keyed by the
+      client's email, and in a Workspace room that principal IS the person who
+      put the file there. *Residual:* a room with two humans surfaces only the
+      email of whoever's message triggered this wake — the other's files stay
+      unmentioned. Reading every human participant's inbox would cost one
+      ``docker exec`` per human per wake, and the shape rooms actually have is
+      one person and N agents.
+
+    * **What counts as asking for an image.** The WHOLE delta, including agent
+      lines — not just the human's. "@sidekick can you look at the screenshot the
+      client sent?" is an ordinary room move, and scoping the intent test to
+      human text would make exactly that relay come through image-less: the bug
+      this fixes, one hop along. The size/count caps upstream bound the cost.
+
+    Never raises. A room turn that cannot be told about a file still runs.
+    """
+    if not email:
+        return "", []
+    try:
+        from client_portal.service import collect_inbox_context
+        return await collect_inbox_context(agent_name, email, _format_delta(delta))
+    except Exception as e:  # noqa: BLE001 — a file we cannot mention never costs a turn
+        logger.warning("room: inbox context for %s/%s failed: %s", agent_name, email, e)
+        return "", []
 
 
 async def post_message(current_user, room_id: str, content: str,
@@ -957,12 +1132,54 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
 
     from services.task_execution_service import get_task_execution_service
 
+    # trinity-enterprise#363. Derived HERE, per wake, from membership — not
+    # threaded down from `post_message`, which does hold the list: `_wake_agent`
+    # calls `post_message` back with the agent's reply and that wakes the next
+    # agent, so a threaded value would have to survive a round trip through a
+    # public function and could go stale the moment a reply recruits a human.
+    # One indexed read against a turn that costs an LLM call.
+    #
+    # Fails toward USER-FACING, the inverse of the usual capability default: an
+    # unreadable roster means we do not know who is watching, and a needless
+    # caution in an agent-only room costs a slightly more careful answer while a
+    # missed signal in front of a customer is the disclosure this prevents.
+    try:
+        user_facing = room_is_user_facing(db.list_participants(room_id))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("room %s: participant read for the user-facing signal "
+                       "failed (%s) — assuming a person is reading", room_id, e)
+        user_facing = True
+
+    room_prompt = build_user_facing_room_prompt() if user_facing else None
+
+    # #2794: the client's files, named to THIS agent. The prefix rides in front
+    # of the transcript for the same reason it rides in front of a 1:1 message —
+    # the agent has to know a file exists before the transcript referring to it
+    # means anything — and `images` is what makes "what is in this picture"
+    # answerable at all, since an agent must never read an image as text (#728).
+    client_email = getattr(current_user, "email", None)
+    manifest_prefix, images = await _room_inbox_context(agent_name, client_email, delta)
+
     try:
         result = await get_task_execution_service().execute_task(
             agent_name=agent_name,
-            message=_build_turn_prompt(room, agent_name, delta, cold),
+            message=manifest_prefix + _build_turn_prompt(room, agent_name, delta, cold, user_facing),
             triggered_by="room",
-            source_user_email=getattr(current_user, "email", None),
+            system_prompt=room_prompt,
+            images=images or None,
+            source_user_email=client_email,
+            # #2792: WHICH room. Without a chat on the row, the room could only
+            # pick its live cards from the Work feed by agent name, and so
+            # inlined every execution of a working participant — a schedule
+            # run, a loop turn, a 1:1 thread, another room — as this room's
+            # work. Same shape as the 1:1 thread's stamp (`source_channel_chat_id
+            # = session_id`), under the room's OWN channel value: see
+            # `config.ROOM_SOURCE_CHANNEL` for why it is not `portal`. A child
+            # this turn delegates inherits it (ent#265 D0), so the Work tab can
+            # group it under its parent by the same key.
+            source_channel=ROOM_SOURCE_CHANNEL,
+            source_channel_chat_id=room_id,
+            source_channel_client=client_email,
             timeout_seconds=ROOM_TURN_TIMEOUT_SECONDS,
             resume_session_id=cached,
             persist_session=True,
@@ -986,10 +1203,64 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
         _broadcast("room_participant_state",
                    {"room_id": room_id, "identity": agent_name, "state": "idle"})
 
+    # `TaskExecutionStatus` is a `str` Enum, so a plain string compare works for
+    # either — but normalise anyway rather than relying on that at a distance.
     status = getattr(result, "status", None)
+    status = str(getattr(status, "value", status) or "").strip().lower()
     reply = (getattr(result, "response", "") or "").strip()
 
-    if status in ("failed", "cancelled") or not reply:
+    # #2795: the RETURNED status is not always the one that stands.
+    #
+    # On a current agent image a cancelled turn comes back labelled: the agent
+    # relabels its own 504/502/500 to a `cancelled` 200 (#679 F3), so
+    # `execute_task` returns CANCELLED and the branch below is exact. An OLDER
+    # image re-raises instead, `execute_task` writes FAILED, that write LOSES
+    # the CAS to the CANCELLED the terminate route already wrote — and returns
+    # FAILED anyway. The room would then blame the agent for a stop the reader
+    # asked for, and drop a resume handle that was never bad.
+    #
+    # The 1:1 does not have this problem because it remembers the cancel
+    # client-side (`cancelledExecutionIds`); a room has no such memory, so it
+    # asks the row that actually stands. One indexed read, only on a path that
+    # has already lost an LLM turn, and fail-open — an unreadable row leaves the
+    # returned status in force.
+    # Only where it can change the outcome: the branch below fires on FAILED or
+    # on an empty reply, so anything else — a success with a reply — must pay
+    # nothing. (A test pinned this after the first draft re-read on every
+    # successful turn.)
+    if status != "cancelled" and (status == "failed" or not reply):
+        eid = getattr(result, "execution_id", None)
+        if eid:
+            try:
+                from database import db as core_db
+                persisted = core_db.get_execution(eid)
+                persisted_status = str(
+                    getattr(getattr(persisted, "status", None), "value",
+                            getattr(persisted, "status", None)) or ""
+                ).strip().lower()
+                if persisted_status == "cancelled":
+                    status = "cancelled"
+            except Exception as e:  # noqa: BLE001 — never let a label read break the turn
+                logger.warning("room %s: could not re-read execution %s for its "
+                               "terminal label (%s)", room_id, eid, e)
+
+    # #2795: a CANCEL IS NOT A FAILURE, and the room must not describe it as
+    # one. A person can now stop a room turn from the tile or the Work tab, and
+    # the line they got for doing it was "<agent> could not respond (no
+    # response)." — the surface reporting a fault for something the reader
+    # themselves just asked for, which is the AC's "no 'something went wrong'
+    # for a cancel the user asked for".
+    #
+    # It also must not clear the resume handle. That drop exists for a DEAD
+    # handle (the Session-tab idiom below), and a cancel is no evidence of one
+    # — the next turn would pay for a cold rebuild of a context that was fine.
+    # The read cursor is left alone either way, so the delta this turn never
+    # answered is re-delivered on the next wake.
+    if status == "cancelled":
+        _post_system(room_id, f"{agent_name}'s turn was stopped.")
+        return
+
+    if status == "failed" or not reply:
         # A dead resume handle is the common cause — drop it so the next wake is
         # cold instead of failing the same way forever (Session-tab idiom).
         if cached:

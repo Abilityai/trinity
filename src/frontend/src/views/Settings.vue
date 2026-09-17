@@ -39,9 +39,14 @@
         </div>
 
         <!-- Loading State -->
-        <div v-if="loading" class="bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900 p-8 text-center">
-          <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-action-primary-600 mx-auto"></div>
-          <p class="mt-4 text-gray-500 dark:text-gray-400">Loading settings...</p>
+        <!-- #1921: card-shaped, so the page keeps its footprint while settings
+             load rather than collapsing to a centred ring and jumping. -->
+        <div v-if="loading" class="bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900 p-8 space-y-4" aria-busy="true">
+          <div class="h-5 w-1/4 rounded bg-gray-200 dark:bg-gray-800 animate-pulse motion-reduce:animate-none"></div>
+          <div class="h-10 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+          <div class="h-10 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+          <div class="h-10 w-3/4 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+          <span class="sr-only">Loading settings…</span>
         </div>
 
         <!-- Settings Content -->
@@ -66,6 +71,9 @@
 
           <!-- #32 — Single Sign-On (enterprise, gated by `sso`) -->
           <SsoPanel v-if="activeTab === 'sso'" />
+
+          <!-- ent#279 — System Credential Vault (enterprise, gated by `credential_vault`) -->
+          <CredentialVaultPanel v-if="activeTab === 'credential-vault'" />
 
           <!-- Retention Tab Content (#1039) -->
           <div v-if="activeTab === 'retention'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
@@ -174,10 +182,25 @@
                The panel fetches the gated enterprise endpoint itself. -->
           <ActivationFunnelPanel v-if="activeTab === 'activation'" />
 
+          <!-- ent#581 — Re-run setup: reopens the first-run overlay the same
+               way `?onboarding=1` does, so a skipped step is recoverable. -->
+          <div v-if="activeTab === 'general'" class="mb-6">
+            <FirstRunRerunPanel />
+          </div>
+
           <!-- ent#12 — Tier-2 opt-in usage sharing. OSS-core, default-off,
                reversible. Admin-only (General tab), visible in every edition. -->
           <div v-if="activeTab === 'general'" class="mb-6">
             <TelemetrySharingPanel />
+          </div>
+
+          <!-- ent#463 — Operator-intake Settings home. Identified contact
+               capture (email + optional profile), NOT anonymous telemetry.
+               First-run form (SetupPassword.vue) is the other producer; both
+               converge on the same at-most-once service. Admin-only + human-
+               only, audit-logged. -->
+          <div v-if="activeTab === 'general'" class="mb-6">
+            <OperatorIntakePanel />
           </div>
 
           <!-- Workspace session policy (ent#375). On the Retention tab because it
@@ -189,6 +212,14 @@
                the operator it applies to. Only the inputs are entitled. -->
           <div v-if="activeTab === 'retention'" class="mb-6">
             <PortalSessionPolicyPanel />
+          </div>
+
+          <!-- Room budgets (ent#387) — beside the session policy for the same
+               reason: both bound what a client engagement consumes, and this is
+               the only surface that sets them since ent#381 retired the Sessions
+               page. Self-hiding when the rooms module is not entitled. -->
+          <div v-if="activeTab === 'retention'" class="mb-6">
+            <RoomBudgetDefaultsPanel />
           </div>
 
           <!-- Platform Section -->
@@ -211,7 +242,7 @@
                   v-model="adminEmailInput"
                   :placeholder="adminEmailCurrent || 'you@company.com'"
                   :disabled="savingAdminEmail"
-                  class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'flex-1']"
                 />
                 <button
                   @click="saveAdminEmail"
@@ -267,7 +298,7 @@
                       v-model="publicUrl"
                       :placeholder="publicUrlCurrent || 'https://your-domain.com'"
                       :disabled="savingPublicUrl"
-                      class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                      :class="[SETTINGS_TEXT_INPUT_CLASS, 'flex-1']"
                     />
                     <button
                       @click="savePublicUrl"
@@ -289,12 +320,33 @@
                       </svg>
                       <span class="text-status-success-600 dark:text-status-success-400">Saved</span>
                     </template>
-                    <template v-else-if="publicUrlCurrent">
+                    <!-- #2691: a saved URL is a string an admin typed. On a
+                         provisioned install the tick waits until a request for
+                         that exact name has actually arrived here and a
+                         certificate was obtained for it — the same distinction
+                         the first-run step draws. Only the provisioned Caddyfile
+                         calls the gate that latches it, so everywhere else (own
+                         proxy, tunnel, tailnet) the wait would never end: those
+                         keep the plain saved tick. -->
+                    <template v-else-if="publicUrlCurrent && (sessionsStore.publicUrlReached || !sessionsStore.hardeningGuideEligible)">
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
                       <span class="text-status-success-600 dark:text-status-success-400">
                         {{ publicUrlCurrent }}
+                      </span>
+                    </template>
+                    <template v-else-if="publicUrlCurrent">
+                      <!-- Same icon box as every other branch, so the line does
+                           not shift when the latch flips. A clock, not the
+                           warning triangle the unconfigured branch uses: same
+                           token, different shape, different meaning — nothing
+                           is wrong here, it just has not happened yet. -->
+                      <svg class="h-4 w-4 text-state-autonomous-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                        {{ publicUrlCurrent }} — saved, waiting for the first visit to confirm it resolves here
                       </span>
                     </template>
                     <template v-else>
@@ -306,9 +358,18 @@
                       </span>
                     </template>
                   </div>
+                  <!-- #2691: the old text named three consumers out of a dozen
+                       and no side effect. The corrected list and the two shared
+                       lines live in `onboarding/hardeningGuide.js`, so this
+                       field and the first-run step cannot drift apart. -->
                   <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
                     The externally-accessible URL of this Trinity instance (e.g. <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">https://your-domain.com</code>).
-                    Used for Telegram webhooks, Slack OAuth callbacks, and shareable public links.
+                    {{ DOMAIN_BENEFIT }}
+                    It is the address Telegram, WhatsApp and VoIP call back on, the one Slack's
+                    OAuth returns to, and the base for every shareable public link, workspace
+                    link and file download — voice calls fail outright without it, and the rest
+                    fall back to an address nobody outside can use.
+                    {{ DOMAIN_PREREQUISITE }} {{ DOMAIN_SIDE_EFFECT }}
                   </p>
                 </div>
 
@@ -543,6 +604,22 @@
                         v-else
                         class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
                       >not set</span>
+                      <!-- #2695: "configured" is presence; this is whether the key can
+                           TRANSCRIBE. ElevenLabs permissions are per endpoint, so a key
+                           that speaks may still refuse speech-to-text — and then the
+                           Workspace mic is hidden, which this is the one place to see. -->
+                      <span
+                        v-if="sttCapability.tone !== 'none'"
+                        data-testid="elevenlabs-stt-capability"
+                        :data-tone="sttCapability.tone"
+                        class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium"
+                        :class="sttCapability.tone === 'ok'
+                          ? 'bg-status-success-100 text-status-success-800 dark:bg-status-success-900 dark:text-status-success-200'
+                          : sttCapability.tone === 'bad'
+                            ? 'bg-status-danger-100 text-status-danger-800 dark:bg-status-danger-900 dark:text-status-danger-200'
+                            : 'bg-status-warning-100 text-status-warning-800 dark:bg-status-warning-900 dark:text-status-warning-200'"
+                        :title="sttCapability.hint"
+                      >{{ sttCapability.label }}</span>
                     </label>
                     <div class="flex gap-2">
                       <input
@@ -566,6 +643,22 @@
                         class="px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
                       >Clear</button>
                     </div>
+                    <p
+                      v-if="sttCapability.tone === 'bad' || sttCapability.tone === 'unverified'"
+                      data-testid="elevenlabs-stt-hint"
+                      class="mt-1 text-xs"
+                      :class="sttCapability.tone === 'bad'
+                        ? 'text-status-danger-600 dark:text-status-danger-400'
+                        : 'text-status-warning-700 dark:text-status-warning-300'"
+                    >{{ sttCapability.hint }}</p>
+                    <!-- #2696: the operator half of a client's "voice input failed" —
+                         the client got a category sentence; the provider's status
+                         word lives only here, on the admin panel. -->
+                    <p
+                      v-if="sttLastFailure"
+                      data-testid="elevenlabs-stt-last-failure"
+                      class="mt-1 text-xs text-status-danger-600 dark:text-status-danger-400"
+                    >{{ sttLastFailure.text }}<span v-if="sttLastFailure.at"> — {{ new Date(sttLastFailure.at * 1000).toLocaleString() }}</span></p>
                   </div>
 
                   <!-- Default voice id -->
@@ -868,6 +961,11 @@
                     with <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">repo</code> scope.
                   </p>
                 </div>
+
+                <!-- ent#582: the email-provider and Gemini keys — the same field
+                     the first-run flow uses, so a key set there is managed here. -->
+                <PlatformKeyField provider="resend" class="mt-6" />
+                <PlatformKeyField provider="gemini" class="mt-6" />
               </div>
             </div>
           </div>
@@ -1144,299 +1242,10 @@
             </div>
           </div>
 
-          <!-- Claude Subscriptions Section (SUB-001) -->
-          <div v-if="activeTab === 'integrations'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
-            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-              <h2 class="text-lg font-medium text-gray-900 dark:text-white">Claude Subscriptions</h2>
-              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Manage Claude Max/Pro subscription credentials. Register once, assign to multiple agents.
-              </p>
-            </div>
-
-            <div class="px-6 py-4">
-              <div class="space-y-4">
-                <!-- Encryption Not Configured Warning -->
-                <div v-if="!encryptionConfigured" class="bg-status-warning-50 dark:bg-status-warning-900/30 border border-status-warning-200 dark:border-status-warning-800 rounded-lg p-4">
-                  <div class="flex">
-                    <div class="flex-shrink-0">
-                      <svg class="h-5 w-5 text-status-warning-400" fill="currentColor" viewBox="0 0 20 20">
-                        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-                      </svg>
-                    </div>
-                    <div class="ml-3">
-                      <h3 class="text-sm font-medium text-status-warning-800 dark:text-status-warning-300">Encryption not configured</h3>
-                      <p class="mt-1 text-sm text-status-warning-700 dark:text-status-warning-400">
-                        Subscription storage requires <code class="px-1 py-0.5 bg-status-warning-100 dark:bg-status-warning-900 rounded text-xs">CREDENTIAL_ENCRYPTION_KEY</code> in your <code class="px-1 py-0.5 bg-status-warning-100 dark:bg-status-warning-900 rounded text-xs">.env</code> file.
-                        Generate with: <code class="px-1 py-0.5 bg-status-warning-100 dark:bg-status-warning-900 rounded text-xs">openssl rand -hex 32</code> and restart the backend.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Add Subscription Form -->
-                <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4">
-                  <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Add Subscription</h3>
-
-                  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <!-- Name Input -->
-                    <div>
-                      <label for="subscription-name" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                        Name
-                      </label>
-                      <input
-                        type="text"
-                        id="subscription-name"
-                        v-model="newSubscription.name"
-                        placeholder="e.g., eugene-max"
-                        class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
-                        :disabled="addingSubscription"
-                      />
-                    </div>
-
-                    <!-- Type Input -->
-                    <div>
-                      <label for="subscription-type" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                        Type
-                      </label>
-                      <select
-                        id="subscription-type"
-                        v-model="newSubscription.type"
-                        class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
-                        :disabled="addingSubscription"
-                      >
-                        <option value="max">Claude Max</option>
-                        <option value="pro">Claude Pro</option>
-                        <option value="">Unknown</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <!-- Token Input (SUB-002) -->
-                  <div class="mt-4">
-                    <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                      Token (from <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded">claude setup-token</code>)
-                    </label>
-                    <input
-                      type="password"
-                      v-model="newSubscription.token"
-                      placeholder="sk-ant-oat01-..."
-                      :disabled="addingSubscription"
-                      class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-action-primary-500 focus:border-action-primary-500"
-                      :class="{ 'border-status-danger-400 dark:border-status-danger-500': newSubscription.token && !newSubscription.token.startsWith('sk-ant-oat01-') }"
-                    />
-                    <p v-if="newSubscription.token && !newSubscription.token.startsWith('sk-ant-oat01-')" class="mt-1 text-xs text-status-danger-500">
-                      Token must start with sk-ant-oat01-
-                    </p>
-                    <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                      Run <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded">claude setup-token</code> locally to generate a long-lived token (~1 year)
-                    </p>
-                  </div>
-
-                  <!-- Add Button -->
-                  <div class="mt-4 flex justify-end">
-                    <button
-                      @click="clearNewSubscription"
-                      v-if="newSubscription.name || newSubscription.token"
-                      class="mr-3 inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 shadow-sm text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600"
-                    >
-                      Clear
-                    </button>
-                    <button
-                      @click="addSubscription"
-                      :disabled="!newSubscription.name || !newSubscription.token.startsWith('sk-ant-oat01-') || addingSubscription || !encryptionConfigured"
-                      class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <svg v-if="addingSubscription" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
-                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      Register Subscription
-                    </button>
-                  </div>
-                </div>
-
-                <!-- Subscriptions Table -->
-                <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
-                  <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                    <thead class="bg-gray-50 dark:bg-gray-700">
-                      <tr>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                          Name
-                        </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                          Type
-                        </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                          Agents
-                        </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                          Created
-                        </th>
-                        <th scope="col" class="relative px-6 py-3">
-                          <span class="sr-only">Actions</span>
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                      <tr v-if="loadingSubscriptions">
-                        <td colspan="5" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
-                          <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
-                        </td>
-                      </tr>
-                      <tr v-else-if="subscriptions.length === 0">
-                        <td colspan="5" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
-                          No subscriptions registered. Add one above using your Claude credentials.
-                        </td>
-                      </tr>
-                      <template v-else v-for="sub in subscriptions" :key="sub.id">
-                        <tr class="hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer" @click="toggleSubscriptionDetails(sub.id)">
-                          <td class="px-6 py-4 whitespace-nowrap">
-                            <div class="flex items-center">
-                              <svg class="h-4 w-4 text-gray-400 mr-2 transform transition-transform" :class="{ 'rotate-90': expandedSubscriptions.has(sub.id) }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-                              </svg>
-                              <span class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ sub.name }}</span>
-                            </div>
-                          </td>
-                          <td class="px-6 py-4 whitespace-nowrap">
-                            <span v-if="sub.subscription_type" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
-                                  :class="sub.subscription_type === 'max' ? 'bg-accent-purple-100 text-accent-purple-800 dark:bg-accent-purple-900 dark:text-accent-purple-200' : 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'">
-                              {{ sub.subscription_type === 'max' ? 'Max' : sub.subscription_type === 'pro' ? 'Pro' : sub.subscription_type }}
-                            </span>
-                            <span v-else class="text-sm text-gray-500 dark:text-gray-400">—</span>
-                          </td>
-                          <td class="px-6 py-4 whitespace-nowrap">
-                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">
-                              {{ sub.agent_count || 0 }} agent{{ (sub.agent_count || 0) === 1 ? '' : 's' }}
-                            </span>
-                          </td>
-                          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                            {{ formatDate(sub.created_at) }}
-                          </td>
-                          <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                            <button
-                              @click.stop="deleteSubscription(sub)"
-                              :disabled="deletingSubscription === sub.id"
-                              class="text-status-danger-600 hover:text-status-danger-900 dark:text-status-danger-400 dark:hover:text-status-danger-300 disabled:opacity-50"
-                            >
-                              {{ deletingSubscription === sub.id ? 'Deleting...' : 'Delete' }}
-                            </button>
-                          </td>
-                        </tr>
-                        <!-- Expanded Details Row -->
-                        <tr v-if="expandedSubscriptions.has(sub.id)" class="bg-gray-50 dark:bg-gray-700/50">
-                          <td colspan="5" class="px-6 py-4">
-                            <div class="text-sm">
-                              <div class="mb-2 text-gray-600 dark:text-gray-400">
-                                <strong>Owner:</strong> {{ sub.owner_email || 'Unknown' }}
-                              </div>
-                              <div v-if="sub.rate_limit_tier" class="mb-2 text-gray-600 dark:text-gray-400">
-                                <strong>Rate Limit Tier:</strong> {{ sub.rate_limit_tier }}
-                              </div>
-                              <div>
-                                <strong class="text-gray-600 dark:text-gray-400">Assigned Agents:</strong>
-                                <div v-if="sub.agents && sub.agents.length > 0" class="mt-2 flex flex-wrap gap-2">
-                                  <span v-for="agent in sub.agents" :key="agent"
-                                        class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-action-primary-100 text-action-primary-800 dark:bg-action-primary-900 dark:text-action-primary-200">
-                                    <svg class="mr-1 h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                                      <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-                                      <path fill-rule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clip-rule="evenodd" />
-                                    </svg>
-                                    {{ agent }}
-                                    <button
-                                      @click.stop="unassignAgentFromSubscription(agent)"
-                                      :disabled="unassigningAgent === agent"
-                                      class="ml-1.5 inline-flex items-center justify-center h-4 w-4 rounded-full hover:bg-action-primary-200 dark:hover:bg-action-primary-800 text-action-primary-600 dark:text-action-primary-300 disabled:opacity-50"
-                                      title="Remove agent from subscription"
-                                    >
-                                      <svg v-if="unassigningAgent === agent" class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24">
-                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                      </svg>
-                                      <svg v-else class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                      </svg>
-                                    </button>
-                                  </span>
-                                </div>
-                                <p v-else class="mt-1 text-gray-500 dark:text-gray-400 italic">
-                                  No agents assigned yet.
-                                </p>
-                                <!-- Assign Agent Dropdown -->
-                                <div class="mt-3 flex items-center gap-2">
-                                  <select
-                                    v-model="selectedAgentToAssign[sub.id]"
-                                    :disabled="assigningAgent || loadingAgents"
-                                    class="flex-1 max-w-xs px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm text-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white"
-                                    @click.stop
-                                  >
-                                    <option value="" disabled selected>{{ loadingAgents ? 'Loading agents...' : 'Select agent...' }}</option>
-                                    <option
-                                      v-for="agent in getAvailableAgents(sub.id)"
-                                      :key="agent.name"
-                                      :value="agent.name"
-                                    >
-                                      {{ agentOptionLabel(agent) }}{{ agentSubscriptionMap[agent.name] ? ` (on ${agentSubscriptionMap[agent.name]})` : '' }}
-                                    </option>
-                                  </select>
-                                  <button
-                                    @click.stop="assignAgentToSubscription(sub.name, selectedAgentToAssign[sub.id])"
-                                    :disabled="!selectedAgentToAssign[sub.id] || assigningAgent"
-                                    class="inline-flex items-center px-3 py-1.5 border border-transparent rounded-md shadow-sm text-xs font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                                  >
-                                    <svg v-if="assigningAgent" class="animate-spin -ml-0.5 mr-1.5 h-3 w-3" fill="none" viewBox="0 0 24 24">
-                                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                    </svg>
-                                    Assign
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      </template>
-                    </tbody>
-                  </table>
-                </div>
-
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  Expand a subscription row to assign or remove agents. Running agents will restart automatically.
-                </p>
-
-                <!-- Auto-Switch Toggle (SUB-003) -->
-                <div class="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
-                  <div class="flex items-center justify-between">
-                    <div class="flex-1 mr-4">
-                      <label for="auto-switch-toggle" class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                        Automatically switch subscriptions when usage limits are reached
-                      </label>
-                      <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                        When enabled, agents will automatically try a different subscription after 2 consecutive rate-limit errors. Requires at least 2 registered subscriptions.
-                      </p>
-                    </div>
-                    <button
-                      id="auto-switch-toggle"
-                      type="button"
-                      :class="[
-                        autoSwitchEnabled ? 'bg-action-primary-600' : 'bg-gray-200 dark:bg-gray-600',
-                        'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2'
-                      ]"
-                      :disabled="savingAutoSwitch"
-                      @click="toggleAutoSwitch"
-                    >
-                      <span
-                        :class="[
-                          autoSwitchEnabled ? 'translate-x-5' : 'translate-x-0',
-                          'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out'
-                        ]"
-                      />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <!-- Claude Subscriptions (SUB-001/002; #471 usage observability) —
+               extracted to components/settings/SubscriptionsPanel.vue (partial
+               paydown of #717/#1030; the section owns its own data loads). -->
+          <SubscriptionsPanel v-if="activeTab === 'integrations'" />
 
           <!-- Trinity Prompt Section -->
           <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
@@ -1558,6 +1367,30 @@ Example:
                   <dd class="font-mono text-gray-900 dark:text-white text-xs">{{ buildInfo.info.value.build_date }}</dd>
                 </div>
               </dl>
+
+              <!-- Install provenance (#2380). Deliberately OUTSIDE the branch
+                   ladder above. That ladder ends in `isMissing`, which is true
+                   when every git field is the literal "unknown" — a build-time
+                   fact about the IMAGE. Install source is a DB row written at
+                   first boot; one being absent says nothing about the other, and
+                   nesting them meant a locally-built image hid its provenance
+                   from the one surface an operator is told to read for it.
+                   `unknown` renders as "Not recorded" rather than hiding the row:
+                   the absence of a marker IS the answer, and a missing row would
+                   read as a missing feature. Humanised label plus the dimmed raw
+                   value, matching the Commit row. -->
+              <dl
+                v-if="buildInfo.info.value && !buildInfo.loading.value && !buildInfo.error.value"
+                class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm mt-3 pt-3 border-t border-gray-200 dark:border-gray-700"
+              >
+                <div>
+                  <dt class="text-gray-500 dark:text-gray-400">Install source</dt>
+                  <dd class="text-gray-900 dark:text-white">
+                    <span>{{ installSourceLabel }}</span>
+                    <span class="ml-2 text-xs font-mono opacity-60">{{ installSourceRaw }}</span>
+                  </dd>
+                </div>
+              </dl>
             </div>
           </div>
 
@@ -1618,7 +1451,7 @@ Example:
                     <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                       <tr v-if="loadingWhitelist">
                         <td colspan="4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
-                          <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
+                          <div class="h-4 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
                         </td>
                       </tr>
                       <tr v-else-if="emailWhitelist.length === 0">
@@ -1732,7 +1565,7 @@ Example:
                   <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                     <tr v-if="loadingUsers">
                       <td :colspan="umEntitled ? 5 : 4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
-                        <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
+                        <div class="h-4 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
                       </td>
                     </tr>
                     <tr v-else-if="usersList.length === 0">
@@ -1797,7 +1630,7 @@ Example:
 
               <div class="p-5">
                 <div v-if="activityLoading" class="text-center py-8">
-                  <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
+                  <div class="h-4 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
                 </div>
                 <div v-else-if="activityError" class="text-sm text-status-danger-600 dark:text-status-danger-400">{{ activityError }}</div>
                 <template v-else-if="activityData">
@@ -1860,7 +1693,7 @@ Example:
                   v-model="mcpUrlInput"
                   type="url"
                   :placeholder="mcpUrlConfig.default_url || 'https://your-domain.com/mcp'"
-                  class="flex-1 block rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'flex-1']"
                 />
                 <button
                   @click="saveMcpUrl"
@@ -1956,7 +1789,7 @@ Example:
                     <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                       <tr v-if="loadingGithubTemplates">
                         <td colspan="3" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
-                          <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
+                          <div class="h-4 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
                         </td>
                       </tr>
                       <!-- #1931: dropped "or reset to defaults" — the Reset
@@ -2092,7 +1925,7 @@ Example:
                   id="quota-creator"
                   v-model="agentQuotaValues.max_agents_creator"
                   min="0"
-                  class="w-20 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm text-center"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'w-20 text-center']"
                 />
               </div>
 
@@ -2107,7 +1940,7 @@ Example:
                   id="quota-operator"
                   v-model="agentQuotaValues.max_agents_operator"
                   min="0"
-                  class="w-20 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm text-center"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'w-20 text-center']"
                 />
               </div>
 
@@ -2122,7 +1955,7 @@ Example:
                   id="quota-user"
                   v-model="agentQuotaValues.max_agents_user"
                   min="0"
-                  class="w-20 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm text-center"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'w-20 text-center']"
                 />
               </div>
 
@@ -2363,31 +2196,44 @@ import { useRole } from '../composables/useRole'
 import { useBuildInfo } from '../composables/useBuildInfo'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
-import { useAgentsStore } from '../stores/agents'
-import { agentDisplayName, agentOptionLabel } from '../utils/agentName'
 import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
+import { readOpsBool, opsBoolValue } from '../utils/opsSettings'
+import { describeSttCapability, describeSttLastFailure } from '../utils/sttCapability'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
+import SubscriptionsPanel from '../components/settings/SubscriptionsPanel.vue'
 import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
+import CredentialVaultPanel from '../components/settings/CredentialVaultPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
+import FirstRunRerunPanel from '../components/settings/FirstRunRerunPanel.vue'
+import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
-import { SETTINGS_NUMBER_INPUT_CLASS } from '../components/settings/fieldStyles'
+import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
+import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
+// #2691: one home for what the Public URL buys, what must be true first, and
+// what saving it re-points — shared with the first-run step so the explanation
+// does not depend on which surface the operator arrives through.
+import {
+  DOMAIN_BENEFIT,
+  DOMAIN_PREREQUISITE,
+  DOMAIN_SIDE_EFFECT,
+} from '../components/onboarding/hardeningGuide'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
+import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
-const agentsStore = useAgentsStore()
 const settingsStore = useSettingsStore()
 // trinity-enterprise#85: refreshed after a Brain Orb flag change so the
 // admin's own Brain tab / route gating updates without a page reload.
@@ -2399,6 +2245,24 @@ const enterpriseStore = useEnterpriseStore()
 
 // #926: cached fetch of /api/version (singleton shared with NavBar).
 const buildInfo = useBuildInfo()
+
+// #2380: how this instance was installed, from the same /api/version payload.
+// The raw value is the machine truth and is always shown; the label exists
+// because "do-marketplace" means nothing to an operator reading a panel.
+const INSTALL_SOURCE_LABELS = {
+  'do-marketplace': 'DigitalOcean Marketplace',
+  'do-script': 'DigitalOcean (install script)',
+  'vultr-marketplace': 'Vultr Marketplace',
+  script: 'Install script',
+  unknown: 'Not recorded',
+}
+const installSourceRaw = computed(() => buildInfo.info.value?.install_source || 'unknown')
+// An unrecognised value falls through to itself rather than to "Not recorded":
+// a newer backend reporting a channel this bundle has not heard of is a fact
+// worth showing, not one to flatten into "we have no idea".
+const installSourceLabel = computed(
+  () => INSTALL_SOURCE_LABELS[installSourceRaw.value] || installSourceRaw.value
+)
 
 const loading = ref(true)
 const saving = ref(false)
@@ -2419,6 +2283,7 @@ const ALL_TABS = [
   { id: 'agent-permissions', label: 'Agent Permissions', adminOnly: false, requires: 'permissions_matrix' },
   { id: 'security',     label: 'Security',     adminOnly: false, requires: '2fa' },
   { id: 'sso',          label: 'SSO',          adminOnly: true,  requires: 'sso' },
+  { id: 'credential-vault', label: 'Vault',    adminOnly: true,  requires: 'credential_vault' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
   { id: 'retention',    label: 'Retention',    adminOnly: true  },
   // ent#184 — local product-event activation funnel. Capture is OSS-core;
@@ -2770,7 +2635,18 @@ const elevenLabs = reactive({
   keySource: 'none',   // override | env | none
   apiKeyInput: '',
   defaultVoiceId: '',
+  // #2695: what the provider said when asked whether this key may transcribe —
+  // capable | refused | unknown | unconfigured, plus its own status word.
+  sttCapability: 'unconfigured',
+  sttDetail: null,
+  sttLastFailure: null,   // #2696: {category, provider_status, detail, at} | null
 })
+const sttLastFailure = computed(() => describeSttLastFailure(elevenLabs.sttLastFailure))
+const sttCapability = computed(() => describeSttCapability({
+  key_configured: elevenLabs.keyConfigured,
+  stt_capability: elevenLabs.sttCapability,
+  stt_detail: elevenLabs.sttDetail,
+}))
 const savingElevenLabs = ref(false)
 const elevenLabsSaveSuccess = ref(false)
 const elevenLabsError = ref('')
@@ -2866,8 +2742,7 @@ const agentQuotaLegacy = ref(null)
 const savingQuotas = ref(false)
 
 // Auto-Switch Subscriptions state (SUB-003)
-const autoSwitchEnabled = ref(false)
-const savingAutoSwitch = ref(false)
+// (SUB-003 auto-switch + subscription state moved to SubscriptionsPanel.vue, #471)
 
 // Skills Library state now lives in SkillSourcesPanel / stores/skillSources
 // (ent#237): the single skills_library_url setting became a list of sources.
@@ -2889,37 +2764,7 @@ const skillsAutomation = ref({
 const generatingDefaultAvatars = ref(false)
 const defaultAvatarResult = ref(null)
 
-// Subscriptions state (SUB-002)
-const subscriptions = ref([])
-const loadingSubscriptions = ref(false)
-const addingSubscription = ref(false)
-const deletingSubscription = ref(null)
-const expandedSubscriptions = ref(new Set())
-const encryptionConfigured = ref(true)
-const newSubscription = ref({
-  name: '',
-  type: 'max',
-  token: ''
-})
-
-// Agent assignment state (for subscription expanded rows)
-const allAgents = ref([])
-const loadingAgents = ref(false)
-const assigningAgent = ref(null)
-const unassigningAgent = ref(null)
-const selectedAgentToAssign = ref({})
-
-const agentSubscriptionMap = computed(() => {
-  const map = {}
-  for (const sub of subscriptions.value) {
-    if (sub.agents) {
-      for (const agentName of sub.agents) {
-        map[agentName] = sub.name
-      }
-    }
-  }
-  return map
-})
+// Subscriptions state moved to components/settings/SubscriptionsPanel.vue (#471).
 
 const hasChanges = computed(() => {
   return trinityPrompt.value !== originalPrompt.value
@@ -3304,6 +3149,11 @@ function applyElevenLabsState(state) {
   elevenLabs.keyConfigured = !!state.key_configured
   elevenLabs.keySource = state.key_source || 'none'
   elevenLabs.defaultVoiceId = state.default_voice_id || ''
+  // An older backend sends no capability field: `undefined` reads as
+  // "unverified", never as "capable" — see describeSttCapability.
+  elevenLabs.sttCapability = state.stt_capability
+  elevenLabs.sttDetail = state.stt_detail ?? null
+  elevenLabs.sttLastFailure = state.stt_last_failure ?? null
 }
 
 async function loadElevenLabsSettings() {
@@ -3395,6 +3245,9 @@ async function savePublicUrl() {
     setTimeout(() => {
       publicUrlSaveSuccess.value = false
     }, 3000)
+    // Refresh the install_tls_posture flag this session gates on — what retires
+    // the #2380 hardening card in-session instead of on the next hard reload.
+    sessionsStore.loadFeatureFlags(true).catch(() => {})
   } catch (e) {
     error.value = e.response?.data?.detail || 'Failed to save public URL'
   } finally {
@@ -3842,7 +3695,14 @@ async function loadOpsSettings() {
     const response = await axios.get('/api/settings/ops/config', {
       headers: authStore.authHeader
     })
-    sshAccessEnabled.value = response.data.ssh_access_enabled === 'true'
+    // #2411: the payload is nested TWICE — `{settings: {key: {value: "..."}}}`
+    // — and this read it flat, so it was `undefined === 'true'` on every load.
+    // The switch rendered OFF whatever was stored, and since the click handler
+    // negates that state, the first click always sent `true`: an operator with
+    // ephemeral SSH enabled, clicking to DISABLE it, turned it back on. The
+    // rule lives in `utils/opsSettings.js` because this SFC cannot be mounted
+    // in our test setup, and an unreachable rule is how this survived.
+    sshAccessEnabled.value = readOpsBool(response.data, 'ssh_access_enabled')
   } catch (e) {
     console.error('Failed to load ops settings:', e)
   }
@@ -3856,7 +3716,7 @@ async function toggleSshAccess() {
     const newValue = !sshAccessEnabled.value
     await axios.put('/api/settings/ops/config', {
       settings: {
-        ssh_access_enabled: newValue ? 'true' : 'false'
+        ssh_access_enabled: opsBoolValue(newValue)
       }
     }, {
       headers: authStore.authHeader
@@ -3874,39 +3734,7 @@ async function toggleSshAccess() {
   }
 }
 
-// Auto-Switch Subscriptions methods (SUB-003)
-async function loadAutoSwitchSetting() {
-  try {
-    const response = await axios.get('/api/subscriptions/settings/auto-switch', {
-      headers: authStore.authHeader
-    })
-    autoSwitchEnabled.value = response.data.enabled
-  } catch (e) {
-    console.error('Failed to load auto-switch setting:', e)
-  }
-}
-
-async function toggleAutoSwitch() {
-  savingAutoSwitch.value = true
-  error.value = null
-
-  try {
-    const newValue = !autoSwitchEnabled.value
-    await axios.put(`/api/subscriptions/settings/auto-switch?enabled=${newValue}`, null, {
-      headers: authStore.authHeader
-    })
-
-    autoSwitchEnabled.value = newValue
-    showSuccess.value = true
-    setTimeout(() => {
-      showSuccess.value = false
-    }, 3000)
-  } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to update auto-switch setting'
-  } finally {
-    savingAutoSwitch.value = false
-  }
-}
+// Auto-Switch methods (SUB-003) moved to SubscriptionsPanel.vue (#471).
 
 // Skills library automation (ent#236). ent#237 removed the URL/branch writes
 // that used to live here — those settings no longer exist; sources are managed
@@ -3964,174 +3792,7 @@ async function generateDefaultAvatars() {
   }
 }
 
-// Subscription methods (SUB-001)
-async function loadSubscriptions() {
-  loadingSubscriptions.value = true
-  try {
-    // Check encryption status first
-    try {
-      const statusResponse = await axios.get('/api/subscriptions/encryption-status', {
-        headers: authStore.authHeader
-      })
-      encryptionConfigured.value = statusResponse.data?.configured ?? true
-    } catch {
-      // Endpoint may not exist on older backends - assume configured
-      encryptionConfigured.value = true
-    }
-
-    const response = await axios.get('/api/subscriptions', {
-      headers: authStore.authHeader
-    })
-    subscriptions.value = response.data || []
-  } catch (e) {
-    console.error('Failed to load subscriptions:', e)
-    // Non-admin users will get 403 - that's ok, just hide the section
-    if (e.response?.status !== 403) {
-      error.value = e.response?.data?.detail || 'Failed to load subscriptions'
-    }
-  } finally {
-    loadingSubscriptions.value = false
-  }
-}
-
-function clearNewSubscription() {
-  newSubscription.value = {
-    name: '',
-    type: 'max',
-    token: ''
-  }
-}
-
-async function addSubscription() {
-  if (!newSubscription.value.name || !newSubscription.value.token.startsWith('sk-ant-oat01-')) return
-
-  addingSubscription.value = true
-  error.value = null
-
-  try {
-    await axios.post('/api/subscriptions', {
-      name: newSubscription.value.name,
-      token: newSubscription.value.token,
-      subscription_type: newSubscription.value.type || null
-    }, {
-      headers: authStore.authHeader
-    })
-
-    // Clear form and reload list
-    clearNewSubscription()
-    await loadSubscriptions()
-
-    showSuccess.value = true
-    setTimeout(() => {
-      showSuccess.value = false
-    }, 3000)
-  } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to register subscription'
-  } finally {
-    addingSubscription.value = false
-  }
-}
-
-async function deleteSubscription(subscription) {
-  if (!confirm(`Delete subscription "${subscription.name}"?\n\nThis will clear the subscription from all ${subscription.agent_count || 0} assigned agent(s).`)) {
-    return
-  }
-
-  deletingSubscription.value = subscription.id
-  error.value = null
-
-  try {
-    await axios.delete(`/api/subscriptions/${subscription.id}`, {
-      headers: authStore.authHeader
-    })
-
-    // Remove from expanded set if it was expanded
-    expandedSubscriptions.value.delete(subscription.id)
-
-    // Reload list
-    await loadSubscriptions()
-
-    showSuccess.value = true
-    setTimeout(() => {
-      showSuccess.value = false
-    }, 3000)
-  } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to delete subscription'
-  } finally {
-    deletingSubscription.value = null
-  }
-}
-
-function toggleSubscriptionDetails(subscriptionId) {
-  if (expandedSubscriptions.value.has(subscriptionId)) {
-    expandedSubscriptions.value.delete(subscriptionId)
-  } else {
-    expandedSubscriptions.value.add(subscriptionId)
-    fetchAgentList()
-  }
-  // Force reactivity update
-  expandedSubscriptions.value = new Set(expandedSubscriptions.value)
-}
-
-async function fetchAgentList() {
-  if (allAgents.value.length > 0 || loadingAgents.value) return
-  loadingAgents.value = true
-  try {
-    const response = await axios.get('/api/agents', {
-      headers: authStore.authHeader
-    })
-    allAgents.value = response.data || []
-  } catch (e) {
-    console.error('Failed to fetch agent list:', e)
-  } finally {
-    loadingAgents.value = false
-  }
-}
-
-function getAvailableAgents(subId) {
-  const sub = subscriptions.value.find(s => s.id === subId)
-  const assignedHere = sub?.agents || []
-  return allAgents.value
-    .filter(a => !assignedHere.includes(a.name))
-    .sort((a, b) => {
-      const aOnOther = agentSubscriptionMap.value[a.name] ? 1 : 0
-      const bOnOther = agentSubscriptionMap.value[b.name] ? 1 : 0
-      return aOnOther - bOnOther || a.name.localeCompare(b.name)
-    })
-}
-
-async function assignAgentToSubscription(subName, agentName) {
-  assigningAgent.value = agentName
-  error.value = null
-  try {
-    await axios.put(`/api/subscriptions/agents/${encodeURIComponent(agentName)}?subscription_name=${encodeURIComponent(subName)}`, {}, {
-      headers: authStore.authHeader
-    })
-    await loadSubscriptions()
-    // Clear dropdown selection for all subs
-    selectedAgentToAssign.value = {}
-  } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to assign agent'
-  } finally {
-    assigningAgent.value = null
-  }
-}
-
-async function unassignAgentFromSubscription(agentName) {
-  if (!confirm(`Remove "${agentsStore.displayNameForSlug(agentName)}" from this subscription?\n\nIf the agent is running, it will be restarted.`)) return
-  unassigningAgent.value = agentName
-  error.value = null
-  try {
-    await axios.delete(`/api/subscriptions/agents/${encodeURIComponent(agentName)}`, {
-      headers: authStore.authHeader
-    })
-    await loadSubscriptions()
-  } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to unassign agent'
-  } finally {
-    unassigningAgent.value = null
-  }
-}
+// Subscription methods (SUB-001/002) moved to SubscriptionsPanel.vue (#471).
 
 // (#302) Settings is now visible to non-admin users for the MCP Keys tab.
 // Admin-only data fetches MUST be skipped when the user is not admin —
@@ -4148,8 +3809,6 @@ function loadAdminOnlySettings() {
   loadGithubTemplates()
   loadOpsSettings()
   loadAgentQuotas()
-  loadSubscriptions()
-  loadAutoSwitchSetting()
   // ent#236 automation config. Admin-only endpoint, so it belongs here rather
   // than in the unconditional mount path — SkillSourcesPanel loads the source
   // list itself.

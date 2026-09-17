@@ -158,7 +158,11 @@ regular-agent semantics.
   can legitimately disagree.
 - **On the canonical upgrade path adoption is operator-triggered** (alarm → Restart), not automatic:
   `build-base-image.sh` only builds and tags, `start.sh`/`stop.sh` never touch agent containers, and
-  `unless-stopped` means the system agent is *running* after every canonical upgrade.
+  `unless-stopped` means the system agent is *running* after every canonical upgrade. **Since #2541 this
+  is a fleet-wide property, not a `trinity-system` one** — an involuntary reboot used to be a free
+  cold-start boundary where the #1809 image gate fired for every regular agent, and `unless-stopped`
+  removes it. The staleness mechanism described above is now the whole fleet's; `POST /api/ops/fleet/restart`
+  (#1912) is the remedy and is manual.
 - **`/reinitialize` deliberately does not adopt.** It is already an explicit stop and carries zero
   incremental AC coverage.
 - **The system agent gets no `TRINITY_BACKEND_URL`.** The recreate `setdefault`s it for regular agents,
@@ -171,8 +175,10 @@ regular-agent semantics.
   leader lock, so a concurrent recreate can null the lookup mid-flight. That path reconstructs a *regular*
   agent: it deactivates the existing **system-scoped** MCP key and mints an *agent-scoped* one (plaintext
   unrecoverable ⇒ the orchestrator irreversibly loses its permission bypass), omits `trinity.is-system`
-  and the read-only `/template` bind, drops `unless-stopped`, arms `TRINITY_BACKEND_URL`, and follows the
-  fleet capabilities setting. Failing closed is self-healing — `ensure_deployed`'s create branch rebuilds
+  and the read-only `/template` bind, arms `TRINITY_BACKEND_URL`, and follows the fleet capabilities
+  setting. (#2541 removed one item from that list: the rebuild no longer drops `unless-stopped` — it goes
+  through the shared tail, which now bakes it unconditionally for every agent. Every other reason stands,
+  so the fence does not move.) Failing closed is self-healing — `ensure_deployed`'s create branch rebuilds
   it correctly on the next boot. The per-agent start lock (#1817) is the fix for the race itself.
 - **The boot path blocks the lifespan.** The STOPPED branch runs recreate + `wait_for_agent_ready` (60s)
   + credential retries (3 × 2s) + skill injection + read-only sync, so the backend serves nothing for

@@ -99,16 +99,19 @@ class ForceReleaseResult:
 @dataclass
 class PersistentTaskPayload:
     """All fields needed to reconstruct a /task request when drained from the
-    persistent backlog. Mirrors the existing BacklogService.enqueue signature
-    so the wire format on the SQL row is unchanged."""
+    persistent backlog. Mirrors the BacklogService.enqueue signature.
+
+    #2389 dropped `x_mcp_key_id`/`x_mcp_key_name`: they were forgeable header
+    values that `backlog_service._spawn_drain` never read back, so they were
+    stored and never reconstructed. A pre-existing queued row still carrying
+    those two keys drains unchanged — the drain reads the blob key-by-key with
+    `.get()` and never asked for either."""
     request: Any  # ParallelTaskRequest — kept Any to avoid a router import here
     effective_timeout: int
     user_id: Optional[int]
     user_email: Optional[str]
     subscription_id: Optional[str]
     x_source_agent: Optional[str]
-    x_mcp_key_id: Optional[str]
-    x_mcp_key_name: Optional[str]
     triggered_by: str
     collaboration_activity_id: Optional[str]
     is_self_task: bool = False
@@ -414,8 +417,6 @@ class CapacityManager:
                 user_email=overflow_payload.user_email,
                 subscription_id=overflow_payload.subscription_id,
                 x_source_agent=overflow_payload.x_source_agent,
-                x_mcp_key_id=overflow_payload.x_mcp_key_id,
-                x_mcp_key_name=overflow_payload.x_mcp_key_name,
                 triggered_by=overflow_payload.triggered_by,
                 collaboration_activity_id=overflow_payload.collaboration_activity_id,
                 is_self_task=overflow_payload.is_self_task,

@@ -25,16 +25,31 @@ had drifted apart:
    of such agents, *every* agent skipped and the endpoint still answered
    `success: true`.
 
-2. **`.env` is not where git authenticates from.** Clones are created as
-   `https://oauth2:<PAT>@github.com/<org>/<repo>.git` and that URL is persisted
-   in `.git/config` on the workspace volume. Rewriting `.env` changes nothing
-   for the running `git` process. Only re-templating the remote restores
+2. **`.env` was not where git authenticated from.** Clones were created as
+   `https://oauth2:<PAT>@github.com/<org>/<repo>.git` and that URL was persisted
+   in `.git/config` on the workspace volume. Rewriting `.env` changed nothing
+   for the running `git` process. Only re-templating the remote restored
    fetch/push before a restart — which the per-agent path already did and this
    one did not.
 
-So the `.env` write is the *next-start* fix and the remote rewrite is the *now*
-fix, and a rotation needs both. `_apply_pat_to_agent` below is now the single
+So the `.env` write was the *next-start* fix and the remote rewrite was the
+*now* fix, and a rotation needed both. `_apply_pat_to_agent` below is the single
 body both paths call, so the next divergence has to be deliberate.
+
+ent#615 — THE PREMISE OF (2) IS NOW INVERTED, DELIBERATELY
+----------------------------------------------------------
+Remotes carry no credential at all. Git resolves one per operation through the
+`trinity` credential helper, whose ladder is **`.env` first**, baked
+`Config.Env` second. So the `.env` write is now the *now* fix — which is
+exactly why the helper reads it first: a rotation does not recreate the
+container, so `Config.Env` keeps the REVOKED token until the next recreate,
+and a baked-env-first ladder would authenticate with it forever.
+
+`update_remote_pat` is still the load-bearing half and both paths still call
+it, but its job flipped: it places the credential (writing `.env` over
+`docker exec`, which works while the agent server is wedged, restarting or OOM
+— unlike `_apply_pat_to_env`, which raises) and then makes the URL
+credential-less, refusing to touch the URL if nothing resolves.
 """
 import asyncio
 import logging
@@ -199,6 +214,13 @@ async def _apply_pat_to_agent(
     (`git_service.update_remote_pat` returns False rather than raising), because
     a container that cannot be exec'd into must not fail the whole rotation for
     the agents that can.
+
+    ent#615: `update_remote_pat` now ALSO writes the same `.env` line over
+    `docker exec`. Not redundant — this HTTP write is the one that runs
+    `sync_process_env()`, and it is also the one that raises when the agent
+    server is wedged, restarting or OOM, which is exactly when a rotation most
+    needs to land. Two channels, one credential, and the exec one is what makes
+    the remote rewrite safe to attempt at all.
     """
     from services import git_service
 
@@ -209,6 +231,8 @@ async def _apply_pat_to_agent(
 
     # The load-bearing half. Only meaningful for an agent whose clone Trinity
     # templated in the first place — `update_remote_pat` no-ops without a repo.
+    # ent#615: what it does there is place the credential and make the URL
+    # credential-LESS, refusing to touch the URL when nothing resolves.
     git_config = db.get_git_config(agent_name)
     github_repo = git_config.github_repo if git_config else None
     remote_updated = (

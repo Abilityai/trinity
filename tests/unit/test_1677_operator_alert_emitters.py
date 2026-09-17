@@ -61,7 +61,7 @@ _ALLOWED_CALLERS = {
         "platform-only: idempotent id per portal client's legacy dir (ent#308)",
     ("database.py", "DatabaseManager.create_operator_queue_item"):
         "the facade delegation itself (the _operator_queue_ops.create_item spelling)",
-    ("services/agent_client.py", "_emit_dormant_alert"):
+    ("services/agent_client/circuit.py", "_emit_dormant_alert"):  # 1028: package split
         "platform-only: edge-triggered after consecutive failed CB probes (cb-dormant)",
     ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
         "platform-only: raised from probe_archive_writability() at the start of an "
@@ -72,6 +72,18 @@ _ALLOWED_CALLERS = {
         "platform-only: edge-triggered on the durable prior-status transition "
         "(ok->failed), plus a staleness re-alarm throttled to weekly; volume is "
         "bound by the daily job cadence and no agent input reaches it (#2216)",
+    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_refused"):
+        "platform-only: the ent#615 sweep refused to strip a credential URL it "
+        "could not replace. Raised from a start hook / boot one-shot, so the "
+        "cadence is the platform's, and the id is bucketed per agent per UTC "
+        "day so a restart loop is <=1 row/agent/day; no agent input reaches it",
+    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_unreadable"):
+        "platform-only: the ent#615 sweep could not READ the tree it swept, so "
+        "its all-zero report is not evidence of a clean agent. Same emitters as "
+        "its refusal sibling (start hook / boot one-shot), same per-agent-per-UTC-"
+        "day bucketed id, no agent input reaches it — a SEPARATE id family "
+        "because the two need different operator action and sharing one would "
+        "let whichever fired first suppress the other all day",
     ("services/lease_reaper_service.py", "_create_park_item"):
         "platform-only + LOAD-BEARING: #1402 poison-park parks ONLY on a successful "
         "create — must never be throttled (the reason a db-sink bound was rejected)",
@@ -80,6 +92,14 @@ _ALLOWED_CALLERS = {
     ("services/operator_queue_service.py",
      "OperatorQueueSyncService._maybe_emit_flood_alert"):
         "the #1632 flood alert: cooldown-gated, one per episode",
+    ("services/subscription_headroom_alerts.py", "_emit"):
+        "platform-only: edge-triggered per weekly window via a deterministic "
+        "id (sub-headroom-{sid}-{reset-day}-{tier}) whose ON CONFLICT DO NOTHING "
+        "makes a re-emit a no-op; volume is bound by the sweep cadence and a "
+        "per-cycle cap. Agent-CHOSEN names do reach the body (an agent may "
+        "spawn children and name them) but arrive sanitized and capped at five "
+        "per alert — it is the VOLUME an agent cannot drive, which is what this "
+        "exemption rests on (ent#434)",
     ("services/operator_queue_service.py", "create_bounded_alert"):
         "the #1677 budget helper's own admit-path create (the seam itself)",
     ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
@@ -89,7 +109,12 @@ _ALLOWED_CALLERS = {
     ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
         "platform-only: assignment-driven, quasi-idempotent id (ent#236)",
     ("services/skill_service.py", "SkillService._record_adoption_failure"):
-        "platform-only: admin-driven sync cadence (ent#346)",
+        "platform-only: the only input is `skills_library_url`, blocked on the "
+        "generic settings PUT by routers/settings.py LEGACY_SKILLS_LIBRARY_KEYS "
+        "(ent#346), so no agent can drive volume; the steady-state branch is "
+        "additionally idempotent by a URL-derived id ⇒ ≤1 row per refused URL. "
+        "NOT admin-driven — ent#236's auto-sync calls the same sync_library() "
+        "unattended on a 300s-86400s timer (#2744)",
     ("services/skills_sync_service.py",
      "SkillsLibrarySyncService._announce_fleet_failures"):
         "platform-only: leader-locked, one per sync run (ent#236)",

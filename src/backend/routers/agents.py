@@ -21,19 +21,22 @@ from fastapi.responses import JSONResponse
 from models import (
     AgentConfig,
     AgentStatus,
+    AgentSubscriptionPressure,
+    SubscriptionPressureResponse,
     CircuitBreakerConfigUpdate,
     DeployLocalRequest,
     ExecutionResultEnvelope,
     HeartbeatPayload,
     AgentLabelUpdate,
     McpExposedUpdate,
+    OperatorResumeUpdate,
     VoiceRepliesUpdate,
     VoiceReplyRequest,
     TaskExecutionStatus,
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -290,6 +293,62 @@ async def get_all_sync_health(
     return {"agents": entries}
 
 
+@router.get("/subscription-pressure", response_model=SubscriptionPressureResponse)
+async def get_subscription_pressure(
+    current_user: User = Depends(get_current_user)
+):
+    """Dashboard batch endpoint for subscription-pressure badges (#471).
+
+    One row per accessible agent: auth mode (the `AgentAuthStatus` vocabulary),
+    the funding subscription's name, its 24h failure-event count (plus the
+    auth-kind slice of it, #2352), the one-gate `rate_limited_now`, the
+    provider probe's own `token_status`, and — when a fresh provider snapshot
+    exists — the 5h utilization %. Access is the pure-DB visible set (`visible_agent_names`,
+    ent#384 — never the Docker-faulting path), mirroring `/sync-health`'s
+    accessible-only scope; subscription-name disclosure to shared accessors
+    matches the existing per-agent `AgentAuthStatus` gate. Registered BEFORE
+    `/{agent_name}` (Invariant #4).
+    """
+    from services.agent_service.helpers import visible_agent_names
+    from services.subscription_service import derive_auth_mode
+    from services.subscription_headroom_service import pressure_states
+
+    names = visible_agent_names(current_user)  # None = admin (no filter)
+    sub_map = db.get_agent_subscription_map(
+        list(names) if names is not None else None
+    )
+    sub_ids = sorted({
+        m["subscription_id"] for m in sub_map.values() if m["subscription_id"]
+    })
+    states = await pressure_states(sub_ids)
+
+    rows = []
+    for agent_name in sorted(sub_map):
+        m = sub_map[agent_name]
+        sid = m["subscription_id"]
+        state = states.get(sid, {}) if sid else {}
+        headroom = state.get("headroom")
+        util_5h = None
+        source = "observed"
+        if headroom is not None and headroom.status == "ok" and headroom.five_hour:
+            util_5h = headroom.five_hour.utilization_pct
+            source = "anthropic"
+        rows.append(AgentSubscriptionPressure(
+            agent_name=agent_name,
+            auth_mode=derive_auth_mode(bool(sid), m["use_platform_api_key"]),
+            subscription_name=m["subscription_name"],
+            failure_events_24h=int(state.get("failure_events_24h", 0)),
+            auth_failures_24h=int(state.get("auth_failures_24h", 0)),
+            rate_limited_now=bool(state.get("rate_limited_now", False)),
+            # #2352: pass the probe's verdict through so the chip can say
+            # "auth" instead of claiming a limit it has no evidence for.
+            token_status=(headroom.status if headroom is not None else None),
+            utilization_5h_pct=util_5h,
+            headroom_source=source,
+        ))
+    return SubscriptionPressureResponse(agents=rows)
+
+
 @router.get("/slots")
 async def get_all_agent_slots(
     current_user: User = Depends(get_current_user)
@@ -538,15 +597,79 @@ async def create_agent_endpoint(
 async def deploy_local_agent(
     body: DeployLocalRequest,
     request: Request,
-    current_user: User = Depends(require_role("creator"))
+    current_user: User = Depends(require_role("creator")),
+    idempotency_key: Optional[str] = Header(None),
 ):
-    """Deploy a Trinity-compatible local agent. Requires creator role or above."""
-    return await deploy_local_agent_logic(
-        body=body,
-        current_user=current_user,
-        request=request,
-        create_agent_fn=create_agent_internal
-    )
+    """Deploy a Trinity-compatible local agent. Requires creator role or above.
+
+    Invariant #18 (#2060): accepts an optional ``Idempotency-Key`` so a
+    transport retry of a slow deploy (versioning mints a NEW name per call, so
+    a retried deploy previously forked twice: my-agent-2 AND my-agent-3)
+    replays the original response instead of dispatching a second deploy.
+    Mirrors the create endpoint above, including the #2040-F3 staleness
+    branch. The scope folds the caller (another user's identical key must
+    never replay a foreign deploy response).
+    """
+    idem = None
+    if idempotency_key:
+        scope = f"agent_deploy:{current_user.id}"
+        idem = idempotency_service.begin(scope, idempotency_key)
+        if idem.replay:
+            if idem.in_flight:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": (
+                            "A deploy with this Idempotency-Key is still "
+                            "being processed."
+                        ),
+                        "code": "DEPLOY_IN_FLIGHT",
+                    },
+                )
+            # #2040-F3: a completed replay is only truthful while the version
+            # it reports still exists — delete-then-identical-redeploy within
+            # 24h must run a genuinely fresh deploy, not replay a 200 naming
+            # an agent that is gone.
+            recorded_name = ((idem.snapshot or {}).get("versioning") or {}).get(
+                "new_version"
+            )
+            if recorded_name and db.is_agent_live(recorded_name):
+                return JSONResponse(
+                    content=idem.snapshot, headers={"X-Idempotent-Replay": "true"}
+                )
+            idempotency_service.discard_stale_replay(idem.scope, idem.key)
+            idem = idempotency_service.begin(scope, idempotency_key)
+            if idem.replay:
+                # Lost the re-claim race to a concurrent identical retry.
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": (
+                            "A deploy with this Idempotency-Key is being "
+                            "retried concurrently."
+                        ),
+                        "code": "DEPLOY_IN_FLIGHT",
+                    },
+                )
+
+    try:
+        result = await deploy_local_agent_logic(
+            body=body,
+            current_user=current_user,
+            request=request,
+            create_agent_fn=create_agent_internal
+        )
+    except Exception:
+        # Release the fresh claim so a corrected retry can proceed (fail-open;
+        # never converts the underlying error).
+        if idem is not None:
+            idempotency_service.fail(idem)
+        raise
+
+    if idem is not None:
+        new_version = result.versioning.new_version if result.versioning else None
+        idempotency_service.complete(idem, new_version, jsonable_encoder(result))
+    return result
 
 
 @router.delete("/{agent_name}")
@@ -1148,6 +1271,59 @@ async def set_mcp_exposed_endpoint(
         "enabled": body.enabled,
         "tool_name": resolve_tool_name(agent_name, exposed_names),
     }
+
+
+# ============================================================================
+# Respond → resume opt-in (ent#329)
+# ============================================================================
+
+
+@router.get("/{agent_name}/operator-resume")
+async def get_operator_resume_endpoint(
+    agent_name: AuthorizedAgentByName,
+    current_user: CurrentUser,
+):
+    """Whether an operator answer re-triggers this agent (ent#329).
+
+    Default OFF. When off, an answer still reaches the agent's queue file — it is
+    simply processed at the agent's next turn, which is the behaviour every agent
+    had before this flag existed.
+    """
+    return {
+        "agent_name": agent_name,
+        "enabled": db.get_operator_resume_enabled(agent_name),
+    }
+
+
+@router.put("/{agent_name}/operator-resume")
+async def set_operator_resume_endpoint(
+    agent_name: OwnedAgentByName,
+    body: OperatorResumeUpdate,
+    current_user: CurrentUser,
+):
+    """Enable/disable respond→resume for this agent (ent#329). Owner-only, human-only.
+
+    Owner-only rather than accessible-to-sharers because flipping it on means
+    "answers to this agent may now spend money", and the bill lands on the owner.
+    Human-only on top of that: an agent-scoped key resolves to its OWNER on REST,
+    so `OwnedAgentByName` alone is satisfied by the agent's own injected key and
+    the agent could switch on its own paid wake-ups. Same grant-vs-use line as
+    the ent#223 consent toggle — the GET (a use) stays agent-reachable.
+    """
+    reject_agent_principal(current_user)
+    if not db.set_operator_resume_enabled(agent_name, body.enabled):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="operator_resume_config",
+        source="api",
+        actor_user=current_user,
+        target_type="agent",
+        target_id=agent_name,
+        details={"enabled": body.enabled},
+    )
+    return {"agent_name": agent_name, "enabled": body.enabled}
 
 
 # ============================================================================

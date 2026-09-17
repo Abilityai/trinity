@@ -12,9 +12,16 @@ from datetime import datetime
 from typing import NoReturn, Optional
 
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, TaskExecutionStatus
-from dependencies import get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin
+from dependencies import (
+    get_current_user,
+    get_authorized_agent,
+    get_owned_agent,
+    assert_owns_or_admin,
+    resolve_source_agent,
+)
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
+from services.model_catalog import InvalidModelError, validate_dispatch_model
 from services.capacity_manager import (
     CapacityFull,
     CircuitOpen,
@@ -128,8 +135,6 @@ async def chat_with_agent(
     current_user: User = Depends(get_current_user),
     x_source_agent: Optional[str] = Header(None),
     x_via_mcp: Optional[str] = Header(None),
-    x_mcp_key_id: Optional[str] = Header(None),
-    x_mcp_key_name: Optional[str] = Header(None),
     idempotency_key: Optional[str] = Header(None),
 ):
     """
@@ -145,15 +150,34 @@ async def chat_with_agent(
     in the capacity meter.
 
     Headers:
-    - X-Source-Agent: Set when one agent calls another (agent-to-agent)
+    - X-Source-Agent: Set when one agent calls another (agent-to-agent). Honoured
+      only for an agent-scoped key naming its own agent or the event loopback
+      (ent#614, `dependencies.resolve_source_agent`); any other principal → 403.
     - X-Via-MCP: Set for all MCP calls (both user and agent-scoped)
     """
+    # ent#614: resolve the raw X-Source-Agent header BEFORE anything reads it —
+    # the admission audit row, the capacity source, triggered_by, the
+    # collaboration activity/broadcast and the execution row all consume the
+    # value below. Rebinding makes the raw header unreachable past this line.
+    x_source_agent = resolve_source_agent(
+        current_user, x_source_agent, endpoint=f"/api/agents/{name}/chat"
+    )
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     if container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
+
+    # #2796: shape-check the caller-supplied model BEFORE the admission gate —
+    # `admit_chat_request` begins the idempotency claim, and a request refused
+    # after that point would burn the key (the RD11 upload-path quirk this
+    # deliberately does not repeat). Normalised in place so the execution row
+    # and the dispatch payload cannot disagree about the value.
+    try:
+        request.model = validate_dispatch_model(request.model)
+    except InvalidModelError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     # Admission gate (#1026 slice 1): idempotency (#525) + dispatch breaker
     # (#526) + capacity acquire (#428) live in dispatch_admission_service now
@@ -169,8 +193,6 @@ async def chat_with_agent(
             current_user=current_user,
             x_source_agent=x_source_agent,
             x_via_mcp=x_via_mcp,
-            x_mcp_key_id=x_mcp_key_id,
-            x_mcp_key_name=x_mcp_key_name,
             idempotency_key=idempotency_key,
         )
     except CircuitOpen as e:
@@ -221,8 +243,6 @@ async def chat_with_agent(
         current_user=current_user,
         x_source_agent=x_source_agent,
         x_via_mcp=x_via_mcp,
-        x_mcp_key_id=x_mcp_key_id,
-        x_mcp_key_name=x_mcp_key_name,
         idem=idem,
         chat_execution_id=chat_execution_id,
         capacity_result=capacity_result,
@@ -249,7 +269,6 @@ async def chat_with_agent(
             request=request,
             current_user=current_user,
             x_source_agent=x_source_agent,
-            x_mcp_key_name=x_mcp_key_name,
             triggered_by=triggered_by,
             task_execution_id=task_execution_id,
             _chat_subscription_id=_chat_subscription_id,
@@ -285,8 +304,6 @@ async def execute_parallel_task(
     current_user: User = Depends(get_current_user),
     x_source_agent: Optional[str] = Header(None),
     x_via_mcp: Optional[str] = Header(None),
-    x_mcp_key_id: Optional[str] = Header(None),
-    x_mcp_key_name: Optional[str] = Header(None),
     idempotency_key: Optional[str] = Header(None),
     x_event_trigger: Optional[str] = Header(None),
     x_internal_secret: Optional[str] = Header(None),
@@ -307,6 +324,12 @@ async def execute_parallel_task(
     Note: Does NOT update conversation history or session state.
     Executions are saved to the database for history tracking.
     """
+    # ent#614: resolve the raw X-Source-Agent header first (rebind — see
+    # chat_with_agent). `derive_source_and_trigger`'s SELF-EXEC-001 check stays
+    # as belt-and-braces; it can no longer fire for a resolved value.
+    x_source_agent = resolve_source_agent(
+        current_user, x_source_agent, endpoint=f"/api/agents/{name}/task"
+    )
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -338,6 +361,8 @@ async def execute_parallel_task(
     # against their own user id; an agent-scoped key resolves to its owner and is
     # checked against the owner's id; admin bypasses (mirrors the Session tab). No
     # legitimate agent-to-agent path carries a resume id, so gating them costs nothing.
+    # (ent#614: `resolve_source_agent` at the top of this handler now refuses a
+    # human's header outright, so the value never reaches here — the keying stays.)
     #
     # Ownership is the real guard, so NO id-shape check is needed: a value that
     # matches a real row's claude_session_id is a system-generated id (a Claude
@@ -354,6 +379,15 @@ async def execute_parallel_task(
             name, rid, current_user.id
         ):
             raise HTTPException(status_code=404, detail="Session not found.")
+
+    # #2796: same gate as /chat, and it has to be here too — this is the route
+    # the Chat tab actually posts to, and its `model` reaches the runtime as a
+    # `--model` argv element by the same path. Normalised in place, exactly like
+    # the timeout below.
+    try:
+        request.model = validate_dispatch_model(request.model)
+    except InvalidModelError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     # #1068 (demotion PR 1): normalize the deprecated per-task timeout override once
     # here — in place, so every downstream site (acquire, execute_task, backlog
@@ -379,8 +413,6 @@ async def execute_parallel_task(
             container=container,
             x_source_agent=x_source_agent,
             x_via_mcp=x_via_mcp,
-            x_mcp_key_id=x_mcp_key_id,
-            x_mcp_key_name=x_mcp_key_name,
             idempotency_key=idempotency_key,
             x_event_trigger=x_event_trigger,
             x_internal_secret=x_internal_secret,

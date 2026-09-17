@@ -53,6 +53,16 @@ class FakeDB:
         self.settings = {"setup_completed": "false"}
         self.users = {}
 
+    def get_user_by_username(self, username):
+        """#2381: the endpoint now refuses when a usable admin already exists.
+
+        A bare FakeDB starts with `users == {}`, i.e. an install with no admin —
+        which is exactly the state the first-run endpoint is *for*, so every
+        pre-existing test in this module keeps exercising the happy path. Tests
+        that want the refusal seed `users` themselves.
+        """
+        return self.users.get(username)
+
     def get_setting_value(self, key, default=None):
         return self.settings.get(key, default)
 

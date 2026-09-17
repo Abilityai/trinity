@@ -208,7 +208,7 @@ class TestAcquireAdmitted:
                 request=MagicMock(),
                 effective_timeout=900,
                 user_id=1, user_email="a@b", subscription_id=None,
-                x_source_agent=None, x_mcp_key_id=None, x_mcp_key_name=None,
+                x_source_agent=None,
                 triggered_by="user", collaboration_activity_id=None,
             ),
         ))
@@ -348,7 +348,7 @@ class TestAcquireOverflow:
             request=MagicMock(),
             effective_timeout=900,
             user_id=42, user_email="u@x", subscription_id="sub-1",
-            x_source_agent=None, x_mcp_key_id=None, x_mcp_key_name=None,
+            x_source_agent=None,
             triggered_by="user", collaboration_activity_id=None,
         )
         result = asyncio.run(capacity.acquire(
@@ -373,7 +373,7 @@ class TestAcquireOverflow:
         payload = PersistentTaskPayload(
             request=MagicMock(), effective_timeout=900,
             user_id=1, user_email=None, subscription_id=None,
-            x_source_agent=None, x_mcp_key_id=None, x_mcp_key_name=None,
+            x_source_agent=None,
             triggered_by="user", collaboration_activity_id=None,
         )
         with pytest.raises(CapacityFull) as exc:

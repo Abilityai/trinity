@@ -46,6 +46,14 @@ class _Principal:
     agent_name: Optional[str] = None
     connector_agent: Optional[str] = None
     portal_delegate: bool = False
+    # #2323 — this dataclass was docstringed "every field stated" while missing
+    # the field #1854 added to `models.User`. That is why the guard could not
+    # express the failure it exists to catch: `mcp_scope` is the ONLY thing that
+    # distinguishes a `system`/`portal_delegate`/`ops` key from a browser
+    # session, and all three set neither `agent_name` nor `connector_agent`, so
+    # the two named rejections are no-ops for every one of them.
+    # `None` = the JWT branch, matching `get_current_user`.
+    mcp_scope: Optional[str] = None
 
 
 def _deps():
@@ -150,7 +158,8 @@ def test_an_agent_key_cannot_repoint_the_skills_library(monkeypatch):
     from fastapi import HTTPException
 
     try:
-        from routers import settings as settings_router
+        # #1028: the generic /{key} handlers live in the package's `generic` module.
+        from routers.settings import generic as settings_router
         from db_models import SystemSettingUpdate
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")
@@ -190,7 +199,8 @@ def test_the_same_write_still_works_for_a_human_admin(monkeypatch):
     import asyncio
 
     try:
-        from routers import settings as settings_router
+        # #1028: the generic /{key} handlers live in the package's `generic` module.
+        from routers.settings import generic as settings_router
         from db_models import SystemSettingUpdate
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")
@@ -243,7 +253,8 @@ def test_the_skills_library_key_is_refused_for_humans_too(monkeypatch):
     from fastapi import HTTPException
 
     try:
-        from routers import settings as settings_router
+        # #1028: the generic /{key} handlers live in the package's `generic` module.
+        from routers.settings import generic as settings_router
         from db_models import SystemSettingUpdate
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")
@@ -449,3 +460,87 @@ def test_no_route_uses_require_role_admin_as_an_admin_gate():
         "use `require_admin` (rejects agent principals) rather than "
         f'`require_role("admin")` (does not): {offenders}'
     )
+
+
+# ---------------------------------------------------------------------------
+# #2323 — the gate is an ALLOWLIST, not a list of two named enemies
+# ---------------------------------------------------------------------------
+#
+# ent#293 closed the gate against `agent` and `connector` BY NAME. `scope` is a
+# free-text column with no CHECK constraint, so that is a denylist over an open
+# space: any scope setting neither `agent_name` nor `connector_agent` walks both
+# rejections and inherits the owner's admin role across ~163 admin-gated sites.
+# `models.User.mcp_scope`'s docstring predicted exactly this. These tests pin the
+# inversion so scope #7 is protected the day it is invented.
+
+OPS_KEY = _Principal(username="admin", role="admin", mcp_scope="ops")
+PORTAL_DELEGATE_KEY = _Principal(username="admin", role="admin", mcp_scope="portal_delegate")
+FUTURE_KEY = _Principal(username="admin", role="admin", mcp_scope="scope_from_2027")
+
+
+@pytest.mark.parametrize("principal", [OPS_KEY, PORTAL_DELEGATE_KEY, FUTURE_KEY])
+def test_admin_gates_reject_every_scope_outside_the_allowlist(principal):
+    """Including a scope that does not exist yet — that is the whole point."""
+    from fastapi import HTTPException
+
+    d = _deps()
+    for gate in (d.assert_admin, d.require_admin):
+        with pytest.raises(HTTPException) as exc:
+            gate(principal)
+        assert exc.value.status_code == 403
+
+
+@pytest.mark.parametrize("scope", [None, "user", "system"])
+def test_admin_gates_still_admit_the_scopes_that_passed_before(scope):
+    """The inversion must be zero-behaviour-change for everything legitimate.
+    A guard that only proves rejection would pass if the gate rejected
+    everyone — including the browser session and `trinity-system`."""
+    d = _deps()
+    principal = _Principal(username="admin", role="admin", mcp_scope=scope)
+    d.assert_admin(principal)
+    assert d.require_admin(principal) is principal
+
+
+def test_admin_gate_scopes_is_a_closed_literal():
+    """Widening the set must be a deliberate, reviewed edit — never a drive-by
+    addition inside an unrelated PR."""
+    d = _deps()
+    assert d.ADMIN_GATE_SCOPES == frozenset({None, "user", "system"})
+
+
+def test_a_route_may_opt_a_bounded_scope_in_but_only_that_one():
+    """#2323's per-route grant. This is what makes an ops key authorized because
+    of WHAT IT IS rather than who owns it — and it must not become a skeleton
+    key for every other unlisted scope."""
+    from fastapi import HTTPException
+
+    d = _deps()
+    d.assert_admin(OPS_KEY, allow_scopes={"ops"})
+    with pytest.raises(HTTPException):
+        d.assert_admin(FUTURE_KEY, allow_scopes={"ops"})
+
+
+def test_opting_a_scope_in_does_not_bypass_the_role_check():
+    """`allow_scopes` widens WHICH principals may satisfy an admin gate, never
+    WHAT counts as admin. An ops key on a non-admin owner still gets nothing."""
+    from fastapi import HTTPException
+
+    d = _deps()
+    with pytest.raises(HTTPException) as exc:
+        d.assert_admin(_Principal(username="bob", role="user", mcp_scope="ops"),
+                       allow_scopes={"ops"})
+    assert exc.value.status_code == 403
+
+
+def test_named_rejections_still_fire_ahead_of_the_allowlist():
+    """An agent key must keep its OWN 403 message. If the allowlist started
+    answering first, ent#293's diagnostic would silently regress into a generic
+    scope error."""
+    from fastapi import HTTPException
+
+    d = _deps()
+    agent_with_scope = _Principal(username="admin", role="admin",
+                                  agent_name="prospector", mcp_scope="agent")
+    with pytest.raises(HTTPException) as exc:
+        d.assert_admin(agent_with_scope)
+    assert "human-only" in exc.value.detail

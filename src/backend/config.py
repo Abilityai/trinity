@@ -97,12 +97,40 @@ PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT = 30  # hard ceiling from first sign-in
 # #2157: the `schedule_executions.source_channel` stamp identifying a Workspace
 # turn. `triggered_by="public"` is shared with public links and x402 chat, so it
 # cannot answer "did this turn arrive from the Workspace?" — and that answer
-# decides what `send_voice_reply` tells an agent that tries to speak there. It is
-# NOT a messaging channel: portal rows carry no `source_channel_chat_id`, so every
-# channel consumer (the completion-report resolver map, `voice_reply_service`'s
-# supported set) already ignores it. It lives here so the writer (client_portal)
-# and the reader (routers/agents) share one spelling without importing each other.
+# decides what `send_voice_reply` tells an agent that tries to speak there. It
+# lives here so the writer (client_portal) and the reader (routers/agents) share
+# one spelling without importing each other.
+#
+# ent#457 CHANGED WHAT THIS VALUE MEANS, and this comment used to say the
+# opposite — that it is "NOT a messaging channel: portal rows carry no
+# `source_channel_chat_id`, so every channel consumer already ignores it". Both
+# halves are now false. Portal rows DO carry `source_channel_chat_id` (the
+# session id, stamped at both turn-creation sites), and
+# `channel_completion_report._CHANNEL_RESOLVERS` carries a `"portal"` entry, so
+# a delegated terminal is delivered into the Workspace thread as a persisted
+# assistant message. `voice_reply_service` still declines it, but for its own
+# reason — the Workspace narrates client-side (#2157) — not because the stamp
+# is inert.
+#
+# So the honest statement is: this is a real destination for the
+# completion-report leg and NOT one for outbound voice. A consumer that wants
+# "is this a messaging channel?" must ask its own resolver map rather than
+# assume from the name; there is no longer one answer that covers both.
 PORTAL_SOURCE_CHANNEL = "portal"
+
+# #2792 — a Workspace ROOM turn's surface, and the destination stamp
+# (`source_channel_chat_id` = the room id) that lets the room tell its own live
+# work apart from everything else its participants are doing. Deliberately NOT
+# the portal value above: every reader of `"portal"` branches on "this is a 1:1
+# Workspace thread" — `_resolve_portal` looks the chat id up as a portal
+# SESSION, and the voice-reply route promises a speaker control a room does not
+# have. This value is in NEITHER map, so a room turn and its delegated children
+# have no report-back leg and no voice destination by construction. The one
+# reader that does accept it is the Workspace work projection
+# (`client_portal/work/service.py`), where a room id is a chat the client can
+# open. A resolver for rooms, if one is ever wanted, is a deliberate entry in
+# `channel_completion_report._CHANNEL_RESOLVERS`, not a side effect of a stamp.
+ROOM_SOURCE_CHANNEL = "room"
 
 # Bounds enforced on READ, so a bad row cannot widen the window (#506).
 PORTAL_SESSION_MIN_IDLE_MINUTES = 15
@@ -316,6 +344,14 @@ VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 # (mirrors the GEMINI_API_KEY `or` coalesce above.)
 VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.1-flash-live-preview"
 VOICE_MAX_DURATION = int(os.getenv("VOICE_MAX_DURATION", "300"))  # seconds
+# Workspace voice mode (ent#534): the cap for a call started from the Workspace
+# conversation — 30 min, ruled 2026-09-07 — kept apart from the Agent Detail
+# overlay's VOICE_MAX_DURATION because the two are different surfaces with
+# different expectations, not different providers. The Gemini session itself is
+# made to survive this long by context-window compression + resumption in
+# services/gemini_voice.py; the knob is surface-scoped so a second realtime
+# provider (ent#354) inherits it unchanged.
+WORKSPACE_VOICE_MAX_DURATION = int(os.getenv("WORKSPACE_VOICE_MAX_DURATION", "1800"))  # seconds
 
 # Per-agent voice selection (#28). Canonical set of Gemini Live prebuilt voices
 # offered by Trinity; the single source of truth shared by the persisted-voice
@@ -345,9 +381,9 @@ GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL") or "gemini-3.5-flash"
 GEMINI_TRANSCRIPTION_MODEL = os.getenv("GEMINI_TRANSCRIPTION_MODEL") or "gemini-3.5-flash"
 
 # VoIP Telephony Configuration (VOIP-001, #1056 — Phase 1, outbound)
-# Default OFF — mirrors the workspace_available opt-in (#860). The feature
-# also requires a per-agent voip_bindings row to function. `voip_available`
-# in GET /api/settings/feature-flags is `VOIP_ENABLED and bool(GEMINI_API_KEY)`.
+# Default OFF. The feature also requires a per-agent voip_bindings row to
+# function. `voip_available` in GET /api/settings/feature-flags is
+# `VOIP_ENABLED and bool(GEMINI_API_KEY)`.
 VOIP_ENABLED = os.getenv("VOIP_ENABLED", "false").lower() == "true"
 # Outbound A2A calls (#736) — a Trinity agent tasking an EXTERNAL A2A agent.
 # RUNTIME-RESOLVED like the Brain Orb flags, deliberately: no import-time
@@ -484,20 +520,93 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 # cuts its first tag this seed points at a 404 and `sync_library` reports a
 # failed source (fail-soft by design — it never raises).
 #
-# The tag name must match what ent#296 actually publishes: that issue's plan
-# (vybe, 2026-08-04) cuts **v0.1.0** once the seed content lands, so a `v1.0.0`
-# default would leave every fresh install seeded with a source that can never
-# sync — and the failure is quiet (a failed row in Settings), not loud. Bump
-# this in lockstep with the catalog's releases; the env var is the escape hatch
-# for an instance that wants to pin an older or newer catalog.
+# The tag name must match what ent#296 actually publishes (its first cut was
+# v0.1.0, 2026-08): a default naming a tag that does not exist leaves every
+# fresh install seeded with a source that can never sync — and the failure is
+# quiet (a failed row in Settings), not loud. Bump this in lockstep with the
+# catalog's releases — the seed is fresh-install only, so a bump reaches new
+# installs and nothing else (#2545 moved it to v0.2.0, the release that added
+# the project-management category; `.env.example` documents the same value and
+# `tests/unit/test_2545_skill_source_pin.py` keeps the two in step). The env
+# var is the escape hatch for an instance that wants an older or newer catalog.
 #
 # TRINITY_DEFAULT_SKILL_SOURCE="" disables the seed entirely for an operator who
 # wants no community catalog (mirrors TRINITY_DEFAULT_SYSTEM_MANIFEST).
 DEFAULT_SKILL_SOURCE_URL = os.getenv(
     "TRINITY_DEFAULT_SKILL_SOURCE", "github.com/abilityai/trinity-skills"
 )
-DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.1.0")
+DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.2.0")
 DEFAULT_SKILL_SOURCE_NAME = "Trinity Community Skills"
+
+# ============================================================================
+# Install provenance (#2380)
+# ============================================================================
+# HOW this instance was installed, so a surface can be shown to a marketplace
+# operator and to NOBODY else. The value is recorded once at first boot from
+# `TRINITY_INSTALL_SOURCE` (see `database._record_install_source`) and read back
+# from `system_settings` thereafter.
+#
+# An env var rather than a marker file (`/etc/trinity/install-source`), which
+# the issue also offered: `config.py` reads zero files today, and a file would
+# need a read-only bind mount added to every compose file — the packaging class
+# this codebase has shipped repeatedly (#1039, #1056, #1707), where the value
+# never reaches the container and the feature is silently inert forever. The
+# provisioning script already writes `.env`; this is one more line in it.
+#
+# Provenance is the gate rather than observed TLS/network state because the two
+# are not distinguishable from inside the container. Measured across the managed
+# fleet, every instance serves plain HTTP with no domain over a Tailscale CGNAT
+# address — identical in shape to an unhardened public droplet, and already
+# correct (HTTP over a WireGuard tunnel is encrypted transport). Keying on TLS
+# state fires permanently on every paying client; keying on provenance cannot.
+INSTALL_SOURCE_SETTING_KEY = "install_source"
+INSTALL_SOURCE_ENV_VAR = "TRINITY_INSTALL_SOURCE"
+INSTALL_SOURCE_UNKNOWN = "unknown"
+
+# The closed set. The env value is normalised (`.strip().lower()`) before it is
+# matched, so `  DO-Marketplace  ` is accepted — `.env` is a trusted provisioning
+# channel written by a script, and normalisation can only ever map onto a value
+# already in this set, so it widens what is *spelled* acceptably without widening
+# what is *accepted*. An unrecognised value is NOT recorded and reads as
+# `unknown` — never coerced toward a marketplace value, and never recorded as
+# `unknown` either, so a corrected marker on a later boot can still land
+# (recording it would let one typo permanently freeze provenance via
+# first-write-wins).
+INSTALL_SOURCE_VALUES = frozenset({
+    "do-marketplace",
+    "vultr-marketplace",
+    # A doc-driven install onto a DigitalOcean droplet (#2380). Distinct from
+    # the generic `script` because the installer that writes it has PROVEN it is
+    # on DigitalOcean — `start.sh --provision --cloud digitalocean` refuses to
+    # run at all unless DO's metadata service answers — so the value is a fact
+    # the machine established, not a claim an operator typed.
+    "do-script",
+    "script",
+    INSTALL_SOURCE_UNKNOWN,
+})
+
+# The subset that renders the first-run hardening guide. Kept here rather than
+# in the frontend so the browser holds no second copy of the predicate (the
+# ent#386 rule); the flag surface ships the resolved boolean, not this set.
+MARKETPLACE_INSTALL_SOURCES = frozenset({"do-marketplace", "vultr-marketplace"})
+
+# Which installs the first-run hardening guide is offered to. Deliberately a
+# SEPARATE set from `MARKETPLACE_INSTALL_SOURCES` rather than a widening of it:
+# `marketplace_install` answers "did this come from a vendor listing", which is
+# a different question with other consumers, and conflating them would make a
+# doc-driven install start claiming a marketplace provenance it does not have.
+#
+# What the two sets share is the property the guide actually needs — the install
+# is known to have landed on a public cloud VM at a bare IP with no domain, so
+# the advice applies. What it must NOT include is `script` or `unknown`: the
+# managed fleet runs plain HTTP behind a WireGuard/Tailscale tunnel, with no
+# domain, no HTTPS flag and a 100.x address, so a gate on TLS state (or on "any
+# install") would fire permanently on every paying client's instance. Provenance
+# is why this gate exists.
+HARDENING_GUIDE_INSTALL_SOURCES = MARKETPLACE_INSTALL_SOURCES | {"do-script"}
+
+TRINITY_INSTALL_SOURCE = os.getenv(INSTALL_SOURCE_ENV_VAR, "").strip().lower()
+
 
 COMMUNITY_FRESH_INSTALL_SEED = {
     "execution_log_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
@@ -546,6 +655,142 @@ _PERCENT = (0, 100)
 _MINUTES = (0, 525600)              # 1 year
 
 # key -> (kind, min, max); `None` bound = unbounded on that side.
+# The operator-tunable retention OPS-settings keys reported by
+# `GET /api/settings/retention` (audit log excluded — separate env-driven
+# 365-day floor). Membership here means "is a retention window"; it does NOT
+# mean "gets the community floor" — that set is COMMUNITY_FRESH_INSTALL_SEED.
+RETENTION_OPS_KEYS = (
+    "execution_log_retention_days",
+    "execution_row_retention_days",
+    "health_check_retention_days",
+    "agent_soft_delete_retention_days",
+    "schedule_soft_delete_retention_days",
+    # #1644: these two ARE retention windows and were missing here, so three
+    # readers were silently blind to them:
+    #   - `POST /api/settings/ops/reset` skips only RETENTION_OPS_KEYS, so it
+    #     DELETED these two rows while reporting "retention windows unchanged";
+    #   - `GET /api/settings/retention` never reported them;
+    #   - `log_effective_retention_windows()` never logged them at boot — the
+    #     exact observability gap that made #1638 invisible.
+    # Membership means "is a retention window"; it does NOT mean "gets the
+    # community floor" (that set is COMMUNITY_FRESH_INSTALL_SEED, unchanged).
+    "agent_reports_retention_days",
+    "operator_queue_retention_days",
+    # #1296: terminal agent_reminders rows (fired/cancelled/failed). A retention
+    # window (surfaced/logged/reset-protected), NOT a community-floor key.
+    "agent_reminders_retention_days",
+    # ent#433: the two subscription-telemetry windows.
+    #   - subscription_headroom_retention_days is the new probe-history table.
+    #   - subscription_failure_event_retention_days CONVERTS what used to be a
+    #     hardcoded 24h sweep of subscription_rate_limit_events — the platform's
+    #     only durable record of real agent work hitting a provider rate limit,
+    #     previously destroyed daily with no window, no #1644 guard, and no
+    #     GET /api/settings/retention entry while every sibling had all three.
+    # Neither is a community-floor key (that set is COMMUNITY_FRESH_INSTALL_SEED):
+    # the 5-day floor would silently truncate the 7-day default read window.
+    "subscription_headroom_retention_days",
+    "subscription_failure_event_retention_days",
+    # #2216: database-backup artifacts under /data/backups. Membership here
+    # buys the write-path protections (validated /ops/config only, generic
+    # PUT 422-blocked, /ops/reset skips) — but its READ is special-cased:
+    # every surface renders it through
+    # services.db_backup_service.effective_backup_retention_days(), whose
+    # coercion is INVERTED (garbage → 14, never → 0/keep-forever), and
+    # GET /api/settings/retention excludes it from the generic windows map.
+    # NOT a community-floor key (fewer days = the destructive direction here).
+    "backup_retention_days",
+)
+
+# The RETENTION_OPS_KEYS members whose prune is NOT a #1644 row sweep (#2216).
+# `backup_retention_days` prunes FILE artifacts from the backup job's own tail;
+# its bounded-destruction guarantee is structural (the fixed BACKUP_MIN_KEEP
+# floor in db/backup_primitives.py — never zero recovery points), NOT the
+# count-threshold/ack-gated `_guard_allows` refusal in cleanup_service: an
+# ack-gated refusal fails in the INVERTED direction for backups (refused prune
+# → backups fill the disk, #1871 class), so that prune must run unconditionally
+# within its floor. `tests/unit/test_1771a_retention_edges.py` asserts every
+# key in RETENTION_OPS_KEYS minus THIS set has exactly one `_guard_allows`
+# call site — add a second file-artifact window HERE, or the guard fires.
+NON_ROW_RETENTION_OPS_KEYS = frozenset({"backup_retention_days"})
+
+
+# Default values for ops settings (as specified in requirements)
+OPS_SETTINGS_DEFAULTS = {
+    "ops_context_warning_threshold": "75",  # Context % to trigger warning
+    "ops_context_critical_threshold": "90",  # Context % to trigger reset/action
+    "ops_idle_timeout_minutes": "30",  # Minutes before stuck detection
+    "ops_cost_limit_daily_usd": "50.0",  # Daily cost limit (0 = unlimited)
+    "ops_max_execution_minutes": "10",  # Max chat execution time
+    "ops_alert_suppression_minutes": "15",  # Suppress duplicate alerts
+    "ops_log_retention_days": "7",  # Days to keep container logs
+    "ops_health_check_interval": "60",  # Seconds between health checks
+    "ssh_access_enabled": "false",  # Enable SSH access via MCP tool
+    # RETENTION DEFAULTS — READ THIS BEFORE CHANGING A NUMBER BELOW (#1638).
+    #
+    # These are the fallback used at PRUNE time for an install with no
+    # `system_settings` row, which is the default state for every install that
+    # never touched retention. Lowering one of them silently hard-DELETEs the
+    # existing data of every such install, ~seconds after its next boot, with no
+    # error and a green /health. That is #1638; it cost ~3 months of execution
+    # history on a real instance.
+    #
+    # So: these stay at the widest (safest) historical value. The #1039
+    # community floor is applied to NEW installs by seeding rows
+    # (COMMUNITY_FRESH_INSTALL_SEED), which only ever touches an empty DB.
+    # If you want to shrink a window for existing installs, that is a migration
+    # + a docs/migrations/ entry + an operator decision — not an edit here.
+    #
+    # Issue #772: retention policy for execution_log + agent_health_checks.
+    # "0" disables that prune step.
+    "execution_log_retention_days": "30",  # Null `execution_log` TEXT after N days (#772)
+    "execution_row_retention_days": "90",  # DELETE schedule_executions rows after N days (#772)
+    "health_check_retention_days": "7",    # DELETE agent_health_checks rows after N days (#772)
+    # Issue #834 Phase 1a: soft-delete retention for agents. After
+    # DELETE /api/agents/{name}, the agent_ownership row is marked
+    # `deleted_at = NOW` and child rows are preserved. The cleanup
+    # sweep hard-deletes rows older than this many days (cascading
+    # child tables via #816's purge primitive) AND removes the agent's
+    # data volumes (#1581). "0" disables the sweep entirely.
+    # #1638: EXEMPT from the community floor in every edition — this is a
+    # recovery window whose expiry destroys agent workspaces, not a log window.
+    "agent_soft_delete_retention_days": "180",
+    # Issue #834 Phase 1b: per-schedule soft-delete. "0" disables the sweep.
+    "schedule_soft_delete_retention_days": "30",
+    # Issue #918: retention for agent_reports. Rows older than this many days
+    # are deleted by the cleanup sweep. "0" disables the sweep.
+    "agent_reports_retention_days": "90",
+    # Issue #1142: retention for terminal operator_queue rows
+    # (acknowledged/cancelled/expired). "0" disables the sweep. `responded` rows
+    # get a more generous fixed floor (never deleted younger than #772's guard).
+    "operator_queue_retention_days": "90",
+    # Issue #1296: retention for TERMINAL agent_reminders (fired/cancelled/
+    # failed). Rows older than this many days are deleted; pending/firing never
+    # deleted. "0" disables the sweep. Wide/safe default per the #1638 floor rule.
+    "agent_reminders_retention_days": "90",
+    # ent#433: subscription headroom probe history. Volume is bounded by #471's
+    # own floors (<=1 probe/15min/subscription; the click path is floored at
+    # 60s), so 30 days is a few thousand rows per subscription. It is no longer
+    # purely demand-driven: ent#434's sampler adds a background floor of one
+    # probe per subscription per SAMPLE_INTERVAL_SECONDS, which raises the row
+    # count on an unwatched instance while staying well inside the same floors. "0" disables the sweep. Wide/safe per the #1638 floor rule.
+    "subscription_headroom_retention_days": "30",
+    # ent#433: subscription_rate_limit_events. This table was swept at a
+    # HARDCODED 24 hours before ent#433 — widening to 30 is the #1638-SAFE
+    # direction (no install loses data) and changes no existing answer, because
+    # every consumer already filters by time itself (hours=24 at the pressure
+    # call site, a 2h predicate for rate_limited_now). Do not lower it.
+    "subscription_failure_event_retention_days": "30",
+    # Issue #2216: retention for database-backup artifacts. The #1638 "widest
+    # value" rule applies in spirit but the direction INVERTS: raising this
+    # default costs disk on every un-configured install (#1871 class), while
+    # lowering it deletes recovery points — NEVER lower it for existing
+    # installs without a migration note, and never raise it casually either.
+    # "0" is INVALID for this key (validated 1–3650): keep-forever is the
+    # disk-fill trap; disabling backups is DB_BACKUP_ENABLED=false.
+    "backup_retention_days": "14",
+}
+
+
 OPS_SETTINGS_VALIDATION = {
     "ops_context_warning_threshold": ("int", *_PERCENT),
     "ops_context_critical_threshold": ("int", *_PERCENT),
@@ -570,6 +815,10 @@ OPS_SETTINGS_VALIDATION = {
     "agent_reports_retention_days": ("int", 0, _DAYS_MAX),
     "operator_queue_retention_days": ("int", 0, _DAYS_MAX),
     "agent_reminders_retention_days": ("int", 0, _DAYS_MAX),
+    # ent#433 — the two subscription-telemetry windows. `0` means "disable this
+    # sweep" on both, same as the row windows above.
+    "subscription_headroom_retention_days": ("int", 0, _DAYS_MAX),
+    "subscription_failure_event_retention_days": ("int", 0, _DAYS_MAX),
     # #2216: the backup window's fail-safe direction is INVERTED vs the rows
     # above — for backups "never prune" fills the disk (#1871 class), so `0`
     # ("disable the sweep" everywhere else = keep-forever here) is REJECTED.

@@ -1,9 +1,10 @@
 """Execution-row create/update lifecycle, dispatch marker, and execution getters."""
 
+import logging
 from datetime import datetime
 from typing import Optional, List, Dict
 
-from sqlalchemy import select, insert, update, and_
+from sqlalchemy import select, insert, update, and_, func, or_
 
 from ..engine import get_engine
 from ..query_helpers import latest_per_group
@@ -12,8 +13,15 @@ from ..tables import (
 )
 from db_models import ScheduleExecution
 from models import TaskExecutionStatus
-from utils.helpers import utc_now_iso, to_utc_iso, parse_iso_timestamp
+from utils.helpers import (
+    duration_ms_between,
+    parse_iso_timestamp,
+    to_utc_iso,
+    utc_now_iso,
+)
 from ._common import _norm_ts
+
+logger = logging.getLogger(__name__)
 
 # #378: Error-message marker written by cleanup_service._process_stale_slot_reclaims
 # when Phase 3 fails an execution. Used to scope the residual-race WARNING log
@@ -77,6 +85,8 @@ class ScheduleExecutionsMixin:
             validates_execution_id=row["validates_execution_id"] if "validates_execution_id" in row_keys else None,
             # Auto-compact observability (Bundle B)
             compact_metadata=row["compact_metadata"] if "compact_metadata" in row_keys else None,
+            # Turn-integrity flags (#2467)
+            turn_integrity=row["turn_integrity"] if "turn_integrity" in row_keys else None,
             # Reader-race auto-retry (#678)
             retry_count=row["retry_count"] if "retry_count" in row_keys and row["retry_count"] is not None else 0,
             # Lease-reaper re-delivery counter (#1081 Phase 3, #429/#1402)
@@ -88,6 +98,8 @@ class ScheduleExecutionsMixin:
             source_channel_thread=row["source_channel_thread"] if "source_channel_thread" in row_keys else None,
             # Binding-agent for channel report-back (ent#265)
             source_channel_agent=row["source_channel_agent"] if "source_channel_agent" in row_keys else None,
+            source_channel_client=row["source_channel_client"] if "source_channel_client" in row_keys else None,
+            open_canvas_id=row["open_canvas_id"] if "open_canvas_id" in row_keys else None,
         )
 
     # =========================================================================
@@ -106,12 +118,15 @@ class ScheduleExecutionsMixin:
         source_mcp_key_name: str = None,
         model_used: str = None,
         fan_out_id: str = None,
+        fan_out_task_id: str = None,
         loop_id: str = None,
         subscription_id: str = None,
         source_channel: str = None,
         source_channel_chat_id: str = None,
         source_channel_thread: str = None,
         source_channel_agent: str = None,
+        source_channel_client: str = None,
+        open_canvas_id: str = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
 
@@ -126,9 +141,15 @@ class ScheduleExecutionsMixin:
             source_mcp_key_name: MCP API key name (denormalized)
             model_used: Model used for this execution (MODEL-001)
             fan_out_id: Parent fan-out operation ID (FANOUT-001)
+            fan_out_task_id: The caller's own id for this subtask within the
+                batch (#2524). Persisted so the aggregate can be rebuilt from
+                the rows rather than from a dict in the dispatching process.
             loop_id: Parent loop ID (#740) — iterations of a sequential loop
             subscription_id: Subscription active at record time (SUB-004)
             source_channel_agent: Binding-agent for channel report-back (ent#265).
+            source_channel_client: WHICH client the context belongs to — the
+                portal recipient check (ent#457 review). NULL on every
+                pre-existing row; the resolver fails closed on NULL.
                 Set ONLY when channel context is inherited from a parent
                 execution; None for direct rows (reporter falls back to the
                 executing agent).
@@ -153,12 +174,15 @@ class ScheduleExecutionsMixin:
                     source_mcp_key_name=source_mcp_key_name,
                     model_used=model_used,
                     fan_out_id=fan_out_id,
+                    fan_out_task_id=fan_out_task_id,
                     loop_id=loop_id,
                     subscription_id=subscription_id,
                     source_channel=source_channel,
                     source_channel_chat_id=source_channel_chat_id,
                     source_channel_thread=source_channel_thread,
                     source_channel_agent=source_channel_agent,
+                    source_channel_client=source_channel_client,
+                    open_canvas_id=open_canvas_id,
                 )
             )
 
@@ -183,6 +207,8 @@ class ScheduleExecutionsMixin:
                 source_channel_chat_id=source_channel_chat_id,
                 source_channel_thread=source_channel_thread,
                 source_channel_agent=source_channel_agent,
+                source_channel_client=source_channel_client,
+                open_canvas_id=open_canvas_id,
             )
 
     def create_schedule_execution(
@@ -282,6 +308,64 @@ class ScheduleExecutionsMixin:
             )
             return result.rowcount > 0
 
+    def restamp_execution_dispatch(self, execution_id: str) -> bool:
+        """#2433: re-anchor a RUNNING row's clock at the moment the backend
+        actually handed the call to the agent, after a park in the backend
+        agent-call queue.
+
+        ``started_at`` is written at admission, but every age check reads it
+        as "the run began": the registry-blind Phase-1 stale sweep
+        (``mark_stale_executions_failed``), canary E-01, the watchdog's 60s
+        dispatch grace, and ``duration_ms`` at the terminal write. A long park
+        therefore spent the run's own budget — a row parked 20 min and then
+        run for 50 min against a 3600s timeout was bulk-FAILed **mid-run**,
+        its slot TTL-reclaimed, and its ``duration_ms`` recorded the park. The
+        backlog spill already defines ``started_at`` as *left the queue*
+        (``queue.py``: "reset started_at so drain records a clean run window");
+        the limiter is a second, hidden queue, so the same rule applies.
+
+        The admission instant is preserved in ``queued_at`` (only when it was
+        NULL — a drained backlog row keeps its own), so a parked row carries the
+        same ``queued_at``/``started_at`` shape as a drained one and the wait is
+        visible in the row rather than erased. CAS: RUNNING + NULL lease only
+        (pull rows are owned by the lease reaper); a row that went terminal
+        during the park is left alone.
+
+        **Why re-stamping the row is what reaches ``duration_ms``:** it is
+        computed in ``update_execution_status`` from THIS column, not from the
+        in-coroutine ``start_time`` in ``task_execution_service`` — that one is
+        taken before the capacity acquire and still spans the park, which is
+        why the sibling ``execution_time_ms`` continues to measure park + run
+        and is not a bug. Two clocks, two meanings: ``duration_ms`` answers
+        "how long did the agent run", ``execution_time_ms`` answers "how long
+        did the caller wait". (#2435 review verified this end-to-end.)
+
+        Returns:
+            True if the row was re-stamped.
+        """
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(
+                    and_(
+                        schedule_executions.c.id == execution_id,
+                        schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                        schedule_executions.c.lease_expires_at.is_(None),
+                    )
+                )
+                .values(
+                    started_at=now,
+                    # SET expressions read the pre-update row on both dialects,
+                    # so this captures the ADMISSION started_at, not `now`.
+                    queued_at=func.coalesce(
+                        schedule_executions.c.queued_at,
+                        schedule_executions.c.started_at,
+                    ),
+                )
+            )
+            return result.rowcount > 0
+
     def resume_session_belongs_to_user(
         self, agent_name: str, claude_session_id: str, user_id: int
     ) -> bool:
@@ -331,6 +415,7 @@ class ScheduleExecutionsMixin:
         compact_metadata: str = None,
         retry_count: Optional[int] = None,
         claim_token: Optional[str] = None,
+        turn_integrity: Optional[str] = None,
     ) -> bool:
         """Update execution status when completed.
 
@@ -375,12 +460,25 @@ class ScheduleExecutionsMixin:
 
             started_at = parse_iso_timestamp(row["started_at"])
             completed_at = parse_iso_timestamp(utc_now_iso())
-            # started_at and completed_at are written by different processes
-            # (backend --workers 2, and the standalone scheduler container), so
-            # clock skew can make this subtraction negative. Clamp at the write
-            # rather than at every reader — get_agent_analytics consumes
-            # duration_ms unguarded (#1832).
-            duration_ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
+            # Both ends are guarded at the WRITE, not at every reader —
+            # get_agent_analytics consumes duration_ms unguarded.
+            #   low  (#1832): started_at and completed_at are written by
+            #     different processes (backend --workers 2, and the standalone
+            #     scheduler container), so clock skew can go negative.
+            #   high (#2434): the pre-existing max(0, ...) guarded only the low
+            #     end — max(0, 2_850_000_000) is still 2.85 bn, which the
+            #     PostgreSQL INTEGER column cannot hold.
+            duration_ms = duration_ms_between(started_at, completed_at)
+            if duration_ms is None:
+                logger.warning(
+                    "[Execution] #2434 unrepresentable duration for %s: "
+                    "started_at=%s is %.1f days before completion — recording "
+                    "NULL. A gap that large means started_at is stale or "
+                    "corrupt, not that the turn ran that long.",
+                    execution_id,
+                    row["started_at"],
+                    (completed_at - started_at).total_seconds() / 86400,
+                )
 
             values = {
                 "status": status,
@@ -402,6 +500,11 @@ class ScheduleExecutionsMixin:
             # don't accidentally zero it.
             if retry_count is not None:
                 values["retry_count"] = int(retry_count)
+            # #2467: same conditional shape — an unconditional None here would
+            # NULL the column on the documented FAILED→SUCCESS resurrect CAS
+            # and on every terminal writer that doesn't derive it.
+            if turn_integrity is not None:
+                values["turn_integrity"] = turn_integrity
 
             if status == TaskExecutionStatus.SUCCESS:
                 # Agent's own completion result wins over everything except a
@@ -515,8 +618,28 @@ class ScheduleExecutionsMixin:
                 for row in conn.execute(stmt).mappings()
             ]
 
-    def get_agent_executions_summary(self, agent_name: str, limit: int = 50) -> List[Dict]:
+    def get_agent_executions_summary(
+        self,
+        agent_name: str,
+        limit: int = 50,
+        *,
+        exclude_triggers: Optional[frozenset] = None,
+    ) -> List[Dict]:
         """Get execution summaries for list view - excludes large text fields.
+
+        `exclude_triggers` (#2423 review) filters BEFORE the LIMIT, which is the
+        whole point of it living here rather than in the caller. A caller that
+        fetches N rows and drops some in Python is bounded by how many of the
+        newest N survive, so a RUN of excluded rows starves the list — and for
+        the client Workspace page the excluded trigger is `loop`, whose
+        documented ceiling (`models.MAX_RUNS_LIMIT`) is 100 consecutive rows
+        from ONE loop. No over-fetch multiplier outruns that: the multiplier is
+        a constant a reviewer picks, the run length is a product limit.
+
+        NULL is deliberately NOT excluded. `triggered_by` is NOT NULL in the
+        schema, but SQL `NOT IN` evaluates to NULL for a NULL left side and the
+        row would vanish — an unclassified row is not a hidden one, and dropping
+        it silently is the failure this parameter exists to prevent.
 
         Returns only the columns needed for the Tasks list UI, excluding:
         - response (can be large)
@@ -553,11 +676,17 @@ class ScheduleExecutionsMixin:
                 schedule_executions.c.fan_out_id,
                 schedule_executions.c.business_status,
                 schedule_executions.c.validation_execution_id,
+                schedule_executions.c.turn_integrity,
             )
             .where(schedule_executions.c.agent_name == agent_name)
             .order_by(schedule_executions.c.started_at.desc())
             .limit(limit)
         )
+        if exclude_triggers:
+            stmt = stmt.where(or_(
+                schedule_executions.c.triggered_by.is_(None),
+                schedule_executions.c.triggered_by.notin_(sorted(exclude_triggers)),
+            ))
         with get_engine().connect() as conn:
             rows = []
             for row in conn.execute(stmt).mappings():
@@ -570,6 +699,93 @@ class ScheduleExecutionsMixin:
                 rows.append(d)
             return rows
 
+    # ------------------------------------------------------------------
+    # Fan-out batch (#2524, #2670)
+    # ------------------------------------------------------------------
+
+    # A fan-out subtask is finished when its row leaves these. Mirrors
+    # `sync_waiter.TERMINAL_TASK_STATUSES` — `queued` (created, not yet
+    # dispatched, or waiting for a pull worker) and `pending_retry` are
+    # explicitly NOT terminal, which is the whole point: the batch must keep
+    # waiting through them.
+    _FAN_OUT_OPEN_STATUSES = (
+        TaskExecutionStatus.QUEUED,
+        TaskExecutionStatus.RUNNING,
+        TaskExecutionStatus.PENDING_RETRY,
+    )
+
+    def get_fan_out_executions(
+        self, agent_name: str, fan_out_id: str, limit: int = 200
+    ) -> List[dict]:
+        """Every execution row of one fan-out batch, oldest first (#2670).
+
+        The batch's rows are the ONLY durable record of a fan-out, which makes
+        this the read surface a gateway-timeout receipt can be resolved
+        against (#2670) and the source `FanOutService` rebuilds the sync
+        aggregate from (#2524) — and, unlike the idempotency snapshot, it
+        answers WHILE THE BATCH IS STILL RUNNING.
+
+        Scoped by `agent_name` as well as `fan_out_id`: the id is server-minted
+        and unguessable, but the route that exposes this is agent-gated, so the
+        query must not be able to return another agent's rows even if an id were
+        somehow reused.
+
+        Ordered by `started_at` ASC. That is creation order for a batch at
+        rest, but not a contract: a row that is re-queued or claimed by a pull
+        worker has `started_at` re-stamped. Callers match subtasks by
+        `fan_out_task_id` / `id`. `limit` is a belt (MAX_TASKS bounds a batch
+        at creation).
+        """
+        stmt = (
+            select(
+                schedule_executions.c.id,
+                schedule_executions.c.fan_out_task_id,
+                schedule_executions.c.status,
+                schedule_executions.c.started_at,
+                schedule_executions.c.completed_at,
+                schedule_executions.c.duration_ms,
+                schedule_executions.c.message,
+                schedule_executions.c.response,
+                schedule_executions.c.error,
+                schedule_executions.c.cost,
+                schedule_executions.c.context_used,
+                schedule_executions.c.model_used,
+            )
+            .where(schedule_executions.c.agent_name == agent_name)
+            .where(schedule_executions.c.fan_out_id == fan_out_id)
+            .order_by(schedule_executions.c.started_at.asc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            rows = []
+            for row in conn.execute(stmt).mappings():
+                d = dict(row)
+                # #1474: the scheduler is not the writer here, but normalise
+                # anyway so this surface can never serialize a naive timestamp.
+                d["started_at"] = _norm_ts(d.get("started_at"))
+                d["completed_at"] = _norm_ts(d.get("completed_at"))
+                rows.append(d)
+            return rows
+
+    def count_fan_out_open(self, fan_out_id: str) -> int:
+        """How many of a batch's rows have not reached a terminal (#2524).
+
+        Runs on every fan-out terminal, so it is a COUNT against the
+        `(fan_out_id, status)` index rather than a fetch of the whole batch.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(schedule_executions)
+            .where(
+                and_(
+                    schedule_executions.c.fan_out_id == fan_out_id,
+                    schedule_executions.c.status.in_(self._FAN_OUT_OPEN_STATUSES),
+                )
+            )
+        )
+        with get_engine().connect() as conn:
+            return int(conn.execute(stmt).scalar() or 0)
+
     def get_execution(self, execution_id: str) -> Optional[ScheduleExecution]:
         """Get a specific execution by ID."""
         stmt = select(schedule_executions).where(
@@ -578,3 +794,101 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_schedule_execution(row) if row else None
+
+    # ent#525 — the in-flight rows a Workspace chat is waiting on.
+    _CHAT_INFLIGHT_STATUSES = ("running", "queued")
+
+    def get_running_for_chat(self, chat_id: str) -> List[Dict]:
+        """Every RUNNING / QUEUED execution bound to one chat, newest first.
+
+        The Work tab's agent filter cannot find a delegated child: the child's
+        ``agent_name`` is the DELEGATE, not the participant (A asks B → the row
+        says B). What the child does carry is the chat it was started from —
+        ``source_channel_chat_id`` is copied from the parent at creation
+        (ent#265 D0, #2386) — so the card under a message finds its steps by
+        the chat, not by the agent.
+
+        Only in-flight statuses, by design: the selector has no index of its
+        own, and ``idx_executions_status`` makes ``status IN (running, queued)``
+        the driving predicate — a handful of rows on any install — so this
+        needs no migration. History stays on the agent-keyed read.
+
+        Summary columns only (never ``response`` / ``execution_log``).
+        """
+        if not chat_id:
+            return []
+        stmt = (
+            select(
+                schedule_executions.c.id,
+                schedule_executions.c.agent_name,
+                schedule_executions.c.status,
+                schedule_executions.c.started_at,
+                schedule_executions.c.completed_at,
+                schedule_executions.c.duration_ms,
+                schedule_executions.c.message,
+                schedule_executions.c.triggered_by,
+                schedule_executions.c.source_user_email,
+                schedule_executions.c.source_agent_name,
+                schedule_executions.c.source_channel,
+                schedule_executions.c.source_channel_chat_id,
+                schedule_executions.c.loop_id,
+            )
+            .where(and_(
+                schedule_executions.c.status.in_(self._CHAT_INFLIGHT_STATUSES),
+                schedule_executions.c.source_channel_chat_id == chat_id,
+            ))
+            .order_by(schedule_executions.c.started_at.desc())
+            .limit(50)
+        )
+        with get_engine().connect() as conn:
+            rows = []
+            for row in conn.execute(stmt).mappings():
+                d = dict(row)
+                d["started_at"] = _norm_ts(d.get("started_at"))
+                d["completed_at"] = _norm_ts(d.get("completed_at"))
+                rows.append(d)
+            return rows
+
+    def stamp_execution_channel_context(
+        self,
+        execution_id: str,
+        *,
+        source_channel: str,
+        source_channel_chat_id: str,
+        source_channel_client: Optional[str] = None,
+        source_channel_thread: Optional[str] = None,
+        source_channel_agent: Optional[str] = None,
+    ) -> bool:
+        """Attach a delivery destination to an execution row created elsewhere.
+
+        ent#498. Every other writer of these columns sets them at INSERT, which
+        is why no updater existed. A cron fire cannot: the standalone scheduler
+        creates the row itself and always sends `execution_id`, so
+        `execute_task`'s channel-persisting branch (`if not execution_id:`)
+        never runs and the kwargs would be silently inert (#2426). The address
+        rides the dispatch payload and the backend stamps the row here, BEFORE
+        the turn starts, so the terminal appliers find a destination already on
+        the row without any of them changing.
+
+        Guarded on `source_channel IS NULL` — this only ever ADDS a destination
+        to a row that has none. A row that already carries one belongs to an
+        inbound channel turn whose reply the adapter is waiting to send, and
+        repointing it would deliver that answer to the wrong place. Returns
+        whether the stamp landed, so a caller can refuse rather than assume.
+        """
+        stmt = (
+            update(schedule_executions)
+            .where(and_(
+                schedule_executions.c.id == execution_id,
+                schedule_executions.c.source_channel.is_(None),
+            ))
+            .values(
+                source_channel=source_channel,
+                source_channel_chat_id=source_channel_chat_id,
+                source_channel_client=source_channel_client,
+                source_channel_thread=source_channel_thread,
+                source_channel_agent=source_channel_agent,
+            )
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount > 0

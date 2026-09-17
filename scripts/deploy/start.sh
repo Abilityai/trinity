@@ -4,6 +4,70 @@ set -e
 
 cd "$(dirname "$0")/../.."
 
+# --- Shared .env + compose-project helpers (#2280) ---------------------------
+# Five call sites were each hand-rolling `grep ... | cut -d'=' -f2- | tr -d
+# '[:space:]'`, which is NOT how compose reads the same file. Compose strips
+# surrounding quotes and a trailing ` # comment`, and it PRESERVES internal
+# spaces; the hand-rolled form did the opposite on all three counts. That
+# matters more than it looks, because these values are `export`ed — and compose
+# gives the shell environment precedence over `.env`, so a mis-parse here
+# silently OVERRODE a perfectly valid operator line and then blamed them for it
+# (`TRINITY_IMAGE_TAG="v0.9.0"` became `"v0.9.0"`, the pull failed, and the
+# error message pointed at "image-tag spelling").
+#
+# Behaviour verified against `docker compose config` (compose-go dotenv):
+#     X="v0.9.0"        -> v0.9.0        (quotes stripped)
+#     X=v0.9.0  # pin   -> v0.9.0        (inline comment stripped)
+#     X=/srv/my dir     -> /srv/my dir   (internal spaces preserved)
+#     X='has#hash'      -> has#hash      ('#' inside quotes is literal)
+env_value() {
+    local key="$1" line val
+    line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" .env 2>/dev/null | tail -1) || true
+    [ -n "$line" ] || return 0
+    val=${line#*=}
+    case "$val" in
+        \"*\"*) val=${val#\"}; val=${val%%\"*} ;;
+        \'*\'*) val=${val#\'}; val=${val%%\'*} ;;
+        *)
+            # Unquoted: whitespace followed by '#' starts a comment.
+            case "$val" in *" #"*) val=${val%%" #"*} ;; esac
+            case "$val" in *"	#"*) val=${val%%"	#"*} ;; esac
+            val="${val#"${val%%[![:space:]]*}"}"
+            val="${val%"${val##*[![:space:]]}"}"
+            ;;
+    esac
+    printf '%s' "$val"
+}
+
+# Compose's own project-name rule, not an approximation of it: lowercase, keep
+# only [a-z0-9_-], drop every other character, then trim leading '_' and '-'.
+# Verified empirically: directory `proj_Trin-ity!x` -> project `proj_trin-ityx`;
+# `--_Foo.Bar` -> `foobar`; `COMPOSE_PROJECT_NAME` wins, shell over `.env`.
+#
+# This replaces TWO disagreeing derivations. `tr -cd '[:alnum:]'` also stripped
+# '_' and '-', which compose KEEPS — so in a checkout named `project_trinity`
+# (the layout CLAUDE.md documents), `trinity-dev`, or a worktree like
+# `trinity-2280`, the derived name matched no real volume, `docker volume
+# inspect` missed, and the dev<->hosted data guard below failed OPEN on exactly
+# the directory names most likely to be in use. `volume_exists()` had a third
+# spelling (`basename "$PWD"`, no lowercase, no filtering), which missed
+# whenever the directory contained an uppercase letter or a '.'.
+compose_project_name() {
+    local raw="${COMPOSE_PROJECT_NAME:-}"
+    [ -n "$raw" ] || raw=$(env_value COMPOSE_PROJECT_NAME)
+    [ -n "$raw" ] || raw=$(basename "$PWD")
+    printf '%s' "$raw" \
+        | tr '[:upper:]' '[:lower:]' \
+        | tr -cd 'a-z0-9_-' \
+        | sed 's/^[_-]*//'
+}
+
+# `set_env_key` lives in env-file.sh so every `.env` writer shares one copy,
+# because a `.env` writer that disagrees with itself corrupts credentials
+# silently.
+. ./scripts/deploy/env-file.sh
+# -----------------------------------------------------------------------------
+
 echo "====================================="
 echo "Trinity Agent Platform - Starting"
 echo "====================================="
@@ -16,6 +80,412 @@ echo ""
 # a TTY. Whatever gets generated is echoed back in the final summary.
 UNATTENDED="${TRINITY_UNATTENDED:-0}"
 for _arg in "$@"; do [ "$_arg" = "--unattended" ] && UNATTENDED=1; done
+
+# --- Hosted (pull-only) mode (#2280) -----------------------------------------
+# `--hosted` runs the SAME install against prebuilt GHCR images instead of
+# building from source: docker-compose.hosted.yml plus a pulled-and-retagged
+# agent base image. It is a flag on this script rather than a second script on
+# purpose — everything else an install needs (secret generation, the
+# ADMIN_PASSWORD contract #2381 made honest, DOCKER_GID detection, the serving
+# health poll, the next-steps card) is identical, and a parallel copy of it is
+# precisely the shape that has gone stale here before (#1039, #1056, #1707,
+# #1871). One code path, one behaviour, two image sources.
+HOSTED="${TRINITY_HOSTED:-0}"
+for _arg in "$@"; do [ "$_arg" = "--hosted" ] && HOSTED=1; done
+
+# Compose file selection. Dev/default passes NO -f so `docker compose` merges
+# docker-compose.yml + docker-compose.override.yml as it always has; hosted
+# passes an explicit -f, which (deliberately, same as prod) disables that
+# auto-merge.
+COMPOSE_FILES=()
+if [ "$HOSTED" = "1" ]; then
+    COMPOSE_FILES=(-f docker-compose.hosted.yml)
+fi
+# The image tag every hosted pull resolves is settled AFTER .env exists — see
+# resolve_image_tag() below. Resolving it here would be too early to read the
+# file, which is the only place an --unattended or marketplace install can
+# persist it.
+
+# --- Provision a bare cloud VM (--provision, #2380) ---------------------------
+# Bring a BARE Ubuntu VM to the state the install below already assumes: Docker,
+# a pinned Caddy terminating TLS on the machine's own public IP, a host
+# firewall, and the handful of `.env` keys only the machine itself knows.
+#
+# It is a switch on this script for the same reason --hosted is one. This logic
+# existed in THREE places — the Packer bakery (build time), the Packer first
+# boot (per droplet), and a hand-written script pasted into the DigitalOcean
+# deploy doc — and the copies had already drifted: the doc's port list and the
+# image's disagreed, leaving the login page answering plain HTTP past the
+# certificate (#2281 review C1). All three now enter here.
+#
+# Two phases, because a snapshot-based image splits them:
+#   --machine-only  IP-independent, safe to bake into a disk image (packages,
+#                   firewall unit). The Packer bakery calls this, and it exits
+#                   without installing Trinity.
+#   --site-only     what only a real instance knows: its own address — hence the
+#                   Caddyfile, the certificate and the .env keys. Packer's first
+#                   boot calls this, once per droplet, and continues into the
+#                   normal install.
+#   (neither)       both, in order: a doc-driven install on a fresh droplet.
+#
+# OFF by default, and it must stay inert on a developer laptop — it installs
+# system packages, resets ufw and claims :80/:443. The guard is root + Linux + a
+# reachable cloud metadata service, which no laptop satisfies.
+PROVISION=0
+PROVISION_PHASE=both
+PROVISION_CLOUD=""
+PROVISION_PROVENANCE=""
+_pargs=("$@")
+_pi=0
+while [ "$_pi" -lt "${#_pargs[@]}" ]; do
+    case "${_pargs[$_pi]}" in
+        --provision)    PROVISION=1 ;;
+        --machine-only) PROVISION_PHASE=machine ;;
+        --site-only)    PROVISION_PHASE=site ;;
+        --caddy-only)   PROVISION_PHASE=caddy ;;
+        --cloud)        _pi=$((_pi + 1)); PROVISION_CLOUD="${_pargs[$_pi]:-}" ;;
+        --cloud=*)      PROVISION_CLOUD="${_pargs[$_pi]#*=}" ;;
+        --provenance)   _pi=$((_pi + 1)); PROVISION_PROVENANCE="${_pargs[$_pi]:-}" ;;
+        --provenance=*) PROVISION_PROVENANCE="${_pargs[$_pi]#*=}" ;;
+    esac
+    _pi=$((_pi + 1))
+done
+
+# Caddy is PINNED and the floor is load-bearing rather than hygiene: the whole
+# no-domain HTTPS story rests on a Let's Encrypt certificate for a BARE IP, and
+# Caddy could not issue one until v2.11.3 (caddyserver/caddy#7399 — v2.10.0
+# fails outright with "subject '<ip>' cannot have public IP certificate").
+# Deliberately NOT `apt-mark hold`: forward versions carry the fix, and a hold
+# would block security updates for the life of the machine.
+PROVISION_CADDY_VERSION="2.11.4"
+PROVISION_CADDY_MIN_VERSION="2.11.3"
+
+provision_die() { echo "❌ --provision: $1" >&2; exit 1; }
+
+# The only thing that actually differs between clouds is where the instance's
+# own public address is published — one line per cloud, not a provider
+# abstraction for a single string.
+provision_metadata_ip() {
+    case "$PROVISION_CLOUD" in
+        digitalocean)
+            curl -fsS --max-time 10 \
+                http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address 2>/dev/null
+            ;;
+    esac
+}
+
+# Default provenance per cloud (#2380). The card that teaches an operator to put
+# a domain in front of a bare-IP instance is gated on WHERE the install came
+# from, never on TLS state — the managed fleet runs plain HTTP behind a tunnel
+# and must never see it. A doc-driven DigitalOcean install honestly IS a
+# DigitalOcean install, so it records its own value rather than a generic one.
+provision_default_provenance() {
+    case "$PROVISION_CLOUD" in
+        digitalocean) echo "do-script" ;;
+        *)            echo "script" ;;
+    esac
+}
+
+provision_machine() {
+    echo "→ Installing Docker, Caddy ${PROVISION_CADDY_VERSION} and the host firewall..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q
+    # NOT iptables-persistent: ufw declares `Breaks: iptables-persistent`, so apt
+    # resolves that install by silently REMOVING ufw. The DOCKER-USER rules are
+    # persisted by trinity-docker-firewall.service instead, which is the better
+    # mechanism anyway — DOCKER-USER does not exist until Docker creates it, so
+    # restoring saved rules at boot is racy.
+    apt-get install -y -q ca-certificates curl gnupg git jq ufw
+
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list
+
+    # Cloudsmith's own list line already carries a signed-by=, so do not add a
+    # second one.
+    curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+        | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+        > /etc/apt/sources.list.d/caddy-stable.list
+
+    apt-get update -q
+    apt-get install -y -q docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin "caddy=${PROVISION_CADDY_VERSION}"
+    systemctl enable --now docker
+
+    # Assert the floor rather than trusting the pin: the pin can be edited, the
+    # repo can drop a version, and `caddy upgrade` can move it on a live box.
+    local _caddy
+    _caddy="$(caddy version | head -1 | sed 's/^v//' | cut -d' ' -f1)"
+    if [ "$(printf '%s\n%s\n' "$PROVISION_CADDY_MIN_VERSION" "$_caddy" | sort -V | head -1)" \
+         != "$PROVISION_CADDY_MIN_VERSION" ]; then
+        provision_die "caddy ${_caddy} is below ${PROVISION_CADDY_MIN_VERSION}, which cannot issue Let's Encrypt IP certificates (caddyserver/caddy#7399)."
+    fi
+    echo "   Caddy ${_caddy} (floor ${PROVISION_CADDY_MIN_VERSION}) — IP certificates supported."
+    # Caddy owns :80/:443 but is configured by the SITE phase, which needs the
+    # instance's own IP. A Caddy started now with the packaged default would race
+    # that and take a certificate for the wrong name.
+    systemctl stop caddy || true
+
+    # ufw governs HOST ports only. It does NOT govern Docker-published ports —
+    # Docker inserts its rules ahead of ufw's chain, so `ufw deny 8000` on a box
+    # publishing 8000:8000 is silently inert. That gap is closed separately, by
+    # docker-firewall.sh.
+    ufw --force reset >/dev/null
+    ufw default deny incoming >/dev/null
+    ufw default allow outgoing >/dev/null
+    ufw allow 22/tcp >/dev/null
+    ufw allow 80/tcp >/dev/null
+    ufw allow 443/tcp >/dev/null
+    ufw --force enable
+
+    # The unit runs the script from wherever this checkout lives, so a doc
+    # install and a Packer image share one copy of the rules rather than the
+    # image carrying its own.
+    local _fw="${PWD}/scripts/deploy/docker-firewall.sh"
+    [ -x "$_fw" ] || provision_die "missing ${_fw} — is this a Trinity checkout?"
+    cat > /etc/systemd/system/trinity-docker-firewall.service <<UNIT
+[Unit]
+Description=Trinity: drop internet access to Docker-published container ports
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${_fw}
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    # Never fatal: a machine that boots without the rule and SAYS so beats one
+    # that refuses to finish installing.
+    systemctl enable --now trinity-docker-firewall.service \
+        || echo "⚠️  DOCKER-USER rules not applied — container ports may be public. Re-run: ${_fw}" >&2
+}
+
+# Which source addresses may reach Trinity over plain HTTP, from
+# PRIVATE_NETWORK_CIDRS in .env. Empty (the default) renders no rule at all.
+#
+# Source address, never the Host header: a header is supplied by the caller, so
+# matching on it would let anyone on the internet send `Host: 100.64.0.1` to
+# port 80 and be served the login page in cleartext, having bypassed the HTTPS
+# redirect. A source address cannot be forged into a completed TCP handshake.
+provision_private_cidrs() {
+    local raw="${1:-}" token out=()
+    for token in $raw; do
+        case "$token" in
+            0.0.0.0/0|::/0)
+                echo "⚠️  PRIVATE_NETWORK_CIDRS: refusing '${token}' — that is the whole internet, not a private network." >&2
+                return 1 ;;
+            */*) ;;
+            *)
+                echo "⚠️  PRIVATE_NETWORK_CIDRS: ignoring '${token}' — expected CIDR notation, e.g. 100.64.0.0/10." >&2
+                continue ;;
+        esac
+        case "$token" in
+            *[!0-9a-fA-F:./]*)
+                echo "⚠️  PRIVATE_NETWORK_CIDRS: ignoring '${token}' — not an address range." >&2
+                continue ;;
+        esac
+        out+=("$token")
+    done
+    printf '%s' "${out[*]-}"
+}
+
+# Renders /etc/caddy/Caddyfile and reloads Caddy. Split out of provision_site so
+# `--caddy-only` can re-render after PRIVATE_NETWORK_CIDRS changes: the site
+# phase also rewrites FRONTEND_URL and TRINITY_INSTALL_SOURCE, so re-running it
+# to pick up one variable would silently re-stamp a marketplace droplet's
+# provenance as a doc-driven install.
+provision_caddyfile() {
+    local ip="$1" provenance="$2" _do_header="" _private="" _private_block=""
+
+    # Rule 10 of DigitalOcean's 1-Click build standard specifies this header on
+    # the reverse-proxy block, and their own catalog apps ship it (openclaw's
+    # Caddyfile sets it to "openclaw"). It is how a marketplace-originated
+    # install identifies itself to DigitalOcean — so it is keyed on the
+    # marketplace provenance, not on the cloud: the doc-driven install on the
+    # same cloud did not originate from the catalog.
+    if [ "$provenance" = "do-marketplace" ]; then
+        _do_header='header X-DO-MARKETPLACE "trinity"'
+    fi
+
+    # A private network already encrypts the transport, so TLS in front of it
+    # buys nothing — and cannot be obtained anyway: tailnet addresses live in
+    # carrier-grade NAT space, which no public CA will validate. Without this
+    # block an operator who moves the instance onto a VPN and closes 80/443 has
+    # shell access and no URL to browse: every site here is matched by hostname,
+    # and a private address matches neither the public IP nor the saved domain.
+    _private="$(provision_private_cidrs "$(env_value PRIVATE_NETWORK_CIDRS)")" || return 1
+    if [ -n "$_private" ]; then
+        _private_block="$(cat <<PRIVATE
+    @private remote_ip ${_private}
+    handle @private {
+        encode gzip
+        reverse_proxy 127.0.0.1:8081 {
+            flush_interval -1
+        }
+    }
+    handle {
+        redir https://{host}{uri} permanent
+    }
+PRIVATE
+)"
+        echo "→ Caddy: serving plain HTTP to ${_private} (private network)."
+    else
+        _private_block="    redir https://{host}{uri} permanent"
+    fi
+
+    # Render beside the live file, never over it. Caddy keeps a bad config
+    # only in memory until the next restart; an invalid file on disk with the
+    # unit enabled takes the site down on the next reboot.
+    cat > /etc/caddy/Caddyfile.new <<CADDY
+{
+    acme_ca https://acme-v02.api.letsencrypt.org/directory
+    on_demand_tls {
+        ask http://127.0.0.1:8000/api/public/tls-allowed
+    }
+}
+
+https://${ip} {
+    tls {
+        issuer acme {
+            profile shortlived
+        }
+    }
+    encode gzip
+
+    # Streaming endpoints must not be buffered: the Workspace reads execution
+    # logs over SSE (GET /api/executions/{id}/stream).
+    reverse_proxy 127.0.0.1:8081 {
+        flush_interval -1
+    }
+    ${_do_header}
+}
+
+https:// {
+    tls {
+        on_demand
+    }
+    encode gzip
+    reverse_proxy 127.0.0.1:8081 {
+        flush_interval -1
+    }
+}
+
+http:// {
+${_private_block}
+}
+CADDY
+
+    # Validate before reloading. A malformed Caddyfile does not degrade the web
+    # server, it stops it — and on a box reached only over the network that is
+    # indistinguishable from bricking it.
+    if ! caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile.new >/dev/null 2>&1; then
+        echo "❌ Generated Caddyfile is invalid — leaving the running config alone." >&2
+        caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile.new >&2 || true
+        rm -f /etc/caddy/Caddyfile.new
+        return 1
+    fi
+    # A new file takes the caller's umask, and the 1-Click first boot runs with
+    # 077: a 0600 root file the `caddy` service user cannot read, so the restart
+    # fails and the droplet never serves. It holds no secrets.
+    chmod 0644 /etc/caddy/Caddyfile.new
+    mv -f /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
+    systemctl enable caddy
+    systemctl restart caddy
+}
+
+provision_site() {
+    local ip provenance _tls
+    ip="$(provision_metadata_ip || true)"
+    [ -n "$ip" ] || provision_die "could not read this instance's public IP from the ${PROVISION_CLOUD} metadata service."
+    mkdir -p /etc/trinity
+    chmod 0700 /etc/trinity
+    echo "$ip" > /etc/trinity/public-ip
+
+    [ -f .env ] || cp .env.example .env
+    provenance="${PROVISION_PROVENANCE:-$(provision_default_provenance)}"
+    # FRONTEND_PORT moves the SPA off :80 so Caddy can own 80/443 in front of it.
+    set_env_key FRONTEND_PORT 8081
+    set_env_key FRONTEND_URL "https://${ip}"
+    set_env_key TRINITY_INSTALL_SOURCE "$provenance"
+    if [ -n "${TRINITY_IMAGE_TAG:-}" ]; then
+        set_env_key TRINITY_IMAGE_TAG "$TRINITY_IMAGE_TAG"
+    fi
+    chmod 0600 .env
+    echo "→ .env: FRONTEND_URL=https://${ip}, TRINITY_INSTALL_SOURCE=${provenance}"
+
+    provision_caddyfile "$ip" "$provenance" || provision_die "could not write the Caddy configuration."
+
+    # Verify the certificate was actually ISSUED. Without this the failure is
+    # silent and worse than silent: Caddy serves a TLS error, this script exits
+    # 0, and the summary prints a confident https:// URL. Trinity is not up yet,
+    # so Caddy answers 502 — which is the point: curl without -f treats an HTTP
+    # error as success, so a zero exit means the handshake completed and the
+    # chain validated against the system trust store. Nothing weaker separates a
+    # real Let's Encrypt certificate from Caddy's internal-CA fallback.
+    _tls=failed
+    for _try in $(seq 1 30); do
+        if curl -sS -o /dev/null --max-time 10 "https://${ip}/" 2>/dev/null; then
+            _tls=ok
+            break
+        fi
+        sleep 5
+    done
+    printf '%s\n' "$_tls" > /etc/trinity/tls-status
+    if [ "$_tls" = "ok" ]; then
+        echo "→ TLS: certificate issued for ${ip}."
+    else
+        # Never fatal: an instance serving over HTTP with an honest banner beats
+        # one that refuses to finish booting.
+        echo "⚠️  TLS: no valid certificate for ${ip} after ~150s. Trinity will still start." >&2
+        echo "    Check: journalctl -u caddy -n 100" >&2
+    fi
+}
+
+if [ "$PROVISION" = "1" ]; then
+    [ "$(uname -s)" = "Linux" ] || provision_die "only runs on Linux — it installs system packages, resets the firewall and claims :80/:443."
+    [ "$(id -u)" = "0" ] || provision_die "must run as root."
+    case "$PROVISION_CLOUD" in
+        digitalocean) ;;
+        "") provision_die "--cloud is required (supported: digitalocean)." ;;
+        *)  provision_die "unsupported --cloud '${PROVISION_CLOUD}' (supported: digitalocean)." ;;
+    esac
+    # The metadata service is the "this is a fresh cloud VM, not somebody's
+    # laptop" guard, and it costs one request: nothing on a laptop answers on
+    # 169.254.169.254.
+    [ -n "$(provision_metadata_ip || true)" ] \
+        || provision_die "no ${PROVISION_CLOUD} metadata service reachable — refusing to provision a machine that is not a ${PROVISION_CLOUD} instance."
+
+    echo "Provisioning host (cloud: ${PROVISION_CLOUD}, phase: ${PROVISION_PHASE})..."
+    if [ "$PROVISION_PHASE" = "caddy" ]; then
+        # Re-render the web-server config only. Reads the instance's own IP and
+        # provenance back from where the site phase recorded them, so applying a
+        # PRIVATE_NETWORK_CIDRS change cannot re-stamp either.
+        _caddy_ip="$(cat /etc/trinity/public-ip 2>/dev/null || provision_metadata_ip || true)"
+        [ -n "$_caddy_ip" ] || provision_die "could not determine this instance's public IP — has it been provisioned?"
+        [ -f .env ] || provision_die "no .env here — run this from the Trinity install directory."
+        provision_caddyfile "$_caddy_ip" "$(env_value TRINITY_INSTALL_SOURCE)" \
+            || provision_die "could not write the Caddy configuration."
+        echo "Caddy reconfigured."
+        exit 0
+    fi
+    [ "$PROVISION_PHASE" = "site" ]    || provision_machine
+    [ "$PROVISION_PHASE" = "machine" ] || provision_site
+    echo ""
+    if [ "$PROVISION_PHASE" = "machine" ]; then
+        echo "Host provisioned (machine phase) — Trinity itself is NOT installed by this phase."
+        exit 0
+    fi
+fi
+# -----------------------------------------------------------------------------
 
 # Fail fast with ONE consolidated, actionable message rather than crashing
 # mid-run. Docker daemon + Compose v2 are hard requirements. `docker info` also
@@ -41,7 +511,14 @@ fi
 # the redirect is guarded so `set -e` never trips on a free port.
 _port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1 && exec 3>&- 3<&- ; }
 _busy_ports=()
-for _pp in 80 8000 8080 6379; do _port_busy "$_pp" && _busy_ports+=("$_pp"); done
+# #2280: probe the port the Web UI will ACTUALLY bind. Both prod and hosted
+# publish `${FRONTEND_PORT:-80}`, so hardcoding 80 warned about a port Trinity
+# no longer uses and stayed silent about the one it does — while this message's
+# own advice is "set FRONTEND_PORT". On a first install there is no .env to
+# read yet, so the default is 80, which is what will be bound.
+_preflight_frontend_port="${FRONTEND_PORT:-$(env_value FRONTEND_PORT)}"
+_preflight_frontend_port="${_preflight_frontend_port:-80}"
+for _pp in "$_preflight_frontend_port" 8000 8080 6379; do _port_busy "$_pp" && _busy_ports+=("$_pp"); done
 if [ ${#_busy_ports[@]} -gt 0 ]; then
     echo "ℹ️  Ports already in use: ${_busy_ports[*]}."
     echo "    If this is a re-run, that's expected — they're Trinity's own containers."
@@ -88,19 +565,51 @@ ensure_hex32_secret INTERNAL_API_SECRET
 # shift and the running fleet would 401 until recreated.
 ensure_hex32_secret AGENT_AUTH_SECRET
 
+# An operator-supplied ADMIN_PASSWORD in the ENVIRONMENT is written through to
+# `.env` (#2380). The deploy docs ask the reader to put their own password at
+# the top of a one-screen install script; without this, every such script has to
+# hand-roll its own `.env` writer — which is exactly the duplication --provision
+# exists to remove. `.env` wins if it already has one: this never overwrites a
+# password an install has already committed to. "Has one" is decided by
+# `env_value`, i.e. the way compose reads it: `ADMIN_PASSWORD=""`, `=''` and a
+# trailing space are all blank, not set (a raw `=.+` grep called them set).
+if [ -n "${ADMIN_PASSWORD:-}" ] && [ -z "$(env_value ADMIN_PASSWORD)" ]; then
+    set_env_key ADMIN_PASSWORD "$ADMIN_PASSWORD"
+    echo "Wrote ADMIN_PASSWORD from the environment to .env."
+fi
+
 # ADMIN_PASSWORD has no sensible default. Interactively we fail fast rather than
 # boot into a state the operator can't log into (#443). Unattended (#39), we
 # generate a strong one and surface it in the final summary so an agent-run
 # install never hard-stops on a TTY.
+#
+# One deliberate exception (ent#580): ADMIN_PASSWORD_SOURCE=browser, which only
+# a marketplace first boot sets. There the blank IS the point — no admin is
+# provisioned, and the first person to open the instance creates it at /setup,
+# no terminal involved. The marker is persisted to `.env` because this script is
+# also the documented UPDATE path (`start.sh --hosted`, often --unattended): a
+# later run that had forgotten why the password is blank would generate one, and
+# the backend re-syncs `.env`'s password over the one the operator chose in the
+# browser on the very next boot. A real ADMIN_PASSWORD in `.env` still wins over
+# the marker, which is also the recovery path for a forgotten browser password.
 GENERATED_ADMIN_PASSWORD=""
-if ! grep -qE '^ADMIN_PASSWORD=.+' .env 2>/dev/null; then
-    if [ "$UNATTENDED" = "1" ]; then
+ADMIN_IN_BROWSER=0
+ensure_admin_password() {
+    # Blank vs set is compose's reading (`env_value`), not a raw grep: `=""`,
+    # `=''` and `= ` render EMPTY in the hosted compose, so they are blank here.
+    [ -n "$(env_value ADMIN_PASSWORD)" ] && return 0
+    local src="${ADMIN_PASSWORD_SOURCE:-$(env_value ADMIN_PASSWORD_SOURCE)}"
+    if [ "$src" = "browser" ]; then
+        # Explicitly blank, not absent: the hosted compose file renders an empty
+        # ADMIN_PASSWORD (`${ADMIN_PASSWORD?}`) but still refuses an unset one.
+        # Any `ADMIN_PASSWORD=` line already reads blank (checked above).
+        grep -qE '^ADMIN_PASSWORD=' .env 2>/dev/null || set_env_key ADMIN_PASSWORD ""
+        [ "$(env_value ADMIN_PASSWORD_SOURCE)" = "browser" ] || set_env_key ADMIN_PASSWORD_SOURCE browser
+        ADMIN_IN_BROWSER=1
+        echo "ADMIN_PASSWORD left blank (ADMIN_PASSWORD_SOURCE=browser): the first visitor creates the admin at /setup."
+    elif [ "$UNATTENDED" = "1" ]; then
         GENERATED_ADMIN_PASSWORD=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 24)
-        if grep -qE '^ADMIN_PASSWORD=$' .env 2>/dev/null; then
-            sed -i.bak "s|^ADMIN_PASSWORD=$|ADMIN_PASSWORD=${GENERATED_ADMIN_PASSWORD}|" .env && rm -f .env.bak
-        else
-            echo "ADMIN_PASSWORD=${GENERATED_ADMIN_PASSWORD}" >> .env
-        fi
+        set_env_key ADMIN_PASSWORD "$GENERATED_ADMIN_PASSWORD"
         echo "Auto-generated ADMIN_PASSWORD (unattended) — shown in the summary below."
     else
         cat >&2 <<EOF
@@ -114,7 +623,8 @@ ERROR: ADMIN_PASSWORD is blank in .env.
 EOF
         exit 1
     fi
-fi
+}
+ensure_admin_password
 
 # A model API key isn't required to BOOT (the stack starts fine), but agents
 # can't run without one. Warn now and surface it in the summary rather than let
@@ -129,7 +639,7 @@ fi
 # On existing deployments with data, refuse and point at the migration doc:
 # re-keying a populated Redis would lock the backend out of its own data.
 volume_exists() {
-    docker volume inspect "$(basename "$PWD")_redis-data" >/dev/null 2>&1 \
+    docker volume inspect "$(compose_project_name)_redis-data" >/dev/null 2>&1 \
         || docker volume inspect redis-data >/dev/null 2>&1
 }
 
@@ -176,7 +686,7 @@ ensure_data_path_ownership() {
     # Dev compose uses a named volume and is unaffected.
     local data_path
     data_path="${TRINITY_DATA_PATH:-}"
-    [ -z "$data_path" ] && data_path=$(grep -E '^TRINITY_DATA_PATH=' .env 2>/dev/null | cut -d'=' -f2-)
+    [ -z "$data_path" ] && data_path=$(env_value TRINITY_DATA_PATH)
     [ -z "$data_path" ] && data_path="./trinity-data"
 
     mkdir -p "$data_path"
@@ -263,8 +773,223 @@ ensure_docker_gid() {
 
 ensure_docker_gid
 
-# Check base image before starting — without it, agent creation will silently fail
-if ! docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "trinity-agent-base:latest"; then
+# --- Resolve the hosted image tag (#2280) ------------------------------------
+# Precedence: an explicit shell/CI value > `.env` > `latest`. Reading `.env` is
+# the whole point: it is where every other knob in this install lives and the
+# only place an --unattended or marketplace install can persist a pin. Exporting
+# an unconditional default instead — as this first shipped — silently beat the
+# operator's own `.env` line, because compose gives the shell environment
+# precedence over `.env`. The summary then printed `Currently pinned to: latest`
+# as though they had chosen it, which is exactly the unscheduled upgrade the
+# rest of this script warns about.
+#
+# Parsed by the shared env_value() helper, which mirrors compose's own dotenv
+# rules — quotes stripped, inline ` # comment` stripped, last-wins on a repeated
+# key. The hand-rolled parse this replaces kept the quotes and swallowed the
+# comment into the value, and because the result is exported it beat compose's
+# correct parse for every service image ref too.
+resolve_image_tag() {
+    if [ -z "${TRINITY_IMAGE_TAG:-}" ]; then
+        TRINITY_IMAGE_TAG=$(env_value TRINITY_IMAGE_TAG)
+    fi
+    TRINITY_IMAGE_TAG="${TRINITY_IMAGE_TAG:-latest}"
+    export TRINITY_IMAGE_TAG
+}
+resolve_image_tag
+
+# --- Activate the Cloudflare Tunnel profile when a token is present (#2280) ---
+# `cloudflared` is profile-gated (`profiles: ["tunnel"]`), so it starts only
+# under `--profile tunnel`. docs/DEPLOYMENT.md presents the tunnel as the
+# default posture for a public instance and says the service "is already in the
+# compose file, set TUNNEL_TOKEN" — which was true and useless: setting the
+# token and running this script produced no tunnel container, no error, and left
+# the instance in the plain-HTTP-on-a-public-IPv4 state the same table says to
+# avoid. A non-empty TUNNEL_TOKEN is unambiguous intent, so honour it.
+#
+# Hosted only: the dev stack is a localhost workflow and its file set is
+# untouched by this change.
+#
+# The profile is also PERSISTED to `.env` as COMPOSE_PROFILES. Compose acts only
+# on services in the active profile set, so without it every command this script
+# prints in its own summary — `docker compose -f docker-compose.hosted.yml stop`,
+# `logs -f` — silently excludes `trinity-cloudflared`: `stop` leaves the tunnel
+# container running and the instance publicly reachable after the operator has
+# been told the stack is down. Compose reads COMPOSE_PROFILES from `.env`
+# (verified), so persisting it once makes every later bare command correct,
+# including ones a human types weeks from now. Additive: an operator who already
+# listed other profiles keeps them.
+persist_compose_profile() {
+    local want="$1" cur
+    cur=$(env_value COMPOSE_PROFILES)
+    case ",${cur}," in *",${want},"*) return 0 ;; esac
+    # Append rather than rewrite in place. Compose resolves a duplicated `.env`
+    # key last-wins (verified), so appending the merged list is sufficient — and
+    # it keeps an operator-authored value out of a `sed` replacement, where an
+    # `&` or a delimiter in the existing value would be substitution syntax
+    # rather than text. Re-running is a no-op: the second pass finds the profile
+    # already listed and returns above.
+    echo "COMPOSE_PROFILES=${cur:+${cur},}${want}" >> .env
+    echo "Persisted COMPOSE_PROFILES=${cur:+${cur},}${want} to .env so 'docker compose ... stop|logs' also acts on the tunnel."
+}
+
+if [ "$HOSTED" = "1" ]; then
+    _tunnel_token="${TUNNEL_TOKEN:-$(env_value TUNNEL_TOKEN)}"
+    if [ -n "$_tunnel_token" ]; then
+        COMPOSE_FILES+=(--profile tunnel)
+        echo "TUNNEL_TOKEN set → starting the Cloudflare Tunnel (profile 'tunnel')."
+        persist_compose_profile tunnel
+    fi
+fi
+
+# --- Refuse a silent data switch, in EITHER direction (#2280) -----------------
+# Dev and hosted share a compose project name but NOT a /data source:
+# docker-compose.yml mounts the named volume `trinity-data`, while hosted
+# (inheriting prod) binds ${TRINITY_DATA_PATH:-./trinity-data}. So crossing
+# between them comes up against an EMPTY database and migrates from zero while
+# the real one sits untouched — and Redis (`redis-data`, a named volume both
+# files share) is NOT reset, so the result is a half-migrated install with live
+# session/lock state pointing at rows that no longer exist.
+#
+# Nothing about "the same script, only the image source differs" prepares an
+# operator for that, so refuse rather than warn: the failure is silent, and by
+# the time it is noticed the fresh DB may have been written to.
+#
+# BOTH crossings are guarded. Only dev->hosted was, and hosted->dev is the
+# likelier of the two — it needs no new flag, just a forgotten one — so the
+# unguarded direction was the one an operator reaches by doing nothing special.
+# The state is read ONCE into `_dev_volume` / `_hosted_db` and the two refusals
+# branch off it, so the pair cannot drift into disagreeing about what it found.
+_data_path="${TRINITY_DATA_PATH:-$(env_value TRINITY_DATA_PATH)}"
+_data_path="${_data_path:-./trinity-data}"
+# Absolute form for the printed `docker run -v` — `"$(pwd)/${_data_path#./}"`
+# strips only a leading './', so TRINITY_DATA_PATH=/srv/trinity-data produced
+# `/path/to/repo//srv/trinity-data` and would have copied the database into a
+# directory nothing reads. (The value is no longer run through
+# `tr -d '[:space:]'` either, so a path containing spaces survives the read.)
+case "$_data_path" in
+    /*) _data_abs="$_data_path" ;;
+    *)  _data_abs="$(pwd)/${_data_path#./}" ;;
+esac
+_project=$(compose_project_name)
+_dev_volume=0
+docker volume inspect "${_project}_trinity-data" >/dev/null 2>&1 && _dev_volume=1
+_hosted_db=0
+[ -f "${_data_path}/trinity.db" ] && _hosted_db=1
+
+if [ "$HOSTED" = "1" ] && [ "$_hosted_db" = "0" ] && [ "$_dev_volume" = "1" ]; then
+    echo "❌ Refusing to start: this checkout has a dev-stack database that --hosted cannot see." >&2
+    echo "" >&2
+    echo "   Found: docker volume '${_project}_trinity-data' (written by docker-compose.yml)" >&2
+    echo "   Wanted: ${_data_abs}/trinity.db (the bind mount docker-compose.hosted.yml uses)" >&2
+    echo "" >&2
+    echo "   Starting anyway would migrate a NEW empty database from zero while the real" >&2
+    echo "   one stays in the volume — and Redis is shared between the two stacks, so you" >&2
+    echo "   would get a half-migrated install rather than a clean one." >&2
+    echo "" >&2
+    echo "   Copy the data across first (with the stack stopped):" >&2
+    echo "       docker compose stop" >&2
+    echo "       mkdir -p \"${_data_abs}\"" >&2
+    echo "       docker run --rm -v ${_project}_trinity-data:/from -v \"${_data_abs}\":/to \\" >&2
+    echo "           alpine sh -c 'cp -a /from/. /to/'" >&2
+    echo "       ./scripts/deploy/start.sh --hosted" >&2
+    echo "" >&2
+    echo "   Or, to deliberately start fresh, set TRINITY_DATA_PATH to a new directory." >&2
+    exit 1
+fi
+
+# The reverse switch, and the likelier mistake of the two: an operator who
+# installed on the bind mount and later runs this script WITHOUT --hosted —
+# having forgotten it, or followed an older doc — gets docker-compose.yml, an
+# empty `trinity-data` named volume, and the same shared `redis-data`. That is
+# the identical half-migrated state as above, with no warning at all, so it
+# earns the same refusal rather than a one-directional one.
+#
+# #2528: the bind mount is what BOTH docker-compose.prod.yml and
+# docker-compose.hosted.yml write, so this state is reached from a source-built
+# production host just as readily as from a hosted one (the restart that filed
+# the issue was a source-built production host). The message used to assert "installed with
+# --hosted" and offer only `--hosted` as the remedy — which on a prod box would
+# have pulled GHCR images onto a host that builds its own. It now names both
+# installs and prints the invocation each one actually uses.
+if [ "$HOSTED" != "1" ] && [ "$_hosted_db" = "1" ] && [ "$_dev_volume" = "0" ]; then
+    echo "❌ Refusing to start: this checkout has a bind-mounted database that the dev stack cannot see." >&2
+    echo "" >&2
+    echo "   Found: ${_data_abs}/trinity.db (the TRINITY_DATA_PATH bind mount that" >&2
+    echo "          docker-compose.prod.yml and docker-compose.hosted.yml use)" >&2
+    echo "   Wanted: docker volume '${_project}_trinity-data' (what docker-compose.yml mounts)" >&2
+    echo "" >&2
+    echo "   Starting anyway would migrate a NEW empty database from zero while the real" >&2
+    echo "   one stays in ${_data_abs} — and Redis is shared between the two stacks, so you" >&2
+    echo "   would get a half-migrated install rather than a clean one." >&2
+    echo "" >&2
+    echo "   This is a production or hosted install. Bring it up with the file set it" >&2
+    echo "   was installed with:" >&2
+    echo "       docker compose -f docker-compose.prod.yml up -d    # source-built production" >&2
+    echo "       ./scripts/deploy/start.sh --hosted                  # prebuilt GHCR images" >&2
+    echo "   (docker-compose.prod.yml is a complete standalone file — never stack it on" >&2
+    echo "    docker-compose.yml with two -f flags; the merge does not validate.)" >&2
+    echo "" >&2
+    echo "   To move BACK to the dev stack, copy the data into the dev volume first" >&2
+    echo "   (with the stack stopped):" >&2
+    echo "       docker compose -f docker-compose.prod.yml stop      # or docker-compose.hosted.yml" >&2
+    echo "       docker volume create ${_project}_trinity-data" >&2
+    echo "       docker run --rm -v \"${_data_abs}\":/from -v ${_project}_trinity-data:/to \\" >&2
+    echo "           alpine sh -c 'cp -a /from/. /to/'" >&2
+    echo "       ./scripts/deploy/start.sh" >&2
+    echo "" >&2
+    echo "   Or, to deliberately start fresh, move ${_data_abs} aside." >&2
+    exit 1
+fi
+
+# Both stores present (#2528). This is the state a wrong-file start LEAVES
+# BEHIND: the real database in the bind mount and a freshly migrated (and, via
+# the ent#124 first-run seed, freshly populated) one in the named volume.
+# Neither refusal above fires — each is written for a clean crossing — so a
+# repeat of the very mistake that created this state was silent. It cannot be
+# a refusal: the copy-across remedy both refusals print leaves both stores in
+# place, so refusing here would block the operator who did exactly what they
+# were told. It can, and must, say which store the stack is about to use.
+if [ "$_hosted_db" = "1" ] && [ "$_dev_volume" = "1" ]; then
+    if [ "$HOSTED" = "1" ]; then
+        _db_in_use="${_data_abs}/trinity.db (the bind mount docker-compose.hosted.yml uses)"
+        _db_ignored="docker volume '${_project}_trinity-data' (what docker-compose.yml mounts)"
+    else
+        _db_in_use="docker volume '${_project}_trinity-data' (what docker-compose.yml mounts)"
+        _db_ignored="${_data_abs}/trinity.db (the bind mount docker-compose.prod.yml / docker-compose.hosted.yml use)"
+    fi
+    echo "⚠️  Two databases found for this checkout — the stack will use ${_db_in_use}."
+    echo "    Ignored: ${_db_ignored}."
+    echo "    If the ignored one holds your real data, stop now (Ctrl-C) and bring the"
+    echo "    stack up with the file set that mounts it; once you are sure which store"
+    echo "    is live, remove the other so this warning stops."
+    echo ""
+fi
+
+# Check base image before starting — without it, agent creation will silently fail.
+#
+# #2280: the backend creates agent containers from the literal local tag
+# `trinity-agent-base:latest` (hardcoded in services/agent_service/lifecycle.py,
+# allowlisted as `trinity-agent-base:*` by SEC-172), and compose cannot retag —
+# so hosted mode PULLS the GHCR copy and tags it locally rather than spending
+# 5-10 minutes building it. Retagging keeps the SEC-172 allowlist and the
+# #1809 image-drift check untouched: both read the container's own reference,
+# which stays `trinity-agent-base:latest` either way.
+if [ "$HOSTED" = "1" ]; then
+    _base_remote="ghcr.io/abilityai/trinity-agent-base:${TRINITY_IMAGE_TAG}"
+    echo "Pulling agent base image (${_base_remote})..."
+    if ! docker pull "$_base_remote"; then
+        echo ""
+        echo "ERROR: could not pull ${_base_remote}."
+        echo "       Hosted mode cannot fall back to a local build — that is the"
+        echo "       5-10 minute first boot it exists to avoid. Check network and"
+        echo "       image-tag spelling (TRINITY_IMAGE_TAG=${TRINITY_IMAGE_TAG}), or"
+        echo "       drop --hosted to build from source instead."
+        exit 1
+    fi
+    docker tag "$_base_remote" trinity-agent-base:latest
+    echo "Tagged locally as trinity-agent-base:latest (the reference the backend creates agents from)."
+    echo ""
+elif ! docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "trinity-agent-base:latest"; then
     echo "⚠️  trinity-agent-base:latest not found."
     echo "   Building base agent image first (required for agent creation)..."
     echo ""
@@ -277,7 +1002,12 @@ fi
 # ARGs → ENV vars → `GET /api/version` payload. Best-effort: if the host
 # isn't a git checkout (CI tarball install) fall back to "unknown" so the
 # downstream Dockerfile defaults still produce a well-typed response.
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# #2280: skipped in hosted mode. These feed `backend.build.args`, and
+# docker-compose.hosted.yml has no build block — the provenance a pulled image
+# reports was stamped by the publish workflow at release time, and re-exporting
+# the local checkout's git state here would be, at best, inert and, at worst, a
+# claim about a build this host did not do.
+if [ "$HOSTED" != "1" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     export GIT_COMMIT=$(git rev-parse HEAD)
     export GIT_COMMIT_SUBJECT=$(git log -1 --pretty=%s)
     export GIT_COMMIT_TIMESTAMP=$(git log -1 --pretty=%cI)
@@ -298,6 +1028,14 @@ export BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # file source via docker-compose.override.yml (auto-merged by `docker compose up`).
 # Native Linux dockerd is unaffected. Opt out: TRINITY_LOCAL_LOG_SOURCE=docker.
 # Force on: TRINITY_LOCAL_LOG_SOURCE=file. Default: auto-detect Docker Desktop.
+# Hosted passes an explicit -f, which disables override AUTO-merge — but the
+# override is still applicable, so it is appended to COMPOSE_FILES explicitly
+# below rather than switched off. Forcing `_log_src=docker` under --hosted (as
+# this first shipped) meant a hosted install on Docker Desktop or any VM-backed
+# runtime shipped the very `docker_logs` source #1432 exists to avoid, and
+# Vector busy-loops and pegs the Docker VM. The vector service is byte-identical
+# between docker-compose.yml and the hosted file, so the override merges cleanly
+# onto either.
 _log_src="${TRINITY_LOCAL_LOG_SOURCE:-auto}"
 if [ "$_log_src" = "auto" ]; then
     if docker info 2>/dev/null | grep -qi 'Docker Desktop'; then
@@ -314,14 +1052,45 @@ if [ "$_log_src" = "file" ]; then
         echo "  TRINITY_LOCAL_LOG_SOURCE=docker. Local logs land in /data/logs/local-*.json;"
         echo "  prefer 'docker compose logs -f <service>' to tail a single service."
     fi
+    # Dev gets this by auto-merge; hosted must ask for it by name, because its
+    # explicit -f turns auto-merge off. Order matters — the override has to come
+    # after the base file it patches.
+    if [ "$HOSTED" = "1" ]; then
+        COMPOSE_FILES+=(-f docker-compose.override.yml)
+    fi
 fi
 # -----------------------------------------------------------------------------
 
+if [ "$HOSTED" = "1" ]; then
+    echo "Pulling platform images (tag: ${TRINITY_IMAGE_TAG})..."
+    # Tailored fatal, matching the agent-base pull one screen above. Bare, this
+    # died on `set -e` with a raw Compose error on precisely the install least
+    # equipped to read one — and its two likeliest causes (a tag not published
+    # yet, GHCR denying an anonymous pull because a package is still private)
+    # both surface as messages that name neither.
+    if ! docker compose "${COMPOSE_FILES[@]}" pull; then
+        echo ""
+        echo "ERROR: could not pull the platform images at tag '${TRINITY_IMAGE_TAG}'."
+        echo "       Most likely one of:"
+        echo "         • the tag does not exist — check TRINITY_IMAGE_TAG against"
+        echo "           https://github.com/abilityai/trinity/releases (both 'v0.9.0'"
+        echo "           and '0.9.0' are published for the same digest);"
+        echo "         • 'denied' / 'unauthorized' — the GHCR package is not public;"
+        echo "           report it, it is a publishing fault, not yours;"
+        echo "         • no network route to ghcr.io."
+        echo "       Hosted mode does not fall back to building — that is the 5-10"
+        echo "       minute first boot it exists to avoid. Drop --hosted to build"
+        echo "       from source instead."
+        exit 1
+    fi
+    echo ""
+fi
+
 echo "Starting services..."
-docker compose up -d
+docker compose "${COMPOSE_FILES[@]}" up -d
 
 # Read FRONTEND_PORT from .env or use default (needed for the serving check + URL).
-FRONTEND_PORT=${FRONTEND_PORT:-$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | cut -d'=' -f2 || echo "80")}
+FRONTEND_PORT=${FRONTEND_PORT:-$(env_value FRONTEND_PORT)}
 FRONTEND_PORT=${FRONTEND_PORT:-80}
 
 # Verify the stack is actually SERVING, not just "containers started" (#39).
@@ -355,7 +1124,11 @@ echo ""
 if [ "$SERVING_OK" != "1" ]; then
     echo "⚠️  The backend health check at http://localhost:8000/health did not"
     echo "    respond within 180s. Containers are up but may still be initializing"
-    echo "    (first-run image build / migrations). Check:  docker compose logs -f backend"
+    if [ "$HOSTED" = "1" ]; then
+        echo "    (image pulls / migrations). Check:  docker compose -f docker-compose.hosted.yml logs -f backend"
+    else
+        echo "    (first-run image build / migrations). Check:  docker compose logs -f backend"
+    fi
     echo "    Re-running start.sh is safe once it settles."
     echo ""
 fi
@@ -383,9 +1156,20 @@ if [ -n "$GENERATED_ADMIN_PASSWORD" ]; then
     echo ""
     echo "         admin / ${GENERATED_ADMIN_PASSWORD}"
     echo ""
+elif [ "$ADMIN_IN_BROWSER" = "1" ]; then
+    # ent#580: there is no password to show. The browser is the only way in.
+    echo "     No admin account exists yet: the first person to open it creates one"
+    echo "     (email + password). Do that now — until then, anyone who can reach"
+    echo "     this instance can. Already done? Sign in with that password."
 else
-    echo "     Log in as 'admin' with the ADMIN_PASSWORD from your .env, then"
-    echo "     complete the first-run setup wizard (admin email + whitelist)."
+    # #2381: this used to say "then complete the first-run setup wizard". The
+    # wizard only appears on an install with no admin account; setting
+    # ADMIN_PASSWORD (which this script requires) provisions one at boot, so
+    # there is no wizard to complete. Binding a sign-in email is now a normal
+    # post-login action in Settings, not a first-run gate.
+    echo "     Log in as 'admin' with the ADMIN_PASSWORD from your .env."
+    echo "     Then bind a sign-in email in Settings → General (optional, but it"
+    echo "     lets you sign in by email instead of the fixed 'admin' username)."
 fi
 echo "  2. Install the agent-dev plugins (in Claude Code):"
 echo "         /plugin marketplace add abilityai/abilities"
@@ -401,13 +1185,39 @@ fi
 echo ""
 echo "─────────────────────────────────────────────────────────────────────────"
 echo ""
-echo "To view logs:      docker compose logs -f"
-echo "To stop services:  docker compose stop"
-echo "  (use 'stop', NOT 'down' — 'down' destroys agent containers)"
-echo ""
-echo "Just pulled new code? If services fail with ModuleNotFoundError or"
-echo "the UI shows 'Disconnected', the platform images may be stale —"
-echo "rebuild with:  docker compose build && docker compose up -d"
-echo "(See docs/DEPLOYMENT.md → Troubleshooting → Stale platform images.)"
-echo ""
+# #2280: hosted installs have no build context, so the stale-image remedy is a
+# pull, not a build — and every compose command needs the explicit -f, since
+# hosted deliberately opts out of the default file merge. Printing the dev
+# commands to a hosted operator sends them at a `build` that cannot work.
+if [ "$HOSTED" = "1" ]; then
+    _cf="-f docker-compose.hosted.yml"
+    echo "To view logs:      docker compose ${_cf} logs -f"
+    echo "To stop services:  docker compose ${_cf} stop"
+    echo "  (use 'stop', NOT 'down' — 'down' destroys agent containers)"
+    echo ""
+    echo "To upgrade: set TRINITY_IMAGE_TAG to the release you want, then re-run"
+    echo "this script with --hosted. It re-pulls the platform images AND the agent"
+    echo "base image; a plain 'docker compose ${_cf} pull' skips the base image,"
+    echo "which is not a compose service, and leaves agents on the old runtime."
+    echo "Currently pinned to: TRINITY_IMAGE_TAG=${TRINITY_IMAGE_TAG}"
+    if [ "$TRINITY_IMAGE_TAG" = "latest" ]; then
+        echo "  ⚠️  'latest' moves on every Trinity release. Pin a version on any"
+        echo "     install you intend to keep, or your next run is an unscheduled"
+        echo "     upgrade:"
+        echo "         echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env"
+        echo "     (.env, not the shell — that is where the pin survives a reboot"
+        echo "      and whoever runs the upgrade next.)"
+    fi
+    echo ""
+else
+    echo "To view logs:      docker compose logs -f"
+    echo "To stop services:  docker compose stop"
+    echo "  (use 'stop', NOT 'down' — 'down' destroys agent containers)"
+    echo ""
+    echo "Just pulled new code? If services fail with ModuleNotFoundError or"
+    echo "the UI shows 'Disconnected', the platform images may be stale —"
+    echo "rebuild with:  docker compose build && docker compose up -d"
+    echo "(See docs/DEPLOYMENT.md → Troubleshooting → Stale platform images.)"
+    echo ""
+fi
 

@@ -9,6 +9,7 @@ in ``db/tables.py`` (dialect-agnostic expressions, no ``?``/``%s`` placeholders)
 """
 
 import json
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Sequence
@@ -23,7 +24,14 @@ from .tables import agent_activities
 # is the leaf that survives a test harness evicting `db.*` from sys.modules.
 # Re-exported through this module so `db.activities.ActivityCloseOutcome` works.
 from models import ActivityState, ActivityType, ActivityCloseOutcome
-from utils.helpers import utc_now_iso, to_utc_iso, parse_iso_timestamp
+from utils.helpers import (
+    duration_ms_between,
+    parse_iso_timestamp,
+    to_utc_iso,
+    utc_now_iso,
+)
+
+logger = logging.getLogger(__name__)
 
 
 # Dispatch activity types opened by ``track_activity`` at execution start. A
@@ -226,7 +234,22 @@ class ActivityOperations:
             # Use parse_iso_timestamp to handle both 'Z' and non-'Z' timestamps
             started_at = parse_iso_timestamp(row["started_at"])
             completed_at = parse_iso_timestamp(utc_now_iso())
-            duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+            # #2434: `completed_at` here IS when the work stopped, so this is a
+            # real measurement — but an activity with no owning closer can sit
+            # `started` arbitrarily long (#1804's class), and past the int4
+            # ceiling the value is unstorable. duration_ms_between returns None
+            # there rather than raising.
+            duration_ms = duration_ms_between(started_at, completed_at)
+            if duration_ms is None:
+                logger.warning(
+                    "[Activity] #2434 unrepresentable duration for %s: "
+                    "started_at=%s is %.1f days before completion — recording "
+                    "NULL. A started_at that old means the row was never "
+                    "closed by its owner.",
+                    activity_id,
+                    row["started_at"],
+                    (completed_at - started_at).total_seconds() / 86400,
+                )
 
             # Merge existing details with new details
             existing_details = json.loads(row["details"]) if row["details"] else {}
@@ -285,7 +308,6 @@ class ActivityOperations:
 
         closed = 0
         now = utc_now_iso()
-        completed_at = parse_iso_timestamp(now)
         with get_engine().begin() as conn:
             for start in range(0, len(ids), _SQLITE_MAX_IN_VARS):
                 chunk = ids[start:start + _SQLITE_MAX_IN_VARS]
@@ -301,8 +323,6 @@ class ActivityOperations:
                 ).mappings().all()
 
                 for row in rows:
-                    started_at = parse_iso_timestamp(row["started_at"])
-                    duration_ms = int((completed_at - started_at).total_seconds() * 1000)
                     result = conn.execute(
                         update(agent_activities)
                         .where(
@@ -314,7 +334,11 @@ class ActivityOperations:
                         .values(
                             activity_state=status,
                             completed_at=now,
-                            duration_ms=duration_ms,
+                            # #2434: the recovery sweep is inventing this end
+                            # time — the execution's terminal writer knows when
+                            # the work stopped, this loop does not. NULL, not a
+                            # number, and never one the int4 column cannot hold.
+                            duration_ms=None,
                             error=error,
                         )
                     )
@@ -484,7 +508,9 @@ class ActivityOperations:
         # (SQLite's datetime() returns space-separated format which breaks string comparison)
         threshold = (datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)).strftime('%Y-%m-%dT%H:%M:%S')
         with get_engine().begin() as conn:
-            # Find stale activities for duration calculation
+            # #2434: the per-row loop below no longer computes a duration, so
+            # started_at is selected only to keep the row shape stable for
+            # readers of this query; the CAS-less UPDATE still needs the id.
             stale_rows = conn.execute(
                 select(agent_activities.c.id, agent_activities.c.started_at)
                 .where(
@@ -498,17 +524,19 @@ class ActivityOperations:
             if not stale_rows:
                 return 0
 
-            completed_at = parse_iso_timestamp(now)
             for row in stale_rows:
-                started_at = parse_iso_timestamp(row["started_at"])
-                duration_ms = int((completed_at - started_at).total_seconds() * 1000)
                 conn.execute(
                     update(agent_activities)
                     .where(agent_activities.c.id == row["id"])
                     .values(
                         activity_state=ActivityState.FAILED,
                         completed_at=now,
-                        duration_ms=duration_ms,
+                        # #2434: the backstop noticed the row was stale; it did
+                        # not measure it. Recording `now - started_at` made a
+                        # 15-minute run read as a ~120-minute failure (#1804),
+                        # and past 24.8 days it aborts the whole batch's
+                        # transaction. NULL means "not measured".
+                        duration_ms=None,
                         error='Marked as failed by cleanup: exceeded ' + str(timeout_minutes) + '-minute timeout',
                     )
                 )

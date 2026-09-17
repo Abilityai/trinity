@@ -30,7 +30,7 @@ sync/recovery without an LLM turn and investigate exactly what a tool did.
 
 | Type | Location | Description |
 |------|----------|-------------|
-| **MCP tool** | `get_git_status` | Live status — branch, remote, last commit, changed/untracked files, sync_status. Read-only. |
+| **MCP tool** | `get_git_status` | Live status — branch, remote, last commit, changed/untracked files, sync_status. Read-only. **#2742:** the agent payload is proxied verbatim, so this tool now also carries `computed_at` (the answer may be a coalesced snapshot up to one leader-run old), `lock_recovery` and `index_lock_stuck`; concurrent callers — this tool, the UI panel and the backend poller — coalesce onto ONE computation and one `git fetch`, so a burst no longer stacks overlapping fetches. No tool-signature change. |
 | **MCP tool** | `git_sync` | Stage + commit + push to working branch. Owner-only. `strategy: normal\|pull_first\|force_push`. |
 | **MCP tool** | `get_git_log` | Recent commits (limit clamped 1–100, default 10). Read-only. |
 | **MCP tool** | `git_pull` | Pull from GitHub. `strategy: clean\|stash_reapply\|force_reset`. Owner + shared accessors. |
@@ -96,7 +96,7 @@ the request-id correlation are the only new behaviour.
   - **`request()`** gains an optional `requestId` param → sets the `X-Request-ID` header; threaded through the reauth-retry recursion.
   - Six proxy methods: `getGitStatus`, `gitSync`, `getGitLog`, `gitPull`, `getGitSyncState`, `resetToMainPreserveState` — each takes `requestId?` last.
 - **`src/mcp-server/src/audit.ts`**
-  - **`ToolCallContext`** (new, exported) — `{session?: McpAuthContext, requestId?: string}` replaces the old inline `{session?}` context type in `withAudit`. A tool stamps `requestId` here; the wrapper reads it **after** `execute` (so a tool that mints it mid-call is captured).
+  - **`ToolCallContext`** (new, exported) — `{session?: McpAuthContext, requestId?: string}` replaces the old inline `{session?}` context type in `withAudit`. A tool stamps `requestId` here; the wrapper reads it **after** `execute` (so a tool that mints it mid-call is captured). Since #2807 it also carries `outcome?: ToolOutcome` — a deny site stamps it through `access.ts::accessDenied` and the wrapper reads it the same way, labelling the row `success: false`, `denied: true`.
   - **`resolveTargetId(params)`** (new, exported) — returns `params.agent_name ?? params.name` when a string, else `undefined`. Defensive so non-agent tools log no target.
   - `logToolCall(...)` gains `targetId?` + `requestId?`, setting `target_type:"agent"`/`target_id`/`request_id` on the `mcp_operation` entry — both fields were previously dropped ("we don't have params here").
 - **`src/mcp-server/src/server.ts`** — registers `createGitTools(client, requireApiKey)` in the tool group list.

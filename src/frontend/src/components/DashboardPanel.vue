@@ -1,9 +1,45 @@
 <template>
   <div class="space-y-6">
-    <!-- Loading State -->
-    <div v-if="loading" class="flex items-center justify-center py-8">
-      <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500"></div>
-    </div>
+    <!-- ent#253: a failed refresh keeps the dashboard on screen. The refresh
+         interval used to overwrite `dashboardData` with `{has_dashboard: false}`
+         on any error, so one blip replaced a rendered dashboard with "no
+         dashboard" — a statement about the agent produced by a failed request
+         (#1926). Sibling banner, never an else-if arm. -->
+    <InlineError
+      v-if="view.stale"
+      :message="staleMessage"
+      :detail="loadError"
+      retryable
+      :retry-label="loading ? 'Retrying…' : 'Try again'"
+      @retry="loadDashboard"
+      @dismiss="loadError = ''"
+    />
+
+    <!-- ONE persistent ScanlineReveal, branching INSIDE the slot (ent#245):
+         branches around it would remount and kill the reveal. Replaces this
+         panel's bespoke spinner (ent#253 AC #4) and carries reduced-motion.
+         Gated on "no data yet", so the poll is invisible. -->
+    <ScanlineReveal :loading="awaitingFirstLoad" :reveal="view.state === 'ready'">
+      <!-- First load, inside the slot (ent#253 review). ScanlineReveal clips
+           its content only during the REVEAL — during the loading phase the
+           slot renders normally under a 50%-opacity track. Without this arm the
+           chain below falls through to the empty state while `dashboardData` is still
+           null, so the panel spent the whole first load telling the operator
+           this agent has no dashboard — the exact false claim this pass removes,
+           merely dimmed. `LibrarySkillsSection` (the ent#245 reference adopter)
+           solves the same problem by gating each terminal on `store.hasLoaded`;
+           one placeholder arm is used here instead because it also RESERVES the
+           height, so nothing shifts when the content arrives (p4). -->
+      <div v-if="awaitingFirstLoad" class="min-h-[8rem]" aria-hidden="true"></div>
+
+      <LoadFailed
+        v-else-if="loadFailed"
+        title="Couldn't load the dashboard"
+        message="The agent did not return its dashboard. This is not the same as an agent without one."
+        :detail="loadError"
+        :retrying="loading"
+        @retry="loadDashboard"
+      />
 
     <!-- Agent Not Running State -->
     <div v-else-if="agentStatus !== 'running'" class="text-center py-8">
@@ -382,16 +418,21 @@
         </div>
       </div>
     </div>
+    </ScanlineReveal>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { renderMarkdown } from '../utils/markdown'
 import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
 import axios from 'axios'
 import SparklineChart from './SparklineChart.vue'
+import ScanlineReveal from './ScanlineReveal.vue'
+import LoadFailed from './LoadFailed.vue'
+import InlineError from './InlineError.vue'
+import { viewState, staleBannerMessage } from '../utils/loadingState'
 
 const props = defineProps({
   agentName: {
@@ -408,25 +449,60 @@ const agentsStore = useAgentsStore()
 const authStore = useAuthStore()
 const dashboardData = ref(null)
 const loading = ref(true)
+const loadError = ref('')
+const lastLoadedAt = ref(null)
 const hasUpdateDashboardPlaybook = ref(false)
 const updatingDashboard = ref(false)
 let refreshInterval = null
 
+// ent#253: `loading` stays "fetch in flight" (it drives the Retry label); the
+// template gates on "no data yet" (`dashboardData === null`), so the scheduled
+// refresh swaps values in place and is invisible.
 const loadDashboard = async () => {
   loading.value = true
   try {
     const response = await agentsStore.getAgentDashboard(props.agentName)
     dashboardData.value = response
+    lastLoadedAt.value = new Date()
+    loadError.value = ''
   } catch (error) {
-    console.error('Failed to load dashboard:', error)
-    dashboardData.value = {
-      has_dashboard: false,
-      error: 'Failed to load dashboard'
-    }
+    // Keep what the agent last published; a failed refresh does not unpublish
+    // it. The banner above says the reading is stale and offers the retry.
+    // Review: a request that resolves AFTER the agent stopped must not
+    // write its error. The `agentStatus` watcher clears `loadError`
+    // synchronously on the transition, but this catch lands later and used to
+    // write unconditionally — so stopping an agent mid-fetch reproduced the
+    // blocking symptom by ordering alone, which is exactly the wedged-agent
+    // case an operator is most likely to hit.
+    if (props.agentStatus !== 'running') return
+    loadError.value = error?.response?.data?.detail || error?.message || 'Request failed'
   } finally {
     loading.value = false
   }
 }
+
+const view = computed(() => viewState({
+  loading: loading.value,
+  hasLoaded: dashboardData.value !== null,
+  error: loadError.value,
+  // Review finding: `count` defaults to 1, so `state` was 'ready' for every
+  // successful response INCLUDING an empty one — and `ScanlineReveal`'s
+  // contract is `reveal: false` when loading ended without real data, so the
+  // celebratory 550ms wipe played over the "No Dashboard Defined" empty state.
+  count: dashboardData.value?.has_dashboard ? 1 : 0,
+}))
+const firstLoad = computed(() => view.value.state === 'loading')
+// ent#253 review: `viewState` ignores `loading` by design, so on a STOPPED
+// agent — where onMounted never fetches — `hasLoaded` is false forever and
+// `firstLoad` stays true for the life of the mount. Gated only on that, the
+// placeholder arm above wins permanently and the "Agent Not Running" arm
+// below is unreachable: a blank, dimmed, wordless panel under a track stuck
+// at :loading. The placeholder is a claim that data is COMING, which is only
+// true while a fetch can happen. The primitive takes the same gate, or it
+// animates behind the not-running copy.
+const awaitingFirstLoad = computed(() => firstLoad.value && props.agentStatus === 'running')
+const loadFailed = computed(() => view.value.state === 'failed')
+const staleMessage = computed(() => staleBannerMessage('the dashboard', lastLoadedAt.value))
 
 // Check if agent has an update-dashboard playbook
 const checkUpdateDashboardPlaybook = async () => {
@@ -610,6 +686,8 @@ const stopRefresh = () => {
 watch(() => props.agentName, (newName, oldName) => {
   if (newName && newName !== oldName) {
     dashboardData.value = null
+    loadError.value = ''
+    lastLoadedAt.value = null
     hasUpdateDashboardPlaybook.value = false
     stopRefresh()
     if (props.agentStatus === 'running') {
@@ -629,6 +707,15 @@ watch(() => props.agentStatus, (newStatus) => {
     startRefresh()
   } else {
     stopRefresh()
+    // Review finding: with the request-shaped arms now ahead of it in the
+    // chain, a failed FIRST load outranks "Agent Not Running" — and nothing
+    // cleared `loadError` on the way to stopped. So an agent that 502'd while
+    // booting kept showing "Couldn't load the dashboard" with a Retry that can only
+    // fail again, where the not-running copy belongs; and with data on screen,
+    // the stale banner stayed pinned above it. The error described a request
+    // that is no longer possible, so it goes with the run state that made it
+    // impossible — mirroring what the `agentName` watcher already does.
+    loadError.value = ''
   }
 })
 

@@ -13,6 +13,7 @@
  * agent would render as blank.
  */
 import { describe, it, expect } from 'vitest'
+import { visibleAgentRows, AGENT_COLLAPSE_LIMIT } from '../../src/components/portal/portalUtils.js'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 
@@ -62,15 +63,31 @@ describe('#2159 the row no longer shows the description', () => {
     // same decision agentLabel makes, not a second one that can drift from it.
     const block = source.slice(source.indexOf('v-for="a in shownAgents"'))
     const row = block.slice(0, block.indexOf('</button>'))
-    expect(row).toMatch(/v-if="agentLabel\(a\) !== a\.name"/)
+    // ent#523 added a preview line that takes this slot when there is history,
+    // so the subtitle is now the `v-else-if`. The RULE is unchanged and is what
+    // is asserted: the condition is `agentLabel`'s own decision, never a second
+    // truthiness test that drifts from it on a whitespace-only label.
+    expect(row).toMatch(/v-else-if="agentLabel\(a\) !== a\.name"/)
     expect(row).not.toMatch(/v-if="a\.display_label"/)
   })
 })
 
 describe('#2159 the roster is bounded and expandable', () => {
   it('shows a fixed number by default rather than the whole fleet', () => {
-    expect(source).toMatch(/const AGENT_COLLAPSE_LIMIT = \d+/)
-    expect(source).toMatch(/agentsExpanded\.value \? props\.roster : props\.roster\.slice\(0, AGENT_COLLAPSE_LIMIT\)/)
+    // #2424 moved the rule into portalUtils, so this asserts the PROPERTY
+    // rather than the old inline slice expression. Same guarantee, and now it
+    // fails on a broken bound instead of only on a reworded one.
+    const roster = Array.from({ length: 12 }, (_, i) => ({ name: `a${i}` }))
+    const collapsed = visibleAgentRows(roster, { expanded: false, askCounts: {} })
+    expect(collapsed).toHaveLength(AGENT_COLLAPSE_LIMIT)
+    expect(AGENT_COLLAPSE_LIMIT).toBeLessThan(roster.length)
+    expect(visibleAgentRows(roster, { expanded: true, askCounts: {} })).toHaveLength(12)
+    // ...and the component still routes its rows through it. ent#523 feeds it
+    // the ORDERED roster (AC 6) rather than the raw prop — the bound is what
+    // this pins, not which list it bounds, and ordering before the collapse is
+    // deliberate: bounding first would sort a slice chosen by the old order.
+    expect(source).toMatch(/visibleAgentRows\(orderedRoster\.value/)
+    expect(source).toMatch(/const orderedRoster = computed\(\(\) => orderRosterAgents\(/)
   })
 
   it('uses ONE persistent toggle, not two v-if-alternated buttons', () => {

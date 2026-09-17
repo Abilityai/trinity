@@ -9,13 +9,15 @@ ping-pong between two exhausted subscriptions on every subsequent 429.
 
 These tests pin the fix at the db layer: after a simulated switch, the old
 subscription must still be reported as rate-limited, and
-`select_best_alternative_subscription()` must return None when every candidate
-has rate-limit events in the 2h window.
+`list_viable_alternative_subscriptions()` must return an empty candidate list
+when every candidate has rate-limit events in the 2h window (#2409 moved the
+first-match pick into the service layer; the db-level FILTER is what #444 pins).
 """
 
 from __future__ import annotations
 
 import sqlite3
+import re
 import sys
 import uuid
 from datetime import datetime
@@ -99,6 +101,7 @@ def tmp_db(tmp_path, monkeypatch):
             agent_name TEXT NOT NULL,
             subscription_id TEXT NOT NULL,
             error_message TEXT,
+            failure_kind TEXT,
             occurred_at TEXT NOT NULL
         )
         """
@@ -185,16 +188,15 @@ class TestPingPongPrevention:
         assert sub_ops.is_subscription_rate_limited("sub-a") is True
 
     def test_no_alternative_when_both_subs_exhausted(self, sub_ops):
-        """Given two subscriptions that have each hit the limit,
-        select_best_alternative_subscription must return None — not pick the
-        other exhausted sub."""
+        """Given two subscriptions that have each hit the limit, the candidate
+        list must be empty — not offer the other exhausted sub."""
         _record_events(sub_ops, "agent-x", "sub-a", 2)
         _record_events(sub_ops, "agent-x", "sub-b", 2)
 
         # Agent currently on sub-A → asking for an alternative to sub-A
-        assert sub_ops.select_best_alternative_subscription("sub-a") is None
+        assert sub_ops.list_viable_alternative_subscriptions("sub-a") == []
         # Symmetric: from sub-B's perspective too
-        assert sub_ops.select_best_alternative_subscription("sub-b") is None
+        assert sub_ops.list_viable_alternative_subscriptions("sub-b") == []
 
     def test_pingpong_blocked_across_two_switches(self, sub_ops):
         """Full ping-pong scenario: both subscriptions have 429s recorded. After
@@ -202,27 +204,25 @@ class TestPingPongPrevention:
         back to A because A is still flagged as rate-limited."""
         # First cycle: agent-x on sub-A, 2× 429
         _record_events(sub_ops, "agent-x", "sub-a", 2)
-        # Auto-switch picks sub-B (the only other sub, not yet flagged)
-        alt1 = sub_ops.select_best_alternative_subscription("sub-a")
-        assert alt1 is not None
-        assert alt1.id == "sub-b"
+        # Auto-switch's candidate list is sub-B (the only other sub, not yet flagged)
+        alt1 = sub_ops.list_viable_alternative_subscriptions("sub-a")
+        assert [s.id for s in alt1] == ["sub-b"]
         # Perform the switch (post-fix: no clear)
         sub_ops.assign_subscription_to_agent("agent-x", "sub-b")
 
         # Second cycle: 2× 429 on sub-B too
         _record_events(sub_ops, "agent-x", "sub-b", 2)
         # sub-A still rate-limited → no viable alternative → no ping-pong back
-        alt2 = sub_ops.select_best_alternative_subscription("sub-b")
-        assert alt2 is None
+        alt2 = sub_ops.list_viable_alternative_subscriptions("sub-b")
+        assert alt2 == []
 
     def test_viable_alternative_found_when_only_one_sub_exhausted(self, sub_ops):
         """Sanity check: if only one subscription is rate-limited, the other is
         still a valid alternative (the fix must not over-correct and refuse all
         switches)."""
         _record_events(sub_ops, "agent-x", "sub-a", 2)
-        alt = sub_ops.select_best_alternative_subscription("sub-a")
-        assert alt is not None
-        assert alt.id == "sub-b"
+        alt = sub_ops.list_viable_alternative_subscriptions("sub-a")
+        assert [s.id for s in alt] == ["sub-b"]
 
 
 # =============================================================================
@@ -241,8 +241,21 @@ class TestRateLimitAging:
     """
 
     @staticmethod
-    def _seed_event(tmp_db_path, subscription_id: str, occurred_at: str) -> None:
-        """Insert a rate-limit event with a specific occurred_at timestamp."""
+    def _seed_event(
+        tmp_db_path,
+        subscription_id: str,
+        occurred_at: str,
+        failure_kind: str = "rate_limit",
+    ) -> None:
+        """Insert a rate-limit event with a specific occurred_at timestamp.
+
+        #2352: `failure_kind` is now written explicitly. It was omitted here —
+        leaving every seeded row NULL — which no longer matches what the
+        production writer emits (`record_rate_limit_event` defaults the kind to
+        "rate_limit") and, since the display predicate is now scoped to real
+        429s, would have made these window-aging tests assert against a row
+        shape the platform does not produce.
+        """
         import sqlite3
         import uuid as _uuid
 
@@ -250,9 +263,16 @@ class TestRateLimitAging:
         try:
             conn.execute(
                 "INSERT INTO subscription_rate_limit_events "
-                "(id, agent_name, subscription_id, error_message, occurred_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (str(_uuid.uuid4()), "agent-x", subscription_id, "429", occurred_at),
+                "(id, agent_name, subscription_id, error_message, failure_kind, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    str(_uuid.uuid4()),
+                    "agent-x",
+                    subscription_id,
+                    "429",
+                    failure_kind,
+                    occurred_at,
+                ),
             )
             conn.commit()
         finally:
@@ -300,18 +320,38 @@ class TestRateLimitAging:
         self._seed_event(tmp_db, "sub-a", iso_cutoff(25))
         assert sub_ops.is_subscription_rate_limited("sub-a") is False
 
-    def test_cleanup_removes_old_events(self, sub_ops, tmp_db):
-        """`cleanup_old_rate_limit_events` deletes rows with occurred_at >24h
-        ago, leaves fresher rows alone."""
+    def test_cleanup_removes_events_past_the_retention_window(self, sub_ops, tmp_db):
+        """`cleanup_old_rate_limit_events` deletes rows past its window and
+        leaves fresher rows alone.
+
+        UPDATED by ent#433. This previously asserted a HARDCODED 24-hour sweep
+        — that was a characterization of the defect, not a contract. This table
+        is the platform's only durable record of real agent work hitting a
+        provider rate limit, and it was destroyed daily with no operator-visible
+        window, no #1644 blast-radius guard, and no `GET /api/settings/retention`
+        entry, while every sibling table had all three. The window is now a real
+        retention setting defaulting to 30 days, so a 25h/30h-old event is
+        legitimately RETAINED.
+        """
         from utils.helpers import iso_cutoff
 
-        self._seed_event(tmp_db, "sub-a", iso_cutoff(25))   # should prune
-        self._seed_event(tmp_db, "sub-a", iso_cutoff(30))   # should prune
-        self._seed_event(tmp_db, "sub-a", iso_cutoff(1))    # should keep
-        pruned = sub_ops.cleanup_old_rate_limit_events()
+        self._seed_event(tmp_db, "sub-a", iso_cutoff(24 * 45))  # should prune
+        self._seed_event(tmp_db, "sub-a", iso_cutoff(24 * 40))  # should prune
+        self._seed_event(tmp_db, "sub-a", iso_cutoff(25))       # kept — was pruned pre-ent#433
+        self._seed_event(tmp_db, "sub-a", iso_cutoff(1))        # should keep
+        pruned = sub_ops.cleanup_old_rate_limit_events(retention_days=30)
         assert pruned == 2
         # Fresh event still flags the subscription
         assert sub_ops.is_subscription_rate_limited("sub-a") is True
+
+    def test_cleanup_window_is_configurable_and_zero_disables(self, sub_ops, tmp_db):
+        """ent#433: the window is a real setting, and `0` disables the sweep
+        like every other retention window."""
+        from utils.helpers import iso_cutoff
+
+        self._seed_event(tmp_db, "sub-a", iso_cutoff(25))
+        assert sub_ops.cleanup_old_rate_limit_events(retention_days=0) == 0
+        assert sub_ops.cleanup_old_rate_limit_events(retention_days=1) == 1
 
 
 # =============================================================================
@@ -430,11 +470,58 @@ class TestSingleEventThreshold:
         import services.subscription_auto_switch as auto_switch
         importlib.reload(auto_switch)
 
-        # Default alternative subscription returned by select_best_alternative_subscription
+        # Default candidate list returned by list_viable_alternative_subscriptions
+        # (#2409: the db lists, the service ranks; a one-element list = the old pick)
         alt = MagicMock()
         alt.id = "sub-b"
         alt.name = "sub-b"
-        stub_db.select_best_alternative_subscription.return_value = alt
+        alt.agent_count = 0
+        stub_db.list_viable_alternative_subscriptions.return_value = [alt]
+
+        # #2409: the selector lazily imports the headroom service. Install an
+        # OWN leaf stub with the real semantics (learnings 2026-08-12) so the
+        # real module never binds this test's `database` stub on first import.
+        import types as _types
+        headroom_stub = _types.ModuleType("services.subscription_headroom_service")
+        headroom_stub.cached_headroom_readings = lambda ids, **kw: {sid: None for sid in ids}
+        headroom_stub.rank_subscriptions = lambda candidates, readings: list(candidates)
+        headroom_stub.describe_reading = lambda reading: {
+            "tier": "unknown", "seven_day_pct": None, "five_hour_pct": None,
+            "seven_day_resets_at": None, "five_hour_resets_at": None,
+            "reading_age_seconds": None,
+        }
+        headroom_stub.is_auto_refresh_enabled = lambda: True
+        # #2638 / #2645 ejection: the selector also reaches for these. With them
+        # absent every selector call logged "[#2409] headroom ranking unavailable
+        # (AttributeError …)" and took the FAIL-OPEN branch, so this whole suite
+        # "passed" without its ping-pong regressions ever reaching ranking or
+        # readmission — the silent inertness `test_2409`'s fixture already fixed.
+        # The stub is a leaf with the REAL semantics: no readings ⇒ no
+        # readmission, no failure ⇒ nothing to order against.
+        headroom_stub.FRESHNESS_SECONDS = 1800
+        headroom_stub.RECOVERY_INSTANT_MAX_AGE_SECONDS = 7 * 24 * 3600
+        headroom_stub.RECOVERY_SERVING_NOW = "serving_now"
+        headroom_stub.RECOVERY_WINDOW_RESET = "window_reset"
+        headroom_stub.recovery_verdict = (
+            lambda fresh, aged, last_failure_at, **kw:
+                "serving_now" if (fresh is not None and not getattr(fresh, "refusing", False)) else None
+        )
+        stub_db.list_recently_failed_alternatives.return_value = []
+        stub_db.last_failure_at_by_subscription.return_value = {}
+        monkeypatch.setitem(
+            sys.modules, "services.subscription_headroom_service", headroom_stub
+        )
+        # The suite must FAIL, not degrade, if the service grows a name this
+        # stub lacks: the fail-open branch is exactly what hid the ejection.
+        _seen_names = set()
+        for _line in open(auto_switch.__file__, encoding="utf-8"):
+            for _m in re.finditer(r"\bheadroom\.([A-Za-z_][A-Za-z0-9_]*)", _line):
+                _seen_names.add(_m.group(1))
+        _missing = sorted(n for n in _seen_names if not hasattr(headroom_stub, n))
+        assert not _missing, (
+            f"headroom stub lacks {_missing} — the selector would take the fail-open "
+            "branch and this suite would go inert (#2645 ejection)"
+        )
 
         # Stub the heavy sub-call. Record args, return a synthetic switch result.
         calls = []
@@ -502,7 +589,7 @@ class TestSingleEventThreshold:
         """Regression on the 2h skip-list: when no alternative is viable,
         the service must NOT call _perform_auto_switch even at threshold=1.
         We simulate the skip-list returning None for the alternative."""
-        svc._stub_db.select_best_alternative_subscription.return_value = None
+        svc._stub_db.list_viable_alternative_subscriptions.return_value = []
 
         result = await svc.handle_subscription_failure(
             agent_name="agent-x",
@@ -515,7 +602,11 @@ class TestSingleEventThreshold:
     @pytest.mark.asyncio
     async def test_setting_disabled_blocks_switch(self, svc):
         """Operators who explicitly opted out keep their choice — when the
-        setting is "false", short-circuit before recording any event."""
+        setting is "false", no switch is attempted. #471 flipped the RECORDING
+        half of the old pin: the failure event IS recorded before the enabled
+        gate now, because gating the recording on auto-switch left opted-out
+        operators — exactly the population depending on manual visibility —
+        with a permanently-zero pressure count. Switch suppression unchanged."""
         svc._stub_db.get_setting_value.return_value = "false"
 
         result = await svc.handle_subscription_failure(
@@ -525,8 +616,13 @@ class TestSingleEventThreshold:
         )
         assert result is None
         assert svc._spy_calls == []
-        # Also verify we short-circuited before recording the event
-        svc._stub_db.record_rate_limit_event.assert_not_called()
+        # #471: the event is on record even though the switch was suppressed.
+        svc._stub_db.record_rate_limit_event.assert_called_once_with(
+            agent_name="agent-x",
+            subscription_id="sub-a",
+            error_message="429",
+            failure_kind="rate_limit",
+        )
 
     @pytest.mark.asyncio
     async def test_no_switch_when_agent_has_no_subscription(self, svc):
@@ -816,7 +912,6 @@ class TestHotReloadSwitch:
 
         result = await auto_switch._perform_auto_switch(
             agent_name="agent-x",
-            old_subscription_id="sub-a",
             old_subscription_name="sub-A",
             new_subscription=new_sub,
             failure_kind="rate_limit",

@@ -9,6 +9,29 @@
 #   - 4317: OTel Collector gRPC (OTLP)
 #   - 4318: OTel Collector HTTP (OTLP)
 #   - 8889: OTel Prometheus metrics
+#
+# THIS IS A COMPLETE, STANDALONE FILE — NOT an overlay on docker-compose.yml (#2528).
+# Run it on its own:
+#
+#     docker compose -f docker-compose.prod.yml up -d
+#
+# The only file that layers ON TOP of it is docker-compose.prod.enterprise.yml
+# (and, on Docker Desktop, docker-compose.override.example.yml for the Vector
+# log source, which start.sh appends by name). Never stack it on the dev file:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml   # WRONG
+#
+# `security_opt`, `group_add`, `cap_drop` and the rest are not duplicates of
+# the dev file's — they ARE the production hardening, restated because this
+# file stands alone. Compose merges list-type keys by CONCATENATION, so that
+# stack either fails validation on the exact-duplicate items (Compose ≥ 2.24:
+# "services.backend.group_add array items[0,1] must be unique") or, on an
+# older Compose, silently doubles the frontend's `ports` — the dev file maps
+# host→80 (Vite) and this one host→8080 (unprivileged nginx, #874) — and a
+# container with two host mappings for one published port never joins its
+# network, so nginx crash-loops on "host not found in upstream". Every
+# supported file set is rendered in CI (container-security.yml →
+# verify-compose-file-sets) and listed in docs/DEPLOYMENT.md.
 
 # #1871: bound every container's json-file log. Docker's json-file driver has
 # NO max-size and NO max-file by default, so each container's log under
@@ -46,6 +69,12 @@ services:
     environment:
       - SECRET_KEY=${SECRET_KEY}
       - "ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}"
+      # #2381: present in docker-compose.yml and .env.example but missing here,
+      # so setting ADMIN_USERNAME never reached a production container. The
+      # backend then provisioned `admin` while the operator believed otherwise —
+      # and `routers/setup.py` hardcoded the same literal, so the mismatch was
+      # invisible until it wasn't.
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       # REDIS_URL embeds the `backend` ACL user — see docker-compose redis service.
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
@@ -90,7 +119,7 @@ services:
       # knobs are inert — the #1039 packaging-gap class).
       - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
-      - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
+      - WORKSPACE_VOICE_MAX_DURATION=${WORKSPACE_VOICE_MAX_DURATION:-1800}  # Workspace voice call cap, seconds (ent#534)
       # VoIP telephony (VOIP-001, #1056) — opt-in, default OFF. Default-OFF means
       # the master switch MUST reach the container or voip_available stays false;
       # omitting it here was the prod packaging gap (same class as #1039 LOG_*).
@@ -120,11 +149,17 @@ services:
       - PORTAL_CHAT_HOURLY_LIMIT=${PORTAL_CHAT_HOURLY_LIMIT:-300}  # ... per 3600s
       - PORTAL_UPLOAD_BURST_LIMIT=${PORTAL_UPLOAD_BURST_LIMIT:-20} # portal uploads per email per 60s
       - PORTAL_UPLOAD_HOURLY_LIMIT=${PORTAL_UPLOAD_HOURLY_LIMIT:-100}  # ... per 3600s
+      - PORTAL_FILE_BURST_LIMIT=${PORTAL_FILE_BURST_LIMIT:-20}     # portal file downloads per email per 60s
+      - PORTAL_FILE_HOURLY_LIMIT=${PORTAL_FILE_HOURLY_LIMIT:-100}  # ... per 3600s — the tier that actually bounds it
+      - PORTAL_FILE_DELETE_BURST_LIMIT=${PORTAL_FILE_DELETE_BURST_LIMIT:-60}  # deletes per email per 60s
       - PORTAL_TITLE_MODEL=${PORTAL_TITLE_MODEL:-claude-haiku-4-5-20251001}  # thread-title model
       - PORTAL_TITLE_TIMEOUT_SECONDS=${PORTAL_TITLE_TIMEOUT_SECONDS:-15}
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Prod compose launches standalone (no base merge / env_file), so wire it here too.
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.
+      # This compose launches standalone (no base merge / env_file), so wire it here too.
+      - CANVAS_MAX_PER_AGENT=${CANVAS_MAX_PER_AGENT:-100}        # canvases per agent
       # Skills library lifecycle automation (ent#236).
       # Prod compose launches standalone (no base merge / env_file), so wire it here too.
       - SKILLS_RECONCILE_MAX_REMOVALS=${SKILLS_RECONCILE_MAX_REMOVALS:-10}   # per-agent blast-radius cap
@@ -156,6 +191,7 @@ services:
       - OPERATOR_QUEUE_OPTIONS_MAX_BYTES=${OPERATOR_QUEUE_OPTIONS_MAX_BYTES:-4096}             # options byte cap (dropped over)
       - OPERATOR_QUEUE_ID_MAX=${OPERATOR_QUEUE_ID_MAX:-256}                                    # max agent-supplied id length
       - OPERATOR_QUEUE_EXECUTION_ID_MAX=${OPERATOR_QUEUE_EXECUTION_ID_MAX:-128}                # max execution_id kept in a marker
+      - OPERATOR_QUEUE_EMAIL_MAX=${OPERATOR_QUEUE_EMAIL_MAX:-320}                               # ent#364: addressee email length clamp (RFC 5321)
       - OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS=${OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:-300}  # one flood alert / agent / window
       - OPERATOR_ALERT_MAX_PENDING_PER_TYPE=${OPERATOR_ALERT_MAX_PENDING_PER_TYPE:-5}     # per-(agent,type) platform-alert budget (#1677)
       - GITHUB_PAT=${GITHUB_PAT}
@@ -179,6 +215,12 @@ services:
       - DB_BACKUP_HOUR=${DB_BACKUP_HOUR:-3}
       - DB_BACKUP_MINUTE=${DB_BACKUP_MINUTE:-30}
       - DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS=${DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS:-1800}
+      # Git sync-health poll cadence (#2742). Default UNCHANGED at 60s; the knob
+      # exists so an operator can cut the per-poll `git fetch` load on a large
+      # fleet. Read at call time in sync_health_service, so it must reach the
+      # container; prod compose launches standalone (no base merge / env_file),
+      # so wire it here too or the lever is inert (the #1056/#1039 class).
+      - SYNC_HEALTH_POLL_INTERVAL_SECONDS=${SYNC_HEALTH_POLL_INTERVAL_SECONDS:-60}  # seconds between fleet sync-health polls
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
       # First-run default system seed (trinity-enterprise#124): a path to an
@@ -196,6 +238,10 @@ services:
       #   bare, set to ""      -> "" -> seed disabled, as documented
       - TRINITY_DEFAULT_SKILL_SOURCE
       - TRINITY_DEFAULT_SKILL_SOURCE_REF
+      # #2380: install provenance marker, written by whatever
+      # provisioned this box. Bare passthrough (not ${VAR:-}) so an
+      # unset marker never reaches the container as an empty string.
+      - TRINITY_INSTALL_SOURCE
       # ent#126: directory the bundled-manifest catalog
       # (GET /api/systems/manifests) reads. Empty = the image's own
       # config/manifests (already bind-mounted :ro below). Point it at another
@@ -317,6 +363,15 @@ services:
       # (the #1039 packaging-gap class). Default false; safe to flip early
       # (non-202 agent responses fall back to sync). Backend-only.
       - DISPATCH_ASYNC=${DISPATCH_ASYNC:-false}
+      # Backend agent-call limiter (#904): concurrent outbound agent calls held
+      # per uvicorn worker, and how long a call may wait in that queue (0 = wait
+      # forever). Mirrors docker-compose.yml; without these lines the .env
+      # levers are inert in prod (the #1039 packaging-gap class) — #2433 found
+      # operators unable to raise the cap under a parallel load test. A parked
+      # call is now re-anchored at dispatch and visible to the watchdog, but the
+      # cap itself is still the fleet-wide fan-out bound.
+      - BACKEND_AGENT_CALL_LIMIT=${BACKEND_AGENT_CALL_LIMIT:-8}
+      - BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S=${BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S:-3600}
       # Dispatch circuit breaker global gate (RELIABILITY-007, #526). Producer-side
       # per-agent breaker; engages ONLY when this AND the per-agent
       # agent_ownership.circuit_breaker_enabled toggle are both on. Mirrors
@@ -324,6 +379,11 @@ services:
       # #1039 packaging-gap class) and the owner-facing PUT .../circuit-breaker
       # toggle silently no-ops (#1487). Default false.
       - DISPATCH_BREAKER_ENABLED=${DISPATCH_BREAKER_ENABLED:-false}
+      # ent#434: how many subscriptions the background headroom sweep probes
+      # concurrently. Bounded so an N-subscription fleet x a 15s probe timeout
+      # cannot outlive the sweep's leader lease. A real operator lever (fleet
+      # size dependent), so it is forwarded rather than left inert.
+      - SUBSCRIPTION_SWEEP_CONCURRENCY=${SUBSCRIPTION_SWEEP_CONCURRENCY:-4}
       # Host telemetry (/api/telemetry) — container-stats cache freshness (s) and
       # max concurrent Docker stat fetches per refresh. Mirrors docker-compose.yml;
       # without these lines the .env knobs are inert in prod (the #1039
@@ -451,8 +511,13 @@ services:
     restart: unless-stopped
     # Issue #874: container nginx binds 8080 (unprivileged). Host port 80
     # preserved so external URLs do not change.
+    # #2280: FRONTEND_PORT was inert here — hardcoded "80". start.sh offers it
+    # as the remedy for a port conflict and prints the resulting URL in its
+    # summary, so an operator who set it got a working suggestion that changed
+    # nothing and an access URL pointing at a port nothing listened on. The
+    # container side stays 8080 (unprivileged nginx, #874).
     ports:
-      - "80:8080"
+      - "${FRONTEND_PORT:-80}:8080"
     depends_on:
       backend:
         condition: service_healthy
@@ -691,6 +756,15 @@ services:
       # #848 ceiling for the four backend relay fetches on the inline-auth path.
       # Functional via its 15000ms default; wired so the lever is not inert.
       - MCP_INLINE_AUTH_TIMEOUT_MS=${MCP_INLINE_AUTH_TIMEOUT_MS:-15000}
+      # #914/#2661 ceiling for the synchronous backend fetch in chat_with_agent
+      # sync mode (both routes). On abort the MCP server looks up the execution
+      # and answers with a `queued_timeout` receipt instead of `fetch failed`.
+      # Default 25000ms sits below the typical 30-60s MCP gateway ceiling.
+      - MCP_CHAT_TIMEOUT_MS=${MCP_CHAT_TIMEOUT_MS:-25000}
+      # #2661 ceiling for the executions lookup that recovery runs AFTER the
+      # abort — whatever is left of the gateway ceiling is all it has, so it
+      # must fail fast rather than hang into the same `fetch failed`.
+      - MCP_RECOVERY_TIMEOUT_MS=${MCP_RECOVERY_TIMEOUT_MS:-5000}
       # #736 ceiling for the mcp-server's own outbound-A2A fetches. Must stay
       # below the MCP client's gateway abort — see docker-compose.yml.
       # Functional via its 40000ms default; wired so the lever is not inert.

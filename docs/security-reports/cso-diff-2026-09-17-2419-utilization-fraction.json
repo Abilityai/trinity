@@ -1,0 +1,96 @@
+{
+  "version": "1.1",
+  "date": "2026-09-17",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/2419-utilization-fraction",
+  "issue": "abilityai/trinity#2419",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "changed_files": 10,
+    "new_endpoints": 0,
+    "new_mcp_tools": 0,
+    "new_websocket_channels": 0,
+    "new_inputs": 0,
+    "changed_input_path": "one pre-existing input: the provider's anthropic-ratelimit-unified-{5h,7d}-utilization RESPONSE header, read by _parse_utilization (float() + finite/non-negative guard on the scaled value) — one caller (parse_unified_headers), one ingestion point (_probe)",
+    "new_log_sites": "one INFO line in _probe when a window reads past 100%: subscription UUID + five rate-limit response headers (never the request's Authorization header)",
+    "ci": "unchanged",
+    "docker_compose": "unchanged",
+    "dependencies": "unchanged",
+    "docs_changed": [
+      "docs/memory/feature-flows/subscription-usage-tracking.md",
+      "docs/memory/learnings.md"
+    ]
+  },
+  "findings": [],
+  "appendix": [
+    {
+      "id": "A1",
+      "severity": "LOW",
+      "confidence": 8,
+      "status": "DESIGN GAP, FOLLOW-UP APPROVED",
+      "category": "Data integrity (honest status)",
+      "title": "overage_status / unified_status are parsed and persisted but read by no predicate; a subscription serving on overage may carry unified-status=rejected with overage-status=allowed",
+      "where": "src/backend/services/subscription_headroom_service.py parse_unified_headers (overage_status, unified_status); the status predicates _headroom_indicates_limited/_healthy read per-window status + the probe HTTP status only",
+      "exploit": "none — a mis-badge (LIMIT shown for a serving subscription, or an overage invisible), not a boundary crossing",
+      "impact": "Operator-facing truthfulness of the badge/alert on overage-enabled plans; unobserved until a real overage sample arrives (the diff's arrival log is the capture path)",
+      "note": "Not introduced by this diff (surfaced by the independent strategy review). Registered as abilityai/trinity#2865 (approved at the 2026-09-17 plan gate, Choice 3).",
+      "tracking": "abilityai/trinity#2865"
+    }
+  ],
+  "supply_chain_summary": {
+    "python": "requirements unchanged",
+    "node": "n/a (no frontend/mcp-server change)",
+    "install_scripts": "no dependency delta"
+  },
+  "filter_stats": {
+    "candidates": 12,
+    "reported": 0,
+    "refuted_or_appendix": 12,
+    "detail": [
+      "1x new INFO log line carries provider-controlled header strings — log spoofing (hard exclusion #9); values arrive over TLS from the pinned PROBE_URL and are rendered with %r — cleared",
+      "1x could the log line leak the subscription token? _probe passes resp.headers (the RESPONSE), the token lives only in the request headers built in _post_probe; the five keys read are all anthropic-ratelimit-unified-* — cleared (service.py:271, :296-305)",
+      "1x float() on a provider header — no eval, ValueError/TypeError caught, non-finite/negative → None; the guard sits on the scaled value so a finite 1e307 cannot become inf — narrows what reaches Redis/SQLite/PG (the old code could persist NaN/Infinity) — improvement, cleared",
+      "1x values past 100 reaching consumers — every reader is monotone or clamps geometry only (_finite_pct, selection_sort_key inf sentinel, decide_tier >=, barWidthPct); no division by (100 - pct) anywhere; DoS class is hard exclusion #1 regardless — cleared",
+      "1x negative reading now classifies unassessable instead of has_headroom — fail-closed direction (fleet claims block on unassessable) — improvement, cleared",
+      "1x secret patterns over the working-tree diff + the new test file (AWS/Anthropic/OpenAI/GitHub/Slack shapes, word-boundary): 0 — cleared",
+      "1x tracked .env: none; TLS verify flags in diff: none; Authorization in diff: none — cleared",
+      "1x enterprise-docs guard PCRE replayed with python re over the two changed docs: 0 hits — cleared",
+      "1x diff census: no @router, websocket, subprocess, os.system, execute(, v-html, innerHTML, eval/exec in added lines — cleared",
+      "1x test fixtures: synthetic header values only (0.34 / 1.2 / 0.39), no credential-shaped strings — cleared (hard exclusion #8 anyway)",
+      "1x operator-queue alert body now able to say 'at 120%' — the channel already carried the percentage; no new disclosure — cleared",
+      "1x pre-existing design gap on overage/unified status predicates — appendix A1, follow-up approved"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior": "docs/security-reports/cso-diff-2026-09-15-628-loop-permission-gate.json",
+    "resolved": 0,
+    "persistent": 3,
+    "new": 0,
+    "direction": "stable",
+    "note": "0 findings introduced (tenth consecutive clean diff audit). The prior appendix items (abilityai/trinity-enterprise#629 owner-equivalence, abilityai/trinity#2807 audit-of-denials, the access.ts none/name guard limit) are outside this diff's surface and remain tracked where they were. This diff strictly narrows a parser (no NaN/Infinity/negative ever reaches storage now) and adds one credential-free log line."
+  }
+}

@@ -172,6 +172,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { useSkillsStore } from '../stores/skills'
 
 const props = defineProps({
   agentName: {
@@ -187,6 +188,7 @@ const props = defineProps({
 const emit = defineEmits(['run-with-instructions'])
 
 const authStore = useAuthStore()
+const skillsStore = useSkillsStore()   // #2703: per-agent "skills changed" ticks
 
 // State
 const loading = ref(false)
@@ -305,6 +307,16 @@ watch(() => props.agentName, () => {
   if (props.agentStatus === 'running') {
     loadPlaybooks()
   }
+})
+
+// #2703 — a skill was assigned / unassigned / synced on this agent (the thin
+// `agent_skills_changed` trigger, ticked per agent in the skills store): the
+// `/` popup and the empty-state quick actions read `/playbooks`, so refetch.
+// Debounced in the store; the running gate mirrors the mount path — a stopped
+// agent has no agent-server to ask, and the status→running watch above
+// already reloads on start.
+watch(() => skillsStore.changedAt[props.agentName], (tick, prev) => {
+  if (tick && tick !== prev && props.agentStatus === 'running') loadPlaybooks()
 })
 </script>
 

@@ -122,7 +122,9 @@ import routers.notifications as notifications  # noqa: E402
 import routers.ops as ops  # noqa: E402
 import routers.public as public  # noqa: E402
 import routers.public_memory as public_memory  # noqa: E402
-import routers.settings as settings  # noqa: E402
+# #1028: `routers/settings.py` is the package `routers/settings/`; this names
+# the module that owns the handler under test.
+import routers.settings.generic as settings  # noqa: E402
 import routers.slack as slack  # noqa: E402
 import routers.subscriptions as subscriptions  # noqa: E402
 import routers.system_agent as system_agent  # noqa: E402
@@ -169,10 +171,11 @@ def seeded(db_backend):
     return db_backend
 
 
-def _user(username: str, role: str = "user", *, uid: int = 0, agent_name=None, connector_agent=None):
+def _user(username: str, role: str = "user", *, uid: int = 0, agent_name=None, connector_agent=None, mcp_scope=None):
     from models import User
 
-    return User(id=uid, username=username, role=role, agent_name=agent_name, connector_agent=connector_agent)
+    return User(id=uid, username=username, role=role, agent_name=agent_name,
+                connector_agent=connector_agent, mcp_scope=mcp_scope)
 
 
 def _stranger():

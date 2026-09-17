@@ -640,14 +640,16 @@ class TestInternalDispatchSecret:
             _patch.dict(os.environ, {"INTERNAL_API_SECRET": "top-secret-xyz"}),
             _patch("httpx.AsyncClient", _Client),
         ):
-            _await(eds.trigger_subscription(sub, event))
+            _await(eds.trigger_subscription(sub, event, agent_originated=True))
 
         assert captured["headers"]["X-Event-Trigger"] == eds.RESERVED_EVENT_TRIGGER_HEADER_VALUE
         assert captured["headers"]["X-Internal-Secret"] == "top-secret-xyz"
 
     def test_trigger_subscription_no_secret_leak_on_non_reserved(self):
         """A normal agent-emitted event dispatch must NOT carry the internal
-        secret (only reserved-namespace loopbacks are backend-authenticated)."""
+        secret (only reserved-namespace loopbacks are backend-authenticated).
+        ent#614 kept this property: the loopback proves its source agent with a
+        SECRET_KEY-signed JWT claim instead, never with the shared secret."""
         import os
         from unittest.mock import patch as _patch
         from services import event_dispatch_service as eds
@@ -680,7 +682,7 @@ class TestInternalDispatchSecret:
             _patch.dict(os.environ, {"INTERNAL_API_SECRET": "top-secret-xyz"}),
             _patch("httpx.AsyncClient", _Client),
         ):
-            _await(eds.trigger_subscription(sub, event))
+            _await(eds.trigger_subscription(sub, event, agent_originated=True))
 
         assert "X-Internal-Secret" not in captured["headers"]
         assert "X-Event-Trigger" not in captured["headers"]
@@ -764,8 +766,6 @@ class TestRouterRecursionBreakGate:
                         current_user=user,
                         x_source_agent=None,
                         x_via_mcp=None,
-                        x_mcp_key_id=None,
-                        x_mcp_key_name=None,
                         idempotency_key=None,
                         x_event_trigger=x_event_trigger,
                         x_internal_secret=x_internal_secret,

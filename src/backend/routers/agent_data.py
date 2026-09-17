@@ -1,3 +1,4 @@
+# mcp: agents.ts (export_agent_data, import_agent_data)
 """
 Agent runtime-data export / import (#1169).
 

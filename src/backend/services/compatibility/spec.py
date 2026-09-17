@@ -234,6 +234,9 @@ CHECKS: List[CheckDef] = [
        prompt="If this agent is intended to be called by other agents (references Trinity MCP, agent permissions, or describes itself as a worker/specialist), does it document the format/schema of its output? FAIL if it describes only what it does, not what it returns. PASS if not a callable agent."),
     _c("I-002", "soft", "ai", "I", "scheduled tasks produce structured, consumable output",
        prompt="Do the agent's scheduled/autonomous tasks write structured, file-based output (JSON/CSV/markdown to a known path or shared folder) that another system could consume without parsing a conversation? FAIL if they only produce chat responses. PASS if no autonomous tasks."),
+    _c("I-006", "info", "static", "I",
+       "Trinity plugin present, so the agent can onboard itself in place",
+       claude_only=True),
     # --- DP: Runtime Data Paths (#1169) ------------------------------------
     # Documented in agent-validation-spec.md since #1169 but never implemented:
     # `TestSpecDocSync::test_ids_match_doc` matched a SINGLE-letter prefix

@@ -1786,53 +1786,14 @@ def get_github_template(template_id: str) -> Optional[dict]:
     return _build_template(repo, metadata, None, reason)
 
 
-def clone_github_repo(github_repo: str, github_pat: str, dest_path: Path, branch: str = None) -> bool:
-    """
-    Clone a GitHub repository using a Personal Access Token.
-
-    Args:
-        github_repo: Repository in format 'org/repo' (e.g., 'Abilityai/agent-ruby')
-        github_pat: GitHub Personal Access Token
-        dest_path: Destination path to clone to
-        branch: Optional branch to clone (default: repo's default branch)
-
-    Returns:
-        True if successful, False otherwise
-    """
-    clone_url = f"https://oauth2:{github_pat}@github.com/{github_repo}.git"
-
-    # Build git clone command
-    clone_cmd = ["git", "clone", "--depth", "1"]
-    if branch:
-        clone_cmd.extend(["-b", branch])
-    clone_cmd.extend([clone_url, str(dest_path)])
-
-    try:
-        result = subprocess.run(
-            clone_cmd,
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-
-        if result.returncode != 0:
-            print(f"Git clone failed: {result.stderr}")
-            return False
-
-        # Remove .git directory to prevent accidental pushes from container
-        git_dir = dest_path / ".git"
-        if git_dir.exists():
-            shutil.rmtree(git_dir)
-
-        print(f"Successfully cloned {github_repo} to {dest_path}")
-        return True
-
-    except subprocess.TimeoutExpired:
-        print(f"Git clone timed out for {github_repo}")
-        return False
-    except Exception as e:
-        print(f"Error cloning {github_repo}: {e}")
-        return False
+# ent#615: `clone_github_repo(repo, pat, dest, branch)` was DELETED here. It
+# built `https://oauth2:<pat>@github.com/<repo>.git` and passed it as **argv**
+# to `subprocess.run` on the backend host — the same bug class as the agent
+# remotes this issue is about, one layer out, where the reader is anything that
+# can see the backend's process table. It had no production callers (the
+# `services/__init__` re-export and two test mocks), so there was nothing to
+# migrate; leaving it would have meant allowlisting a dead token producer in
+# the guard that now scans this tree.
 
 
 def extract_env_vars_from_mcp_json(file_path: Path) -> Dict[str, List[str]]:

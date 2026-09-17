@@ -161,6 +161,27 @@ def _comment_job():
     pytest.fail("no job posts the sticky comment any more")
 
 
+def _branch_body(script: str, opener: str) -> str:
+    """The lines of a shell `if` branch, ending at a line that is exactly `fi`.
+
+    Bounded on a TOKEN, not on the substring "fi" (#2462). The original form,
+    `guard.split("fi")[0]`, truncated at the first occurrence anywhere — and
+    "fi" occurs inside ordinary English: it fired the moment a warning message
+    in that branch used the word "unverified", cutting the slice before the
+    `exit 0` the assertion looks for and reporting a guard that was in fact
+    present. Same family as this file's own comment-stripping: a check that
+    matches inside words tests the prose, not the code.
+    """
+    lines = script.splitlines()
+    start = next(i for i, l in enumerate(lines) if opener in l)
+    out = []
+    for line in lines[start + 1:]:
+        if line.strip() == "fi":
+            break
+        out.append(line)
+    return "\n".join(out)
+
+
 def test_an_unknown_merge_verdict_writes_no_status_file():
     """The #2029 defect: this step is `if: always()`, so it also runs when the
     job died before the merge produced an answer. The unset output stringifies
@@ -176,8 +197,8 @@ def test_an_unknown_merge_verdict_writes_no_status_file():
         "the status step no longer refuses to write on an unknown merge "
         "verdict — a failed job posts a false clean again (#2029)"
     )
-    guard = body[body.index('if [ -z "$merge_conflict" ]'):]
-    assert "exit 0" in guard.split("fi")[0], (
+    guard = _branch_body(body, 'if [ -z "$merge_conflict" ]')
+    assert "exit 0" in guard, (
         "the unknown-verdict branch does not exit before writing the file"
     )
 

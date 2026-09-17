@@ -24,9 +24,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, Q
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-from config import CORS_ORIGINS, VOICE_ENABLED, GEMINI_API_KEY
+from config import CORS_ORIGINS, VOICE_ENABLED
 from models import User
-from dependencies import get_current_user
+from dependencies import get_current_user, scope_may_open_event_stream
 from services.docker_service import docker_client, list_all_agents_fast
 from utils.helpers import utc_now_iso
 
@@ -83,10 +83,13 @@ from routers.compatibility import router as compatibility_router  # #668 agent c
 from routers.skills import router as skills_router
 from routers.internal import router as internal_router, pull_router as internal_pull_router
 from routers.tags import router as tags_router, set_websocket_manager as set_tags_ws_manager
+from services.skill_service import set_websocket_manager as set_skills_ws_manager
 from routers.system_views import router as system_views_router
 from routers.notifications import router as notifications_router, set_websocket_manager as set_notifications_ws_manager, set_filtered_websocket_manager as set_notifications_filtered_ws_manager
 from routers.reports import router as reports_router
+from routers.canvas import router as canvas_router  # Agent canvas (ent#438)
 from routers.product_events import router as product_events_router
+from routers.onboarding import router as onboarding_router
 from routers.evaluations import router as evaluations_router  # ent#206 behavioral-eval referee surface
 from routers.reminders import router as reminders_router
 from services.report_service import set_websocket_manager as set_reports_ws_manager, set_filtered_websocket_manager as set_reports_filtered_ws_manager
@@ -120,10 +123,13 @@ from routers.loops import (
 from services.loop_service import set_websocket_manager as set_loop_ws_manager
 from routers.webhooks import router as webhooks_router  # Webhook triggers (WEBHOOK-001, #291)
 from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#550)
+from services.ws_identity_service import accessible_agents_for, resolve_ws_identity  # ent#467
 # Workspace / client portal — OSS core since ent#356 (was an entitled
 # enterprise module). Its own package rather than routers/: it moved
 # wholesale from the submodule, and keeping the vertical slice intact
 # keeps the move reviewable as a move.
+from client_portal.asks.router import router as portal_asks_router
+from client_portal.work.router import router as portal_work_router
 from client_portal.router import router as client_portal_router
 from shared_sessions.router import budget_router as room_budget_router
 from shared_sessions.router import router as rooms_router
@@ -189,7 +195,23 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._client_ids: Dict[WebSocket, str] = {}
 
-    async def connect(self, websocket: WebSocket, last_event_id: Optional[str] = None) -> None:
+    async def connect(
+        self,
+        websocket: WebSocket,
+        last_event_id: Optional[str] = None,
+        *,
+        email: str = "",
+        is_admin: bool = False,
+        accessible_agents: Optional[List[str]] = None,
+    ) -> None:
+        """Accept a ``/ws`` client and register it with its agent scope.
+
+        ent#467: the identity arguments are what make ``/ws`` filtered. They
+        are keyword-only and default to "nobody, no agents", so a caller that
+        forgets them registers a slot that sees only agent-less events rather
+        than the whole fleet — the fail-closed direction for a delivery
+        surface. ``/ws`` itself resolves them before calling and refuses the
+        connection when it cannot."""
         await websocket.accept()
         async def _send(payload: dict) -> None:
             await websocket.send_text(json.dumps(payload))
@@ -197,6 +219,9 @@ class ConnectionManager:
             websocket,
             scope=SCOPE_ALL,
             send_func=_send,
+            is_admin=is_admin,
+            accessible_agents=accessible_agents or [],
+            email=email,
             last_event_id=last_event_id,
         )
         self._client_ids[websocket] = client_id
@@ -257,6 +282,14 @@ class FilteredWebSocketManager:
 manager = ConnectionManager()
 filtered_manager = FilteredWebSocketManager()
 
+
+# ent#467 — `/ws` is agent-scoped now, so the dispatcher needs a way to
+# re-resolve a live client's roster after a share/create/delete. Injected
+# rather than imported inside `event_bus`: that module's only import is
+# `config`, and reaching into `database` from the delivery layer would invert
+# the router → service → db direction (Invariant #1).
+stream_dispatcher.set_accessible_resolver(accessible_agents_for)
+
 # Inject WebSocket manager into routers that need it
 set_agents_ws_manager(manager)
 set_agents_filtered_ws_manager(filtered_manager)
@@ -264,6 +297,7 @@ set_agent_rename_ws_manager(manager)
 set_agent_rename_filtered_ws_manager(filtered_manager)
 set_sharing_ws_manager(manager)
 set_tags_ws_manager(manager)  # agent_tags_changed (org overlay, ent#305)
+set_skills_ws_manager(manager)  # agent_skills_changed (#2703)
 set_chat_persistence_ws_manager(manager)  # #1483: chat_response_ready broadcast
 set_chat_execution_ws_manager(manager)    # #1483: agent_collaboration + self_task broadcasts
 set_public_links_ws_manager(manager)
@@ -342,9 +376,33 @@ def setup_opentelemetry(app: FastAPI) -> bool:
         return False
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan handler."""
+# ---------------------------------------------------------------------------
+# Lifespan phases (#1028)
+# ---------------------------------------------------------------------------
+# `lifespan` was 580 lines at cyclomatic complexity 109 — the longest function
+# in the backend and the one the refactor audit named first. It is split here
+# into ordered phase helpers whose bodies are moved VERBATIM: the point is to
+# make the startup sequence readable, not to change it.
+#
+# THE ORDER IS THE CONTRACT. Several pairs are load-bearing and none of them
+# is obvious from the call site alone, which is why the sequence is pinned by
+# a test rather than left to a reader's care:
+#   * logging before everything, so a later hang cannot swallow the boot log;
+#   * the event bus before any WebSocket client can register with a dispatcher;
+#   * Docker/system-agent before the services that sweep the fleet;
+#   * startup recovery before the channel transports, so a recovered execution
+#     is not raced by inbound channel traffic.
+#
+# Each phase keeps its own try/except: a phase that fails must not take the
+# boot down, which is the behaviour the original had and this preserves.
+
+async def _init_logging_and_first_run_notice() -> None:
+    """Structured logging, then the first-run notice — before anything that can hang.
+
+    Startup phase 1 of 12 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # Set up structured JSON logging (captured by Vector)
     setup_logging()
 
@@ -363,6 +421,14 @@ async def lifespan(app: FastAPI):
             "tunnel/VPN until setup completes (docs/DEPLOYMENT.md → Security)."
         )
 
+
+async def _start_event_bus() -> None:
+    """Redis Streams bus + dispatcher. MUST precede the WebSocket endpoints accepting clients.
+
+    Startup phase 2 of 12 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # Start Redis Streams event bus + dispatcher (RELIABILITY-003 / #306).
     # Must start before the WebSocket endpoints begin accepting clients so the
     # first connection has a live dispatcher to register with.
@@ -374,6 +440,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Event bus startup failed (broadcasts will degrade): {e}")
 
+
+async def _log_startup_environment() -> None:
+    """The startup audit row and the two boot-time environment warnings.
+
+    Startup phase 3 of 12 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     await platform_audit_service.log(
         event_type=AuditEventType.SYSTEM,
         event_action="startup",
@@ -401,6 +475,22 @@ async def lifespan(app: FastAPI):
             "to the backend service (start.sh auto-generates it on first boot)."
         )
 
+
+async def _init_docker_and_system_agent() -> None:
+    """Roster listing and the system-agent auto-deploy (Phase 11.1).
+
+    Startup phase 4 of 12 (#1028). Extracted from the former 580-line
+    `lifespan` verbatim EXCEPT the re-materialised `_db` import below — see the
+    comment on it. Ordering between phases is load-bearing and pinned by
+    tests/unit/test_1028_lifespan_phases.py.
+    """
+    # #1028: re-materialised here. In the former 580-line `lifespan` this name
+    # was a function-local import bound once near the top and shared with every
+    # later block through the enclosing scope. Splitting the function ends that
+    # sharing, and every use below sits inside a `try/except Exception`, so the
+    # NameError would have been caught and logged rather than raised — a silently
+    # dead transport, not a failed boot.
+    from database import db as _db
 
     if docker_client:
         try:
@@ -442,6 +532,14 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Docker not available - running in demo mode")
 
+
+async def _start_maintenance_services() -> None:
+    """Log archive, audit retention, DB vacuum, DB backup, operator-queue sync.
+
+    Startup phase 5 of 12 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # NOTE: Embedded scheduler REMOVED (2026-02-11)
     # All schedule execution is handled by the dedicated scheduler service (trinity-scheduler container)
     # which uses Redis distributed locking and syncs schedules from database periodically.
@@ -485,6 +583,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error starting operator queue sync service: {e}")
 
+
+async def _schedule_staggered_services() -> None:
+    """PERF-269 staggered starts. Each spawns a delayed task; none blocks boot.
+
+    Startup phase 6 of 12 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # Stagger cleanup service start by 2.5s to offset from operator queue writes
     async def _start_cleanup_delayed():
         await asyncio.sleep(2.5)
@@ -545,6 +651,40 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error starting skills library sync service: {e}")
     asyncio.create_task(_start_skills_sync_delayed())
 
+    # ent#615: ONE-SHOT fleet remediation of remotes still carrying an embedded
+    # credential — deliberately not a loop, and the only reacher that covers a
+    # `restart: unless-stopped` container the daemon brought back after a host
+    # reboot. Scheduling lives in the service (strong task ref, stagger, the
+    # never-raises fence); rationale in `sweep_fleet_git_remote_tokens`.
+    from services import git_service as _git_service_boot
+    _git_service_boot.schedule_fleet_git_remote_token_sweep()
+
+    # #447: subscription recovery probe — re-asks the provider whether a
+    # subscription believed rate-limited is back. Nothing else can clear the
+    # badge (no success path clears a failure row), and the ambient refresh is
+    # demand-driven, so an unwatched instance never re-checks. Self-gates on the
+    # `subscription_headroom_auto_refresh` setting and is leader-locked, so
+    # starting it in every worker is safe. Staggered +13s past the other loops.
+    async def _start_subscription_recovery_delayed():
+        await asyncio.sleep(13)
+        try:
+            from services.subscription_recovery_service import (
+                subscription_recovery_service,
+            )
+            subscription_recovery_service.start()
+            logger.info("Subscription recovery probe service started (staggered +13s)")
+        except Exception as e:
+            logger.error(f"Error starting subscription recovery service: {e}")
+    asyncio.create_task(_start_subscription_recovery_delayed())
+
+
+async def _start_capacity_and_canary() -> None:
+    """Canary watcher (self-gating) and the CapacityManager maintenance loop (#428).
+
+    Startup phase 7 of 12 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # CANARY-001 / Issue #411: Canary watcher — 5-min cycle. Disabled by
     # default (CANARY_ENABLED=1 to enable on staging/dev). Service self-
     # gates internally; the start() call is a no-op when not enabled.
@@ -583,6 +723,39 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error wiring CapacityManager: {e}")
 
+    # #2523: due-loop sweep. A loop's inter-run pause used to be an
+    # `asyncio.sleep` inside the runner coroutine; the runner is gone, so the
+    # pause is `agent_loops.next_run_at` and this brings the loop back when it
+    # comes due. Short period because `delay_seconds` is a user-visible pacing
+    # knob — a 60s tick would round every small delay up to a minute. The claim
+    # is a CAS, so every worker can run this safely; the read is an index scan
+    # of `idx_loops_next_run` and returns nothing at all when no loop is parked.
+    try:
+        from services.loop_service import get_loop_service
+
+        async def _loop_due_sweep():
+            await asyncio.sleep(8 + random.uniform(0, 2))
+            service = get_loop_service()
+            while True:
+                try:
+                    await service.dispatch_due_loops()
+                except Exception as exc:
+                    logger.warning(f"[Loop] due sweep tick failed: {exc}")
+                await asyncio.sleep(5 + random.uniform(0, 1))
+
+        asyncio.create_task(_loop_due_sweep())
+        logger.info("Loop due-run sweep running (5s)")
+    except Exception as e:
+        logger.error(f"Error wiring the loop due-run sweep: {e}")
+
+
+async def _schedule_watch_loops() -> None:
+    """Heartbeat watch (#307) and the lifespan-resumed monitoring loop (#1121).
+
+    Startup phase 8 of 12 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # RELIABILITY-004 / #307: agent heartbeat watch loop — 5s cadence,
     # staggered +10s. Actively downgrades an agent to a soft `degraded` health
     # state after 3 consecutive missed heartbeats (additive to the 30s
@@ -622,6 +795,14 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error resuming monitoring service: {e}")
     asyncio.create_task(_start_monitoring_delayed())
 
+
+async def _run_startup_recovery() -> None:
+    """Orphaned-execution recovery (#128). Opens the #748 warming-up gate in `finally`.
+
+    Startup phase 9 of 12 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # Recover orphaned regular task executions (Issue #128).
     # #748: flip the warming-up gate open in a finally block so the
     # /internal/execute-task route doesn't 503 forever if recovery raises.
@@ -646,6 +827,12 @@ async def lifespan(app: FastAPI):
     finally:
         mark_startup_recovery_complete()
 
+
+async def _start_slack_transport(app: FastAPI) -> None:
+    """Slack transport (Socket Mode or webhook). Optional; never fails boot.
+
+    Extracted VERBATIM (#1028); the body below is unchanged.
+    """
     # Start Slack channel transport (Socket Mode or webhook)
     try:
         from adapters.slack_adapter import SlackAdapter
@@ -692,7 +879,22 @@ async def lifespan(app: FastAPI):
         logger.error(f"Error starting Slack transport: {e}")
         # Don't fail startup — Slack is optional
 
+
+async def _start_telegram_transport(app: FastAPI) -> None:
+    """Telegram webhook transport. Optional; never fails boot.
+
+    Extracted from the former `lifespan` (#1028) verbatim EXCEPT the
+    re-materialised import(s) below — see the comment on them.
+    """
     # Start Telegram webhook transport
+    # #1028: re-materialised here. In the former 580-line `lifespan` this name
+    # was a function-local import bound once near the top and shared with every
+    # later block through the enclosing scope. Splitting the function ends that
+    # sharing, and every use below sits inside a `try/except Exception`, so the
+    # NameError would have been caught and logged rather than raised — a silently
+    # dead transport, not a failed boot.
+    from database import db as _db
+    from adapters.message_router import message_router
     try:
         from adapters.telegram_adapter import TelegramAdapter
         from adapters.transports.telegram_webhook import TelegramWebhookTransport, register_webhook
@@ -724,7 +926,22 @@ async def lifespan(app: FastAPI):
         logger.error(f"Error starting Telegram transport: {e}")
         # Don't fail startup — Telegram is optional
 
+
+async def _start_whatsapp_transport(app: FastAPI) -> None:
+    """WhatsApp (Twilio) webhook transport (WHATSAPP-001). Optional; never fails boot.
+
+    Extracted from the former `lifespan` (#1028) verbatim EXCEPT the
+    re-materialised import(s) below — see the comment on them.
+    """
     # Start WhatsApp (Twilio) webhook transport (WHATSAPP-001)
+    # #1028: re-materialised here. In the former 580-line `lifespan` this name
+    # was a function-local import bound once near the top and shared with every
+    # later block through the enclosing scope. Splitting the function ends that
+    # sharing, and every use below sits inside a `try/except Exception`, so the
+    # NameError would have been caught and logged rather than raised — a silently
+    # dead transport, not a failed boot.
+    from database import db as _db
+
     try:
         from adapters.whatsapp_adapter import WhatsAppAdapter
         from adapters.transports.twilio_webhook import (
@@ -753,8 +970,12 @@ async def lifespan(app: FastAPI):
         logger.error(f"Error starting WhatsApp transport: {e}")
         # Don't fail startup — WhatsApp is optional
 
-    yield
 
+async def _shutdown_background_services(app: FastAPI) -> None:
+    """Log archive, audit retention, DB vacuum, DB backup, cleanup, session cleanup.
+
+    Extracted VERBATIM (#1028); the body below is unchanged.
+    """
     # NOTE: Embedded scheduler shutdown removed - scheduler runs in dedicated container
     # See: src/scheduler/, docs/memory/feature-flows/scheduler-service.md
 
@@ -801,6 +1022,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error stopping session cleanup service: {e}")
 
+
+async def _shutdown_loops_and_transports(app: FastAPI) -> None:
+    """Fleet monitoring, the three channel transports, sync health, skills sync.
+
+    Extracted VERBATIM (#1028); the body below is unchanged.
+    """
     # Shutdown fleet monitoring loop (MON-001 / #1121) — parity with the
     # other lifespan-managed loops; no-op when it was never started.
     try:
@@ -846,6 +1073,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error stopping sync health service: {e}")
 
+    # Shutdown the telemetry-sharing heartbeat (ent#12; #2618). Cancelling the
+    # task mid-send takes the tick's release path, so a graceful shutdown never
+    # leaves this process's tick marker blocking the next boot's first wake.
+    try:
+        from services.telemetry_sharing_service import telemetry_sharing_service
+        await telemetry_sharing_service.stop()
+        logger.info("Telemetry-sharing heartbeat stopped")
+    except Exception as e:
+        logger.error(f"Error stopping telemetry-sharing heartbeat: {e}")
+
     # Shutdown skills library sync service (trinity-enterprise#236)
     try:
         from services.skills_sync_service import skills_sync_service
@@ -853,6 +1090,23 @@ async def lifespan(app: FastAPI):
         logger.info("Skills library sync service stopped")
     except Exception as e:
         logger.error(f"Error stopping skills library sync service: {e}")
+
+
+async def _shutdown_probes_and_clients(app: FastAPI) -> None:
+    """Subscription-recovery probe, canary, operator-queue sync, pooled HTTP clients.
+
+    Extracted VERBATIM (#1028); the body below is unchanged.
+    """
+    # Shutdown subscription recovery probe service (#447) — releases the
+    # leader lease so a sibling worker takes over immediately instead of
+    # waiting out the TTL.
+    try:
+        from services.subscription_recovery_service import (
+            subscription_recovery_service,
+        )
+        subscription_recovery_service.stop()
+    except Exception as e:
+        logger.error(f"Error stopping subscription recovery service: {e}")
 
     # Shutdown canary service (CANARY-001 / Issue #411)
     try:
@@ -876,6 +1130,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error closing agent HTTP client pool: {e}")
 
+
+async def _shutdown_audit_and_event_bus(app: FastAPI) -> None:
+    """The shutdown audit row, then the event bus LAST so late broadcasts still land.
+
+    Extracted VERBATIM (#1028); the body below is unchanged.
+    """
     try:
         await platform_audit_service.log(
             event_type=AuditEventType.SYSTEM,
@@ -894,6 +1154,34 @@ async def lifespan(app: FastAPI):
         logger.info("Event bus and stream dispatcher stopped")
     except Exception as e:
         logger.error(f"Error stopping event bus/dispatcher: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler.
+
+    A thin orchestrator over the phase helpers above (#1028). Read the phase
+    list as the boot sequence; each name links to the block it used to inline.
+    """
+    await _init_logging_and_first_run_notice()
+    await _start_event_bus()
+    await _log_startup_environment()
+    await _init_docker_and_system_agent()
+    await _start_maintenance_services()
+    await _schedule_staggered_services()
+    await _start_capacity_and_canary()
+    await _schedule_watch_loops()
+    await _run_startup_recovery()
+    await _start_slack_transport(app)
+    await _start_telegram_transport(app)
+    await _start_whatsapp_transport(app)
+
+    yield
+
+    await _shutdown_background_services(app)
+    await _shutdown_loops_and_transports(app)
+    await _shutdown_probes_and_clients(app)
+    await _shutdown_audit_and_event_bus(app)
 
 
 # Create FastAPI app
@@ -965,7 +1253,14 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
-    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    # ent#461: the DEFAULT, never a clobber. This middleware runs after every
+    # route, so a plain assignment silently overwrote a header a route had
+    # deliberately set — which made the signed file-download route's
+    # `cross-origin` policy completely inert. That route exists to be opened
+    # from Telegram/Slack/WhatsApp, and `same-origin` is exactly what stops
+    # those clients embedding or previewing it. Every other route keeps the
+    # strict default, because absence still resolves to it.
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
     response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
 
     # HSTS only when we know the wire is HTTPS — checking both the
@@ -1028,7 +1323,12 @@ app.include_router(tags_router)  # Agent Tags (ORG-001)
 app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
 app.include_router(notifications_router)  # Agent Notifications (NOTIF-001)
 app.include_router(reports_router)  # Agent Reports (#918)
+# ent#438 — the agent canvas. Mounted on the same /api/agents prefix as
+# agent_config et al.; its routes are all `/{name}/canvas...`, which is
+# below the static collection routes registered earlier (Invariant #4).
+app.include_router(canvas_router)  # Agent canvas (ent#438)
 app.include_router(product_events_router)  # Local product-event capture (ent#184)
+app.include_router(onboarding_router)  # First-run front desk state (ent#319)
 app.include_router(evaluations_router)  # Behavioral evaluations (ent#206)
 app.include_router(reminders_router)  # Agent Self-Reminders (#1296)
 app.include_router(connector_router)  # Per-agent MCP connector (ent#46, OSS-core #118)
@@ -1069,6 +1369,15 @@ app.include_router(client_portal_router)  # Workspace / client portal (ent#356, 
 # path there would sit beside `/{room_id}` (Invariant #4).
 app.include_router(rooms_router)
 app.include_router(room_budget_router)
+# Workspace asks — OSS core since ent#428 (engine ent#364). A separate router
+# on the same prefix, mounted BEFORE `register_enterprise(app)` below so that
+# on an install whose submodule still registers the old gated module, the
+# ungated OSS routes win the match order (the ent#443 transition rule).
+app.include_router(portal_asks_router)
+# Workspace work — the live execution card + the rail's Work tab
+# (trinity-enterprise#525, the visual half of ent#457). Same prefix, same
+# transition rule as the asks router above; platform-door only inside.
+app.include_router(portal_work_router)
 
 
 # #847 Phase 0 — Enterprise modules (closed-source companion submodule
@@ -1190,8 +1499,30 @@ async def websocket_endpoint(
         await websocket.close(code=4001, reason="Invalid or expired WebSocket ticket")
         return
 
+    # ent#467 — resolve WHO this is before accepting, because `/ws` events are
+    # now scoped to the agents this user may see. Fails CLOSED: a ticket whose
+    # subject is not a resolvable Trinity user is refused rather than
+    # registered with an empty roster, so an identity we cannot establish
+    # never becomes a silently-degraded connection nobody notices. This also
+    # incidentally refuses a VoIP-scoped ticket (`subject` there is a numeric
+    # user id, not a username) on a surface it was never minted for.
+    try:
+        identity = resolve_ws_identity(str(payload.get("sub")))
+    except Exception:
+        logger.warning("[/ws] identity resolution failed", exc_info=True)
+        identity = None
+    if identity is None:
+        await websocket.close(code=4001, reason="WebSocket ticket subject is not a known user")
+        return
+
     # Ticket validated — now accept the connection
-    await manager.connect(websocket, last_event_id=validate_last_event_id(last_event_id))
+    await manager.connect(
+        websocket,
+        last_event_id=validate_last_event_id(last_event_id),
+        email=identity["email"],
+        is_admin=identity["is_admin"],
+        accessible_agents=identity["accessible_agents"],
+    )
 
     try:
         while True:
@@ -1247,6 +1578,24 @@ async def websocket_events_endpoint(
     key_info = db.validate_mcp_api_key(token)
     if not key_info:
         await websocket.close(code=4001, reason="Invalid or inactive MCP API key")
+        return
+
+    # #2323 — bounded key scopes may not open the fleet event stream. This
+    # handler authenticates the key itself and never runs `get_current_user`,
+    # so none of that function's fences apply here; without this the ops fence's
+    # own docstring claim would be false, and a bounded credential could read
+    # fleet-wide activity through a surface outside its allowlist.
+    #
+    # #2389 — `agent_name` is passed because the SAME absence of
+    # `get_current_user` also skips `_enforce_ephemeral_key_fence`: an ephemeral
+    # ghost's own key is `agent`-scoped, and without the name the gate cannot tell
+    # it from an ordinary agent's.
+    if not scope_may_open_event_stream(
+        key_info.get("scope"), key_info.get("agent_name")
+    ):
+        await websocket.close(
+            code=4003, reason="This key scope may not open the event stream"
+        )
         return
 
     user_email = key_info.get("user_email")
@@ -1336,7 +1685,10 @@ async def health_check():
 
 
 def _build_version_payload(
-    voice_enabled: bool, edition: str, enterprise_features: list
+    voice_enabled: bool,
+    edition: str,
+    enterprise_features: list,
+    install_source: str = "unknown",
 ) -> dict:
     """Pure dict-builder for the `/api/version` payload (#926-testable).
 
@@ -1346,7 +1698,9 @@ def _build_version_payload(
     the unit tests exec-slice this function out of the source, so any
     dependency on module state (e.g. entitlement_service) would break
     them — `edition`/`enterprise_features` are computed by the handler
-    and threaded in as parameters (#1443).
+    and threaded in as parameters (#1443), and `install_source` (#2380) is
+    threaded in for exactly the same reason: it is a `system_settings` read,
+    and a DB call inside this function would break the exec-slice.
     """
     import os
     from pathlib import Path
@@ -1434,6 +1788,10 @@ def _build_version_payload(
         "git_commit_timestamp": os.getenv("GIT_COMMIT_TIMESTAMP", "unknown"),
         "git_branch": os.getenv("GIT_BRANCH", "unknown"),
         "voice_enabled": voice_enabled,
+        # #2380: how this instance was installed, for operator support. The
+        # same recorded value the feature-flag surface serves, so the two
+        # cannot diverge (the `edition` precedent one field up).
+        "install_source": install_source,
     }
 
 
@@ -1455,6 +1813,11 @@ async def get_version(current_user: User = Depends(get_current_user)):
     submodule presence on disk — a mounted-but-failed registration reports
     "oss"; a partial registration reports "enterprise" with the surviving
     modules listed in `enterprise_features`. See docs/ENTERPRISE.md.
+
+    `install_source` (#2380) is how this instance was installed —
+    `do-marketplace` / `vultr-marketplace` / `script` / `unknown` — recorded
+    once at first boot and surfaced here so an operator can answer "what kind
+    of install is this?" from a support surface they already read.
     """
     # Function-local import (matches routers/settings.py): the module
     # global is rebound by `_set_for_testing`, so a top-level
@@ -1462,10 +1825,16 @@ async def get_version(current_user: User = Depends(get_current_user)):
     # instance and bypass test stubs.
     from services.entitlement_service import entitlement_service
 
+    from services import settings_service as _settings_service
+
     features = entitlement_service.list_entitled_features()
     edition = "enterprise" if features else "oss"
+    # #2380: resolved here, not inside the builder — that function is
+    # exec-sliced by its own tests and must stay stdlib-only.
+    install_source = _settings_service.get_install_source()
     return _build_version_payload(
-        VOICE_ENABLED and bool(GEMINI_API_KEY), edition, features
+        VOICE_ENABLED and bool(_settings_service.get_gemini_api_key()),
+        edition, features, install_source,
     )
 
 

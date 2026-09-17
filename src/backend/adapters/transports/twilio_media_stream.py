@@ -31,7 +31,6 @@ from fastapi import WebSocket, WebSocketDisconnect
 from adapters.transports.voip_audio import (
     FRAME_BYTES,
     pcm24k_to_ulaw8k,
-    pop_frames,
     ulaw8k_to_pcm16k,
 )
 from config import REDIS_URL, VOIP_MAX_CALL_DURATION

@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "date": "2026-09-08",
+  "mode": "daily",
+  "scope": "--diff (feature/2578-no-recurse-submodules vs dev @ 818e7f5f)",
+  "issue": "abilityai/trinity#2578",
+  "phases_run": ["P0", "P1", "P2 (diff)", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11", "P12", "P13", "P14"],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": [],
+    "new_inputs": [],
+    "ci_cd": [
+      ".github/workflows/deploy-dev.yml: --no-recurse-submodules on git fetch/checkout/pull in the Pull block",
+      ".github/workflows/deploy-dev.yml: ENT_STALE flag + classify-submodule-failure.sh in the stale branch; ::error:: in the registration section + exit 1 at the end of the script (after the seeding and error checks)",
+      ".github/workflows/deploy-dev.yml: notify-failure body names the Submodule/Enterprise registration stages"
+    ],
+    "new_workflow_expressions": 0,
+    "new_secret_references": 0,
+    "docker_or_compose_changes": 0,
+    "dependency_changes": 0,
+    "tests": ["tests/unit/test_2578_deploy_fetch_never_recurses.py (hermetic: GIT_* scrubbed, fake ssh with dial log, file transport only)"]
+  },
+  "hardening_shipped": [
+    "The dev deploy's fetch/checkout/pull no longer dial a submodule remote as a side effect of a pointer bump",
+    "A stale enterprise tree is a failed deploy with a classified cause, not a green run with a warning",
+    "Static guard scans every git fetch/pull/checkout in the deploy script; 11-way mutation meta-test"
+  ],
+  "findings": [],
+  "supply_chain_summary": {
+    "python": "no dependency files changed",
+    "node": "no dependency files changed",
+    "actions": "no action or version change; third-party actions remain SHA-pinned (unchanged lines)"
+  },
+  "filter_stats": {
+    "candidates": 4,
+    "reported": 0,
+    "refuted_by_verifier": 1,
+    "excluded_by_rules": 3,
+    "notes": [
+      "REFUTED: classifier echo of captured submodule-update output could leak the PAT — git strips the credential from the URL in its error output (verified with ls-remote and clone against a closed local port); the same output was already printed in full by the existing unconditional echo; GitHub masks registered secrets",
+      "EXCLUDED (rule 1, DoS): a stale enterprise tree now fails the dev deploy — intended",
+      "EXCLUDED (rule 8, tests): fake ssh script written to tmp_path with exec bit — test fixture only",
+      "EXCLUDED (rule 12, docs): the docs paragraph reproduces the PAT insteadOf form with the ${PAT} placeholder already used on that page"
+    ]
+  },
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+  "trend": {
+    "prior_reports": [
+      "cso-diff-2026-09-07-ent534-workspace-voice-mode.md",
+      "cso-diff-2026-09-07-ent537-canvas-design-kit.json",
+      "cso-diff-2026-09-07-ent190-benchmark-wiring.json"
+    ],
+    "note": "diff-mode reports are branch-scoped; no fingerprint overlap — this diff touches only the deploy workflow, docs and tests"
+  }
+}

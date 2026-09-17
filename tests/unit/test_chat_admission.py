@@ -99,8 +99,6 @@ def _call(idempotency_key="k1"):
         current_user=_user(),
         x_source_agent=None,
         x_via_mcp=None,
-        x_mcp_key_id=None,
-        x_mcp_key_name=None,
         idempotency_key=idempotency_key,
     ))
 
@@ -152,7 +150,7 @@ def test_admitted_returns_chat_admission():
         admission = asyncio.run(admit_chat_request(
             name="agent1", request=ChatMessageRequest(message="hi"),
             current_user=_user(), x_source_agent=None, x_via_mcp=None,
-            x_mcp_key_id=None, x_mcp_key_name=None, idempotency_key="k1",
+ idempotency_key="k1",
         ))
     assert isinstance(admission, ChatAdmission)
     assert admission.capacity_result is cap_result
@@ -209,7 +207,6 @@ def _prep(x_source_agent=None):
         ctx = asyncio.run(prepare_chat_execution(
             name="agent1", request=ChatMessageRequest(message="hi"),
             current_user=_user(), x_source_agent=x_source_agent, x_via_mcp=None,
-            x_mcp_key_id=None, x_mcp_key_name=None,
             idem=m["isvc"].begin.return_value,
             chat_execution_id="cex1", capacity_result=cap_result, queue_result="running",
         ))
@@ -264,7 +261,7 @@ def test_run_finalize_http_error_releases_slot_and_idem_then_503():
         with pytest.raises(ChatDispatchError) as exc:
             asyncio.run(run_chat_turn(
                 name="agent1", request=ChatMessageRequest(message="hi"),
-                current_user=_user(), x_source_agent=None, x_mcp_key_name=None,
+                current_user=_user(), x_source_agent=None,
                 triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,
                 chat_activity_id="ca1", collaboration_activity_id=None,
                 session=MagicMock(id="s1"), execution=MagicMock(id="cex1"),
@@ -302,7 +299,7 @@ def test_run_finalize_http_error_on_cancelled_row_closes_activity_cancelled():
         with pytest.raises(ChatDispatchError) as exc:
             asyncio.run(run_chat_turn(
                 name="agent1", request=ChatMessageRequest(message="hi"),
-                current_user=_user(), x_source_agent=None, x_mcp_key_name=None,
+                current_user=_user(), x_source_agent=None,
                 triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,
                 chat_activity_id="ca1", collaboration_activity_id=None,
                 session=MagicMock(id="s1"), execution=MagicMock(id="cex1"),
@@ -351,7 +348,7 @@ def test_run_finalize_budget_exhausted_on_cancelled_row_closes_activity_cancelle
         with pytest.raises(ChatDispatchError) as exc:
             asyncio.run(run_chat_turn(
                 name="agent1", request=ChatMessageRequest(message="hi"),
-                current_user=_user(), x_source_agent=None, x_mcp_key_name=None,
+                current_user=_user(), x_source_agent=None,
                 triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,
                 chat_activity_id="ca1", collaboration_activity_id=None,
                 session=MagicMock(id="s1"), execution=MagicMock(id="cex1"),
@@ -390,7 +387,7 @@ def test_run_finalize_http_error_on_running_row_still_closes_failed():
         with pytest.raises(ChatDispatchError):
             asyncio.run(run_chat_turn(
                 name="agent1", request=ChatMessageRequest(message="hi"),
-                current_user=_user(), x_source_agent=None, x_mcp_key_name=None,
+                current_user=_user(), x_source_agent=None,
                 triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,
                 chat_activity_id="ca1", collaboration_activity_id=None,
                 session=MagicMock(id="s1"), execution=MagicMock(id="cex1"),

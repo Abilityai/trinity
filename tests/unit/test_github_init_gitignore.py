@@ -21,6 +21,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+# #1028: gitignore-owned names read as data by these tests.
+from services.git_service import gitignore as gs_gitignore
+
 
 _project_root = Path(__file__).resolve().parents[2]
 backend_path = str(_project_root / "src" / "backend")
@@ -46,7 +49,10 @@ def _load_git_service():
         for key in list(sys.modules.keys()):
             if key.startswith("services.git_service"):
                 del sys.modules[key]
-        import services.git_service as gs
+        # #1028: git_service is a package; the alias names the module that
+        # owns the functions under test, so patches land where the code looks.
+        import services.git_service.provisioning as gs
+        from services.git_service import gitignore as gs_gitignore
     return gs
 
 
@@ -57,7 +63,7 @@ def _run_merge(tmp_path: Path) -> str:
     gs = _load_git_service()
     # The production helper hardcodes the path that the agent container
     # passes in; for tests we just point it at the temp dir.
-    cmd = gs._build_gitignore_merge_command(str(tmp_path))
+    cmd = gs_gitignore._build_gitignore_merge_command(str(tmp_path))
     result = subprocess.run(
         cmd, shell=True, capture_output=True, text=True, timeout=10
     )
@@ -121,7 +127,7 @@ def test_full_documented_exclusion_list_present(tmp_path):
     content = _run_merge(tmp_path)
     lines = content.splitlines()
 
-    for pattern in gs._GITIGNORE_PATTERNS:
+    for pattern in gs_gitignore._GITIGNORE_PATTERNS:
         assert pattern in lines, (
             f"pattern {pattern!r} from _GITIGNORE_PATTERNS missing — got:\n"
             f"{content}"
@@ -139,7 +145,7 @@ def test_idempotent_double_run(tmp_path):
 
     # Each pattern must appear exactly once.
     gs = _load_git_service()
-    for pattern in gs._GITIGNORE_PATTERNS:
+    for pattern in gs_gitignore._GITIGNORE_PATTERNS:
         count = lines.count(pattern)
         assert count == 1, (
             f"pattern {pattern!r} appears {count} times after double run — "
@@ -148,13 +154,23 @@ def test_idempotent_double_run(tmp_path):
 
 
 def test_doc_and_constant_in_sync():
-    """The `.gitignore` code block in `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`
-    must contain every entry in `_GITIGNORE_PATTERNS`.
+    """The `.gitignore` fence in `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` and
+    `_GITIGNORE_PATTERNS` must be the SAME SET — both directions.
 
-    The Python constant is the source of truth. The doc is hand-written and
-    drifts; this test catches drift in CI before the doc gets out of date
-    again. A new entry in `_GITIGNORE_PATTERNS` requires a matching update
-    to the doc block (see `### 5. .gitignore (Required)` section).
+    #2529 changed this from `constant ⊆ doc`, and the change is the point. The
+    old one-way assertion is exactly why the fence could carry `!.env.example`
+    and `!.mcp.json.template` for months while the constant did not: the guide
+    told template authors to write a negation the platform then appended a
+    broader rule below, so an agent shipping `.env.example` — which compat check
+    F-004 REQUIRES — lost it on its first Push, and CI could not see the
+    direction that mattered. The issue names it outright: "CI cannot catch this
+    direction."
+
+    Both surfaces are hand-maintained and both are read by real consumers (the
+    constant by the merge builder, the fence by every template author and by the
+    #1908 fence-order guard), so neither may be a superset of the other. Order
+    is pinned separately by
+    `test_1908_bundled_template_gitignore.py::test_guide_fence_order_matches_the_constant`.
     """
     import re
     gs = _load_git_service()
@@ -168,13 +184,27 @@ def test_doc_and_constant_in_sync():
         f"no ```gitignore``` code block found in {doc_path} — did the "
         "section get renamed or the fence language change?"
     )
-    doc_lines = set(match.group(1).splitlines())
+    # Comments and blank lines are prose, not patterns.
+    doc_lines = {
+        line.strip()
+        for line in match.group(1).splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+    constant = set(gs_gitignore._GITIGNORE_PATTERNS)
 
-    missing = [p for p in gs._GITIGNORE_PATTERNS if p not in doc_lines]
+    missing = sorted(constant - doc_lines)
     assert not missing, (
         f"_GITIGNORE_PATTERNS entries missing from doc block: {missing}. "
         f"Update the gitignore code block in {doc_path.name} to match "
         "git_service.py — they are intentionally kept in sync."
+    )
+    extra = sorted(doc_lines - constant)
+    assert not extra, (
+        f"the {doc_path.name} gitignore fence carries {len(extra)} pattern(s) "
+        f"the platform does not implement: {extra}. This is the #2529 "
+        "direction: a fence-only negation is advice the merge does not honour. "
+        "Add them to _GITIGNORE_PATTERNS (and to _GITIGNORE_PROTECTED if they "
+        "must not be overridable) or delete them from the guide."
     )
 
 
@@ -228,8 +258,8 @@ def test_rm_cached_for_newly_ignored_files(tmp_path):
 
     # Run the real migration: gitignore merge + rm-cached for ignored files.
     for build in (
-        gs._build_gitignore_merge_command,
-        gs._build_rm_cached_ignored_command,
+        gs_gitignore._build_gitignore_merge_command,
+        gs_gitignore._build_rm_cached_ignored_command,
     ):
         result = subprocess.run(
             build(str(tmp_path)),
@@ -313,8 +343,8 @@ def test_rm_cached_exempts_brain_orb_hooks(tmp_path):
 
     # Run the real migration: fleet merge (appends `.trinity/`) + rm-cached.
     for build in (
-        gs._build_gitignore_merge_command,
-        gs._build_rm_cached_ignored_command,
+        gs_gitignore._build_gitignore_merge_command,
+        gs_gitignore._build_rm_cached_ignored_command,
     ):
         result = subprocess.run(
             build(str(tmp_path)),

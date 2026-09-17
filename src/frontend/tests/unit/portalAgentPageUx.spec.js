@@ -44,6 +44,7 @@ import { stripComments } from './helpers/stripComments'
 import {
   shouldEscapeStage,
   PORTAL_BUCKET_LABELS,
+  STAGE_QUERY_KEYS,
   WORKSPACE_ROOT,
 } from '@/components/portal/portalUtils'
 import {
@@ -53,7 +54,13 @@ import {
 } from '@/utils/executionBuckets'
 
 const PORTAL = fileURLToPath(new URL('../../src/views/Portal.vue', import.meta.url))
-const PAGE = fileURLToPath(new URL('../../src/components/portal/PortalAgentPage.vue', import.meta.url))
+// ent#523: the agent page was dismantled — the chart and the stats it owned
+// are the always-visible band's now, and the asks it rendered were the second
+// of two copies (the conversation kept the surviving one). `PAGE` follows the
+// chart, which is what most of this file is about; the asks guards below name
+// their new surface explicitly.
+const PAGE = fileURLToPath(new URL('../../src/components/portal/PortalAgentBand.vue', import.meta.url))
+const CONVERSATION = fileURLToPath(new URL('../../src/components/portal/PortalConversation.vue', import.meta.url))
 const CHART = fileURLToPath(new URL('../../src/components/StackedBarChart.vue', import.meta.url))
 
 // Comments are stripped so prose about a rule isn't scanned as code. Shared,
@@ -116,6 +123,14 @@ describe('shouldEscapeStage', () => {
   it('escapes a stage named by the query at the workspace root', () => {
     expect(shouldEscapeStage('/workspace', { agent: 'acme-billing' })).toBe(true)
     expect(shouldEscapeStage('/workspace', { new: '1' })).toBe(true)
+    // #2559 — the Talk door's key. `bootstrap()` strips it on every exit, so this
+    // is belt-and-braces; it costs nothing and keeps the sign-out predicate
+    // honest if a residual key ever survives.
+    expect(shouldEscapeStage('/workspace', { voice: '1' })).toBe(true)
+  })
+
+  it('names every stage-bearing query key, so sign-out cannot leak one', () => {
+    expect(STAGE_QUERY_KEYS).toEqual(['agent', 'new', 'voice'])
   })
 
   it('ignores an empty or absent query', () => {
@@ -218,7 +233,7 @@ describe('bucket labels', () => {
     }
   })
 
-  it('is presentation only — the page stacks by the untranslated buckets', () => {
+  it('is presentation only — the band stacks by the untranslated buckets', () => {
     const src = pageSource()
     // If the labels were passed as `:buckets`, every `by_type[bucket]` lookup
     // would miss and the chart would render blank.
@@ -246,117 +261,101 @@ describe('StackedBarChart labels prop', () => {
 // ---------------------------------------------------------------------------
 
 describe('Overview containment', () => {
-  it('keeps asks on the Overview rather than a new tab', () => {
-    const src = pageSource()
-    expect(src).toContain('Waiting on you')
-    // The tab list is unchanged: five tabs, no sixth for asks.
+  it('keeps asks in front of the composer rather than behind a tab', () => {
+    // ent#523 repoint, the second for this guard: #2449 removed the page's
+    // duplicate ask rendering, and ent#523 removed the page. The surviving
+    // mount is the conversation's — which is where a pending decision belongs,
+    // directly above the box you would answer it in — and it is still inline
+    // rather than behind a tab.
+    const src = stripComments(readFileSync(CONVERSATION, 'utf8'))
+    expect(src).toContain('<PortalAsks')
     expect(src).not.toMatch(/id:\s*'asks'/)
   })
 
-  it('orders the Overview activity → recent work → asks', () => {
-    // Reverses #2161's "asks first in DOM order so the mobile stack keeps the
-    // priority" (#2169). The reversal is deliberate and instructed, not a
-    // regression, and it is pinned rather than deleted so a later reader can
-    // see the rule was retired on purpose — the precedent is #2161 itself
-    // rewriting workspaceRoomsGate F24. The mobile residual is bounded: the
-    // ask-count badge lives in the header, outside the page scroller.
-    const src = pageSource()
-    // Presence first. `indexOf` returns -1 for a deleted marker, and -1 is less
-    // than everything, so an ordering assertion alone passes on deletion.
-    expect(src).toContain('Activity · last')
-    expect(src).toContain('>Recent work<')
-    expect(src).toContain('Waiting on you')
-    expect(src.indexOf('Activity · last')).toBeLessThan(src.indexOf('>Recent work<'))
-    expect(src.indexOf('>Recent work<')).toBeLessThan(src.indexOf('Waiting on you'))
+  it('does not advertise an asks section for an agent with nothing waiting', () => {
+    // Survives both repoints: the surviving mount is guarded on the store list
+    // being non-empty, so an agent with nothing waiting renders no section at
+    // all — same rule, one source, now on the conversation.
+    const src = stripComments(readFileSync(CONVERSATION, 'utf8'))
+    expect(src).toMatch(/v-if="agentAsks\.length"[\s\S]{0,200}<PortalAsks/)
   })
 
-  it('does not nest a scroll region inside the page scroller', () => {
-    // Precedent #2101 on this surface: the chat pane is the single scroll axis,
-    // and a pane that scrolls inside a page that scrolls traps touch gestures.
-    // Containment is first-N plus a toggle instead.
-    expect(pageSource()).not.toMatch(/overflow-y-auto[^"]*"[\s\S]{0,200}Waiting on you/)
-    expect(pageSource()).toContain('allAsks')
+  it('does not nest a scroll region inside the asks rendering', () => {
+    // #2101 on this surface: the page has one scroll axis, and a pane that
+    // scrolls inside a page that scrolls traps the gesture on touch. After
+    // #2449 the containment belongs to `PortalAsks`, so assert it there rather
+    // than against a section this file no longer owns.
+    const ASKS = fileURLToPath(
+      new URL('../../src/components/portal/PortalAsks.vue', import.meta.url),
+    )
+    expect(stripComments(readFileSync(ASKS, 'utf8'))).not.toMatch(
+      /overflow-y-auto|overflow-auto/,
+    )
   })
 
-  it('renders the ask count as a floor when the service truncated it', () => {
-    // MAX_ASKS = 20 server-side, so a full list means "at least 20" — a bare
-    // "20" against 50 pending is a wrong number, not a rounded one. The cap is
-    // a named constant so the cross-boundary duplication is visible.
+  // RETIRED BY #2449 — recorded rather than silently dropped, the way this file
+  // records #2161's own reversal above.
+  //
+  // Three tests lived here that pinned the DELETED section:
+  //
+  //   'orders the Overview activity -> recent work -> asks'  (#2169)
+  //   'puts asks outside the top row, not in it as a third column'  (#2169)
+  //   'renders the ask count as a floor when the service truncated it'
+  //
+  // The first two encoded #2169's instructed rule that asks sit BELOW the top
+  // row. That rule was already void before this change: ent#428 added
+  // `<PortalAsks>` immediately under the header, ABOVE the stats strip, so the
+  // page led with asks and then repeated them lower down. The tests kept
+  // passing only because the lower copy still existed. Deleting the duplicate
+  // makes the page do one thing; it does not decide where asks belong, and if
+  // the answer is still "below the top row" the fix is to move the surviving
+  // mount, not to restore a second one.
+  //
+  // The third pinned `ASKS_CAP = 20`, mirroring the removed reader's server-side
+  // `MAX_ASKS`. The surviving list is fetched at `limit=200`, so a "20+" floor
+  // would now be a wrong number rather than a rounded one. The badge is a plain
+  // count of the pending list, pinned in `portalAskSingleSource.spec.js`.
+
+  it('lets the activity chart fill its cell', () => {
+    // The cap this pinned (`max-w-2xl`, from when the chart sat alone above a
+    // full-width row) must not come back with the chart's third home. ent#523
+    // moved it into the band, where it is the flexible cell between the stat
+    // figures and the window selector.
     const src = pageSource()
-    expect(src).toMatch(/const ASKS_CAP = 20/)
-    expect(src).toMatch(/asks\.value\.length >= ASKS_CAP \? `\$\{ASKS_CAP\}\+`/)
-  })
-
-  it('keeps the top row two columns whether or not there are asks', () => {
-    // The #2169 defect, inverted. The column count used to be bound to
-    // `asks.length`, so the page changed shape when a transient operator-queue
-    // item opened or closed. Both directions are asserted: the negative alone
-    // passes if the grid is deleted outright, and a looser positive says
-    // nothing about the two classes living on the SAME element.
-    //
-    // The positive is scoped to the Overview block, and that scoping is the
-    // whole assertion. A file-wide match is satisfied by the LOADING SKELETON,
-    // which this same change gave the identical `grid gap-6 xl:grid-cols-2`
-    // string — so with the row's grid deleted outright, or its two classes
-    // split across two elements, the negative passed vacuously and the positive
-    // passed on the skeleton, and the headline AC failed with a green suite.
-    // Verified by planting both violations (learnings L2).
-    const src = pageSource()
-    expect(src).not.toMatch(/grid-cols-2'?\s*:\s*asks\.length/)
-    expect(overviewBlock(src)).toMatch(/class="[^"]*\bgrid\b[^"]*\bxl:grid-cols-2\b[^"]*"/)
-  })
-
-  it('puts asks outside the top row, not in it as a third column', () => {
-    // Every other guard here is satisfied by an asks section left INSIDE the
-    // grid as a third child — half width, under the chart — so AC #3 could fail
-    // with a green suite. What separates the two layouts is whether the row's
-    // <div> has CLOSED by the time the asks section opens, and a bare
-    // `slice(grid, asks)).toContain('</div>')` does not answer that: the chart's
-    // own bordered card closes inside the row. So match the row's opening tag to
-    // its close by depth.
-    const src = pageSource()
-    const overview = src.indexOf("tab === 'overview'")
-    expect(overview).toBeGreaterThan(-1)
-
-    const gridClass = src.indexOf('xl:grid-cols-2', overview)
-    expect(gridClass).toBeGreaterThan(-1)
-    const gridOpen = src.lastIndexOf('<div', gridClass)
-    expect(gridOpen).toBeGreaterThan(overview)
-
-    let depth = 0
-    let i = gridOpen
-    let gridClose = -1
-    while (i < src.length) {
-      const open = src.indexOf('<div', i)
-      const close = src.indexOf('</div>', i)
-      if (close === -1) break
-      if (open !== -1 && open < close) { depth += 1; i = open + 4; continue }
-      depth -= 1
-      if (depth === 0) { gridClose = close; break }
-      i = close + 6
-    }
-    expect(gridClose).toBeGreaterThan(-1)
-
-    const asksAt = src.indexOf('Waiting on you')
-    expect(asksAt).toBeGreaterThan(gridClose)
-  })
-
-  it('lets the activity chart fill its column', () => {
-    // The chart carried `max-w-2xl` when it sat alone above a full-width row.
-    // Inside a half-width column that cap is dead weight below ~1656px, and the
-    // section it capped is now one of two equal columns.
-    const src = pageSource()
-    expect(src).toContain('Activity · last')
+    expect(src).toContain('StackedBarChart')
     expect(src).not.toMatch(/max-w-2xl/)
   })
 
-  it('does not advertise an asks section for an agent with nothing waiting', () => {
-    expect(pageSource()).toMatch(/<section v-if="asks\.length"/)
-  })
+  // The duplicate of the asks guard that used to sit here is gone: the file
+  // carried the same rule twice (once per describe block) against the same
+  // source, and after ent#523 moved the rendering to the conversation, keeping
+  // both would have meant maintaining two copies of one assertion about a
+  // surface this describe block no longer covers. It lives once, above.
 
   it('shapes the loading skeleton like the row it precedes', () => {
-    // Layout stability (contract principles #4/#6): a one-column skeleton in
-    // front of a two-column row reflows the page on every load.
-    expect(pageSource()).toMatch(/loading && !page"[^>]*class="[^"]*\bgrid\b[^"]*\bxl:grid-cols-2\b/)
+    // Layout stability (contract principles #4/#6). The RULE survives ent#523;
+    // the shape it is measured against does not — the two-column Overview grid
+    // this pinned went with the agent page, and the band is a single row of
+    // stat figures. So the skeleton is that row: three figure-sized blocks, not
+    // a grid. Retired deliberately and replaced, rather than deleted, per this
+    // file's own #2169 convention.
+    const src = pageSource()
+    // #2597 made the skeleton the SECOND arm of the chain (`v-else-if`), after
+    // a failed-first-load arm. The gate is matched position-independently so
+    // this test keeps asserting its own property — the skeleton's SHAPE — and
+    // stops failing whenever an arm is added above it.
+    expect(src).toMatch(/v-(?:else-)?if="!loaded"[\s\S]{0,400}animate-pulse/)
+    expect(src).not.toMatch(/xl:grid-cols-2/)
+  })
+
+  it('gates the band on the verdict, never on a request being open', () => {
+    // #2540/#1927: `loaded` is "no data yet". Gating on `loading` would blank
+    // the numbers on every window change and would be counted by the
+    // loading-gate ratchet.
+    const src = pageSource()
+    // Position-independent for the #2597 reason above. The negative assertion
+    // — never `loading` — is the point of this test and is untouched.
+    expect(src).toMatch(/v-(?:else-)?if="!loaded"/)
+    expect(src).not.toMatch(/v-if="loading"/)
   })
 })

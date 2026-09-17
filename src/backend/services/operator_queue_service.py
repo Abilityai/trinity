@@ -26,6 +26,7 @@ from typing import Optional
 from database import db
 from redis_breaker_util import get_breaker_redis
 from services import rate_limiter
+from services.operator_queue_choices import OPTIONS_DROPPED_MARKER
 from services.agent_client import AgentClient
 from utils.helpers import utc_now_iso
 
@@ -83,6 +84,9 @@ OPERATOR_QUEUE_CONTEXT_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_CONTEXT_MAX_BYT
 OPERATOR_QUEUE_OPTIONS_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_OPTIONS_MAX_BYTES", "4096"))
 OPERATOR_QUEUE_ID_MAX = int(os.getenv("OPERATOR_QUEUE_ID_MAX", "256"))
 OPERATOR_QUEUE_EXECUTION_ID_MAX = int(os.getenv("OPERATOR_QUEUE_EXECUTION_ID_MAX", "128"))
+# ent#364: RFC 5321 caps an address at 320 chars; anything longer is not an
+# email and never matches a roster row, so it is refused before the DB read.
+OPERATOR_QUEUE_EMAIL_MAX = int(os.getenv("OPERATOR_QUEUE_EMAIL_MAX", "320"))
 # Flood alert: one per episode, un-guessable id, in-memory cooldown.
 OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS = int(
     os.getenv("OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS", "300")
@@ -120,7 +124,18 @@ OPERATOR_ALERT_MAX_PENDING_PER_TYPE = int(
 # unregistered `item["type"]` is refused fail-closed: a caller-trusted string
 # would mint a fresh budget per distinct value (unbounded cap keyspace), so
 # registration is a one-line reviewed act here, never a call-site decision.
-_BUDGETED_ALERT_TYPES = frozenset({"skill_not_found"})
+_BUDGETED_ALERT_TYPES = frozenset({
+    "skill_not_found",
+    # ent#499: a Workspace client's thumbs-down. No agent authors it, but the
+    # volume is driven by a person clicking, which is the same
+    # not-bound-by-platform-cadence side of the #1677 classification.
+    "workspace_problem_report",
+    # #2529: the per-Push `.gitignore` sweep's alert. Budgeted rather than
+    # exempted because `sync_to_github` is reachable from the `git_sync` MCP
+    # tool, which an agent-scoped key may call on itself — so an agent CAN drive
+    # the volume, which is the whole test the #1677 classification applies.
+    "gitignore_untracked",
+})
 
 # Shape guard for the episode alert's `last_triggered_by` triage field: a
 # platform trigger enum only — NEVER agent-controlled free text (G-04: the
@@ -130,6 +145,16 @@ _TRIGGERED_BY_RE = re.compile(r"[a-z0-9_]{1,32}")
 
 # Valid priority values — an agent-supplied unknown collapses to "medium".
 _VALID_PRIORITIES = {"critical", "high", "medium", "low"}
+
+# Reserved id prefix for role-assignment drift alerts (trinity-enterprise#500).
+# A NAMED public constant rather than a bare literal in the emitter, because the
+# emitter is CROSS-REPO: the registered module that raises these items imports
+# this name, so the reservation below and the id it produces cannot drift apart
+# across two repositories. (The house convention puts the constant in the
+# emitter's own module — `BASE_IMAGE_STALE_ALERT_PREFIX` in
+# `system_agent_service.py`. This is the deliberate deviation, and the reason is
+# exactly that the emitter is not in this repo.)
+ROLE_DRIFT_ALERT_PREFIX = "role-drift-"
 
 # Platform-reserved id prefixes an agent must NOT author. If it could, it would
 # pre-create — and via create_item's on_conflict_do_nothing, silently suppress —
@@ -151,6 +176,31 @@ _RESERVED_ID_PREFIXES = (
                          # on-conflict dedup from being agent-pre-suppressible)
     "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
     "log-archive-",      # archive_storage unwritable-directory alarm (#2205)
+    "sub-headroom-",     # subscription_headroom_alerts weekly-window alarm (ent#434)
+    # skills legacy-adoption refusal (#2744). The family prefix, so it covers
+    # BOTH the steady-state `…-refused-<sha256(url)[:12]>` id and the two
+    # actionable branches' timestamped ids (and the historical rows). The
+    # steady-state id is derived from an admin-visible URL and is therefore
+    # GUESSABLE, and `_skills-sync` is uncreatable at agent CREATE but NOT on
+    # the rename path (`routers/agent_rename.py` keeps a leading `_`), so an
+    # owner-hijacked host could pre-create the id and suppress the alarm.
+    # `is_platform_minted` is keyed on this tuple too — it gates the ent#499
+    # responded write-back and the ent#329 respond→resume dispatch, and this
+    # item is one an operator is now EXPECTED to click through on.
+    "skills-legacy-adoption-",
+    "workspace-problem-",  # client_portal report-a-problem (ent#499) — reserved
+                           # so an agent cannot pre-create the id of a complaint
+                           # ABOUT ITSELF and silence it through ON CONFLICT
+    # git_service per-Push sweep alert (#2529). Reserved for the #1632 reason
+    # above, and — since ent#499 keyed `is_platform_minted` on this very tuple —
+    # this listing is ALSO what keeps the alert out of the agent's own
+    # `~/.trinity/operator-queue.json`. Correct: the sweep alarm is a platform
+    # alarm ABOUT the agent, not a loop the agent opened and is waiting on.
+    "gitignore-untracked-",
+    ROLE_DRIFT_ALERT_PREFIX,  # role-assignment drift (trinity-enterprise#500) —
+                           # the role file lives in the AGENT'S OWN workspace, so
+                           # an unreserved prefix would let it pre-create the id
+                           # of the alert about its own configuration
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a
@@ -159,7 +209,10 @@ _ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 # Inline truncation marker (kept short so the clamped field length stays ≤ cap).
 _TRUNC_MARKER = "…[truncated]"
-_OPTIONS_DROPPED_MARKER = "(options omitted: exceeded size cap)"
+# #2376: one definition, imported. The respond-side validator has to exempt
+# items wearing this marker, and a second literal would drift the day either
+# side is reworded — leaving the sink accepting a placeholder as a decision.
+_OPTIONS_DROPPED_MARKER = OPTIONS_DROPPED_MARKER
 
 # #1632: single Redis key for the operator-queue sync leader (mirror monitoring
 # #1464). Only the lease-holder runs a poll cycle, so `--workers 2` doesn't
@@ -181,6 +234,36 @@ def _valid_execution_id(value) -> Optional[str]:
     return None
 
 
+def is_platform_minted(item) -> bool:
+    """Was this queue item raised by the PLATFORM rather than by the agent?
+
+    ent#499. The two agent-facing return paths — the responded write-back into
+    ``~/.trinity/operator-queue.json`` and the ent#329 respond→resume dispatch —
+    both exist to close a loop the AGENT opened: it parked a question, a human
+    answered, the answer goes back. A platform alarm opened no such loop. The
+    agent never asked, is not waiting, and in ent#499's case is the SUBJECT of
+    the complaint rather than its author.
+
+    Feeding those back is not merely useless, it is a disclosure: ent#499's body
+    carries a client's email and their verbatim words, which ent#366 deliberately
+    withholds from the rated agent (``comment_withheld``). Without this predicate
+    an operator clicking "Got it" hands both to that agent within one 5s sync
+    cycle, and — with ``operator_resume_enabled`` — spends one of its turns doing
+    it.
+
+    Keyed on the reserved id prefixes, which are already the platform's marker
+    for "an agent may not mint this id" (#1632). One predicate, both sinks, so
+    they cannot drift.
+    """
+    if isinstance(item, str):
+        candidate = item
+    elif isinstance(item, dict):
+        candidate = item.get("request_id") or item.get("id") or ""
+    else:
+        candidate = getattr(item, "request_id", "") or getattr(item, "id", "") or ""
+    return str(candidate).strip().lower().startswith(_RESERVED_ID_PREFIXES)
+
+
 def _truncate_with_marker(text: str, max_len: int) -> str:
     """Truncate so the RESULT (content + marker) is ≤ max_len chars."""
     if len(text) <= max_len:
@@ -189,13 +272,106 @@ def _truncate_with_marker(text: str, max_len: int) -> str:
     return text[:keep] + _TRUNC_MARKER
 
 
-def _clamp_ingested_item(req: dict) -> dict:
+def _validated_addressee(agent_name: str, raw) -> Optional[str]:
+    """The email an ask is addressed to, or None (ent#364).
+
+    This is the one field on an agent-authored item that is an AUTHORIZATION
+    decision: it determines who may answer the ask and whose Workspace sidebar it
+    appears in. So it is validated here, at the same boundary that clamps every
+    other agent-supplied field, against the agent's own roster — an agent may
+    address only someone it was already shared with.
+
+    `include_owned=False` is the rule, not a default (see `agent_on_roster`'s
+    docstring): an external client's scope is exactly what was shared with them,
+    and the owned-agents branch would hand a client agents nobody gave them.
+
+    Fails CLOSED: a malformed value, an off-roster address, or a roster lookup that
+    raises all yield None — an operator ask — because addressing an ask we could
+    not validate is worse than not addressing it. Never raises, per this module's
+    #1632 contract.
+    """
+    if not isinstance(raw, str):
+        return None
+    email = raw.strip().lower()
+    if not email or len(email) > OPERATOR_QUEUE_EMAIL_MAX or "@" not in email:
+        return None
+    try:
+        from client_portal.service import agent_on_roster
+
+        if agent_on_roster(agent_name, email, include_owned=False):
+            return email
+        logger.info(
+            "[OperatorQueue] %s addressed an item to an off-roster email; "
+            "treating it as an operator ask (ent#364)",
+            agent_name,
+        )
+    except Exception:  # noqa: BLE001 — a roster read must never break ingestion
+        logger.warning(
+            "[OperatorQueue] could not validate the addressee for %s; "
+            "treating it as an operator ask (ent#364)",
+            agent_name,
+            exc_info=True,
+        )
+    return None
+
+
+# ent#429: the context key naming the chat an addressed ask belongs to. Written
+# by the platform (below), read by `client_portal/asks/service.py::_project` as
+# the client-facing `chat_id`, and stripped from anything the agent authored —
+# named here so the writer and the stripper cannot drift apart.
+_WORKSPACE_THREAD_KEY = "workspace_session_id"
+
+
+def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:
+    """The chat an addressed ask attaches to, or None (ent#429).
+
+    Resolved at RAISE time, never at render time: an ask raised by a scheduled
+    run has no conversation of its own, and "we will work out where it belongs
+    when someone looks at it" is not an attachment — it is a guess repeated
+    per view, with nothing durable to audit.
+
+    Fail-SOFT, and deliberately the opposite direction to `_validated_addressee`
+    beside it. That one fails CLOSED because an addressee it cannot verify is an
+    authorization decision it must not make. This one only decides where a link
+    POINTS: a thread we could not resolve costs the reader one extra click, and
+    refusing the whole ask over it would lose the question entirely. Never
+    raises — the #1632 clamp contract.
+    """
+    try:
+        from client_portal.service import ensure_thread_for_ask
+
+        return ensure_thread_for_ask(agent_name, email) or None
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[OperatorQueue] could not attach a workspace chat for an ask from %s; "
+            "it will render without a thread link (ent#429)",
+            agent_name,
+            exc_info=True,
+        )
+        return None
+
+
+def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     """#1632: total field-hygiene clamp for an agent-authored queue item.
 
     Called INSIDE the create try/except so any failure is quarantined by #1525
     rather than hot-looping — but it is written to NEVER raise (every branch is
     isinstance-guarded, json.dumps is wrapped). Returns a NEW dict; never mutates
     the caller's request.
+
+    NOT PURE, and the name undersells it. Two of the steps below reach the
+    database, and one of them WRITES:
+
+    * `addressed_to_email` (ent#364) is resolved against the agent's roster —
+      an authorization decision, and the reason it is not simply copied through.
+    * `context.workspace_session_id` (ent#429) is stripped and then re-written
+      with a thread this call may CREATE (`_workspace_thread_for`).
+
+    So this is not safe to call speculatively "just to see what a clamped item
+    would look like": today's one production caller creates the row immediately
+    after, and a second caller that did not would leave an empty client thread
+    behind. Both reads/writes are fail-soft and neither can raise, so the #1525
+    contract above still holds.
 
     - title / question: truncate-with-marker.
     - context: non-dict → {} (fixes the create_item .get crash class); serialized
@@ -206,6 +382,9 @@ def _clamp_ingested_item(req: dict) -> dict:
       expires_at is left untouched (honored).
     - priority: validate-only (unknown → medium; a legit `critical` is untouched —
       the depth cap already bounds critical *volume*).
+    - addressed_to_email: resolved, never trusted (ent#364) — see above.
+    - context.workspace_session_id: agent value stripped, platform value written
+      for an addressed ask (ent#429) — see above.
     """
     out = dict(req)
 
@@ -217,22 +396,58 @@ def _clamp_ingested_item(req: dict) -> dict:
     if isinstance(question, str):
         out["question"] = _truncate_with_marker(question, OPERATOR_QUEUE_QUESTION_MAX)
 
+    # ent#364: the addressee is an authorization decision, so it is resolved here
+    # rather than trusted. Absent/invalid/off-roster → None, i.e. an operator ask.
+    #
+    # Resolved BEFORE the context block below, not after, because ent#429 writes
+    # the addressee's thread id INTO context — doing it afterwards would add
+    # bytes the size cap had already signed off on.
+    out["addressed_to_email"] = _validated_addressee(agent_name, out.get("addressed_to_email"))
+
     context = out.get("context")
     if not isinstance(context, dict):
         # Non-dict context (str/list/None) → {} — also fixes the pre-existing
-        # create_item execution_id `.get` crash.
+        # create_item execution_id `.get` crash. An ask with no context at all is
+        # the COMMON case for a scheduled run, and it is exactly the one that must
+        # still get a thread (ent#429), so the attach happens on this branch too.
         out["context"] = {}
+        if out["addressed_to_email"]:
+            thread_id = _workspace_thread_for(agent_name, out["addressed_to_email"])
+            if thread_id:
+                out["context"][_WORKSPACE_THREAD_KEY] = thread_id
     else:
+        # ent#429: `workspace_session_id` is PLATFORM-written and this is the one
+        # place that writes it. Stripped UNCONDITIONALLY first — an agent that
+        # could author it would be choosing which conversation its ask claims to
+        # belong to, and `_project` hands that straight to the client as
+        # `chat_id`. The projection's docstring already promised "platform-written
+        # context only"; nothing enforced it until now.
+        #
+        # Rebuilt rather than popped: `out = dict(req)` is a SHALLOW copy, so the
+        # context dict is still the caller's, and this function's contract is that
+        # it never mutates the request it was handed.
+        context = {k: v for k, v in context.items() if k != _WORKSPACE_THREAD_KEY}
+        out["context"] = context
+        if out["addressed_to_email"]:
+            thread_id = _workspace_thread_for(agent_name, out["addressed_to_email"])
+            if thread_id:
+                context[_WORKSPACE_THREAD_KEY] = thread_id
         try:
             ctx_bytes = len(json.dumps(context).encode("utf-8"))
         except (TypeError, ValueError):
             ctx_bytes = None  # non-serializable
         if ctx_bytes is None or ctx_bytes > OPERATOR_QUEUE_CONTEXT_MAX_BYTES:
-            out["context"] = {
+            marker = {
                 "_truncated": True,
                 "_original_bytes": ctx_bytes,
                 "execution_id": _valid_execution_id(context.get("execution_id")),
             }
+            # The thread id survives truncation. It is platform-written and ~32
+            # bytes, and dropping it would make an oversize agent context the one
+            # way to produce a homeless ask (ent#429).
+            if context.get(_WORKSPACE_THREAD_KEY):
+                marker[_WORKSPACE_THREAD_KEY] = context[_WORKSPACE_THREAD_KEY]
+            out["context"] = marker
 
     options = out.get("options")
     if options is not None:
@@ -767,7 +982,7 @@ class OperatorQueueSyncService:
             # New item — clamp then create. The clamp runs INSIDE the try so any
             # clamp/create failure is quarantined by #1525 rather than hot-looping.
             try:
-                clamped = _clamp_ingested_item(req)
+                clamped = _clamp_ingested_item(req, agent_name)
                 db.create_operator_queue_item(agent_name, clamped)
                 admitted += 1
                 new_items.append(clamped)
@@ -892,6 +1107,10 @@ class OperatorQueueSyncService:
         # sync cycle's exists() check — keyed on request_id — matches instead of
         # creating a duplicate.
         for resp in responded_items:
+            # ent#499: a platform alarm was never in this agent's file and must
+            # not be written into it — see `is_platform_minted`.
+            if is_platform_minted(resp):
+                continue
             if resp["request_id"] not in seen_ids:
                 requests.append({
                     "id": resp["request_id"],

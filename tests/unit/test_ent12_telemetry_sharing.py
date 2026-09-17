@@ -59,11 +59,15 @@ def test_payload_has_no_pii(tss):
 def test_payload_is_coarse_and_keyed(tss):
     mod, _ = tss
     pl = mod.build_aggregate_payload(window_days=30, backfill=True)
-    assert pl["installation_id"]
+    # ent#437: keyed by the SHARE id (the preview placeholder before consent),
+    # never the install id — that one travels with the operator's email.
+    assert pl["sharing_id"] and "installation_id" not in pl
     assert pl["counts"]["agents"] == 3
     assert pl["counts"]["executions_total"] == 22
     assert "activation_funnel" in pl
-    assert set(pl["instance"]) == {"trinity_version", "edition", "platform", "python_version"}
+    assert set(pl["instance"]) == {
+        "trinity_version", "edition", "platform", "python_version", "install_source",
+    }
 
 
 def test_no_egress_when_consent_off(tss):
@@ -157,8 +161,11 @@ def test_consent_audit_uses_a_real_audit_event_type():
     from pathlib import Path
     from services.platform_audit_service import AuditEventType
 
-    src = (Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
-           / "settings.py").read_text()
+    # #1028: routers/settings.py is a package; the consent handler lives in
+    # flags.py — read the whole package so a sub-module move cannot blank this.
+    pkg = (Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
+           / "settings")
+    src = "\n".join(f.read_text() for f in sorted(pkg.glob("*.py")))
     handler = src[src.index("telemetry_sharing_consent") - 2000:
                   src.index("telemetry_sharing_consent") + 200]
     members = re.findall(r"AuditEventType\.([A-Z_]+)", handler)
@@ -177,8 +184,9 @@ def test_generic_settings_put_blocks_telemetry_sharing_keys():
     egress consent around all of that (trinity-ops-agent#232 class)."""
     from pathlib import Path
 
+    # #1028: the generic catch-all lives in routers/settings/generic.py now.
     src = (Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
-           / "settings.py").read_text()
+           / "settings" / "generic.py").read_text()
     assert 'key.startswith("telemetry_sharing_")' in src, (
         "generic settings PUT must block the telemetry_sharing_* key family"
     )

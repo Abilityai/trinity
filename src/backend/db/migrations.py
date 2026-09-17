@@ -2537,6 +2537,50 @@ def _migrate_agent_evaluations_table(cursor, conn):
     )
 
 
+def _migrate_subscription_headroom_history_table(cursor, conn):
+    """Create the subscription_headroom_history table + indexes (ent#433).
+
+    One row per #471 headroom probe, so utilization trends survive the single
+    last-known-good Redis snapshot that overwrites itself on every probe. Also
+    defined in db/schema.py for fresh installs; this handles existing installs.
+    Idempotent. Mirrored by Alembic 0043_subscription_headroom_history for
+    PostgreSQL (#1183 dual-track).
+
+    The FOREIGN KEY is documentation only — `PRAGMA foreign_keys` is off
+    platform-wide and the PG DDL path strips FK clauses outright, so the
+    cascade is performed explicitly in `delete_subscription`.
+    """
+    cursor.execute("PRAGMA table_info(subscription_headroom_history)")
+    if cursor.fetchall():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS subscription_headroom_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subscription_id TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            five_hour_utilization_pct REAL,
+            five_hour_resets_at TEXT,
+            five_hour_status TEXT,
+            seven_day_utilization_pct REAL,
+            seven_day_resets_at TEXT,
+            seven_day_status TEXT,
+            representative_claim TEXT,
+            overage_status TEXT,
+            unified_status TEXT,
+            FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id) ON DELETE CASCADE
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_headroom_history_sub_fetched "
+        "ON subscription_headroom_history(subscription_id, fetched_at DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_headroom_history_fetched "
+        "ON subscription_headroom_history(fetched_at)"
+    )
+
+
 def _migrate_agent_reminders_table(cursor, conn):
     """Create the agent_reminders table + indexes (#1296).
 
@@ -2813,6 +2857,81 @@ def _migrate_agent_loops_max_cost(cursor, conn):
     conn.commit()
 
 
+def _migrate_execution_fan_out_task_id(cursor, conn):
+    """#2524 — the caller's subtask id, on the row.
+
+    `FanOutService` used to hold the batch in one coroutine and key its results
+    by the caller's task id in a local dict. The aggregate is a query over
+    `fan_out_id` now — that is what lets a fan-out run on the durable queue and
+    what lets a status endpoint answer after the dispatching request is gone —
+    so the id has to be persisted next to the execution it belongs to.
+
+    Also adds a composite index: the join counts non-terminal rows for one
+    `fan_out_id` on every fan-out terminal, which the existing single-column
+    `idx_executions_fan_out` cannot serve without reading every row of the batch.
+
+    Mirrored by the Alembic revision 0062_execution_fan_out_task_id.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "fan_out_task_id",
+        "ALTER TABLE schedule_executions ADD COLUMN fan_out_task_id TEXT",
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_fan_out_status "
+        "ON schedule_executions(fan_out_id, status)"
+    )
+    conn.commit()
+
+
+def _migrate_agent_loops_terminal_driven(cursor, conn):
+    """#2523 — the two columns that let a loop live without an in-process runner.
+
+    `LoopService._run` used to hold the whole loop in one `asyncio.Task`: a
+    `for` loop over iterations, with the stop flag on an in-memory `_LoopHandle`
+    and the inter-run pause as `asyncio.sleep`. Neither survives a restart, so
+    startup recovery flipped every in-flight loop to `interrupted`. The loop is
+    now driven by execution terminals instead, which needs those two pieces of
+    state on the row:
+
+      * `next_run_at`       — when the next iteration is due (the `delay_seconds`
+                              pause). NULL means "not waiting"; a due-loop sweep
+                              dispatches rows whose time has come.
+      * `stop_requested_at` — replaces `_LoopHandle.should_stop`, so `stop_loop`
+                              works on a loop this process never started.
+
+    Everything else the runner kept locally was already persisted
+    (`last_response`, `runs_completed`, `failed_runs`) or is derivable from
+    `agent_loop_runs` (accumulated cost, consecutive failures, the #1157
+    no-progress fingerprints), which is why only two columns are needed.
+
+    Mirrored by the Alembic revision 0051_agent_loops_terminal_driven.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "next_run_at",
+        "ALTER TABLE agent_loops ADD COLUMN next_run_at TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "stop_requested_at",
+        "ALTER TABLE agent_loops ADD COLUMN stop_requested_at TEXT",
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loops_next_run ON agent_loops(next_run_at)"
+    )
+    # Every execution terminal asks "is this a loop run?" — an indexed point
+    # read, not a scan of every loop run ever recorded.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loop_runs_execution "
+        "ON agent_loop_runs(execution_id)"
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_mcp_exposed(cursor, conn):
     """#846 — per-agent MCP exposure toggle.
 
@@ -2827,6 +2946,27 @@ def _migrate_agent_ownership_mcp_exposed(cursor, conn):
         "agent_ownership",
         "mcp_exposed",
         "ALTER TABLE agent_ownership ADD COLUMN mcp_exposed INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
+def _migrate_rate_limit_events_failure_kind(cursor, conn):
+    """#471 — split 429s from auth-class failures in the subscription failure stream.
+
+    Adds ``failure_kind TEXT`` (nullable) to ``subscription_rate_limit_events``.
+    The writer (``handle_subscription_failure``) has carried a ``failure_kind``
+    param ("rate_limit" | "auth") since #441/#792 but never persisted it, so
+    the table conflated broken-token auth failures with genuine quota 429s —
+    and five downstream consumers (#471 badges, ent#259 tile, ent#351,
+    ent#98/#101, ent#166) read this stream believing "count = 429s". NULL =
+    pre-#471 row (kind unknown; the 24h sweep retires these within a day).
+    Mirrored by Alembic revision 0040_rl_events_failure_kind for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "subscription_rate_limit_events",
+        "failure_kind",
+        "ALTER TABLE subscription_rate_limit_events ADD COLUMN failure_kind TEXT",
     )
     conn.commit()
 
@@ -2848,6 +2988,34 @@ def _migrate_agent_ownership_a2a_exposed(cursor, conn):
         "agent_ownership",
         "a2a_exposed",
         "ALTER TABLE agent_ownership ADD COLUMN a2a_exposed INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
+def _migrate_agent_ownership_operator_resume(cursor, conn):
+    """ent#329 — owner opt-in: an operator answer re-triggers the agent.
+
+    Adds ``operator_resume_enabled INTEGER DEFAULT 0`` to ``agent_ownership``.
+    An operator response is written back to the agent's queue file within ~5s but
+    is only *processed* at the agent's next turn, so an agent with no schedule
+    never acts on it — an approved action silently never runs. With this flag on,
+    a CAS-won respond dispatches one execution carrying the item + answer.
+
+    Default 0 and per-AGENT rather than per-request on purpose: a dispatch spends
+    money, so it is never unconditional (respond-storms must not fan out
+    executions), and an agent-declared per-request flag would let any agent turn
+    any answer into spend — including a Workspace client's (ent#430 AC #3).
+
+    Edition-agnostic OSS primitive: OSS owns the column, the dispatch and its
+    enforcement; the entitled Workspace surface only renders the ask (the #995
+    primitive/knob split). Mirrored by Alembic revision
+    0039_agent_ownership_operator_resume for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "operator_resume_enabled",
+        "ALTER TABLE agent_ownership ADD COLUMN operator_resume_enabled INTEGER DEFAULT 0",
     )
     conn.commit()
 
@@ -3040,6 +3208,14 @@ def _migrate_agent_sync_state_git_dir_bytes(cursor, conn):
         "git_dir_bytes",
         "ALTER TABLE agent_sync_state ADD COLUMN git_dir_bytes INTEGER",
     )
+    # #2800 widened this column to BIGINT on PostgreSQL (Alembic
+    # `0063_agent_sync_state_git_dir_bytes_bigint`) and in `schema.py`. There is
+    # deliberately NO SQLite migration for it: INTEGER and BIGINT are the same
+    # 64-bit INTEGER affinity here, so an upgraded file declaring INTEGER and a
+    # fresh one declaring BIGINT store identical values — and the schema-parity
+    # suite cannot tell them apart anyway (both of its fixtures build from
+    # empty, so `init_schema` creates this table in both snapshots). A
+    # rename-swap rebuild of a live table at boot buys nothing on this track.
 
 def _migrate_agent_sync_state_gc_signals(cursor, conn):
     """Add pack_count / loose_objects / maintenance_failures to agent_sync_state (#1595).
@@ -3419,6 +3595,144 @@ def _migrate_portal_session_resume(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_queue_addressed_to(cursor, conn):
+    """Address an operator-queue item to a specific human (ent#364).
+
+    `agent_name` says WHICH AGENT an item belongs to; nothing said which person
+    should answer it. Workspace asks need that, and it has to be a column rather
+    than a key inside `context`: `context` is agent-authored free-form JSON, so
+    burying the addressee there would let an agent decide who may answer and whose
+    sidebar an ask appears in. The value is validated at the ingestion boundary
+    (`operator_queue_service`) against the agent's roster.
+
+    Nullable with no default, so every existing row keeps meaning exactly what it
+    meant: an ask for the operator.
+    """
+    _safe_add_column(
+        cursor,
+        "operator_queue",
+        "addressed_to_email",
+        "ALTER TABLE operator_queue ADD COLUMN addressed_to_email TEXT",
+        log_msg="Adding addressed_to_email to operator_queue for workspace asks (ent#364)",
+    )
+    conn.commit()
+
+
+def _migrate_channel_report_client(cursor, conn):
+    """ent#457 review — WHICH client a portal channel context belongs to.
+
+    ``source_channel_agent`` (ent#265) records the agent whose binding owns the
+    context; nothing recorded the HUMAN. That was fine while every channel leg
+    delivered to a chat identified only by a chat id, but the portal leg files
+    into a per-client thread, and its authorization to do so came from a guard
+    that checks the AGENT — ``_inherited_channel_context`` refuses only when
+    ``parent_agent != agent_principal``.
+
+    So for an agent A shared with clients X and Y, A could pass the execution id
+    of one of X's portal turns while serving Y: the guard passes (same agent),
+    the child inherits X's session, and its terminal reports into X's thread
+    with a body A chose. A is a single agent holding both clients' data, so that
+    is a cross-client disclosure between two different people.
+
+    The client identity therefore has to ride WITH the channel context rather
+    than be re-derived from it. ``source_user_email`` was rejected as a carrier:
+    ``routers/public_memory.py`` reads it to decide whose MEM-001 memory blob a
+    turn writes into, so overloading it would silently redirect memory writes.
+
+    Nullable, no default: every pre-existing row reports NULL, and the portal
+    resolver fails CLOSED on NULL rather than delivering unverified.
+
+    Mirrored by Alembic 0048_channel_report_client for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "source_channel_client",
+        "ALTER TABLE schedule_executions ADD COLUMN source_channel_client TEXT",
+    )
+def _migrate_workspace_ratings(cursor, conn):
+    """One-click Workspace ratings land in `agent_evaluations` (ent#366).
+
+    Not a new table: ent#206 built this surface precisely so a score is written
+    by someone other than the agent being scored, and a user rating is the one
+    score that must never pass through the thing it grades. What it lacked was a
+    way to say WHAT was rated — `execution_id` names a run, and a person clicks
+    a message or a deliverable.
+
+    `comment` is client-authored free text and is treated as untrusted: the read
+    path strips it for an agent principal, so the rated agent sees its tallies
+    and never a stranger's verbatim words (the ent#366 grooming decision).
+
+    The UNIQUE index is what makes "changing your mind updates rather than
+    appends" a property of the table rather than a race between two clicks. It
+    is partial on `target_id IS NOT NULL` so the graded-run rows a Tier-0 pass
+    writes — all of which have no target — are untouched.
+    """
+    for column, ddl in (
+        ("target_kind", "ALTER TABLE agent_evaluations ADD COLUMN target_kind TEXT"),
+        ("target_id", "ALTER TABLE agent_evaluations ADD COLUMN target_id TEXT"),
+        ("comment", "ALTER TABLE agent_evaluations ADD COLUMN comment TEXT"),
+        ("updated_at", "ALTER TABLE agent_evaluations ADD COLUMN updated_at TEXT"),
+    ):
+        _safe_add_column(
+            cursor, "agent_evaluations", column, ddl,
+            log_msg=f"Adding {column} to agent_evaluations for Workspace ratings (ent#366)",
+        )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_evaluations_rating_target "
+        "ON agent_evaluations(evaluator, target_kind, target_id) WHERE target_id IS NOT NULL"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_target "
+        "ON agent_evaluations(agent_name, target_kind, target_id)"
+    )
+    conn.commit()
+
+
+def _migrate_report_audience(cursor, conn):
+    """Reports gain an audience and the chat that produced them (ent#365).
+
+    `addressed_to_email` is who the report is FOR; `portal_session_id` is the
+    Workspace chat it was published in. Both are **validated columns**, not keys
+    inside `payload` — the ent#364 rule, and it matters more here: `payload` is
+    agent-authored free-form JSON that a client-facing renderer displays, so an
+    audience buried in it would let the agent choose whose Workspace shows the
+    report, and a session id buried in it would let the agent post a card into a
+    conversation it was never part of. The addressee is checked against the
+    agent's own roster at the publish boundary; the session is resolved
+    server-side from the publishing turn and never read from the request.
+
+    Nullable with no default, so every existing row keeps meaning what it meant:
+    an operator-scoped report, tied to no chat.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_reports",
+        "addressed_to_email",
+        "ALTER TABLE agent_reports ADD COLUMN addressed_to_email TEXT",
+        log_msg="Adding addressed_to_email to agent_reports for Workspace deliverables (ent#365)",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_reports",
+        "portal_session_id",
+        "ALTER TABLE agent_reports ADD COLUMN portal_session_id TEXT",
+        log_msg="Adding portal_session_id to agent_reports for Workspace deliverables (ent#365)",
+    )
+    # The Workspace reads by (addressee, agent) and by (addressee, session); an
+    # unindexed scan of a table the retention sweep lets grow to 90 days of
+    # fleet-wide reports is not a list view.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reports_audience "
+        "ON agent_reports(addressed_to_email, agent_name, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reports_portal_session "
+        "ON agent_reports(portal_session_id, created_at)"
+    )
+    conn.commit()
+
+
 def _migrate_portal_chat_state(cursor, conn):
     """Per-user star + read cursor for Workspace chats (ent#359).
 
@@ -3444,6 +3758,132 @@ def _migrate_portal_chat_state(cursor, conn):
         """
     )
     conn.commit()
+
+
+def _migrate_portal_file_dismissals_table(cursor, conn):
+    """Per-viewer dismissal of an agent-shared file (#2582 / ent#548).
+
+    ``agent_shared_files`` has no audience column, so ``portal_documents`` lists
+    every active share of an agent to every rostered client. "Remove it from MY
+    list" therefore needs its own storage — and the one generic per-user
+    preference store (``user_ui_preferences``) is FK'd to ``users.id``, which a
+    Workspace client has no row in.
+
+    Keyed by the caller's own email, which makes the row itself the per-viewer
+    scope; ``file_id`` is deliberately never validated on write (a 404 for an
+    unknown id would be an existence oracle over every share in the install —
+    OSS invariant #8, the same fork ``set_chat_star`` resolved), and a row cap
+    bounds the write instead. ``agent_name`` is what makes the row follow the
+    agent's lifecycle through ``AGENT_REFS``.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS portal_file_dismissals (
+            client_email TEXT NOT NULL,
+            file_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            dismissed_at TEXT NOT NULL,
+            PRIMARY KEY (client_email, file_id)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_portal_file_dismissals_file "
+        "ON portal_file_dismissals(file_id)"
+    )
+    conn.commit()
+
+
+def _migrate_secret_settings_encryption(cursor, conn):
+    """Encrypt the cleartext credential rows in ``system_settings`` (ent#435).
+
+    Six settings held LIVE third-party credentials in cleartext — every DB dump,
+    backup, replica and snapshot carried usable tokens, and any read path to the
+    DB yielded them without needing ``CREDENTIAL_ENCRYPTION_KEY`` (CWE-312). This
+    is the one-shot sweep: each value moves to an AES-256-GCM envelope under
+    ``<key>_encrypted`` and the cleartext row is DELETED.
+
+    The key NAME moves deliberately. Leaving the value encrypted in place under
+    the original name would make "is this install encrypted?" unanswerable
+    without decrypting every row; with the rename, the reporter's own
+    verification query — ``SELECT key FROM system_settings WHERE key IN (...)``
+    returning nothing — is the proof, and the ``set_setting`` guard keeps it true.
+
+    Policy (which keys, envelope shape, skip rules) is shared verbatim with the
+    PostgreSQL track via ``services.secret_settings.plan_migration``; only the
+    SQL plumbing differs, because that track holds a SQLAlchemy Connection and
+    this one a raw ``sqlite3`` cursor (Invariant #9).
+
+    Hard-fails on a missing ``CREDENTIAL_ENCRYPTION_KEY``, matching the #453
+    Slack sweep and every Invariant #12 helper: the backend refuses to start
+    rather than leave the credentials in cleartext. ``scripts/deploy/start.sh``
+    auto-generates the key (``ensure_hex32_secret``), so a supported deployment
+    always has one.
+
+    Idempotent at row level (an existing envelope is skipped) and at migration
+    level (``schema_migrations``).
+
+    **The whole sweep is ONE transaction** — a single ``conn.commit()`` after the
+    loop, not a commit per row. That is the stronger property and it is
+    deliberate: a crash mid-sweep rolls back every row, so the install is never
+    left with three of six credentials migrated and the runner never records the
+    migration as applied. Do not "fix" this into a per-row commit; that would
+    trade all-or-nothing for a partially-converted state whose only recovery is
+    the read-path lazy migration. Either way no credential is ever lost — the
+    encrypted row is written before the cleartext row is deleted — but rollback
+    is cleaner than convergence.
+
+    NOTE for operators: this protects the DB going forward. Historical backups
+    still contain the plaintext, so the affected tokens should be ROTATED —
+    see docs/migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md.
+    """
+    from services.secret_settings import SECRET_SETTING_KEYS, plan_migration
+
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='system_settings'"
+    )
+    if not cursor.fetchone():
+        logger.info("ent#435 migration: system_settings absent, skipping")
+        return
+
+    placeholders = ",".join("?" for _ in SECRET_SETTING_KEYS)
+    keys = sorted(SECRET_SETTING_KEYS)
+    cursor.execute(
+        f"SELECT key, value FROM system_settings WHERE key IN ({placeholders})", keys
+    )
+    rows = cursor.fetchall()
+
+    # Raises ValueError if CREDENTIAL_ENCRYPTION_KEY is unset — but only once we
+    # know there is something to encrypt, so a fresh install with no credential
+    # rows is never blocked from booting by a key it does not yet need.
+    plan = plan_migration(rows) if rows else []
+
+    now = utc_now_iso()
+    for legacy_key, encrypted_key, envelope in plan:
+        cursor.execute(
+            "INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at",
+            (encrypted_key, envelope, now),
+        )
+        cursor.execute("DELETE FROM system_settings WHERE key = ?", (legacy_key,))
+    conn.commit()
+
+    if plan:
+        # Names only — never values (the G-04 rule: a violation record must not
+        # become a second copy of the secret).
+        logger.warning(
+            "ent#435 migration: encrypted %d cleartext credential setting(s): %s. "
+            "ROTATE these credentials — historical backups still hold the plaintext.",
+            len(plan),
+            ", ".join(sorted(k for k, _, _ in plan)),
+        )
+    else:
+        logger.info(
+            "ent#435 migration: no cleartext credential settings found (%d row(s) "
+            "already encrypted or empty)",
+            len(rows),
+        )
 
 
 def _migrate_shared_sessions_tables_to_oss(cursor, conn):
@@ -3525,6 +3965,314 @@ def _migrate_shared_sessions_tables_to_oss(cursor, conn):
         cursor.execute(index_sql)
     conn.commit()
 
+
+def _migrate_execution_turn_integrity(cursor, conn):
+    """#2467: queryable turn-integrity flags on the execution row.
+
+    A ``claude --print`` turn that ends with a background shell still running
+    is killed by the CLI ~5s after exit; the kill is reported in the stream the
+    agent forwards as ``execution_log``, but the row recorded a clean
+    ``success`` with no structured trace. ``turn_integrity`` is a nullable
+    TEXT JSON object derived backend-side at terminal write
+    (``services/execution_integrity.py``), carrying
+    ``background_tasks_killed`` (structural kill records: id/type/origin/
+    status — never description or command text, the #2127 privacy rule) and
+    ``background_tasks_pending_at_exit`` (the waited-path counter that was
+    previously reported in metadata but persisted nowhere).
+
+    NULL means "no evidence" (healthy run, or a transcript shape without the
+    events) — never "verified healthy" (the ``clone_status`` convention).
+    Mirrored by Alembic ``0049_execution_turn_integrity``.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "turn_integrity",
+        "ALTER TABLE schedule_executions ADD COLUMN turn_integrity TEXT",
+        log_msg="Adding turn_integrity column to schedule_executions...",
+    )
+    conn.commit()
+
+
+def _migrate_agent_canvases_table(cursor, conn):
+    """Create agent_canvases (ent#438).
+
+    The durable agent canvas — one row per (agent_name, canvas_id), so a write
+    is an upsert and the surface is addressable. Schema is also in
+    db/schema.py for fresh installs; this handles existing ones. Idempotent.
+    Mirrored by Alembic revision 0050_agent_canvases for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(agent_canvases)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_canvases (
+            agent_name TEXT NOT NULL,
+            canvas_id TEXT NOT NULL,
+            title TEXT,
+            blocks TEXT NOT NULL,
+            audience TEXT NOT NULL DEFAULT 'operator',
+            schema_version INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by_execution_id TEXT,
+            PRIMARY KEY (agent_name, canvas_id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_canvases_agent "
+        "ON agent_canvases(agent_name, updated_at DESC)"
+    )
+    conn.commit()
+
+
+def _migrate_agent_canvases_template(cursor, conn):
+    """ent#537 — a canvas may declare a starter layout by name.
+
+    `agent_canvases.template` holds 'dashboard' | 'report' | 'brief' |
+    'status-board', or NULL for the stacked default every pre-#537 row keeps.
+    A property of the SURFACE (like `audience`), so a column rather than a key
+    inside `blocks`; the per-block `slot` that fills a layout lives in the
+    blocks JSON because it travels with the block through `patch_canvas`.
+    No backfill: NULL is the honest reading of a row nobody laid out.
+
+    Mirrored by the Alembic revision 0054_agent_canvases_template.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_canvases",
+        "template",
+        "ALTER TABLE agent_canvases ADD COLUMN template TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_agent_canvases_pinned(cursor, conn):
+    """ent#553 — a human may pin a canvas so it stays at the top of the pile.
+
+    `agent_canvases.pinned` is 0/1, default 0, and is written ONLY by the
+    human-facing pin route — never by the agent write path. The distinction is
+    the point: `audience` is the agent's decision about who may read a canvas,
+    `pinned` is the reader's decision about what they want to see first, and an
+    agent that could pin itself to the top would defeat the ordering the pin
+    exists to give the person.
+
+    NOT NULL DEFAULT 0 so every pre-#553 row reads as unpinned without a
+    backfill pass.
+
+    Mirrored by the Alembic revision 0059_agent_canvases_pinned.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_canvases",
+        "pinned",
+        "ALTER TABLE agent_canvases ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+    )
+    conn.commit()
+
+
+def _migrate_execution_open_canvas(cursor, conn):
+    """ent#555 — which canvas the user had open when they sent a turn.
+
+    A per-turn CONTEXT field of exactly the shape `source_channel*` already
+    has on this table: stamped at dispatch, read by the surfaces that need to
+    know what the turn was about. It never widens what the agent may reach —
+    the boundary that stamps it validates the canvas belongs to that agent.
+
+    Mirrored by the Alembic revision 0061_execution_open_canvas.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "open_canvas_id",
+        "ALTER TABLE schedule_executions ADD COLUMN open_canvas_id TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_agent_canvas_shares_table(cursor, conn):
+    """ent#554 — share links for a canvas.
+
+    A separate table rather than a typed row in `agent_public_links`: nothing
+    in that table's read path filters on `type`, so a canvas row there would
+    also be a working public-CHAT token. See the DDL comment in db/schema.py.
+
+    Mirrored by the Alembic revision 0060_agent_canvas_shares.
+    """
+    cursor.execute("PRAGMA table_info(agent_canvas_shares)")
+    if cursor.fetchall():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_canvas_shares (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            canvas_id TEXT NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            scope TEXT NOT NULL DEFAULT 'authorized',
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT,
+            revoked_at TEXT,
+            last_viewed_at TEXT,
+            view_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_canvas_shares_token "
+        "ON agent_canvas_shares(token)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_canvas_shares_canvas "
+        "ON agent_canvas_shares(agent_name, canvas_id)"
+    )
+    conn.commit()
+
+
+def _migrate_portal_session_title_source(cursor, conn):
+    """ent#473 — which hand wrote a Workspace thread's title.
+
+    `enterprise_portal_sessions.title` is written by three hands: the derived
+    fallback (`touch_portal_session`, first message prefix), the ent#186
+    generated title, and — from ent#473 — a person renaming the chat. The
+    generator must never overwrite a person's title, and the ent#473 second
+    pass has to know whether the first attempt landed at all, so the hand is
+    recorded beside the value: NULL = derived fallback (or any row that
+    predates this column), 'generated', 'user'.
+
+    No backfill, deliberately: a pre-#473 title keeps working exactly as
+    before (AC "existing threads keep their titles; no migration"), and NULL is
+    the honest reading of a row nobody can attribute.
+
+    Mirrored by the Alembic revision 0052_portal_session_title_source.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_sessions",
+        "title_source",
+        "ALTER TABLE enterprise_portal_sessions ADD COLUMN title_source TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_user_ui_preferences_table(cursor, conn):
+    """Create user_ui_preferences (trinity-enterprise#413, OSS-core).
+
+    Per-user UI state that used to live in browser-global localStorage — the
+    Dashboard Grid layout, tile prefs and org toggles first. One row per
+    (user_id, key); the value is an opaque JSON object, size-capped at the
+    service. Schema is also in db/schema.py for fresh installs; this handles
+    existing ones. Idempotent. Mirrored by Alembic revision
+    0053_user_ui_preferences for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(user_ui_preferences)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_ui_preferences (
+            user_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, key),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
+def _migrate_portal_messages_voice_source(cursor, conn):
+    """ent#534 — a Workspace voice call's turns land in the chat, marked spoken.
+
+    Two nullable columns on `enterprise_portal_messages`: `source` (NULL for a
+    typed turn, 'voice' for one spoken in a call) and `voice_call_id` (the voice
+    session id, so one call's rows group into a single collapsed block). Both
+    are written by the platform only — no client request carries them.
+
+    A per-row call id rather than a header row, deliberately: `get_portal_messages`
+    reads the newest 100 rows, and a 30-minute call is ~180, so anything keyed on
+    an opener row falls apart exactly when the call was long enough to matter.
+
+    Additive, no backfill: every existing row is a typed turn (`source IS NULL`).
+    Mirrored by the Alembic revision 0057_portal_messages_voice_source.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "source",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN source TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "voice_call_id",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN voice_call_id TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_portal_session_main_chat(cursor, conn):
+    """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
+
+    Every (user, agent) pair has one **Main** chat: the place the agent reaches
+    you when no conversation named itself. `is_main` marks it; `archived_at`
+    marks the one Reset retired, which stays an ordinary past chat — readable,
+    resumable, renameable — and simply stops being that place.
+
+    The partial unique index is the point of the migration, not an
+    afterthought. `ensure_main_session` is reachable from two request paths and
+    runs in every uvicorn worker, so a check-then-insert races two Mains into
+    existence for one pair, after which "the pinned first tab" has no single
+    answer. The predicate `WHERE is_main = 1` is load-bearing: an archived row
+    keeps its (agent, client) pair forever, so an unconditional unique index
+    would refuse the SECOND Reset.
+
+    No backfill, deliberately. Every existing row reads `is_main = 0` and Main
+    is created lazily on the next visit — the same shape as ent#473's
+    `title_source`. Backfilling would have to pick one existing thread as Main
+    for every pair on the instance, and "the chat that happened to be most
+    recent when we migrated" is not a fact anyone asked for.
+
+    Mirrored by the Alembic revision 0055_portal_session_main_chat.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_sessions",
+        "is_main",
+        "ALTER TABLE enterprise_portal_sessions ADD COLUMN is_main INTEGER NOT NULL DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_sessions",
+        "archived_at",
+        "ALTER TABLE enterprise_portal_sessions ADD COLUMN archived_at TEXT",
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_sessions_main "
+        "ON enterprise_portal_sessions(agent_name, client_email) WHERE is_main = 1"
+    )
+    conn.commit()
+
+
+
+def _migrate_schedule_workspace_delivery(cursor, conn):
+    """Let a schedule deliver its output into a Workspace conversation (ent#498).
+
+    One nullable column, no backfill and no index. NULL — every existing row —
+    is today's behaviour, and the resolver fails CLOSED on it, so an install that
+    never sets the field cannot notice this ran.
+
+    No index deliberately: the column is read only through the schedule row the
+    scheduler already loaded by id, never selected on.
+
+    Postgres counterpart: `0056_schedule_workspace_delivery`.
+    """
+    _safe_add_column(
+        cursor, "agent_schedules", "deliver_to_workspace_email",
+        "ALTER TABLE agent_schedules ADD COLUMN deliver_to_workspace_email TEXT",
+        log_msg=("Adding deliver_to_workspace_email to agent_schedules for "
+                 "Workspace brief delivery (ent#498)..."),
+    )
+    conn.commit()
 
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
@@ -3620,6 +4368,8 @@ MIGRATIONS = [
     ("schedule_executions_pull_claim_lease", _migrate_schedule_executions_pull_claim_lease),
     ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
     ("agent_loops_failure_policy", _migrate_agent_loops_failure_policy),
+    ("agent_loops_terminal_driven", _migrate_agent_loops_terminal_driven),
+    ("execution_fan_out_task_id", _migrate_execution_fan_out_task_id),
     ("agent_sync_state_gc_signals", _migrate_agent_sync_state_gc_signals),
     ("agent_ownership_volume_base_name", _migrate_agent_ownership_volume_base_name),
     ("agent_ownership_display_label", _migrate_agent_ownership_display_label),
@@ -3636,5 +4386,25 @@ MIGRATIONS = [
     ("client_portal_tables_to_oss", _migrate_client_portal_tables_to_oss),
     ("portal_session_resume", _migrate_portal_session_resume),
     ("portal_chat_state", _migrate_portal_chat_state),
+    ("operator_queue_addressed_to", _migrate_operator_queue_addressed_to),
+    ("rate_limit_events_failure_kind", _migrate_rate_limit_events_failure_kind),
+    ("secret_settings_encryption", _migrate_secret_settings_encryption),
+    ("agent_ownership_operator_resume", _migrate_agent_ownership_operator_resume),
+    ("subscription_headroom_history_table", _migrate_subscription_headroom_history_table),
     ("shared_sessions_tables_to_oss", _migrate_shared_sessions_tables_to_oss),
+    ("report_audience", _migrate_report_audience),
+    ("channel_report_client", _migrate_channel_report_client),
+    ("workspace_ratings", _migrate_workspace_ratings),
+    ("execution_turn_integrity", _migrate_execution_turn_integrity),
+    ("agent_canvases_table", _migrate_agent_canvases_table),
+    ("portal_session_title_source", _migrate_portal_session_title_source),
+    ("user_ui_preferences_table", _migrate_user_ui_preferences_table),
+    ("agent_canvases_template", _migrate_agent_canvases_template),
+    ("agent_canvases_pinned", _migrate_agent_canvases_pinned),
+    ("agent_canvas_shares_table", _migrate_agent_canvas_shares_table),
+    ("execution_open_canvas", _migrate_execution_open_canvas),
+    ("portal_session_main_chat", _migrate_portal_session_main_chat),
+    ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
+    ("portal_messages_voice_source", _migrate_portal_messages_voice_source),
+    ("portal_file_dismissals_table", _migrate_portal_file_dismissals_table),
 ]

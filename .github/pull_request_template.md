@@ -6,6 +6,22 @@ Brief description of changes.
 
 Fixes #(issue number)
 
+## Journey Impact
+
+<!-- #2350. One line, exactly one of:
+
+       Journey Impact: new: J11
+       Journey Impact: extends: J03
+       Journey Impact: none: <why this touches no promise>
+
+     `none` REQUIRES a reason — a bare `none` fails the check. Declaring `new:`
+     obliges this PR to carry a journey skeleton under tests/journeys/; a
+     `strict=True` xfail asserting the journey's invariants is enough.
+
+     The promise list lives in tests/journeys/catalog.yaml. -->
+
+Journey Impact: 
+
 ## Type of Change
 
 - [ ] Bug fix (non-breaking change that fixes an issue)
@@ -18,6 +34,16 @@ Fixes #(issue number)
 - [ ] I have tested this locally
 - [ ] New tests added (if applicable)
 - [ ] All existing tests pass
+- [ ] Every new test **executes** the changed path — no assertion over the source text of the
+      module under test unless its live consumer is CI itself (a workflow, a vendored copy, a
+      route table), and no bound check at the one value where both bounds coincide (#2829)
+
+<!-- #2829. For a bug fix, name the test(s) that go RED with the fix reverted (revert from a
+     scratch copy, restore byte-identical). A fix whose tests stay green with the fix
+     reverted has no regression test, whatever the file is named. Leave the line as
+     "Mutation: n/a — not a fix" for a feature/docs PR. -->
+
+Mutation: 
 
 ## Checklist
 

@@ -17,7 +17,7 @@ Trinity is an autonomous agent orchestration platform: every agent runs in its o
 | Deploy yourself (or another agent) to a Trinity instance | [Deploy an agent](#deploy-an-agent-to-trinity) | `trinity agents list` (or `GET /api/agents`) shows the agent `running` |
 | Stand up a new Trinity instance | [Stand up an instance](#stand-up-a-trinity-instance) | `curl /health` → `{"status": "healthy"}` |
 | Operate an existing instance (chat, schedules, fleet ops) | [Operate over MCP](#operate-a-trinity-instance-over-mcp) | an MCP tool call (e.g. `list_agents`) returns results over your API key |
-| Evaluate Trinity / summarize it for your operator | [README.md](README.md), then [docs/user-docs/README.md](docs/user-docs/README.md); system design: [docs/memory/architecture.md](docs/memory/architecture.md) | you can state what Trinity is, how to run it, and its license |
+| Evaluate Trinity / summarize it for your operator | [README.md](README.md), then [docs/user-docs/README.md](docs/user-docs/README.md); system design: [docs/memory/architecture.md](docs/memory/architecture.md) (+ [docs/memory/architecture/](docs/memory/architecture/) for area detail) | you can state what Trinity is, how to run it, and its license |
 | Contribute to Trinity's codebase | [Work on this repository](#work-on-this-repository) — Claude Code also auto-loads [CLAUDE.md](CLAUDE.md) | tests pass and a PR is open against `dev` |
 
 ## Key facts
@@ -97,7 +97,7 @@ cd my-agent/ && trinity deploy .      # package, upload, create + start the cont
 
 ```bash
 TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
-  -d 'username=admin&password=YOUR_ADMIN_PASSWORD' | jq -r .access_token)
+  -d 'username=admin&password=YOUR_ADMIN_PASSWORD' | jq -r '.access_token // empty')
 curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents
 ```
 
@@ -130,7 +130,7 @@ Caveats that matter to agents:
 
 - **This is a PUBLIC repository.** Never commit credentials, API keys, internal URLs, or PII. Use placeholders (`your-domain.com`, `user@example.com`). Review `git diff` before every commit.
 - Run the stack: `./scripts/deploy/start.sh` (Docker must be running). Stop: `./scripts/deploy/stop.sh`. Rebuild the agent base image after `docker/base-image/` changes: `./scripts/deploy/build-base-image.sh`.
-- Tests: `python -m pytest -v --tb=short` (markers: `unit` needs no backend, `requires_agent` needs a running agent).
+- Tests: `cd tests && pytest unit/` is the per-PR unit island and needs no backend; every other tier creates and deletes real agents on the instance `TRINITY_API_URL` points at, so read [tests/README.md](tests/README.md) first — and [docs/testing/STRATEGY.md](docs/testing/STRATEGY.md) for what each lane proves.
 - Layout: `src/backend` (FastAPI), `src/frontend` (Vue 3 + Pinia), `src/mcp-server` (TypeScript MCP proxy), `src/cli`, `docker/base-image` (agent runtime).
 - Backend pattern: router → service → db (`src/backend/routers|services|db`); schema changes require a versioned migration in `src/backend/db/migrations.py`.
 - Workflow: GitHub Issues with priority/type/theme labels; feature branches off `dev`; PRs target `dev` (releases merge `dev` → `main`). **Two-tracker open-core model:** bugs/refactor/docs live in public `abilityai/trinity`; features/epics in private `abilityai/trinity-enterprise` (see `.claude/DEVELOPMENT_WORKFLOW.md` → Repository Routing). See [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -140,11 +140,13 @@ Caveats that matter to agents:
 | Resource | What's in it |
 |----------|--------------|
 | [docs/user-docs/README.md](docs/user-docs/README.md) | **The detailed docs index** — guides, agents, credentials, collaboration, automation, operations, sharing, integrations, CLI, abilities plugins, API reference |
-| [docs/memory/architecture.md](docs/memory/architecture.md) | Current system design: components, cross-cutting subsystems, DB schema, invariants |
+| [docs/memory/architecture.md](docs/memory/architecture.md) | Always-loaded core: system shape, all invariants, network topology, and the Architecture Map |
+| [docs/memory/architecture/](docs/memory/architecture/) | Per-area detail read on demand: component/API catalogs, execution, reliability, agent lifecycle + runtime, integrations, observability, workspace, frontend, MCP server, DB schema, security |
 | [docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md](docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md) | Agent template structure in depth |
 | [docs/MULTI_AGENT_SYSTEM_GUIDE.md](docs/MULTI_AGENT_SYSTEM_GUIDE.md) | Multi-agent YAML manifests and coordination patterns |
 | [docs/CLI.md](docs/CLI.md) | Full `trinity` CLI reference and multi-instance profiles |
 | [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) | Current limitations and workarounds |
+| [docs/testing/STRATEGY.md](docs/testing/STRATEGY.md) | How Trinity is tested — the method, the CI lanes, and the bar a harness must meet; read it before adding or running tests |
 | [abilityai/abilities](https://github.com/abilityai/abilities) | The plugin marketplace — agent lifecycle workflows (scaffold, develop, deploy, iterate) |
 
 Programmatic docs Q&A: `./scripts/ask-trinity.sh "your question"` from a checkout, or the hosted endpoint linked in [docs/user-docs/getting-started/help.md](docs/user-docs/getting-started/help.md).

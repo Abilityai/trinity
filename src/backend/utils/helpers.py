@@ -3,7 +3,7 @@ Utility helper functions for the Trinity backend.
 """
 import re
 from datetime import datetime, timedelta, timezone
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 # =============================================================================
@@ -125,6 +125,44 @@ def parse_iso_timestamp(timestamp: str) -> datetime:
         dt = dt.replace(tzinfo=timezone.utc)
 
     return dt
+
+
+# =============================================================================
+# Duration Representability (#2434)
+# =============================================================================
+
+_PG_INT4_MAX = 2**31 - 1  # 24.855 days in ms — the PostgreSQL INTEGER ceiling
+
+
+def duration_ms_between(
+    started_at: datetime, completed_at: datetime
+) -> Optional[int]:
+    """Elapsed milliseconds, or ``None`` when the result is not a measurement.
+
+    Low end (#1832): ``started_at`` and ``completed_at`` are written by
+    different processes (the backend runs ``--workers 2``; the standalone
+    ``src/scheduler`` container is a separate image), so clock skew can make the
+    subtraction negative — clamp at 0, unchanged.
+
+    High end (#2434): ``duration_ms`` is a PostgreSQL ``INTEGER``. A value above
+    ``2**31-1`` ms (24.855 days) means ``started_at`` is stale or corrupt, not
+    that the work ran that long. Recording it raises
+    ``NumericValueOutOfRange`` — and because every watchdog sweep batches its
+    SELECT and its whole per-row UPDATE loop in ONE transaction, that aborts the
+    batch and leaves every row in it ``running`` forever. SQLite stores an
+    8-byte int and never raises, which is why this was invisible in CI.
+
+    Takes both datetimes as parameters and never calls ``now()``: the backend
+    passes AWARE datetimes (``parse_iso_timestamp``) and the scheduler passes
+    NAIVE ones (``parse_scheduler_ts``); resolving "now" in here would mix the
+    two shapes and raise.
+
+    Mirrored behaviourally (not imported) in ``src/scheduler/utils.py`` per
+    Invariant #16; parity is enforced by
+    ``tests/unit/test_1713_scheduler_utils_parity.py``.
+    """
+    ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
+    return None if ms > _PG_INT4_MAX else ms
 
 
 def parse_env_content(content: str) -> List[Tuple[str, str]]:

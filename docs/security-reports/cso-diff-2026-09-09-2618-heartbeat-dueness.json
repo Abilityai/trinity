@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "date": "2026-09-09",
+  "mode": "daily",
+  "scope": "--diff (feature/2618-heartbeat-last-shared vs dev @ bce0bbe1)",
+  "issue": "abilityai/trinity#2618",
+  "phases_run": ["P0", "P1", "P2 (diff)", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11", "P12", "P13", "P14"],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": [],
+    "new_inputs": [],
+    "ci_cd": [],
+    "new_workflow_expressions": 0,
+    "new_secret_references": 0,
+    "docker_or_compose_changes": 0,
+    "dependency_changes": 0,
+    "background_loops_changed": ["services/telemetry_sharing_service.py::TelemetrySharingService (wake/tick split; dueness from the persisted stamp; fresh SingleFlightLock per claim, released only when the receiver did not acknowledge; persisted retry cap; fenced stamp write; lifespan stop hook in main.py)"],
+    "tests": ["tests/unit/test_2618_heartbeat_dueness.py (36 tests; fake settings store, fake httpx, fakeredis marker, patched clock)", "src/frontend/tests/unit/telemetryConsent.spec.js (copy regex)"]
+  },
+  "hardening_shipped": [
+    "share_now's True now means 'the receiver acknowledged': the post-2xx stamp write is fenced, so a local write failure can no longer be reported as a failed send — under the new release-on-failure path an unfenced write would have re-sent an accepted snapshot every wake on both workers",
+    "the cross-worker marker is constructed per claim (SingleFlightLock is single-use) and only the lock created in the current tick can be released, so a fail-open claim can never delete a live marker",
+    "attempt frequency during a receiver outage is capped from the persisted send log (five consecutive failures, then one attempt per half-interval) — bounded without Redis and restart-proof",
+    "the heartbeat is stopped in lifespan shutdown and a cancellation mid-send releases the marker, so a dead process's marker cannot block the next boot's first wake",
+    "egress CONDITIONS are unchanged: the config kill switch and the stored consent are evaluated before any stamp read or Redis touch; a settings read failure reads as consent-off",
+    "the one new WARNING and the loop guard log a period, a count or an exception class only — never TELEMETRY_SHARING_URL, which is operator-supplied and may carry userinfo"
+  ],
+  "findings": [],
+  "supply_chain_summary": {
+    "python": "no dependency files changed",
+    "node": "no dependency files changed (a pnpm lockfile created by the host vitest run was deleted, never staged)",
+    "actions": "no workflow files changed"
+  },
+  "filter_stats": {
+    "candidates": 4,
+    "reported": 0,
+    "refuted_by_verifier": 0,
+    "excluded_by_rules": 4,
+    "notes": [
+      "EXCLUDED (rule 1, DoS / rate limiting): the wake changes ATTEMPT frequency during a receiver outage or on an air-gapped consented install (from one per day to at most one per wake for the first five failures, then one per half-interval); the diff itself adds the cap, and content, gates and recipient are unchanged",
+      "EXCLUDED (rule 5, hardening without a concrete vulnerability): the documented reset path `DELETE /api/settings/telemetry_sharing_last_shared_at` (admin-gated, human-only) now yields one heartbeat within 10–20 minutes instead of at the next boot-relative tick; consent still gates, the document is the same anonymized aggregate, and the change is documented in the feature flow and FR-7",
+      "EXCLUDED (rule 6, race not concretely exploitable): `release_if_owned` is GET-then-DELETE (the pre-existing primitive, compare-and-delete on the caller's own token); the only writers are trusted backend workers and agents cannot reach Redis (two-network invariant #589), so no attacker-controlled interleaving exists",
+      "CHECKED, not a finding: the `_loop` guard's `logger.exception` — every callee on the guarded path (`_read`, `is_consent_enabled`, `_recent_sends`, `_claim_tick`, `share_now`) swallows its own errors and none holds the URL or a credential in scope, so a traceback there could only come from a programming error in the pure helpers"
+    ]
+  },
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+  "trend": {
+    "prior_reports": ["cso-diff-2026-09-08-2578-deploy-fetch-never-recurses.json", "cso-diff-2026-09-07-ent541-retention-parity-guard.json", "cso-diff-2026-09-07-ent190-benchmark-wiring.json"],
+    "note": "diff-mode reports are branch-scoped; the ent#190 report covered the same module's benchmark read and also closed with no findings — no fingerprint overlap"
+  }
+}

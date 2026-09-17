@@ -16,6 +16,14 @@ class RoomCreate(BaseModel):
     scribe: Optional[str] = None
 
 
+class RoomRename(BaseModel):
+    """ent#473 — a person's title for the room. Bounded here only against
+    abuse; the one-line / non-empty / 100-char rules are `services/chat_title`'s,
+    applied in the service so the refusal is a NAMED 400 the person can act on
+    rather than a 422 about a schema."""
+    name: str = Field(max_length=4000)
+
+
 class RoomMessageCreate(BaseModel):
     """``sender`` is deliberately absent — the acting principal comes from the
     auth context, never the body, so nobody can post as someone else."""

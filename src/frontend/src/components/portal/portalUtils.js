@@ -65,6 +65,80 @@ export function unreadByAgent(threads) {
   return out
 }
 
+// ent#364 / #2424: asks per agent — the ask twin of `unreadByAgent`.
+//
+// Deliberately a SEPARATE map, never summed into the unread count. The two are
+// different facts about different obligations: an ask is waiting on you to
+// DECIDE, an unread reply on you to READ. PortalSidebar has said so since
+// ent#364; what it lacked was this half.
+export function asksByAgent(asks) {
+  const out = {}
+  for (const a of Array.isArray(asks) ? asks : []) {
+    const name = a?.agent_name
+    if (!name) continue
+    out[name] = (out[name] || 0) + 1
+  }
+  return out
+}
+
+// The aggregate badge's accessible name.
+//
+// #2424: it counted ASKS and said "agents" — two asks raised by one agent read
+// as "2 agents are waiting on your answer". The number was right and the noun
+// was wrong, and the two only diverge when a single agent raises more than one
+// ask, which is why nobody caught it.
+//
+// Resolved toward asks rather than agents, because the row badges added
+// alongside this now answer "which agent" — so the header's job is "how many
+// decisions", and that is a count of asks.
+export function askBadgeTitle(count) {
+  const n = Number(count) || 0
+  if (n <= 0) return ''
+  return `${n} ${n === 1 ? 'ask is' : 'asks are'} waiting on your answer`
+}
+
+// The agent row's accessible name.
+//
+// #2424: this composed unread replies and the availability chip and never
+// mentioned asks, so a blocked agent's title was the bare "Open ws-sage" — the
+// pending decision was unreachable for a screen-reader user as well as
+// invisible. Asks lead: a decision outranks unread chatter.
+export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle = '' } = {}) {
+  const who = label && label !== name ? `${label} (${name})` : (label || name || '')
+  const asks = Number(askCount) || 0
+  const reads = Number(unread) || 0
+
+  const parts = []
+  if (asks > 0) parts.push(`${asks} ${asks === 1 ? 'ask' : 'asks'} waiting on you`)
+  if (reads > 0) parts.push(`${reads} unread ${reads === 1 ? 'reply' : 'replies'}`)
+
+  const base = parts.length ? `${who} — ${parts.join(', ')}` : `Open ${who}`
+  return chipTitle ? `${base} — ${chipTitle}` : base
+}
+
+// #2159 capped the roster at five so a long fleet could not push chats below
+// the fold. #2424: the cap is a plain roster-order slice, so on any fleet larger
+// than five the agent WAITING ON YOU is as likely as not to be behind the
+// toggle — observed with an agent 11th of 12 while the header advertised its
+// two asks.
+//
+// Ask-bearing agents are appended, not floated to the top: re-sorting on a
+// transient count moves rows under the cursor between refreshes, which is the
+// same reason the roster is not re-sorted by availability. So the first N stay
+// exactly where they were and the visible list simply grows.
+export const AGENT_COLLAPSE_LIMIT = 5
+
+export function visibleAgentRows(roster, { expanded = false, askCounts = {}, limit = AGENT_COLLAPSE_LIMIT } = {}) {
+  const list = Array.isArray(roster) ? roster : []
+  if (expanded) return list
+
+  const head = list.slice(0, limit)
+  const shown = new Set(head.map((a) => a?.name))
+  const counts = askCounts || {}
+  const waiting = list.filter((a) => a?.name && !shown.has(a.name) && (Number(counts[a.name]) || 0) > 0)
+  return waiting.length ? [...head, ...waiting] : head
+}
+
 export function totalUnread(threads) {
   return (Array.isArray(threads) ? threads : [])
     .reduce((sum, t) => sum + (Number(t?.unread) || 0), 0)
@@ -184,6 +258,233 @@ export function threadTitle(t) {
   return (t.title || '').trim() || 'New chat'
 }
 
+// --- Chat titles (ent#473) --------------------------------------------------
+// The client-side mirror of `services/chat_title.py::normalize_chat_title`,
+// so a person is told BEFORE the request; the server stays the authority and
+// its named 400 (`invalid_title`) is rendered verbatim when the two disagree.
+export const CHAT_TITLE_MAX_CHARS = 100
+export const TITLE_EXAMPLE = 'Q3 invoice discrepancy'
+
+// Control characters other than \t/\n/\r are dropped as whitespace; a line
+// break INSIDE the trimmed text is a refusal rather than a silent join.
+// eslint-disable-next-line no-control-regex
+const CONTROL_RE = /[\x00-\x09\x0b\x0c\x0e-\x1f\x7f]/g
+
+export function normalizeChatTitle(raw) {
+  if (typeof raw !== 'string') return { ok: false, reason: 'empty', message: chatTitleProblem('empty') }
+  const s0 = raw.trim()
+  if (/[\n\r]/.test(s0)) return { ok: false, reason: 'multiline', message: chatTitleProblem('multiline') }
+  const s = s0.replace(CONTROL_RE, ' ').split(/\s+/).filter(Boolean).join(' ')
+  if (!s) return { ok: false, reason: 'empty', message: chatTitleProblem('empty') }
+  if (s.length > CHAT_TITLE_MAX_CHARS) {
+    return { ok: false, reason: 'too_long', message: chatTitleProblem('too_long', s.length) }
+  }
+  return { ok: true, title: s }
+}
+
+export function chatTitleProblem(reason, have = 0) {
+  if (reason === 'multiline') return `A title is one line — remove the line breaks. Example: ${TITLE_EXAMPLE}`
+  if (reason === 'too_long') {
+    return `Keep the title to ${CHAT_TITLE_MAX_CHARS} characters or fewer (this one is ${have}). Example: ${TITLE_EXAMPLE}`
+  }
+  return `A title can't be empty. Example: ${TITLE_EXAMPLE}`
+}
+
+// The sentence for a rename the SERVER refused. A named 400 carries the
+// rule's own sentence; anything else degrades to one that still names the
+// next action, never a bare status.
+export function renameFailureMessage(err) {
+  const detail = err?.response?.data?.detail
+  if (detail && typeof detail === 'object' && detail.code === 'invalid_title' && detail.message) {
+    return String(detail.message)
+  }
+  if (err?.response?.status === 404) return "This chat isn't yours to rename any more — reload to see the current list."
+  return "Couldn't save the new title. Check your connection and try again."
+}
+
+// --- The agent's chats as tabs (ent#451, #2579) -----------------------------
+// This user's threads with the active agent, most recent first, as the tab
+// strip above the thread. Rooms are not an agent's tabs (a room has no single
+// agent subject), and another agent's threads are not this agent's.
+//
+// #2579 REVERSES one half of the 2026-09-06 ruling, deliberately. The ruling —
+// "a new chat exists (tab and sidebar row) once its first message is sent" —
+// stays true for the THREAD: nothing is created before the first message, and
+// this function still never invents a row. What changed is the STRIP: pressing
+// New chat and seeing nothing at all change is the defect the operator
+// reported, so an unsaved ACTIVE chat is drawn as a provisional tab labelled
+// "New chat" with `thread: null` behind it.
+//
+// The provisional tab is keyed ONLY off the caller's explicit `draft` intent,
+// never off "the active id is not in the list". That distinction is the whole
+// safety of it: a cold deep link to a thread the cross-agent batch has not
+// listed yet would otherwise wear a "New chat" label over a real conversation.
+// It carries no special styling either — the label IS the mark, and a second
+// visual language for a tab that lives for one round trip is noise.
+//
+// It is inserted directly AFTER Main, which is the slot the real row takes
+// once the list carries it (the sort below falls back to `created_at`), so
+// adoption swaps the tab in place instead of making it jump.
+export const NEW_CHAT_TAB_ID = '__new_chat__'
+export const NEW_CHAT_TAB_LABEL = 'New chat'
+
+// ent#523: the pinned Main chat's tab label. A constant because three places
+// have to agree on it — the strip, the details list, and the test — and a chat
+// whose title is literally "Main" would otherwise be indistinguishable from it.
+export const MAIN_TAB_LABEL = 'Main'
+
+export function agentChatTabs(threads, agentName, { activeId = null, draft = false } = {}) {
+  if (!agentName) return []
+  const mine = (Array.isArray(threads) ? threads : [])
+    .filter((t) => t && !t.is_room && t.agent_name === agentName)
+    // ent#523: an archived chat IS a tab. The operator ruled it explicitly —
+    // "one system line in Main names the archived chat, which becomes the
+    // newest tab" (2026-09-06) — and it is right: an archive is an ordinary
+    // past chat, and hiding the thing the system line just pointed at is the
+    // one place the person is most likely to look next.
+    //
+    // An earlier draft filtered these out, reasoning that Reset would grow the
+    // strip by one permanent entry per use. That was solving a problem
+    // `OverflowTabs` already solves: the strip renders what fits and counts the
+    // rest under "N more", so growth costs nothing visually.
+  const ts = (t) => {
+    const iso = t.last_message_at || t.created_at
+    const n = iso ? new Date(iso).getTime() : 0
+    return Number.isNaN(n) ? 0 : n
+  }
+  const tabs = mine
+    .slice()
+    // Main first, then recency. Sorted rather than spliced so there is one
+    // comparator to reason about, and so a payload that (wrongly) carries two
+    // Mains still produces a stable order instead of a random one.
+    .sort((a, b) => (b.is_main ? 1 : 0) - (a.is_main ? 1 : 0) || ts(b) - ts(a))
+    .map((t) => ({
+      id: t.id || t.session_id,
+      // Main is named by its ROLE, never by its title: it is the same thread
+      // for the life of the pair, and a derived title from whatever was said
+      // in it first would make the pinned tab wander.
+      label: t.is_main ? MAIN_TAB_LABEL : threadTitle(t),
+      // The bookmark the approved design (board A3) draws on Main. It is the
+      // one tab that is pinned rather than ordered, so it is the one that says
+      // so in the strip rather than only in its position.
+      pinned: !!t.is_main,
+      thread: t,
+    }))
+  // #2579: the provisional tab. Only on an explicit draft, and only while no
+  // real row already carries the active id — once the list catches up with the
+  // adopted thread the real tab takes over in the same slot.
+  if (draft && !tabs.some((t) => t.id === activeId)) {
+    const after = tabs.length && tabs[0].pinned ? 1 : 0
+    tabs.splice(after, 0, {
+      // Keyed to the adopted id when there is one, so the tab the person is
+      // looking at keeps its identity across the gap between "the thread now
+      // exists" and "the list says so".
+      id: activeId || NEW_CHAT_TAB_ID,
+      label: NEW_CHAT_TAB_LABEL,
+      provisional: true,
+      pinned: false,
+      thread: null,
+    })
+  }
+  return tabs
+}
+
+// #2579: does this agent already have a Main chat on screen? The shell asks
+// before spending a per-agent round trip to mint one (the batch deliberately
+// never mints, so a pair whose chats predate ent#523 has no Main in the list).
+export function agentHasMain(threads, agentName) {
+  if (!agentName) return false
+  return (Array.isArray(threads) ? threads : [])
+    .some((t) => t && !t.is_room && t.agent_name === agentName && !!t.is_main)
+}
+
+// #2579: is this thread inside the window where a generated title may still
+// land? Two `touch_portal_session(added=1)` calls happen per exchange (the
+// user's message and the reply), and `_title_plan` gates on the PRE-turn
+// `message_count <= 2` — so a post-turn count of 2..4 is exactly the `first`
+// plus one `retry` window, and nothing wider.
+//
+// The `>= 2` floor is required, not defensive: `sessions-changed` fires from
+// four sites in the conversation, one of them right after the voice path's
+// `createSession` on a ZERO-message thread, and arming a settle cycle there
+// would poll for a title nothing is generating.
+//
+// Main is NOT excluded. Its tab is labelled by role, but its sidebar row
+// renders `threadTitle`, and post-ent#523 Main is the default landing thread —
+// so excluding it left the single most common conversation showing its first
+// message as its name.
+export function titleSettling(t) {
+  const n = Number(t?.message_count ?? 0)
+  return n >= 2 && n <= 4
+}
+
+// #2579: the re-read schedule after a turn, in ms since turn-done.
+//
+// A best-effort refresh WINDOW, and deliberately NOT a mirror of the server's
+// `PORTAL_TITLE_TIMEOUT_SECONDS` — that is operator-tunable, and a client that
+// invents its own ceiling for a server budget is the #2133 class. Exhausting
+// this schedule is therefore a trigger to ASK the authority (the health
+// record), never a verdict that generation is broken.
+export const TITLE_SETTLE_DELAYS_MS = [2000, 6000, 16000]
+
+// #2579: who may fetch the admin-only title-health endpoint. Request
+// avoidance, not a security gate — `assert_admin` on the endpoint is the
+// authority — but it matters that a portal client never asks: the endpoint is
+// dead for that audience (the #2128 lesson), so the notice must be too.
+export function shouldFetchTitleHealth(isPlatformSession, role) {
+  return !!isPlatformSession && role === 'admin'
+}
+
+// The overflow trigger's label: counted, as the contract asks ("N more").
+export function moreTabsLabel(n) {
+  return `${n} more`
+}
+
+// --- New chat hotkey (ent#451) ----------------------------------------------
+// ⌘J on Mac, Ctrl+J elsewhere — ruled 2026-09-06 (⌘N is the browser's, ⌘⇧O
+// declined). Plain modifier only: Shift/Alt variants are someone else's.
+export function isNewChatHotkey(e) {
+  if (!e || typeof e.key !== 'string') return false
+  if (e.key.toLowerCase() !== 'j') return false
+  if (e.shiftKey || e.altKey) return false
+  return !!(e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey)
+}
+
+export function isMacLike(platform) {
+  return /mac|iphone|ipad|ipod/i.test(String(platform || ''))
+}
+
+// --- Generated-title health → an operator notice (ent#473) -------------------
+// The settings panel renders what `GET /api/settings/portal-session-policy`
+// reports under `title_generation`. Only a BAD state earns a notice: "ok" and
+// "unknown" (no attempt yet this process) say nothing, because a panel that
+// reassures on every load trains people to skip it.
+export function titleGenerationNotice(health) {
+  if (!health || typeof health !== 'object') return null
+  const when = health.last_failure_at ? ` Last attempt: ${health.last_failure_at}.` : ''
+  if (health.state === 'no_credential') {
+    return {
+      level: 'warning',
+      title: "Workspace chat titles aren't being generated",
+      body: `No Anthropic API key and no subscription token was available for the agent, so new chats keep a title taken from their first message. Add an API key under Credentials, or assign the agent a subscription.${when}`,
+    }
+  }
+  if (health.state === 'failing') {
+    const n = Number(health.consecutive_failures) || 0
+    const why = health.last_failure ? ` (${health.last_failure})` : ''
+    return {
+      level: 'warning',
+      title: 'Workspace chat titles are failing to generate',
+      body: `${n} attempt${n === 1 ? '' : 's'} in a row failed${why}; new chats keep a title taken from their first message until the model call succeeds again.${when}`,
+    }
+  }
+  return null
+}
+
+export function newChatHotkeyLabel(platform) {
+  return isMacLike(platform) ? '⌘J' : 'Ctrl+J'
+}
+
 // #2101: bounded briefing hint grid. Order deterministically — a card with a
 // real frontmatter description is a useful hint, a bare humanized slug is
 // noise, so described cards come first (stable within each group; the backend
@@ -236,7 +537,12 @@ export function resolveAgentLanding({ agent, forceNew = false, agents = [], thre
   if (!Array.isArray(agents) || !agents.some((a) => a && a.name === agent)) return null
   if (forceNew) return { agentName: agent, sessionId: null }
 
-  const latest = (Array.isArray(threads) ? threads : []).find((t) => t && t.agent_name === agent)
+  // ent#523: the same rule the sidebar's agent row uses (`landingThread`), not
+  // a second one. This used to take the first row of an already-sorted list,
+  // which agreed with "most recent" by accident; once Main exists, an unused
+  // Main sorts last on recency and "first row" would skip it, so a deep link
+  // and a sidebar click could land a first-time visitor in different places.
+  const latest = landingThread(threads, agent)
   return {
     agentName: agent,
     sessionId: latest ? (latest.id || latest.session_id || null) : null,
@@ -322,8 +628,14 @@ export function collapseSelection(selected, { multi = false } = {}) {
 // the previous session's agent name, surfaced to someone who never asked for
 // it. That is the same class the path guard exists to close, so it belongs in
 // the same predicate rather than in a second one somebody has to remember.
-export const STAGE_QUERY_KEYS = ['agent', 'new']
+export const STAGE_QUERY_KEYS = ['agent', 'new', 'voice']
 
+// The Workspace root. Two consumers: the stage guard below, and the brand
+// mark's link target (ent#556, `PortalBrand`). It is the only route the mark
+// may point at — a client session holds no `users` row, so a platform route
+// would be a door that 404s or bounces to `/login` for exactly the audience
+// this surface exists for, and a dead affordance is one of the two failures
+// the brand corner must not have (the other being an unlabelled one).
 export const WORKSPACE_ROOT = '/workspace'
 
 export function shouldEscapeStage(path, query) {
@@ -592,6 +904,39 @@ export function availabilityChip(agent, { detailed = false } = {}) {
     }
 }
 
+/**
+ * #2641 — does THIS list of rows need the availability slot reserved at all?
+ *
+ * The slot's fixed footprint exists so a row does not reflow when an agent
+ * starts or stops between refreshes (#2196), and that is worth keeping. What
+ * was wrong is paying for it on every row unconditionally: `availabilityChip`
+ * returns null for every state except `stopped` and `unavailable`, so on a
+ * fleet where everything is running — the normal case — the strip is empty on
+ * EVERY row. That produced both halves of the reported defect at once: the
+ * dates stopped 72px short of the right edge, and 72px per row came out of the
+ * only element that wanted it, the name.
+ *
+ * The reservation is now a property of the LIST, not of a row: reserve on every
+ * row iff any row can actually show a chip. Uniform down the list, so #2580's
+ * identical truncation point survives, and free when there is nothing to hold
+ * space for.
+ *
+ * Takes the ROWS BEING RENDERED, not the whole roster — a stopped agent hidden
+ * by search or by the collapse limit would otherwise reserve width on a list
+ * that shows no chip, which is the original bug with extra steps.
+ *
+ * Residual, stated rather than discovered: the 0→1 transition (the first agent
+ * in view stops) reflows the whole list once, where before it reflowed nothing.
+ * That is the honest cost of not charging every row for the empty case, and it
+ * is the trade the issue delegates. Within a populated list nothing moves: a
+ * second agent stopping, or the first one restarting while another is still
+ * stopped, changes only that row's chip.
+ */
+export function reservesAvailabilitySlot(rows, opts = {}) {
+  if (!Array.isArray(rows)) return false
+  return rows.some((a) => availabilityChip(a, opts) !== null)
+}
+
 export const EMPTY_REASON_NO_PLAYBOOKS = 'No playbooks are available for this agent right now.'
 export const EMPTY_REASON_NO_PEERS = 'No other agents are shared with you.'
 export const EMPTY_REASON_NO_MENTIONABLE_PEERS =
@@ -698,6 +1043,144 @@ export function boundCandidates(list, limit = TYPEAHEAD_LIMIT) {
   const all = Array.isArray(list) ? list : []
   const n = Number.isInteger(limit) && limit > 0 ? limit : TYPEAHEAD_LIMIT
   return { visible: all.slice(0, n), overflow: Math.max(0, all.length - n) }
+}
+
+// ---------------------------------------------------------------------------
+// ent#402 — sidebar search filters the AGENT roster too, not only the chats.
+//
+// Everything decidable lives here rather than in PortalSidebar.vue, because
+// vitest runs `environment: 'node'` with no component-mount harness: a rule
+// written inside the SFC is a rule no test can reach (the ent#392 precedent).
+// ---------------------------------------------------------------------------
+
+// Its own constant, deliberately not TYPEAHEAD_LIMIT: a sidebar row is taller
+// than a typeahead row (avatar + label + slug + chips), so the two windows are
+// answering different questions about the same list.
+export const SIDEBAR_AGENT_RESULT_LIMIT = 8
+
+export const SEARCH_PLACEHOLDER = 'Search agents and chats…'
+
+/**
+ * Agent matches for the sidebar search.
+ *
+ * Two properties are load-bearing and both live HERE rather than at the call
+ * site, so a caller cannot get them wrong:
+ *
+ *  1. `requireMentionable: false`. `filterAgentCandidates` defaults it TRUE for
+ *     the composer, where an un-mentionable slug is a dead-end pick. A sidebar
+ *     row is not a mention — a dotted slug like `data.scout` opens perfectly
+ *     well — so filtering by mentionability here would hide a real agent from a
+ *     search for its own name.
+ *  2. The window is `visibleAgentRows`, the #2424 rule the steady state already
+ *     uses, NOT a plain `boundCandidates` slice. A slice is rank-ordered, so an
+ *     agent with an open ask can fall past the window and be hidden from the
+ *     result set — the exact failure #2424 fixed for the collapsed list, which a
+ *     second bounding rule would quietly reintroduce for search.
+ *
+ * Returns a RECORD, because the section header, the toggle and the empty line
+ * each need a different fact about the same result and must not re-derive it.
+ */
+export function searchAgents(roster, query, {
+  askCounts = {},
+  expanded = false,
+  limit = SIDEBAR_AGENT_RESULT_LIMIT,
+} = {}) {
+  const { items } = filterAgentCandidates(roster, query, { requireMentionable: false })
+  const visible = visibleAgentRows(items, { expanded, askCounts, limit })
+  return {
+    items,
+    visible,
+    total: items.length,
+    hidden: Math.max(0, items.length - visible.length),
+  }
+}
+
+/**
+ * Which shape the search region is in.
+ *
+ * `roster-loading` wins outright: a two-character query typed while the roster
+ * is still in flight must not read "No agents match." over a roster that has
+ * not arrived — loading is not empty (design-system p15). `searching` describes
+ * the CHAT request only; agents are filtered client-side over a roster already
+ * in hand, so they render regardless of what the chat request is doing.
+ */
+export function sidebarSearchState({
+  agentTotal = 0,
+  chatCount = 0,
+  chatsSearching = false,
+  rosterLoading = false,
+} = {}) {
+  if (rosterLoading) return 'roster-loading'
+  if (chatsSearching) return 'searching'
+  if (agentTotal > 0 && chatCount > 0) return 'both'
+  if (agentTotal > 0) return 'agents-only'
+  if (chatCount > 0) return 'chats-only'
+  return 'none'
+}
+
+/**
+ * The honest lines, PER SECTION — never one combined sentence.
+ *
+ * A combined "Nothing matches" over-claims: the chat half is a server request
+ * whose failure the view currently swallows into `[]`, so "nothing matches"
+ * would assert something about chats that was never actually answered. Two
+ * lines each state only what their own section knows, and neither can stand in
+ * for the other: "nothing matched at all" is BOTH lines plus the hint, while
+ * "agents matched, no chats" is the chats line alone.
+ *
+ * `agentsEmpty` exists because the STATE cannot express one real case. The chat
+ * request's own flag is set on every keystroke and stays set until the request
+ * settles, so `searching` covers the whole time someone is typing — and the
+ * agent half is a client-side filter that already knows its answer. Reading the
+ * agents line off the state alone left an agents section with a header, no rows
+ * and no sentence for the entire typing session, which is the dead state this
+ * function exists to prevent. `chats-only`/`none` already MEAN no agent matched,
+ * so the flag only adds the arm the state cannot reach; loading still outranks
+ * both (loading is not empty).
+ */
+export function searchEmptyLines(state, query = '', { agentsEmpty = false } = {}) {
+  const q = String(query ?? '')
+  const noAgents = agentsEmpty || state === 'chats-only' || state === 'none'
+  const agents = (state !== 'roster-loading' && noAgents) ? 'No agents match.' : null
+  let chats = null
+  if (state === 'searching') chats = 'Searching chats…'
+  else if (state === 'agents-only' || state === 'none') chats = 'No chats match.'
+  const hint = state === 'none'
+    ? (q ? 'Try another word, or clear the search.' : null)
+    : null
+  return { agents, chats, hint }
+}
+
+// The count, not the overflow — the toggle beside it already states how many
+// are hidden, and a header that repeats it says the same thing twice.
+export function agentResultsLabel(total) {
+  const n = Number(total) || 0
+  return n > 0 ? `Agents · ${n}` : 'Agents'
+}
+
+/**
+ * The label on the ONE persistent toggle (#2159 — two v-if-alternated buttons
+ * drop keyboard focus on collapse). Its count changes with the mode because it
+ * expands a different list: the whole roster in the steady state, the match set
+ * while searching.
+ */
+export function agentToggleLabel({
+  searching = false,
+  expanded = false,
+  rosterCount = 0,
+  matchCount = 0,
+} = {}) {
+  if (expanded) return 'Show fewer'
+  return searching
+    ? `Show all (${Number(matchCount) || 0} matches)`
+    : `Show all (${Number(rosterCount) || 0})`
+}
+
+// While searching the toggle is only meaningful when it has something to do:
+// something is hidden, or the list is expanded and can be collapsed back.
+export function showAgentToggle({ searching = false, hidden = 0, expanded = false } = {}) {
+  if (!searching) return true
+  return expanded || (Number(hidden) || 0) > 0
 }
 
 /**
@@ -1074,5 +1557,491 @@ export function resolveComposerGrowth(metrics, max) {
     // Below the ceiling there is nothing to scroll, so the scrollbar must be gone
     // rather than merely unused.
     overflowY: wanted > ceiling ? 'auto' : 'hidden',
+  }
+}
+
+/**
+ * How an expired ask describes itself (ent#429).
+ *
+ * "Visibly expired" is not enough on its own: the #1142 sweep DELETES terminal
+ * rows, so between lapsing and being swept an ask is the only evidence that a
+ * question was ever asked — and "this expired" without a WHEN leaves the reader
+ * unable to tell a question that lapsed an hour ago from one that lapsed in
+ * March. The first is worth chasing; the second is history.
+ *
+ * Pure, and `now` is injected, because a component that formats its own dates is
+ * a component whose wording no test can reach (the ent#392 rule for this file).
+ *
+ * Degrades to the bare sentence on anything it cannot read — a missing, garbled
+ * or future `expires_at`. A wrong time is worse than no time here: the reader
+ * would act on it.
+ */
+export function expiredLabel(expiresAt, now = Date.now()) {
+  const bare = 'This expired before it was answered.'
+  if (!expiresAt) return bare
+
+  const at = Date.parse(expiresAt)
+  if (Number.isNaN(at)) return bare
+
+  const ms = now - at
+  // A future timestamp means the row is not actually expired and something
+  // upstream disagrees with us; say less rather than something false.
+  if (ms < 0) return bare
+
+  const mins = Math.floor(ms / 60000)
+  if (mins < 1) return 'This expired moments ago, before it was answered.'
+  if (mins < 60) return `This expired ${mins}m ago, before it was answered.`
+
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `This expired ${hours}h ago, before it was answered.`
+
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `This expired ${days}d ago, before it was answered.`
+
+  // Past a month, "43d ago" stops meaning anything — a date does.
+  return `This expired on ${new Date(at).toLocaleDateString()}, before it was answered.`
+}
+
+/**
+ * Should this ask offer "open the conversation it belongs to"? (ent#429)
+ *
+ * `chat_id` is written at RAISE time so the ask is never homeless — but a link
+ * is only useful when it goes somewhere the reader is not. Offered when the ask
+ * names a thread AND that is not the thread already on screen; the agent page
+ * and the sidebar pass no current thread, so there it is always offered.
+ *
+ * Additive by design: it never HIDES an ask from a thread it was not raised
+ * against. The attachment exists so a scheduled run's question is durable and
+ * findable, not to restrict where it may be answered — and an ask the reader
+ * can see but not reach is the failure this closes, not one it should create.
+ */
+export function askThreadLink(ask, currentSessionId = null) {
+  const target = ask?.chat_id
+  if (!target) return null
+  if (currentSessionId && target === currentSessionId) return null
+  return target
+}
+
+
+// ---- ent#365: deliverables ------------------------------------------------
+
+// The badge on a deliverable card. Keyed off the report's `display_hint`, which
+// is the same enum the renderer dispatches on — so a hint the renderer knows
+// always has a label, and one it does not degrades to the same honest word the
+// fallback renderer is showing.
+export const DELIVERABLE_KIND_LABELS = {
+  table: 'Table',
+  kpi: 'Metrics',
+  markdown: 'Document',
+  timeline: 'Timeline',
+  json: 'Data',
+}
+
+export function deliverableKindLabel(displayHint) {
+  return DELIVERABLE_KIND_LABELS[displayHint] || 'Report'
+}
+
+// Relative for recency, absolute for anything older than a week (principle 22).
+// Locale-free by construction so it is testable: the absolute form is the ISO
+// date, not a formatted one.
+export function relativeTime(iso, now = Date.now()) {
+  if (!iso) return ''
+  const then = new Date(iso).getTime()
+  if (!Number.isFinite(then)) return ''
+  const diff = Math.max(0, now - then)
+  if (diff < 60_000) return 'just now'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d ago`
+  return new Date(then).toISOString().slice(0, 10)
+}
+
+
+// ---- ent#366: ratings ------------------------------------------------------
+
+// The words differ by what is being rated, and the difference is deliberate: a
+// message is judged as an answer ("did this help?"), a deliverable as a piece of
+// work ("was this what you needed?"). Same underlying up/down.
+export const RATING_LABELS = {
+  message: { up: 'Helpful', down: 'Not helpful' },
+  deliverable: { up: 'Useful', down: 'Not what I needed' },
+}
+
+export function ratingLabels(targetKind) {
+  return RATING_LABELS[targetKind] || RATING_LABELS.message
+}
+
+// Clicking the rating you already gave is a no-op, not an un-rate: there is no
+// retract endpoint, and silently clearing a score locally would show the person
+// a state the server does not have.
+export function nextRating(current, clicked) {
+  return current === clicked ? null : clicked
+}
+
+// A negative rating is the one that opens the comment box (ent#366): the free
+// text was always the valuable part, and asking a happy person to explain
+// themselves is how you stop getting either.
+export function shouldPromptForComment(rating) {
+  return rating === 'down'
+}
+
+// The tally, as words. RAW COUNTS, never a percentage — one thumbs-down out of
+// one rating is "100% negative", a number that looks like evidence and is not.
+export const RATINGS_UNAVAILABLE_TEXT = 'Ratings unavailable right now.'
+export const RATINGS_EMPTY_TEXT = 'No ratings yet.'
+
+export function ratingTallyText(tally, targetKind = 'message') {
+  if (!tally || tally.unavailable) return RATINGS_UNAVAILABLE_TEXT
+  const up = Number(tally.up) || 0
+  const down = Number(tally.down) || 0
+  if (up + down === 0) return RATINGS_EMPTY_TEXT
+  const labels = ratingLabels(targetKind)
+  return `${up} ${labels.up.toLowerCase()} · ${down} ${labels.down.toLowerCase()}`
+}
+
+// What to tell someone after their words are saved. Both branches are honest:
+// "passed to the agent" only when it was, and otherwise the comment is still
+// recorded — never a promise of a follow-up that will not happen (AC #6).
+export const FEEDBACK_SENT_TEXT = 'Thanks — passed on to the agent.'
+export const FEEDBACK_RECORDED_TEXT = 'Thanks — recorded for the team.'
+
+// `already_dispatched` (ent#366 review) reads as SENT, not merely recorded: the
+// agent was handed this target's feedback on the first down-rating and one turn
+// per person per target is the rule, so "passed on to the agent" is the true
+// sentence. Only the no-skill and unknown cases fall back to "recorded".
+const FEEDBACK_REACHED_AGENT = new Set(['dispatched', 'already_dispatched'])
+
+export function feedbackAcknowledgement(captureFeedback) {
+  return FEEDBACK_REACHED_AGENT.has(captureFeedback) ? FEEDBACK_SENT_TEXT : FEEDBACK_RECORDED_TEXT
+}
+
+// --- Agents at the centre (ent#523) ------------------------------------------
+
+// Which chat opening an agent lands you in. Most recently ACTIVE wins, and Main
+// is the floor — never a blank stage, and never "the oldest thread happened to
+// sort first". Returns null only when the caller has no chats with this agent at
+// all, which the caller reads as "open Main once the list arrives".
+//
+// Deliberately NOT `agentChatTabs()[0]`: that pins Main to the front, so it
+// would land you in Main every time regardless of where you were last — the
+// exact behaviour AC 1 replaced.
+export function landingThread(threads, agentName) {
+  if (!agentName) return null
+  const mine = (Array.isArray(threads) ? threads : [])
+    .filter((t) => t && !t.is_room && t.agent_name === agentName && !t.archived_at)
+  if (!mine.length) return null
+  const ts = (t) => {
+    const iso = t.last_message_at || t.created_at
+    const n = iso ? new Date(iso).getTime() : 0
+    return Number.isNaN(n) ? 0 : n
+  }
+  // An unused Main has no `last_message_at` and would sort last on recency
+  // alone, so a first-time visitor would land on nothing. Falling back to it
+  // explicitly is cheaper to read than a comparator that special-cases zero.
+  const used = mine.filter((t) => t.last_message_at)
+  if (used.length) return used.slice().sort((a, b) => ts(b) - ts(a))[0]
+  return mine.find((t) => t.is_main) || mine[0]
+}
+
+// The sidebar's agent order (ent#523 AC 6).
+//
+// ent#491 owns "order by most recent collaboration" and is status-INCUBATING,
+// so this deliberately does NOT implement it. What ships is the deterministic
+// order the AC itself states — the primary companion first, then recency, then
+// name — with `primaryName` as the seam ent#491 will fill. Alphabetical-by-slug
+// was the alternative and is worse for exactly the reason ent#523 exists: it
+// sorts by a handle nobody thinks in.
+export function orderRosterAgents(agents, threads, primaryName = null, pinned = null) {
+  const list = Array.isArray(agents) ? agents.slice() : []
+  const lastSeen = collaborationRecency(threads)
+  // ent#491: a session-stable snapshot may override the derived recency, so a
+  // reply arriving does not re-sort the list under the cursor. Absent (the
+  // default) the derived values are used, which is what every existing caller
+  // and test expects.
+  const at = (name) => {
+    if (!name) return 0
+    const p = pinned && Object.prototype.hasOwnProperty.call(pinned, name)
+      ? Number(pinned[name]) : NaN
+    return Number.isFinite(p) ? p : (lastSeen.get(name) || 0)
+  }
+  const rank = (a) => (a?.name && a.name === primaryName ? 1 : 0)
+  return list.sort((a, b) =>
+    rank(b) - rank(a)
+    || at(b?.name) - at(a?.name)
+    || String(a?.name || '').localeCompare(String(b?.name || ''))
+  )
+}
+
+/**
+ * Per-agent "when did I last collaborate with this agent", in ms (ent#491).
+ *
+ * A ROOM counts for every agent in it — the `unreadByAgent` rule, for the same
+ * reason: there is no single agent a multi-agent conversation is "with", so
+ * working in a room with three agents is recent collaboration with all three.
+ * Before this, `orderRosterAgents` skipped rooms outright (`t.is_room`), so an
+ * agent you only ever work with in a room ranked as never-used and sat at the
+ * bottom under the alphabetical tiebreak.
+ *
+ * A room's `last_message_at` is real since ent#491's backend half; for an empty
+ * room it is absent and `created_at` is the honest fallback, which is what
+ * `normalizeRoomRow` already supplies.
+ *
+ * Exported so the store can seed its session snapshot from exactly this rule
+ * rather than a second copy of it.
+ */
+export function collaborationRecency(threads) {
+  const lastSeen = new Map()
+  const bump = (name, n) => {
+    if (!name) return
+    if (n > (lastSeen.get(name) || 0)) lastSeen.set(name, n)
+  }
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (!t) continue
+    const iso = t.last_message_at || t.created_at
+    const n = iso ? new Date(iso).getTime() : 0
+    if (!Number.isFinite(n) || n === 0) continue
+    const names = Array.isArray(t.agent_names) && t.agent_names.length
+      ? t.agent_names
+      : (t.agent_name ? [t.agent_name] : [])
+    for (const name of names) bump(name, n)
+  }
+  return lastSeen
+}
+
+// The one-line preview under an agent's name: the last thing said in any of
+// your chats with it (AC 6). Returns null with nothing to show, so the row
+// keeps its two-line footprint instead of reserving space for an empty string.
+export function agentPreview(threads, agentName) {
+  if (!agentName) return null
+  const mine = (Array.isArray(threads) ? threads : [])
+    .filter((t) => t && !t.is_room && t.agent_name === agentName && t.last_message_at)
+  if (!mine.length) return null
+  const ts = (t) => {
+    const n = new Date(t.last_message_at).getTime()
+    return Number.isNaN(n) ? 0 : n
+  }
+  const newest = mine.slice().sort((a, b) => ts(b) - ts(a))[0]
+  // The thread TITLE, not the message body: the sidebar list is viewer-scoped
+  // metadata (#2198) and carries no message content, so a body preview would
+  // need a second fetch per agent — the N+1 that batch call exists to remove.
+  const label = threadTitle(newest)
+  return label === 'New chat' ? null : label
+}
+
+// What the composer says when the agent cannot take a message (AC 10).
+//
+// A LABEL, never a disabled input: disabling relocates the dead state rather
+// than removing it, and the person can still type, queue their thought and read
+// why it will not go yet. The server's 502 stays the real refusal — this only
+// sets the expectation before they hit Enter. Returns null while the agent can
+// run, including on `unknown`, which is not evidence of anything.
+export function composerAvailabilityNotice(agent) {
+  const chip = availabilityChip(agent, { detailed: true })
+  if (!chip) return null
+  return { state: chip.state, message: chip.title }
+}
+
+// --- Answering an ask (ent#468) ----------------------------------------------
+
+// What the person is told after their answer lands.
+//
+// The decision this issue asked for is RENDER, not drop: on an opt-in agent an
+// answer sets real work in motion and spends the owner's budget, so the person
+// who caused that is told it happened. ent#364's AC — "the answer reaches the
+// agent and it resumes" — was true in the backend and invisible in the product.
+//
+// Consumes BOTH fields the answer response carries, which is the AC's "either
+// both or neither":
+//   * `status` is the gate. Only a row the server calls `answered` earns a
+//     confirmation — anything else means the answer did not land the way this
+//     copy would claim, and saying "Sent" over it would be the over-claim
+//     ent#430 spent a blocker removing from the field below.
+//   * `resume_requested` is the wording, and it is a report of INTENT
+//     (`_resume_requested`'s own contract): the dispatch is backgrounded, so
+//     "is picking this up" is the honest tense — not "has finished", and not a
+//     promise the turn succeeded. A failure after this point surfaces as a
+//     FAILED execution row and an audit entry on the operator's side.
+//
+// Returns null when there is nothing honest to say, so the caller renders
+// nothing rather than an empty line.
+export function answerConfirmation(answered, agentLabel = null) {
+  if (!answered || answered.status !== 'answered') return null
+  const who = (agentLabel || answered.agent_name || 'the agent')
+  return answered.resume_requested === true
+    ? `Sent — ${who} is picking this up.`
+    : 'Sent.'
+}
+
+// How long a confirmation stays before it clears itself. Long enough to read a
+// short sentence you were not waiting for, short enough that it never becomes
+// furniture — and it is a CONSTANT rather than a prop because the answer to
+// "how long should this be up" does not vary by surface.
+export const ANSWER_CONFIRMATION_MS = 6000
+
+// Every agent row's preview + timestamp, in ONE pass over the thread list.
+//
+// The two helpers below each scan the whole list, and the sidebar template
+// called them per row and twice each (a `v-if` and an interpolation) — so a
+// 10-agent roster over 200 threads did ~8k iterations per render, on a surface
+// that re-renders on every store tick. Same rules, same output; the cost is
+// O(threads + agents) instead of O(rows × threads × 4).
+export function agentRowMeta(threads, now = Date.now()) {
+  const newest = new Map()
+  const title = new Map()
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (!t || t.is_room || !t.agent_name || !t.last_message_at) continue
+    const n = new Date(t.last_message_at).getTime()
+    if (!Number.isFinite(n)) continue
+    if (n > (newest.get(t.agent_name) || 0)) {
+      newest.set(t.agent_name, n)
+      title.set(t.agent_name, threadTitle(t))
+    }
+  }
+  const out = {}
+  for (const [name, n] of newest) {
+    const label = title.get(name)
+    out[name] = {
+      // Same rule as `agentPreview`: an untitled chat is no preview, because a
+      // row reading "New chat" under every agent is noise.
+      preview: label === 'New chat' ? null : label,
+      time: compactAge(n, now),
+    }
+  }
+  return out
+}
+
+// The tight form, split out so `agentRowTime` and `agentRowMeta` cannot drift
+// on what "2d" means.
+function compactAge(then, now) {
+  const diff = Math.max(0, now - then)
+  if (diff < 60_000) return 'now'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d`
+  return new Date(then).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+// The agent row's right-hand timestamp (ent#523, board A3): when you last
+// heard from this agent, in the tightest form that is still unambiguous.
+//
+// Deliberately NOT `relativeTime` above, which other surfaces use and which
+// says "just now" / "5m ago" / "2026-09-07". This column is a few characters
+// wide beside a name and a preview, so it drops the "ago" the position already
+// implies and shows a month-day past a week — the shape the design draws
+// (`now` · `12m` · `2d` · `Aug 21`). Two formats because there are two jobs,
+// not because one of them was overlooked.
+export function agentRowTime(threads, agentName, now = Date.now()) {
+  if (!agentName) return ''
+  let newest = 0
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (!t || t.is_room || t.agent_name !== agentName || !t.last_message_at) continue
+    const n = new Date(t.last_message_at).getTime()
+    if (Number.isFinite(n) && n > newest) newest = n
+  }
+  if (!newest) return ''
+  return compactAge(newest, now)
+}
+
+// ---------------------------------------------------------------------------
+// #2580 — one shape for a message row, built in three places.
+//
+// `PortalConversation` constructs a thread row from history (`loadThread`), from
+// a completed turn (`deliver`) and from a reattached turn (`reattach`). The
+// defect the issue reports is that two of those three dropped the persisted
+// `id`, so a reply the user had just watched arrive carried no id and
+// `<PortalRating v-if="item.message.id">` hid the thumbs until the next page
+// load — arbitrary, from the reader's side, since an older reply two lines up
+// had them.
+//
+// A shared mapper rather than three corrected object literals: this is exactly
+// the #2211 shape (a fix landing in one twin and not the other), and it is also
+// the only form the rule can be TESTED in — `vitest.config.js` pins
+// `environment: 'node'` with no mount harness, so a rule living inside an SFC
+// is a rule no test can execute.
+//
+// `id` defaults to `null`, never `undefined`: the consumer's gate is a
+// truthiness test either way, but a row whose id is explicitly null says "this
+// was built without one" where a missing key says nothing at all.
+export function assistantRow({ content = '', id = null, my_rating = null,
+                               source = null, voice_call_id = null } = {}) {
+  return {
+    role: 'assistant',
+    content,
+    id: id || null,
+    myRating: my_rating || null,
+    source: source || null,
+    voiceCallId: voice_call_id || null,
+  }
+}
+
+// The reply a just-finished turn produced, read out of the history payload the
+// client polls anyway (`awaitPersistedReply`).
+//
+// `baseline` is taken BEFORE dispatch (`replyBaseline`): the newest assistant
+// row is only this turn's reply if it differs from the baseline, otherwise it
+// is the PREVIOUS turn's and would be shown twice. Returns null while that is
+// the case, which is the caller's "keep waiting".
+//
+// This is where the id was being lost. The persisted row was already in hand —
+// it is what the count is derived from — and only its content and cost were
+// carried out of the function.
+//
+// #2694: found by IDENTITY, not by count. The history read is now a window of
+// typed turns plus the spoken rows of the calls among them, so between the
+// baseline read and a poll the window can shift by a whole call — a count
+// would never grow, the poll would idle out, and a turn that answered would
+// be reported as "check shortly". The baseline is the id of the newest TYPED
+// assistant row (`replyBaseline`); a reply is new when that id changed. A
+// spoken reply (`source === 'voice'`) is never this turn's answer. The count
+// survives only as the fallback for a row with no id (the best-effort write).
+export function latestTypedReply(messages) {
+  const rows = Array.isArray(messages) ? messages : []
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const m = rows[i]
+    if (m && m.role === 'assistant' && m.source !== 'voice') return m
+  }
+  return null
+}
+
+function typedReplyCount(messages) {
+  return (Array.isArray(messages) ? messages : [])
+    .filter((m) => m && m.role === 'assistant' && m.source !== 'voice').length
+}
+
+// What a reply must differ from: taken BEFORE dispatch, from the same rows the
+// poll will read (the server's newest rows, or the local thread on a reattach).
+export function replyBaseline(messages) {
+  const last = latestTypedReply(messages)
+  return { id: last?.id || null, count: typedReplyCount(messages) }
+}
+
+// A missing session id is not an empty conversation. The portal backend resolves
+// it to the pair's Main chat, so the baseline read must make the same request and
+// let the server name the thread. Otherwise Main's last reply looks new as soon
+// as the streaming dispatch adopts the resolved session.
+export async function readReplyBaseline(fetchHistory, sessionId) {
+  try {
+    const data = await fetchHistory(sessionId || null)
+    return replyBaseline(data?.messages)
+  } catch {
+    return replyBaseline([])
+  }
+}
+
+export function replyFromHistory(messages, baseline) {
+  const last = latestTypedReply(messages)
+  if (!last) return null
+  const base = baseline && typeof baseline === 'object'
+    ? baseline
+    : { id: null, count: Number(baseline) || 0 }
+  const isNew = last.id && base.id
+    ? last.id !== base.id
+    : typedReplyCount(messages) > (Number(base.count) || 0)
+  if (!isNew) return null
+  return {
+    response: last.content,
+    cost: last.cost ?? null,
+    id: last.id || null,
+    myRating: last.my_rating || null,
   }
 }

@@ -1,13 +1,42 @@
 <template>
-  <div class="flex flex-col h-full min-h-0">
+  <!-- ent#524: a room takes a file drop like a 1:1 does, and the file goes to
+       EVERY participating agent's inbox (operator decision 13, 2026-09-06) —
+       a room is one conversation, so its files should match its transcript.
+       One gesture, N inbox writes, and the chip names the recipients so the
+       fan-out is visible rather than assumed. -->
+  <div
+    class="relative flex flex-col h-full min-h-0"
+    @dragenter="dropHandlers.onDragEnter"
+    @dragover="dropHandlers.onDragOver"
+    @dragleave="dropHandlers.onDragLeave"
+    @drop="dropHandlers.onDrop"
+  >
+    <div
+      v-if="fileDragging && !isClosed"
+      class="absolute inset-2 z-20 pointer-events-none rounded-2xl border-2 border-dashed border-action-primary-400 bg-action-primary-50/80 dark:bg-action-primary-900/30 flex items-center justify-center"
+      data-testid="portal-room-drop-overlay"
+      aria-hidden="true"
+    >
+      <p class="text-sm font-medium text-action-primary-700 dark:text-action-primary-200">
+        Drop files to send to {{ recipientLabel }}
+      </p>
+    </div>
+
     <!-- Header: who is in the room (ent#361 AC#2) -->
     <header class="shrink-0 flex items-center gap-2 px-3 sm:px-4 h-14 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
       <button class="sm:hidden -ml-1 p-2 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200" aria-label="Menu" @click="$emit('open-menu')">
         <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" /></svg>
       </button>
 
-      <div class="min-w-0">
-        <div class="font-semibold truncate text-sm">{{ room?.name || 'Chat' }}</div>
+      <div class="min-w-0 flex-1">
+        <!-- ent#473: the room's name, renameable in place by any human member. -->
+        <PortalEditableTitle
+          :value="room?.name || ''"
+          placeholder="Chat"
+          :rename="rename ? saveName : null"
+          label="Rename this chat"
+          text-class="font-semibold text-sm"
+        />
         <div class="flex items-center gap-1 mt-0.5">
           <PortalAvatar
             v-for="a in agentParticipants"
@@ -27,11 +56,19 @@
            room that closes at a cap with no prior warning reads as the agents
            going quiet. Shown from ~80% so there is time to react, not as a
            permanent gauge nobody asked for. -->
-      <div v-if="budgetWarning" class="ml-auto mr-2 text-xs text-status-warning-600 dark:text-status-warning-400 truncate" :title="budgetWarning">
-        {{ budgetWarning }}
+      <div
+        v-if="notice"
+        class="ml-auto mr-2 truncate text-xs"
+        :class="notice.level === 'critical'
+          ? 'text-status-danger-600 dark:text-status-danger-400 font-medium'
+          : 'text-status-warning-600 dark:text-status-warning-400'"
+        :title="`${notice.headline}. ${notice.detail}`"
+        data-testid="room-budget-headline"
+      >
+        {{ notice.headline }}
       </div>
 
-      <div class="flex items-center gap-1" :class="{ 'ml-auto': !budgetWarning }">
+      <div class="flex items-center gap-1 shrink-0" :class="{ 'ml-auto': !notice }">
         <!-- ent#359 AC #4: star from the header, same as a 1:1. -->
         <PortalStarButton
           :starred="starred"
@@ -43,6 +80,8 @@
           title="Add another agent to this conversation"
           @click="addOpen = !addOpen"
         >+ Add agent</button>
+        <!-- ent#625: the theme switch, filled by the shell (see PortalConversation). -->
+        <slot name="header-end" />
       </div>
     </header>
 
@@ -66,9 +105,12 @@
       <p v-if="addError" class="mt-1.5 text-xs text-status-danger-600 dark:text-status-danger-400">{{ addError }}</p>
     </div>
 
-    <!-- Transcript -->
-    <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
-      <div class="max-w-4xl mx-auto space-y-6">
+    <!-- Transcript. The wrapper is the jump-to-latest control's positioned box
+         (#2624) — it floats over the transcript rather than taking layout, so
+         appearing and disappearing never reflows what is being read. -->
+    <div class="relative flex-1 min-h-0 flex flex-col">
+    <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5" @scroll.passive="onTranscriptScroll">
+      <div class="max-w-[var(--ws-message-max,64rem)] mx-auto space-y-6">
         <p v-if="loading" class="text-center text-sm text-gray-400">Loading…</p>
 
         <div v-for="m in messages" :key="m.seq">
@@ -87,7 +129,12 @@
             <PortalAvatar :name="m.sender_identity" :size="28" class="mt-0.5" />
             <div class="max-w-[85%]">
               <div class="text-xs text-gray-500 dark:text-gray-400 mb-0.5">{{ m.sender_identity }}</div>
-              <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-3 text-sm leading-relaxed prose-portal" v-html="render(m.content)"></div>
+              <!-- #2515: the sender label stays out here (a room row is
+                   attributed, a 1:1 is not); the bubble itself is the shared
+                   component, so both transcripts render agent markdown the
+                   same way by construction rather than by two copies kept in
+                   step by a comment. -->
+              <PortalAgentBubble :content="m.content" />
             </div>
           </div>
         </div>
@@ -96,7 +143,33 @@
              the local send, so a client that reloaded mid-turn still sees it —
              a reload used to make the dots vanish while two agents were still
              working, which reads as the room having given up. -->
-        <div v-if="workingAgents.length" class="flex items-start gap-2.5">
+        <!-- ent#525: the live card per working agent, from the Work feed the
+             shell owns — status, elapsed, steps where the agent publishes
+             them. Falls back to the server-derived line below until the feed
+             has the rows, so a reload never shows a room that gave up. -->
+        <div v-if="roomLiveItems.length" class="space-y-2" data-testid="portal-room-work">
+          <div v-for="it in roomLiveItems" :key="it.id" class="flex items-start gap-2.5">
+            <PortalAvatar :name="it.agent_name" :size="28" class="mt-0.5" />
+            <!-- #2795: the card has always RENDERED a Stop button — it was
+                 simply never handed the two props that turn it on, so a room
+                 was the one surface where live work could not be interrupted.
+                 `can_stop` is the server's verdict (it mirrors what the
+                 terminate route will accept), never a local guess, and the
+                 store action is the Work tab's own. -->
+            <PortalWorkCard
+              :item="it"
+              show-agent
+              :elapsed-seconds="elapsedOf(it)"
+              :live-step="stepOf(it)"
+              :can-stop="it.can_stop"
+              :stopping="workStore.stoppingIds.includes(it.id)"
+              show-open-in-work
+              @stop="onStopWork"
+              @open-work="emit('open-work')"
+            />
+          </div>
+        </div>
+        <div v-else-if="workingAgents.length" class="flex items-start gap-2.5">
           <PortalAvatar :name="workingAgents[0]" :size="28" class="mt-0.5" />
           <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 px-3.5 py-2.5 flex items-center gap-2">
             <span class="inline-flex gap-1">
@@ -117,62 +190,174 @@
             <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:300ms"></span>
           </span>
         </div>
+        <!-- A refused cancel is the one outcome the person must be told about:
+             the turn is still running and still spending. A SUCCESSFUL stop
+             needs no line here — the room posts its own "…turn was stopped."
+             into the transcript.
+
+             Placed AFTER the live-work chain closes, not between its arms:
+             `v-else-if` binds to the immediately preceding element, so a
+             conditional dropped inside the chain steals it and the fallbacks
+             below render on the wrong condition. That is the #2794 defect, and
+             the first draft of THIS change committed it. -->
+        <InlineError
+          v-if="stopError"
+          :message="stopError"
+          data-testid="portal-room-stop-error"
+          @dismiss="stopError = ''"
+        />
       </div>
     </div>
+    <PortalJumpToLatest :show="showJumpToLatest" :count="unreadBelow" @jump="scrollToLatest" />
+    </div>
+
+    <!-- ent#474: the rail's mobile collapsed form — see PortalConversation. -->
+    <slot name="rail-strip" />
 
     <!-- Composer -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-6 py-3">
-      <div class="max-w-4xl mx-auto">
+      <div class="max-w-[var(--ws-message-max,64rem)] mx-auto">
         <!-- A closed room is a dead end unless it SAYS so. Rooms end on their
              own (message budget, cost cap, TTL) — silence would read as the
              agents having stopped answering. -->
         <p v-if="isClosed" class="text-xs text-center text-gray-500 dark:text-gray-400 py-2">
           This conversation has ended{{ room?.stop_reason ? ` (${closedReason})` : '' }}. Start a new chat to keep going.
         </p>
-        <form v-else class="flex items-end gap-2" @submit.prevent="send">
-          <!-- ent#392: `@` typeahead over the room's WAKE-SET. Same anchored
-               wrapper as the 1:1 composer; it must carry the flex sizing the
-               textarea used to hold, or the field collapses to content width.
+        <!-- ent#524: one chip per file, with its own outcome, and the
+             recipients named — a room's upload is a fan-out and the person
+             should see who received it. -->
+        <p v-if="batchNotice" class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300">{{ batchNotice }}</p>
+        <!-- #2620 — the proactive half. The header line is ambient; this is
+             where the person is about to SPEND one, so the last few messages
+             say so in full, once, right above the box. Only at `critical`: a
+             banner that is always there is a banner nobody reads. -->
+        <div
+          v-if="notice && notice.level === 'critical'"
+          class="mb-2 rounded-lg border border-status-danger-200 bg-status-danger-50 px-3 py-2 text-xs text-status-danger-800 dark:border-status-danger-800 dark:bg-status-danger-900/30 dark:text-status-danger-200"
+          data-testid="room-budget-banner"
+          role="status"
+        >
+          <span class="font-medium">{{ notice.headline }}.</span>
+          {{ notice.detail }}
+        </div>
 
-               #2259: and the same `block` on the textarea. A `<textarea>` is
-               inline-block, so in this block wrapper it sat on the baseline and
-               the line box reserved 6px below it; `items-end` then aligned Send
-               to that dead space instead of to the visible input edge. Twin of
-               PortalConversation — the two composers are the same markup in two
-               files, so a fix landing in only one silently keeps the bug. -->
-          <div ref="composerWrap" class="relative flex-1 min-w-0">
-            <PortalTypeahead
-              v-if="typeaheadOpen"
-              kind="@"
-              :rows="typeaheadRows"
-              :active-index="activeIndex"
-              :overflow="typeaheadBound.overflow"
-              :empty-message="typeaheadEmpty || ''"
-              @pick="acceptActive"
-              @hover="activeIndex = $event"
-            />
-            <textarea
-              ref="textarea"
-              v-model="input"
-              rows="1"
-              :placeholder="placeholder"
-              class="block w-full resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
-              @keydown="onComposerKeydown"
-              @input="onComposerInput"
-              @click="onComposerCaret"
-              @select="onComposerCaret"
-            ></textarea>
-          </div>
-          <button
-            type="submit"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
-            :disabled="!input.trim() || sending"
-            title="Send"
+        <!-- ent#524: one chip per file, with its own outcome, and the
+             recipients named. Sits ABOVE the composer and does not replace it
+             (#2794) — the 1:1's shape, which this composer is otherwise a copy
+             of (#2662). -->
+        <div v-if="attachments.length && !isClosed" class="mb-2 flex flex-wrap gap-1.5">
+          <span
+            v-for="(f, i) in attachments"
+            :key="i"
+            class="inline-flex items-center gap-1 text-xs rounded-full pl-2.5 pr-1.5 py-1"
+            :class="f.error
+              ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
+              : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'"
+            :title="f.error || `${f.name} → ${recipientLabel}`"
+            data-testid="portal-room-attachment-chip"
           >
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
-          </button>
+            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+            <span class="max-w-[10rem] truncate">{{ f.name }}</span>
+            <svg v-if="attachmentState(f) === 'uploading'" class="w-3 h-3 animate-spin text-gray-400" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            <span v-else-if="attachmentState(f) === 'failed'" class="max-w-[16rem] truncate opacity-90">· {{ f.error }}</span>
+            <span v-else class="opacity-70">· to {{ recipientLabel }}</span>
+          </span>
+        </div>
+        <!-- #2794: `v-if="!isClosed"`, NOT a `v-else`.
+             The composer shipped as `<form v-else>` chained to the "this
+             conversation has ended" line above (ent#358) — the right rule. It
+             is no longer that rule: `v-else` binds to the immediately
+             preceding ELEMENT, and three separate changes since have each
+             inserted a conditional in between (the batch notice and the
+             attachment chips in ent#524, the budget banner in #2620), so the
+             chain now ends on `attachments.length`. That is two live defects
+             in one expression: attaching a file to a room REPLACES the
+             composer (and the room never clears its chips, so it does not come
+             back), and a closed room renders a live composer under the line
+             saying it has ended.
+             The condition is therefore stated rather than inherited. A `v-else`
+             is a promise about the neighbour above it, and this neighbourhood
+             has broken that promise three times. -->
+        <form v-if="!isClosed" @submit.prevent="send">
+          <!-- #2662: the same composer shell as the 1:1 thread — field on top,
+               controls in a row inside it. The two composers are the same
+               markup in two files (the #2211 lesson recorded in
+               `portalComposerAlignment.spec.js`), so this shape lands in BOTH
+               or the room composer visibly diverges from the chat it sits
+               beside. The room has no model picker — that is per-agent and a
+               room has several — so its control row holds Send alone. -->
+          <div
+            class="rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
+            @click="focusComposerFromShell"
+          >
+            <!-- ent#392: `@` typeahead over the room's WAKE-SET. Same anchored
+                 wrapper as the 1:1 composer, same ref name, and the same
+                 `block` on the textarea (#2259). It sheds `flex-1 min-w-0`
+                 with its twin: it is the shell's first row, not a flex item. -->
+            <div ref="composerWrap" class="relative">
+              <PortalTypeahead
+                v-if="typeaheadOpen"
+                kind="@"
+                :rows="typeaheadRows"
+                :active-index="activeIndex"
+                :overflow="typeaheadBound.overflow"
+                :empty-message="typeaheadEmpty || ''"
+                @pick="acceptActive"
+                @hover="activeIndex = $event"
+              />
+              <textarea
+                ref="textarea"
+                v-model="input"
+                rows="1"
+                :placeholder="placeholder"
+                class="block w-full resize-none border-0 bg-transparent text-sm px-2 py-2 leading-6 focus:outline-none focus:ring-0 max-h-40"
+                @keydown="onComposerKeydown"
+                @input="onComposerInput"
+                @click="onComposerCaret"
+                @select="onComposerCaret"
+                @paste="dropHandlers.onPaste"
+              ></textarea>
+            </div>
+            <div class="mt-1 flex items-center gap-1">
+              <div class="ml-auto flex items-center gap-1 min-w-0">
+                <button
+                  type="submit"
+                  class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
+                  :disabled="!input.trim() || sending"
+                  title="Send"
+                >
+                  <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
+                </button>
+              </div>
+            </div>
+          </div>
         </form>
         <p v-if="sendError" class="mt-1.5 text-xs text-status-danger-600 dark:text-status-danger-400">{{ sendError }}</p>
+        <!-- #2794: what came with the message that created this room. The room
+             is otherwise silent about attachments, so without this the person
+             who escalated has no way to tell a carried file from a dropped one
+             — which is half of what they reported.
+             A plain `v-if` on its own, deliberately NOT chained to anything
+             above: see the composer's comment. -->
+        <div
+          v-if="carryNotice && carryNotice.text"
+          class="mt-1.5 flex items-start gap-2 text-xs"
+          :class="carryNotice.problem
+            ? 'text-status-warning-700 dark:text-status-warning-300'
+            : 'text-status-info-700 dark:text-status-info-300'"
+          :role="carryNotice.problem ? 'alert' : 'status'"
+          data-testid="portal-room-carry-notice"
+        >
+          <svg class="w-3.5 h-3.5 mt-px shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+          <span class="min-w-0">{{ carryNotice.text }}</span>
+          <BaseButton
+            size="sm"
+            variant="ghost"
+            class="ml-auto shrink-0"
+            data-testid="portal-room-carry-notice-dismiss"
+            @click="emit('dismiss-carry-notice')"
+          >Dismiss</BaseButton>
+        </div>
       </div>
     </div>
   </div>
@@ -200,10 +385,23 @@
  */
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
-import { renderMarkdown } from '@/utils/markdown'
+import { budgetNotice } from '@/utils/roomBudgets'
+import InlineError from '@/components/InlineError.vue'
+import PortalAgentBubble from './PortalAgentBubble.vue'
+import PortalWorkCard from './PortalWorkCard.vue'
+import { usePortalWorkStore } from '@/stores/portalWork'
+import { liveElapsedSeconds, liveItemsForRoom, soleStoppableItem } from './portalWork'
+import { resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
+import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
+import BaseButton from '@/components/base/BaseButton.vue'
+import PortalJumpToLatest from './PortalJumpToLatest.vue'
+import { workSignalFromRoom } from './portalRail'
+import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import { shouldCancelOnEscape, cancelOutcome } from '@/utils/turnCancel'
+import { useStickToBottom } from '@/composables/useStickToBottom'
 import {
   applyTypeaheadInsert,
   boundCandidates,
@@ -223,23 +421,54 @@ import {
 import { agentDisplayName } from '@/utils/agentName'
 
 const props = defineProps({
+  // ent#473: async (roomId, title) => void — the shell owns the request and
+  // the sidebar list; null when renaming is unavailable.
+  rename: { type: Function, default: null },
   roomId: { type: String, required: true },
   roster: { type: Array, default: () => [] },
   // ent#359: star state is per-viewer and owned by the shell, not by the room —
   // a room is shared, a star is not.
   starred: { type: Boolean, default: false },
+  // ent#475: text to seed the composer with — the rail's "Ask for a canvas"
+  // pre-fills, never sends. Same contract as `PortalConversation`'s.
+  prefill: { type: String, default: '' },
+  // #2794: `{ roomId, text, problem }` — what the shell carried into this room
+  // when a 1:1 escalated into it, or null. Owned by the shell because the
+  // carry happens while this component is still mounting, and scoped to a
+  // room id there so it cannot follow the reader into another conversation.
+  carryNotice: { type: Object, default: null },
 })
-defineEmits(['open-menu', 'rooms-changed', 'toggle-star'])
+const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice'])
 
 const store = useClientPortalStore()
 
 const room = ref(null)
+// ent#473: the header's rename. The shell renames and re-reads the list; the
+// room keeps its own header in step without a refetch, then tells the shell.
+async function saveName(title) {
+  await props.rename(props.roomId, title)
+  if (room.value) room.value = { ...room.value, name: title }
+  emit('rooms-changed')
+}
 const messages = ref([])
 const loading = ref(true)
 const sending = ref(false)
 const sendError = ref(null)
 const input = ref('')
 const scrollEl = ref(null)
+// #2624: an arriving message must not move a transcript the reader is holding.
+// The 3s poll below is the worst offender on this surface — several agents can
+// be replying at once, so reading anything but the tail used to be impossible.
+// The rule lives in the composable, shared with `PortalConversation`.
+const {
+  unread: unreadBelow,
+  showJumpToLatest,
+  onScroll: onTranscriptScroll,
+  onArrive: onMessagesArrived,
+  pinToBottom,
+  scrollToLatest,
+  reset: resetFollowing,
+} = useStickToBottom(scrollEl)
 const addOpen = ref(false)
 const adding = ref(false)
 const addError = ref(null)
@@ -247,6 +476,12 @@ const addError = ref(null)
 // ent#392 — composer typeahead state (`@` only; see the block below for why
 // there is no `/` here).
 const textarea = ref(null)
+
+// ent#475 — a prefill lands in the composer and focuses it; the person
+// decides whether to send. Mirrors `PortalConversation`'s watcher.
+watch(() => props.prefill, (v) => {
+  if (v) { input.value = v; nextTick(() => { autoGrow(); textarea.value?.focus() }) }
+})
 const composerWrap = ref(null)
 const typeaheadTrigger = ref(null)
 const activeIndex = ref(-1)
@@ -255,38 +490,105 @@ const dismissed = ref(null)
 let pollTimer = null
 const POLL_MS = 3000
 
-const render = (c) => renderMarkdown(c || '')
-
 const agentParticipants = computed(() =>
   (room.value?.participants || []).filter((p) => p.kind === 'agent' && !p.left_at).map((p) => p.identity)
 )
 const isClosed = computed(() => room.value?.status === 'closed')
+
+// ent#524 — the same drop/batch implementation the 1:1 conversation uses. The
+// only difference is the destination: ONE upload call per participating agent,
+// so the file lands in each of their inboxes (operator decision 13). A single
+// failing participant is reported like any other per-file failure rather than
+// failing the whole drop.
+const recipientLabel = computed(() => {
+  const names = agentParticipants.value
+  if (!names.length) return 'this room'
+  if (names.length === 1) return names[0]
+  if (names.length === 2) return `${names[0]} and ${names[1]}`
+  return `${names.length} agents`
+})
+
+const {
+  dragging: fileDragging,
+  entries: attachments,
+  batchNotice,
+  clear: clearAttachments,
+  handlers: dropHandlers,
+} = usePortalFileDrop(
+  async (file) => {
+    const names = agentParticipants.value
+    if (!names.length) throw new Error('This room has no agents to send to.')
+    for (const name of names) await store.uploadDocument(name, file)
+  },
+  { disabled: () => isClosed.value },
+)
 
 // Server-reported, so it survives a reload. The local `sending` flag still
 // covers the gap between posting and the first poll, when nobody has been
 // marked working yet.
 const workingAgents = computed(() => room.value?.working || [])
 
-// ent#381: the near-limit signal the Sessions page used to own. Same 80%
-// threshold, same two budgets — messages and cost — so a client sees a room
-// approaching its end rather than discovering it after the fact.
-const BUDGET_WARN_AT = 0.8
+// ent#525 / #2792: the feed's live rows for THIS room — joined on the chat id
+// the room turn stamps on its execution, never on the agent name alone. The
+// feed is agent-scoped in a room (the rail's Work tab wants everything the
+// participants are doing), so by name every schedule run, loop turn, 1:1
+// thread or other room on a working participant rendered here as this room's
+// work. The SERVER's `working` list stays in the join so a row the room's own
+// poll has already retired never draws a card under the posted reply, and it
+// stays the "thinking…" fallback below for the rows the feed has not read yet.
+const workStore = usePortalWorkStore()
+const roomLiveItems = computed(() => liveItemsForRoom(workStore.live, props.roomId, workingAgents.value))
+const clockMs = ref(Date.now())
+let clockTimer = null
+watch(() => roomLiveItems.value.length > 0, (on) => {
+  if (on && !clockTimer) clockTimer = setInterval(() => { clockMs.value = Date.now() }, 1000)
+  if (!on && clockTimer) { clearInterval(clockTimer); clockTimer = null }
+}, { immediate: true })
+onBeforeUnmount(() => { if (clockTimer) clearInterval(clockTimer) })
+function elapsedOf(it) { return liveElapsedSeconds(it, { fetchedAtMs: workStore.fetchedAt, nowMs: clockMs.value }) }
+// trinity-enterprise#620: a room's cards carry the activity line too — the
+// room has no stream of its own, so every card reads the heartbeat feed.
+function stepOf(it) {
+  return resolveActivityText({ live: true, activity: workStore.activityFor(it), nowMs: clockMs.value })
+}
 
-const budgetWarning = computed(() => {
-  const r = room.value
-  if (!r || r.status !== 'open') return null
-  const used = r.message_count ?? 0
-  const maxMsgs = r.max_messages ?? 0
-  if (maxMsgs && used / maxMsgs >= BUDGET_WARN_AT) {
-    return `${used}/${maxMsgs} messages`
-  }
-  const cost = r.cost ?? 0
-  const maxCost = r.max_cost_usd ?? 0
-  if (maxCost && cost / maxCost >= BUDGET_WARN_AT) {
-    return `$${cost.toFixed(2)}/$${maxCost.toFixed(2)}`
-  }
-  return null
-})
+// #2795 — stopping a room turn.
+//
+// The store action is the Work tab's, unchanged: it re-checks `can_stop`, calls
+// the same portal terminate route, treats a 404 as the lost race rather than a
+// refusal, and refetches so CANCELLED comes back from the server instead of
+// being written optimistically here. Two surfaces, one cancel path.
+//
+// Only a FAILURE is reported. A successful stop already says so where the
+// reader is looking — `_wake_agent` posts "<agent>'s turn was stopped." into
+// the transcript — so a banner would be the same news twice.
+const stopError = ref('')
+
+async function onStopWork(item) {
+  stopError.value = ''
+  const res = await workStore.stopItem(item)
+  if (!res.success) stopError.value = cancelOutcome({ ok: false }).message
+}
+
+// Escape stops the turn ONLY when there is exactly one to stop (see
+// `soleStoppableItem`). A room fans out to several agents, and a keystroke that
+// picks one of them by position would destroy work somebody is still waiting
+// for. In practice the fan-out is sequential, so a room normally has one live
+// row and Escape behaves exactly as it does in a 1:1; when it does not, the
+// tile's own Stop button is the unambiguous control.
+const escapeStoppable = computed(() => soleStoppableItem(roomLiveItems.value, workStore.stoppingIds))
+
+// ent#474 — the shell scopes the rail to the room's participants and derives
+// its Work signal from the SERVER's `working` list (never a local flag), so
+// both survive a reload and follow the room's own poll — live push degrades
+// to poll, never to a stuck indicator.
+watch(agentParticipants, (list) => emit('participants-changed', list), { immediate: true, deep: true })
+watch(workingAgents, (list) => emit('work-state', workSignalFromRoom(list)), { immediate: true, deep: true })
+
+// #2620 — the notice now names the CONSEQUENCE, not just the ratio. The rule
+// is pure and lives in `utils/roomBudgets.js`, where a node-env test can reach
+// it; this component only decides where it appears.
+const notice = computed(() => budgetNotice(room.value))
 
 const closedReason = computed(() => ({
   max_messages: 'message limit reached',
@@ -442,8 +744,34 @@ function onComposerInput(e) {
 }
 
 function onComposerCaret(e) { refreshTypeahead(e?.target) }
+/**
+ * #2662: the shell owns the chrome, so the visible box is bigger than the field
+ * and a click on its padding used to land on <body>. Twin of the 1:1 composer's
+ * handler, guard included — the typeahead picks on `mousedown` and the click
+ * that follows would otherwise arrive here. No `voiceCallActive` arm: a room has
+ * no call. The room's shell chrome is unconditional for the same reason.
+ */
+const SHELL_INTERACTIVE = 'button, select, textarea, input, a, [role="listbox"], [role="option"]'
+function focusComposerFromShell(event) {
+  if (event.target?.closest?.(SHELL_INTERACTIVE)) return
+  textarea.value?.focus()
+}
 
 function onComposerKeydown(e) {
+  // Asked BEFORE `resolveComposerKey`, and gated on the typeahead/add-agent
+  // popups via `overlays`, so a press that belongs to something nearer the
+  // keystroke never reaches the turn (ent#155's rule, unchanged).
+  const target = escapeStoppable.value
+  if (target && shouldCancelOnEscape(e, {
+    inFlight: true,
+    cancelling: workStore.stoppingIds.includes(target.id),
+    overlays: [typeaheadOpen.value, addOpen.value],
+  })) {
+    e.preventDefault()
+    onStopWork(target)
+    return
+  }
+
   const length = typeaheadBound.value.visible.length
   switch (resolveComposerKey({
     key: e.key,
@@ -515,7 +843,12 @@ async function load({ full = false } = {}) {
     const incoming = data.messages || []
     if (full) messages.value = incoming
     else if (incoming.length) messages.value = messages.value.concat(incoming)
-    if (incoming.length) await scrollDown()
+    // #2624: a FULL load is opening the room — an intent, so it pins. An
+    // incremental load is the poll, i.e. somebody else's message arriving:
+    // it follows only if the reader was already at the bottom, and otherwise
+    // counts toward the jump-to-latest control.
+    if (full) await pinToBottom()
+    else if (incoming.length) await onMessagesArrived(incoming.length)
   } catch (err) {
     if (full) sendError.value = 'Could not load this conversation.'
   } finally {
@@ -534,6 +867,18 @@ async function send() {
   resetTypeahead()
   try {
     await store.postRoomMessage(props.roomId, text)
+    // #2794: the chips describe what is going out with THIS message, so they
+    // clear once it has gone — the 1:1's rule, which this composer never had.
+    // Without it a room accumulated every chip it had ever drawn, describing
+    // files that had been delivered several messages ago as though they were
+    // still pending.
+    clearAttachments()
+    // The carry notice describes the message that CREATED this room. Once a
+    // newer message exists it is describing history while sitting under the
+    // composer, so a send retires it — same reason as the chips above. The
+    // escalation's own first post is made by the shell, not here, so this
+    // cannot retire the notice before it has been read.
+    if (props.carryNotice) emit('dismiss-carry-notice')
     // The post returns once the mentioned agents have been woken; their replies
     // land as further messages, which the poll picks up.
     await load()
@@ -545,7 +890,10 @@ async function send() {
     resetTypeahead()
   } finally {
     sending.value = false
-    await scrollDown()
+    // Sending is an explicit intent to follow the bottom — it pins and re-arms
+    // whatever the prior position, so a reader who was scrolled up is not
+    // handed an unread badge for their own message.
+    await pinToBottom()
   }
 }
 
@@ -565,11 +913,6 @@ async function addAgent(name) {
   }
 }
 
-async function scrollDown() {
-  await nextTick()
-  if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight
-}
-
 function startPolling() {
   stopPolling()
   pollTimer = setInterval(() => {
@@ -586,6 +929,9 @@ watch(() => props.roomId, async () => {
   messages.value = []
   loading.value = true
   resetTypeahead()
+  // #2624: the outgoing room's element is about to be replaced, so re-arm
+  // WITHOUT scrolling it; the incoming room's full load pins.
+  resetFollowing()
   await load({ full: true })
   // Same reason as on mount: switching rooms can swap a closed room for an open
   // one, which mounts a fresh textarea that has never been measured.
@@ -620,23 +966,3 @@ onBeforeUnmount(() => {
   stopPolling()
 })
 </script>
-
-<style scoped>
-/* Review finding: `prose-portal` was applied in this file's template but DEFINED
-   only in PortalConversation's scoped block, so it was inert here — room transcripts
-   got neither the #2211 paragraph rhythm nor the pre-existing overflow guard, and a
-   wide code block overflowed the bubble. Kept byte-identical to the conversation's
-   copy so the two surfaces cannot drift; a shared stylesheet is the follow-up, not a
-   change to smuggle into a readability fix. */
-.prose-portal :deep(p) { margin: 0.5rem 0; }
-.prose-portal :deep(p:first-child) { margin-top: 0; }
-.prose-portal :deep(p:last-child) { margin-bottom: 0; }
-.prose-portal :deep(pre) { overflow-x: auto; padding: 0.5rem; border-radius: 0.375rem; }
-/* Token-based tint rather than an `rgba()` literal: the design contract
-   forbids hardcoded colors, and the raw-color ratchet counts them. Applied
-   via @apply so light/dark both come from the gray scale. */
-.prose-portal :deep(pre) { @apply bg-gray-100 dark:bg-gray-800; }
-.prose-portal :deep(code) { font-size: 0.8em; }
-.prose-portal :deep(ul) { list-style: disc; padding-left: 1.25rem; }
-.prose-portal :deep(a) { text-decoration: underline; }
-</style>

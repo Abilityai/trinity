@@ -32,6 +32,11 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+# ent#365: the report read is scoped to who is asking, so every call names a
+# reader. These suites keep their own subjects (agent isolation, row windowing);
+# the audience rule itself is pinned in test_ent365_report_audience.py.
+CLIENT_EMAIL = "client@example.com"
+
 AGENT = "scribe"
 OTHER = "recon"
 
@@ -72,9 +77,9 @@ def test_without_rows_limit_the_response_is_unchanged(agent_page, monkeypatch):
     """The route ships today. `rows_limit=None` must return exactly what it
     returned before this feature existed — including no `row_meta` key at all,
     since the frontend keys "is this windowed?" off its presence."""
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: _row(TABULAR))
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: _row(TABULAR))
 
-    got = agent_page.report_detail(AGENT, "r1")
+    got = agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL)
 
     assert got["payload"] == TABULAR
     assert len(got["payload"]["rows"]) == 250
@@ -87,9 +92,9 @@ def test_windowing_does_not_mutate_the_source_payload(agent_page, monkeypatch):
     (or a cache added later) would otherwise find the row list truncated in
     place, i.e. data loss that only shows up on the second read."""
     payload = {"columns": ["a"], "rows": [[i] for i in range(10)]}
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: _row(payload))
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: _row(payload))
 
-    agent_page.report_detail(AGENT, "r1", rows_limit=2)
+    agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL, rows_limit=2)
 
     assert len(payload["rows"]) == 10
 
@@ -99,9 +104,9 @@ def test_windowing_does_not_mutate_the_source_payload(agent_page, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_a_tabular_payload_is_windowed_with_a_true_total(agent_page, monkeypatch):
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: _row(TABULAR))
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: _row(TABULAR))
 
-    got = agent_page.report_detail(AGENT, "r1", rows_offset=0, rows_limit=100)
+    got = agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL, rows_offset=0, rows_limit=100)
 
     assert got["payload"]["columns"] == ["name", "score"]
     assert got["payload"]["rows"] == TABULAR["rows"][:100]
@@ -113,9 +118,9 @@ def test_a_tabular_payload_is_windowed_with_a_true_total(agent_page, monkeypatch
 
 
 def test_a_later_page_starts_where_the_previous_one_ended(agent_page, monkeypatch):
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: _row(TABULAR))
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: _row(TABULAR))
 
-    got = agent_page.report_detail(AGENT, "r1", rows_offset=100, rows_limit=100)
+    got = agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL, rows_offset=100, rows_limit=100)
 
     assert got["payload"]["rows"] == TABULAR["rows"][100:200]
     assert got["row_meta"] == {"total": 250, "offset": 100, "limit": 100}
@@ -124,9 +129,9 @@ def test_a_later_page_starts_where_the_previous_one_ended(agent_page, monkeypatc
 def test_an_offset_past_the_end_is_empty_with_an_honest_total(agent_page, monkeypatch):
     """Not an error: the table shrank, or a stale client asked. Empty rows plus
     the real total lets the UI show "0 of N" and stop, rather than dead-end."""
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: _row(TABULAR))
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: _row(TABULAR))
 
-    got = agent_page.report_detail(AGENT, "r1", rows_offset=9999, rows_limit=100)
+    got = agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL, rows_offset=9999, rows_limit=100)
 
     assert got["payload"]["rows"] == []
     assert got["row_meta"]["total"] == 250
@@ -140,9 +145,9 @@ def test_limit_is_clamped_at_the_shared_ceiling(agent_page, monkeypatch):
     from models import REPORT_ROWS_PAGE_MAX
 
     big = {"columns": ["a"], "rows": [[i] for i in range(REPORT_ROWS_PAGE_MAX + 500)]}
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: _row(big))
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: _row(big))
 
-    got = agent_page.report_detail(AGENT, "r1", rows_limit=REPORT_ROWS_PAGE_MAX * 10)
+    got = agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL, rows_limit=REPORT_ROWS_PAGE_MAX * 10)
 
     assert len(got["payload"]["rows"]) == REPORT_ROWS_PAGE_MAX
     assert got["row_meta"]["limit"] == REPORT_ROWS_PAGE_MAX
@@ -151,9 +156,9 @@ def test_limit_is_clamped_at_the_shared_ceiling(agent_page, monkeypatch):
 def test_a_negative_offset_reads_from_the_start(agent_page, monkeypatch):
     """Python would treat a negative offset as "from the end" and silently serve
     the WRONG rows under an honest-looking total."""
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: _row(TABULAR))
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: _row(TABULAR))
 
-    got = agent_page.report_detail(AGENT, "r1", rows_offset=-50, rows_limit=10)
+    got = agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL, rows_offset=-50, rows_limit=10)
 
     assert got["payload"]["rows"] == TABULAR["rows"][:10]
     assert got["row_meta"]["offset"] == 0
@@ -180,9 +185,9 @@ def test_a_non_tabular_payload_is_returned_whole_with_no_row_meta(
     payload and answers honestly: whole payload, no `row_meta`, no 400. The
     frontend then renders no "Load more" footer, which is exactly right for a
     document with no row axis."""
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: _row(payload))
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: _row(payload))
 
-    got = agent_page.report_detail(AGENT, "r1", rows_limit=100)
+    got = agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL, rows_limit=100)
 
     assert got["payload"] == payload
     assert "row_meta" not in got
@@ -196,19 +201,19 @@ def test_a_foreign_report_stays_unreadable_when_windowed(agent_page, monkeypatch
     """Report ids are global and the roster gate only proves the caller may
     reach THIS agent. The window rides the same read, so it cannot become a
     second, laxer door onto every report in the install."""
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: _row(TABULAR, agent=OTHER))
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: _row(TABULAR, agent=OTHER))
 
-    assert agent_page.report_detail(AGENT, "r1", rows_limit=100) is None
+    assert agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL, rows_limit=100) is None
 
 
 def test_missing_and_foreign_stay_indistinguishable_when_windowed(agent_page, monkeypatch):
     """Both None → the same 404. A different answer on the windowed path would
     reopen the existence oracle invariant #8 closed on the unwindowed one."""
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: None)
-    missing = agent_page.report_detail(AGENT, "nope", rows_limit=100)
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: None)
+    missing = agent_page.report_detail(AGENT, "nope", client_email=CLIENT_EMAIL, rows_limit=100)
 
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: _row({}, agent=OTHER))
-    foreign = agent_page.report_detail(AGENT, "r1", rows_limit=100)
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: _row({}, agent=OTHER))
+    foreign = agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL, rows_limit=100)
 
     assert missing is None and foreign is None
 
@@ -219,9 +224,9 @@ def test_a_read_failure_is_still_swallowed_into_a_404(agent_page, monkeypatch):
     def boom(_rid):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(agent_page.db, "get_report", boom)
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", boom)
 
-    assert agent_page.report_detail(AGENT, "r1", rows_limit=100) is None
+    assert agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL, rows_limit=100) is None
 
 
 # ---------------------------------------------------------------------------

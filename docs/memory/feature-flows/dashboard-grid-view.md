@@ -1,6 +1,6 @@
 # Feature Flow: Dashboard Grid View (magnetic tile canvas)
 
-> **Last Updated**: 2026-08-12 (info tiles: Recent failures, ent#100)
+> **Last Updated**: 2026-09-07 (trinity-enterprise#413: layout / tile prefs / org toggles are the user's server record)
 > **Status**: Implemented — third dashboard mode, not default
 > **Issue**: trinity-enterprise#47 (design of record embedded in the issue)
 > **Requirements**: `docs/memory/requirements/core-agent.md` §9.8, §9.12 (info tiles)
@@ -21,20 +21,28 @@ iPhone-style drag and live snap preview, on a pan/zoom dotted-canvas.
   persists to `localStorage['trinity-dashboard-view']`. **Timeline stays the
   default** for users with no saved preference (and a stale mode — `'graph'`,
   or `'list'` on an older bundle — degrades to it via the
-  `VIEW_MODES.includes()` guard).
-- **No Vue Flow dependency** in this mode, and **no new backend endpoints**.
+  `VIEW_MODES.includes()` guard). Since #2536 the toggle is the LAST header
+  control (position pinned across modes and the history spinner — in a
+  right-anchored flex row a child's x depends only on the siblings to its
+  right, so with none it cannot move; Tidy up / Reset sit immediately to its
+  left) and `v` cycles Timeline → Grid → List through the `/` hotkey's guard
+  ladder; the mode list is `utils/viewModes.js` (one home).
+- **No Vue Flow dependency** in this mode. The only backend surface is the per-user preferences record (ent#413, below).
 
 ## Components & Data Flow
 
 ```
 views/Dashboard.vue          mode toggle, grid pane (v-if), Tidy up / Reset pills,
-  │                          "N working now" header stat, empty/error/skeleton states
+  │                          "N working now" header stat, empty/error/skeleton states,
+  │                          `v` hotkey (shares the `/` guard ladder, #2536)
   ├─ components/FleetGrid.vue    pan/zoom viewport, lattice, drag physics, sockets,
   │    │                         cell shading, keyboard reorder, zoom controls + legend,
   │    │                         viewport culling, shared 1s tick for tile timers
   │    └─ components/AgentTile.vue   five-zone tile (see below); composes
   │           AgentAvatar / RuntimeBadge / RunningStateToggle / AutonomyToggle
-  ├─ stores/fleetGrid.js     per-user layout (localStorage v1, self-healing),
+  ├─ stores/userPreferences.js  per-user UI preference sync engine (ent#413):
+  │                          one GET, debounced conditional PUT per key, DELETE
+  ├─ stores/fleetGrid.js     per-user layout (server record + per-user cache, self-healing),
   │                          lazy analytics hydration queue (concurrency 4,
   │                          stale-while-revalidate over executions-store cache),
   │                          batch chip data (sync-health + operator-queue pending)
@@ -61,6 +69,29 @@ views/Dashboard.vue          mode toggle, grid pane (v-if), Tidy up / Reset pill
 | ⚠ needs response / approval pending chip | `GET /api/operator-queue?status=pending` (batch, grouped per agent) |
 | ▶ working + elapsed timer | WS `agent_activity` events → `workingState` map, reconciled by the context-stats poll; fallback `activityState === 'active'` |
 
+### Identity zone — the label leads, the slug follows (#2358)
+
+`.t-name` renders `agentNameParts(agent).primary` (the display label when there
+is one, else the slug). When a distinct label hides the slug, the ALREADY
+always-rendered `.t-repo` meta line leads with it —
+`<code class="t-slug nodrag">` + a `·` separator, then the existing
+`owner/repo` (or `Local agent`) segment. The tile therefore gains **no third
+identity line**: `.gtile` is `justify-content: space-between` inside a fixed
+384×216 cell, so a third line only on labelled tiles would compress their zone
+rhythm and squeeze the charts on those tiles alone.
+
+Three details are load-bearing. `.t-slug` carries its own
+`nowrap/overflow/text-overflow` (the `.t-repo span` ellipsis rule targets `span`
+only) plus `flex: none; max-width: 55%`, so a long slug ellipsizes instead of
+painting over the repo text. It is `user-select: all` + `cursor: text` against
+the tile root's `user-select: none`, so the identity stays copyable in one
+click (§1.3.1 FR-4 says visible **and** copyable). And it is `nodrag`, because
+`FleetGrid.onTilePointerDown` bails on `.closest('.nodrag')` — without it a
+click would start a tile drag rather than selecting. **By design the slug does
+not navigate**: it is a copy affordance; navigation stays on `.t-name` and the
+Details button. Ink is `var(--gv-muted)`, the same token as the repo text it
+sits beside — no new `--gv-*` var.
+
 ### Trigger-bucket collapse (tile scale)
 
 The backend's #1107 buckets collapse to three groups: **Scheduled** ←
@@ -70,8 +101,76 @@ explains the colors once — never repeated per tile.
 
 ## Layout model
 
-- Layout = per-user map `agent → {c, r}`; localStorage key
-  `trinity-grid-layout-v1`; server-side per-user storage is a follow-up.
+- Layout = per-user map `agent|widget:* → {c, r}`. **Since trinity-enterprise#413
+  the record of truth is the SERVER** — `user_ui_preferences` key `grid_layout`
+  (the Tiles ▾ override map is `grid_widgets`, the org Zones/Lines toggles
+  `grid_org`), read in one `GET /api/users/me/preferences`, written by a
+  trailing-debounced (800 ms) conditional `PUT /api/users/me/preferences/{key}`,
+  cleared by `DELETE`. The same user gets their board on any browser; two users
+  on one browser never see each other's. OSS-core by explicit decision.
+- **Persistence layering** (`stores/userPreferences.js` is the sync engine —
+  one home for "this UI state belongs to the user, not the browser"; the grid
+  store is its first consumer and every other per-user localStorage key
+  migrates by consuming it, never by re-implementing it):
+  - **Browser cache, per user**: `localStorage[<key>:<principalId>]`
+    (`utils/gridStorageKeys.js::userScopedKey`). `principalId` is the JWT
+    `sub` (`stores/auth.js` getter) — the username on every login path and
+    available synchronously from the stored token, unlike `user.username`,
+    which is absent until `/api/users/me` lands. It gives the first paint a
+    layout before the GET answers (the #47 performance contract is unchanged)
+    and keeps the grid editable when the server cannot be reached.
+  - **Load order per blob**: server record → per-user cache → legacy
+    browser-global blob (`trinity-grid-layout-v2`, then `-v1`; `-widgets-v1`;
+    `-org-v1`) → default. A legacy blob is ADOPTED once into the server record
+    by the **first** identity to sign in after the upgrade
+    (`trinity-grid-legacy-adopted-by` marker) — everyone after starts from the
+    default rather than inheriting someone else's board — and the legacy key
+    is left in place so a downgrade is not a data-loss event.
+  - **Adoption wins**: `syncLayout` overlays the in-memory `layout` over
+    `_savedRaw`, so when the server record lands the store sets
+    `layout = {}` before replacing `_savedRaw` and bumping `layoutGeneration`,
+    which `FleetGrid.vue` watches to re-run the reconcile. Order is widgets →
+    org → layout, then one bump, so the `activeWidgetKeys` re-sync sees the
+    adopted map. A gesture the user made in this tab before the GET landed is
+    NOT overwritten — its pending write pushes the local state instead.
+  - **No write is unconditional**: nothing leaves before the initial GET
+    settles, and every PUT carries `base_updated_at` — `null` = insert-only
+    (409 if a row exists), a string = compare-and-set. A **409 is
+    origin-aware**: a write born from a user gesture re-PUTs once with the new
+    base (this tab's edit wins — last-write-wins per user), a write born from
+    a reconcile (`syncLayout` on a roster change) adopts the server record and
+    does not retry — that is exactly the stale tab the base exists to stop.
+    One retry per write; no loop.
+  - **Identity change** (logout → another login without a reload —
+    `auth.logout()` does not reset Pinia): both stores watch `principalId`
+    with `flush: 'sync'`; the engine cancels timers and drops its queue,
+    every queued write is tagged with the identity it was made under and
+    discarded on mismatch, and the grid store wipes its in-memory blobs. Never
+    flushed on identity change.
+  - **Tab going away**: `FleetGrid.vue` listens to `pagehide` (its own
+    listener — `stopPolling` tears down the store's visibility hook) and
+    `flushPending()` sends the debounced writes via `fetch(..., { keepalive })`
+    with the bearer header — the same documented raw-`fetch` exception
+    `streamPortalExecution` makes; an XHR is killed on tab discard and
+    `sendBeacon` cannot carry the header.
+  - **Honest fallback**: a failed load or save keeps the grid working from
+    the cache; the store exposes `layoutSource` (`pending|server|local|default`)
+    and `persistNotice` (a sentence naming the HTTP status or "network error"),
+    rendered as a dismissable `role="status"` notice on the canvas
+    (`.gv-orgtoast.gv-persist`). A 401 is a logout, never "unreachable".
+  - **Reset** clears the caller's per-user cache + the legacy generations
+    (or the next load adopts the stale blob straight back in, ent#325),
+    `DELETE`s the caller's server key, and the reconcile that follows
+    re-persists the default insert-only. "Reset tiles" writes an explicit
+    `{}` cache rather than removing the key, for the same reason.
+  - Stale agent names are NOT pruned client-side (filtered ≠ deleted from
+    the client's view); the value is size-capped server-side (256 KiB).
+  - Pinned by `tests/unit/fleetGridServerPersist.spec.js` (store contract),
+    `tests/unit/test_ent413_user_ui_preferences.py` (backend), and the e2e
+    grid specs, which clear the per-user cache + legacy keys and DELETE the
+    three server keys through `e2e/helpers/grid-prefs.js`; the new
+    server-restore case drags, wipes the browser copy, reloads and polls for
+    the re-sync.
 - **Self-healing** (`normalizeLayout`): new agents take the first free cell
   near the origin (spiral search); deleted agents leave their gap; an invalid
   or colliding saved position resolves to the nearest free cell.
@@ -152,6 +251,96 @@ spinners/skeletons (fleet-wide adoption pass: trinity-enterprise#253).
 2026-08-08): Agent Detail keeps its existing loading states. Rolling the
 primitive across further surfaces (Overview trend charts included) is
 trinity-enterprise#253's charter.
+
+### Executions info tile (trinity-enterprise#449)
+
+The second adoption on this surface, and the first on the **info-tile chassis**
+rather than an agent tile. Zone = `.ex-chart` (the 24-column chart), NOT the
+whole tile body.
+
+- **The instance is owned by the TILE, around its chart zone.** The headline
+  (`.ex-head`) sits ABOVE it and the legend below, both outside the primitive.
+  That is forced, not stylistic: the first frame of `scan-wipe` is
+  `inset(0 100% 0 0)`, which clips every pixel of slot content — a headline
+  inside the zone would blink at arrival — and the ACs require the em-dash
+  headline to be VISIBLE while loading. Same shape `AgentTile`'s zones use.
+- **`InfoTile` gains an `owns-loading` opt-in** (default off). The chassis
+  renders the default slot only at `ready`, so without a handoff the tile's
+  instance would first mount at `ready` with `loading = false` — an instant
+  cache-hit mount that never reveals — while `.it-skel` still showed. With the
+  opt-in the slot renders for `loading` AND `ready`, and both states compile to
+  the same branch, so the instance is PATCHED across the edge, never remounted.
+  A tile owns its loading face **only**: `error`/`empty` still replace the slot
+  with the chassis message, so no terminal can be drawn under a loading track
+  (learnings 2026-08-24).
+- **Two pure rules**, in `utils/executionsTile.js` so a node-env suite can reach
+  them: `scanlineProps(state)` → `{loading, reveal}` (only `'ready'` earns the
+  reveal; `error`/`empty` snap) and `headlineFace(head, state)` → `—` for total
+  and ok% while loading, `failed` held at 0 (rendering "— failed" would assert
+  failures exist before anything was read — the ent#100 rule applied to the
+  number rather than to the empty state).
+- **`loading` is "no data yet", never "fetch in flight".** `tileState` is
+  `'loading'` only before the first successful read, and `execTimelineLoaded`
+  latches on that success and is never written false — so the 60s batch refresh
+  swaps values in place with no beam. The latch is pinned at the layer that owns
+  it in `tests/unit/fleetGridFailuresFetch.spec.js`, across a rejected refresh
+  and a malformed 200.
+- **One footprint, and `display: flow-root` on the zone.** The zone root and
+  `.ex-chart` share one 70px literal (the root must be sized because the
+  primitive's content wrapper is auto-height and empty while loading; the inner
+  box must be sized because a percentage height does not resolve inside that
+  wrapper). `flow-root` is load-bearing: `.scanline` is `position: relative` but
+  not a BFC root, and `.scan-content`'s `margin: -4px` collapses through it and
+  then with the head's 6px bottom margin. Measured in Chromium over this exact
+  CSS — head→zone gap 6px→2px, chart 4px BELOW the track for the whole wipe,
+  body 4px shorter; `flow-root` restores 6/0/0. Never `overflow: hidden` (it
+  clips the primitive's deliberate bleed). The same latent offset exists in
+  every consumer, so fixing the primitive's own root is a follow-up rather than
+  a change made from inside one tile.
+- **Theming**: `.ex-head ~ .ex-zone.scanline` → `--scan-core: var(--gv-blue)`,
+  `--scan-track: var(--gv-bar-track)`. Three classes + the scoped attribute is
+  (0,4,0), which beats the primitive's own `.dark .scanline` (0,3,0) regardless
+  of stylesheet injection order; a two-class selector merely ties and wins by
+  import order.
+- **Accessibility, stated**: opting in drops the skeleton's `role="status"
+  aria-label="Loading"` for this tile, so its loading face is the visible `—`
+  plus the primitive's `aria-busy`. Same trade `AgentTile`'s zones already make;
+  `announce` stays off because dozens of tiles must not each announce on a mass
+  reveal. The chart's `role="img"` element is not rendered while loading, so its
+  label can never claim "0 runs" during loading.
+- **KNOWN GAP — retry gets no beam.** The store clears `execTimelineError` only
+  on success, never before a retry fetch, so `'error' → 'ready'` skips
+  `'loading'` and an explicit Retry snaps the chart in with no in-progress
+  feedback. The honest fix is clearing the error on a **retry-initiated** fetch
+  only — never on the background poll, which would blink the `24h · stale` stamp
+  every 60s — and that is a store change outside ent#449. Recorded, not
+  rationalised. (`'empty' → 'ready'` when executions start arriving on a later
+  poll snaps for the same mechanical reason, and THAT one is correct under §6:
+  late data on a poll is a background refresh, never a late celebration.)
+
+**Why the other three info tiles keep the chassis skeleton in this pass**
+(recorded decision, ent#449). `FleetSummaryTile` never enters `loading` at all
+(`:state="agents.length ? 'ready' : 'empty'"`, and `Dashboard.vue` gates the
+whole canvas behind the first roster read, so no tile mounts before it). The
+other two — Recent failures and Subscription pressure — both render
+`TileRowList`, whose four tracks are `repeat(var(--tr-rows), minmax(0,1fr))` at
+`height: 100%`. Inside the primitive's deliberately auto-height `.scan-content`
+that percentage does not resolve, and the row block stops matching the body.
+Measured on the running Grid with a throwaway prototype (never committed),
+against a control: bare `.tr` renders **135.5px into a 135.5px body** — an exact
+fit, no overflow — while the same list wrapped in the primitive renders
+**138.38px**, i.e. **+2.88px of silent overflow** clipped by
+`.it-body { overflow: hidden }`, with the last row pushed past the clip edge,
+identically in both themes and with or without an explicit height on the
+wrapper. The control is the load-bearing half: it is what shows the overflow is
+caused by the wrapping rather than pre-existing in the row list. Adopting there therefore means re-basing `TileRowList`'s row geometry
+on definite heights FIRST: a layout change to two shipped tiles that ent#449 did
+not scope. It is the follow-up's natural home — one change, both consumers,
+per-row tracks under the beam — after which `owns-loading`, `.it-skel` and
+`--gv-skel` can all be deleted and the chassis can render the slot for `loading`
+unconditionally (or move to a chassis-OWNED instance with a `#head` slot above
+it, which is the better end state and was rejected here only for scope).
+
 4. **A slow or failed per-agent fetch degrades that one tile only.**
 
 ## Info tiles (widget chassis ent#325 · data tiles ent#100, ent#96)
@@ -189,8 +378,10 @@ catalog entry declares `wantsTick: true`.
 
 ```
 components/tiles/ExecutionsTile.vue          (default-on, wantsTick: false)
-  ├─ components/InfoTile.vue                 shell
-  └─ utils/executionsTile.js                 PURE: stack order, columns, legend, headline, state
+  ├─ components/InfoTile.vue                 shell (`owns-loading`: the tile draws its own loading face)
+  ├─ components/ScanlineReveal.vue           ent#449: ONE instance around the chart zone
+  └─ utils/executionsTile.js                 PURE: stack order, columns, legend, headline, state,
+                                             zone props + headline face
 ```
 
 | Tile element | Source |
@@ -297,6 +488,97 @@ on every current install and the freed width goes to the real message. Persistin
 `error_summary` is agent/LLM-authored, prompt-injectable text: rendered as text
 interpolation and bound attributes only, never `v-html`.
 
+### Subscription pressure (ent#259) — the first admin-only tile
+
+"How much is left on any of my subscriptions?" answered from the board. The
+**inverse unit** of #471's per-agent pressure chip: that chip says whether *this
+agent's* funding is strained and structurally cannot say *which subscription* is
+the bottleneck, because agents share a subscription and burn one 5h window
+between them — reading it off the board otherwise means grouping every agent
+chip into buckets by eye.
+
+```
+components/tiles/SubscriptionPressureTile.vue     (adminOnly, default-on, wantsTick: false)
+  ├─ components/InfoTile.vue                      shell
+  ├─ components/tiles/parts/TileRowList.vue       one row per subscription
+  ├─ utils/subscriptionPressureTile.js            ALL decisions (pure, node-env testable)
+  └─ stores/subscriptions.js::fetchPressureData   roster + usage on the 60s batch poll
+```
+
+**Zero backend change**, per the operator ruling on ent#259 (2026-08-19): "a
+small build on `GET /api/agents/subscription-pressure` + the extended
+`GET /api/subscriptions/{id}/usage` once #471 merges". The roster comes from
+`GET /api/subscriptions` and each row's figures from `/{id}/usage` — a fan-out
+of one request per subscription, which at the real fleet size (one per Claude
+account) is fewer requests than `fetchOpQueuePending` already makes on the same
+poll. A batched endpoint was designed and **rejected**: it optimizes ~0.5 q/s,
+and `assert_admin` rejects agent principals (#1890) so it would not even be
+reusable by ent#351's agent-facing tools.
+
+**First `adminOnly: true` tile, and not a style choice** — every endpoint it
+reads is admin-gated (the payload carries per-subscription spend) and its footer
+link goes to Settings, whose route is `requiresAdmin`. The flag also does the
+gating for free: the widget key is absent for non-admins, so the batch fetch
+never fires and there is no 403 loop. Because `isAdmin` is only confirmed once
+`fetchUserProfile()` lands, the store also **watches the key appearing** and
+re-polls — otherwise a cold load skips the fetch and the tile sits blank until
+the next 60s tick. `fetchSubscriptionPressure()` (the per-agent chip feed) stays
+**ungated**: chips and list badges must keep working while this tile is off.
+
+**What the row may claim** — the honesty rules, all pinned in the pure module:
+
+| Shown | Rule |
+|---|---|
+| `5h ▰▰▰ 97%   7d ▰▰ 88%` | **Both** rolling limits, each as a small 30×4px bar **plus** the number, coloured by its own band — green < 60, amber < 85, red ≥ 85 (`utilizationLevel`). The bar is a second glanceable channel, never the only one: colour also rides the number, the row carries a severity chip, and each window is `role="img"` with an `aria-label` spelling the reading out. Fill width is `fill` (clamped 0–100 by `barWidthPct`), NOT `pct` — an overage plan reports >100% and an unclamped `width: 137%` overruns its track and shoves the row out of a body that is `overflow: hidden`; the *number* stays unclamped so the overage is still reported. Track width is fixed so the two windows align into columns down the tile. Two windows rather than one because either can be the wall you hit: a subscription routinely sits at 20% of its 5h while its weekly is nearly gone, and one number cannot say which. Rendered ONLY when `source=anthropic` and the snapshot is ≤30 min old (`headroomIsFresh`); #471 established the number is real (`anthropic-ratelimit-unified-*` headers), so ent#259's "never a fake-precise X% left" is about FRAMING — utilization *consumed*, source-labelled — not about hiding a genuine reading. Labelled `5h`/`7d` with a visible `resets_at`. These were previously described here as **rolling** windows; ent#434 measured them and they are **fixed windows with a scheduled reset** — on a live instance `seven_day_resets_at` held constant at one midnight-UTC instant across five days of probes while utilization climbed 36→90, then stepped exactly +7 days. So the number is consumption accumulated *within* the current window, not a rolling average, and it drops to near-zero at the reset rather than decaying. The `5h`/`7d` labels stay in preference to "daily"/"weekly" because the reset is not calendar-aligned to the reader's timezone. An absent window is omitted rather than shown as `0%` |
+| `near` chip | A window in the **red** band — **or the provider's own `allowed_warning` status, which can fire below that band and is better evidence precisely because it is theirs (#2396)** — raises severity to `warn` even with a spotless failure history — it is the only signal that exists *before* the first 429. Without it a subscription at 93% of its weekly ranks below one whose usage read merely failed, and gets pushed into the overflow. The chip distinguishes `429s` (already happened) from `near` (has not yet) |
+| `3× 429` | the `rate_limit` **kind only**, never `failure_events_24h`, which also counts `auth` and pre-#471 `unknown` rows. Migration 0040 split them at the data layer; reporting the total under a "429" label would undo that fix in the UI |
+| `rate-limited` | the backend's one-gate `rate_limited_now` only — a 24h count alone never claims "limited now". **Since #2352 that flag means real 429s**: its event half is scoped to `failure_kind = 'rate_limit'`, so an auth failure no longer renders here (it used to, via a kind-blind 2h predicate — a dead token read as quota exhaustion on every surface). **Nor does the provider's warning tier (#2396):** `allowed_warning` was read as a hard limit by the backend predicate, so a subscription that was merely *near* its weekly window wore a red `limit` chip while the provider was still serving it. It now scores `warn`/`near` |
+| `token invalid` | `headroom.status == "invalid_token"` — the provider REFUSED the credential. It outranks `rate-limited` (#2353): a probe that could not authenticate learned nothing about the quota, so a limit claim there is unfounded, not merely less useful. It is also the only state on this list a person can act on immediately, and before #2353 it was reachable only by hovering. Read regardless of snapshot age — the deliberate inverse of the freshness gate above, because a *number* decays and "this credential was refused" does not |
+| `auth` chip | a rejected token gets its OWN severity, ranked ABOVE `crit` in the row sort: the row needing a person sorts above the row needing a wait. The warn tier gains the same word for an auth-only 24h history (`warnReason: "auth"`, strict equality against the total so the per-agent chip — which sees only a total and an auth count — cannot disagree) — without it, an auth-only history would land in `warn` after the predicate split and render as `429s`, trading one wrong label for another |
+| `no provider data` | `headroom.status == "error"` (transport failure, non-200, or a 200 carrying no unified headers). Ranked below the failure states — a failed probe says nothing — but ABOVE `ok`, which would assert health on no evidence |
+| `nearing limit` | the provider's `allowed_warning` tier or the red band (#2396). A forecast, not a failure, so it ranks below everything that has actually gone wrong and above `ok`, which the row is not. **Scope, honestly:** the SFC binds `{{ row.meta }}` behind `v-else` on `v-if="row.windows"`, so on the tile this wording is reached only by a fresh warning-tier snapshot carrying a status but no utilization figure — the bars are the reading otherwise. It exists so `pressureHeadline` cannot say `ok` for a row this module scores `warn`; the operator-visible half of the fix is the lead chip going red `limit` → amber `near` |
+| `≈$3.12 · 1.2k out` | output tokens and cost are real. **`input_tokens` is deliberately absent from the row face**: it is `SUM(schedule_executions.context_used)` — context-window *occupancy* per run, not tokens consumed — the same ruling architecture.md already made for the sibling ent#101 tile against `/executions/timeline`. It appears in the tooltip, labelled an estimate |
+| `unavailable` | a failed per-subscription usage read renders as unavailable — never zeroes, never a healthy-looking row |
+
+`showsReset` carries a third arm for the same reason (#2396): a provider-warned row at 78%
+used to be (wrongly) `crit`, and `crit` is what put the reset on the row. Demoting it to
+`warn` without that arm would have silently removed *when the limit clears* — the one
+actionable fact — from the row whose entire message is "this is about to matter", and only
+below the 85% band where the provider is the sole source of the warning.
+
+Cost is always `≈`: a subscription is a flat fee, so the figure is
+API-equivalent, not a bill. The tooltip states that 7d *contains* the 5h window
+so the two are never read as additive, and surfaces
+`headroom.status == "error"` as the reason the percentages are missing.
+`invalid_token` was in this tooltip from the start — described as "the most
+actionable state the payload carries and otherwise indistinguishable from 'no
+provider data'" — and #2353 is that observation cashed out: it was ALSO
+indistinguishable from real throttling, which is worse, so the state now leads
+the row face and the tooltip keeps the remedy.
+
+**Empty vs failed vs stale**, the three states this surface must not blur: the
+empty branch requires a fetch that SUCCEEDED and returned zero (`listLoaded &&
+!listError`), never `rows.length === 0`; a wrong-shaped 200 is a FAULT, not an
+empty fleet (`stores/subscriptions.js` guards `Array.isArray`, mirroring the
+ent#100 fetchers) — laundering it would tell an operator their subscriptions are
+*not configured*, a different and much worse claim than "could not read them";
+and a poll that fails *after* a good one keeps its rows and marks the stamp
+`stale` rather than replacing real data with an error panel.
+
+**Overflow is disclosed, not clipped.** Past the fixed track count a row is
+clipped by `InfoTile`'s `overflow: hidden` with no scroll or ellipsis, so the
+pure function returns `visibleRows`/`totalRows`, the last track becomes a
+`+N more` link, and the stamp reads `3 of 9`. Sort is a **total** order
+(severity → 429 volume → utilization → name) so equal rows cannot reshuffle
+between polls, and the utilization term uses the **fullest** window — ranking on
+the 5h alone buries a subscription whose weekly is the one about to run out.
+
+Reading the dashboard drives #471's ambient headroom refresh — floored
+server-side at one probe per 15 min per subscription. That is the intended
+demand-driven design (an unwatched instance probes nothing); an open dashboard
+keeping headroom warm is the point of the tile. The trend line is **ent#433's**
+(headroom history): this tile ships point-in-time only, by explicit coordination.
+
 ### Chassis rules a list tile must honour
 
 Centralised in `TileRowList.vue` rather than repeated per tile, because each is
@@ -317,7 +599,9 @@ dashboard-breaking when forgotten:
 
 ## Failure modes & edge cases
 
-- Corrupt/unavailable localStorage → default layout, session-local.
+- Corrupt/unavailable localStorage → server record if any, else default; edits still reach the server (the cache is a convenience, not the record).
+- Server unreachable (load or save) → cached/default layout, session-local edits, honest notice; retried on the next change / next mount.
+- Stale tab (older `base_updated_at`) → 409: gesture retries once and wins, reconcile adopts the server record.
 - Agent deleted/renamed mid-session → self-healing pass; a mid-drag removal
   cancels the drag cleanly.
 - Stopped agent → Offline state, context chart flattens to a dash.
@@ -332,6 +616,19 @@ dashboard-breaking when forgotten:
 (@smoke), mode persistence across reload, drag-to-cell with socket preview +
 layout persistence, tidy/reset, and Timeline coexistence (@smoke; Graph mode decommissioned #1689).
 
+`src/frontend/e2e/grid-tile-loading-motion.spec.js` (ent#449) — the info-tile
+half of the loading motion, in its own file because its mechanism (the
+`owns-loading` handoff) and failure mode differ from the agent tiles' zones.
+`'Executions info tile loads with the scanline, never the chassis skeleton'` is
+DATA-CONTROLLED: a settle-only assertion cannot tell "the beam played and
+finished" from "the primitive never mounted", since a quiet install has no
+executions in 24h and the tile lands on the chassis `empty` message with the
+slot never rendered. So the timeline read is held on a deferred while the
+loading face is asserted (`.scan-track` present, `.it-skel` absent, headline at
+`—`, no chart under the track), then fulfilled with a 24-bucket fixture and the
+settled state asserted, including that no `.scan-content` retains a `clip-path`.
+A reduced-motion twin asserts the same end state with no clip-path at any point.
+
 Unit (node environment — pure modules and static source guards, no mounting):
 `tests/unit/executionFailure.spec.js` (the ent#100 state machine, including an
 exhaustive sweep proving no fault combination reaches the green ✓),
@@ -344,15 +641,37 @@ and bare `to:` object literals across `components/tiles/**` — it previously
 matched only a literal `link-to` ATTRIBUTE, so every per-row link was invisible
 to the guard whose failure mode is a frozen dashboard).
 
+ent#449 adds, in the same node-env style: `tests/unit/executionsTile.spec.js`
+→ `describe('ent#449 chart zone — one loading motion')` — the two pure rules
+driven through the real phase machine over the exact inputs the store emits
+(first load reveals; a refresh, succeeding OR failing, never re-beams; both
+data-less terminals snap; the retry gap is asserted as the gap it is), plus
+source pins for the invariants the motion rests on: exactly ONE
+`<ScanlineReveal>` with the branch INSIDE its slot, head → zone → legend order
+(the first-frame clip AND the `~` selector's precondition in one assertion), no
+surviving `head.*` read in the template, the shared 70px block, `display:
+flow-root`, the `--gv-*` override on a (0,4,0) selector, and a term-by-term
+chassis pin over `InfoTile.vue` (deliberately NOT a pin on `.it-skel` existing —
+that would go red on the very follow-up meant to delete it).
+`tests/unit/scanlinePhase.spec.js` gains one lifecycle: a remount after a
+data-less terminal never plays a late reveal.
+`tests/unit/fleetGridFailuresFetch.spec.js` gains the store-latch case above.
+
 ## Out of scope (tracked follow-ups)
 
 Fleet KPI strip; "Needs your attention" + live-activity right rail;
-server-side per-user layout storage; the widget-chassis documentation itself
+`trinity-dashboard-view` / `trinity-dashboard-filter-owner` as further
+`user_ui_preferences` keys; the widget-chassis documentation itself
 (#2126 — the `widget:*` occupant type, what `InfoTile` deliberately lacks, the
 org-overlay interlock, the layout v1→v2 copy-migration, prefs-as-override-map);
 persisting `error_code` so the failure chip carries the platform taxonomy;
 WS-driven early refresh for the failures tile; the sibling **Next schedules**
-tile (ent#99), held.
+tile (ent#99), held; and the ent#449 follow-up chain — re-base `TileRowList` on
+definite heights and adopt the scanline for Recent failures + Subscription
+pressure, then delete `owns-loading` / `.it-skel` / `--gv-skel`, hoist the
+`--scan-*` override to one grid-level rule (it currently exists twice, here and
+in `AgentTile.vue`), give `ScanlineReveal`'s own root `display: flow-root`, and
+close the retry-feedback gap in the store.
 
 ## Org overlay — department zones + reporting lines (trinity-enterprise#305)
 

@@ -37,7 +37,10 @@ describe('#2157 portal voice-mode persistence', () => {
 
   it('writes on change and re-reads when the agent switches', () => {
     expect(CODE).toMatch(/watch\(voiceMode,[\s\S]{0,200}setItem\(voiceModeKey\.value/)
-    expect(CODE).toMatch(/watch\(\(\)\s*=>\s*props\.agent\?\.name[\s\S]{0,120}loadVoiceMode\(\)/)
+    // Window widened for ent#440 (and kept for ent#534, whose "end any live
+    // voice call" line sits in the same watcher). The rule being guarded is
+    // unchanged: switching agents RE-READS that agent's stored choice.
+    expect(CODE).toMatch(/watch\(\(\)\s*=>\s*props\.agent\?\.name[\s\S]{0,600}loadVoiceMode\(\)/)
   })
 
   it('never lets a storage failure break the conversation', () => {
@@ -47,7 +50,15 @@ describe('#2157 portal voice-mode persistence', () => {
   })
 
   it('still speaks only when the client has narration on AND the agent can be narrated', () => {
-    expect(CODE).toContain('if (voiceMode.value && ttsEnabled.value && data.response) speak(data.response)')
+    // The #2157 rule is asserted term by term so it survives additions to the
+    // guard without degrading into "some line mentions voiceMode".
+    expect(CODE).toContain('if (voiceMode.value && ttsEnabled.value && data.response')
+    // ent#534: the third term moved from the retired ent#440 loop's `voiceConvLive`
+    // to the voice CALL — the orb owns playback while a call is on, so this
+    // branch must not narrate over it. Pinned as a RULE, not a literal.
+    expect(CODE).toMatch(/voiceMode\.value && ttsEnabled\.value && data\.response[\s\S]{0,120}!voiceCallActive\.value\) speak\(data\.response\)/)
+    expect(CODE).not.toContain('voiceConvLive')
+    expect(CODE).not.toContain('voiceLoopEndedDuringTurn')
     expect(CODE).toContain('const ttsEnabled = computed(() => !!props.agent.voice_available)')
   })
 })

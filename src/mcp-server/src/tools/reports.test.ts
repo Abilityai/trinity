@@ -15,7 +15,7 @@
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 
-import { createReportTools, filterReportsForAgentScope } from "./reports.js";
+import { createReportTools, filterReportsForAgentScope, stripAudienceFromReports } from "./reports.js";
 import type { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 
@@ -231,5 +231,42 @@ describe("get_report — fail closed (#1838 review)", () => {
       await tools.getReport.execute({ report_id: "r1" }, { session: USER_CTX }),
     );
     assert.deepEqual(out.payload, { ok: true });
+  });
+});
+describe("stripAudienceFromReports (ent#365 review)", () => {
+  it("removes the client address a report was produced for", () => {
+    const [out] = stripAudienceFromReports([
+      { id: "r1", agent_name: "atlas", title: "Weekly", addressed_to: "client@example.com" },
+    ]);
+    assert.equal("addressed_to" in out, false);
+    // Everything an agent legitimately reads survives.
+    assert.equal((out as { id: string }).id, "r1");
+    assert.equal((out as { agent_name: string }).agent_name, "atlas");
+  });
+
+  it("leaves an operator-only report untouched", () => {
+    const rows = [{ id: "r2", agent_name: "atlas", title: "Ops" }];
+    assert.deepEqual(stripAudienceFromReports(rows), rows);
+  });
+
+  it("accepts an interface, not just an index-signature type", () => {
+    // The first version constrained on `Record<string, unknown>`, which a
+    // TypeScript `interface` cannot satisfy — it has no implicit index
+    // signature — so `tsc` failed on `ReportSummary[]` and the MCP server did
+    // not build. This is the regression, expressed in the type system.
+    interface Row {
+      id: string;
+      agent_name: string;
+      addressed_to?: string | null;
+    }
+    const rows: Row[] = [{ id: "r3", agent_name: "atlas", addressed_to: "c@x.test" }];
+    const [out] = stripAudienceFromReports(rows);
+    assert.equal("addressed_to" in out, false);
+  });
+
+  it("does not mutate the caller's rows", () => {
+    const row = { id: "r4", agent_name: "atlas", addressed_to: "c@x.test" };
+    stripAudienceFromReports([row]);
+    assert.equal(row.addressed_to, "c@x.test");
   });
 });

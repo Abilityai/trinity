@@ -142,9 +142,10 @@ def _label_from_installation_id() -> Optional[str]:
     until the operator opts into intake/telemetry, so minting it transmits
     nothing. And `canary_service` has no leader lock (unlike monitoring
     #1464 / operator-queue #1632), so under `--workers 2` two workers can
-    race the read-then-write and land different UUIDs, last-write-wins; the
-    cost is bounded to a differing 8-char label across one cycle's alerts on
-    a fresh install, and the race is pre-existing in the accessor.
+    reach the mint together; since ent#545 the accessor claims the id
+    write-once (`insert_setting_if_absent`) and a losing worker reads the
+    winner's back, so both label with the same 8 chars — before that the
+    read-then-upsert could land different UUIDs, last-write-wins.
     """
     try:
         from services.operator_intake_service import get_or_create_installation_id

@@ -1,5 +1,9 @@
 # Message Envelope — Payload-per-Kind Schema (#945)
 
+> **Start at [`PULL_MIGRATION_STATUS.md`](PULL_MIGRATION_STATUS.md) — it is the migration's entry point and the one
+> place that states current phase, remaining gates and open decisions. This file is reference
+> material.**
+
 > **Status**: Contract spec. Companion to [`ACTOR_MODEL_POSTCARD.md`](ACTOR_MODEL_POSTCARD.md).
 > Gates the pull pilot ([#946](https://github.com/abilityai/trinity/issues/946)).
 >
@@ -24,8 +28,8 @@
 > is a **documented contract, not a physically enforced wire format**. The pilot
 > rides the existing `backlog_metadata` / `ParallelTaskRequest` reconstruction
 > shape; whether the envelope can cleanly *replace* that shape is itself a Phase 3
-> finding (postcard §"scope caveat"; [PULL_PILOT_946_SOAK.md](PULL_PILOT_946_SOAK.md)
-> §4 "Envelope finding"). Physically enforcing it is the six demotion PRs in
+> finding (postcard §"scope caveat"). The #946 pilot that was to record it closed
+> without the finding being filled in. Physically enforcing it is the six demotion PRs in
 > [`ACTOR_MODEL_TASK_DEMOTION_MAP.md`](ACTOR_MODEL_TASK_DEMOTION_MAP.md).
 
 ---
@@ -176,6 +180,16 @@ stateless.
 Model selection is **not** a task field: per-call `model` is demoted to a
 session/schedule attribute (map #2, MODEL-001). `async_mode` disappears —
 everything is async; sync is the `?wait=true` edge adapter (map #4).
+
+> **Pilot reality (#2317).** The table above is the TARGET shape. Until the
+> demotion PRs land, the producer of a queued row (`backlog_service.enqueue`)
+> still records a per-task `model` and `timeout_seconds`, the push path enforces
+> both, and the pull worker reads both off `task_overrides` — so the claim
+> envelope built by `pull_coordination_service._build_claim_response` carries
+> `model` and `timeout_seconds` alongside the three fields above. They leave the
+> payload when the demotion that removes them from `ParallelTaskRequest` lands,
+> not before; dropping them from the wire earlier is a silent correctness
+> regression on the pull path (that was #2317).
 
 ### 2.3 `kind: event`
 
@@ -479,8 +493,6 @@ enforcement (the demotion PRs, #1081 Phase 3+).
   §"Recovery: Lease-Expiry Re-Delivery", §"Async-First Communication".
 - [`ACTOR_MODEL_TASK_DEMOTION_MAP.md`](ACTOR_MODEL_TASK_DEMOTION_MAP.md) — the
   `ParallelTaskRequest` → envelope demotion (the physical-enforcement pre-work).
-- [`PULL_PILOT_946_SOAK.md`](PULL_PILOT_946_SOAK.md) — the pilot this gates; §4
-  "Envelope finding" is where the reconciliation (§5 above) is decided.
 - Code precedent for the result shape:
   `docker/base-image/agent_server/services/result_callback.py` (#1083 terminal
   envelope), `src/backend/services/task_execution_service.py`

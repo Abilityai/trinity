@@ -124,7 +124,11 @@ def test_pre_alembic_db_is_stamped_not_rebuilt(pg):
     runner.upgrade_to_head()
     with eng.connect() as c:
         ver = c.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert ver == "0001_baseline"
+    # Stamped at the baseline and then upgraded: the DB ends at HEAD. Asserting
+    # the baseline only held while head == baseline (v0.8.0) — #2802.
+    from alembic.script import ScriptDirectory
+    head = ScriptDirectory.from_config(runner._config()).get_current_head()
+    assert ver == head, f"expected head {head}, got {ver}"
     assert "users" in _table_names(eng)
 
 

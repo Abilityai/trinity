@@ -33,6 +33,10 @@ from .auto_sync import schedule_auto_sync_if_enabled
 from .heartbeat import schedule_heartbeat
 from .services.result_callback import schedule_pending_result_resend
 from .services.orphan_sweeper import schedule_orphan_sweeper
+from .utils.thread_diagnostics import (
+    enable as _enable_thread_diagnostics,
+    schedule_loop_watchdog as _schedule_loop_watchdog,
+)
 from .services.pull_worker import (
     schedule_pull_workers,
     schedule_pending_pull_result_resend,
@@ -43,6 +47,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Create FastAPI application
+# #2455: arm the thread-stack dump BEFORE anything can wedge. Free until
+# used — a signal handler plus a function; no polling, no timer. Gives ops
+# `kill -USR1 <pid>` on a wedged container, and lets the stuck-reader
+# branches below dump automatically at the instant they notice.
+_enable_thread_diagnostics()
+
 app = FastAPI(
     title="Claude Agent API",
     description="Internal API for Claude Code agent (not exposed externally)",
@@ -94,6 +104,15 @@ schedule_pending_result_resend(app)
 # scenario where Trinity-side CB termination skips drain_reader_threads
 # and subsequent tasks fast-fail before reaching the agent.
 schedule_orphan_sweeper(app)
+
+# #2455 (09-02 occurrence): the wedge is not a teardown artifact — the event
+# loop stopped completing requests ~10 min BEFORE claude finished and ~3h
+# before any drain branch could notice, while heartbeats kept the agent
+# looking healthy. A beat task + watchdog THREAD is the only vantage point
+# that can notice a wedged loop; past a 60s stall it dumps every thread's
+# stack and the loop's task await-chains, re-dumping every 5 min while the
+# stall persists, and logs the recovery that bounds the wedge window.
+_schedule_loop_watchdog(app)
 
 # #946 / #1081 Phase 2: agent-side pull worker pool. DEFAULT OFF — gated on the
 # per-agent TRINITY_PULL_MODE flag (allowlist-injected by the backend). When off

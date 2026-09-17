@@ -159,10 +159,10 @@ Must exclude secrets, instance-specific files, and large content.
 
 > **Source of truth**: this list mirrors `_GITIGNORE_PATTERNS` in
 > `src/backend/services/git_service.py`. The Python constant is the
-> source of truth — the platform appends every entry to the agent's
-> `.gitignore` on init and again on every Push. A unit test
+> source of truth — the platform reconciles your `.gitignore` against it on
+> init, at creation, and again on every Push. A unit test
 > (`tests/unit/test_github_init_gitignore.py::test_doc_and_constant_in_sync`)
-> asserts the two stay in sync.
+> asserts the two are the same set, in both directions.
 
 ```gitignore
 # Shell init / history (instance-specific)
@@ -264,6 +264,93 @@ __pycache__/
 - ❌ `.claude/debug/` - Debug logs
 - ❌ `.claude/sessions/` - Per-session state
 - ❌ `.claude/shell-snapshots/` - Shell environment snapshots
+
+#### How the platform merges this list into your `.gitignore` (#2529)
+
+Every sync **rewrites** your `.gitignore` into three parts, in this order:
+
+```
+# >>> Trinity default ignore rules — managed; your own rules go BELOW and win (#2529) >>>
+   ... the list above, minus the protected ones ...
+# <<< Trinity default ignore rules <<<
+
+   ... YOUR rules, in the order you wrote them ...
+
+# >>> Trinity protected rules — managed; NOT overridable (...) >>>
+   ... credentials + platform-authored .trinity/ paths ...
+# <<< Trinity protected rules <<<
+```
+
+Both managed regions are rewritten on every sync. Do not edit inside them —
+edit between them.
+
+**Overriding a default.** Git is last-match-wins, so a negation you write in the
+middle region beats the defaults block above it. Since #2529 it **no longer has
+to be the last line of the file** — anything below the defaults block wins.
+Write, for example:
+
+```gitignore
+!keep.db          # override the canonical *.db
+!important.log    # override the canonical *.log
+```
+
+**What you cannot override.** The protected floor sits *below* your rules, so
+these win no matter what you write:
+
+- the credential patterns (`.env`, `.env.*`, `.mcp.json`, `credentials.json`,
+  `*.pem`, `*.key`, `.ssh/`) — an inert `!.env` or `!.ssh` that suddenly went live
+  on an unattended 15-minute auto-sync would push a live secret (or an SSH private
+  key) into your own repo, so the platform refuses;
+- `.trinity/*` and the `!` re-includes for the paths the platform itself authors
+  and reads back (`pre-check`, `post-check`, `pre-snapshot`, `setup.sh`,
+  `persistent-processes.allow`, `brain-orb/`, `pipelines/`, `plugins.yaml`) — a
+  broad rule of yours (`*.sh`, `*.yaml`, `*.json`) must not silently stop your
+  own hooks from being committed.
+
+`!.env.example` and `!.mcp.json.template` are *in* the floor, so those two files
+are always committable — which is what compatibility check **F-004** requires.
+
+**One honest git limitation.** A negation cannot re-include a file whose
+**parent directory** is excluded: git never descends into an excluded directory,
+so the negation is inert *wherever* you put it. This applies to every dir-form
+rule in the list above — `content/`, `node_modules/`, `.venv/`,
+`.claude/projects/`, `.claude/plugins/`, `.cache/`, and the rest:
+
+```gitignore
+content/            # canonical
+!content/keep.md    # INERT — git never looked inside content/
+```
+
+The workaround is to keep the file outside the excluded directory. When this
+bites you, the sync now **tells you**: its result carries
+`shadowed_negations`, e.g. `"!content/keep.md -> content/"`.
+
+**Recovering a file a sync already untracked.** The sweep only touches the
+index, so the file is still on disk. Two steps:
+
+```bash
+# 1. Negate it in your .gitignore. Appending is fine — the next sync moves the
+#    line into the user region for you, where it beats the defaults block.
+echo '!path/to/file' >> .gitignore
+
+# 2. Re-add it once — it was ignored, so a plain `git add` will skip it
+git add -f path/to/file
+```
+
+After that the next sync keeps it: once the negation is effective, the file is
+no longer "tracked but ignored", so nothing untracks it again. If step 1 does
+not take effect, the file's parent directory is excluded — see the limitation
+above.
+
+**Knowing it happened at all.** A sync's result names what it removed
+(`removed_paths`), what it newly un-ignored and is about to commit
+(`unignored_paths`), and which of your negations a managed rule defeated
+(`shadowed_negations`). A sync that changes what is tracked — in **either**
+direction, untracked *or* newly committed — also files an operator-queue entry,
+so an unattended 15-minute cycle is not silent. Watch `unignored_paths` in
+particular: those files were ignored before this sync and are now in your
+repository's history, so if one turns out to be a secret, rotate it rather than
+just deleting the file.
 
 **Note on Skills**: Skills in templates are seeded to the **Platform Skills Library** on first deployment, then managed centrally. See [Platform Skills](#platform-skills).
 
@@ -385,6 +472,62 @@ Rules and why:
 > **Runtime installs.** Plugins you install *after* creation via `/plugin install`
 > (not declared in the template) are **not** captured into the manifest yet — put
 > anything you want to survive a reconstitution in `template.yaml plugins:`.
+
+---
+
+## Deploy as-is, then onboard in place — ent#411
+
+Everything above assumes you build the agent *first* and deploy it second. The
+opposite order also works, and it is the shortest path for a repo that already
+exists: **deploy the repo as-is, then let the agent make itself compatible.**
+
+`create_agent(template: github:owner/repo)` already tolerates a repo with **no
+`template.yaml`** — it creates exactly as it always has. What used to be missing
+was the other half: the deployed agent had no way to *become* compatible without a
+human cloning the repo locally, running the wizard, and opening a PR against a
+repo they may not even own.
+
+So the Trinity plugin is **pre-installed in the agent base image** and ensured on
+every boot, whether or not anything is declared. A bare repo has no
+`template.yaml` to declare it in — which is exactly why declaring it cannot be the
+condition for having it.
+
+```
+create_agent(template: "github:owner/bare-repo")   # no template.yaml, no plugins:
+  → agent starts, trinity@abilityai already present
+  → /trinity:onboard  (in place, inside the container)
+      writes template.yaml (incl. plugins:), .env.example,
+             .gitignore, .mcp.json.template
+      commits + pushes back with the agent's own PAT
+  → get_agent_compatibility_report → 0 HARD findings
+```
+
+What to know:
+
+- **Additive, never subtractive.** A `template.yaml plugins:` block that omits
+  `trinity@abilityai` does **not** uninstall it. Reconcile means "install what is
+  missing", never "make the installed set match the declaration".
+- **The platform's marketplace name is pinned.** A manifest may add marketplaces
+  freely, but it cannot re-point `abilityai` at another source — the manifest is
+  on the agent-writable volume, and a redefinable platform marketplace would be an
+  arbitrary-code-fetch primitive rather than a self-healing boot step.
+- **Source mode is pull-only.** Files the agent writes inside its container are
+  container-local until pushed. In-place onboarding therefore ends in a push (or,
+  for a tokenless agent, an honest report that the result is local plus the patch)
+  — otherwise the work is lost on the next reset.
+- **Opt out with `TRINITY_PLATFORM_PLUGINS=0`** (runtime) or build the image with
+  `--build-arg TRINITY_PREINSTALL_PLUGINS=0` (air-gapped builds). Neither is fatal
+  on its own: the build still succeeds if the marketplace is unreachable, and the
+  boot hook retries.
+- **Base-image ordering caveat.** An agent running an image built before this
+  change silently lacks the pre-install; its next start installs the plugin
+  through the boot hook instead (same caveat as #1704's hook). Rebuild the base
+  image (`./scripts/deploy/build-base-image.sh`) to get the zero-subprocess path.
+- **How to tell what happened.** The boot reconciler writes
+  `~/.trinity/plugins-state.json`, and compatibility check **I-006** reports it:
+  installed, withheld *with the reason*, or switched off. "The marketplace was
+  unreachable" and "the operator never wanted it" are different facts, and a bare
+  presence flag cannot tell them apart.
 
 ---
 
@@ -1476,6 +1619,8 @@ sections:
 | `divider` | - | Horizontal line |
 | `spacer` | - | Vertical space |
 
+This table is the closed set. Anything else — a chart, badge, or countdown widget, for example — is stripped by the agent server before render, appears in the Dashboard tab's warning banner, and fails compatibility check D-002 by name. For trend lines, give `metric`/`progress` widgets a stable `id:` — Trinity records their values on every fetch and draws the sparkline itself.
+
 ### Widget Examples (All Types)
 
 **IMPORTANT**: Use exact field names shown below. Common mistakes:
@@ -1995,6 +2140,7 @@ Closing stdout only (not stderr) preserves error messages from a failing
 
 | Date | Changes |
 |------|---------|
+| 2026-09-06 | **Widget Types**: stated as a closed set; no chart/badge/countdown widget exists (#2110) |
 | 2026-02-05 | **Credential System Refactor (CRED-002)**: Updated Credential Management section for new simplified system; Direct file injection replaces Redis-based assignments; Export/Import with encrypted `.credentials.enc` for git storage; Auto-import on agent startup |
 | 2026-01-27 | **Advanced Skills & CLAUDE.md**: Added 8 new skill frontmatter fields (`disable-model-invocation`, `user-invocable`, `argument-hint`, `model`, `context`, `agent`, `hooks`); Added invocation control table; Added string substitutions (`$ARGUMENTS`, `$N`, `${CLAUDE_SESSION_ID}`); Added dynamic context injection (`!`command``); Added skill size guidelines; Added CLAUDE.md imports (`@path` syntax) and best practices table |
 | 2026-01-26 | **Platform Skills Best Practices**: Expanded Platform Skills section with comprehensive skill writing guidance; Added SKILL.md format, frontmatter fields, description best practices, `allowed-tools` for restricting tool access, multi-file skill patterns, Skills vs Commands vs CLAUDE.md comparison table; Emphasized skills as the recommended way to encode reusable knowledge |

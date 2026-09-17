@@ -221,7 +221,15 @@ function toggle() {
 **Notes**:
 - Controls column beside RunningStateToggle / ReadOnlyToggle
 - Loading state tracked per-agent via `autonomyLoading` ref
-- `invisible` (column-preserving) for system agents
+- `invisible` (column-preserving) for system agents — since #2358 that also
+  holds at the List's `md` breakpoint, which used `v-if` and dropped the
+  toggle instead. The List has no header below `lg`, so row-to-row parity is
+  the only cue a reader has, and at `md` the toggles sit before the `flex-1`
+  success bar: dropping one pulled that bar ~298px left on exactly the system
+  and shared rows (the meter and task counts sit after the `flex-1` and never
+  moved). The reservation is a wrapper around the toggle, so its width comes
+  from the toggle itself and cannot drift from a hand-written rem. The List's
+  `base` layout renders no AutonomyToggle at all
 - Handler calls `networkStore.toggleAutonomy` and toasts off the returned
   `{success, error}` — the network store returns, never throws
 

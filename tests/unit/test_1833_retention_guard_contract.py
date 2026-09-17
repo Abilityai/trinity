@@ -482,6 +482,7 @@ class _Admin:
     role: str = "admin"
     agent_name: Optional[str] = None
     connector_agent: Optional[str] = None
+    mcp_scope: Optional[str] = None  # #2323
 
 
 class _EndpointDb:
@@ -520,7 +521,11 @@ def _get_retention(monkeypatch, agent_count):
     import asyncio
 
     try:
-        from routers import settings as mod
+        # #1028: `routers/settings.py` is a package now. This names the module
+        # that owns the handler — the collaborators below are deliberately not
+        # re-exported on the package, so a stale patch raises instead of
+        # applying to a module nobody reads.
+        from routers.settings import retention as mod
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")
 

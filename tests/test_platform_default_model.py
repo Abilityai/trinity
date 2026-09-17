@@ -77,29 +77,26 @@ class TestFeatureFlagsEndpoint:
         resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", timeout=10)
         assert resp.status_code == 401
 
-    def test_feature_flags_includes_workspace_available(self):
-        """feature-flags must expose workspace_available key (#860)."""
-        headers = get_auth_headers()
-        resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", headers=headers, timeout=10)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "workspace_available" in data, (
-            "feature-flags response missing 'workspace_available' key"
-        )
-        assert isinstance(data["workspace_available"], bool)
+    def test_feature_flags_omits_retired_workspace_available(self):
+        """`workspace_available` is retired, not merely default-off (ent#438).
 
-    def test_workspace_available_false_by_default(self):
-        """workspace_available must be False unless WORKSPACE_ENABLED is set (#860)."""
+        Replaces the two #860 tests that required the key to be PRESENT and
+        False. ent#438 merged the per-agent workspace page into the Workspace
+        and removed every consumer, so the key described a gate that no longer
+        existed; `WORKSPACE_ENABLED` is gone from `.env.example` and all three
+        compose files. `tests/unit/test_workspace_flag_retired.py` owns the
+        source- and config-level pins; this is the over-the-wire one.
+        """
         headers = get_auth_headers()
         resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", headers=headers, timeout=10)
         assert resp.status_code == 200
         data = resp.json()
-        # In CI/test environments WORKSPACE_ENABLED is not set, so this must be False.
-        # If GEMINI_API_KEY is also absent, voice_available=False makes workspace_available
-        # False regardless — both conditions confirm the default-off behaviour.
-        assert data["workspace_available"] is False, (
-            "workspace_available should default to False unless explicitly enabled"
+        assert "workspace_available" not in data, (
+            "feature-flags still carries the retired 'workspace_available' key"
         )
+        # The sibling voice flag stays — this retired one flag, not the family.
+        assert "voice_available" in data
+        assert isinstance(data["voice_available"], bool)
 
     def test_feature_flags_includes_mcp_agent_chat_pull_enabled(self):
         """feature-flags must expose mcp_agent_chat_pull_enabled (#946 observability)."""

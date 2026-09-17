@@ -1,0 +1,167 @@
+name: Journey smoke
+
+# Rail R2 of the journey-coverage deck (#2336), on the tier R1 built (#2335).
+#
+# WHY THIS EXISTS, precisely: on 2026-08-14 five of six stopped agents could not
+# be started — HTTP 500 on the most fundamental operation the platform has — and
+# it reached users. A human found it by poking around. Nothing automated caught
+# it, because the per-PR gate collects `tests/unit/` only and no test in the
+# merge path had ever started a real agent.
+#
+# Nightly-only gating is not a substitute. With six humans and dev agents
+# merging, a red morning with fifteen suspect PRs is a forensic exercise, not a
+# signal. So the split is by COST, not by importance: journeys needing a fresh
+# host gate the release cut; journeys that run against a stack this job can
+# stand up gate every PR.
+#
+# RUNTIME BUDGET (#2336 AC 5): `timeout-minutes: 30` for the job, of which the
+# stack boot is ~8-12 min (the agent base image builds here) and the journeys
+# are ~3-4 min. A timeout FAILS the job — it is never reported as a pass.
+#
+# CREDENTIALS: none, deliberately. `pull_request` exposes repository secrets to
+# fork PRs while running arbitrary shell from the PR's own tree, and this job
+# runs the PR's own `scripts/deploy/start.sh` — so a provider key named here
+# would be readable by anyone who opens a PR (the reasoning
+# `integration-nightly.yml` sets out in full). The credential-bound J03
+# first-turn journey therefore runs on a developer's stack and in the nightly;
+# what runs HERE is the lifecycle journey, which is where the 08-14 regression
+# actually was.
+
+# NO `paths-ignore` HERE, deliberately — see the review note below before adding
+# one. Every PR to `dev` boots the stack, which is the 5-12 min tax a reviewer
+# rightly flagged for docs-only PRs. The obvious fix is the wrong one.
+#
+# A `paths-ignore` that filters out a PR means the workflow never runs, so the
+# check is never REPORTED. For a check this PR intends to make required, "never
+# reported" is not "skipped" — it is a PR that can never merge, waiting forever
+# on a status that will not arrive. That exact failure was diagnosed on
+# trinity#2384 on 2026-08-27: three required workflows produced no run, and the
+# PR sat green-but-unmergeable until someone pushed again.
+#
+# The safe shape is the one `frontend-e2e.yml` already uses: keep the trigger
+# unconditional, put the decision in a cheap `changes` job, and gate the heavy
+# job with `if: needs.changes...`. A job skipped by `if:` still reports a
+# conclusion, so the required check is satisfied. That job also has to FAIL OPEN
+# — being unable to determine the changed files must mean "run", never "skip"
+# and never a red X (#1782, where `gh pr diff` 406s on PRs over 300 files).
+#
+# Not done here because it is a ~50-line gate with subtle semantics and
+# `frontend-e2e.yml` says of its own sibling implementation that the two "differ
+# ON PURPOSE. Don't 'unify' them" — so this wants its own deliberate copy, in
+# its own change, not a rushed third one appended to this PR.
+on:
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: journey-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  journey-smoke:
+    name: journey-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - uses: actions/setup-python@v7
+        with:
+          # Literal, matching every sibling workflow. #1891's rule is that this
+          # must EQUAL the image pin in docker/{backend,scheduler,base-image}/
+          # Dockerfile, and `tests/unit/test_1891_python_version_parity.py`
+          # scans all workflows and fails on a stale one — so the parity is
+          # enforced by that test, not by pointing setup-python at a Dockerfile
+          # it cannot parse (it read the literal string "FROM python:3.13-slim"
+          # as a version and failed the job in 8 seconds).
+          python-version: '3.13'
+
+
+      - name: Install test dependencies
+        run: pip install -r tests/requirements-test.txt
+
+      - name: Generate a throwaway admin password
+        # Never a fixed literal, and masked so a failing test cannot echo it into
+        # a public log. The `Aa1!` suffix guarantees the OWASP ASVS 2.1 classes
+        # on the random branch (the shape integration-nightly.yml uses).
+        run: |
+          set -euo pipefail
+          PASS="$(openssl rand -base64 24 | tr -d '/+=\n')Aa1!"
+          echo "::add-mask::$PASS"
+          echo "ADMIN_PASSWORD=$PASS" >> "$GITHUB_ENV"
+
+      - name: Boot the stack
+        run: |
+          set -uo pipefail
+          cp .env.example .env
+          echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> .env
+          echo "SECRET_KEY=$(openssl rand -hex 32)" >> .env
+          # Zero seeded agents at baseline (learnings 2026-07-08), so the
+          # journeys' own fixtures are the only agents on the instance and a
+          # leftover cannot make a journey pass or fail for someone else's
+          # reason.
+          echo "TRINITY_DEFAULT_SYSTEM_MANIFEST=disabled" >> .env
+          ./scripts/deploy/start.sh || { echo "::error title=Stack failed to start::scripts/deploy/start.sh exited non-zero — the journeys never ran"; exit 1; }
+          for i in $(seq 1 120); do
+            if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+              echo "backend healthy after $((i*2))s"; exit 0
+            fi
+            sleep 2
+          done
+          echo "::error title=Backend never became healthy::/health did not answer 200 within 240s of start.sh completing"
+          docker compose logs --tail 80 backend || true
+          exit 1
+
+      - name: Run the journey tier
+        env:
+          TRINITY_API_URL: http://localhost:8000
+          # `tests/conftest.py` aliases TRINITY_TEST_PASSWORD from ADMIN_PASSWORD.
+          # Safe here and nowhere else: the sweep refuses a non-localhost target
+          # and this instance is a throwaway destroyed with the runner (#1558).
+          TRINITY_TEST_CLEANUP_SWEEP: '1'
+        run: |
+          set -uo pipefail
+          # `|| rc=$?` rather than a bare call then `rc=$?`.
+          #
+          # GitHub's default shell for `run:` is `bash --noprofile --norc -e -o
+          # pipefail {0}`, and `set -uo pipefail` adds `-u` without clearing the
+          # `-e` that is already in force. So with a bare call a non-zero pytest
+          # aborted the step on the pytest line itself: `rc=$?` never ran, the
+          # `if` never ran, and the "No journeys collected" annotation could
+          # never appear. The job still went red on exit 5 — via `-e`, not via
+          # the code documenting the guarantee — so the #2029 protection this
+          # gate exists to provide was resting on an implicit shell flag while
+          # the lines asserting it were unreachable. A later editor reshaping
+          # this step, or adding `continue-on-error`, would have got no signal.
+          #
+          # `|| rc=$?` is chosen over `set +e` because the command is part of a
+          # condition, which `-e` does not apply to — the exit code is captured
+          # by construction rather than by remembering to disable a flag.
+          rc=0
+          python -m pytest tests/journeys/ -v -rs --tb=short \
+            --timeout=300 --timeout-method=thread || rc=$?
+          # A tier that collected nothing is a FAILURE, not a pass — the #2029
+          # class this gate is required precisely to prevent. pytest exits 5 on
+          # "no tests collected".
+          if [ "$rc" = "5" ]; then
+            echo "::error title=No journeys collected::tests/journeys/ produced no tests — a green tick here would mean nothing ran"
+            exit 1
+          fi
+          exit "$rc"
+
+      - name: Stack logs on failure
+        if: failure()
+        run: |
+          docker compose logs --tail 200 backend || true
+          docker compose ps || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v --remove-orphans || true

@@ -317,7 +317,7 @@ def test_create_schedule_path_skips_enforcement_when_timeout_none(monkeypatch):
         "Test premise: ScheduleCreate.timeout_seconds defaults to None after #913"
     )
 
-    fake_user = types.SimpleNamespace(username="owner", role="user", connector_agent=None)
+    fake_user = types.SimpleNamespace(username="owner", role="user", connector_agent=None, mcp_scope=None)
 
     # Invoke the async route handler directly.
     asyncio.run(
@@ -399,7 +399,7 @@ def test_create_schedule_path_runs_enforcement_when_timeout_set(monkeypatch):
         timeout_seconds=600,
     )
 
-    fake_user = types.SimpleNamespace(username="owner", role="user", connector_agent=None)
+    fake_user = types.SimpleNamespace(username="owner", role="user", connector_agent=None, mcp_scope=None)
 
     asyncio.run(
         sched_router.create_schedule(
@@ -447,7 +447,7 @@ def test_create_schedule_denies_access_before_existence_check(monkeypatch):
     schedule_data = sched_router.ScheduleCreate(
         name="test", cron_expression="*/5 * * * *", message="hi",
     )
-    fake_user = types.SimpleNamespace(username="probe", role="user", connector_agent=None)
+    fake_user = types.SimpleNamespace(username="probe", role="user", connector_agent=None, mcp_scope=None)
 
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(
@@ -488,7 +488,7 @@ def test_create_schedule_missing_agent_returns_404(monkeypatch):
     schedule_data = sched_router.ScheduleCreate(
         name="test", cron_expression="*/5 * * * *", message="hi",
     )
-    fake_user = types.SimpleNamespace(username="admin", role="admin", connector_agent=None)
+    fake_user = types.SimpleNamespace(username="admin", role="admin", connector_agent=None, mcp_scope=None)
 
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(

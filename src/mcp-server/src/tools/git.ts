@@ -28,6 +28,7 @@ import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import type { ToolCallContext } from "../audit.js";
+import { accessDenied } from "../access.js";
 
 /** git log -N is shelled in the agent server — clamp to a sane bound (#905). */
 const GIT_LOG_MIN = 1;
@@ -97,7 +98,7 @@ export function createGitTools(client: TrinityClient, requireApiKey: boolean) {
     const access = await checkAgentAccess(apiClient, authContext, agentName);
     if (!access.allowed) {
       console.log(`[${toolName}] Access denied: ${access.reason}`);
-      return JSON.stringify({ error: "Access denied", reason: access.reason }, null, 2);
+      return accessDenied(context, { error: "Access denied", reason: access.reason });
     }
 
     // Mint one id per tool call and stamp it on the shared audit context so the
@@ -179,7 +180,14 @@ export function createGitTools(client: TrinityClient, requireApiKey: boolean) {
         "paths (subset to sync), strategy (normal | pull_first | force_push). On a " +
         "conflict the tool returns a structured 409 with the conflict type and a " +
         "hint to resolve via chat_with_agent. Owner-only (a shared/non-owner key " +
-        "gets read+pull only).",
+        "gets read+pull only). Every sync also reconciles the agent's .gitignore " +
+        "against the platform's canonical list and untracks files that now match " +
+        "a rule, so the result carries removed_paths (tracked -> untracked by this " +
+        "sync; the working tree is untouched, but the deletion is committed), " +
+        "unignored_paths (newly un-ignored and about to be committed) and " +
+        "shadowed_negations ('!rule -> deciding managed pattern' for a negation " +
+        "the platform's own rules defeat). Check removed_paths before assuming a " +
+        "sync only added things.",
       parameters: z.object({
         agent_name: z.string().min(1).describe("Agent to sync."),
         message: z.string().optional().describe("Custom commit message."),

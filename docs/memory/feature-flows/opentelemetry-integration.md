@@ -455,7 +455,7 @@ Existing agents keep their OTel config until restarted.
 | `.env.example` | OTel environment variables (lines 95-112) |
 | `docs/DEPLOYMENT.md` | Added OpenTelemetry section |
 | `src/frontend/src/stores/observability.js` | Pinia store for observability state (268 lines) — **unused after Dashboard removal** |
-| `src/frontend/src/components/ObservabilityPanel.vue` | Collapsible metrics panel (185 lines) — **removed from Dashboard 2026-04-18** |
+| `src/frontend/src/components/ObservabilityPanel.vue` | Collapsible metrics panel — **removed from Dashboard 2026-04-18, file deleted in #2492** (unreferenced) |
 
 ---
 

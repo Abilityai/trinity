@@ -43,6 +43,11 @@ def _run(coro):
 def _human_caller():
     caller = MagicMock()
     caller.agent_name = None
+    caller.connector_agent = None
+    # #2323: the admin gate allowlists `mcp_scope`, and MagicMock auto-creates a
+    # truthy one. None = an interactive human, which is what this stands in for.
+    caller.mcp_scope = None
+    caller.role = "admin"
     return caller
 
 
@@ -58,16 +63,30 @@ def _blob(obj) -> str:
 @pytest.fixture
 def ops(monkeypatch):
     import routers.ops as mod
+    # #1028: the fleet orchestration lives in services/fleet_ops_service; the
+    # route keeps the gate. Collaborator patches land on the service, the gate
+    # patch on the router, and the fixture hands the SERVICE back with the
+    # route entry points attached (the test_1860 shape).
+    import services.fleet_ops_service as svc
 
-    monkeypatch.setattr(mod, "assert_admin", lambda user: None)
-    monkeypatch.setattr(mod, "db", MagicMock())
+    monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None)  # **kw: #2323 added allow_scopes=
+    monkeypatch.setattr(svc, "db", MagicMock())
     # Mirrors the test_1860 fixture: a bare MagicMock reads as "this agent is an
     # ephemeral ghost / system agent", which makes the loop SKIP and the test
     # vacuous — the skip path produces no error field at all.
-    mod.db.get_agent_owner.return_value = {"is_system": False}
-    mod.db.get_agent_ephemeral_info.return_value = None
-    monkeypatch.setattr(mod, "platform_audit_service", MagicMock(log=AsyncMock()))
-    return mod
+    svc.db.get_agent_owner.return_value = {"is_system": False}
+    svc.db.get_agent_ephemeral_info.return_value = None
+    monkeypatch.setattr(svc, "platform_audit_service", MagicMock(log=AsyncMock()))
+    svc.stop_fleet = mod.stop_fleet
+    svc.get_fleet_health = mod.get_fleet_health
+    # the cost rollup has its own service (#1028) — attach the route and
+    # point per-test patches (httpx, the OTEL url) at that module.
+    import services.ops_costs_service as costs_svc
+    svc.get_ops_costs = mod.get_ops_costs
+    svc.httpx = costs_svc.httpx
+    svc.OTEL_COLLECTOR_METRICS_URL = None  # setattr target below is costs_svc
+    svc._costs = costs_svc
+    return svc
 
 
 class _Agent:
@@ -140,7 +159,7 @@ def test_fleet_health_probe_error_carries_no_raw_message(ops, monkeypatch):
 
 def test_ops_costs_error_carries_no_raw_message(ops, monkeypatch):
     """The OTel collector URL and its internal host live in this message."""
-    monkeypatch.setattr(ops, "OTEL_COLLECTOR_METRICS_URL", "http://otel:8889/metrics", raising=False)
+    monkeypatch.setattr(ops._costs, "OTEL_COLLECTOR_METRICS_URL", "http://otel:8889/metrics", raising=False)
 
     class _Client:
         async def __aenter__(self):
@@ -152,7 +171,7 @@ def test_ops_costs_error_carries_no_raw_message(ops, monkeypatch):
         async def get(self, *a, **k):
             raise RuntimeError(SENTINEL)
 
-    monkeypatch.setattr(ops.httpx, "AsyncClient", lambda *a, **k: _Client())
+    monkeypatch.setattr(ops._costs.httpx, "AsyncClient", lambda *a, **k: _Client())
 
     out = _run(ops.get_ops_costs(MagicMock(), current_user=_human_caller()))
 
@@ -169,7 +188,7 @@ def test_system_agent_health_error_carries_no_raw_message(monkeypatch):
     container host (`agent-trinity-system:8000`)."""
     import routers.system_agent as mod
 
-    monkeypatch.setattr(mod, "assert_admin", lambda user: None, raising=False)
+    monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None, raising=False)  # **kw: #2323 added allow_scopes=
     monkeypatch.setattr(mod, "db", MagicMock())
     monkeypatch.setattr(mod, "get_agent_container", lambda name: MagicMock(status="running"))
 
@@ -191,10 +210,16 @@ def test_system_agent_health_error_carries_no_raw_message(monkeypatch):
 
 @pytest.mark.parametrize(
     "module",
-    ["routers/ops.py", "routers/system_agent.py"],
+    [
+        "routers/ops.py",
+        "routers/system_agent.py",
+        # #1028 moved the ops handlers' bodies here; the ban follows the code.
+        "services/fleet_ops_service.py",
+        "services/ops_costs_service.py",
+    ],
 )
 def test_no_raw_str_e_remains_in_these_routers(module):
-    """`str(e)` in these two files is, without exception, the defect this issue
+    """`str(e)` in these files is, without exception, the defect this issue
     is about — every occurrence was a response field or an HTTPException detail.
     A plain ban is therefore the honest guard, and it fails loudly if a new one
     is added rather than waiting for the next CodeQL run.

@@ -1,19 +1,31 @@
 # Public Access
 
-By default, Trinity is only accessible on the local network or via VPN. Enabling public access exposes specific paths through a Cloudflare Tunnel so that external webhooks and public chat links work without opening firewall ports or requiring a static IP.
+By default, Trinity is only accessible on the local network or via VPN. Enabling public access exposes specific paths through a Cloudflare Tunnel so that external webhooks, public chat links and MCP clients work without opening firewall ports or requiring a static IP.
+
+## TLS Is Terminated Outside Trinity
+
+Trinity serves plain HTTP; no compose file carries an HTTPS listener or a certificate step. Before an instance answers on a public address, choose one posture:
+
+| Posture | What it gives you | When to use it |
+|---|---|---|
+| **Cloudflare Tunnel** (this page) | HTTPS at a real hostname, no inbound ports open at all | The default for a public instance. Nothing to renew. |
+| **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport; the instance is not on the public internet | Teams and webhook sources that can all reach the VPN. Inbound integrations (Telegram, WhatsApp, VoIP, webhook triggers) do not work without a public hostname. |
+| **Reverse proxy you run** (Caddy / nginx + Let's Encrypt) | HTTPS at your own domain | You already operate a proxy. |
+
+Plain HTTP on a public IP with none of the above is the one combination to avoid. A provisioned DigitalOcean Droplet (the 1-Click or the installer script) ships its own Caddy with a short-lived certificate for the Droplet's IP, and the **Secure this instance** step of its first-run setup presents the tunnel below as the second hardening stage, after a domain — see [Single Server → DigitalOcean 1-Click](single-server.md#digitalocean-marketplace-1-click).
 
 ## What Public Access Enables
 
 | Feature | Requires public access |
 |---|---|
-| Slack channel adapter (OAuth callback + event webhooks) | Yes |
+| Slack: the one-time OAuth install callback, and event delivery in webhook mode (the default Socket Mode connects outward and needs none) | Yes |
 | Telegram bot webhooks | Yes |
 | WhatsApp (Twilio) webhooks | Yes |
 | Public chat links (`/chat/*`) | Yes |
 | Agent website proxy (`/site/<token>/`) | Yes |
 | Nevermined paid chat (`/api/paid/*/chat`) | Yes |
 | Web UI access for team members off-VPN | Yes |
-| MCP access for Claude Code clients off-VPN | Yes |
+| MCP access for Claude Code clients off-VPN (`/mcp`) | Yes |
 
 If all your users and webhook sources can reach the server directly (e.g., via Tailscale), you do not need the Cloudflare Tunnel.
 
@@ -29,21 +41,28 @@ If all your users and webhook sources can reach the server directly (e.g., via T
 
 ### 2. Configure public hostnames
 
-In the Cloudflare dashboard, add public hostnames for your tunnel under the **Public Hostnames** tab. Route traffic to the internal Docker services by container name.
+In the Cloudflare dashboard, add a public hostname for your tunnel under the **Public Hostnames** tab. The `cloudflared` container runs on both Trinity networks, so it reaches the platform containers by name.
 
-Recommended ingress rules:
+**Simplest: one catch-all rule** — route the whole hostname to the frontend, `http://trinity-frontend:8080`. The production frontend's nginx already proxies `/api/`, `/a2a/`, `/mcp`, `/ws` and `/health` to the right upstream, so a single rule serves the web UI, every webhook, and MCP. (The frontend container listens on **8080** inside the network; `FRONTEND_PORT` only changes the host-side mapping.)
+
+**Narrower: path-split rules** — if you want to publish only the webhook surface rather than the whole UI:
 
 | Path prefix | Routes to | Purpose |
 |---|---|---|
-| `/api/public/*` | `http://backend:8000` | Public API, OAuth callbacks |
-| `/api/telegram/webhook/*` | `http://backend:8000` | Telegram bot webhooks |
-| `/api/whatsapp/*` | `http://backend:8000` | WhatsApp/Twilio webhooks |
-| `/api/paid/*` | `http://backend:8000` | Nevermined paid chat |
-| `/api/webhooks/*` | `http://backend:8000` | Schedule webhook triggers |
-| `/chat/*` | `http://frontend:80` | Public chat UI |
-| `/site/*` | `http://backend:8000` | Agent website proxy |
-| `/assets/*` | `http://frontend:80` | Static assets |
-| `/` (catch-all) | `http://frontend:80` | SPA root and web UI |
+| `/api/public/*` | `http://trinity-backend:8000` | Public API, OAuth callbacks |
+| `/api/telegram/webhook/*` | `http://trinity-backend:8000` | Telegram bot webhooks |
+| `/api/whatsapp/*` | `http://trinity-backend:8000` | WhatsApp/Twilio webhooks |
+| `/api/paid/*` | `http://trinity-backend:8000` | Nevermined paid chat |
+| `/api/webhooks/*` | `http://trinity-backend:8000` | Schedule webhook triggers |
+| `/api/voip/*` | `http://trinity-backend:8000` | VoIP media streams (WebSocket) |
+| `/mcp` | `http://trinity-frontend:8080` | MCP server, proxied by the frontend |
+| `/chat/*` | `http://trinity-frontend:8080` | Public chat UI |
+| `/site/*` | `http://trinity-backend:8000` | Agent website proxy |
+| `/assets/*` | `http://trinity-frontend:8080` | Static assets |
+
+These rules publish the webhook surface and not the web interface. To publish the interface as well, add a `/` catch-all routing to `http://trinity-frontend:8080`. To keep it private, leave that out and reach it over a private network — [Hardening → Step 2c](hardening.md#step-2c-both--the-tunnel-carries-the-callbacks-the-tailnet-carries-you).
+
+Add the matching rule whenever you connect a new channel. A path you have not published stops delivering, with no error on this end.
 
 ### 3. Add the DNS record
 
@@ -57,12 +76,12 @@ Cloudflare creates this automatically when you use **Public Hostnames** in Zero 
 
 ## Required Environment Variables
 
-Both variables are forwarded by `docker-compose.prod.yml`:
+Both variables are forwarded by `docker-compose.prod.yml` and `docker-compose.hosted.yml` (the dev compose does not forward `TUNNEL_TOKEN` — a tunnel is a server-install feature):
 
 | Variable | Example value | Notes |
 |---|---|---|
 | `TUNNEL_TOKEN` | `eyJhIjoiY...` | The token from the Cloudflare Zero Trust dashboard. Required for the `cloudflared` container to authenticate. |
-| `PUBLIC_CHAT_URL` | `https://public.your-domain.com` | The externally reachable base URL. Used to construct webhook URLs, public chat links, and agent website proxy URLs. Must match the public hostname you configured in Cloudflare. |
+| `PUBLIC_CHAT_URL` | `https://public.your-domain.com` | The externally reachable base URL. Used to construct webhook URLs, public chat links, and agent website proxy URLs. Must match the public hostname you configured in Cloudflare. Also settable after login as the **Public URL** under **Settings → General**. |
 
 Set both in `.env`:
 
@@ -79,7 +98,11 @@ FRONTEND_URL=https://trinity.your-domain.com
 
 ## Starting with the Tunnel
 
-The `cloudflared` service is defined under the `tunnel` Compose profile. It does **not** start with a plain `docker compose up -d`. Start it explicitly:
+The `cloudflared` service is defined under the `tunnel` Compose profile. Setting `TUNNEL_TOKEN` alone starts nothing.
+
+**Hosted installs:** `./scripts/deploy/start.sh --hosted` reads `TUNNEL_TOKEN` from `.env`, adds `--profile tunnel` itself, and appends `COMPOSE_PROFILES=tunnel` to `.env` — so every later bare `docker compose -f docker-compose.hosted.yml stop` / `logs` also acts on the tunnel container. Without that persisted profile, `stop` would leave the tunnel running and the instance publicly reachable after you had been told the stack was down.
+
+**Source-built installs:** pass the profile explicitly:
 
 ```bash
 # Start everything including the tunnel
@@ -87,11 +110,15 @@ docker compose -f docker-compose.prod.yml --profile tunnel up -d
 
 # Start only the tunnel (if other services are already running)
 docker compose -f docker-compose.prod.yml --profile tunnel up -d cloudflared
+
+# Or make the profile stick for every later command
+echo 'COMPOSE_PROFILES=tunnel' >> .env
 ```
 
 Verify the tunnel is connected:
 
 ```bash
+docker ps | grep cloudflared          # a missing container is silent — check it exists
 docker logs trinity-cloudflared
 # Look for: "Registered tunnel connection" or "Connection established"
 ```
@@ -99,7 +126,7 @@ docker logs trinity-cloudflared
 ## Stopping the Tunnel
 
 ```bash
-docker compose -f docker-compose.prod.yml stop cloudflared
+docker compose -f docker-compose.prod.yml stop cloudflared     # or -f docker-compose.hosted.yml
 ```
 
 This stops the tunnel container without affecting the rest of the platform.
@@ -116,6 +143,8 @@ Once `PUBLIC_CHAT_URL` is set and the tunnel is connected, Trinity constructs we
 
 Copy the URL shown in the UI into the respective third-party dashboard (Telegram BotFather, Twilio console, etc.).
 
+MCP clients off-VPN connect to `{PUBLIC_CHAT_URL}/mcp` with an MCP API key (**Settings → MCP Keys**); **Settings → MCP Keys → MCP Server URL** sets the URL the UI shows to users.
+
 ## Security Notes
 
 - The Cloudflare Tunnel does **not** require opening any inbound firewall ports — the `cloudflared` container initiates an outbound connection to Cloudflare's edge.
@@ -123,9 +152,10 @@ Copy the URL shown in the UI into the respective third-party dashboard (Telegram
 - Path prefixes not listed in your ingress rules return 404 at Cloudflare's edge before reaching your server.
 - The agent website proxy (`/site/<token>/`) strips `authorization`, `cookie`, and `x-internal-secret` headers before forwarding to agent containers.
 - Rate limits apply to the public endpoints (120 req/min per IP for `/site/`, 10 req/60s per token for schedule webhooks).
+- MCP over the tunnel is protected by the MCP API key on every request. Leave `MCP_INLINE_AUTH_ENABLED` at its default (`false`) unless you intend keyless email-code sign-in over MCP, and then only over TLS.
 
 ## See Also
 
-- [Single-Server Deployment](single-server.md) — Base server setup before enabling public access
+- [Single-Server Deployment](single-server.md) — Base server setup before enabling public access, and the DigitalOcean 1-Click's own HTTPS
 - [Slack Integration](../../integrations/slack-integration.md) — Slack OAuth and webhook configuration
 - [Telegram Integration](../../integrations/telegram-integration.md) — Telegram bot webhook setup

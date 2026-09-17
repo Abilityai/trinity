@@ -603,8 +603,13 @@ def update_execution_status(
     cost: float = None,
     tool_calls: str = None
 ) -> bool:
-    # Calculate duration from started_at
-    duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+    # Calculate duration from started_at.
+    # #2434: guarded at BOTH ends by one helper, not a bare subtraction —
+    # max(0, ...) low (#1832 clock skew across processes) and None above the
+    # PostgreSQL int4 ceiling (2**31-1 ms = 24.855 days), where the value means
+    # started_at is stale rather than that the turn ran that long. A NULL here
+    # is therefore "not measured", and every reader already tolerates it.
+    duration_ms = duration_ms_between(started_at, completed_at)
     # Update record
 ```
 

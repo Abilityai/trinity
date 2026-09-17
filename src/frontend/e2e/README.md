@@ -1,6 +1,7 @@
 # Frontend E2E Tests
 
-Playwright-based end-to-end tests for the Trinity frontend (#556).
+Playwright-based end-to-end tests for the Trinity frontend (#556). Where this
+layer sits among the others: [docs/testing/STRATEGY.md](../../../docs/testing/STRATEGY.md).
 
 ## Run locally
 
@@ -87,6 +88,7 @@ Some specs need a real agent on the stack. Each reads an env var with a
 | `portal-agent-page-overview` | `PORTAL_TEST_AGENT` | exists, visible to admin |
 | `timeline-cancelled-bar`, `honest-failed-states` | `TEST_AGENT` | exists |
 | `circuit-breaker-badge` | `TEST_AGENT` | exists |
+| `agent-detail-talk-door` | `TALK_AGENT` (**`@interactive` only**) | exists, **and on the signed-in operator's Workspace roster** (shared ∪ owned — an admin's reach on Agent Detail is wider than the roster's). The `@smoke` tier needs **no fixture**: it is hermetic on a synthetic `e2e-talk-door` and must stay that way, because CI pins the baseline at zero user agents and its admin has no email (so the live roster 403s) |
 
 **The contract (#2199): a missing fixture reads as SKIPPED, never broken —
 and the probe must be authenticated.** `GET /api/agents/{name}` is behind
@@ -98,6 +100,26 @@ died with a backend restart), a 5xx, or a transport error means the *probe*
 broke, and `agentExists` throws so the test fails with the real diagnosis
 instead of skipping under a false "agent not found". Use the shared
 `e2e/helpers/agent-probe.js` — do not hand-roll a probe.
+
+**Borrowing an agent's display label (#2358).** `e2e/helpers/agent-label.js`
+(`FIXTURE_LABEL` / `pickLabelFixture` / `readLabel` / `writeLabel`) is the
+shared borrow-and-restore for specs that must see a labelled agent. It prefers
+an agent that is already labelled and falls back to `trinity-system` (CI's
+whole fleet). **Read the prior label, restore it in `test.afterEach`, and keep
+such tests in a `serial` block**: a `finally` inside a body that times out is
+not reliably run, the config is `fullyParallel: true`, and `AgentHeader.vue`
+hides the label pencil for system agents — a label stranded on
+`trinity-system` can only be cleared through the API. Same loud-never-silent
+rule as the probe: every non-2xx throws with the real status.
+
+`serial` orders tests within ONE file, and two specs borrow the same agent
+(`dashboard-list-view` and `dashboard-grid-view`), so **run them together with
+`--workers=1`** — `workers` is pinned to 1 on CI but left at the default
+locally. `FIXTURE_LABEL` is the only label these helpers write and is
+deliberately self-identifying; `readLabel` REFUSES to return it, so a second
+worker (or a run killed mid-borrow) fails loudly before writing instead of
+restoring a test artefact as if it were the operator's own label. If you ever
+see it on a live agent: `PUT /api/agents/<name>/label {"label": null}`.
 
 > **Known gap:** `circuit-breaker-badge.spec.js` still carries the legacy
 > unauthenticated probe, so both its tests skip on every run. It was left as-is
@@ -131,11 +153,14 @@ LOOPS_TEST_AGENT=my-agent SESSION_TEST_AGENT=my-agent PORTAL_TEST_AGENT=my-agent
 
 ## Why this layer exists
 
-The frontend has no other automated test coverage today. E2E tests catch:
+The frontend has two automated layers: the Vitest specs under
+`src/frontend/tests/unit/` (`npm run test:unit`, run by `frontend-build.yml`; they
+carry the raw-colour and loading-gate ratchets) and this Playwright layer. E2E
+tests catch:
 - Login regressions
 - Top-level routing breakage
 - Auth boundary violations exposed via the UI
 - Color drift on the design system (with visual regression)
 
-Cheaper layers (Vitest unit tests, type checking) are tracked in #556
-Phase 1 / Phase 3 — separate follow-ups.
+Type checking is still a #556 follow-up; the Vitest layer landed and lives next
+to the specs it covers.

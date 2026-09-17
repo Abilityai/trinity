@@ -117,6 +117,40 @@ class PlatformAuditService:
             event_id = str(uuid.uuid4())
             timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+            # #2323 — derive WHICH credential from the authenticated principal.
+            #
+            # Every one of the ~70 `actor_user=`-only call sites gets this for
+            # free, with zero diff at any of them: the principal already knows,
+            # it was simply never carried. Before this, an admin action taken
+            # with a machine key was byte-identical in `audit_log` to the owner
+            # clicking in a browser, so a leaked key could not be scoped after
+            # the fact.
+            #
+            # `getattr` with a `None` default is MANDATORY, not stylistic: some
+            # callers pass a `SimpleNamespace` actor (see `routers/voice.py`),
+            # and a plain attribute access would raise into `log()`'s bare
+            # `except`, which returns None — silently DROPPING the audit row.
+            # `None` is also the unprivileged answer, per the rule that a
+            # getattr default across principal types must never be the
+            # privileged one.
+            #
+            # An explicitly-passed value still wins ONLY where the principal
+            # carries none. The two dispatch-admission sites that used to pass a
+            # client-supplied `X-MCP-Key-Id` no longer do — that header is
+            # validated nowhere and is persisted into the backlog replay blob,
+            # so honouring it would have let any authenticated caller forge the
+            # attribution in the very rows this exists to make trustworthy.
+            # `routers/internal.py` still passes explicitly and is unaffected:
+            # it sends no `actor_user`, so derivation cannot compete, and it is
+            # internal-secret-gated.
+            if actor_user is not None:
+                if mcp_key_id is None:
+                    mcp_key_id = getattr(actor_user, "mcp_key_id", None)
+                if mcp_key_name is None:
+                    mcp_key_name = getattr(actor_user, "mcp_key_name", None)
+                if mcp_scope is None:
+                    mcp_scope = getattr(actor_user, "mcp_scope", None)
+
             actor_type, actor_id, resolved_email = self._resolve_actor(
                 actor_user=actor_user,
                 actor_agent_name=actor_agent_name,

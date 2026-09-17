@@ -333,6 +333,35 @@ def _restore_unit_sys_modules() -> None:
             sys.modules.pop(_k, None)
 
 
+# ---------------------------------------------------------------------------
+# trinity-enterprise#620: no unit test may signal a process outside the test
+# session. Installed at conftest import so it also covers collection time
+# and fixture teardown; see tests/signal_guard.py for the why.
+# ---------------------------------------------------------------------------
+_sg_spec = importlib.util.spec_from_file_location(
+    "signal_guard", Path(__file__).resolve().parent.parent / "signal_guard.py"
+)
+_signal_guard = importlib.util.module_from_spec(_sg_spec)
+_sg_spec.loader.exec_module(_signal_guard)
+sys.modules.setdefault("signal_guard", _signal_guard)  # one instance for the test below
+
+_SIGNAL_GUARD_ACTIVE = _signal_guard.install()
+
+
+@pytest.fixture(autouse=True)
+def _no_foreign_process_signals(request):
+    """Fail the test that reached the real process killer, even if the caller
+    swallowed `ForeignProcessSignal` (the production drain catches Exception)."""
+    _signal_guard.consume_violations()
+    yield
+    refused = _signal_guard.consume_violations()
+    if refused:
+        pytest.fail(
+            f"{request.node.nodeid} signalled a process outside the test session:\n"
+            + "\n".join(refused)
+        )
+
+
 @pytest.fixture(autouse=True)
 def _restore_sys_modules_baseline_unit():
     """Restore the pristine post-preload sys.modules baseline before AND
@@ -390,5 +419,3 @@ def pytest_collectstart(collector):
             _v = _SYS_MODULES_BASELINE_VALUES.get(_k)
             if _v is not None:
                 sys.modules[_k] = _v
-
-

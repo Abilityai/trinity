@@ -15,6 +15,11 @@ from database import db
 from dependencies import get_current_user
 from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.operator_queue_choices import (
+    ResponseNotOfferedError,
+    validate_response_choice,
+)
+from services import operator_queue_service, operator_resume_service
 
 
 router = APIRouter(prefix="/api/operator-queue", tags=["operator-queue"])
@@ -214,6 +219,23 @@ async def respond_to_queue_item(
             detail=f"Cannot respond to item with status '{existing['status']}'"
         )
 
+    # #2376: the decision has to be one the AGENT offered. Nothing checked this
+    # at any layer, so #2370 recorded `"approved"` against `["Approve", "Deny"]`
+    # for five months with no 4xx — the agent read back a string it never
+    # offered. Named 422 rather than a bare one: the options are agent-authored,
+    # so a refusal that does not list them leaves the operator guessing.
+    try:
+        validate_response_choice(existing, body.response)
+    except ResponseNotOfferedError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": e.code,
+                "message": str(e),
+                "offered_options": e.options,
+            },
+        )
+
     item = db.respond_to_operator_queue_item(
         item_id=item_id,
         response=body.response,
@@ -229,6 +251,24 @@ async def respond_to_queue_item(
         raise HTTPException(
             status_code=409,
             detail=f"Item is no longer pending (now '{item['status']}') — response was not recorded"
+        )
+
+    # ent#329 — respond → re-trigger dispatch. Hung off the CAS *win* only: the
+    # 409 above already returned for a lost race, so reaching here means this
+    # caller's answer is the one that landed. Backgrounded so respond stays fast;
+    # a no-opt-in agent costs one flag read. The answer is already committed, so
+    # this can never roll it back.
+    # ent#499: a PLATFORM-minted item opened no loop for the agent to resume —
+    # it never asked, is not waiting, and for a problem report is the subject of
+    # the complaint. Dispatching would spend one of its turns on a prompt
+    # carrying the client's email and verbatim words, which ent#366 withholds
+    # from that agent by design. Same predicate the responded write-back uses.
+    if item and not operator_queue_service.is_platform_minted(item):
+        operator_resume_service.spawn_resume_dispatch(
+            item,
+            response=body.response,
+            response_text=body.response_text,
+            responded_by_email=current_user.email or current_user.username,
         )
 
     # Broadcast WebSocket event

@@ -8,6 +8,7 @@ fallback.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
 from sqlalchemy import select, func, and_, or_, text, bindparam
@@ -15,7 +16,7 @@ from sqlalchemy import select, func, and_, or_, text, bindparam
 from db.engine import get_engine, make_insert
 from db.tables import (
     system_settings, agent_sharing, agent_ownership, users,
-    enterprise_portal_chat_state,
+    enterprise_portal_chat_state, portal_file_dismissals,
 )
 from utils.helpers import iso_cutoff, utc_now_iso
 
@@ -33,7 +34,18 @@ def get_setting(key: str, default: str = "") -> str:
 
 
 def set_setting(key: str, value: str, now: str) -> None:
-    """Upsert an OSS ``system_settings`` value. Mirrors ``db/settings.py:set_setting``."""
+    """Upsert an OSS ``system_settings`` value. Mirrors ``db/settings.py:set_setting``.
+
+    Including the ent#435 cleartext-credential guard, because "mirrors" has to
+    mean the policy too: this function is a second writer into the same table, so
+    a guard installed only on the canonical sink would be one import away from
+    being bypassed. It writes only portal config keys today — the guard is
+    inert for those and exists so the NEXT key added here cannot be a secret.
+    """
+    from services.secret_settings import assert_plaintext_write_allowed
+
+    assert_plaintext_write_allowed(key)
+
     stmt = (
         make_insert(system_settings)
         .values(key=key, value=value, updated_at=now)
@@ -70,6 +82,11 @@ def get_shared_roster(email: str) -> list[dict]:
             # than resolved per agent — `get_display_label` is one query each,
             # which would add an N+1 to fix a row that renders the wrong title.
             agent_ownership.c.display_label,
+            # ent#403: the #894 per-agent model override, selected HERE for the
+            # same reason `display_label` is — this query already joins
+            # `agent_ownership`, so it is one column rather than a per-card read,
+            # and the roster's model control needs it for every row.
+            agent_ownership.c.public_channel_model,
             users.c.username.label("owner"),
         )
         .select_from(
@@ -123,6 +140,7 @@ def get_owned_roster(email: str) -> list[dict]:
             agent_ownership.c.tts_voice_id,
             agent_ownership.c.tts_voice_replies_enabled,   # #2157
             agent_ownership.c.display_label,        # #2159, same rationale as above
+            agent_ownership.c.public_channel_model,  # ent#403, same rationale
             users.c.username.label("owner"),
         )
         .select_from(
@@ -147,16 +165,22 @@ def get_owned_roster(email: str) -> list[dict]:
 
 def add_portal_message(msg_id: str, agent_name: str, client_email: str,
                        role: str, content: str, cost, now: str,
-                       session_id: Optional[str] = None) -> None:
+                       session_id: Optional[str] = None,
+                       source: Optional[str] = None,
+                       voice_call_id: Optional[str] = None) -> None:
+    # ent#534: `source`/`voice_call_id` are platform-written only (NULL for a
+    # typed turn, 'voice' + the call id for a spoken one) — no request carries them.
     stmt = text(
         "INSERT INTO enterprise_portal_messages "
-        "(id, agent_name, client_email, session_id, role, content, cost, created_at) "
-        "VALUES (:id, :agent, :email, :session, :role, :content, :cost, :now)"
+        "(id, agent_name, client_email, session_id, role, content, cost, created_at, "
+        " source, voice_call_id) "
+        "VALUES (:id, :agent, :email, :session, :role, :content, :cost, :now, :source, :call)"
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {
             "id": msg_id, "agent": agent_name, "email": (client_email or "").lower(),
             "session": session_id, "role": role, "content": content, "cost": cost, "now": now,
+            "source": source, "call": voice_call_id,
         })
 
 
@@ -172,8 +196,17 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
         where += " AND session_id = :session"
         params["session"] = session_id
     stmt = text(
-        f"SELECT role, content, cost, created_at FROM enterprise_portal_messages "
-        f"WHERE {where} ORDER BY created_at DESC LIMIT :lim"
+        # ent#366: `id` rides along so a message can be RATED. The row has always
+        # had a primary key; the client just never saw it, which is why a thumb
+        # had nothing to point at.
+        # ent#534: `source` / `voice_call_id` ride along so the chat can fold a
+        # voice call's rows into one block and the context formatter can label them.
+        # #2694: `id` is a uuid — the tiebreak is STABLE, not chronological. Equal
+        # stamps cannot come from the live writers (one clock, microseconds,
+        # per-session monotonic voice stamps); this only makes a read repeatable.
+        f"SELECT id, role, content, cost, created_at, source, voice_call_id "
+        f"FROM enterprise_portal_messages "
+        f"WHERE {where} ORDER BY created_at DESC, id DESC LIMIT :lim"
     )
     with get_engine().connect() as conn:
         rows = [dict(r) for r in conn.execute(stmt, params).mappings()]
@@ -181,30 +214,215 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
     return rows
 
 
+# --- The thread window, counted in typed turns (#2694) ------------------------
+#
+# `get_portal_messages` counts ROWS. A 30-minute voice call is ~180 rows, so one
+# call filled the whole 100-row history window, every typed turn before it fell
+# off, and the call block — anchored at the call's first row IN THE WINDOW —
+# rendered as the head of the thread. The window is now counted in TYPED rows;
+# every spoken row of the calls among them rides along; a row ceiling bounds the
+# payload and SAYS so, rather than silently re-creating the symptom at call #9.
+
+_MESSAGE_COLUMNS = "id, role, content, cost, created_at, source, voice_call_id"
+
+# A typed-path row. The platform's own `system` lines (the ent#523 reset notice)
+# carry NULL `source` too — they are part of the typed timeline, not of a call.
+_TYPED = "source IS NULL"
+
+# Sized against a real 30-minute transcript (~180 rows): ~3 long calls plus
+# their typed turns. Read at call time (tests pin it), never captured as a
+# default argument.
+PORTAL_HISTORY_ROW_CEILING = 600
+
+
+@dataclass
+class ThreadWindow:
+    rows: list[dict]          # oldest-first
+    truncated: bool           # the ceiling cut rows off the OLD end
+
+
+def get_portal_thread_window(agent_name: str, client_email: str, session_id: str,
+                             typed_limit: int = 100,
+                             ceiling: Optional[int] = None) -> ThreadWindow:
+    """The newest ``typed_limit`` typed rows of one thread, plus every spoken
+    row inside that span, oldest-first; at most ``ceiling`` rows (the NEWEST
+    survive, and ``truncated`` reports the cut).
+
+    Two portable statements: the ``(created_at, id)`` of the N-th newest typed
+    row, then everything at or after it. Both order by ``created_at DESC, id
+    DESC`` so the threshold and the range agree at a tie. Fewer typed rows than
+    the limit → the whole thread (≤ ceiling). A call-only thread has no typed
+    row at all and is returned whole for the same reason.
+    """
+    ceiling = int(ceiling or PORTAL_HISTORY_ROW_CEILING)
+    typed_limit = max(1, int(typed_limit or 1))
+    base = "agent_name = :agent AND client_email = :email AND session_id = :session"
+    params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id}
+    threshold_stmt = text(
+        f"SELECT created_at, id FROM enterprise_portal_messages "
+        f"WHERE {base} AND {_TYPED} ORDER BY created_at DESC, id DESC LIMIT 1 OFFSET :off"
+    )
+    with get_engine().connect() as conn:
+        threshold = conn.execute(threshold_stmt, {**params, "off": typed_limit - 1}).first()
+        where = base
+        range_params = dict(params)
+        if threshold is not None:
+            where += " AND (created_at > :ts OR (created_at = :ts AND id >= :tid))"
+            range_params.update(ts=threshold[0], tid=threshold[1])
+        range_stmt = text(
+            f"SELECT {_MESSAGE_COLUMNS} FROM enterprise_portal_messages "
+            f"WHERE {where} ORDER BY created_at DESC, id DESC LIMIT :lim"
+        )
+        rows = [dict(r) for r in conn.execute(range_stmt, {**range_params, "lim": ceiling + 1}).mappings()]
+    truncated = len(rows) > ceiling
+    rows = rows[:ceiling]
+    rows.reverse()
+    return ThreadWindow(rows=rows, truncated=truncated)
+
+
+def get_platform_rows_since_last_reply(agent_name: str, client_email: str,
+                                       session_id: str) -> list[dict]:
+    """The rows of one thread the agent's LIVE session never produced or
+    received — spoken turns (`source='voice'`) and the platform's own `system`
+    lines — later than the newest typed assistant row, oldest-first. Every such
+    row when the thread has no typed reply yet.
+
+    The cursor is the typed ASSISTANT row, not the user row: a typed turn that
+    fails leaves a user row with no reply, and a user-row cursor would then
+    erase a call from every later delta. A reply is the one thing the live
+    session itself wrote, so "rows since the last reply" is exactly "rows it
+    has not heard", and it stays true across a retry.
+
+    ent#551: a reply that carries a `voice_call_id` is a task the call ran in
+    the background — typed in form, but it landed mid-call, so it is NOT the
+    cursor. Taking it as one would erase the call's earlier spoken rows from
+    the next delta, which is the very loss #2694 exists to prevent.
+    """
+    base = "agent_name = :agent AND client_email = :email AND session_id = :session"
+    params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id,
+              # Bounded like the window: the NEWEST rows survive (the formatter
+              # trims oldest-first anyway), so N back-to-back calls with no
+              # typed reply between them cannot make this read unbounded.
+              "lim": int(PORTAL_HISTORY_ROW_CEILING)}
+    stmt = text(
+        f"SELECT {_MESSAGE_COLUMNS} FROM enterprise_portal_messages "
+        f"WHERE {base} AND (source IS NOT NULL OR role = 'system') "
+        f"AND created_at > COALESCE((SELECT MAX(created_at) FROM enterprise_portal_messages "
+        f"                            WHERE {base} AND role = 'assistant' AND {_TYPED} "
+        f"                              AND voice_call_id IS NULL), '') "
+        f"ORDER BY created_at DESC, id DESC LIMIT :lim"
+    )
+    with get_engine().connect() as conn:
+        rows = [dict(r) for r in conn.execute(stmt, params).mappings()]
+    rows.reverse()
+    return rows
+
+
+def get_portal_message(message_id: str) -> Optional[dict]:
+    """One message row by id (ent#366) — for verifying a rating target.
+
+    Returns the owning `agent_name`/`client_email` so the caller can prove the
+    message is one the rater can actually see. A rating route that trusted the
+    id alone would let anyone rate anyone's conversation.
+    """
+    stmt = text(
+        "SELECT id, agent_name, client_email, session_id, role, created_at "
+        "FROM enterprise_portal_messages WHERE id = :id"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"id": message_id}).mappings().first()
+    return dict(row) if row else None
+
+
 # --- Portal chat sessions (#78): one conversation thread per row --------------
 
 def create_portal_session(session_id: str, agent_name: str, client_email: str,
-                          now: str, title: Optional[str] = None) -> None:
+                          now: str, title: Optional[str] = None,
+                          is_main: bool = False) -> None:
+    """Open an empty thread. ``is_main`` (ent#523) marks it as the pair's pinned
+    Main chat and is guarded by ``idx_portal_sessions_main`` — a second live Main
+    raises ``IntegrityError`` rather than existing, which is what makes
+    ``ensure_main_session`` safe to race."""
     stmt = text(
         "INSERT INTO enterprise_portal_sessions "
-        "(id, agent_name, client_email, title, created_at, last_message_at, message_count) "
-        "VALUES (:id, :agent, :email, :title, :now, NULL, 0)"
+        "(id, agent_name, client_email, title, created_at, last_message_at, "
+        " message_count, is_main) "
+        "VALUES (:id, :agent, :email, :title, :now, NULL, 0, :is_main)"
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {
             "id": session_id, "agent": agent_name, "email": (client_email or "").lower(),
-            "title": title, "now": now,
+            "title": title, "now": now, "is_main": 1 if is_main else 0,
         })
+
+
+def get_main_portal_session_id(agent_name: str, client_email: str) -> Optional[str]:
+    """The pair's LIVE Main chat id, or None if it has never been created (ent#523).
+
+    ``is_main = 1`` alone is the predicate: the flag is cleared in the same
+    statement that sets ``archived_at``, so a retired Main can never answer here.
+    """
+    stmt = text(
+        "SELECT id FROM enterprise_portal_sessions "
+        "WHERE agent_name = :agent AND client_email = :email AND is_main = 1 "
+        "LIMIT 1"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {
+            "agent": agent_name, "email": (client_email or "").lower(),
+        }).first()
+        return row[0] if row else None
+
+
+def archive_main_and_mint(agent_name: str, client_email: str, *, main_id: str,
+                          new_id: str, now: str,
+                          archive_title: Optional[str] = None) -> bool:
+    """Reset (ent#523): retire ``main_id`` and mint ``new_id`` as the pair's Main,
+    in ONE transaction. Returns False if ``main_id`` was not the live Main when
+    the UPDATE ran — a concurrent Reset won, and the caller must not then insert
+    a second Main.
+
+    The order matters and is not stylistic: the archive's ``is_main`` must be
+    cleared BEFORE the insert, or ``idx_portal_sessions_main`` refuses the new
+    row. Both statements share the transaction, so a failure leaves the old Main
+    exactly as it was — Reset is all-or-nothing.
+
+    ``archive_title`` is applied only when the retired row has no title at all;
+    a person's title (``title_source = 'user'``) and a generated one are left
+    alone, so the archive appears in the chat list under the name it already had.
+    """
+    email = (client_email or "").lower()
+    with get_engine().begin() as conn:
+        updated = conn.execute(text(
+            "UPDATE enterprise_portal_sessions "
+            "SET is_main = 0, archived_at = :now, "
+            "    title = COALESCE(title, :archive_title) "
+            "WHERE id = :main AND agent_name = :agent AND client_email = :email "
+            "  AND is_main = 1"
+        ), {
+            "main": main_id, "agent": agent_name, "email": email,
+            "now": now, "archive_title": archive_title,
+        }).rowcount
+        if not updated:
+            return False
+        conn.execute(text(
+            "INSERT INTO enterprise_portal_sessions "
+            "(id, agent_name, client_email, title, created_at, last_message_at, "
+            " message_count, is_main) "
+            "VALUES (:id, :agent, :email, NULL, :now, NULL, 0, 1)"
+        ), {"id": new_id, "agent": agent_name, "email": email, "now": now})
+        return True
 
 
 def list_portal_sessions(agent_name: str, client_email: str) -> list[dict]:
     """A client's conversation threads with one agent, most-recently-active first.
     Sessions with no messages yet sort by ``created_at`` (``last_message_at`` NULL)."""
     stmt = text(
-        "SELECT id, title, created_at, last_message_at, message_count "
+        "SELECT id, title, created_at, last_message_at, message_count, "
+        "       is_main, archived_at "
         "FROM enterprise_portal_sessions "
         "WHERE agent_name = :agent AND client_email = :email "
-        "ORDER BY COALESCE(last_message_at, created_at) DESC"
+        "ORDER BY is_main DESC, COALESCE(last_message_at, created_at) DESC"
     )
     with get_engine().connect() as conn:
         return [dict(r) for r in conn.execute(stmt, {
@@ -246,7 +464,8 @@ def list_portal_sessions_for_agents(client_email: str, agent_names: list[str]) -
         # ask anyway. Same guard as `search_portal_sessions`.
         return []
     stmt = text(
-        "SELECT id, agent_name, title, created_at, last_message_at, message_count "
+        "SELECT id, agent_name, title, created_at, last_message_at, message_count, "
+        "       is_main, archived_at "
         "FROM enterprise_portal_sessions "
         "WHERE client_email = :email AND agent_name IN :agents "
         "ORDER BY COALESCE(last_message_at, created_at) DESC, id DESC"
@@ -281,7 +500,8 @@ def get_portal_session(session_id: str, agent_name: str, client_email: str) -> O
     """One session row, scoped to (agent, client) so a client can't read another's
     thread by id. Returns None on miss."""
     stmt = text(
-        "SELECT id, title, created_at, last_message_at, message_count "
+        "SELECT id, title, title_source, created_at, last_message_at, message_count, "
+        "       is_main, archived_at "
         "FROM enterprise_portal_sessions "
         "WHERE id = :id AND agent_name = :agent AND client_email = :email"
     )
@@ -289,6 +509,28 @@ def get_portal_session(session_id: str, agent_name: str, client_email: str) -> O
         row = conn.execute(stmt, {
             "id": session_id, "agent": agent_name, "email": (client_email or "").lower(),
         }).mappings().first()
+        return dict(row) if row else None
+
+
+def get_portal_session_by_id(session_id: str) -> Optional[dict]:
+    """One session row by id ALONE — who it belongs to, not whether you may read it.
+
+    Deliberately unscoped, and therefore deliberately not reachable from a
+    request handler: the only caller is the ent#457 completion reporter, which
+    is asking the opposite question from `get_portal_session` above. That one
+    answers "may THIS caller read this thread" and needs the caller's identity;
+    this one answers "whose thread is this", because the platform is deciding
+    where a finished job's result belongs and there is no caller to scope to.
+
+    Any future caller must justify the same: an unscoped session read in a path
+    that serves a request is an IDOR waiting to be written.
+    """
+    stmt = text(
+        "SELECT id, agent_name, client_email, title, last_message_at "
+        "FROM enterprise_portal_sessions WHERE id = :id"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"id": session_id}).mappings().first()
         return dict(row) if row else None
 
 
@@ -338,14 +580,46 @@ def search_portal_sessions(client_email: str, like_pattern: str,
         }).mappings()]
 
 
-def set_portal_session_title(session_id: str, title: str) -> None:
-    """Overwrite a thread's title (ent#186 — the generated title replacing the
-    derived fallback ``touch_portal_session`` already stored). Unconditional by
-    design: the caller decides *whether* to generate (first exchange only), this
-    just lands the result."""
-    stmt = text("UPDATE enterprise_portal_sessions SET title = :title WHERE id = :id")
+def set_portal_session_title(session_id: str, title: str) -> bool:
+    """Land a GENERATED title (ent#186) over the derived fallback
+    ``touch_portal_session`` already stored — unless a person got there first.
+
+    ent#473: this used to be unconditional ("the caller decides whether to
+    generate, this just lands the result"), and that was right while only two
+    hands wrote the column. A third hand — a person renaming the chat — races
+    the generator by construction: generation runs off the reply path, so a
+    rename typed during the first turn's 15 s window would be overwritten by a
+    model's guess seconds later. The guard is in the UPDATE itself (not a
+    read-then-write in the caller) so there is no window between the check and
+    the write. Returns whether the title landed; ``False`` means a person's
+    title stood and the caller should say so in the log, not retry.
+    """
+    stmt = text(
+        "UPDATE enterprise_portal_sessions "
+        "SET title = :title, title_source = 'generated' "
+        "WHERE id = :id AND (title_source IS NULL OR title_source != 'user')"
+    )
     with get_engine().begin() as conn:
-        conn.execute(stmt, {"title": title, "id": session_id})
+        return (conn.execute(stmt, {"title": title, "id": session_id}).rowcount or 0) > 0
+
+
+def rename_portal_session(session_id: str, agent_name: str, client_email: str,
+                          title: str) -> bool:
+    """A person renames their thread (ent#473). Scoped to (agent, client) in
+    the UPDATE itself — the same shape as `get_portal_session` — so a caller
+    can never rename another client's thread by id; a miss is ``False`` and
+    the router turns it into the uniform 404 (Invariant #8). Marks the hand as
+    ``'user'``, which is what makes `set_portal_session_title` stand down."""
+    stmt = text(
+        "UPDATE enterprise_portal_sessions "
+        "SET title = :title, title_source = 'user' "
+        "WHERE id = :id AND agent_name = :agent AND client_email = :email"
+    )
+    with get_engine().begin() as conn:
+        return (conn.execute(stmt, {
+            "title": title, "id": session_id, "agent": agent_name,
+            "email": (client_email or "").lower(),
+        }).rowcount or 0) > 0
 
 
 def touch_portal_session(session_id: str, now: str, added: int = 2,
@@ -600,22 +874,29 @@ def get_chat_state(client_email: str) -> list[dict]:
 
     Unbounded read, bounded set: the write path caps how many rows a user can
     create (``MAX_CHAT_STATE_ROWS``), so there is nothing here to paginate."""
+    # ent#557: the account baseline lives in this table under a reserved kind
+    # and is not a chat. Excluded here so it never reaches the sidebar payload
+    # as a phantom row, and below so it cannot consume a user's row budget.
     stmt = text(
         "SELECT chat_kind, chat_id, starred_at, last_read_at "
-        "FROM enterprise_portal_chat_state WHERE client_email = :email"
+        "FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind != :bkind"
     )
     with get_engine().connect() as conn:
         return [dict(r) for r in conn.execute(
-            stmt, {"email": (client_email or "").lower()}
+            stmt, {"email": (client_email or "").lower(), "bkind": BASELINE_KIND}
         ).mappings()]
 
 
 def count_chat_state_rows(client_email: str) -> int:
     stmt = text(
-        "SELECT COUNT(*) FROM enterprise_portal_chat_state WHERE client_email = :email"
+        "SELECT COUNT(*) FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind != :bkind"
     )
     with get_engine().connect() as conn:
-        return int(conn.execute(stmt, {"email": (client_email or "").lower()}).scalar() or 0)
+        return int(conn.execute(stmt, {
+            "email": (client_email or "").lower(), "bkind": BASELINE_KIND,
+        }).scalar() or 0)
 
 
 def chat_state_row_exists(client_email: str, chat_kind: str, chat_id: str) -> bool:
@@ -711,36 +992,188 @@ def count_starred_rows(client_email: str) -> int:
         return int(conn.execute(stmt, {"email": (client_email or "").lower()}).scalar() or 0)
 
 
+# ent#557 — the viewer's account baseline: the instant from which a chat they
+# have NEVER OPENED starts counting as unread.
+#
+# It is a row in this same table under a reserved kind, and it is written ONCE,
+# the first time the viewer reads anything. Every read path filters it out, so
+# it is invisible to the sidebar and to both caps.
+#
+# A derived baseline was tried first and is wrong in a way worth recording,
+# because both obvious derivations fail the same test:
+#
+#   * MAX(last_read_at) — "since you were last here" — moves forward every time
+#     the viewer reads anything, so a reply sitting unread in a chat they have
+#     not opened is silently cleared by reading a DIFFERENT chat.
+#   * MIN(last_read_at) — "since the first time you read anything" — looks
+#     stable and is not: `mark_chat_read` UPDATES the row it advances, so a
+#     viewer with one chat has MIN == MAX and inherits exactly the same bug.
+#
+# Only a value nothing updates is stable, so the baseline is stored rather than
+# derived. `tests/unit/test_ent557_unread_never_opened_chat.py::
+# test_reading_one_chat_does_not_silently_clear_another` is the case that
+# rejects both derivations; it failed against MIN before this row existed.
+BASELINE_KIND = "account"
+BASELINE_ID = "baseline"
+
+
+def _ensure_unread_baseline(client_email: str, now: str) -> None:
+    """Write the baseline row if the viewer does not have one yet.
+
+    Idempotent by construction — `_upsert_chat_state` would happily move it, so
+    the existence check is what makes this write-once. A viewer who already has
+    a baseline keeps the one they have, forever; that is the whole property.
+    """
+    if _has_read_cursor(client_email, BASELINE_KIND, BASELINE_ID):
+        return
+    _upsert_chat_state(client_email, BASELINE_KIND, BASELINE_ID, now,
+                       last_read_at=now)
+
+
 def mark_chat_read(client_email: str, chat_kind: str, chat_id: str, now: str) -> None:
-    """Advance one chat's read cursor for one user."""
+    """Advance one chat's read cursor for one user.
+
+    Also establishes the account baseline on the viewer's FIRST ever read
+    (ent#557). Here rather than at sign-in because this is the first moment we
+    know the viewer has actually looked at something: a baseline written at
+    sign-in would start counting from a session someone opened and abandoned.
+    """
+    _ensure_unread_baseline(client_email, now)
     _upsert_chat_state(client_email, chat_kind, chat_id, now, last_read_at=now)
 
 
-def count_unread_by_session(client_email: str) -> dict[str, int]:
-    """Per-thread count of agent messages newer than that thread's read cursor.
+# ---------------------------------------------------------------------------
+# #2582 / ent#548 — per-viewer dismissal of an agent-shared file
+# ---------------------------------------------------------------------------
+#
+# Same tenancy shape as the chat state above: the row is keyed by the caller's
+# own email, so there is no filter that could be forgotten and no way to address
+# another viewer's rows. And the same abuse bound, for the same reason — the
+# write deliberately does NOT verify the share exists (a 404 for an unknown id
+# would be an existence oracle over every share in the install, OSS invariant
+# #8), so without a cap a portal session is an unbounded write primitive.
+#
+# One ceiling, not two. The chat-state table needed a second because read
+# cursors accumulate from ordinary use and unstarring cannot remove them, which
+# made a single total cap unreachable-by-recovery. Nothing here accumulates
+# without the user asking: every row is a deliberate "remove this from my list",
+# and the sweeper drops the row when the share it names is purged. So the total
+# IS the recoverable set.
+MAX_FILE_DISMISSALS = 1000
 
-    A thread with NO cursor reports nothing rather than reporting its whole
-    history as unread. "Unread" is defined relative to a cursor; inventing one at
-    the beginning of time would light up every historical chat the first time
-    this shipped, which is noise, not information. A cursor is written the first
-    time the user opens or sends in a thread, so any live conversation acquires
-    one immediately. (Rooms keep their own seq cursor and are not counted here —
-    see the feature flow's Known Limitations.)
+
+def count_file_dismissals(client_email: str) -> int:
+    stmt = select(func.count()).select_from(portal_file_dismissals).where(
+        portal_file_dismissals.c.client_email == (client_email or "").lower()
+    )
+    with get_engine().connect() as conn:
+        return int(conn.execute(stmt).scalar() or 0)
+
+
+def dismiss_shared_file(client_email: str, file_id: str, agent_name: str,
+                        now: str) -> None:
+    """Hide one agent-shared file from one viewer's list. Idempotent."""
+    email = (client_email or "").lower()
+    stmt = (
+        make_insert(portal_file_dismissals)
+        .values(client_email=email, file_id=file_id, agent_name=agent_name,
+                dismissed_at=now)
+        .on_conflict_do_update(
+            index_elements=[
+                portal_file_dismissals.c.client_email,
+                portal_file_dismissals.c.file_id,
+            ],
+            set_={"agent_name": agent_name, "dismissed_at": now},
+        )
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt)
+
+
+def dismissed_file_ids(client_email: str) -> set[str]:
+    """Every share id this viewer has dismissed.
+
+    Unbounded read, bounded set — `MAX_FILE_DISMISSALS` caps the write path, and
+    the PK's leading column is `client_email`, which is this predicate.
+    """
+    stmt = select(portal_file_dismissals.c.file_id).where(
+        portal_file_dismissals.c.client_email == (client_email or "").lower()
+    )
+    with get_engine().connect() as conn:
+        return {r[0] for r in conn.execute(stmt)}
+
+
+def count_unread_by_session(client_email: str) -> dict[str, int]:
+    """Per-thread count of agent messages the viewer has not seen.
+
+    Two cases, and the second one is ent#557:
+
+    * **The thread has a read cursor** — count agent messages newer than it.
+      Unchanged since ent#359.
+
+    * **The thread has NO cursor** — count agent messages newer than the
+      viewer's ACCOUNT BASELINE, which is the earliest read cursor they hold
+      anywhere. Before ent#557 these threads reported nothing at all.
+
+    Why the null-cursor case existed, and why it had to change. "Unread" is
+    defined relative to a cursor, and inventing one at the beginning of time
+    would have lit up every historical chat the first time ent#359 shipped —
+    noise, not information. A cursor is written the first time the viewer opens
+    or sends in a thread, so any conversation THEY start acquires one
+    immediately. What was not foreseen is that ent#523 made Main the landing
+    place for everything an AGENT starts — agent-initiated messages, asks raised
+    outside a chat, scheduled briefs all resolve to it — and a freshly minted
+    Main has never been read by anyone. So the one case the feature exists for
+    produced no badge anywhere.
+
+    The baseline is a STORED, write-once row (`BASELINE_KIND` /
+    `BASELINE_ID`), not a value derived from the cursors that happen to exist.
+    Both obvious derivations were tried and both are wrong for the same reason —
+    they move:
+
+    * **MAX** — "since you were last here" — advances every time the viewer
+      reads anything, so a reply sitting unread in a chat they have not opened
+      is silently cleared by reading a DIFFERENT chat.
+    * **MIN** — "since the first time you read anything" — looks stable and is
+      not: `mark_chat_read` UPDATES the row it advances, so a viewer with one
+      chat has MIN == MAX and inherits the identical bug.
+
+    A viewer with no baseline row (a first-ever sign-in) has no baseline, the
+    subquery is NULL, the comparison is NULL, and nothing counts — byte-for-byte
+    the property the original rule was written for, preserved rather than traded
+    away, and it falls out of SQL's NULL semantics rather than a second branch.
+
+    Read as: *anything an agent has said to you since the first time you read
+    anything here, in a chat you have never opened.* A chat created before that
+    instant and never opened still reports nothing, which is the conservative
+    direction.
+
+    (Rooms keep their own seq cursor and are not counted here — see the feature
+    flow's Known Limitations.)
     """
     stmt = text(
         "SELECT m.session_id AS session_id, COUNT(*) AS n "
         "FROM enterprise_portal_messages m "
-        "JOIN enterprise_portal_chat_state st "
+        "LEFT JOIN enterprise_portal_chat_state st "
         "  ON st.client_email = :email AND st.chat_kind = 'thread' "
         " AND st.chat_id = m.session_id "
         "WHERE m.client_email = :email "
         "  AND m.role = 'assistant' "
-        "  AND st.last_read_at IS NOT NULL "
-        "  AND m.created_at > st.last_read_at "
+        "  AND ("
+        "        (st.last_read_at IS NOT NULL AND m.created_at > st.last_read_at)"
+        "     OR (st.last_read_at IS NULL AND m.created_at > ("
+        "           SELECT b.last_read_at FROM enterprise_portal_chat_state b "
+        "           WHERE b.client_email = :email AND b.chat_kind = :bkind "
+        "             AND b.chat_id = :bid"
+        "         ))"
+        "      ) "
         "GROUP BY m.session_id"
     )
     with get_engine().connect() as conn:
-        rows = conn.execute(stmt, {"email": (client_email or "").lower()}).mappings()
+        rows = conn.execute(stmt, {
+            "email": (client_email or "").lower(),
+            "bkind": BASELINE_KIND, "bid": BASELINE_ID,
+        }).mappings()
         return {r["session_id"]: int(r["n"]) for r in rows if r["session_id"]}
 
 

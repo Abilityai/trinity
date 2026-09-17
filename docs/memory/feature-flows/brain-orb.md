@@ -226,7 +226,7 @@ The data route uses standard `AuthorizedAgentByName` Bearer auth like every othe
 | Agent-server | `docker/base-image/agent_server/routers/brain_orb.py` (data/scopes/scope + search + **action** hook — Phase 4a) |
 | Flag (FE) | `src/frontend/src/stores/sessions.js` (`brainOrbAvailable`, `brainOrbVoiceAvailable`, **`brainOrbWriteAvailable`**) |
 | Admin panel (#85) | `src/frontend/src/views/Settings.vue` (General → Brain Orb panel), `src/frontend/src/stores/settings.js` (`get/setBrainOrbSettings`) |
-| Tests | `tests/unit/test_brain_orb.py`, `tests/unit/test_85_brain_orb_settings.py` |
+| Tests | `tests/unit/test_brain_orb.py`, `tests/unit/test_85_brain_orb_settings.py`; HUD (Playwright `@smoke` against the standalone page's FALLBACK graph — no agent, no auth; skips without WebGL): `src/frontend/e2e/brain-orb-wheel-latch.spec.js` (#2538), `src/frontend/e2e/brain-orb-inspector-layout.spec.js` (#2539), helper `src/frontend/e2e/helpers/brain-orb.js` |
 
 ## Invariants honored
 
@@ -235,6 +235,6 @@ The data route uses standard `AuthorizedAgentByName` Bearer auth like every othe
 ## Known limitations / follow-ups
 
 - `data.json` is multi-MB and re-fetched per visit (`Cache-Control: no-store`); a future refresh/cache strategy can ride the same proxy.
-- `/brain-orb/orb.js` is a non-hashed asset under nginx's 1y-immutable static cache — a future orb update needs a cache-bust (query param / rename). The orb is frozen (verbatim) for now.
+- `/brain-orb/{orb.js,styles.css}` are non-hashed assets under prod nginx's 1y-immutable static cache (Vite copies `public/` verbatim), so `index.html` loads both with one shared `?v=<YYYY-MM-DD>` query token — **bump BOTH tokens to today's date on every edit** (the HTML comment above the `<link>` tags says so; first bumped to `2026-09-06` by #2538/#2539, the first orb edits to reach `dev` since the v0.8.0 release — Phases 2–4 had already edited it before that release). Residual: `/brain-orb/index.html` itself falls under nginx's `location /` with no `Cache-Control`, so returning users pick up new tokens only after heuristic freshness expires (hours–days; a hard reload is immediate) — a `\.html$` no-store rule twin of the `= /index.html` block is the paired follow-up.
 - Visual + functional parity (AC) is verified at the asset level (vendored bundle renders the real `data.json`); full in-stack parity needs a real Cornelius agent.
 - Scope `POST /scope` is owner-gated (which bounds abuse) but not yet rate-limited; a per-agent rate limit on the re-export trigger is a cheap hardening follow-up. The agent-side `scope` hook is responsible for serializing concurrent re-exports (the Cornelius proxy uses an RLock).

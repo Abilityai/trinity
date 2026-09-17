@@ -222,22 +222,55 @@
               <path stroke-width="1.4" stroke-linecap="round" d="M12 3c3.2 2.4 3.2 15.6 0 18M12 3c-3.2 2.4-3.2 15.6 0 18" opacity="0.7" />
             </svg>
           </button>
-          <!-- Workspace button (voice + canvas, BETA) -->
+          <!-- Open in Workspace (ent#438). Was a voice-orb-plus-canvas page of
+               its own, gated on VOICE_ENABLED && GEMINI_API_KEY; the page is
+               retired and this now opens THE Workspace scoped to this agent.
+               No longer flag-gated and no longer BETA: the Workspace is a
+               first-class surface and needs no Gemini key, so gating this on
+               `workspaceAvailable` would hide a working link on every install
+               without one. Also no longer disabled while the agent is stopped —
+               the Workspace page reports availability itself (#2196), and a
+               dead button is a worse answer than a page that says why. -->
           <button
-            v-if="workspaceAvailable"
             @click="goToWorkspace"
-            :disabled="agent.status !== 'running'"
-            class="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors"
-            :class="agent.status === 'running'
-              ? 'text-action-primary-600 dark:text-action-primary-400 hover:bg-action-primary-50 dark:hover:bg-action-primary-900/30 border border-action-primary-200 dark:border-action-primary-700'
-              : 'text-gray-300 dark:text-gray-600 border border-gray-200 dark:border-gray-700 cursor-not-allowed'"
-            title="Open Workspace — voice + canvas (Beta)"
+            class="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors text-action-primary-600 dark:text-action-primary-400 hover:bg-action-primary-50 dark:hover:bg-action-primary-900/30 border border-action-primary-200 dark:border-action-primary-700"
+            title="Open this agent in the Workspace"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h8M8 14h5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            Workspace
+          </button>
+          <!-- Talk (#2559). A DOOR, not a surface: the voice call lives in the
+               Workspace conversation, and this opens it there with the call
+               starting. The chat-panel overlay that used to run a parallel call
+               from this page — its own start route, its own transcript home —
+               is retired; the mic glyph moved here with the affordance.
+
+               Same tab, deliberately: the navigation is same-document, which is
+               what lets `armVoiceAutoStart()`'s module-scoped one-shot survive
+               to the Workspace (a new tab is a fresh document, where it is
+               false by construction) and what keeps the Workspace's
+               `AudioContext` resumable from the click that started the call.
+
+               NOT gated, on purpose. The instance-wide voice flag this page
+               could gate on is the same boolean the Workspace itself checks, so
+               a gate here would buy nothing and cost two defects: the flag
+               arrives after first paint (a button that pops in a beat late) and
+               a failed flags fetch sets it false with no retry (a working
+               feature hidden, indistinguishable from an instance without
+               voice). The Workspace reports availability in words instead —
+               ent#438's ruling, applied consistently. -->
+          <button
+            @click="goToTalk"
+            data-testid="agent-talk"
+            class="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors text-action-primary-600 dark:text-action-primary-400 hover:bg-action-primary-50 dark:hover:bg-action-primary-900/30 border border-action-primary-200 dark:border-action-primary-700"
+            title="Talk to this agent by voice. The call opens in the Workspace, and the conversation lives there — not in this chat."
           >
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z" />
             </svg>
-            Workspace
-            <span class="px-1 py-0.5 text-[10px] font-semibold rounded bg-state-autonomous-100 dark:bg-state-autonomous-900/40 text-state-autonomous-700 dark:text-state-autonomous-400 leading-none">BETA</span>
+            Talk
           </button>
           <!-- Running State Toggle -->
           <RunningStateToggle
@@ -376,6 +409,15 @@
       v-if="tokenStats && (tokenStats.lifetime_executions > 0)"
       class="px-4 py-2 border-t border-gray-100 dark:border-gray-700 flex items-center space-x-4 text-xs"
     >
+      <!-- #471 Tier 0: billing-mode qualifier — subscription usage shown as
+           API-price equivalents, never presented as a bill -->
+      <span
+        v-if="isSubscriptionFunded"
+        class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/50 dark:text-accent-purple-300"
+        :title="`Figures are API-price equivalents of subscription usage — not a bill. Funded by subscription: ${authStatus?.subscription_name || 'unknown'}`"
+      >
+        ≈ API-equiv
+      </span>
       <!-- 7-day cost sparkline -->
       <div class="flex items-center space-x-1.5">
         <span class="text-gray-400 dark:text-gray-500">7d</span>
@@ -390,7 +432,7 @@
       <!-- Today's cost -->
       <div class="flex items-center space-x-1">
         <span class="text-gray-400 dark:text-gray-500">Today</span>
-        <span class="font-mono text-gray-700 dark:text-gray-300">{{ formatCost(tokenStats.cost_24h) }}</span>
+        <span class="font-mono text-gray-700 dark:text-gray-300" :title="costUnreported ? 'Cost is not reported under this auth — token-based tracking only' : null">{{ costUnreported ? '—' : costPrefix + formatCost(tokenStats.cost_24h) }}</span>
       </div>
       <!-- Trend vs 7d average -->
       <div v-if="tokenStats.avg_daily_cost > 0" class="flex items-center space-x-1">
@@ -415,7 +457,7 @@
       <!-- Lifetime cost -->
       <div class="ml-auto flex items-center space-x-1 text-gray-400 dark:text-gray-500">
         <span>Lifetime</span>
-        <span class="font-mono text-gray-600 dark:text-gray-400">{{ formatCost(tokenStats.lifetime_cost) }}</span>
+        <span class="font-mono text-gray-600 dark:text-gray-400" :title="costUnreported ? 'Cost is not reported under this auth — token-based tracking only' : null">{{ costUnreported ? '—' : costPrefix + formatCost(tokenStats.lifetime_cost) }}</span>
         <span class="text-gray-300 dark:text-gray-600">·</span>
         <span class="font-mono">{{ tokenStats.lifetime_executions }} runs</span>
       </div>
@@ -522,6 +564,7 @@ import AutonomyToggle from './AutonomyToggle.vue'
 import ReadOnlyToggle from './ReadOnlyToggle.vue'
 import TagsEditor from './TagsEditor.vue'
 import { useFormatters } from '../composables'
+import { armVoiceAutoStart } from './portal/portalVoiceMode'
 
 // Name editing state
 const isEditingName = ref(false)
@@ -643,14 +686,6 @@ const props = defineProps({
     type: Object,
     default: null
   },
-  voiceAvailable: {
-    type: Boolean,
-    default: false
-  },
-  workspaceAvailable: {
-    type: Boolean,
-    default: false
-  },
   // #60 — Brain Orb: platform flag AND the agent's brain-orb capability (resolved
   // in AgentDetail). Gates the header logo that opens the orb page.
   brainAvailable: {
@@ -682,7 +717,18 @@ const emit = defineEmits([
 const router = useRouter()
 
 function goToWorkspace() {
-  router.push(`/agents/${props.agent.name}/workspace`)
+  // ent#438 — one workspace. `?agent=` is the Workspace's own selection param;
+  // the retired per-agent route redirects here too, so an old bookmark and this
+  // button land in the same place.
+  router.push({ path: '/workspace', query: { agent: props.agent.name } })
+}
+
+function goToTalk() {
+  // The intent is armed IN THE APP, never by the URL alone (#2559). A pasted,
+  // bookmarked or mailed `?voice=1` arrives on a fresh document where `armed`
+  // is false, so it opens the conversation and starts nothing.
+  armVoiceAutoStart()
+  router.push({ path: '/workspace', query: { agent: props.agent.name, voice: '1' } })
 }
 
 function goToBrain() {
@@ -765,6 +811,21 @@ function saveSlug() {
 }
 
 const { formatBytes, formatUptime, formatRelativeTime, formatCost } = useFormatters()
+
+// #471 Tier 0: a bare `$` on a subscription-funded agent reads as a bill.
+// The authStatus prop (already fetched for the auth chip) tells us the billing
+// mode; when it's a subscription, cost figures render as ≈API-equivalent.
+const isSubscriptionFunded = computed(() => props.authStatus?.auth_mode === 'subscription')
+const costPrefix = computed(() => (isSubscriptionFunded.value ? '≈' : ''))
+// The operator's Step-0 fork: if cost is NEVER populated under this auth
+// (lifetime 0 across real runs), `≈$0.00` would assert a meaningless number —
+// show an honest dash instead. A zero *day* on a cost-reporting agent still
+// renders normally (lifetime > 0 proves the channel works).
+const costUnreported = computed(() =>
+  isSubscriptionFunded.value
+  && (props.tokenStats?.lifetime_executions || 0) > 0
+  && !(props.tokenStats?.lifetime_cost > 0)
+)
 
 // Token stats helpers (issue #250)
 const tokenCostSparkline = computed(() => {

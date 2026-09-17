@@ -25,6 +25,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import routers.settings as sr
+# #1028: the ElevenLabs handlers live in the package's `integrations`
+# module now; `sr.router` is still the composed router.
+import routers.settings.integrations as sr_integrations
 from dependencies import get_current_user
 from services.settings_service import settings_service
 
@@ -98,11 +101,11 @@ def _make_app():
 
 
 def _admin():
-    return types.SimpleNamespace(id=1, username="admin", role="admin", agent_name=None, connector_agent=None)
+    return types.SimpleNamespace(id=1, username="admin", role="admin", agent_name=None, connector_agent=None, mcp_scope=None)
 
 
 def _user():
-    return types.SimpleNamespace(id=2, username="bob", role="user", agent_name=None, connector_agent=None)
+    return types.SimpleNamespace(id=2, username="bob", role="user", agent_name=None, connector_agent=None, mcp_scope=None)
 
 
 def test_elevenlabs_get_admin_never_echoes_key():
@@ -138,7 +141,7 @@ def test_elevenlabs_put_sets_key_and_audits():
          patch.object(settings_service, "get_elevenlabs_api_key", return_value="sk_new"), \
          patch.object(settings_service, "elevenlabs_key_source", return_value="override"), \
          patch.object(settings_service, "get_default_voice_id", return_value=None), \
-         patch.object(sr.platform_audit_service, "log", new=AsyncMock()) as audit:
+         patch.object(sr_integrations.platform_audit_service, "log", new=AsyncMock()) as audit:
         r = client.put(_URL, json={"api_key": "sk_new"})
     assert r.status_code == 200
     set_key.assert_called_once_with("sk_new")
@@ -165,7 +168,7 @@ def test_elevenlabs_put_clear_key():
          patch.object(settings_service, "get_elevenlabs_api_key", return_value=""), \
          patch.object(settings_service, "elevenlabs_key_source", return_value="none"), \
          patch.object(settings_service, "get_default_voice_id", return_value=None), \
-         patch.object(sr.platform_audit_service, "log", new=AsyncMock()):
+         patch.object(sr_integrations.platform_audit_service, "log", new=AsyncMock()):
         r = client.put(_URL, json={"clear": ["api_key"]})
     assert r.status_code == 200
     clear_key.assert_called_once()

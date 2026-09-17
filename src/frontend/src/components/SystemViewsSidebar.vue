@@ -46,8 +46,21 @@
       <div v-if="!isCollapsed && views.length > 0" class="my-2 border-t border-gray-200 dark:border-gray-700"></div>
 
       <!-- System Views -->
-      <div v-if="isLoading && views.length === 0" class="px-3 py-2 text-xs text-gray-400">
-        Loading...
+      <!-- #1921: bare "Loading..." text replaced by a placeholder shaped like the
+           view rows it becomes, so the sidebar keeps one footprint through
+           loading -> loaded (principle 4). The gate is already compound
+           ("no data yet"), so only the treatment changes. -->
+      <div
+        v-if="isLoading && views.length === 0"
+        class="px-3 py-2 space-y-2"
+        aria-busy="true"
+      >
+        <div
+          v-for="n in 3"
+          :key="n"
+          class="h-5 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"
+        ></div>
+        <span class="sr-only">Loading…</span>
       </div>
 
       <button
@@ -88,6 +101,14 @@
           </div>
         </template>
       </button>
+
+      <!-- Getting started (ent#238). In the rail rather than the dashboard
+           flow: the entitlement answer lands a round-trip after paint, and here
+           that extends a scrolling column instead of pushing the fleet grid
+           down. Always under the view labels, however many there are, and gone
+           with them when the rail is collapsed. Renders nothing when
+           unentitled, dismissed or done. -->
+      <ActivationChecklist v-if="!isCollapsed" />
     </div>
 
     <!-- Create New View Button -->
@@ -112,6 +133,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useSystemViewsStore } from '@/stores/systemViews'
+import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
 import { storeToRefs } from 'pinia'
 
 const emit = defineEmits(['create', 'edit'])
@@ -119,9 +141,12 @@ const emit = defineEmits(['create', 'edit'])
 const systemViewsStore = useSystemViewsStore()
 const { views, activeViewId, isLoading, sortedViews } = storeToRefs(systemViewsStore)
 
-// Default to collapsed, but respect localStorage if set
+// Expanded by default (vybe's call), with labels — a collapsed rail hides the
+// systems it lists and the getting-started checklist below them. A saved
+// preference still wins. Open, it takes 176px from every dashboard pane, and
+// the list view's eleven-column grid only just fits at 1280.
 const savedCollapsed = localStorage.getItem('trinity-sidebar-collapsed')
-const isCollapsed = ref(savedCollapsed !== null ? savedCollapsed === 'true' : true)
+const isCollapsed = ref(savedCollapsed !== null ? savedCollapsed === 'true' : false)
 
 // Watch for collapse changes and persist
 function toggleCollapse() {

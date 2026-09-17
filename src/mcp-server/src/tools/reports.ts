@@ -13,6 +13,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied } from "../access.js";
 
 
 /**
@@ -26,6 +27,32 @@ export function filterReportsForAgentScope<T extends { agent_name: string }>(
   allowedNames: Set<string>,
 ): T[] {
   return reports.filter((r) => allowedNames.has(r.agent_name));
+}
+
+/**
+ * Strip the client's email address from report metadata (ent#365 review).
+ *
+ * `addressed_to` was appended to `_SUMMARY_COLUMNS` so an OPERATOR can answer
+ * "who was this produced for" — the support question a deliverable creates.
+ * But `list_reports` returns the backend's rows verbatim, and
+ * `filterReportsForAgentScope` filters ROWS by agent, never FIELDS. So an agent
+ * holding an `agent_permissions` edge to another agent could call
+ * `list_reports({agent_name: "A"})` and pull A's clients' email addresses into
+ * its own LLM context, where none were exposed before.
+ *
+ * It also contradicts the tool's own advertised contract — "Returns METADATA
+ * only (id, type, title, period, created_at)".
+ *
+ * Applied to every principal rather than only to agent-scoped keys: an operator
+ * reading through an MCP client still gets the field from the REST surface the
+ * UI uses, and a tool result is LLM context wherever it lands.
+ */
+export function stripAudienceFromReports<T extends object>(reports: T[]): T[] {
+  return reports.map((r) => {
+    if (!("addressed_to" in r)) return r;
+    const { addressed_to: _dropped, ...rest } = r as Record<string, unknown>;
+    return rest as T;
+  });
 }
 
 export function createReportTools(client: TrinityClient, requireApiKey: boolean) {
@@ -102,7 +129,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           "e.g. 'recon.weekly_summary', 'prospector.leads_found', 'ops.daily_health', 'custom.notes'."
         ),
         title: z.string().max(300).describe("Short human-readable title (required, max 300 chars)."),
-        payload: z.record(z.unknown()).describe(
+        payload: z.record(z.string(), z.unknown()).describe(
           // Keep in step with REPORT_PAYLOAD_MAX_BYTES (backend `models.py`).
           // This is the SECOND agent-facing statement of the ceiling; it was
           // left at 256 KB while #1537 raised the real cap to 5 MiB — the same
@@ -123,6 +150,24 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           .describe("Optional ISO-8601 start of the period this report covers."),
         period_end: z.string().optional()
           .describe("Optional ISO-8601 end of the period this report covers."),
+        // ent#365 — the audience. Without it a report is operator-only, which
+        // is what every report was before this field existed. The backend
+        // checks the address against YOUR OWN roster and refuses an address it
+        // does not already share you with, so this cannot reach a stranger.
+        audience_email: z.string().optional()
+          .describe(
+            "Optional. The Workspace user this report is FOR — it then appears as a deliverable " +
+            "on their agent page, and (with execution_id) as a card in the chat that produced it. " +
+            "Must be someone this agent is already shared with. Omit for an operator-only report."
+          ),
+        // Only meaningful alongside an audience: it places the card in the
+        // right conversation. The backend resolves the session itself; the id
+        // is never trusted as a conversation pointer.
+        execution_id: z.string().optional()
+          .describe(
+            "Optional. The execution_id of the turn you are publishing from, so the deliverable " +
+            "appears in that Workspace chat. Omit for a scheduled run — it still lists on the agent page."
+          ),
       }),
       execute: async (
         params: {
@@ -133,6 +178,8 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           schema_version?: number;
           period_start?: string;
           period_end?: string;
+          audience_email?: string;
+          execution_id?: string;
         },
         context?: { session?: McpAuthContext }
       ) => {
@@ -161,6 +208,8 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
             schema_version: params.schema_version,
             period_start: params.period_start,
             period_end: params.period_end,
+            audience_email: params.audience_email,
+            execution_id: params.execution_id,
           });
           return JSON.stringify(
             {
@@ -169,6 +218,9 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
               agent_name: result.agent_name,
               report_type: result.report_type,
               created_at: result.created_at,
+              // Echoed so an agent can tell an addressed deliverable from an
+              // operator-only one without re-reading it.
+              addressed_to: params.audience_email ?? null,
             },
             null,
             2
@@ -263,7 +315,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           const access = await checkAgentAccess(apiClient, authContext, params.agent_name);
           if (!access.allowed) {
             console.log(`[list_reports] Access denied: ${access.reason}`);
-            return JSON.stringify({ error: "Access denied", reason: access.reason }, null, 2);
+            return accessDenied(context, { error: "Access denied", reason: access.reason });
           }
         }
 
@@ -304,7 +356,11 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
             );
           }
 
-          return JSON.stringify({ count: reports.length, reports }, null, 2);
+          return JSON.stringify(
+            { count: reports.length, reports: stripAudienceFromReports(reports) },
+            null,
+            2,
+          );
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           console.error(`[list_reports] error: ${msg}`);
@@ -350,16 +406,22 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           if (authContext?.scope === "agent") {
             if (!owner) {
               console.error("[get_report] response carried no agent_name — refusing");
-              return JSON.stringify({ error: "Report not found" }, null, 2);
+              return accessDenied(context, { error: "Report not found" }, "response carried no agent_name — refusing");
             }
             const access = await checkAgentAccess(apiClient, authContext, owner);
             if (!access.allowed) {
               console.log(`[get_report] Access denied: ${access.reason}`);
-              return JSON.stringify({ error: "Report not found" }, null, 2);
+              return accessDenied(context, { error: "Report not found" }, access.reason);
             }
           }
 
-          return JSON.stringify(report, null, 2);
+          // Review finding: stripping `list_reports` only left the disclosure
+          // open one hop further on. `_mapping_to_report` sets `addressed_to`
+          // and `GET /api/reports/{id}` returns it, so a permitted sibling agent
+          // could `list_reports({agent_name: "A"})` for ids — which is by design
+          // — and then `get_report(id)` to pull A's client email into its own
+          // context. Same strip, same reason.
+          return JSON.stringify(stripAudienceFromReports([report])[0], null, 2);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           console.error(`[get_report] error: ${msg}`);

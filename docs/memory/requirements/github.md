@@ -71,7 +71,7 @@
   - `agent_sync_state` table + `auto_sync_enabled` / `freeze_schedules_if_sync_failing` flags on `agent_git_config`
   - 15-min `GIT_SYNC_AUTO` heartbeat loop in the agent container (default-on for non-source-mode GitHub-template agents)
   - Dual `ahead_main`/`ahead_working` tuples in `GET /api/git/status` (P6 fix)
-  - `SyncHealthService` emits `sync_failing` operator-queue entries at `consecutive_failures ≥ 3`
+  - `SyncHealthService` emits `sync_failing` operator-queue entries at `consecutive_failures ≥ 3` (leader-leased across uvicorn workers, #2742 — `synchealth:leader`, fail-open. Note the counter is per *poll*, not per worker, so one leader instead of two **doubles** time-to-`sync_failing` from ~90 s to ~180 s; cadence knob `SYNC_HEALTH_POLL_INTERVAL_SECONDS`, default unchanged at 60 s)
   - `GET /api/agents/sync-health` (batch) + dashboard dot
   - `GET /api/fleet/sync-audit` with `duplicate_binding` flag (§P5 query)
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`
@@ -86,11 +86,13 @@
   - Auto-sync cycle off the event loop (`asyncio.to_thread`) with a non-blocking repo lock; mutating git endpoints 409 `agent_busy` under contention
   - Trigger: packs ≥ `GIT_MAINTENANCE_PACK_THRESHOLD` (20) OR loose ≥ `GIT_MAINTENANCE_LOOSE_THRESHOLD` (6700); guards: free-disk preflight, exponential failure backoff (1h→24h), env-tunable budget (`GIT_MAINTENANCE_TIMEOUT_SECONDS`)
   - Concurrent-writer safety: `repack -A -d -l --unpack-unreachable=1.hour.ago` + `gc --prune=1.hour.ago` (never `--prune=now`); `pack.threads=1` + `pack.windowMemory=128m` RSS bound
-  - Stale-lock hygiene: startup reap (`index.lock`, `gc.pid`, `maintenance.lock`, ref/reflog locks) + per-cycle age-gated reap incl. abandoned `tmp_pack_*`
+  - Stale-lock hygiene: startup reap (`index.lock`, `gc.pid`, `maintenance.lock`, ref/reflog locks) + per-cycle age-gated reap incl. abandoned `tmp_pack_*`. **#2742 makes the startup reap speak** (it was `rm -f`, silent whether or not it removed anything): it now tests-then-removes, echoes a line naming each lock it cleared, and drops a marker the agent server converts into `sync_state.last_lock_recovery` → the `lock_recovery` field on `GET /api/git/status`, so a self-healed wedge reaches the platform instead of vanishing. It also now reaps `index.lock` under `<gitdir>/modules/*` and `<gitdir>/worktrees/*` — covered by nothing before, so a submodule or linked-worktree wedge survived every restart.
   - Signal: `pack_count`/`loose_objects`/`maintenance_failures` in sync-state → `agent_sync_state` (agent-supplied ints coerced at the boundary) → `GET /api/agents/sync-health`; edge-triggered `git_bloat` operator alerts (`GIT_DIR_ALERT_BYTES` default 10 GiB; 3 consecutive maintenance failures)
+  - **Lock-free status read (#2742)**: `GET /api/git/status` — the surface the 60 s `SyncHealthService` poll drives — runs `git --no-optional-locks status --porcelain`, so the poll no longer takes `.git/index.lock` ~2×/min in every agent workspace (the flag is scoped to THIS one call site; the auto-sync commit path and the `sync`/`pull` bodies legitimately want the index writeback and keep the plain form). Every status child now routes through `run_registered`, so a sweep tick straddling the 30 s `git fetch` can no longer orphan ref litter. The handler is computed in ONE worker thread behind a loop-level single-flight, so concurrent callers (poller + UI git panel + MCP `get_git_status`) coalesce onto one computation and one `git fetch origin` — and the response carries `computed_at`, because coalescing is bounded staleness and a follower can be served a snapshot up to one leader-run old.
+  - **Stuck-lock report, never a runtime delete (#2742)**: a currently-present `index.lock` is *observed* and surfaced as `index_lock_stuck`, never unlinked. A 0-byte lock is the signature of a **live** `git add` for ~100 % of its life (measured: 29 s at 60 000 files; 155 s under a `clean` filter), `st_mtime` is stamped at create and never advances, so neither size nor age separates *abandoned* from *busy* — and a wrong unlink promotes another git's in-flight file onto `.git/index`, a permanent 0-byte-index wedge that no Trinity path clears. Detection is therefore a **two-point inode-stability** observation (same `st_ino`/`st_mtime_ns`/`st_size` unchanged across ≥3 ticks spanning ≥15 min), which is also immune to a forward clock step; the tunable is the number of stable sightings, not a wall-clock age. The observer resolves the real gitdir (`.git` is a FILE for a worktree or submodule) and covers `<gitdir>/index.lock`, `<gitdir>/modules/*/index.lock` and `<gitdir>/worktrees/*/index.lock`. It takes no repo lock (an `lstat` needs none, and holding one would make a status poll a new source of 409 `agent_busy`) and is wrapped in its own `except OSError` — an observability path must never be able to 500 the feed it feeds.
 - **Rollout**: base-image rebuild + agent recreate required; recovery of pre-existing bloated fleets is ops-side (trinity-ops-agent#127) using the tunable budget + memory bounds
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`
-- **Related**: #1505 (general sweep-subtree seam — evidence cross-filed), #1501 (transient-pid seam), #1596 (threshold repack, superseded parameters)
+- **Related**: #1505 (general sweep-subtree seam — evidence cross-filed), #1501 (transient-pid seam), #1596 (threshold repack, superseded parameters), #2742 (the sync-health poll no longer takes or orphans `index.lock`)
 
 ### 11.10 Per-User GitHub PAT (ent#162)
 - **Status**: ✅ Implemented (v0.8.5 payload) — OSS-core half of a private feature.
@@ -183,18 +185,27 @@
   seam (`lifecycle._apply_persisted_auth_env`) so a tokenless agent rebuilt
   after container loss still clones (silent-empty-agent class, #843/#1439).
 - **FR-4 — startup.sh clones anonymously**: clone gate is `GITHUB_REPO`-only;
-  `CLONE_URL` embeds `oauth2:<PAT>@` only when a PAT is present (else the
-  credential-less form, mirroring the fork-to-own `UPSTREAM_URL`); tokenless
+  `CLONE_URL` is the **credential-less** form for every agent (ent#615 — see
+  §11.16; the PAT-bearing branch is gone, and the credential arrives per
+  operation from the `trinity` git credential helper); tokenless
   git network ops run with `GIT_TERMINAL_PROMPT=0` (deterministic fail-fast);
   on restart the baked-env PAT falls back to the workspace `.env` value
   before the origin URL is rewritten (preserves a live-injected per-agent PAT
-  across ops-path raw restarts, #1264/#1089). Tokenless agents get a
+  across ops-path raw restarts, #1264/#1089), and the rewrite itself is
+  **conditional** — it never strips userinfo it has not already replaced.
+  Tokenless agents get a
   **blackholed push remote** (self-describing invalid push URL) so any
-  in-container `git push` fails legibly.
+  in-container `git push` fails legibly; the gate is "a credential resolves",
+  which for an ent#123 agent is still false.
 - **FR-5 — Push surfaces fail honestly**: backend push paths (`sync_to_github`,
   `reset_to_main_preserve_state`) pre-check write credentials — baked env
-  `GITHUB_PAT` **or** the per-agent PAT row (never the global tier, which
-  cannot reach a tokenless container) — and return conflict_type
+  `GITHUB_PAT` **or** the per-agent PAT row **or** (ent#615) anything the
+  `trinity` credential helper resolves in the container, asked by exit code
+  and only for an agent the first two tiers call tokenless. The parenthetical
+  that used to stand here — "never the global tier, which cannot reach a
+  tokenless container" — was made FALSE by ent#615: a global PAT the helper
+  resolves does reach the remote, and answering `no_write_credentials` to an
+  agent that can push is a lie. Returns conflict_type
   `no_write_credentials` with the actionable message. MCP `git_sync` suppresses
   the "resolve via chat" hint for this conflict type.
   **Amended by §11.12 (ent#109):** the message no longer teaches the manual
@@ -545,5 +556,259 @@
 - **Follow-up (filed separately)**: `GIT_SYNC_AUTO` is baked for ephemeral ghosts at
   all, contradicting the "ghosts never auto-push" intent — a distinct pre-existing bug;
   #2069 only ensures the merge *covers* everyone who auto-syncs.
+
+---
+
+### 11.15 Canonical `.gitignore` Precedence and Sweep Reporting (#2529)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Description**: Both writers of an agent's `.gitignore` **appended**, and git is
+  **last-match-wins**. So the canonical `_GITIGNORE_PATTERNS` block — appended to the
+  END of the file on every Push — silently reversed every `!negation` the agent wrote
+  above it, and `_build_rm_cached_ignored_command` then `git rm --cached`'d the files
+  those negations were protecting, inside an unrelated sync commit that named none of
+  them. Two confirmed field instances: an internal fleet agent on 2026-07-30 (causing
+  commit `47efd80`, a commit about skill scripts that does not touch `.gitignore` at
+  all) and corbin on 2026-09-02, hand-restored with the comment *"Negation must stay
+  LAST in this file."* Casualties include **`.env.example`** — compat check **F-004**
+  requires it and `credential_requirements_service` reads it, so an agent that ships
+  one lost it on its first Push and then failed its own compatibility contract — and
+  **`.claude/settings.json`**, whose negation was the escape hatch #2036's own
+  rationale offered. `#1703` (repo root ≡ `$HOME`) retires this whole layer
+  structurally; until then this is the correctness fix, designed as the steady state
+  because #1703 is P3, unassigned and a decision issue first.
+- **Key Features**:
+  - **TWO managed regions, not one.** The merge is a **normalize-and-rebuild**: it
+    strips canonical / superseded / marker lines *wherever* they appear, then writes
+    `[DEFAULTS block][user region, original order][PROTECTED floor]`. Idempotent by
+    construction (a second run computes byte-identical output) and the file is written
+    only when the computed content differs, so the 15-minute auto-sync loop has nothing
+    to re-commit. One block provably cannot carry both *defaults the user may override*
+    and *guarantees the user may not* — see the next two entries; that is the whole
+    reason there are two regions and four marker lines.
+  - **Defaults region (top) — agent negations win.** Anything the agent writes below
+    the block beats a canonical default, so `!.env.example`, `!.claude/settings.json`
+    and `!**/.env.example` hold **without having to be the file's last line**.
+  - **Protected floor (bottom) — NOT overridable.** The seven credential patterns
+    (`.env`, `.env.*`, `.mcp.json`, `credentials.json`, `*.pem`, `*.key`, `.ssh/`) plus
+    their two canonical negations (`!.env.example`, `!.mcp.json.template`), and
+    `.trinity/*` with the 8 `!` re-includes derived from `_TRINITY_AUTHORED_PATHS`, sit
+    **below** the user region. Floor membership is decided against
+    `services/credential_paths.py` — the platform's own answer to *"is this secret
+    material"* — **not** against the source file's comment headings: `.ssh/` sits under
+    "Instance-specific directories" and was consequently missed on the first pass, which
+    left a fleet agent carrying `!.ssh` (with no `.ssh/` line of its own) newly committing
+    `.ssh/id_rsa` on its migration Push. Pinned by
+    `test_2529_gitignore_precedence.py::test_credential_bearing_defaults_are_all_in_the_floor`
+    and `::test_a_user_negation_cannot_un_ignore_ssh_key_material`. Two reasons, both measured: (1) hoisting a single block would flip
+    every currently-**inert** credential negation in the fleet live in one Push — today
+    a user's `!.env` with no `.env` line gets `.env` appended *below* it, so `.env` **is**
+    ignored; hoisting reverses that, and the unattended 15-minute `git add -A` commits
+    the result to the user's GitHub repo (the #458 class, on the path nobody watches).
+    (2) A user `*.sh` below a hoisted block would beat `!.trinity/setup.sh` —
+    trinity-enterprise#76 / #1704 reintroduced, failing *quietly* (never `git add`-ed
+    rather than untracked, because the rm-cached pathspec still exempts it).
+    `_GITIGNORE_PROTECTED` is **derived** as a filter over `_GITIGNORE_PATTERNS`, not a
+    second hand-written list, so a new authored path is still one edit and the two
+    cannot drift (#2070's principle).
+  - **AC-1 is rule (b): untrack only when no agent-authored negation covers it** —
+    enforced by **git itself**, not by an allowlist. Once the canonical block sits above
+    the user's rules, `git ls-files -ci --exclude-standard` no longer reports a path an
+    *effective* negation covers. Rule (a) as literally worded ("never untrack a path
+    already tracked before that Push") was rejected: it would delete #462's purpose and
+    #1596's more sharply still — #1596's patterns exist to untrack *long*-committed
+    `node_modules/`, so any recency window defeats them outright.
+  - **Dir-form residual — reported, not converted.** 23 of the 59 canonical patterns are
+    dir-form (`content/`, `node_modules/`, `.venv/`, `.claude/projects/`, …). Git does
+    not descend into an excluded directory, so a negation beneath one is inert **at any
+    position** — the exact trap #2070 fixed for `.trinity/` by going contents-only. The
+    contents-form conversion (`content/` → `content/*`) is recorded and **rejected on
+    cost**: forcing git to descend and stat a `node_modules/`-sized tree on every
+    `status`/`add` is the whole reason dir-form exists. The residual is surfaced instead,
+    via `shadowed_negations`.
+  - **Three honest report fields on `GitSyncResult`**, populated on **all four**
+    post-sweep returns (200 / 409 / non-200 / exception — the index mutation has already
+    happened by then): `removed_paths` (tracked → untracked by this Push),
+    `unignored_paths` (newly un-ignored and still untracked — the inverted-duplicate
+    case), `shadowed_negations` (`"!rule -> deciding managed pattern"`, the dir-form and
+    protected-floor residuals). The verdict comes from **`git check-ignore -v`**, never a
+    reimplemented matcher — and from the deciding **pattern text**, never the exit code,
+    which is 0 even when the deciding rule is itself a negation.
+  - **Five surfaces, one of which outlives the session.** API response, `git_sync` MCP
+    tool result, UI toast, the commit message, and — because both field incidents were
+    unattended and surfaced two months late — an **operator-queue entry**
+    (`gitignore_untracked`, the #1595 `git_bloat` precedent). **Every one of the five
+    gates on `GitignoreSweep.changed_tracking` — `removed` OR `unignored` — never on
+    `removed` alone.** The rebuild can change what is in the repo in *both* directions,
+    and the addition is the worse half: a removal is recoverable from the working tree,
+    whereas a newly un-ignored path is already in the remote's history and may need a
+    credential rotated. `shadowed` is deliberately **not** in the gate — it is standing
+    advice about the file, not a change this Push made, so including it would file an
+    alert on every single Push of every agent with a dir-form negation. An
+    unignored-ONLY entry files at `medium`, not `high`: `unignored` is
+    `after − before` across two execs against a live container, so a file the agent's
+    own session creates in that window lands there too, whereas a removal is a
+    confirmed destructive act. That entry is **budgeted**
+    (#1677 `create_bounded_alert`), not a direct create like its `git_bloat`/`sync_failing`
+    siblings: their cadence is the 60-second platform poller's, while this one fires from
+    `sync_to_github`, which the `git_sync` MCP tool lets an agent-scoped key drive on itself
+    — a repeated `git add -f <ignored>` + sync loop yields a fresh `removed` set each time
+    against a timestamped, non-idempotent id. Its `gitignore-untracked-` prefix is reserved
+    so an agent cannot pre-create the id and suppress its own alert through the sink's
+    `on_conflict_do_nothing`. The commit-message half is
+    explicitly **best-effort**: `git rm --cached` only *stages*, and if the in-container
+    auto-sync loop commits first the deletions ride in someone else's commit — which is
+    exactly what `47efd80` was. The operator-queue entry is the surface that does not
+    depend on who commits. Failure-path honesty: the router's `HTTPException` keeps only
+    `detail`, so the summary line is appended to `result.message` **inside**
+    `sync_to_github` rather than special-cased per status code.
+  - **Report, never block.** An inverted user duplicate (`!.env.production` above the
+    user's own `.env.*`) becomes tracked and is reported via `unignored_paths`. A
+    blocking detect-and-refuse was considered and rejected by the issue author: *"A
+    blocking detect-and-refuse on unattended crons trades a wrong repo for a frozen one
+    — and the frozen one is harder to notice because nothing changes. Proceed and
+    report."* The protected floor makes it structurally impossible for the cases where
+    it is dangerous.
+  - **Merge-command hardening** (each reproduced before being fixed): the strip `grep`
+    is a real command in the `&&` chain with an explicit `rc<=1` check, because a failure
+    inside a process substitution is invisible (`cat` still exits 0) and the `mv` then
+    replaces the user's `.gitignore` with the block alone — data loss, reproduced on the
+    real base image with a mode-000 file; `LC_ALL=C grep -a`, because without `-a` a
+    `.gitignore` carrying a NUL byte makes grep print `binary file matches` and emit
+    **zero** lines while exiting **0**, dropping the whole user region past even the
+    status check; the strip list carries each pattern **twice, bare and `\r`-suffixed**,
+    so a CRLF canonical copy is stripped instead of surviving below the block and still
+    overriding; `[ -e .gitignore ] || : > .gitignore` instead of `touch`, which bumped
+    mtime on every Push; and a module-level assertion rejecting an empty or
+    newline-bearing pattern, because an empty entry in a `grep -vxF -f` list matches
+    every blank line (and without `-x`, every line).
+  - **`.trinity/operator-queue.json` stays ignored** — deliberately **not** added to
+    `_TRINITY_AUTHORED_PATHS`. It is a live approval queue rewritten continuously;
+    committing it would put a diff in every 15-minute auto-sync cycle and push approval
+    payloads into the user's repo. Same call #919 / Invariant #8 made for
+    `.trinity/pipelines/` (definitions committed) vs `pipeline-state/` (state not).
+    Reviewed, not forgotten. If the fleet decides an orchestrator's approval record must
+    survive a rebuild, the answer is a `data_paths` / export mechanism, not a git commit
+    per 15 minutes.
+  - **Known contamination, stated**: `unignored_paths` is computed as `after − before`
+    across two execs against a **live** container, so a file the agent's own session
+    creates in that window is reported as newly un-ignored. Folding both probes into the
+    two execs the Push already ran narrows the window; it does not close it. The field is
+    advisory.
+  - **The 14 bundled templates are regenerated with the markers** so #1908's
+    byte-identity property — the zero-drift guarantee #953 depends on — still holds.
+    Without it the merge against a pristine bundled template yields `M .gitignore`,
+    39 insertions / 37 deletions, on every template-derived agent.
+  - **CI direction fixed**: `test_github_init_gitignore.py::test_doc_and_constant_in_sync`
+    asserted `constant ⊆ doc` only, which is exactly why the guide could carry
+    `!.env.example` for months while the constant did not. It is now set **equality**,
+    and `test_1908_bundled_template_gitignore.py::ALLOWED_NON_CANONICAL` shrinks to empty.
+- **Source of truth**: `services/git_service.py` (`_GITIGNORE_PROTECTED`, the four
+  `_GITIGNORE_BLOCK_*` / `_GITIGNORE_FLOOR_*` markers, `_build_gitignore_merge_command`,
+  `_build_rm_cached_ignored_command`, `_build_shadowed_negations_probe`,
+  `GitignoreSweep`, `_migrate_workspace_gitignore`, `sync_to_github`),
+  `db_models.py::GitSyncResult`, `routers/git.py`, `src/mcp-server/src/tools/git.ts`,
+  `src/frontend/src/composables/useGitSync.js`.
+- **Flow**: `docs/memory/feature-flows/github-sync.md`, `docs/memory/feature-flows/git-sync-health.md`
+- **GitHub Issue**: #2529 (continuation of #2069 / #2070)
+
+---
+
+### 11.16 Credential-Free Git Remotes (trinity-enterprise#615)
+
+- **Status**: ✅ Implemented.
+- **The defect**: every agent's remote was persisted as
+  `<scheme>://oauth2:<PAT>@<host>/<org>/<repo>.git`, putting the fleet-wide
+  GitHub token in two places — **`.git/config` on the workspace volume** (at
+  rest, readable by the agent's own `Bash` tool for the life of the container)
+  and **git child argv**, because git expands the stored URL into
+  `git-remote-https`'s argv on every fetch and push, including the 60s
+  sync-health poll. The argv half has a platform-side sink: `ps` → the agent
+  server's reaped-cmdline logging → Vector → the host log files → the logs API
+  → another agent's LLM context. ent#292 closed the last hop of that chain and
+  was rated P0; this closes the cause.
+
+- **FR-1 — No code path builds a credential-bearing remote URL.** All four
+  producers are gone: `git_service._git_remote_url` (deleted; its three call
+  sites use `_credentialless_remote_url`), `startup.sh`'s PAT-bearing
+  `CLONE_URL` branch (one credential-less form), `template_service.clone_github_repo`
+  (deleted — dead, and it passed a token URL as **argv** to `subprocess.run` on
+  the backend host) and `skill_service._authenticated_url` (split into
+  `_normalized_url` + `_auth_pat_for`; that one was LIVE, leaving the platform
+  PAT at rest in `/data/skills-library/*/.git/config` on the `~/trinity-data`
+  **host bind mount**, and so in every backup and snapshot of it). Guarded over
+  **both** trees by `tests/unit/test_ent615_token_free_remotes.py`, with **zero**
+  allowlist entries — an entry there is a review smell.
+
+- **FR-2 — The credential arrives per operation, over stdin.** A git credential
+  helper (`docker/base-image/git-credential-trinity.sh`, installed root-owned
+  at `/usr/local/bin/git-credential-trinity`) answers git's credential protocol
+  on stdin/stdout, which never reaches argv and is never persisted. Registered
+  in `/etc/gitconfig` as **`trinity`**, never as the filename — git prepends
+  `git-credential-` to any non-absolute helper value, so the filename resolves
+  to a command that does not exist and the helper silently never runs.
+  Registered **unscoped**, because `TRINITY_GIT_BASE_URL` is a runtime value a
+  build-time `credential.<base>.helper` could not know; the helper resolves the
+  allowed origin itself and matches protocol + host **exactly, port-inclusive**.
+
+- **FR-3 — Resolution order is `.env` → baked env → harvest file**, the
+  INVERSE of `startup.sh`'s, and deliberately: `startup.sh` runs at boot where
+  baked env is the freshly-recreated truth, while the helper runs in steady
+  state where `Config.Env` is immutable without a recreate and `.env` carries
+  the live-injected token. A baked-env-first ladder would make a global
+  rotation (#1967) a silent no-op until the old token is revoked. `.env` is
+  agent-writable, so it is PARSED — never sourced or eval'd.
+
+- **FR-4 — Nothing strips a credential it has not already replaced.** The
+  remediation sweep (`git_service.scrub_git_remote_tokens`) installs the
+  helper, PROVES it resolves **by exit code** (`git credential fill` prints the
+  credential on stdout, and the sweep's output crosses the `docker exec`
+  boundary into the platform log and `GitInitResult.error`), harvests only for
+  an agent with no other source, and **REFUSES and reports** rather than
+  stripping what it could not replace. `startup.sh`'s per-restart rewrite and
+  `update_remote_pat` follow the same rule. The orphan class this protects is
+  `POST /{agent}/git/initialize`'s: an agent-git-config row, a push with the
+  resolved platform PAT, no baked env, no per-agent row, no `.env`.
+
+- **FR-5 — The harvest is a relocation, never a grant.** The rescued
+  credential lands in `/home/developer/.trinity/git-credential` (0600, ignored
+  contents-only by `.trinity/*` per #2070), the helper's LAST rung — never in
+  `.env` as `GITHUB_PAT`, which `startup.sh` exports as `GH_TOKEN` and
+  `GITHUB_TOKEN` (authenticating the whole `gh` CLI and REST API) and which
+  gates the ent#123 push blackhole. That would be the ent#162 class applied
+  fleet-wide. `configure_push_remote`'s gate widens from `GITHUB_PAT` to "a
+  credential resolves" — which for an ent#123 tokenless agent is still false.
+
+- **FR-6 — Degrades with a NAMED error.** A helper that resolves nothing emits
+  `TRINITY_GIT_NO_CREDENTIAL host=<host>` on stderr (a host, never a value) and
+  nothing on stdout; git then fails with "could not read Username … terminal
+  prompts disabled", a shape `_AUTH_PATTERNS` already matched. A bare `403` is
+  deliberately NOT added: `classify_conflict` evaluates auth patterns first, so
+  it would relabel a secondary-rate-limit, a SAML-SSO-enforcement and an
+  archived-repo push as "no write credentials".
+
+- **Reaching the existing fleet**: a boot-time one-shot
+  (`sweep_fleet_git_remote_tokens`, leader-locked, **not** a recurring service —
+  there is no recurring producer left to chase), the `start_agent_internal`
+  hook, and `startup.sh`'s conditional per-restart rewrite. The one-shot is the
+  reacher that covers a `restart: unless-stopped` container the daemon brings
+  back after a host reboot. Runbook:
+  `docs/migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md`.
+
+- **Explicitly NOT closed**: a prompt-injected agent reading its own
+  credential. `GITHUB_PAT` stays in the container env and `.env`, and root
+  ownership of the helper is **integrity, not confidentiality**. Blast radius
+  is also unchanged — the credential stays fleet-wide. The structural fix is a
+  broker outside the container (**trinity-enterprise#558, AAuth**); the cheapest
+  real lever that already exists is per-agent, repo-scoped PATs via
+  `agent_git_config.github_pat_encrypted` (#1264's machinery, unused).
+
+- **Source of truth**: `docker/base-image/git-credential-trinity.sh`,
+  `services/git_credential_helper.py` (byte-identical mirror + the sweep),
+  `services/git_service.py`, `docker/base-image/startup.sh`,
+  `services/skill_service.py`, `services/skill_source_clone.py`,
+  `docker/base-image/agent_server/services/execution_env.py`.
+- **Flow**: `docs/memory/feature-flows/github-sync.md`,
+  `docs/memory/feature-flows/github-repo-initialization.md`
+- **GitHub Issue**: abilityai/trinity-enterprise#615
 
 ---

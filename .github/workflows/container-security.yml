@@ -216,6 +216,57 @@ jobs:
           path: trinity-logs.txt
           retention-days: 14
 
+  # #2528: every SUPPORTED compose file set must render. A production restart
+  # hit two failures back to back, both from guessing which files go together:
+  # `quickstart.sh`'s bare `docker compose up -d` loaded the dev file over a
+  # prod bind mount (empty DB, healthy backend), and the corrected attempt
+  # stacked base + prod, which Compose ≥ 2.24 rejects on exact-duplicate
+  # `security_opt`/`group_add` items and older Compose silently breaks by
+  # concatenating the frontend's `ports`. The two standalone files now say so
+  # in their headers; this job is the guard, rendering each supported set by
+  # its exact `-f` sequence (the list is mirrored, and pinned, by
+  # tests/unit/test_2528_compose_file_sets.py). Base + prod is NOT here on
+  # purpose — rendering it would legitimise it. `docker compose config` needs
+  # no daemon and runs in seconds, so this is not gated on the container-surface
+  # self-skip.
+  verify-compose-file-sets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Render every supported compose file set
+        run: |
+          set -euo pipefail
+          # The `${VAR:?}` render-blockers. Per-run random rather than literal
+          # placeholders (the I-01 rule from cso-diff-2026-05-17: the repo
+          # publishes no default credential, even one nothing ever starts).
+          export ADMIN_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=\n')Aa1!"
+          export REDIS_PASSWORD="$(openssl rand -hex 24)"
+          export REDIS_BACKEND_PASSWORD="$(openssl rand -hex 24)"
+          status=0
+          while IFS= read -r file_set; do
+            [ -n "$file_set" ] || continue
+            echo "::group::docker compose ${file_set} config"
+            # Word-splitting of $file_set into `-f a -f b` is the point.
+            # shellcheck disable=SC2086
+            if docker compose --env-file /dev/null ${file_set} config -q; then
+              echo "OK"
+            else
+              echo "::error::unsupported render: docker compose ${file_set} config"
+              status=1
+            fi
+            echo "::endgroup::"
+          done <<'EOF'
+          -f docker-compose.yml
+          -f docker-compose.yml -f docker-compose.override.example.yml
+          -f docker-compose.prod.yml
+          -f docker-compose.prod.yml -f docker-compose.prod.enterprise.yml
+          -f docker-compose.hosted.yml
+          -f docker-compose.hosted.yml -f docker-compose.override.example.yml
+          EOF
+          exit "$status"
+
   # #1131: lock start.sh's DOCKER_GID detection. This is the ONLY guard for the
   # probe path — verify-non-root above runs on the Linux runner where the socket
   # IS group-owned by `docker`, so it never exercises the Docker Desktop / Colima

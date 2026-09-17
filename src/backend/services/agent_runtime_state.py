@@ -47,6 +47,16 @@ from typing import Dict, Tuple
 logger = logging.getLogger(__name__)
 
 
+# Keyspaces that are deliberately NOT agent-keyed and therefore outside this
+# registry by construction (the `session_inflight:{session_id}` precedent):
+#   execution:inflight:{execution_id}  — #2433 live-dispatcher marker, 60s TTL,
+#                                        refreshed by agent_call_limiter's
+#                                        refresher; liveness, not state.
+#   execution:cancel:{execution_id}    — #2433 cross-worker cancel flag for a
+#                                        parked dispatch, TTL-bounded.
+# Clearing either on an agent lifecycle event would strand (or un-cancel) a
+# call that is genuinely in flight; both expire on their own.
+
 # Per-agent Redis keyspaces this module clears. Written exactly as the prefix
 # literals appear in the backend source — the parity test greps for them.
 CLEARED_KEYSPACES: Tuple[str, ...] = (
@@ -95,6 +105,16 @@ EXEMPT_KEYSPACES: Dict[str, str] = {
         "targeting one repo; clearing it on any single agent's lifecycle event "
         "would unserialize the other. Registered here so the parity test stays "
         "green and the omission stays a decision."
+    ),
+    "agent:deploy_op:": (
+        "Short-lived SETNX per-BASE-NAME deploy lock (#2060) carrying its own "
+        "TTL, serializing concurrent deploy-local calls that would otherwise "
+        "compute the same next-version name and collide on the template dir + "
+        "workspace volume. Keyed by the deploy BASE name, not the versioned "
+        "agent name this module's lifecycle events fire for — and clearing it "
+        "mid-deploy would unserialize the very deploy holding it (the "
+        "agent:bind_op: reasoning). Fail-open on Redis down; the prepop "
+        "attached-volume 409 is the destructive-collision backstop."
     ),
     "agent:mcp_key_regen:": (
         "Short-lived SETNX MCP-key rotation lock carrying its own TTL (#1854). "

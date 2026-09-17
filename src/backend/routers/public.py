@@ -24,18 +24,24 @@ from database import (
     PublicChatResponse,
     PublicChatMessage
 )
-from dependencies import get_current_user, assert_owns
+from dependencies import get_current_user, get_optional_user, assert_owns
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
+from services import canvas_share_service
 from services.agent_auth import agent_httpx_client
+from services.chat_execution_service import terminate_execution as _terminate_execution
+from services.chat_signals import ChatDispatchError
 from services.docker_service import get_agent_container
 from services.email_service import email_service
+from services.settings_service import PUBLIC_URL_REACHED_KEY, settings_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_prompt_service import (
     build_public_channel_caller_prompt,
     format_user_memory_block,
     summarize_user_memory_background,
 )
+from services import public_chat_service
+from services.public_chat_service import PublicChatError
 from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
 
 
@@ -43,10 +49,161 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/public", tags=["public"])
 
+
+@router.get("/tls-allowed")
+async def tls_allowed(request: Request, domain: str = ""):
+    """Caddy's on-demand-TLS gate: may a certificate be issued for `domain`? (#2380)
+
+    Caddy calls this with `?domain=<hostname>` before obtaining a certificate for
+    a name it has never seen. A 2xx authorises issuance; anything else refuses.
+
+    This is what makes "add a domain" a Settings field instead of a root shell on
+    the host. Trinity runs in a container and cannot rewrite a Caddyfile or reload
+    a web server, so the previous shape was: the operator sets Public URL, that
+    reconfigures nothing, and the domain serves a certificate error while the UI
+    reports success. Inverting the direction fixes it without moving any
+    privilege — Caddy asks, Trinity answers, and nothing in the container gains
+    access to the host.
+
+    STRICTLY ONE NAME, and that is the whole security model. An `ask` endpoint
+    that answers yes broadly turns the instance into an open certificate
+    requester: anyone who points a DNS record at this address makes it ask Let's
+    Encrypt on their behalf, until the account hits a rate limit and the
+    operator's OWN renewals start failing. So the allowlist is exactly the host
+    of the URL an admin saved, and an unset Public URL allows nothing.
+
+    Unauthenticated by necessity — Caddy holds no Trinity credential and calls
+    this during a TLS handshake. It discloses only whether a guessed hostname
+    matches this instance's configured one, which a DNS lookup answers anyway.
+
+    Fails CLOSED: any error refuses issuance rather than authorising a name it
+    could not verify. A 404 body is what Caddy documents as "not authorised", and
+    the response must be fast — it runs inside a handshake — so this is one
+    settings read and a string compare, never a network call.
+
+    Both sides go through `canonical_host` (#2691). SNI is ASCII, so Caddy always
+    asks about the A-label (`xn--…`), while an operator saves the name as they
+    read it. Lower-casing alone left those two forms unequal, so a domain with
+    any non-ASCII character was refused here forever — silently, on every
+    visitor's page load, with the UI reporting the domain as set.
+    """
+    from urllib.parse import urlparse
+    from utils.url_validation import canonical_host
+
+    requested = canonical_host(domain or "")
+    if not requested:
+        raise HTTPException(status_code=404, detail="No domain supplied")
+
+    try:
+        configured = (settings_service.get_public_chat_url() or "").strip()
+    except Exception:
+        # A settings read that fails must not authorise anything.
+        raise HTTPException(status_code=404, detail="Not authorised")
+
+    if not configured:
+        raise HTTPException(status_code=404, detail="No public URL configured")
+
+    # Parse rather than substring-match: `evil-example.com` contains
+    # `example.com`, and a naive check would issue for the attacker's name.
+    allowed = canonical_host(urlparse(configured).hostname or "")
+    if not allowed or requested != allowed:
+        raise HTTPException(status_code=404, detail="Not authorised")
+
+    if _is_caddy_ask(request):
+        # Off the event loop: the write below is synchronous SQLAlchemy against
+        # an engine that can block for its lock timeout, and this handler runs
+        # inside a TLS handshake on the one uvicorn worker.
+        await asyncio.to_thread(_latch_public_url_reached, allowed)
+    return {"authorized": True, "domain": allowed}
+
+
+# Hosts Caddy's `ask` can address the backend as. The provisioned Caddyfile
+# hard-codes `http://127.0.0.1:8000/api/public/tls-allowed`, pinned by
+# tests/unit/test_2380_provision_single_source.py.
+_ASK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+# Hosts already recorded in this process. The stamp is written once per host per
+# instance, but Caddy re-asks on every certificate renewal and the handler is on
+# an unauthenticated path — so after the first hit the fast path touches no
+# database at all.
+_reached_memo: set[str] = set()
+
+
+def _is_caddy_ask(request: Request) -> bool:
+    """Is this the web server's gate call, or a request off the public internet?
+
+    It matters because the stamp this guards is the product's evidence that a
+    name really works. The gate is reachable two ways on a provisioned host:
+    Caddy calls `http://127.0.0.1:8000/...` directly, and the SAME route is also
+    exposed through the public front door, because Caddy proxies everything to
+    the frontend and nginx forwards `/api/` to the backend. The domain is not a
+    secret — it is published in every webhook URL and public link — so without
+    this check anyone could `curl https://<ip>/api/public/tls-allowed?domain=…`
+    and flip the instance to "domain reached" with no DNS record in existence.
+
+    The two paths are distinguishable at the headers: nginx always sets
+    `X-Forwarded-For` and `X-Forwarded-Proto` (`src/frontend/nginx.conf`), and
+    Caddy's ask sets neither and carries the loopback authority it dialled.
+    That makes the stamp unforgeable FROM THE PUBLIC FRONT DOOR — not from inside
+    the Docker network: any container that can reach `backend:8000` (an agent)
+    can send `Host: 127.0.0.1` with no forwarding headers and latch the tick.
+    The source address cannot close that gap, because Caddy reaches the backend
+    through the published port and arrives from a bridge gateway, not loopback.
+    Accepted because the stamp is advisory: it grants no certificate, access or
+    data, and the gate's own answer is decided before this is consulted.
+    """
+    headers = request.headers
+    if headers.get("x-forwarded-for") or headers.get("x-forwarded-proto"):
+        return False
+    host = (headers.get("host") or "").strip().lower()
+    return host.rsplit(":", 1)[0] in _ASK_HOSTS if host else False
+
+
+def _latch_public_url_reached(host: str) -> None:
+    """Record that the saved public URL has actually been reached (#2691).
+
+    Reaching here means Caddy is mid-handshake for the exact name an admin saved
+    and is about to obtain a certificate for it. That is proof of the whole chain
+    the operator cannot otherwise confirm from inside Trinity: DNS resolves,
+    traffic reaches this box, SNI matches, a certificate follows. It stays true
+    behind Cloudflare's proxy, a load balancer or a reserved IP, where comparing
+    the name's DNS answer against this instance's own address says the opposite.
+
+    The HOST is stored beside the stamp, and the reader compares it to the host
+    currently configured (`settings_service.is_public_url_reached`). Recording
+    which name was reached, rather than clearing the row when the setting
+    changes, is what keeps this honest without coupling it to the settings
+    write: a restored backup, a direct row edit or a second writer can leave a
+    stale row, but a stale row describes a host that no longer matches and reads
+    as not-reached. It also removes the interleaving where a handshake landing
+    mid-save was wiped by the save that provoked it.
+
+    Never raises: a settings write that fails must not cost a certificate.
+    """
+    if host in _reached_memo:
+        return
+    try:
+        from utils.helpers import utc_now_iso
+
+        db.set_setting(PUBLIC_URL_REACHED_KEY, f"{utc_now_iso()}|{host}")
+        _reached_memo.add(host)
+        logger.info(f"[#2691] Public URL reached for the first time: {host}")
+    except Exception as e:  # noqa: BLE001 — advisory stamp, never fatal
+        # Warning, not debug: Caddy asks once per obtain, so a failure here is
+        # the difference between an earned tick and an operator staring at
+        # "waiting for the first visit" over a domain that works.
+        logger.warning(f"[#2691] Could not record public-URL reachability: {e}")
+
+
 # Rate limiting constants
 MAX_VERIFICATION_REQUESTS_PER_EMAIL = 3  # per 10 minutes
-MAX_CHAT_MESSAGES_PER_IP = 30  # per minute
-MAX_CHAT_MESSAGES_PER_TOKEN = 60  # per minute, per public link token
+# Re-exported, NOT redeclared: the per-IP / per-token chat caps moved to
+# `public_chat_service` with the accounting that reads them (#1028). Two equal
+# literals would leave `tests/test_ip_rate_limit_fix.py` asserting a constant
+# nothing enforces — the values agree today, so only the guard would break, and
+# silently.
+MAX_CHAT_MESSAGES_PER_IP = public_chat_service.MAX_CHAT_MESSAGES_PER_IP
+MAX_CHAT_MESSAGES_PER_TOKEN = public_chat_service.MAX_CHAT_MESSAGES_PER_TOKEN
 PUBLIC_LINK_LOOKUP_RATE_LIMIT = 60  # max lookups per minute per IP (pentest 3.3.2)
 PUBLIC_LINK_LOOKUP_RATE_WINDOW = 60  # 1 minute in seconds
 
@@ -167,19 +324,8 @@ def _validate_public_link(token: str) -> dict:
     return link
 
 
-def _agent_requires_email(agent_name: str) -> bool:
-    """Agent-level email requirement (unified cross-channel policy, #311).
-
-    Replaces the per-public-link require_email flag. Source of truth is
-    `agent_ownership.require_email` — same policy applied by the channel
-    message router for Slack/Telegram.
-    """
-    return bool(db.get_access_policy(agent_name).get("require_email"))
 
 
-def _agent_allows_open_access(agent_name: str) -> bool:
-    """Agent-level open-access flag: any verified email may chat without approval."""
-    return bool(db.get_access_policy(agent_name).get("open_access"))
 
 
 @router.get("/link/{token}", response_model=PublicLinkInfo)
@@ -242,7 +388,7 @@ async def get_public_link_info(token: str, request: Request):
 
     return PublicLinkInfo(
         valid=True,
-        require_email=_agent_requires_email(agent_name),
+        require_email=public_chat_service.agent_requires_email(agent_name),
         agent_available=agent_available,
         reason=None,
         agent_display_name=agent_display_name,
@@ -307,7 +453,7 @@ async def request_verification_code(
     check_public_link_rate_limit(client_ip)
     link = _validate_public_link(verification.token)
 
-    if not _agent_requires_email(link["agent_name"]):
+    if not public_chat_service.agent_requires_email(link["agent_name"]):
         raise HTTPException(
             status_code=400,
             detail="This link does not require email verification"
@@ -395,290 +541,19 @@ async def public_chat(
     chat_request: PublicChatRequest,
     request: Request
 ):
-    """
-    Send a chat message via a public link with conversation persistence.
+    """Send a chat message via a public link with conversation persistence.
 
-    For links requiring email verification, a valid session_token must be provided.
-    For anonymous links, a session_id can be provided to maintain conversation context.
-    Returns session_id for anonymous links to store in localStorage.
+    Thin since #1028: HTTP concerns here — client IP, the per-IP link rate
+    limit, token resolution, and the error map — with the 289-line
+    orchestration in ``services/public_chat_service.py`` (the #1483 shape).
     """
     client_ip = _get_client_ip(request)
     check_public_link_rate_limit(client_ip)
     link = _validate_public_link(token)
-
-    # Determine session identifier and type
-    session_identifier = None
-    identifier_type = None
-    verified_email = None
-
-    agent_name = link["agent_name"]
-    require_email = _agent_requires_email(agent_name)
-
-    if require_email:
-        # Email-required: use verified email as identifier
-        if not chat_request.session_token:
-            raise HTTPException(
-                status_code=401,
-                detail="Session token required for this link"
-            )
-
-        session_valid, email = db.validate_session(link["id"], chat_request.session_token)
-        if not session_valid:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid or expired session. Please verify your email again."
-            )
-        # Defensive normalization (#446): ensure gate compares lowercased emails
-        # even if the stored session email contained unexpected casing/whitespace.
-        verified_email = (email or "").strip().lower()
-        session_identifier = verified_email
-        identifier_type = "email"
-
-        # Unified cross-channel access gate (#311) — same logic as
-        # adapters.message_router for Slack/Telegram. Owner/admin/shared
-        # always pass; otherwise honor open_access or queue an access request.
-        if db.email_has_agent_access(agent_name, verified_email):
-            pass
-        elif _agent_allows_open_access(agent_name):
-            pass
-        else:
-            try:
-                db.upsert_access_request(agent_name, verified_email, "web")
-            except Exception as e:
-                logger.error(f"Failed to upsert access_request for {verified_email}: {e}")
-            raise HTTPException(
-                status_code=403,
-                detail="Your access request is pending approval. You'll be notified once the agent owner responds."
-            )
-    else:
-        # Anonymous: use provided session_id or generate new one
-        if chat_request.session_id:
-            session_identifier = chat_request.session_id
-        else:
-            session_identifier = secrets.token_urlsafe(16)
-        identifier_type = "anonymous"
-
-    # Rate limiting by IP (primary) — pentest 3.2.4: uses real TCP peer, not spoofable header
-    recent_messages = db.count_recent_messages_by_ip(client_ip, minutes=1)
-    if recent_messages >= MAX_CHAT_MESSAGES_PER_IP:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many requests. Please wait a moment."
-        )
-
-    # Rate limiting by token (secondary) — caps total flood regardless of IP diversity
-    recent_token_messages = db.count_recent_messages_by_token(link["id"], minutes=1)
-    if recent_token_messages >= MAX_CHAT_MESSAGES_PER_TOKEN:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many requests. Please wait a moment."
-        )
-
-    # Check agent is available
-    container = get_agent_container(agent_name)
-    if not container or container.status != "running":
-        raise HTTPException(
-            status_code=503,
-            detail="Agent is not available. Please try again later."
-        )
-
-    # (#364) File upload processing for public chat.
-    # Rate-limited by existing IP check above. Files must be processed
-    # synchronously before the async/sync fork so bytes are in the container.
-    _pub_image_data: list = []
-    _pub_file_descs: list = []
-    if chat_request.files:
-        uploader = verified_email or f"anonymous ({client_ip})"
-        raw_files = [
-            {
-                "name": f.name,
-                "mimetype": f.mimetype,
-                "size": f.size,
-                "data": decode_web_file(f.dict()),
-                "id": f"f{i}",
-            }
-            for i, f in enumerate(chat_request.files)
-        ]
-        file_descs, _, all_writes_failed, _pub_image_data = await process_file_uploads(
-            raw_files=raw_files,
-            agent_name=agent_name,
-            container=container,
-            session_id=session_identifier,
-            uploader=uploader,
-            source="public",
-            max_files=WEB_MAX_FILES,
-            max_file_size=WEB_MAX_FILE_SIZE,
-            max_image_size=WEB_MAX_IMAGE_SIZE,
-            max_total_image_size=WEB_MAX_TOTAL_IMAGE_SIZE,
-        )
-        if all_writes_failed:
-            raise HTTPException(
-                status_code=502,
-                detail="File upload failed: could not write to agent workspace."
-            )
-        _pub_file_descs = file_descs
-
-    # Get or create chat session
-    chat_session = db.get_or_create_public_chat_session(
-        link_id=link["id"],
-        session_identifier=session_identifier,
-        identifier_type=identifier_type
-    )
-
-    # Build context from prior history before storing the new user message.
-    # Must happen first — storing the user message then reading it back would
-    # include the current message in both "Previous conversation:" and
-    # "Current message:", sending it to the agent twice on every turn.
-    context_prompt = db.build_public_chat_context(
-        session_id=chat_session.id,
-        new_message=chat_request.message,
-        max_turns=10
-    )
-    if _pub_file_descs:
-        context_prompt = f"{context_prompt}\n\n" + "\n".join(_pub_file_descs)
-
-    # Store user message (after context is built so it doesn't appear twice).
-    # #903: stamp the verified email as the message sender so the shared
-    # sender-filtered MEM-001 summarizer (which keys on the user's own turns)
-    # works on the web path identically to channels. None for anonymous
-    # sessions, which never summarize.
-    db.add_public_chat_message(
-        session_id=chat_session.id,
-        role="user",
-        content=chat_request.message,
-        sender_email=verified_email,
-    )
-
-    # Record usage
-    db.record_public_link_usage(
-        link_id=link["id"],
-        email=verified_email,
-        ip_address=client_ip
-    )
-
-    # MEM-001 (#895): Fetch per-user memory for email-verified sessions and inject
-    # into the system prompt. The record carries two independently-written sections
-    # (agent_notes + conversation_summary); format_user_memory_block renders both
-    # when present and returns None when both are empty.
-    memory_system_prompt = None
-    if identifier_type == "email" and verified_email:
-        user_memory = db.get_or_create_public_user_memory(agent_name, verified_email)
-        memory_system_prompt = format_user_memory_block(user_memory)
-
-    # EXEC-024: Execute via TaskExecutionService (unified execution path)
-    # Public executions now get full tracking: execution records, activity stream,
-    # slot management, credential sanitization, and Dashboard timeline visibility.
-    source_email = verified_email or f"anonymous ({client_ip})"
-    task_execution_service = get_task_execution_service()
-
-    # Async mode (THINK-001): return execution_id immediately for SSE streaming
-    if chat_request.async_mode:
-        # Create execution record early so we have an ID
-        execution = db.create_task_execution(
-            agent_name=agent_name,
-            message=context_prompt,
-            triggered_by="public",
-            source_user_email=source_email,
-        )
-        execution_id = execution.id if execution else None
-
-        # Spawn background task
-        asyncio.create_task(_execute_public_chat_background(
-            agent_name=agent_name,
-            context_prompt=context_prompt,
-            source_email=source_email,
-            execution_id=execution_id,
-            chat_session_id=chat_session.id,
-            session_identifier=session_identifier,
-            identifier_type=identifier_type,
-            verified_email=verified_email,
-            memory_system_prompt=memory_system_prompt,
-            images=_pub_image_data,
-        ))
-
-        return {
-            "status": "accepted",
-            "execution_id": execution_id,
-            "agent_name": agent_name,
-            "session_id": session_identifier if identifier_type == "anonymous" else None,
-            "async_mode": True,
-        }
-
-    # Sync mode: wait for result
-    result = await task_execution_service.execute_task(
-        agent_name=agent_name,
-        message=context_prompt,
-        triggered_by="public",
-        source_user_email=source_email,
-        timeout_seconds=900,
-        # #894: per-agent public-channel model override (None → platform default).
-        model=db.get_public_channel_model(agent_name),
-        # #1205: per-agent public/channel custom-instructions fragment.
-        system_prompt=build_public_channel_caller_prompt(
-            agent_name, memory_system_prompt
-        ),
-        images=_pub_image_data,
-    )
-
-    if result.status in ("failed", "cancelled"):
-        # #679: a CANCELLED turn is non-delivery, not a success-like empty
-        # response. It falls through to the generic 502 below (its error text
-        # matches no capacity/timeout branch) — the operator stopped the work.
-        error = result.error or ""
-        if "at capacity" in error:
-            raise HTTPException(
-                status_code=429,
-                detail="Agent is busy. Please try again later."
-            )
-        elif "timed out" in error:
-            raise HTTPException(
-                status_code=504,
-                detail="Request timed out. Please try again with a simpler question."
-            )
-        else:
-            logger.error(f"Public chat task failed for {agent_name}: {error}")
-            raise HTTPException(
-                status_code=502,
-                detail="Failed to process your request. Please try again."
-            )
-
-    assistant_response = result.response
-
-    # Store assistant response in public chat messages.
-    # #903: a public-link session is always single-participant, so stamp the
-    # assistant turn with the same verified email as the user turn. The
-    # sender-filtered MEM-001 summarizer then keeps the assistant's replies in
-    # this user's summary (they were included pre-#903) while the shared
-    # multi-participant Slack thread — where the assistant turn stays null —
-    # is the only place the filter drops assistant context.
-    db.add_public_chat_message(
-        session_id=chat_session.id,
-        role="assistant",
-        content=assistant_response,
-        cost=result.cost,
-        sender_email=verified_email,
-    )
-
-    # MEM-001: Increment message count and trigger background summarization every 5 messages
-    if identifier_type == "email" and verified_email:
-        new_count = db.increment_public_user_memory_count(agent_name, verified_email)
-        if new_count % 5 == 0:
-            asyncio.create_task(summarize_user_memory_background(
-                agent_name=agent_name,
-                user_email=verified_email,
-                session_id=chat_session.id,
-            ))
-
-    # Get updated message count
-    updated_session = db.get_public_chat_session(chat_session.id)
-    message_count = updated_session.message_count if updated_session else 0
-
-    return PublicChatResponse(
-        response=assistant_response,
-        session_id=session_identifier if identifier_type == "anonymous" else None,
-        message_count=message_count,
-        usage=None  # Usage details are tracked in the execution record
-    )
+    try:
+        return await public_chat_service.run_public_chat(link, chat_request, client_ip)
+    except PublicChatError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
 
 
 # Introduction prompt - asks agent to introduce itself
@@ -708,7 +583,7 @@ async def get_agent_intro(
     link = _validate_public_link(token)
 
     # Verify session if email required
-    if _agent_requires_email(link["agent_name"]):
+    if public_chat_service.agent_requires_email(link["agent_name"]):
         if not session_token:
             raise HTTPException(
                 status_code=401,
@@ -788,7 +663,7 @@ async def get_public_chat_history(
     check_public_link_rate_limit(client_ip)
     link = _validate_public_link(token)
 
-    require_email = _agent_requires_email(link["agent_name"])
+    require_email = public_chat_service.agent_requires_email(link["agent_name"])
 
     # Determine session identifier
     session_identifier = None
@@ -865,7 +740,7 @@ async def clear_public_session(
     check_public_link_rate_limit(client_ip)
     link = _validate_public_link(token)
 
-    require_email = _agent_requires_email(link["agent_name"])
+    require_email = public_chat_service.agent_requires_email(link["agent_name"])
 
     # Determine session identifier
     session_identifier = None
@@ -916,71 +791,6 @@ async def clear_public_session(
 # Async Public Chat Support (THINK-001 for Public Links)
 # ============================================================================
 
-async def _execute_public_chat_background(
-    agent_name: str,
-    context_prompt: str,
-    source_email: str,
-    execution_id: str,
-    chat_session_id: str,
-    session_identifier: str,
-    identifier_type: str,
-    verified_email: str = None,
-    memory_system_prompt: str = None,
-    images: list = None,
-):
-    """
-    Background task for async public chat execution.
-
-    Runs the task via TaskExecutionService (which handles slot management,
-    activity tracking, and credential sanitization) and stores the assistant
-    response in the public chat session.
-    """
-    try:
-        task_execution_service = get_task_execution_service()
-        result = await task_execution_service.execute_task(
-            agent_name=agent_name,
-            message=context_prompt,
-            triggered_by="public",
-            source_user_email=source_email,
-            timeout_seconds=900,
-            execution_id=execution_id,
-            # #894: per-agent public-channel model override (None → platform default).
-            model=db.get_public_channel_model(agent_name),
-            # #1205: per-agent public/channel custom-instructions fragment.
-            system_prompt=build_public_channel_caller_prompt(
-                agent_name, memory_system_prompt
-            ),
-            images=images or [],
-        )
-
-        if result.status == "success" and result.response:
-            # #903: single-participant web session — stamp the assistant turn
-            # with the verified email (mirror the sync path) so the
-            # sender-filtered summarizer keeps assistant replies in this user's
-            # memory.
-            db.add_public_chat_message(
-                session_id=chat_session_id,
-                role="assistant",
-                content=result.response,
-                cost=result.cost,
-                sender_email=verified_email,
-            )
-
-            # MEM-001: Increment message count and trigger background summarization every 5 messages
-            if identifier_type == "email" and verified_email:
-                new_count = db.increment_public_user_memory_count(agent_name, verified_email)
-                if new_count % 5 == 0:
-                    asyncio.create_task(summarize_user_memory_background(
-                        agent_name=agent_name,
-                        user_email=verified_email,
-                        session_id=chat_session_id,
-                    ))
-        elif result.status in ("failed", "cancelled"):
-            # #679: non-delivery — only a SUCCESS turn with a response is posted
-            # to the public session above; a cancelled turn writes nothing.
-            logger.info(f"[PublicChatAsync] Task {result.status} for {agent_name}: {result.error}")
-    except Exception as e:
-        logger.error(f"[PublicChatAsync] Background execution error for {agent_name}: {e}")
 
 
 @router.get("/executions/{token}/{execution_id}/stream")
@@ -1075,6 +885,98 @@ async def public_execution_status(
     }
 
 
+@router.post("/executions/{token}/{execution_id}/terminate")
+async def public_terminate_execution(
+    token: str,
+    execution_id: str,
+    request: Request,
+    session_token: str = None,
+):
+    """Cancel a public-chat turn the visitor started (ent#155).
+
+    Same access scoping as every other public execution route: rate limit,
+    token validation, and the execution must belong to the agent behind THIS
+    link. There is no JWT and no `users` row — the token is the credential, and
+    it is the same one that was required to start the turn.
+
+    Scoping is per-link on an OPEN link, where there genuinely is no
+    per-visitor identity to check. On a `require_email` link there IS one —
+    `source_user_email` is populated for a verified visitor, and `POST /chat`
+    already demands a `session_token` there — so this route demands the same and
+    additionally requires the turn to be the CALLER'S OWN.
+
+    That asymmetry was the review finding: without it, terminate was weaker than
+    the route that creates the thing it destroys, and one visitor on a
+    verified-email link could stop another's turn with the link token alone.
+    The earlier docstring claimed the identity did not exist; on exactly these
+    links it does.
+
+    Cancellation semantics are the platform's existing ones — CANCELLED, not
+    FAILED (#679/#1332), and CAS-guarded, so a cancel that arrives after the
+    turn finished loses and the reply stands.
+    """
+    client_ip = _get_client_ip(request)
+    check_public_link_rate_limit(client_ip)
+    link = _validate_public_link(token)
+
+    agent_name = link["agent_name"]
+
+    execution = db.get_execution(execution_id)
+    if not execution or execution.agent_name != agent_name:
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    # Review finding: the link + agent pair is the right scope for a READ, and
+    # the wrong one for a destructive write. `status` and `stream` only let a
+    # link holder observe; this route lets them KILL — and every execution on
+    # that agent shares the agent name: the owner's own Agent Detail turn, a
+    # scheduled run, a loop iteration. Ids are 128-bit so this is not
+    # blind-guessable, but one leaked id (a screenshot, a log, a shared browser)
+    # would let a visitor stop the owner's scheduled work.
+    #
+    # A public link can therefore only cancel what a public link produced. The
+    # symmetry-with-reading argument is sound for a read and does not carry.
+    if getattr(execution, "triggered_by", None) != "public":
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    # Per-VISITOR gate, on the links that have a visitor identity (review).
+    # Mirrors `status`/`stream`'s session handling, and then goes one step
+    # further than they do — they only let a holder OBSERVE, this one kills —
+    # by requiring the turn to be this visitor's own.
+    if public_chat_service.agent_requires_email(agent_name):
+        if not session_token:
+            raise HTTPException(
+                status_code=401, detail="Session token required for this link"
+            )
+        session_valid, email = db.validate_session(link["id"], session_token)
+        if not session_valid:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired session. Please verify your email again.",
+            )
+        owner = (getattr(execution, "source_user_email", None) or "").strip().lower()
+        # Uniform 404, not 403: a distinguishable refusal would confirm that
+        # this execution id exists on this link (Invariant #8).
+        if not owner or owner != (email or "").strip().lower():
+            raise HTTPException(status_code=404, detail="Execution not found")
+
+    # Already finished: a no-op success, never a 4xx. The client races its own
+    # poll, and a cancel that lost that race is not an error the visitor did
+    # anything about — the reply is on screen.
+    if execution.status not in ("running", "queued"):
+        return {"status": "already_terminal", "execution_id": execution_id}
+
+    try:
+        return await _terminate_execution(
+            name=agent_name,
+            execution_id=execution_id,
+            task_execution_id=execution_id,
+            current_user=None,
+            actor_kind="public_link",
+        )
+    except ChatDispatchError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
+
+
 @router.get("/sessions/{token}")
 async def get_public_link_sessions(
     token: str,
@@ -1143,3 +1045,78 @@ async def get_public_link_session_detail(
         "message_count": len(messages),
         "messages": [m.model_dump() for m in messages],
     }
+
+# ---------------------------------------------------------------------------
+# Canvas share view (ent#554)
+# ---------------------------------------------------------------------------
+
+@router.get("/canvas/{token}")
+async def get_shared_canvas(
+    token: str,
+    request: Request,
+    user=Depends(get_optional_user),
+):
+    """Render one shared canvas (ent#554).
+
+    Optional auth, because the two scopes need different things: a `public`
+    link must render for a stranger with no credential, while an `authorized`
+    link is a DEEP link — it points at a canvas the viewer could already see,
+    and the server re-checks that rather than trusting the URL.
+
+    The status vocabulary is deliberate. `revoked` and `expired` are only ever
+    returned for a token that MATCHED a row: whoever holds such a link was
+    already told the canvas exists, so naming the state discloses nothing new
+    and is what AC #2 asks for. Everything else — an unknown token, a canvas
+    deleted out from under the link — collapses into the same `not_found`, so
+    a stranger guessing tokens cannot tell a real one from a fabricated one.
+
+    Rate-limited on the shared public-token counter: this route resolves an
+    attacker-suppliable token, so it belongs to the same budget the other
+    token endpoints share rather than getting its own generous one.
+    """
+    check_public_link_rate_limit(_get_client_ip(request))
+
+    resolution = canvas_share_service.resolve(token, user)
+    status_value = resolution["status"]
+
+    if status_value == canvas_share_service.ShareResolution.OK:
+        return canvas_share_service.public_view_payload(resolution)
+
+    if status_value == canvas_share_service.ShareResolution.SIGN_IN_REQUIRED:
+        # 401 with a NAMED reason, not the uniform 404: the page has to be able
+        # to offer a sign-in rather than a dead end, and this state is only
+        # reachable for a token that already matched a live row.
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "status": status_value,
+                "message": "Sign in to view this canvas — it was shared with the people who already have access.",
+            },
+        )
+
+    if status_value == canvas_share_service.ShareResolution.NOT_AUTHORIZED:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "status": status_value,
+                "message": "This canvas was shared with the people who already have access to its agent, and this account does not.",
+            },
+        )
+
+    if status_value in (
+        canvas_share_service.ShareResolution.REVOKED,
+        canvas_share_service.ShareResolution.EXPIRED,
+    ):
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "status": status_value,
+                "message": (
+                    "This share link was turned off by its owner."
+                    if status_value == canvas_share_service.ShareResolution.REVOKED
+                    else "This share link has expired."
+                ),
+            },
+        )
+
+    raise HTTPException(status_code=404, detail=INVALID_LINK_MESSAGE)

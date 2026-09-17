@@ -7,6 +7,7 @@ dist
 # Playwright e2e
 /e2e/.auth/admin.json
 /e2e/test-results/
+/e2e/canvas-gallery-shots/
 /e2e/playwright-report/
 /e2e/blob-report/
 /playwright/.cache/

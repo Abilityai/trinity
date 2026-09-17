@@ -141,42 +141,6 @@
                 data-testid="filter-kbd-hint"
               >/</button>
 
-              <!-- Mode Toggle (Timeline / Grid / List — trinity-enterprise#47 grid,
-                   trinity-enterprise#260 list; Graph decommissioned #1689). This
-                   v-for is the second home of the mode list — keep in sync with
-                   VIEW_MODES in stores/network.js. -->
-              <div class="flex rounded-md border border-gray-300 dark:border-gray-600 p-0.5 bg-gray-50 dark:bg-gray-700">
-                <button
-                  v-for="mode in ['timeline', 'grid', 'list']"
-                  :key="mode"
-                  @click="toggleMode(mode)"
-                  :class="[
-                    'px-2 py-1 rounded text-xs font-medium transition-all capitalize',
-                    viewMode === mode ? 'bg-blue-600 text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
-                  ]"
-                >
-                  {{ mode }}
-                </button>
-              </div>
-
-              <!-- Grid-mode controls (trinity-enterprise#47) -->
-              <template v-if="viewMode === 'grid'">
-                <button
-                  @click="fleetGridRef?.tidyUp()"
-                  class="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
-                  title="Compact tiles row-by-row, preserving reading order"
-                >
-                  Tidy up
-                </button>
-                <button
-                  @click="fleetGridRef?.resetToDefault()"
-                  class="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
-                  title="Restore the default tile layout"
-                >
-                  Reset
-                </button>
-              </template>
-
               <!-- Time Range -->
               <select
                 v-model="selectedTimeRange"
@@ -199,8 +163,16 @@
                 :title="isConnected ? 'Connected' : 'Disconnected'"
               ></div>
 
-              <!-- Loading -->
-              <svg v-if="isLoadingHistory" class="animate-spin h-4 w-4 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24">
+              <!-- #1921: KEPT, after an incorrect deletion.
+                   The sweep's first pass removed this as a background-refresh
+                   indicator the design system says should be invisible. It is
+                   not one: `fetchHistoricalCommunications` has exactly three
+                   callers — mount, the Refresh button, and a time-range change —
+                   and no interval anywhere. All three are first-load or explicit
+                   user actions, which is precisely when in-flight feedback is
+                   sanctioned. #2536's e2e caught the deletion by measuring the
+                   switcher's box with and without this element. -->
+              <svg v-if="isLoadingHistory" class="animate-spin h-4 w-4 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24" data-testid="history-loading">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
               </svg>
@@ -211,11 +183,66 @@
                 :disabled="isLoadingHistory"
                 class="p-1.5 text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-colors disabled:opacity-50"
                 title="Refresh"
+                data-testid="refresh-all"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                 </svg>
               </button>
+
+              <!-- Grid-mode controls (trinity-enterprise#47) — immediately
+                   before the switcher (#2536), so the grid tools appear beside
+                   the Grid button that summons them. -->
+              <template v-if="viewMode === 'grid'">
+                <button
+                  @click="fleetGridRef?.tidyUp()"
+                  class="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
+                  title="Compact tiles row-by-row, preserving reading order"
+                >
+                  Tidy up
+                </button>
+                <button
+                  @click="fleetGridRef?.resetToDefault()"
+                  class="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
+                  title="Restore the default tile layout"
+                >
+                  Reset
+                </button>
+              </template>
+
+              <!-- Mode Toggle (Timeline / Grid / List — trinity-enterprise#47 grid,
+                   trinity-enterprise#260 list; Graph decommissioned #1689). The
+                   list is VIEW_MODES from utils/viewModes.js — the ONE home shared
+                   with the store whitelist, the `v` cycle and the e2e specs
+                   (#2536). LAST child of this cluster ON PURPOSE (#2536): in a
+                   right-anchored, non-shrinking flex row a child's x depends only
+                   on the siblings to its RIGHT, so with none it cannot move when
+                   Tidy up / Reset or the history spinner mount. Do not append
+                   anything after this element — a conditional sibling here
+                   re-opens the jump. Tidy up / Reset sit immediately before it so
+                   the grid tools appear beside the Grid button. If #1754 ever
+                   collapses this cluster at narrow widths, collapse from the LEFT
+                   (Create's label already degrades) — this control is last for
+                   stability and must be the last to go. Pinned by
+                   tests/unit/viewModeStructure.spec.js (required CI gate) and
+                   e2e/dashboard-mode-switcher.spec.js. -->
+              <div
+                class="flex rounded-md border border-gray-300 dark:border-gray-600 p-0.5 bg-gray-50 dark:bg-gray-700"
+                data-testid="view-mode-switcher"
+                title="Switch view (press v to cycle)"
+              >
+                <button
+                  v-for="mode in VIEW_MODES"
+                  :key="mode"
+                  @click="toggleMode(mode)"
+                  :class="[
+                    'px-2 py-1 rounded text-xs font-medium transition-all capitalize',
+                    viewMode === mode ? 'bg-blue-600 text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
+                  ]"
+                >
+                  {{ mode }}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -306,7 +333,7 @@
           <h3 class="text-sm font-medium text-gray-900 dark:text-gray-100">No agents yet</h3>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Launch your first agent in a couple of clicks.</p>
           <button
-            @click="openOnboarding"
+            @click="showCreateModal = true"
             class="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
           >
             Get started
@@ -354,7 +381,7 @@
           <h3 class="text-sm font-medium text-gray-900 dark:text-gray-100">No agents yet</h3>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Launch your first agent in a couple of clicks.</p>
           <button
-            @click="openOnboarding"
+            @click="showCreateModal = true"
             class="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
           >
             Get started
@@ -455,13 +482,11 @@
       @saved="onViewSaved"
     />
 
-    <!-- First-run onboarding wizard (trinity-enterprise#52) -->
-    <OnboardingWizard
-      v-if="showOnboarding"
-      :claude-auth-configured="sessionsStore.claudeAuthConfigured"
-      @close="closeOnboarding"
-      @deployed="onAgentDeployed"
-    />
+    <!-- First-run overlay (ent#581): one blocking, teleported setup sequence
+         that replaced the inline card ladder and the ent#52 wizard. It decides
+         for itself when to open (`firstRunSteps.js`) and honours
+         `?onboarding=1`; `firstRunOpen` only lets this view's hotkeys stand down. -->
+    <FirstRunOverlay v-model:open="firstRunOpen" />
   </div>
 </template>
 
@@ -472,8 +497,7 @@ import ReplayTimeline from '@/components/ReplayTimeline.vue'
 import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
-import OnboardingWizard from '@/components/OnboardingWizard.vue'
-import { useSessionsStore } from '@/stores/sessions'
+import FirstRunOverlay from '@/components/onboarding/FirstRunOverlay.vue'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -482,13 +506,13 @@ import { useSystemViewsStore } from '@/stores/systemViews'
 import { storeToRefs } from 'pinia'
 import FleetGrid from '@/components/FleetGrid.vue'
 import { isOrgTag } from '@/utils/gridOrg'
+import { VIEW_MODES, nextViewMode } from '@/utils/viewModes'
 import AgentListPanel from '@/components/AgentListPanel.vue'
 import CreateAgentModal from '@/components/CreateAgentModal.vue'
 import { useNotification } from '@/composables/useNotification'
 
 const networkStore = useNetworkStore()
 const systemViewsStore = useSystemViewsStore()
-const sessionsStore = useSessionsStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -505,40 +529,8 @@ watch(() => route.query.view, (view) => {
   router.replace({ query: rest }).catch(() => {})
 }, { immediate: true })
 
-// First-run onboarding (trinity-enterprise#52). Auto-opens once for a fresh
-// install with zero agents; dismissal is remembered so it never nags.
-const ONBOARDING_DISMISSED_KEY = 'trinity_onboarding_dismissed_v1'
-const showOnboarding = ref(false)
-function openOnboarding() {
-  showOnboarding.value = true
-}
-function closeOnboarding() {
-  showOnboarding.value = false
-  try { localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1') } catch { /* ignore */ }
-}
-function onAgentDeployed() {
-  // Agent was created via the wizard's real create modal. Keep the wizard open
-  // (it advances to the credential step on its own) and refresh the fleet so
-  // the new agent appears on the graph without a manual page reload — the
-  // WebSocket agent_created event can lag while the container spins up.
-  networkStore.fetchAgents()
-}
-function maybeAutoOpenOnboarding() {
-  if (showOnboarding.value) return
-  // Explicit ?onboarding=1 re-opens the wizard any time (re-run / QA preview),
-  // regardless of fleet size or prior dismissal.
-  if (route.query.onboarding === '1') {
-    showOnboarding.value = true
-    return
-  }
-  if (isFleetLoading.value) return
-  // Count only user-created agents — `trinity-system` exists on every install,
-  // so counting it would mean a fresh fleet is never "empty" and auto-open
-  // would never fire.
-  if (agents.value.filter(a => !a.is_system).length > 0) return
-  if (localStorage.getItem(ONBOARDING_DISMISSED_KEY) === '1') return
-  showOnboarding.value = true
-}
+// First-run overlay (ent#581) is open — the hotkey guards below stand down.
+const firstRunOpen = ref(false)
 
 // System View Editor Modal State
 const isEditorOpen = ref(false)
@@ -725,8 +717,9 @@ function toggleFilterPill() {
   else openFilterPill()
 }
 
-// Document keydown: `/` opens (guards 0-5), Esc is the clear backstop so
-// "Esc to clear" stays true after focus wanders out of the pill input.
+// Document keydown: `/` opens the filter and `v` cycles the view mode
+// (guards 0-5, shared — #2536); Esc is the clear backstop so "Esc to clear"
+// stays true after focus wanders out of the pill input.
 function handleDashboardKeydown(e) {
   // Guard 0: respect consumers + ignore key-hold repeat.
   if (e.defaultPrevented || e.repeat) return
@@ -736,7 +729,7 @@ function handleDashboardKeydown(e) {
     // .stop's before reaching here.
     if (!(filterOpen.value || filterActive.value)) return
     // Never race a modal's own Esc handling.
-    if (showOnboarding.value || isEditorOpen.value || showCreateModal.value) return
+    if (firstRunOpen.value || isEditorOpen.value || showCreateModal.value) return
     // Layered dismissal (strategy F5): an open tag dropdown consumes this
     // Esc; the filter survives — the second Esc clears.
     if (showTagDropdown.value) {
@@ -755,9 +748,17 @@ function handleDashboardKeydown(e) {
     return
   }
 
-  // Guard 1: layout-produced `/` only (fires for Shift+7 on de-DE — do NOT
-  // exclude shiftKey).
-  if (e.key !== '/') return
+  // Guard 1: layout-produced keys only — `/` opens the filter (ent#261), `v`
+  // cycles the view mode (#2536). `/` must NOT exclude shiftKey (de-DE `/` is
+  // Shift+7); `v` DOES exclude it — the letter never needs Shift on any
+  // layout, so Shift+V stays free (a future reverse cycle) while `V` from
+  // Caps Lock (shiftKey false) still works. Guards 2–5 below are shared by
+  // every hotkey — add a key HERE, never a second document listener
+  // (mountListenerOrdering.spec.js + viewModeStructure.spec.js).
+  const action = e.key === '/' ? openFilterPill
+    : (e.key === 'v' || e.key === 'V') && !e.shiftKey ? cycleViewMode
+    : null
+  if (!action) return
   // Guard 2: don't shadow browser/OS chords.
   if (e.ctrlKey || e.metaKey || e.altKey) return
   // Guard 3: IME composition.
@@ -766,10 +767,10 @@ function handleDashboardKeydown(e) {
   const t = e.target
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
   // Guard 5: open modals.
-  if (showOnboarding.value || isEditorOpen.value || showCreateModal.value) return
+  if (firstRunOpen.value || isEditorOpen.value || showCreateModal.value) return
 
-  e.preventDefault() // blocks Firefox quick-find
-  openFilterPill()
+  e.preventDefault() // `/`: blocks Firefox quick-find. `v`: no browser default — harmless, kept uniform.
+  action()
 }
 
 // Agents executing right now: WS-observed in-flight work unioned with the
@@ -841,7 +842,7 @@ onMounted(async () => {
   // Do NOT move these below an await. Guarded by
   // tests/unit/mountListenerOrdering.spec.js.
   document.addEventListener('click', handleClickOutside) // tag dropdown dismiss
-  document.addEventListener('keydown', handleDashboardKeydown) // ent#261 type-to-filter + Esc backstop
+  document.addEventListener('keydown', handleDashboardKeydown) // ent#261 type-to-filter + Esc backstop; #2536 `v` view cycle
 
   // Initialize system views store (restores persisted view selection)
   systemViewsStore.initialize()
@@ -865,11 +866,6 @@ onMounted(async () => {
     networkStore.fetchSchedules(),
     fetchAvailableTags()
   ])
-
-  // First-run onboarding: load the Claude-auth flag (for the wizard's setup
-  // hint) and auto-open the wizard if this is a fresh, empty install.
-  sessionsStore.loadFeatureFlags().catch(() => {})
-  maybeAutoOpenOnboarding()
 
   // Connect WebSocket for real-time updates
   networkStore.connectWebSocket()
@@ -950,6 +946,13 @@ function formatTime(timestamp) {
 // View Mode Functions
 function toggleMode(mode) {
   networkStore.setViewMode(mode)
+}
+
+// `v` hotkey (#2536): advance Timeline → Grid → List → Timeline through the
+// same store path a switcher click takes, so localStorage and the active
+// button can never disagree with the pane.
+function cycleViewMode() {
+  networkStore.setViewMode(nextViewMode(viewMode.value))
 }
 
 function handlePlay() {
@@ -1042,7 +1045,6 @@ function handleClickOutside(event) {
 </script>
 
 <style scoped>
-
 /*
  * Stats bar progressive degrade (#1830).
  *

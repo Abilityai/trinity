@@ -14,15 +14,29 @@ export const MODEL_CATALOG = [
     "note": "Most capable Opus (latest)",
     "publicChannel": true,
     "adminDefaultSelectable": true,
-    "recommended": false
+    "recommended": false,
+    "workspace": true,
+    "workspaceTier": "Most capable"
+  },
+  {
+    "id": "claude-fable-5-1",
+    "label": "Claude Fable 5.1",
+    "note": "Most capable — longest tasks (latest)",
+    "publicChannel": true,
+    "adminDefaultSelectable": true,
+    "recommended": false,
+    "workspace": false,
+    "workspaceTier": ""
   },
   {
     "id": "claude-fable-5",
     "label": "Claude Fable 5",
-    "note": "Most capable — longest tasks (latest)",
+    "note": "Most capable — longest tasks",
     "publicChannel": true,
     "adminDefaultSelectable": true,
-    "recommended": false
+    "recommended": false,
+    "workspace": false,
+    "workspaceTier": ""
   },
   {
     "id": "claude-sonnet-5",
@@ -30,7 +44,9 @@ export const MODEL_CATALOG = [
     "note": "Fast + smart, 1M context (latest)",
     "publicChannel": true,
     "adminDefaultSelectable": true,
-    "recommended": false
+    "recommended": false,
+    "workspace": true,
+    "workspaceTier": "Balanced — fast and smart"
   },
   {
     "id": "claude-opus-4-8",
@@ -38,7 +54,9 @@ export const MODEL_CATALOG = [
     "note": "Legacy (prior Opus)",
     "publicChannel": true,
     "adminDefaultSelectable": true,
-    "recommended": false
+    "recommended": false,
+    "workspace": false,
+    "workspaceTier": ""
   },
   {
     "id": "claude-opus-4-7",
@@ -46,7 +64,9 @@ export const MODEL_CATALOG = [
     "note": "Legacy",
     "publicChannel": true,
     "adminDefaultSelectable": true,
-    "recommended": false
+    "recommended": false,
+    "workspace": false,
+    "workspaceTier": ""
   },
   {
     "id": "claude-opus-4-6",
@@ -54,7 +74,9 @@ export const MODEL_CATALOG = [
     "note": "Legacy",
     "publicChannel": true,
     "adminDefaultSelectable": true,
-    "recommended": false
+    "recommended": false,
+    "workspace": false,
+    "workspaceTier": ""
   },
   {
     "id": "claude-sonnet-4-6",
@@ -62,7 +84,9 @@ export const MODEL_CATALOG = [
     "note": "Fast + smart",
     "publicChannel": true,
     "adminDefaultSelectable": true,
-    "recommended": true
+    "recommended": true,
+    "workspace": false,
+    "workspaceTier": ""
   },
   {
     "id": "claude-haiku-4-5-20251001",
@@ -70,7 +94,9 @@ export const MODEL_CATALOG = [
     "note": "Fastest, cheapest",
     "publicChannel": true,
     "adminDefaultSelectable": false,
-    "recommended": false
+    "recommended": false,
+    "workspace": true,
+    "workspaceTier": "Fastest"
   },
   {
     "id": "claude-opus-4-5-20251101",
@@ -78,7 +104,9 @@ export const MODEL_CATALOG = [
     "note": "Legacy",
     "publicChannel": false,
     "adminDefaultSelectable": false,
-    "recommended": false
+    "recommended": false,
+    "workspace": false,
+    "workspaceTier": ""
   },
   {
     "id": "claude-sonnet-4-5-20250929",
@@ -86,6 +114,8 @@ export const MODEL_CATALOG = [
     "note": "Legacy",
     "publicChannel": false,
     "adminDefaultSelectable": false,
-    "recommended": false
+    "recommended": false,
+    "workspace": false,
+    "workspaceTier": ""
   }
 ];

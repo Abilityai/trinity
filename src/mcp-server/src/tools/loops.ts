@@ -6,30 +6,73 @@
  *   - get_loop_status   — poll a loop's status and per-run summaries
  *   - stop_loop         — graceful stop (current iteration finishes)
  *
- * Permission rules match `chat_with_agent`: owner/admin/shared, or
- * explicit agent_permissions for agent-scoped keys. Backend enforces.
+ * Permission model (abilityai/trinity-enterprise#628 — verified, not assumed):
+ *   - `run_agent_loop` is gated at REGISTRATION: its row in
+ *     `TOOL_ACCESS_POLICY` (../access.ts) is `enforce:{param:"agent_name"}`, so
+ *     `server.ts` runs `checkAgentEdge` on the target before this tool executes.
+ *     An agent key reaches itself and its permitted targets; a user key is
+ *     passed through and the backend decides.
+ *   - `get_loop_status` / `stop_loop` are addressed by loop id, so the agent is
+ *     known only after the resolve: they fetch the loop, gate on its
+ *     `agent_name`, and withhold the payload on denial behind a compound
+ *     uniform reason — the id is the caller's only input, and naming the agent
+ *     would tell it whose loop that is.
+ *   - The backend behind all three is owner-equivalent for an agent key
+ *     (architecture.md Invariant #8): this is a tool-surface gate, not a
+ *     capability boundary. Whether the boundary should hold one hop down is
+ *     abilityai/trinity-enterprise#629.
  */
 
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
-import type { McpAuthContext } from "../types.js";
+import type { LoopStatus, McpAuthContext } from "../types.js";
+import { accessDenied, checkAgentEdge, resolveClient } from "../access.js";
+import type { DenyCallContext } from "../access.js";
 
 export function createLoopTools(
   client: TrinityClient,
   requireApiKey: boolean
 ) {
-  const getClient = (authContext?: McpAuthContext): TrinityClient => {
-    if (requireApiKey) {
-      if (!authContext?.mcpApiKey) {
-        throw new Error(
-          "MCP API key authentication required but no API key found in request context"
-        );
-      }
-      const userClient = new TrinityClient(client.getBaseUrl());
-      userClient.setToken(authContext.mcpApiKey);
-      return userClient;
-    }
-    return client;
+  const getClient = (authContext?: McpAuthContext): TrinityClient =>
+    resolveClient(client, requireApiKey, authContext);
+
+  const LOOP_DENIAL_HINT =
+    "If you started this loop and your permission to its agent was removed since, ask the " +
+    "agent's owner: the loop can be stopped from the Workspace (Loops) or with " +
+    "POST /api/loops/{loop_id}/stop by a principal that can access the agent.";
+
+  /**
+   * The loop-id tools' gate. Returns the denial body, or null when the caller
+   * may reach the loop's agent. Fail-closed: a payload without an agent name is
+   * not a loop this layer can vouch for. The internal reason (which names the
+   * agent) is logged and stamped on the admin-only audit row (#2807), never
+   * returned — the caller supplied only an id.
+   */
+  const denyUnlessAccessible = async (
+    context: DenyCallContext | undefined,
+    apiClient: TrinityClient,
+    authContext: McpAuthContext | undefined,
+    loopId: string,
+    loop: Partial<LoopStatus> | null | undefined
+  ): Promise<string | null> => {
+    const agentName = loop?.agent_name;
+    const access =
+      typeof agentName === "string" && agentName
+        ? await checkAgentEdge(apiClient, authContext, agentName)
+        : { allowed: false as const, reason: "loop payload carries no agent_name" };
+    if (access.allowed) return null;
+    const caller = authContext?.agentName || authContext?.userId || "unknown";
+    console.log(`[Access Denied] loop ${loopId}: ${caller}: ${access.reason}`);
+    return accessDenied(
+      context,
+      {
+        success: false,
+        error: "Access denied",
+        reason: `Loop '${loopId}' not found or not accessible`,
+        hint: LOOP_DENIAL_HINT,
+      },
+      access.reason
+    );
   };
 
   const resolveAgentName = (
@@ -237,10 +280,13 @@ export function createLoopTools(
         params: { loop_id: string },
         context?: { session?: McpAuthContext }
       ) => {
-        const apiClient = getClient(context?.session);
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
         try {
-          const result = await apiClient.getLoopStatus(params.loop_id);
-          return JSON.stringify({ success: true, ...(result as object) }, null, 2);
+          const loop = await apiClient.getLoopStatus(params.loop_id);
+          const denial = await denyUnlessAccessible(context, apiClient, authContext, params.loop_id, loop);
+          if (denial) return denial;
+          return JSON.stringify({ success: true, ...loop }, null, 2);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           return JSON.stringify({ success: false, error: msg }, null, 2);
@@ -265,7 +311,27 @@ export function createLoopTools(
         params: { loop_id: string },
         context?: { session?: McpAuthContext }
       ) => {
-        const apiClient = getClient(context?.session);
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+        // Resolve BEFORE the side effect: the POST is the thing being gated.
+        let loop: LoopStatus;
+        try {
+          loop = await apiClient.getLoopStatus(params.loop_id);
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          return JSON.stringify(
+            {
+              success: false,
+              error:
+                `Could not resolve loop '${params.loop_id}' before stopping it (${msg}); the stop was NOT sent. ` +
+                `If it must stop now, use POST /api/loops/${params.loop_id}/stop or the Workspace (Loops).`,
+            },
+            null,
+            2
+          );
+        }
+        const denial = await denyUnlessAccessible(context, apiClient, authContext, params.loop_id, loop);
+        if (denial) return denial;
         try {
           const result = await apiClient.stopAgentLoop(params.loop_id);
           return JSON.stringify({ success: true, ...result }, null, 2);

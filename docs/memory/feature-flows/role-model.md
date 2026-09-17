@@ -427,13 +427,18 @@ Admin-only. Changes the role of the specified user.
 
 ### Test Steps
 
+> **If a token comes back empty**, the account needs a second factor: `/api/token`
+> answers **403** with `mfa_required` and issues no session (#2322). Use an admin
+> account without 2FA, or an MCP API key (`trinity_mcp_*`), which is not subject
+> to the second-factor flow.
+
 #### 1. Verify role hierarchy: operator cannot create agents
 
 **Action:**
 ```bash
 # Login as a user with role=operator and try to create an agent
 TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
-  -d 'username=operator@example.com&password=...' | jq -r .access_token)
+  -d 'username=operator@example.com&password=...' | jq -r '.access_token // empty')
 
 curl -s -X POST http://localhost:8000/api/agents \
   -H "Authorization: Bearer $TOKEN" \
@@ -448,7 +453,7 @@ curl -s -X POST http://localhost:8000/api/agents \
 **Action:**
 ```bash
 ADMIN_TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
-  -d 'username=admin&password=YOUR_PASSWORD' | jq -r .access_token)
+  -d 'username=admin&password=YOUR_PASSWORD' | jq -r '.access_token // empty')
 
 curl -s -X PUT http://localhost:8000/api/users/operator@example.com/role \
   -H "Authorization: Bearer $ADMIN_TOKEN" \

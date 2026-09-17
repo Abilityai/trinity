@@ -24,6 +24,34 @@ const props = defineProps({
   // render an empty chart. Unmapped buckets show their own name.
   labels: { type: Object, default: () => ({}) },
   height: { type: Number, default: 150 },
+  // ent#523: where the legend sits. 'below' (default) is every existing
+  // caller's layout, unchanged. 'side' puts it in a column BEFORE the bars —
+  // what board A3 draws for the Workspace band, where the chart shares one
+  // short row with the stat figures and a legend underneath would double the
+  // band's height.
+  //
+  // ent#547 adds 'none': no legend at all, series identity carried by the hover
+  // tooltip, which already names every bucket with its swatch and count. Read
+  // the two `v-if`s below as a pair — the second was `legend !== 'side'`, so a
+  // third value would have rendered the BELOW legend rather than no legend, and
+  // "add a value to an enum, then grep the readers" is exactly the class this
+  // repo's ledger keeps recording. Both branches now name their value.
+  //
+  // Why 'side' is a height problem worth a third value rather than a smaller
+  // font: it lays out `flex-col`, one row per bucket, so it grows ~13px per
+  // bucket — ~29px at one bucket and ~133px at nine. In the Workspace band that
+  // made a busy agent's header nearly twice a quiet one's.
+  legend: { type: String, default: 'below' },
+  // ent#547: the sparse x-axis day labels under the bars. On by default (every
+  // existing caller). The Workspace band turns them off: at 7 columns they are
+  // four truncated dates, and the hover tooltip carries each bar's full date
+  // already — so they cost height the compact band does not have and say
+  // nothing the chart does not.
+  axis: { type: Boolean, default: true },
+  // OPTIONAL x-label formatter (ent#536). Null = the UTC-day formatters every
+  // existing caller relies on (`date` is an ISO day); the canvas passes its own
+  // so a category column is not parsed as a date.
+  labelFormat: { type: Function, default: null },
 })
 
 const hover = ref(null)
@@ -64,10 +92,12 @@ function labelFor(b) {
 }
 
 function fmtDate(iso) {
+  if (props.labelFormat) return props.labelFormat(iso)
   const dt = new Date(iso + 'T00:00:00Z')
   return dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
 }
 function fmtDayShort(iso) {
+  if (props.labelFormat) return props.labelFormat(iso)
   const dt = new Date(iso + 'T00:00:00Z')
   return dt.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric', timeZone: 'UTC' })
 }
@@ -80,12 +110,27 @@ function showLabel(i) {
 </script>
 
 <template>
-  <div>
+  <div :class="legend === 'side' ? 'flex items-end gap-3' : ''">
+    <!-- legend, when it sits BESIDE the bars (ent#523 / board A3). Same markup
+         as the block below; only the position differs, so the two cannot drift
+         in what they say. Rendered first so it reads left-to-right. -->
+    <div v-if="legend === 'side'" class="shrink-0 flex flex-col gap-0.5 pb-4">
+      <span
+        v-for="b in buckets"
+        :key="`side-${b}`"
+        class="inline-flex items-center text-[10px] leading-tight text-gray-600 dark:text-gray-300 whitespace-nowrap"
+      >
+        <span class="w-2 h-2 rounded-sm mr-1 shrink-0" :style="{ backgroundColor: colorFor(b) }"></span>
+        {{ labelFor(b) }}
+      </span>
+    </div>
+
+    <div :class="legend === 'side' ? 'flex-1 min-w-0' : ''">
     <!-- bars -->
     <div class="flex items-end gap-px" :style="{ height: height + 'px' }">
       <div
         v-for="(d, i) in data"
-        :key="d.date"
+        :key="i"
         class="relative flex-1 flex flex-col-reverse justify-start items-center min-w-0"
         @mouseenter="hover = i"
         @mouseleave="hover = null"
@@ -130,18 +175,22 @@ function showLabel(i) {
     </div>
 
     <!-- x labels (sparse) -->
-    <div class="flex gap-px mt-1">
+    <div v-if="axis" class="flex gap-px mt-1">
       <div
         v-for="(d, i) in data"
-        :key="d.date"
+        :key="i"
         class="flex-1 text-center text-[9px] text-gray-400 dark:text-gray-500 truncate"
       >
         {{ showLabel(i) ? fmtDayShort(d.date) : '' }}
       </div>
     </div>
 
-    <!-- legend with per-bucket window totals -->
-    <div class="flex flex-wrap gap-x-3 gap-y-1 mt-3">
+    </div>
+
+    <!-- legend with per-bucket window totals. Gated on the VALUE, not on
+         `!== 'side'`: with the negated test ent#547's new 'none' would have
+         rendered this block, i.e. the one thing it asks to remove. -->
+    <div v-if="legend === 'below'" class="flex flex-wrap gap-x-3 gap-y-1 mt-3">
       <span
         v-for="b in buckets"
         :key="b"

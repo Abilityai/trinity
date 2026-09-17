@@ -48,7 +48,10 @@ def _load_isolated(name: str, relpath: str):
     return mod
 
 
-_RS = _load_isolated("retention_reset_isolated", "routers/settings.py")
+# #1028: `routers/settings.py` is now the package `routers/settings/`. This
+# isolated load points at the module that owns the handler under test —
+# the split moved the code, not its behaviour.
+_RS = _load_isolated("retention_reset_isolated", "routers/settings/ops.py")
 
 pytestmark = pytest.mark.unit
 
@@ -192,6 +195,7 @@ def test_ops_reset_cannot_strand_a_retention_window():
     admin = MagicMock()
     admin.role = "admin"
     admin.connector_agent = None  # #1310: not a connector principal
+    admin.mcp_scope = None  # #2323: admin gate allowlists mcp_scope; absent fails CLOSED
     admin.agent_name = None  # ent#293: not an agent-scoped key
 
     fake_db = MagicMock()

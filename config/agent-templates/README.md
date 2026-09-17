@@ -20,6 +20,8 @@ Ready-made starting points for deploying an agent to Trinity. Each subdirectory 
 | `sage` | Strategic advisor — synthesizes research into actionable recommendations |
 | `scribe` | Content writer — reports, proposals, and client deliverables |
 
+Each ships a bundled `avatar.webp` beside its `template.yaml`, installed as the agent's default avatar at creation — so the starter fleet has faces with no image-generation key (#2693). Any template with an `avatar_prompt` can do the same.
+
 `scout` → `sage` → `scribe` are designed to work as a **consulting team**: Scout researches into a shared folder, Sage strategizes over it, Scribe writes the deliverable. Deploy them together to see agent-to-agent collaboration.
 
 These three are the **whole** visible catalog. Looking for more? The canonical way to build an agent is the [`abilityai/abilities`](https://github.com/abilityai/abilities) marketplace and its `create-agent` wizards — not a longer list of directories here.

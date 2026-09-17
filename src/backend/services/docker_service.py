@@ -92,13 +92,21 @@ def get_agent_status_from_container(container) -> AgentStatus:
 
     # Normalize Docker status to simpler values for frontend
     # Docker statuses: created, running, paused, restarting, removing, exited, dead
+    #
+    # #2541: `restarting` counts as stopped. It became reachable for every agent
+    # when containers started being born `unless-stopped` — most visibly as the
+    # transient state during a host-reboot recovery, i.e. exactly when someone is
+    # watching. Passed through verbatim it matches neither of the frontend's
+    # exact-equality filters (stores/agents.js `runningAgents`/`stoppedAgents`),
+    # so the agent shows in NEITHER list; and `agent_container_states` below has
+    # always called such a container "stopped". All three mappings now agree.
     docker_status = container.status
-    if docker_status in ("exited", "dead", "created"):
+    if docker_status in ("exited", "dead", "created", "restarting"):
         normalized_status = "stopped"
     elif docker_status == "running":
         normalized_status = "running"
     else:
-        normalized_status = docker_status  # paused, restarting, etc.
+        normalized_status = docker_status  # paused, removing, etc.
 
     # Extract runtime from container environment variables
     runtime = "claude-code"  # Default
@@ -206,9 +214,12 @@ def list_all_agents_fast() -> List[AgentStatus]:
             # Use container name as authoritative source (handles rename correctly)
             agent_name = container.name.removeprefix("agent-")
 
-            # Normalize Docker status to simpler values for frontend
+            # Normalize Docker status to simpler values for frontend.
+            # Kept byte-equivalent to `get_agent_status_from_container` above —
+            # including `restarting` (#2541). The two are copy-pasted twins, so
+            # a fix applied to one only is a fix that reaches one API surface.
             docker_status = container.status
-            if docker_status in ("exited", "dead", "created"):
+            if docker_status in ("exited", "dead", "created", "restarting"):
                 normalized_status = "stopped"
             elif docker_status == "running":
                 normalized_status = "running"
@@ -303,10 +314,12 @@ def agent_container_states() -> Optional[Dict[str, str]]:
     ``list_all_agents_fast`` says "use container name as authoritative source".
 
     The status is classified EXPLICITLY. ``list_all_agents_fast`` falls through
-    with ``else: normalized_status = docker_status``, which passes ``paused``,
-    ``restarting`` and — routinely, during any delete — ``removing`` straight to
-    the caller; consumers of this function map the result onto a closed set, so a
-    raw status escaping here would fail their validation instead of degrading.
+    with ``else: normalized_status = docker_status``, which passes ``paused``
+    and — routinely, during any delete — ``removing`` straight to the caller;
+    consumers of this function map the result onto a closed set, so a raw status
+    escaping here would fail their validation instead of degrading. (``restarting``
+    was in that list until #2541 folded it into the stopped tuple on both
+    normalizers, so all three mappings now agree on it — see RESTART-005.)
     """
     if not docker_client:
         return None
@@ -332,6 +345,105 @@ def agent_container_states() -> Optional[Dict[str, str]]:
         _warn_throttled(
             "agent_container_states",
             "Failed to read agent container states from Docker: %s", e,
+        )
+        return None
+
+
+def agent_container_runtimes() -> Optional[Dict[str, str]]:
+    """Every Trinity agent container's execution RUNTIME, in ONE Docker round trip.
+
+    Returns ``{agent_name: "claude-code" | "codex" | "gemini" | …}``, or ``None``
+    when Docker could not be asked. Same tri-state discipline, same keying and
+    the same ``sparse=True`` cost bound as :func:`agent_container_states` — this
+    is the batch form of :func:`get_agent_runtime`, added for the Workspace
+    roster (ent#403), which needs the runtime for EVERY rostered agent and must
+    not pay ``get_agent_runtime``'s inspect-per-agent (the #2160 cost).
+
+    The sparse constraint is the same trap with a different exit. Under
+    ``sparse=True`` docker-py's ``container.labels`` **raises** — it reads
+    ``attrs["Config"]["Labels"]``, which only a full inspect populates — so the
+    label is taken from ``attrs["Labels"]``, the key the ``/containers/json``
+    SUMMARY actually carries. Reading ``.labels`` here would raise on every
+    container, be swallowed by the ``except`` below, and return ``None``
+    forever: safe, silent, and permanently wrong.
+
+    Fails OPEN at the call site, not here: a name absent from a valid map, or an
+    unreadable Docker, leaves the caller with no runtime, and ent#403 resolves
+    that to ``"claude-code"`` — the same fallback ``get_agent_runtime``
+    documents. Denying a working affordance on every Claude agent because one
+    Docker read hiccuped is the #2196 inversion.
+    """
+    if not docker_client:
+        return None
+    try:
+        containers = docker_client.containers.list(
+            all=True,
+            filters={"label": "trinity.platform=agent"},   # server-side; unaffected by sparse
+            sparse=True,
+        )
+        runtimes: Dict[str, str] = {}
+        for container in containers:
+            raw = (container.attrs.get("Names") or [""])[0] or ""
+            name = raw.lstrip("/").removeprefix("agent-")
+            if not name:
+                continue
+            labels = container.attrs.get("Labels") or {}
+            if not isinstance(labels, dict):
+                labels = {}
+            runtimes[name] = labels.get("trinity.agent-runtime") or "claude-code"
+        return runtimes
+    except Exception as e:  # noqa: BLE001 — unreadable Docker is a valid answer here
+        _warn_throttled(
+            "agent_container_runtimes",
+            "Failed to read agent container runtimes from Docker: %s", e,
+        )
+        return None
+
+
+def agent_container_runtime_labels() -> Optional[Dict[str, Optional[str]]]:
+    """Every Trinity agent container's RAW ``trinity.agent-runtime`` label, in
+    ONE Docker round trip (#2572).
+
+    Returns ``{agent_name: label_or_None}``, or ``None`` when Docker could not
+    be asked — the same tri-state, keying and ``sparse=True`` cost bound as
+    :func:`agent_container_runtimes`, and the same trap: under ``sparse`` the
+    label must come from ``attrs["Labels"]`` because docker-py's
+    ``container.labels`` reads ``attrs["Config"]["Labels"]`` and **raises**.
+
+    The ONE difference from :func:`agent_container_runtimes` is the whole
+    reason this exists: that function resolves a missing label to
+    ``"claude-code"``, which is right for a UI affordance and **wrong** for
+    deciding whether to hand an agent a Claude subscription. ``trinity-system``
+    carries no ``trinity.agent-runtime`` label at all (see
+    ``system_agent_service._create_system_agent``'s label set), so a consumer
+    that must be label-STRICT — "adopt only on positive evidence of a Claude
+    runtime" (#1187 decision 7) — needs the raw value with absence preserved.
+    A name absent from the mapping means *this agent has no container*, which
+    is again distinct from both.
+    """
+    if not docker_client:
+        return None
+    try:
+        containers = docker_client.containers.list(
+            all=True,
+            filters={"label": "trinity.platform=agent"},   # server-side; unaffected by sparse
+            sparse=True,
+        )
+        labels_by_agent: Dict[str, Optional[str]] = {}
+        for container in containers:
+            raw = (container.attrs.get("Names") or [""])[0] or ""
+            name = raw.lstrip("/").removeprefix("agent-")
+            if not name:
+                continue
+            labels = container.attrs.get("Labels") or {}
+            if not isinstance(labels, dict):
+                labels = {}
+            labels_by_agent[name] = labels.get("trinity.agent-runtime")
+        return labels_by_agent
+    except Exception as e:  # noqa: BLE001 — unreadable Docker is a valid answer here
+        _warn_throttled(
+            "agent_container_runtime_labels",
+            "Failed to read agent container runtime labels from Docker: %s", e,
         )
         return None
 
@@ -570,13 +682,35 @@ def get_next_available_port(exclude: Optional[Set[int]] = None) -> int:
     return port
 
 
-async def execute_command_in_container(container_name: str, command: str, timeout: int = 60) -> dict:
+async def execute_command_in_container(
+    container_name: str,
+    command: str,
+    timeout: int = 60,
+    *,
+    environment: Optional[Dict[str, str]] = None,
+    user: str = "developer",
+) -> dict:
     """Execute a command in a Docker container.
 
     Args:
         container_name: Name of the container (e.g., "agent-myagent")
         command: Command to execute
-        timeout: Timeout in seconds
+        timeout: ACCEPTED AND NOT FORWARDED. Pre-existing (`container_exec_run`
+            has no timeout parameter and docker-py's exec has none either);
+            named here so a caller does not read it as a bound it is not. A
+            call that can hang must bound ITSELF — `asyncio.wait_for` frees the
+            caller, and an in-container `timeout N` prefix frees the pool
+            thread, which `wait_for` alone does not.
+        environment: Per-exec env, sent in the Exec Create body — NOT argv
+            (ent#615). This is how a credential reaches an in-container git
+            without appearing in the process table.
+        user: Container user to exec as. Defaults to the agent's own uid.
+            ``user="root"`` is for the two cases that need it: installing
+            root-owned platform files, and an exec whose ``environment``
+            carries a credential the AGENT must not read — a same-uid process
+            can read `/proc/<pid>/environ` for the life of the exec, a
+            different-uid one cannot (`ssh_service.py` is the existing
+            root-exec precedent).
 
     Returns:
         Dictionary with 'exit_code' and 'output' keys
@@ -591,7 +725,8 @@ async def execute_command_in_container(container_name: str, command: str, timeou
         result = await container_exec_run(
             container,
             command,
-            user="developer"
+            user=user,
+            environment=environment,
         )
 
         # result.exit_code is the exit code

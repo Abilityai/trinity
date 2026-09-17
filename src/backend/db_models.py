@@ -150,6 +150,45 @@ class ScheduleCreate(BaseModel):
     validation_enabled: bool = False  # Enable post-execution validation
     validation_prompt: Optional[str] = None  # Custom auditor instructions (None = default prompt)
     validation_timeout_seconds: int = 120  # Timeout for validation task (30-600 range)
+    # ent#498: deliver this schedule's output into one person's Workspace
+    # conversation with the agent. None = today's behaviour (the run terminates
+    # in an execution row and nothing is delivered).
+    deliver_to_workspace_email: Optional[str] = None
+
+    @field_validator("deliver_to_workspace_email")
+    @classmethod
+    def _normalize_delivery_email(cls, v: Optional[str]) -> Optional[str]:
+        """Normalize the delivery target, and refuse a shape that cannot be one.
+
+        Lower-cased and stripped because that is how the portal roster stores and
+        compares an address — a case difference must not become an
+        "unreachable target" refusal at fire time, hours after the schedule was
+        accepted.
+
+        An empty string becomes None: "" is not a target, and letting it through
+        would arm the delivery path against an address that can never resolve.
+
+        The shape check is deliberately minimal (one `@`, no whitespace, no
+        control characters) — real authorization is `agent_on_roster` at fire
+        time, and a stricter regex here would only reject deliverable addresses.
+        What it does buy is a NAMED 422 at write time instead of a schedule that
+        looks configured and fails on its first run.
+        """
+        if v is None:
+            return None
+        s = str(v).strip().lower()
+        if not s:
+            return None
+        if len(s) > 320:  # RFC 3696 practical ceiling
+            raise ValueError("deliver_to_workspace_email is too long")
+        if s.count("@") != 1 or s.startswith("@") or s.endswith("@"):
+            raise ValueError("deliver_to_workspace_email must be an email address")
+        if any(c.isspace() or ord(c) < 32 for c in s):
+            raise ValueError(
+                "deliver_to_workspace_email must not contain whitespace or "
+                "control characters"
+            )
+        return s
 
 
 class Schedule(BaseModel):
@@ -190,6 +229,8 @@ class Schedule(BaseModel):
     # exactly once, at mint time, and never persisted in the clear).
     webhook_auth_enabled: bool = False
     webhook_secret_encrypted: Optional[str] = None
+    # ent#498: the Workspace delivery target. Nullable on every existing row.
+    deliver_to_workspace_email: Optional[str] = None
 
 
 class ScheduleExecution(BaseModel):
@@ -241,6 +282,10 @@ class ScheduleExecution(BaseModel):
     validates_execution_id: Optional[str] = None   # FK to execution being validated (for validation records)
     # Auto-compact observability (Bundle B)
     compact_metadata: Optional[str] = None       # JSON list of compact events fired during this turn
+    # Turn-integrity flags (#2467): JSON object with background_tasks_killed
+    # (structural kill records) and/or background_tasks_pending_at_exit.
+    # NULL = no evidence (healthy run or old transcript shape), never "verified healthy".
+    turn_integrity: Optional[str] = None
     # Reader-race auto-retry (#678): how many times this execution was retried in-line
     # by the backend HTTPError handler. 0 = never retried; 1 = retried once (cap).
     retry_count: int = 0
@@ -258,6 +303,10 @@ class ScheduleExecution(BaseModel):
     # transitive across A→B→C). NULL = direct row; reporter falls back to the
     # executing agent.
     source_channel_agent: Optional[str] = None
+    source_channel_client: Optional[str] = None
+    # ent#555 — the canvas the user had open for this turn. Context about what
+    # is being discussed; never authority over what may be read or written.
+    open_canvas_id: Optional[str] = None
 
 
 # =========================================================================
@@ -293,6 +342,15 @@ class GitSyncResult(BaseModel):
     sync_time: Optional[datetime] = None
     conflict_type: Optional[str] = None  # "push_rejected", "merge_conflict", etc.
     conflict_class: Optional[str] = None  # S5 #386: operator-readable class (AHEAD_ONLY, PARALLEL_HISTORY, ...)
+    # #2529 — what the per-Push `.gitignore` sweep actually did. Populated on
+    # EVERY return of `git_service.sync_to_github`, success and failure alike:
+    # the index mutation happens before the HTTP call, so a 409 is exactly as
+    # obliged to report it as a 200. Invariant #14 does not apply here —
+    # `db_models.py` is the persistence-model home and is deliberately out of
+    # `test_models_centralized.py`'s router scope.
+    removed_paths: List[str] = Field(default_factory=list)      # tracked -> untracked by this Push
+    unignored_paths: List[str] = Field(default_factory=list)    # newly un-ignored, still untracked (advisory)
+    shadowed_negations: List[str] = Field(default_factory=list)  # "!rule -> deciding managed pattern"
 
 
 # =========================================================================
@@ -908,12 +966,64 @@ class SubscriptionUsageWindow(BaseModel):
     message_count: int = 0
 
 
+class HeadroomWindow(BaseModel):
+    """One rolling-limit window from the anthropic-ratelimit-unified-* headers (#471)."""
+    utilization_pct: Optional[float] = None  # percent of the cap; past 100 on an overage plan (#2419)
+    resets_at: Optional[str] = None          # ISO-Z
+    status: Optional[str] = None             # provider's per-window status (e.g. "allowed")
+
+
+class SubscriptionHeadroom(BaseModel):
+    """Provider-truth headroom snapshot for one subscription (#471).
+
+    Sourced from a minimal probe's response headers. Absent windows mean the
+    provider did not report them — never fabricated.
+    """
+    five_hour: Optional[HeadroomWindow] = None
+    seven_day: Optional[HeadroomWindow] = None
+    representative_claim: Optional[str] = None  # which window binds ("five_hour"/"seven_day")
+    overage_status: Optional[str] = None
+    fetched_at: Optional[str] = None            # ISO-Z of the probe
+    snapshot_age_seconds: Optional[int] = None
+    status: str = "ok"                          # ok | invalid_token | rate_limited | error
+
+
 class SubscriptionUsage(BaseModel):
-    """Per-subscription usage across rolling time windows. (SUB-004)"""
+    """Per-subscription usage across rolling time windows. (SUB-004; extended #471)
+
+    #471 fields default so pre-#471 constructors and stored snapshots survive:
+    `source` says where the *headroom* reading came from — "anthropic" (probe
+    headers, `headroom` populated) or "observed" (DB-derived only). The
+    windows/counters below are ALWAYS DB-derived and always populated (the
+    load-bearing arm — see the #2170 lesson).
+    """
     subscription_id: str
     window_5h: SubscriptionUsageWindow
     window_7d: SubscriptionUsageWindow
     agents: List[str] = []  # agents currently assigned to this subscription
+    failure_events_24h: int = 0                 # #471: SUB-003 failure events on record (24h)
+    failure_events_by_kind: Dict[str, int] = Field(default_factory=dict)  # {"rate_limit": n, "auth": n, "unknown": n}
+    rate_limited_now: bool = False              # #471: ONE derivation (2h predicate OR fresh provider status)
+    source: str = "observed"                    # #471: "anthropic" | "observed"
+    headroom: Optional[SubscriptionHeadroom] = None  # #471: provider snapshot when available
+
+
+class SubscriptionUsageBreakdownRow(BaseModel):
+    """Per-agent consumption within one window (#471 Tier 2). Ranked by cost_usd
+    desc at the query — cost is model-weighted by construction (API prices ≈
+    limit-burn rates), the honest ranking on a mixed-model subscription."""
+    agent_name: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    message_count: int = 0
+
+
+class SubscriptionUsageBreakdown(BaseModel):
+    """Per-agent breakdown for a subscription, both windows (#471 Tier 2)."""
+    subscription_id: str
+    window_5h: List[SubscriptionUsageBreakdownRow] = []
+    window_7d: List[SubscriptionUsageBreakdownRow] = []
 
 
 # =========================================================================

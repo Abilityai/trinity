@@ -28,23 +28,14 @@ sys.path.insert(0, _BACKEND_STR)
 
 
 def _make_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE agent_reports (
-            id TEXT PRIMARY KEY,
-            agent_name TEXT NOT NULL,
-            user_id INTEGER,
-            report_type TEXT NOT NULL,
-            title TEXT NOT NULL,
-            payload TEXT NOT NULL,
-            display_hint TEXT,
-            schema_version INTEGER DEFAULT 1,
-            period_start TEXT,
-            period_end TEXT,
-            created_at TEXT NOT NULL
-        )
-        """
-    )
+    # Derived from the SAME metadata the code uses, not hand-copied. The copy
+    # this replaces broke when ent#365 added the audience columns — reporting a
+    # fixture problem as a failure of the accessors under test.
+    from sqlalchemy.schema import CreateTable
+    from sqlalchemy.dialects import sqlite as sqlite_dialect
+    from db.tables import agent_reports as _agent_reports_table
+
+    conn.execute(str(CreateTable(_agent_reports_table).compile(dialect=sqlite_dialect.dialect())))
     conn.commit()
 
 

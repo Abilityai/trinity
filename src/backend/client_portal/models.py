@@ -39,6 +39,38 @@ class PortalPlaybook(BaseModel):
     starter_prompt: str
 
 
+class PortalModelOption(BaseModel):
+    """One model the Workspace composer may offer (ent#403).
+
+    `tier` is the option's PRIMARY text — plain language, not a model id, and not
+    `label — note` (two catalog entries both lead with "Most capable", and the
+    join nests an em-dash inside an em-dash). The model name rides `label`, which
+    the control puts on the `title`; the closed state therefore shows a short
+    string on any viewport.
+    """
+    id: str
+    tier: str
+    label: str
+
+
+class PortalModelDefault(BaseModel):
+    """What a turn runs on when the user picks "Agent's default" (ent#403).
+
+    `label` is a display name that NEVER crashes and never renders blank:
+    `platform_default_model` is written through the generic
+    `PUT /api/settings/{key}` with no catalog check, and free-text ids like
+    `claude-sonnet-4-6[1m]` are in legitimate circulation, so the resolver falls
+    back to the raw id rather than a bare catalog lookup that would 500 the
+    roster — this surface's front door.
+
+    `source` is for docs and tests ("did the agent's own override win, or the
+    platform default?"), never for the label.
+    """
+    model: str
+    label: str
+    source: Literal["agent", "platform"]
+
+
 class PortalAgentCard(BaseModel):
     """One agent on the client's "My Agents" roster."""
     name: str
@@ -50,8 +82,12 @@ class PortalAgentCard(BaseModel):
     avatar_url: Optional[str] = None
     shared_at: Optional[str] = None
     voice_available: bool = False    # #78: portal voice (ElevenLabs key + agent voice set)
-    # #2212 — whether the platform can TRANSCRIBE, i.e. exactly the `/stt` gate:
-    # an ElevenLabs key resolves. Deliberately a SEPARATE bit from
+    # #2212 — whether the platform can TRANSCRIBE, i.e. exactly the `/stt` gate.
+    # #2695: that gate is no longer key PRESENCE alone — it is the key resolving
+    # AND the capability verdict not being `refused`, because ElevenLabs
+    # permissions are per endpoint and a key with Text-to-Speech but no
+    # Speech-to-Text rendered a mic that failed on every press. Deliberately a
+    # SEPARATE bit from
     # `voice_available`: output additionally needs an effective voice to speak
     # WITH, input does not, so collapsing the two would either hide a working mic
     # or render a dead one. Fails CLOSED for the same reason `voice_available`
@@ -60,6 +96,16 @@ class PortalAgentCard(BaseModel):
     # which answers with real statuses and real messages) over the browser Web
     # Speech API, and to drop the mic entirely when neither path can work.
     stt_available: bool = False
+    # ent#553 — may THIS caller delete or pin this agent's canvases (owner or
+    # admin, platform sessions only). Per-agent, unlike the instance-level
+    # capability bits above, because ownership is.
+    #
+    # Fails CLOSED like its siblings, and for the same reason stated at
+    # `voice_available`: the bug being guarded is showing a control that then
+    # refuses. AC #2 asks that a user who may not delete never sees the
+    # affordance, so this is the field that decides it. UX, not containment —
+    # the routes re-check with the same predicate.
+    can_manage_canvases: bool = False
     # #138 briefing — ships with the roster at sign-in so the new-chat screen
     # renders with zero extra fetches. Best-effort live data (a stopped/slow
     # agent yields None/[]). `playbooks` is the hint-card set (ent#380): the
@@ -80,6 +126,29 @@ class PortalAgentCard(BaseModel):
     # today's behaviour rather than failing validation.
     searchable_playbooks: list[PortalPlaybook] = Field(default_factory=list)
     playbooks_total: int = 0
+    # #2163 — has this card's briefing been RESOLVED yet, and did it work?
+    #
+    #   pending      the roster shipped without it; call GET /briefings
+    #   ready        a briefing completed (its fields may still be empty —
+    #                that is a genuinely hint-less agent, not a failure)
+    #   unavailable  the briefing tripped its bound, raised, or was never
+    #                attempted (the agent is not `ready`/`unknown`)
+    #
+    # All three are SERVER-owned. Letting the server say `ready` for a bound
+    # trip would make a wedged agent indistinguishable from one that genuinely
+    # has nothing to offer — the "looks complete" class `playbooks_total`
+    # already exists to prevent one tier over — and would force every headless
+    # ent#83 client to reinvent the third value from empty fields.
+    #
+    # Default `"ready"`, so a payload from a build that predates this field
+    # (or any caller that builds a card inline) reads as "resolved inline,
+    # nothing to hydrate" — today's behaviour. That is the NON-privileged
+    # direction: the field grants nothing and gates no affordance, it only
+    # says whether a fetch is still owed, so an absent field must not leave a
+    # client waiting forever on a hydration call it will never make. It is a
+    # data-state marker, NOT a capability — #2128's rule (the roster payload is
+    # the portal capability channel) is untouched.
+    briefing_state: Literal["pending", "ready", "unavailable"] = "ready"
     # #2196 — whether this agent can currently run. Roster MEMBERSHIP is a DB
     # fact (`agent_ownership` / `agent_sharing`); this is a Docker fact
     # PROJECTED onto the card, and is never a membership filter. A live
@@ -101,6 +170,54 @@ class PortalAgentCard(BaseModel):
     # customer's roster over an infrastructure fault. When Docker is unreadable
     # every card reads `unknown` and the roster renders exactly as it does today.
     availability: Literal["ready", "stopped", "unavailable", "unknown"] = "unknown"
+    # #2582 — is this caller the agent's OWNER, as the roster union resolved it?
+    # The Files tab's "Delete for everyone" affordance is gated on this, and
+    # `service.portal_owns_agent` enforces the same membership server-side, so
+    # the button and the gate cannot disagree. Fails CLOSED (`False`): the bug
+    # to avoid is offering a destructive action the server will refuse. Note it
+    # is session-type dependent by construction — `include_owned` is
+    # `principal.is_platform` (ent#358) — so an owner on a magic-link portal
+    # token reads `False` here, and that is correct rather than a defect.
+    owned: bool = False
+
+    # ent#403 — what THIS agent runs on when the composer's model control is left
+    # on "Agent's default": the agent's #894 `public_channel_model` when one is
+    # set and still valid, else the platform default.
+    #
+    # `None` means the control does not render AT ALL — for every non-platform
+    # principal (the Workspace model choice is platform-users-only, per the
+    # operator ruling) and for a non-Claude runtime (the platform does not pass
+    # `--model` to Codex, so a Claude-model list there is a dead affordance).
+    # Fails CLOSED, like `voice_available` and `multi_agent_chat_available` and
+    # deliberately UNLIKE the `availability` field above: the bug this guards is
+    # promising an affordance that cannot work, not denying a working one. An
+    # older client, a partial payload or a failed read renders no control.
+    model_default: Optional[PortalModelDefault] = None
+
+
+class PortalBriefing(BaseModel):
+    """ONE agent's briefing, hydrated off the roster's critical path (#2163).
+
+    The same four fields `PortalAgentCard` carries, plus the state that says
+    whether they are real. `state` is `"unavailable"` by default because an
+    entry that failed to build must never read as a completed empty briefing.
+    """
+    description: Optional[str] = None
+    playbooks: list[PortalPlaybook] = Field(default_factory=list)
+    searchable_playbooks: list[PortalPlaybook] = Field(default_factory=list)
+    playbooks_total: int = 0
+    state: Literal["ready", "unavailable"] = "unavailable"
+
+
+class PortalBriefings(BaseModel):
+    """`GET /briefings` — briefings keyed by agent name (#2163).
+
+    Keys are always a SUBSET of the caller's roster: an unknown or off-roster
+    name in `?agents=` is dropped silently rather than answered, so the route
+    is no existence oracle (Invariant #8) and the caller learns nothing beyond
+    what its own roster already told it.
+    """
+    briefings: dict[str, PortalBriefing] = Field(default_factory=dict)
 
 
 class PortalTtsRequest(BaseModel):
@@ -108,10 +225,42 @@ class PortalTtsRequest(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
 
 
+class PortalRealtimeVoice(BaseModel):
+    """Whether THIS principal may start a real-time voice call from the
+    Workspace (ent#534), and — for a platform user on an instance that cannot —
+    why, in words. Named for the capability, not the provider (ent#354 may add
+    a second one behind the same field). Distinct from the per-agent
+    `voice_available`, which means "this agent has a TTS voice to narrate with".
+
+    Fail-closed like `voice_available`: the bug this guards is promising an
+    affordance that cannot work. `reason` is None for a portal-token client —
+    the WebSocket needs a platform JWT they do not hold, so the control is not
+    rendered at all rather than rendered disabled with an explanation that is
+    not theirs to act on.
+    """
+    available: bool = False
+    reason: Optional[str] = None
+
+
+class PortalVoiceStartRequest(BaseModel):
+    """Start a voice call bound to a Workspace thread (ent#534)."""
+    portal_session_id: str = Field(..., min_length=1, max_length=64)
+    voice_name: Optional[str] = None
+
+
+class PortalVoiceStartResponse(BaseModel):
+    voice_session_id: str
+    websocket_url: str
+    portal_session_id: str
+    max_duration_seconds: int
+
+
 class PortalRoster(BaseModel):
     """The client-facing roster: every agent the signed-in email may reach."""
     client_email: Optional[str] = None
     agents: list[PortalAgentCard]
+    # ent#534 — see PortalRealtimeVoice. Resolved once per roster load.
+    realtime_voice: PortalRealtimeVoice = Field(default_factory=PortalRealtimeVoice)
     # #2128 — whether a chat may include MORE THAN ONE agent on this instance.
     # Named for the capability, never the module or the edition: this payload
     # goes to an operator's customer, who can neither buy a missing module nor
@@ -119,6 +268,15 @@ class PortalRoster(BaseModel):
     # Defaults False so an older client, a partial payload or a failed read
     # never advertises an affordance that cannot work (the whole of this bug).
     multi_agent_chat_available: bool = False
+    # ent#403 — the curated model list the composer offers. INSTANCE-level, like
+    # the two fields above and for the same reason `realtime_voice` is: the
+    # option list is identical for every agent, and putting it on each card would
+    # ship N copies of it on exactly the path #2159/#2163 exist to keep small.
+    # Only the resolved default varies per agent (`PortalAgentCard.model_default`).
+    #
+    # Empty by default, and an empty list renders no control — the same
+    # fail-closed direction as `model_default`.
+    model_options: list[PortalModelOption] = Field(default_factory=list)
 
 
 class PortalAuthRequest(BaseModel):
@@ -161,6 +319,31 @@ class PortalChatRequest(BaseModel):
     new one if they've never chatted with this agent)."""
     message: str = Field(min_length=1, max_length=8000)
     session_id: Optional[str] = None
+    # ent#451: ask for a FRESH thread rather than the client's most recent one.
+    # An absent `session_id` alone could not say this — it also means "I don't
+    # know which thread", which is how New chat kept landing in the existing
+    # conversation. Ignored when `session_id` names a thread: the id is a fact,
+    # this is an intent. Defaults False so no existing caller changes behaviour.
+    new_thread: bool = False
+    # ent#555 — which canvas the client has open on screen, so "add a column to
+    # this" resolves without asking. Client-supplied and therefore VALIDATED
+    # server-side against the agent's own visible canvases; an unrecognised
+    # value degrades to "nothing open" rather than erroring. Optional, so every
+    # existing caller (and the headless integration surface ent#83 documents)
+    # is unaffected.
+    open_canvas_id: Optional[str] = Field(None, max_length=64)
+    # ent#403 — the model this turn should run on. THREE states, preserving the
+    # #894 shape rather than collapsing it to two: a curated id = an explicit
+    # choice; `None`/`""`/whitespace = INHERIT (the agent's `public_channel_model`,
+    # else the platform default). The router normalises blank to None BEFORE it
+    # validates — `""` is the control's own default-option value, so validating
+    # the raw field would 422 every default turn on day one.
+    #
+    # Typed `Optional[str]` and NOT validated here: the closed-allow-list check
+    # is the security control and it lives at the router, which also knows
+    # whether this principal may choose at all. A payload-level enum would refuse
+    # before the 403 and leak which ids exist to a principal with no control.
+    model: Optional[str] = None
 
 
 class PortalChatResponse(BaseModel):
@@ -169,6 +352,17 @@ class PortalChatResponse(BaseModel):
     response: str
     cost: Optional[float] = None
     session_id: Optional[str] = None
+    # #2580: the persisted row's id, so the caller can rate the reply it was just
+    # given instead of waiting for a reload to learn what to point at. The
+    # streaming path never needed this — it reads the row back out of history —
+    # but this synchronous route is its fallback, and a defect that only shows up
+    # on the fallback is still the defect.
+    #
+    # Optional, and genuinely so: the history write is best-effort (a hiccup must
+    # not fail an already-billed turn), so a reply can exist with no row behind
+    # it. `None` then, and the client's `v-if="message.id"` correctly withholds
+    # the thumbs rather than offering a control whose POST would 404.
+    message_id: Optional[str] = None
 
 
 class PortalTurnStarted(BaseModel):
@@ -194,6 +388,35 @@ class PortalSessionSummary(BaseModel):
     created_at: Optional[str] = None
     last_message_at: Optional[str] = None
     message_count: int = 0
+    # ent#523 — the pinned Main chat, and the tombstone Reset leaves. Both
+    # default to the pre-#523 reading (an ordinary live chat), so a row from an
+    # install that has not run the migration still validates.
+    is_main: bool = False
+    archived_at: Optional[str] = None
+
+
+class PortalMainReset(BaseModel):
+    """ent#523 — what Reset did, so the client can say it rather than guess.
+
+    `archived_title` is the name the retired chat now carries in the list, which
+    is what the system line in the new Main names too — the client renders the
+    server's word for it instead of composing a second one that could differ.
+
+    `archived_session_id` is **nullable, and that is the no-op signal**:
+    resetting an untouched Main archives nothing, because an untouched Main is
+    already what Reset produces. The client says "this is already a fresh chat"
+    on a null rather than naming an archive that was never created."""
+    main_session_id: str
+    archived_session_id: Optional[str] = None
+    archived_title: Optional[str] = None
+
+
+class PortalSessionRename(BaseModel):
+    """ent#473 — a person's title for their thread. Bounded here only against
+    abuse; the one-line / non-empty / 100-char rules are `services/chat_title`'s,
+    applied in the service so the refusal is a NAMED 400 (`invalid_title`) the
+    person can act on rather than a 422 about a schema."""
+    title: str = Field(max_length=4000)
 
 
 class PortalSessions(BaseModel):
@@ -220,21 +443,6 @@ class PortalAllSessions(BaseModel):
     request-count fix.
     """
     sessions: list[PortalAllSessionsItem]
-
-
-class PortalAgentAsk(BaseModel):
-    """One thing the agent is waiting on a person for (ent#360).
-
-    Agent-authored `approval`/`question` items only. `context` is deliberately
-    absent — free-form agent JSON, and a known credential-leak surface.
-    """
-    id: str
-    type: str
-    priority: Optional[str] = None
-    title: Optional[str] = None
-    question: Optional[str] = None
-    options: Optional[list] = None
-    created_at: Optional[str] = None
 
 
 class PortalAgentWork(BaseModel):
@@ -309,8 +517,10 @@ class PortalAgentPage(BaseModel):
     header: PortalAgentHeader
     capabilities: list[PortalPlaybook] = Field(default_factory=list)
     stats: PortalAgentStats
-    asks: list[PortalAgentAsk] = Field(default_factory=list)
     recent_work: list[PortalAgentWork] = Field(default_factory=list)
+    # ent#366 — raw up/down counts (never a percentage). `unavailable` keeps an
+    # unread tally from rendering as a real zero.
+    ratings: dict = Field(default_factory=lambda: {"up": 0, "down": 0, "total": 0, "unavailable": False})
 
 
 class PortalAgentReport(BaseModel):
@@ -392,6 +602,12 @@ class PortalUploadItem(BaseModel):
     filename: str
     size_bytes: int
     uploaded_at: Optional[str] = None
+    # #2582 — guessed from the extension by `_read_inbox`, because a client
+    # upload has no DB row to carry a detected type. Declaring it here is what
+    # makes it reach the client at all: the route's `response_model` silently
+    # strips undeclared keys, so `PortalRailFiles.vue`'s `<FileIcon :mime>` has
+    # been rendering the generic icon unconditionally since it shipped.
+    mime_type: Optional[str] = None
 
 
 class PortalUploads(BaseModel):
@@ -400,12 +616,73 @@ class PortalUploads(BaseModel):
     uploads: list[PortalUploadItem]
 
 
+class PortalRatingRequest(BaseModel):
+    """One click on a message or a deliverable (ent#366).
+
+    `comment` is optional and only meaningful on a negative rating — it is the
+    box that opens under a thumbs-down. Capped here as well as at the service,
+    because this is the boundary a client writes to.
+    """
+    target_kind: str                  # 'message' | 'deliverable'
+    target_id: str = Field(..., max_length=128)
+    rating: str                       # 'up' | 'down'
+    comment: Optional[str] = Field(None, max_length=2000)
+
+
+class PortalRatingResult(BaseModel):
+    """What was recorded, and whether the words went anywhere further."""
+    target_kind: str
+    target_id: str
+    rating: str
+    comment_recorded: bool
+    rated_at: Optional[str] = None
+    # ent#366 AC #6: absent the capture-feedback skill the rating still records
+    # and this says so, so the UI can thank the person honestly instead of
+    # implying a follow-up that will not happen.
+    capture_feedback: Optional[str] = None   # 'dispatched' | 'already_dispatched' | 'skill_not_installed' | None
+
+
 class PortalHistoryMessage(BaseModel):
     """One persisted turn in a client↔agent conversation."""
+    # ent#366: the row's own id, so a thumb has something to point at. Optional
+    # because a message composed client-side during a live turn has no row yet.
+    id: Optional[str] = None
     role: str                       # 'user' | 'assistant'
     content: str
     cost: Optional[float] = None
     created_at: Optional[str] = None
+    # The caller's OWN rating of this message, if any — never anyone else's.
+    # Present so a reload shows the thumb the person already gave.
+    my_rating: Optional[str] = None  # 'up' | 'down' | None
+    # ent#534: `'voice'` for a turn spoken in a Workspace voice call (NULL/None
+    # for a typed one), and the call it belongs to — the chat folds one call's
+    # rows into a single collapsed block keyed on this id.
+    source: Optional[str] = None
+    voice_call_id: Optional[str] = None
+
+
+class PortalTurnOutcome(BaseModel):
+    """Why the last turn on this thread ended badly (#2320).
+
+    A turn that fails before or at start persists no assistant message and
+    clears its in-flight marker, so the client sees a thread that looks idle and
+    reports "we've lost track of this turn" — for a turn the backend diagnosed
+    precisely. This is that diagnosis, in the only form a client may receive it.
+
+    ``message`` is client-safe by construction: every producer is a
+    ``ClientPortalError`` detail already authored as client copy, and the one
+    uncategorised path substitutes a fixed sentence. The raw
+    ``schedule_executions.error`` text is never carried here.
+
+    ``retryable`` is decided at the raise site and answers exactly one question:
+    is re-sending guaranteed to be wrong? It is True only where nothing reached
+    the agent, so nothing was billed — the case the #2120/#2133 no-Retry rule
+    was never about.
+    """
+    execution_id: str
+    category: str          # see PORTAL_FAILURE_CATEGORIES in service.py
+    message: str
+    retryable: bool = False
 
 
 class PortalHistory(BaseModel):
@@ -428,6 +705,17 @@ class PortalHistory(BaseModel):
     # fields, so without this line the budget would silently never leave the
     # server.
     in_flight_wait_budget_seconds: Optional[int] = None
+    # #2320: the last turn's failure, when it failed. Present only while the
+    # record lives (15 min) and only for a turn that ended badly — a thread
+    # whose last turn answered carries None. Declared here for the same reason
+    # the budget above is: an undeclared key is stripped by `response_model` and
+    # never reaches the client.
+    last_turn_outcome: Optional[PortalTurnOutcome] = None
+    # #2694: the window is counted in typed turns and bounded by a row ceiling;
+    # True when the ceiling cut rows off the OLD end, so the client can say
+    # "earlier messages aren't shown" instead of rendering a thread that
+    # silently starts mid-call. Declared for the same reason as the two above.
+    truncated: bool = False
 
 
 # --- Operator controls over a signed-in client (ent#281) ----------------------

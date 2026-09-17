@@ -1,3 +1,4 @@
+# mcp: none — share / unshare is a grant surface, human-only (reject_agent_principal, ent#69 Part 2)
 """
 Agent sharing routes for the Trinity backend.
 """

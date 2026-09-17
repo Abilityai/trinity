@@ -1,3 +1,4 @@
+# mcp: none — Overview chart data for the UI (#1107); agents get the same facts via get_agent_activity_summary / get_execution_result
 """Agent-scoped execution analytics (#1107).
 
 Backs the Agent Detail "Overview" dashboard. Generalises the #868

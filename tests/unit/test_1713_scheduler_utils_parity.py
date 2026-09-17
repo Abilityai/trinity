@@ -15,6 +15,13 @@ separator, mishandles a tz), one of these fails and names the desync — which i
 exactly the #1474 regression (naive strings a JS ``new Date(...)`` renders shifted
 by the viewer's offset).
 
+`#2434`: ``duration_ms_between`` joins the mirror and is covered here too. Its
+contract is *numeric* rather than textual, and it has a hard boundary — the
+PostgreSQL ``int4`` ceiling, above which it returns ``None`` instead of a value
+that cannot be stored. A mirror that disagreed by one at that boundary would
+make the scheduler the only writer still capable of wedging a sweep, which is
+precisely the divergence class this file exists for.
+
 Sibling mirror ``src/scheduler/failure_classifier.py`` is deliberately NOT covered
 here: its two copies are genuinely **byte-identical**, so its byte-parity test
 (``test_904_sigkill_no_false_auth.py::TestBackendSchedulerParity``) is valid and
@@ -120,3 +127,78 @@ def test_parse_scheduler_ts_returns_naive_utc(scheduler):
     for got in (z, off, naive):
         assert got.tzinfo is None, f"parse_scheduler_ts must return naive UTC, got {got!r}"
     assert z == off == naive == datetime(2026, 1, 15, 10, 30, 0, 123456)
+
+
+# ---------------------------------------------------------------------------
+# duration_ms_between (#2434) — a numeric contract with a hard boundary
+# ---------------------------------------------------------------------------
+
+_PG_INT4_MAX = 2**31 - 1  # 24.855 days in ms
+
+# Both tz shapes on purpose: the backend feeds this AWARE datetimes
+# (`parse_iso_timestamp`) and the scheduler feeds it NAIVE ones
+# (`parse_scheduler_ts`). An aware-only suite would not exercise the shape the
+# mirror actually sees in production.
+_TZ_SHAPES = [
+    pytest.param(None, id="naive"),
+    pytest.param(timezone.utc, id="aware-utc"),
+    pytest.param(timezone(timedelta(hours=3)), id="aware-plus-3"),
+]
+
+_DELTAS = [
+    pytest.param(timedelta(seconds=5), 5_000, id="normal-5s"),
+    pytest.param(timedelta(0), 0, id="zero"),
+    pytest.param(timedelta(seconds=-300), 0, id="negative-clamps-to-zero-1832"),
+    pytest.param(timedelta(milliseconds=_PG_INT4_MAX), _PG_INT4_MAX, id="exactly-int4-max"),
+    pytest.param(timedelta(milliseconds=_PG_INT4_MAX + 1), None, id="one-over-int4-max"),
+    pytest.param(timedelta(days=33), None, id="the-reported-33-days"),
+]
+
+
+@pytest.mark.parametrize("tz", _TZ_SHAPES)
+@pytest.mark.parametrize("delta,expected", _DELTAS)
+def test_duration_ms_between_agrees_across_both_tz_shapes(
+    tz, delta, expected, backend, scheduler
+):
+    """AC: the two copies agree on VALUE, including at the int4 boundary.
+
+    The boundary cases are the point: ``_PG_INT4_MAX`` must still be a number
+    and ``+1`` must be ``None``. An off-by-one in either copy is the difference
+    between a sweep that closes a stale row and one that aborts its whole
+    transaction and leaves the fleet's stale rows ``running`` forever (#2434).
+    """
+    started = datetime(2026, 1, 15, 10, 30, 0, tzinfo=tz)
+    completed = started + delta
+
+    b = backend.duration_ms_between(started, completed)
+    s = scheduler.duration_ms_between(started, completed)
+
+    assert b == s, (
+        f"duration_ms_between desynced for {delta!r} ({tz}): "
+        f"backend={b!r} scheduler={s!r}. Re-sync "
+        "src/scheduler/utils.py::duration_ms_between from the backend copy."
+    )
+    assert s == expected, f"expected {expected!r}, got {s!r}"
+
+
+def test_duration_ms_between_ceilings_agree(backend, scheduler):
+    """The constant itself must not drift — it IS the contract."""
+    assert backend._PG_INT4_MAX == scheduler._PG_INT4_MAX == 2**31 - 1
+
+
+def test_duration_ms_between_never_resolves_now_itself(backend, scheduler):
+    """Both copies take two datetimes and call no clock of their own.
+
+    Load-bearing: the backend hands this AWARE datetimes and the scheduler NAIVE
+    ones. If either copy resolved "now" internally it would subtract mixed
+    shapes and raise ``TypeError`` on one of the two callers — a crash on the
+    terminal-write path, in the code meant to prevent one.
+    """
+    import inspect
+
+    for mod in (backend, scheduler):
+        params = list(inspect.signature(mod.duration_ms_between).parameters)
+        assert params == ["started_at", "completed_at"], params
+        source = inspect.getsource(mod.duration_ms_between)
+        body = source.split('"""')[-1]
+        assert "now(" not in body and "utcnow" not in body, source

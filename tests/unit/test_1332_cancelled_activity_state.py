@@ -109,14 +109,16 @@ def _run_terminate(*, agent_status="terminated", open_activity_id="act-1",
     # Running (not queued) row so the backlog short-circuit is skipped.
     exec_row = MagicMock()
     exec_row.status = TaskExecutionStatus.RUNNING
+    exec_row.agent_name = "test-agent"  # #2433: the entry gate refuses a row owned elsewhere
 
     mock_db = MagicMock()
-    # get_execution is read early (backlog short-circuit, sees RUNNING) and again
-    # in the #1332 CAS-lost branch (re-read sees the row's real terminal state).
+    # get_execution is read at the #2433 agent-scope entry gate, early (backlog
+    # short-circuit, sees RUNNING) and again in the #1332 CAS-lost branch
+    # (re-read sees the row's real terminal state).
     if reconciled_status is not None:
         reconciled_row = MagicMock()
         reconciled_row.status = reconciled_status
-        mock_db.get_execution.side_effect = [exec_row, reconciled_row]
+        mock_db.get_execution.side_effect = [exec_row, exec_row, reconciled_row]
     else:
         mock_db.get_execution.return_value = exec_row
     mock_db.update_execution_status.return_value = cancel_won
