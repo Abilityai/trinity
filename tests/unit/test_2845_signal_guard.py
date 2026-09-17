@@ -17,6 +17,15 @@ import signal_guard as sg
 
 pytest_plugins = ["pytester"]
 
+# Where the session cgroup is unreadable (macOS, some sandboxes) `install()`
+# returns False and the REAL os.kill/os.killpg stay in place — the refusal
+# tests below would then deliver their signals for real, SIGTERMing this
+# session's own process group (pytest, xdist, and the shell above them).
+pytestmark = pytest.mark.skipif(
+    os.kill is not sg.guarded_kill,
+    reason="signal guard not installed (no readable /proc cgroup on this host)",
+)
+
 
 @pytest.fixture(autouse=True)
 def _own_violations():
