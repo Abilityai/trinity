@@ -53,6 +53,10 @@ _STUBBED_MODULE_NAMES = [
 def _restore_sys_modules():
     """Snapshot sys.modules before each test and restore after."""
     saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    # #2859: the git_service package and every submodule are restored as ONE set —
+    # a parent restored without its children is exactly the half-state that breaks
+    # `git_service.<sub>` reads in the next file (13 failures in test_ent615).
+    saved_git = {k: v for k, v in sys.modules.items() if k.startswith("services.git_service")}
     try:
         yield
     finally:
@@ -61,6 +65,9 @@ def _restore_sys_modules():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = value
+        for key in [k for k in list(sys.modules) if k.startswith("services.git_service")]:
+            del sys.modules[key]
+        sys.modules.update(saved_git)
 
 
 def _load_git_service():
