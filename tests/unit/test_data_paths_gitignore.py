@@ -78,7 +78,13 @@ def _load_git_service():
     sys.modules["database"].AgentGitConfig = Mock
     sys.modules["database"].GitSyncResult = Mock
 
-    sys.modules.pop("services.git_service", None)
+    # #1028 made git_service a package. Evicting only the parent leaves its
+    # submodules cached, so the re-imported package never re-binds
+    # `.token_scrub` / `.conflicts` / ... and every later `git_service.<sub>`
+    # attribute read in another test file fails (the red-dev leak, M1 of the
+    # 0.9.5 work order). Evict the whole family so the package re-imports whole.
+    for key in [k for k in list(sys.modules) if k.startswith("services.git_service")]:
+        del sys.modules[key]
     # #1028: git_service is a package; the alias names the module that
     # owns the functions under test, so patches land where the code looks.
     import services.git_service.trinity_files as gs
