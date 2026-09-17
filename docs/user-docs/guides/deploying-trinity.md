@@ -1,20 +1,10 @@
 # Deploying Trinity
 
-Trinity runs your agents 24/7 with scheduling, monitoring, and multi-agent coordination. Choose cloud-hosted for simplicity or self-hosted for complete control.
+Trinity runs your agents 24/7 with scheduling, monitoring, and multi-agent coordination. You run it yourself, on your own machine or server, so your agents and their data stay inside your own perimeter. Setup takes about two minutes with prebuilt images, or up to 15 minutes when you build from source.
 
 > 📺 **Watch:** [I Built a DevOps Agent That Deploys Other Agents](https://youtu.be/8RozanPd14Y) *(Apr 2026)* · [Control My DGX Spark From Anywhere](https://youtu.be/epDBrEtg4nE) *(Jan 2026)* · [all videos](../videos.md)
 
-## Cloud vs Self-Hosted
-
-| | Cloud Hosted (ability.ai) | Self Hosted |
-|---|---|---|
-| **Infrastructure** | Zero to manage | You manage |
-| **Setup time** | 30 seconds | 2 minutes (prebuilt images) to 15 minutes (build from source) |
-| **Data location** | ability.ai servers | Your perimeter |
-| **Pricing** | Pay-per-agent | Free forever |
-| **Best for** | Teams focused on building | Enterprises with compliance requirements |
-
-### Self-hosted install paths
+## Install Paths
 
 | Path | Command | Best for | Guide |
 |---|---|---|---|
@@ -26,33 +16,7 @@ Trinity runs your agents 24/7 with scheduling, monitoring, and multi-agent coord
 
 All five paths share one installer (`scripts/deploy/start.sh`), one `.env` contract, and one set of day-two procedures ([Upgrading](deploying/upgrading.md), [Backup and Restore](deploying/backup-and-restore.md), [Monitoring](deploying/monitoring.md)).
 
-## Option A: Cloud Hosted (ability.ai)
-
-### Step 1: Create an account
-
-Sign up at [ability.ai](https://ability.ai).
-
-### Step 2: Get your MCP connection URL
-
-After signup, go to **Settings > API Keys** and copy your MCP server URL.
-
-### Step 3: Connect from Claude Code
-
-```bash
-/trinity:connect
-```
-
-The skill asks for your connection URL and saves it to your config.
-
-### Step 4: Deploy your first agent
-
-```bash
-/trinity:onboard
-```
-
-Done. Your agent is now running on ability.ai.
-
-## Option B: Self Hosted (local, from source)
+## Option A: Local, from Source
 
 > **Tip:** the install runs one-shot with `./scripts/deploy/start.sh --unattended` (generates and prints the admin password), or is driven end to end by an AI coding agent via the runbook at [`docs/AGENT_INSTALL_GUIDE.md`](../../AGENT_INSTALL_GUIDE.md). `./quickstart.sh` is an alias for `start.sh` (`--defaults` means `--unattended`).
 
@@ -127,7 +91,7 @@ Alternatively, for email-verified login: when prompted, enter your email and fol
 /trinity:onboard
 ```
 
-## Option C: Server with Prebuilt Images
+## Option B: Server with Prebuilt Images
 
 On a server, pull-only is the path you want: every platform image and the agent base image are published to GHCR on each release, so nothing is compiled on the box.
 
@@ -140,13 +104,13 @@ echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env  # pin a release; `latest` moves on ever
 
 The repository checkout must stay beside the compose file (it mounts `./config/*`), and upgrades are a re-run of `start.sh --hosted` with a new `TRINITY_IMAGE_TAG` — not a bare `docker compose pull`. Full details, the tunnel and TLS choices, and the "which compose files go together" table: [Single Server → Prebuilt images](deploying/single-server.md#option-a-prebuilt-images-recommended).
 
-## Option D: DigitalOcean Marketplace 1-Click
+## Option C: DigitalOcean Marketplace 1-Click
 
 Create a Droplet from the Trinity image (4 GB RAM minimum, 8 GB recommended). First boot obtains a Let's Encrypt certificate for the Droplet's own IP and runs `start.sh --hosted --unattended` from the images baked into the snapshot — Trinity is serving over HTTPS about ninety seconds later with no input from you. **No admin account exists yet:** open `https://<droplet-ip>` and the first visitor creates it (email + password) at `/setup`, logged straight in. Do that right after creating the Droplet — until then, anyone who finds the IP can claim it. No terminal is needed and no password is ever printed. To choose the password before first boot instead, supply it as cloud-init user-data (or use the installer script below).
 
 After the first login, the first-run setup opens with a **Secure this instance** step that walks you through adding a real domain and, optionally, a Cloudflare Tunnel. Details: [Single Server → DigitalOcean 1-Click](deploying/single-server.md#digitalocean-marketplace-1-click).
 
-## Option E: DigitalOcean from your terminal
+## Option D: DigitalOcean from your terminal
 
 `scripts/deploy/trinity-do-create.sh` runs on your own machine with `doctl` signed in. It asks for the admin password and a Claude subscription token, creates a stock Ubuntu Droplet whose first boot runs the same provisioning as the 1-Click, and prints the HTTPS address when it answers. Because you chose the password up front, the admin is provisioned at boot and there is no claim window.
 
