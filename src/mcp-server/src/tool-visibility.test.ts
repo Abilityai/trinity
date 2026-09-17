@@ -438,7 +438,11 @@ describe("ent#500 get_agent_assignments is operator-scope only", () => {
     assert.equal(operatorOnly({ scope: "some_future_tier" }), false);
   });
 
-  it("registers the tool in the operator group, not the connector one", async () => {
+  it("is FENCED for 0.9.5 (work-order F1): the module exists but server.ts does not register it", async () => {
+    // The assignments layer (ent#500) is not shipping in this cut, so the tool that
+    // reads it must not be advertised to ANY scope. The module stays (its own tests
+    // cover the proxy); the registration is what is withheld. When ent#500 lands,
+    // flip this assertion back to `assert.match` and restore the access.ts row.
     const { createAssignmentTools } = await import("./tools/assignments.js");
     const tools = createAssignmentTools(
       { getBaseUrl: () => "http://x" } as any,
@@ -450,8 +454,8 @@ describe("ent#500 get_agent_assignments is operator-scope only", () => {
     const serverSrc = await import("node:fs").then((fs) =>
       fs.readFileSync(new URL("./server.ts", import.meta.url), "utf8"),
     );
-    assert.match(serverSrc, /createAssignmentTools\(client, requireApiKey\)/);
-    assert.doesNotMatch(serverSrc, /connectorGroup\s*=\s*createAssignmentTools/);
+    assert.doesNotMatch(serverSrc, /createAssignmentTools\(client, requireApiKey\)/);
+    assert.doesNotMatch(serverSrc, /^import \{ createAssignmentTools \}/m);
   });
 
   it("exposes no write tool — an assignment is a grant, and the backend " +
