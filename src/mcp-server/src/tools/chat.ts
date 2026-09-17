@@ -9,7 +9,7 @@ import { z } from "zod";
 import { createHash } from "crypto";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext, AgentAccessCheckResult } from "../types.js";
-import { checkAgentEdge, resolveClient, uniformDenial } from "../access.js";
+import { accessDenied, checkAgentEdge, resolveClient, uniformDenial } from "../access.js";
 
 /**
  * RELIABILITY-006 (#525): derive a deterministic Idempotency-Key for an MCP
@@ -166,12 +166,12 @@ export async function runAgentChat(
 
   if (!accessCheck.allowed) {
     console.log(`[Access Denied] ${authContext?.agentName || authContext?.userId || "unknown"} -> ${agent_name}: ${accessCheck.reason}`);
-    return JSON.stringify({
+    return accessDenied(context, {
       error: "Access denied",
       reason: accessCheck.reason,
       caller: authContext?.agentName || authContext?.userId,
       target: agent_name,
-    }, null, 2);
+    });
   }
 
   // Pass source agent for collaboration tracking
@@ -664,10 +664,10 @@ export function createChatTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
         if (!accessCheck.allowed) {
           console.log(`[Access Denied] ${authContext?.agentName || authContext?.userId || "unknown"} -> ${agent_name}: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const sourceAgent = authContext?.scope === "agent" ? authContext.agentName : undefined;

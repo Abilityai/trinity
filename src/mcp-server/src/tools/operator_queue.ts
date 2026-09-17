@@ -19,6 +19,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied } from "../access.js";
 
 /**
  * Pure helper: keep only items whose agent is in the allowed set. Used to gate
@@ -157,7 +158,7 @@ export function createOperatorQueueTools(
           const access = await checkAgentAccess(apiClient, authContext, params.agent_name);
           if (!access.allowed) {
             console.log(`[list_operator_queue] Access denied: ${access.reason}`);
-            return JSON.stringify({ error: "Access denied", reason: access.reason }, null, 2);
+            return accessDenied(context, { error: "Access denied", reason: access.reason });
           }
         }
 
@@ -237,7 +238,7 @@ export function createOperatorQueueTools(
         const access = await checkAgentAccess(apiClient, authContext, item.agent_name);
         if (!access.allowed) {
           console.log(`[get_operator_queue_item] Access denied: ${access.reason}`);
-          return JSON.stringify({ error: "Access denied", reason: access.reason }, null, 2);
+          return accessDenied(context, { error: "Access denied", reason: access.reason });
         }
 
         return JSON.stringify(item, null, 2);
@@ -296,7 +297,7 @@ export function createOperatorQueueTools(
         const access = await checkAgentAccess(apiClient, authContext, item.agent_name);
         if (!access.allowed) {
           console.log(`[respond_to_operator_queue] Access denied: ${access.reason}`);
-          return JSON.stringify({ error: "Access denied", reason: access.reason }, null, 2);
+          return accessDenied(context, { error: "Access denied", reason: access.reason });
         }
 
         try {

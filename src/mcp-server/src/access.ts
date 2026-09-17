@@ -23,6 +23,9 @@
  *      tool with no row, an `enforce` row naming a parameter the tool does not
  *      declare, or a `none` row on a tool whose parameters name an agent, throws
  *      at startup. A tool added tomorrow cannot register without a row.
+ *   4. `accessDenied` — the ONE serialiser for a returned denial (#2807). It
+ *      stamps the per-call context so `withAudit` records the refusal; a deny
+ *      site that serialises its own envelope fails `audit-denial.test.ts`.
  *
  * What this is NOT: a capability boundary. The backend resolves an agent key to
  * its owner carrying the owner's role (architecture.md Invariant #8), so the
@@ -34,7 +37,7 @@
  */
 
 import { TrinityClient } from "./client.js";
-import type { AgentAccessCheckResult, McpAuthContext } from "./types.js";
+import type { AgentAccessCheckResult, McpAuthContext, ToolOutcome } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Client resolution (moved from tools/chat.ts so the wrapper below and the
@@ -69,6 +72,56 @@ export function resolveClient(
 /** The #186 shape: one reason for "does not exist" and "not yours", no owner. */
 export function uniformDenial(targetAgentName: string): AgentAccessCheckResult {
   return { allowed: false, reason: `Agent '${targetAgentName}' not found or not accessible` };
+}
+
+// ---------------------------------------------------------------------------
+// The one serialiser for a returned denial (#2807)
+// ---------------------------------------------------------------------------
+
+/**
+ * The subset of the tool-call context `accessDenied` writes. `session?` is
+ * listed so the `{ session?: McpAuthContext }` object every tool already types
+ * its context as passes TypeScript's weak-type check; the wrapper's fuller
+ * `ToolCallContext` (audit.ts) is structurally a superset.
+ */
+export interface DenyCallContext {
+  session?: McpAuthContext;
+  outcome?: ToolOutcome;
+}
+
+/**
+ * Serialise a denial envelope AND record that this call was refused.
+ *
+ * Every gate on this surface RETURNS its denial — the JSON the caller reads is
+ * the contract (agents parse it), so throwing was never an option — but
+ * `withAudit` labels a call by throw/no-throw, so a returned denial used to be
+ * audited as `success: true` (#2807). The fix is a stamp: this helper writes
+ * `context.outcome = { kind: "denied", reason }` on the PER-CALL context object
+ * (FastMCP builds one per `execute`; #905 already stamps `requestId` there) and
+ * the wrapper reads it after `execute`. The envelope is serialised exactly as
+ * before — same keys, same order, same `null, 2` — so nothing a caller parses
+ * changes.
+ *
+ * `auditReason` is for compound denials whose caller-facing reason is
+ * deliberately uniform (`Loop '<id>' not found or not accessible`, `Report not
+ * found`): the operator's admin-only row may carry the internal reason the site
+ * already logs. Never stamp `context.session` — that object is shared by every
+ * call on the session (`verify_login` relies on it).
+ */
+export function accessDenied(
+  context: DenyCallContext | undefined,
+  envelope: Record<string, unknown>,
+  auditReason?: string
+): string {
+  if (context) {
+    const reason =
+      auditReason ??
+      (typeof envelope.reason === "string" ? envelope.reason : undefined) ??
+      (typeof envelope.error === "string" ? envelope.error : undefined) ??
+      "Access denied";
+    context.outcome = { kind: "denied", reason };
+  }
+  return JSON.stringify(envelope, null, 2);
 }
 
 /**
@@ -409,8 +462,8 @@ interface AccessCallContext {
  *
  * The denial is RETURNED, in the same envelope every other gate on this surface
  * returns, so callers that read `success` and callers that read `error` both
- * see it. A returned denial is audited by `withAudit` as a successful call —
- * that is #2807, and it is fixed there for every gate at once, not here for one.
+ * see it. `accessDenied` stamps the call context so `withAudit` records the
+ * refusal as one (#2807) — the envelope bytes are unchanged.
  */
 export function withAgentAccess<P extends Record<string, unknown>>(
   toolName: string,
@@ -428,11 +481,7 @@ export function withAgentAccess<P extends Record<string, unknown>>(
     if (!access.allowed) {
       const caller = authContext?.agentName || authContext?.userId || "unknown";
       console.log(`[Access Denied] ${toolName}: ${caller} -> ${target}: ${access.reason}`);
-      return JSON.stringify(
-        { success: false, error: "Access denied", reason: access.reason, caller, target },
-        null,
-        2
-      );
+      return accessDenied(context, { success: false, error: "Access denied", reason: access.reason, caller, target });
     }
     return execute(params, context);
   };

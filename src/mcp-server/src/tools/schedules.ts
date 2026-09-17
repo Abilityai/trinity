@@ -7,6 +7,7 @@
 import { z } from "zod";
 import { ApiError, TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied } from "../access.js";
 
 /**
  * Create schedule management tools with the given client
@@ -109,10 +110,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[list_agent_schedules] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const schedules = await apiClient.listAgentSchedules(agent_name);
@@ -252,11 +253,11 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, args.agent_name, "write");
         if (!accessCheck.allowed) {
           console.log(`[create_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
             hint: "Agents can only create schedules on themselves, not other agents.",
-          }, null, 2);
+          });
         }
 
         const schedule = await apiClient.createAgentSchedule(args.agent_name, {
@@ -318,10 +319,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[get_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const schedule = await apiClient.getAgentSchedule(agent_name, schedule_id);
@@ -440,11 +441,11 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, args.agent_name, "write");
         if (!accessCheck.allowed) {
           console.log(`[update_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
             hint: "Agents can only update their own schedules.",
-          }, null, 2);
+          });
         }
 
         // Build updates object (exclude undefined fields)
@@ -513,11 +514,11 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "write");
         if (!accessCheck.allowed) {
           console.log(`[delete_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
             hint: "Agents can only delete their own schedules.",
-          }, null, 2);
+          });
         }
 
         // Get schedule name before deletion for response
@@ -565,10 +566,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[toggle_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const result = enabled
@@ -610,10 +611,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[trigger_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         // #1970: carry the caller identity through so the resulting execution
@@ -711,10 +712,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[get_schedule_executions] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         // Clamp limit to max 100
