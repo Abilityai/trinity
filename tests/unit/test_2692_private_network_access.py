@@ -17,6 +17,7 @@ and a static check cannot tell those apart.
 """
 from __future__ import annotations
 
+import stat
 import subprocess
 import tempfile
 import textwrap
@@ -227,6 +228,39 @@ def test_a_failed_validate_leaves_the_previous_caddyfile_on_disk() -> None:
                 assert live.read_text() == "previous working config\n", "an invalid render replaced the live file"
             else:
                 assert "remote_ip 1.2.3.4/99" in live.read_text(), "a valid render was not installed"
+
+
+def test_the_installed_caddyfile_is_readable_by_the_caddy_user_under_a_strict_umask() -> None:
+    """The Caddy unit runs as `User=caddy`, not root. The 1-Click first boot sets
+    `umask 077` before calling start.sh, so a render into a NEW file came out
+    0600 root: Caddy's restart failed with "permission denied", provisioning
+    stopped before Trinity started, and the droplet never served. Overwriting
+    in place had kept the package's 0644, which is why this only broke once the
+    render moved beside the live file."""
+    src = _START.read_text()
+    cidr_fn = src[src.index("provision_private_cidrs() {") : src.index("\n}\n", src.index("provision_private_cidrs() {")) + 3]
+    caddy_fn = src[src.index("provision_caddyfile() {") : src.index("\nprovision_site() {")]
+    with tempfile.TemporaryDirectory() as tmp:
+        live = Path(tmp) / "Caddyfile"
+        live.write_text("previous working config\n")
+        live.chmod(0o644)
+        harness = (
+            "umask 077\n"
+            + (cidr_fn + "\n" + caddy_fn).replace("/etc/caddy/Caddyfile", str(live))
+            + "\n"
+            + "env_value() { printf '%s' \"$CIDRS\"; }\n"
+            + "systemctl() { :; }\n"
+            + "caddy() { :; }\n"
+            + 'provision_caddyfile "203.0.113.10" "do-marketplace"\n'
+        )
+        proc = subprocess.run(
+            ["bash", "-c", harness],
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", "CIDRS": ""},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert stat.S_IMODE(live.stat().st_mode) == 0o644, oct(live.stat().st_mode)
 
 
 def test_the_variable_is_documented_where_an_operator_will_set_it() -> None:
