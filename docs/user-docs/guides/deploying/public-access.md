@@ -18,7 +18,7 @@ Plain HTTP on a public IP with none of the above is the one combination to avoid
 
 | Feature | Requires public access |
 |---|---|
-| Slack channel adapter (OAuth callback + event webhooks) | Yes |
+| Slack: the one-time OAuth install callback, and event delivery in webhook mode (the default Socket Mode connects outward and needs none) | Yes |
 | Telegram bot webhooks | Yes |
 | WhatsApp (Twilio) webhooks | Yes |
 | Public chat links (`/chat/*`) | Yes |
@@ -60,7 +60,7 @@ In the Cloudflare dashboard, add a public hostname for your tunnel under the **P
 | `/site/*` | `http://trinity-backend:8000` | Agent website proxy |
 | `/assets/*` | `http://trinity-frontend:8080` | Static assets |
 
-These rules publish the webhook surface and not the web interface. To publish the interface as well, add a `/` catch-all routing to `http://trinity-frontend:8080`. To keep it private, leave that out and reach it over a private network — [Hardening → Step 2c](hardening.md#step-2c-both-the-tunnel-carries-the-callbacks-the-tailnet-carries-you).
+These rules publish the webhook surface and not the web interface. To publish the interface as well, add a `/` catch-all routing to `http://trinity-frontend:8080`. To keep it private, leave that out and reach it over a private network — [Hardening → Step 2c](hardening.md#step-2c-both--the-tunnel-carries-the-callbacks-the-tailnet-carries-you).
 
 Add the matching rule whenever you connect a new channel. A path you have not published stops delivering, with no error on this end.
 

@@ -30,6 +30,9 @@ That is **first-run setup**: one guided sequence over a Dashboard that does not 
 
 Use **Settings → General → First-run setup → Re-run setup**, or add `?onboarding=1` to the Dashboard URL (`http://localhost/?onboarding=1`) — log in first, because the login page drops the parameter. This works however many agents you already have: completed steps show as done, a step you skipped earlier is offered again, and the sequence only ever opens by itself on a fresh install. Everything the steps touch also lives in Settings — the admin sign-in email under **General**, Claude and the other keys under **Integrations**, usage sharing under **General** — so you never need the sequence to finish configuration. See [Quick Start → Guided Onboarding](../getting-started/quick-start.md#guided-onboarding-first-run).
 
+## Where did the Getting started checklist go?
+
+It moved off the Dashboard body into the left **Systems** sidebar, under the list of views and above **New View**. If you do not see it, expand the sidebar: collapsing the sidebar hides the checklist along with the view labels. Its header shows your progress and collapses the list, and it refreshes whenever you return to the Dashboard. It also disappears once every milestone is done, or for good after **Don't show this again**, which cannot be undone. The checklist appears only on instances with the matching enterprise entitlement. See [Setup → Your First Dashboard](../getting-started/setup.md#your-first-dashboard).
 
 ## How do I log in to Trinity?
 

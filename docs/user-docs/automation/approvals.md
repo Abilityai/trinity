@@ -90,7 +90,7 @@ Agent-scoped API keys see only items for the calling agent itself plus agents it
 ## Limitations
 
 - An answer wakes the agent only when its owner has turned wake-on-answer on; otherwise it waits for the agent's next turn. If the agent has neither a schedule nor a heartbeat, the agent is expected to say in the request how it should be re-triggered.
-- Wake-on-answer is a per-agent switch, never per request — an agent cannot decide that answering it costs the answerer a turn.
+- Wake-on-answer is a per-agent switch, never per request — an agent cannot decide that answering it costs the answerer a turn. Only the agent's owner or an admin can change the switch, and an agent's own key is refused.
 - A wake that fails after the answer was recorded shows as a failed execution and an audit entry on the operator side; the Workspace confirmation reports the intent to start work, not its outcome.
 
 ## See Also

@@ -94,6 +94,7 @@ When a breaker is open, the agent header and the agent's Dashboard tile show a "
 
 An answer to one of the agent's parked requests (an approval, a question) always reaches the agent, but by default it is only read on the agent's *next* turn. An agent with no schedule has no next turn, so an approved action would wait indefinitely. Turn on **Wake this agent when an operator answers** in **Settings → Reliability** and answering starts one turn so the agent acts on it right away. Off by default.
 
+- Only the owner or an admin can change it, and never with an agent's key: an agent's own key is refused with `403` even though it acts for the owner. Each wake is a turn the owner pays for, so an agent cannot switch on its own wake-ups. An agent can still read the setting.
 - API: `GET /api/agents/{name}/operator-resume` and `PUT /api/agents/{name}/operator-resume` (`{"enabled": true}`)
 - See [Approvals](../automation/approvals.md) for the operator side.
 
