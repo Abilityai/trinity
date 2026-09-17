@@ -118,11 +118,13 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useOnboardingStore } from '../../stores/onboarding'
+import { useAgentsStore } from '../../stores/agents'
 
 const store = useOnboardingStore()
+const agentsStore = useAgentsStore()
 const router = useRouter()
 
 // Expanded on first start; a saved preference wins after that.
@@ -141,7 +143,13 @@ const go = (item) => {
   if (item.action_route) router.push(item.action_route)
 }
 
+// Milestones are derived server-side, so the list is only as fresh as its last
+// read. Re-read on every mount — chat, schedules and channels are reached on
+// other pages, so returning to the dashboard is when those land — and when the
+// fleet grows or shrinks, since agents are created and deleted from this page
+// (the WS agent_created / agent_deleted handlers keep that list current).
 onMounted(() => {
-  store.fetchChecklist()
+  store.fetchChecklist(true)
 })
+watch(() => agentsStore.agents.length, () => store.fetchChecklist(true))
 </script>
