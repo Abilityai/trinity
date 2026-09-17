@@ -241,8 +241,11 @@ async function switchAgentInSpa(page, targetAgent) {
   // List mode is what renders a per-agent row; wait for its toolbar so a slow
   // agent fetch can't be mistaken for a missing row.
   await expect(page.getByPlaceholder('Search agents...')).toBeVisible({ timeout: 20000 })
+  // One name link per list layout (desktop / tablet / mobile); which one renders
+  // depends on the list's width, so take the visible one.
   const targetLink = page
     .locator(`[data-agent="${targetAgent}"] a[href="/agents/${targetAgent}"]`)
+    .filter({ visible: true })
     .first()
   await expect(targetLink).toBeVisible({ timeout: 20000 })
   await targetLink.click()

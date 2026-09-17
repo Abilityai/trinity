@@ -247,14 +247,6 @@
           </div>
         </div>
 
-        <!-- Getting-started checklist (ent#238). The ONLY first-run surface
-             left inline: it tracks first-value milestones over days, so the
-             first-run overlay (ent#581, below) deliberately does not absorb it —
-             a blocking sequence would turn a progress marker into a gate.
-             Renders nothing unless the enterprise onboarding module is entitled
-             AND the user still has an undone step. -->
-        <ActivationChecklist />
-
     <!-- Timeline View (only visible in timeline mode) -->
     <template v-if="isTimelineMode">
       <!-- Loading skeleton (#1266): immediate feedback while fleet/timeline data loads -->
@@ -506,7 +498,6 @@ import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import FirstRunOverlay from '@/components/onboarding/FirstRunOverlay.vue'
-import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
