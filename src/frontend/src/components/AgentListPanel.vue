@@ -9,8 +9,16 @@
        Pane shell: the chassis column is overflow-hidden, so this root IS the
        scroll container (h-full overflow-y-auto). The horizontal padding
        replaces the old page shell's — it is what gives the half-out-of-card
-       avatar (32px, 16px overhang) room without clipping or an h-scrollbar. -->
-  <div class="h-full overflow-y-auto px-4 sm:px-6 lg:px-8 py-4">
+       avatar (32px, 16px overhang) room without clipping or an h-scrollbar.
+
+       It is also the `agent-list` size container: the row layout switches on
+       `list-lg:` (this pane's content width), not the viewport's `lg:`. The
+       pane's width depends on the systems rail beside it, so a viewport
+       breakpoint picked the ten-track grid for a pane that could not hold it —
+       at 1280 with the rail open the name track fell to ~70px and the name
+       link to nothing. Its own padding stays viewport-keyed: a container
+       cannot query itself. -->
+  <div class="h-full overflow-y-auto px-4 sm:px-6 lg:px-8 py-4 [container:agent-list/inline-size]">
     <!-- Notification Toast -->
     <div v-if="notification"
       :class="[
@@ -232,21 +240,21 @@
          a different `1fr`, misaligning every track between them even with
          identical content.
 
-         Edge insets are ordinary item MARGINS (`lg:ml-8` on the first cell,
-         `lg:mr-4` on the last), identical on the header and every row — NOT
+         Edge insets are ordinary item MARGINS (`list-lg:ml-8` on the first cell,
+         `list-lg:mr-4` on the last), identical on the header and every row — NOT
          padding on a subgrid item, which is laid out inside its first/last
          tracks (CSS Grid L2 §7.1) and would make alignment depend on a spec
          corner. Do not re-add horizontal padding to the header or a row. -->
-    <div class="flex flex-col gap-y-1.5 lg:grid lg:grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto_auto] lg:gap-x-4">
+    <div class="flex flex-col gap-y-1.5 list-lg:grid list-lg:grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto_auto] list-lg:gap-x-4">
       <!-- Column Header (lg+ only). The spacer widths no longer DECIDE
            alignment (the shared `auto` tracks size to the row cells), but they
            are kept equal to the cells they sit above so a spacer can never be
            the widest contribution. -->
       <div
         data-testid="list-header"
-        class="hidden lg:grid lg:grid-cols-subgrid lg:col-span-full items-center py-2 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider"
+        class="hidden list-lg:grid list-lg:grid-cols-subgrid list-lg:col-span-full items-center py-2 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider"
       >
-        <div class="w-4 lg:ml-8"></div>
+        <div class="w-4 list-lg:ml-8"></div>
         <div class="w-2.5"></div>
         <div class="w-2"></div>
         <div data-col="name">Name</div>
@@ -255,7 +263,7 @@
         <div data-col="success">Success</div>
         <div data-col="stats">Exec / Sched</div>
         <div class="w-4"></div>
-        <div class="w-1.5 lg:mr-4"></div>
+        <div class="w-1.5 list-lg:mr-4"></div>
       </div>
 
       <!-- Agent Rows -->
@@ -270,7 +278,7 @@
           // positioning parent of the half-out avatar), now resolving its
           // columns from the list container. Vertical padding is lg-only: the
           // md/base layouts below carry their own.
-          'lg:grid lg:grid-cols-subgrid lg:col-span-full lg:items-center lg:gap-y-1 lg:py-3',
+          'list-lg:grid list-lg:grid-cols-subgrid list-lg:col-span-full list-lg:items-center list-lg:gap-y-1 list-lg:py-3',
           'transition-colors duration-150 hover:bg-gray-50 dark:hover:bg-gray-750',
           agent.is_system
             ? 'border-l-3 border-l-purple-500'
@@ -290,15 +298,15 @@
 
         <!-- Desktop layout (lg+). `contents` rather than a box: these eleven
              children ARE the row's grid items, so one breakpoint switch stands
-             in for eleven `hidden lg:…` cells and no extra box sits between the
+             in for eleven `hidden list-lg:…` cells and no extra box sits between the
              row and its tracks. -->
-        <div class="hidden lg:contents">
+        <div class="hidden list-lg:contents">
             <!-- Checkbox (track 1 — carries the row's left inset) -->
             <input
               type="checkbox"
               :checked="selectedAgents.includes(agent.name)"
               @change="toggleSelection(agent.name)"
-              class="w-4 h-4 lg:ml-8 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500 cursor-pointer flex-shrink-0"
+              class="w-4 h-4 list-lg:ml-8 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500 cursor-pointer flex-shrink-0"
             />
 
             <!-- Status dot -->
@@ -463,7 +471,7 @@
                  `col-start-4` puts it under the name column by construction. -->
             <div
               data-testid="row-secondary-lg"
-              class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] text-gray-500 dark:text-gray-400 lg:row-start-2 lg:col-start-4 lg:col-end-10"
+              class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] text-gray-500 dark:text-gray-400 list-lg:row-start-2 list-lg:col-start-4 list-lg:col-end-10"
             >
               <!-- Fixed order: slug · pressure · runtime · tags · +N. The line is
                    the row's one meta strip and it stays legible only while it has
@@ -526,12 +534,15 @@
               :max="getSlotStats(agent.name) ? getSlotStats(agent.name).max : 3"
               :height="48"
               :width="6"
-              class="flex-shrink-0 lg:col-start-10 lg:row-start-1 lg:row-span-2 lg:self-stretch lg:mr-4"
+              class="flex-shrink-0 list-lg:col-start-10 list-lg:row-start-1 list-lg:row-span-2 list-lg:self-stretch list-lg:mr-4"
             />
         </div>
 
-        <!-- Tablet layout (md, < lg) -->
-        <div class="hidden md:flex md:flex-col lg:hidden pl-8 pr-4 py-3 gap-2">
+        <!-- Tablet layout (md, pane < list-lg). `!hidden`, not `hidden`: plugin
+             variants are emitted BEFORE the screen variants, so a plain
+             `list-lg:hidden` loses to `md:flex` and this block renders inside
+             the desktop row as a stray grid item (#2662's emit-order trap). -->
+        <div class="hidden md:flex md:flex-col list-lg:!hidden pl-8 pr-4 py-3 gap-2">
           <div class="flex items-center gap-3">
             <input
               type="checkbox"
@@ -666,7 +677,7 @@
               <span v-else class="text-gray-400 dark:text-gray-500">--</span>
             </div>
           </div>
-          <!-- Secondary line (tablet) — same contract as lg: always rendered,
+          <!-- Secondary line (tablet) — same contract as list-lg: always rendered,
                so md rows are one height whether or not they carry tags (they
                were not: a tagged row used to be ~30px taller). That uniformity
                is what makes it a safe home for the slug. Tagless md rows grow

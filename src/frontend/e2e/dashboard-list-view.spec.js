@@ -201,22 +201,25 @@ test.describe('dashboard list column alignment + identity (#2358)', () => {
     return page.locator(`[data-agent="${fixtureAgent}"]`)
   }
 
+  // The lg row layout keys on the PANE width (`list-lg:`, 68rem), so whether
+  // 1280 gets the grid depends on the systems rail beside it (open, it renders
+  // the tablet layout). 1440 holds the grid with the rail open or collapsed.
   test('@smoke lg header and rows resolve ONE set of columns', async ({ page }) => {
-    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.setViewportSize({ width: 1440, height: 900 })
     await gotoList(page)
     await expect(page.locator('[data-agent]').first()).toBeVisible({ timeout: 15000 })
 
-    await expectColumnsAligned(page, '1280px')
+    await expectColumnsAligned(page, '1440px')
 
     // Layout stability across a resize (not varying content — see the header).
-    await page.setViewportSize({ width: 1440, height: 900 })
-    await expectColumnsAligned(page, '1440px')
+    await page.setViewportSize({ width: 1680, height: 900 })
+    await expectColumnsAligned(page, '1680px')
   })
 
   test('the capacity meter sits in grid rows 1-2, never an implicit third row', async ({
     page,
   }) => {
-    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.setViewportSize({ width: 1440, height: 900 })
     await gotoList(page)
     const row = page.locator('[data-agent]').first()
     await expect(row).toBeVisible({ timeout: 15000 })
@@ -242,7 +245,7 @@ test.describe('dashboard list column alignment + identity (#2358)', () => {
     page,
     baseURL,
   }) => {
-    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.setViewportSize({ width: 1440, height: 900 })
     await gotoList(page)
     const row = await borrowLabel(page, baseURL)
     await expect(row).toBeVisible({ timeout: 15000 })
