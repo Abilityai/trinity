@@ -22,7 +22,7 @@ Trinity runs your agents 24/7 with scheduling, monitoring, and multi-agent coord
 | **Server, prebuilt images** | `./scripts/deploy/start.sh --hosted` | Any Linux VM — serving in about two minutes, no on-box builds | [Single Server → Prebuilt images](deploying/single-server.md#option-a-prebuilt-images-recommended) |
 | **Server, build from source** | `docker compose -f docker-compose.prod.yml up -d` | Servers that build their own images (custom patches, enterprise overlay) | [Single Server → Build from source](deploying/single-server.md#option-b-build-from-source) |
 | **DigitalOcean Marketplace 1-Click** | Create a Droplet from the Trinity image | HTTPS at the Droplet's IP with zero input; claim the admin account in the browser; upgrade to a domain later | [Single Server → DigitalOcean 1-Click](deploying/single-server.md#digitalocean-marketplace-1-click) |
-| **DigitalOcean, from your terminal** | `scripts/deploy/trinity-do-create.sh` (needs `doctl`) | Same result as the 1-Click, but you choose the admin password and paste a Claude subscription token before the Droplet exists | [Single Server → DigitalOcean installer](deploying/single-server.md#digitalocean-installer-script) |
+| **DigitalOcean, from your terminal** | `scripts/deploy/trinity-do-create.sh` (needs `doctl`) | Same result as the 1-Click, but you choose the admin password before the Droplet exists | [Single Server → DigitalOcean installer](deploying/single-server.md#digitalocean-installer-script) |
 
 All five paths share one installer (`scripts/deploy/start.sh`), one `.env` contract, and one set of day-two procedures ([Upgrading](deploying/upgrading.md), [Backup and Restore](deploying/backup-and-restore.md), [Monitoring](deploying/monitoring.md)).
 
@@ -148,7 +148,7 @@ After the first login, the first-run setup opens with a **Secure this instance**
 
 ## Option E: DigitalOcean from your terminal
 
-`scripts/deploy/trinity-do-create.sh` runs on your own machine with `doctl` signed in. It asks for the admin password and a Claude subscription token, creates a stock Ubuntu Droplet whose first boot runs the same provisioning as the 1-Click, and prints the HTTPS address when it answers. Because you chose the password up front, the admin is provisioned at boot and there is no claim window. Details: [Single Server → DigitalOcean installer](deploying/single-server.md#digitalocean-installer-script).
+`scripts/deploy/trinity-do-create.sh` runs on your own machine with `doctl` signed in. It asks for the admin password, creates a stock Ubuntu Droplet whose first boot runs the same provisioning as the 1-Click, and prints the HTTPS address when it answers. Because you chose the password up front, the admin is provisioned at boot and there is no claim window. You connect Claude on first sign-in, in the setup that opens. Details: [Single Server → DigitalOcean installer](deploying/single-server.md#digitalocean-installer-script).
 
 ## Key URLs (Self-Hosted)
 

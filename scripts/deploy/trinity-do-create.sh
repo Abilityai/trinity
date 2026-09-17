@@ -11,10 +11,15 @@
 #
 # Deliberately PROMPTS rather than shipping a file to edit. A guide that says
 # "download this and change four lines" fails the audience this exists for, and
-# it puts two secrets in a file on disk. `read -rs` keeps both of them off the
+# it puts the admin password in a file on disk. `read -rs` keeps it off the
 # terminal, out of shell history, and out of every file but the droplet's own
 # user-data. Prompts also read fine from a pipe, so the flow stays testable:
-#     printf 'pw\npw\ntoken\n\n\ny\n' | bash trinity-do-create.sh
+#     printf 'pw\npw\n\n\ny\n' | bash trinity-do-create.sh
+#
+# It does NOT ask for a Claude credential: the first sign-in opens the onboarding
+# overlay, whose blocking "Connect Claude" step takes a subscription token or an
+# API key, checks it with Anthropic, and hands it to the agents that have none
+# (trinity-enterprise#582). A token typed here would be unchecked until first boot.
 set -euo pipefail
 
 SIZE='s-4vcpu-8gb'      # 4 vCPU / 8 GB, $48/month — Trinity's recommended size.
@@ -27,7 +32,7 @@ fail() { printf '\n%s\n\n' "$1" >&2; exit 1; }
 ask()  { printf '%s' "$1" >&2; }
 
 # ---------------------------------------------------------------------------
-# Checks first, questions second: never collect two secrets and THEN discover
+# Checks first, questions second: never collect a password and THEN discover
 # the tool is missing.
 # ---------------------------------------------------------------------------
 command -v doctl >/dev/null 2>&1 || fail \
@@ -56,7 +61,7 @@ case "$_doctl_bin:$(readlink -f "$_doctl_bin" 2>/dev/null)" in
     *)                                             USER_DATA_DIR="${TMPDIR:-/tmp}" ;;
 esac
 # A snap doctl with no usable HOME has nowhere readable to put the file; /tmp is
-# invisible to it. Refuse now, before the operator has typed two secrets.
+# invisible to it. Refuse now, before the operator has typed a password.
 [ -n "$USER_DATA_DIR" ] || fail \
 "doctl is installed as a snap but \$HOME is not set, so there is nowhere it can
 read the droplet's setup file from. Run this from a normal login shell, or
@@ -66,7 +71,7 @@ cat >&2 <<'INTRO'
 
   Trinity on DigitalOcean
   ───────────────────────────────────────────────────────────────────────
-  Four questions, then about six minutes of waiting. Nothing is written to
+  Three questions, then about six minutes of waiting. Nothing is written to
   this computer.
 
 INTRO
@@ -94,30 +99,7 @@ done
 unset _confirm
 printf '  Your username will be: admin\n\n' >&2
 
-# --- 2. The Claude subscription token ---------------------------------------
-cat >&2 <<'TOKENHELP'
-  Trinity's agents sign in to Claude with a subscription token. In another
-  terminal run:
-
-      claude setup-token
-
-  and copy the sk-ant-oat01-... value it prints. (An API key, sk-ant-api03-...,
-  is a different thing and will not work.)
-
-TOKENHELP
-while :; do
-    ask "  Paste the token: "
-    read -rs CLAUDE_SUBSCRIPTION_TOKEN; printf '\n' >&2
-    case "$CLAUDE_SUBSCRIPTION_TOKEN" in
-        sk-ant-oat01-*) break ;;
-        sk-ant-api03-*) printf '  That is an API key, not a subscription token. Run: claude setup-token\n\n' >&2 ;;
-        '')             printf '  Nothing pasted.\n\n' >&2 ;;
-        *)              printf '  That does not look like a setup token — it should start sk-ant-oat01-\n\n' >&2 ;;
-    esac
-done
-printf '\n' >&2
-
-# --- 3 + 4. Placement -------------------------------------------------------
+# --- 2 + 3. Placement -------------------------------------------------------
 ask "  Which region? fra1 Frankfurt, nyc3 New York, sfo3 San Francisco, lon1 London, sgp1 Singapore [${DEFAULT_REGION}]: "
 read -r REGION; REGION="${REGION:-$DEFAULT_REGION}"
 ask "  What should it be called in your DigitalOcean account? [${DEFAULT_NAME}]: "
@@ -140,7 +122,7 @@ case "$_go" in y|Y|yes|YES) ;; *) fail "Nothing was created." ;; esac
 # ---------------------------------------------------------------------------
 # umask before the file exists, not after: mktemp would otherwise create it
 # group-readable for the instant between creation and chmod, and it carries
-# both secrets.
+# the admin password.
 umask 077
 # A full path template, not `mktemp -t NAME`: `-t` takes a bare prefix on
 # macOS/BSD but GNU coreutils requires the trailing X's and dies with
@@ -149,8 +131,8 @@ umask 077
 # 077 above still makes the file 0600, and the EXIT trap still removes it.
 USER_DATA="$(mktemp "${USER_DATA_DIR%/}/trinity-user-data.XXXXXX")"
 
-# Both secrets are interpolated into single-quoted shell assignments below, so a
-# single quote INSIDE either one closes the string early and the droplet's first
+# The password is interpolated into a single-quoted shell assignment below, so a
+# single quote INSIDE it closes the string early and the droplet's first
 # boot dies on a syntax error — after the droplet exists and is billing, with the
 # operator watching a 15-minute progress bar that ends in a timeout. Recovery is
 # a rebuild, and the cause is invisible without reading the install log.
@@ -166,7 +148,6 @@ USER_DATA="$(mktemp "${USER_DATA_DIR%/}/trinity-user-data.XXXXXX")"
 # treatment, so the rule is simply: every '${…}' in the heredoc is a _Q value.
 _shquote() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
 ADMIN_PASSWORD_Q="$(_shquote "$ADMIN_PASSWORD")"
-CLAUDE_SUBSCRIPTION_TOKEN_Q="$(_shquote "$CLAUDE_SUBSCRIPTION_TOKEN")"
 TRINITY_IMAGE_TAG_Q="$(_shquote "$TRINITY_IMAGE_TAG")"
 trap 'rm -f "$USER_DATA"' EXIT
 
@@ -179,7 +160,7 @@ exec > >(tee -a /var/log/trinity-install.log) 2>&1
 echo "=== Trinity install: \$(date -u +%FT%TZ) tag=\${TRINITY_IMAGE_TAG} ==="
 
 apt-get update -q
-apt-get install -y -q git curl jq
+apt-get install -y -q git curl
 git clone --depth 1 --branch "\${TRINITY_IMAGE_TAG}" \\
     https://github.com/abilityai/trinity.git /opt/trinity
 cd /opt/trinity
@@ -187,24 +168,6 @@ cd /opt/trinity
 # Docker, Caddy, the firewall, a Let's Encrypt certificate for this droplet's
 # own IP, then the install itself. Same code path as the 1-Click image.
 ./scripts/deploy/start.sh --provision --cloud digitalocean --hosted --unattended
-
-# Hand the Claude subscription to the agents this install just created. Agents
-# created later auto-assign it themselves (#74).
-API=http://localhost:8000
-AUTH="\$(curl -fsS -X POST "\$API/api/token" \\
-    --data-urlencode "username=admin" \\
-    --data-urlencode "password=\${ADMIN_PASSWORD}" | jq -r .access_token)"
-curl -fsS -X POST "\$API/api/subscriptions" \\
-    -H "Authorization: Bearer \$AUTH" -H 'Content-Type: application/json' \\
-    -d "\$(jq -n --arg t '${CLAUDE_SUBSCRIPTION_TOKEN_Q}' \\
-          '{name:"claude-subscription", token:\$t}')" >/dev/null
-for agent in \$(curl -fsS "\$API/api/agents" -H "Authorization: Bearer \$AUTH" \\
-               | jq -r '.[].name? // empty'); do
-    curl -fsS -X PUT \\
-        "\$API/api/subscriptions/agents/\${agent}?subscription_name=claude-subscription" \\
-        -H "Authorization: Bearer \$AUTH" >/dev/null
-    echo "Claude subscription attached to agent: \${agent}"
-done
 
 echo "=== Trinity is ready at https://\$(cat /etc/trinity/public-ip) ==="
 USERDATA
@@ -219,7 +182,7 @@ SSH_ARGS=()
 [ -n "$SSH_KEYS" ] && SSH_ARGS=(--ssh-keys "$SSH_KEYS")
 # Expanded below as ${SSH_ARGS[@]+"${SSH_ARGS[@]}"}: under `set -u`, bash < 4.4
 # (macOS's /bin/bash is 3.2) calls an EMPTY array unbound, so an account with no
-# SSH keys died here, after both secrets had been typed.
+# SSH keys died here, after the password had been typed.
 
 printf '\n  Creating the droplet...\n' >&2
 doctl compute droplet create "$DROPLET_NAME" \
@@ -248,6 +211,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
       Open:     https://${IP}
       Username: admin
       Password: the one you chose above
+
+  After you sign in, Trinity asks you to connect Claude.
 
 DONE
         exit 0

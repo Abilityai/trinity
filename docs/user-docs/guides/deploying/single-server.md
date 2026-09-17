@@ -401,13 +401,14 @@ sudo ./scripts/deploy/start.sh --hosted
 bash <(curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/<release-tag>/scripts/deploy/trinity-do-create.sh)
 ```
 
-It asks four questions and writes nothing to your computer:
+It asks three questions and writes nothing to your computer:
 
 1. **Admin password** (twice; 12+ characters, guessable prefixes refused). Your username will be `admin`.
-2. **Claude subscription token** — run `claude setup-token` in another terminal and paste the `sk-ant-oat01-…` value. An API key is not accepted here; add one later under **Settings → Integrations** if you prefer.
-3. **Region** and **Droplet name** (defaults offered), then a confirmation that names the monthly cost.
+2. **Region** and **Droplet name** (defaults offered), then a confirmation that names the monthly cost.
 
-It then creates an Ubuntu 24.04 Droplet (4 vCPU / 8 GB — Trinity's recommended size), attaches every SSH key already on your account, and hands the Droplet a first-boot script that clones the pinned release to `/opt/trinity`, runs `start.sh --provision --cloud digitalocean --hosted --unattended` (Docker, Caddy with the IP certificate, the firewall, then the install itself), registers your Claude subscription and assigns it to the seeded agents. Both secrets travel only in the Droplet's own user-data; the firewall blocks containers from reading it back. The script polls `https://<ip>/` with certificate verification for up to fifteen minutes and prints the address when it answers. If it times out, open the Droplet's Console and read `/var/log/trinity-install.log`.
+It then creates an Ubuntu 24.04 Droplet (4 vCPU / 8 GB — Trinity's recommended size), attaches every SSH key already on your account, and hands the Droplet a first-boot script that clones the pinned release to `/opt/trinity`, runs `start.sh --provision --cloud digitalocean --hosted --unattended` (Docker, Caddy with the IP certificate, the firewall, then the install itself). The password travels only in the Droplet's own user-data; the firewall blocks containers from reading it back. The script polls `https://<ip>/` with certificate verification for up to fifteen minutes and prints the address when it answers. If it times out, open the Droplet's Console and read `/var/log/trinity-install.log`.
+
+The installer does not ask for a Claude credential. When you first sign in, the setup that opens includes **Connect Claude**, the one required step: paste a subscription token from `claude setup-token` or an Anthropic API key. It is checked with Anthropic before it is saved and handed to the seeded agents.
 
 The install records `do-script` as its provenance, so the first-run **Secure this instance** step appears exactly as on the 1-Click. Day-two operations are identical — see [Managing the Droplet](#managing-the-droplet). The script pins the release it was fetched from; set `TRINITY_IMAGE_TAG` in the environment before running it to pick another.
 
