@@ -51,8 +51,8 @@
         API key
         <!-- Never render the stored key: the endpoint only reports whether one
              resolves. This line is the whole read surface for the credential. -->
-        <span v-if="config?.key_configured" class="ml-1 text-status-success-600 dark:text-status-success-400">— configured</span>
-        <span v-else class="ml-1 text-status-warning-600 dark:text-status-warning-400">— not set (falls back to the platform key for this provider)</span>
+        <span v-if="config?.key_configured" class="ml-1 text-status-success-700 dark:text-status-success-400">— configured</span>
+        <span v-else class="ml-1 text-status-warning-700 dark:text-status-warning-400">— not set (falls back to the platform key for this provider)</span>
       </label>
       <input v-model="form.api_key" type="password" placeholder="leave blank to keep the current key"
              class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-500 text-sm px-3 py-2 focus:outline-none" />
@@ -64,7 +64,7 @@
         {{ saving ? 'Saving…' : 'Save' }}
       </button>
       <span v-if="error" class="text-xs text-status-danger-600 dark:text-status-danger-400">{{ error }}</span>
-      <span v-else-if="saved" class="text-xs text-status-success-600 dark:text-status-success-400">Saved</span>
+      <span v-else-if="saved" class="text-xs text-status-success-700 dark:text-status-success-400">Saved</span>
     </div>
   </div>
 </template>

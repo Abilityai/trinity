@@ -983,8 +983,8 @@ function getActivityStateLabel(row) {
 }
 
 function getActivityStateColor(row) {
-  if (row.activityState === 'active') return 'text-status-success-600 dark:text-status-success-400'
-  if (row.activityState === 'idle') return 'text-status-success-600 dark:text-status-success-400'
+  if (row.activityState === 'active') return 'text-status-success-700 dark:text-status-success-400'
+  if (row.activityState === 'idle') return 'text-status-success-700 dark:text-status-success-400'
   return 'text-gray-500 dark:text-gray-400'
 }
 
@@ -1005,8 +1005,8 @@ function getSuccessBarClass(percent) {
 }
 
 function getSuccessRateClass(rate) {
-  if (rate >= 80) return 'text-status-success-600 dark:text-status-success-400'
-  if (rate >= 50) return 'text-status-warning-600 dark:text-status-warning-400'
+  if (rate >= 80) return 'text-status-success-700 dark:text-status-success-400'
+  if (rate >= 50) return 'text-status-warning-700 dark:text-status-warning-400'
   return 'text-status-danger-600 dark:text-status-danger-400'
 }
 

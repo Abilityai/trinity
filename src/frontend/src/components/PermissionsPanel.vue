@@ -31,7 +31,7 @@
           >
             Allow None
           </button>
-          <span v-if="permissionsDirty" class="text-state-autonomous-600 dark:text-state-autonomous-400 text-xs ml-4">
+          <span v-if="permissionsDirty" class="text-state-autonomous-700 dark:text-state-autonomous-400 text-xs ml-4">
             Unsaved changes
           </span>
         </div>
@@ -85,7 +85,7 @@
           <!-- Status Message -->
           <div v-if="permissionsMessage" :class="[
             'text-sm',
-            permissionsMessage.type === 'success' ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'
+            permissionsMessage.type === 'success' ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'
           ]">
             {{ permissionsMessage.text }}
           </div>
@@ -94,7 +94,7 @@
 
       <!-- No Other Agents -->
       <div v-else class="text-center py-8 text-gray-500 dark:text-gray-400">
-        <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
         </svg>
         <p class="mt-2">No other agents available</p>
