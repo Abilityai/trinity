@@ -2996,8 +2996,16 @@ function removeGithubPat() {
 
 // Platform default model methods (#831)
 async function loadPlatformDefaultModel() {
+  // #2202 — read the RESOLVED value off the feature-flags payload the page
+  // already loads, not `GET /api/settings/platform_default_model`. That key is
+  // unwritten on any instance that never overrode the default, so the generic
+  // getter 404s — measured eight times per Settings load, on every tab. The
+  // flags payload carries the resolved value (row → code default), so this is
+  // also more correct: the control now shows what the platform will actually
+  // use rather than blank.
   try {
-    const value = await settingsStore.getSetting('platform_default_model')
+    await sessionsStore.loadFeatureFlags()
+    const value = sessionsStore.platformDefaultModel
     if (value) platformDefaultModelValue.value = value
   } catch {
     // non-critical; UI shows the code-default
@@ -3204,9 +3212,16 @@ async function saveElevenLabsDefaultVoice() {
 
 // Public URL methods
 async function loadPublicUrl() {
+  // #2202 — the dedicated route, because "not configured" is this setting's
+  // normal state. The generic `GET /api/settings/{key}` answers 404 for a key
+  // that was never written, so this call logged a failed request in the browser
+  // console on every visit to every Settings tab — and no JS handling can
+  // suppress that, which is why the fix is the route and not a try/catch.
   try {
-    const value = await settingsStore.getSetting('public_chat_url')
-    publicUrlCurrent.value = value || ''
+    const { data } = await axios.get('/api/settings/public-chat-url', {
+      headers: authStore.authHeader,
+    })
+    publicUrlCurrent.value = data?.value || ''
   } catch (e) {
     console.error('Failed to load public URL:', e)
   }
