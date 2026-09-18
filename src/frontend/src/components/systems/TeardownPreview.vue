@@ -8,12 +8,40 @@
       <h4 class="text-sm font-semibold text-status-danger-900 dark:text-status-danger-100 flex items-center gap-2">
         <span aria-hidden="true">⛔</span> Membership could not be verified
       </h4>
+      <!-- What is true in BOTH arms. `membership_verified` is one boolean over
+           two independent faults (`tags_readable AND roster_complete`), and it
+           cannot say which fired — so naming one of them here, as this did
+           with the tag read, is a false statement on the other half of the
+           flag: a failed OWNERSHIP read leaves the tags perfectly readable and
+           the LIST incomplete instead. The cause is quoted from the server
+           below rather than guessed at. -->
       <p class="mt-1 text-sm text-status-danger-800 dark:text-status-danger-200">
-        The system's membership tags could not be read, so the agents below were
-        matched by <strong>name only</strong>. A different system whose name starts
-        the same way would look identical. Removal is refused until the platform
-        database is reachable — <strong>nothing has been removed</strong>. Try the
-        preview again in a moment.
+        The removal set below could not be confirmed against the platform
+        database, so it may not be this system's real membership — a different
+        system whose name starts the same way can look identical.
+      </p>
+
+      <!-- The cause, in the server's own words. Same choice the recovery
+           statement makes: the server owns it, the UI does not paraphrase. -->
+      <ul
+        v-if="membershipWarnings.length"
+        class="mt-2 space-y-1 text-sm text-status-danger-800 dark:text-status-danger-200 list-disc list-inside"
+        data-testid="teardown-membership-fault"
+      >
+        <!-- Plain text, never v-html (H-005). -->
+        <li v-for="w in membershipWarnings" :key="w">{{ w }}</li>
+      </ul>
+
+      <!-- The advice has to match the fault. Neither read fails as a blip:
+           "try again in a moment" produced the identical screen forever and
+           trained the operator to read a real stop as flakiness. What happened,
+           what it means, what to do (principle 25) — and the one offer that
+           does work is the per-agent path the server's own refusal names. -->
+      <p class="mt-2 text-sm text-status-danger-800 dark:text-status-danger-200">
+        Removal is refused while that is true — <strong>nothing has been
+        removed</strong>. This does not clear on its own: the platform database
+        needs attention first. Until then, remove agents one at a time from the
+        agent list.
       </p>
     </section>
 
@@ -267,19 +295,43 @@ const ephemeralCount = computed(
 )
 
 /**
- * Warnings not already rendered as their own panel.
+ * Warning routing. Every server line lands in exactly ONE place.
  *
- * The server raises a warning for the unverified read, the excluded agents and
- * the ephemeral members, and each of those has a dedicated block above. Showing
- * the prose copy as well would say everything twice, which trains people to
- * skip the panel that matters.
+ * `MEMBERSHIP_FAULT` is the pair behind `membership_verified`: a failed tag
+ * read and an incomplete roster. Both belong INSIDE the refusal banner as its
+ * cause — the roster line used to fall through to "Notes", which put the
+ * specific fault in a footnote underneath a banner that named the other one.
+ *
+ * `SUPPRESSED` is the pair that already has a dedicated block above (the
+ * protected-agents list, the per-member `no recovery` badge). Repeating the
+ * prose trains people to skip the panel that matters.
+ *
+ * The two predicates partition the list, so a line can neither be shown twice
+ * nor silently dropped.
  */
-const otherWarnings = computed(() => {
-  const w = props.preview.warnings || []
-  return w.filter(
-    (line) => !/could not be verified|were excluded|no recovery window/i.test(line)
+const MEMBERSHIP_FAULT = /could not be verified|roster could not be completed/i
+const SUPPRESSED = /were excluded|no recovery window/i
+
+/**
+ * Claimed by the banner — and ONLY while the banner is actually rendering.
+ *
+ * The server only raises these alongside `membership_verified: false`, so the
+ * guard is belt-and-braces. It is there so the rule is "one line, one place"
+ * rather than "one line, one place, assuming the server keeps a coupling this
+ * file cannot see": a line the banner does not take falls through to Notes
+ * below instead of disappearing from the screen entirely.
+ */
+const membershipWarnings = computed(
+  () => (props.preview.membership_verified === false
+    ? (props.preview.warnings || []).filter((line) => MEMBERSHIP_FAULT.test(line))
+    : [])
+)
+
+const otherWarnings = computed(
+  () => (props.preview.warnings || []).filter(
+    (line) => !SUPPRESSED.test(line) && !membershipWarnings.value.includes(line)
   )
-})
+)
 
 function isChecked (name) {
   return props.checked.includes(name)

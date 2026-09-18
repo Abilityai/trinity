@@ -200,9 +200,84 @@ def test_ephemeral_members_are_marked_as_unrecoverable_before_confirming():
 
 
 def test_an_unverified_read_is_its_own_panel_saying_nothing_was_removed():
-    src = _src(_PREVIEW)
-    assert "membership_verified === false" in src
-    assert "nothing has been removed" in src.lower()
+    # Via `_prose`: the phrase sits inside a `<strong>` that a re-wrap split
+    # across two lines, which failed this assertion without changing a word of
+    # what the operator reads. Copy assertions anchor on words, not on where
+    # the editor's margin happened to fall.
+    assert "membership_verified === false" in _src(_PREVIEW)
+    assert "nothing has been removed" in _prose(_src(_PREVIEW)).lower()
+
+
+def test_the_refusal_does_not_offer_transient_advice_for_a_standing_fault():
+    """"Try again in a moment" is advice for a blip.
+
+    The banner renders on a failed TAG READ — a schema or permission fault
+    that does not clear on its own. Re-previewing produces the identical
+    screen forever, which teaches the operator to read the refusal as
+    flakiness rather than as the real stop it is. It must say what happened,
+    what it means and what to do instead (principle 25).
+    """
+    body = _prose(_src(_PREVIEW))
+    assert "again in a moment" not in body, (
+        "the refusal is offering a retry for a fault that does not clear"
+    )
+    assert "This does not clear on its own" in body, (
+        "the refusal must say the fault is standing, not transient"
+    )
+    # And it still offers the one thing that does work, which is the per-agent
+    # path the server's own refusal detail names.
+    assert "remove agents one at a time from the agent list." in body
+
+
+def test_the_refusal_names_no_fault_the_flag_cannot_identify():
+    """`membership_verified` is ONE boolean over TWO independent faults.
+
+    `verified = tags_readable and roster_complete` (service.py). The banner
+    used to say "the system's membership tags could not be read" on both — a
+    false statement on the roster arm, where the tags read perfectly and it is
+    the agent LIST that is incomplete. A boolean cannot say which fired, so
+    the banner states the consequence (identical either way) and quotes the
+    server for the cause.
+    """
+    body = _prose(_src(_PREVIEW))
+    banner = re.search(
+        r"membership_verified === false([\s\S]*?)</section>", _src(_PREVIEW)
+    )
+    assert banner, "the refusal banner is no longer a single reviewable section"
+    assert "membership tags could not be read" not in _prose(banner.group(1)), (
+        "the banner names the tag read, which is only one of the two faults "
+        "behind the flag it renders on"
+    )
+    assert 'data-testid="teardown-membership-fault"' in body, (
+        "the banner must carry the server's own statement of the cause"
+    )
+    assert "membershipWarnings" in body
+
+
+def test_every_server_warning_lands_in_exactly_one_place():
+    """The banner claims the membership lines; Notes takes the rest; the two
+    with a dedicated block above are suppressed. The roster line used to fall
+    through to Notes, putting the real fault in a footnote beneath a banner
+    naming the other one — and a filter that merely subtracted it from Notes
+    would have dropped it off the screen.
+
+    `otherWarnings` is therefore defined as "not suppressed and not already
+    taken by the banner", never as a second independent regex: two regexes
+    that must stay complementary are two chances to drop a line silently.
+    """
+    body = _code_only(_src(_PREVIEW))
+    assert "roster could not be completed" in body, (
+        "the roster fault must be routed, not left to fall through to Notes"
+    )
+    assert "!membershipWarnings.value.includes(line)" in body, (
+        "Notes must subtract exactly what the banner took, so a line the "
+        "banner declines still reaches the screen"
+    )
+    # And the banner only claims them while it is on screen.
+    assert re.search(
+        r"membership_verified === false[\s\S]{0,200}?MEMBERSHIP_FAULT\.test", body
+    ), "the banner's claim must be conditional on the banner rendering"
+
 
 
 def test_protected_agents_are_listed_rather_than_silently_dropped():
