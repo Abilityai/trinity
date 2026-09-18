@@ -535,7 +535,17 @@ const detailsJson = computed(() => {
           </div>
 
           <!-- Tab pills. Disabled affordance when folded so the user understands
-               clicking a tab unfolds first. -->
+               clicking a tab unfolds first.
+
+               #1925 triage (the audit's advisory item) — deliberately NOT
+               migrated to `OverflowTabs`. This is a two-option SEGMENTED
+               CONTROL inside a panel header, sharing a row with the heading and
+               the legend; it selects which chart the panel draws, not which
+               page-level section you are on. It cannot overflow (two short
+               fixed labels), and a counted "More ▾" disclosure over two items
+               would hide one of them behind a click for no gain. The primitive
+               is for a page's tab strip; a different shape is the right answer
+               here, not an unmigrated one. -->
           <div
             class="inline-flex rounded-md border border-gray-200 dark:border-gray-700 overflow-hidden text-xs"
             role="tablist"
@@ -633,6 +643,11 @@ const detailsJson = computed(() => {
             >
               No events in this window.
             </div>
+            <!-- #1925 triage — NOT a tab strip: a bounded wide table. Horizontal scroll
+                 INSIDE the container is the correct treatment for unbounded column width
+                 (design-system principle 7); collapsing columns into a "More" menu would
+                 hide data, not navigation. Left as-is deliberately so a later audit does
+                 not re-flag it. -->
             <div v-else class="overflow-x-auto">
               <table class="text-[10px] text-gray-500 dark:text-gray-400 border-separate" style="border-spacing: 2px">
                 <thead>
@@ -681,6 +696,11 @@ const detailsJson = computed(() => {
             >
               No events in this window.
             </div>
+            <!-- #1925 triage — NOT a tab strip: a bounded wide table. Horizontal scroll
+                 INSIDE the container is the correct treatment for unbounded column width
+                 (design-system principle 7); collapsing columns into a "More" menu would
+                 hide data, not navigation. Left as-is deliberately so a later audit does
+                 not re-flag it. -->
             <div v-else class="overflow-x-auto">
               <table class="text-[10px] text-gray-500 dark:text-gray-400 border-separate" style="border-spacing: 2px">
                 <thead>
@@ -1030,6 +1050,10 @@ const detailsJson = computed(() => {
             <summary class="text-xs font-medium text-gray-600 dark:text-gray-300 cursor-pointer">
               Details JSON
             </summary>
+            <!-- #1925 triage — NOT a tab strip: a preformatted JSON dump.
+                 Horizontal scroll is correct here (wrapping the payload
+                 corrupts it). Left as-is deliberately so a later audit does
+                 not re-flag it. -->
             <pre
               class="mt-2 p-2 rounded bg-gray-50 dark:bg-gray-900 text-xs text-gray-800 dark:text-gray-200 overflow-x-auto"
             >{{ detailsJson || '(none)' }}</pre>
