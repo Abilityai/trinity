@@ -51,6 +51,20 @@
         </span>
       </div>
 
+      <!-- Why the count above is deliberately short of the total. Without this
+           the unticked rows read as a miscount, and an operator who re-ticks
+           them to "fix" it has undone the safeguard by hand. -->
+      <p
+        v-if="unconfirmed.length"
+        class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300"
+        data-testid="teardown-unconfirmed-note"
+      >
+        {{ unconfirmed.length }} of these matched “{{ preview.system_name }}” by
+        <strong>name only</strong>, so
+        {{ unconfirmed.length === 1 ? 'it starts' : 'they start' }} unticked.
+        Tick one only if you know it belongs to this system.
+      </p>
+
       <p v-if="!members.length" class="text-sm text-gray-600 dark:text-gray-400">
         This system has no removable members.
       </p>
@@ -90,7 +104,8 @@
                 class="mt-1 block text-xs text-status-warning-700 dark:text-status-warning-300"
               >
                 No deploy tagged this agent as part of “{{ preview.system_name }}”.
-                It may belong to a different system — uncheck it if so.
+                It may belong to a different system — tick it only if it belongs
+                to this one.
               </span>
               <span
                 v-else-if="m.is_ephemeral"
@@ -207,9 +222,10 @@
  * It is a CHECKLIST, not a list, and that is load-bearing rather than cosmetic.
  * A member whose `evidence` is `prefix` matched by name with no deploy tag to
  * confirm it, so it may belong to a sibling system whose name shares this
- * one's prefix. The server cannot tell — only the operator can — so the badge
- * plus the opt-out is the mechanism, and the confirmed list is sent back on
- * execute and intersected with freshly-resolved membership.
+ * one's prefix. The server cannot tell — only the operator can — so such a
+ * member arrives UNTICKED and is an opt-IN, while a confirmed member is
+ * ticked and an opt-out. The confirmed list is sent back on execute and
+ * intersected with freshly-resolved membership.
  *
  * The acknowledgement reuses ent#126's `:acknowledged` / `update:acknowledged`
  * contract deliberately: one pattern for "restate the consequence and make the
@@ -232,6 +248,16 @@ const emit = defineEmits(['update:acknowledged', 'update:checked'])
 
 const members = computed(() => props.preview.members || [])
 const checkedCount = computed(() => props.checked.length)
+
+/**
+ * Members the server matched by NAME with no deploy tag to confirm them.
+ *
+ * These start unticked — the decision and its reasoning live in the store's
+ * `teardownDefaultSelection`, which the parent applies. This is the same
+ * predicate read for the copy that explains the short selection; the panel and
+ * the store must not disagree about which members it covers.
+ */
+const unconfirmed = computed(() => members.value.filter((m) => m.evidence === 'prefix'))
 
 const recoverableCount = computed(
   () => members.value.filter((m) => props.checked.includes(m.name) && !m.is_ephemeral).length

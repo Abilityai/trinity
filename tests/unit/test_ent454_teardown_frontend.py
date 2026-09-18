@@ -61,6 +61,20 @@ def _code_only(src: str) -> str:
     return src
 
 
+def _prose(src: str) -> str:
+    """Comment-free source with template line-wrapping collapsed.
+
+    Two traps, one helper. `_code_only` handles the first — these files'
+    comments quote the very strings some assertions forbid — and the
+    short-selection assertion below matched its own JSDoc line on its first
+    run, which is that trap landing a third time. Collapsing whitespace is the
+    second half: where a sentence breaks is chosen by the editor's margin, so
+    an assertion anchored on it fails the next time someone rewraps a
+    paragraph whose WORDS did not change.
+    """
+    return re.sub(r"\s+", " ", _code_only(src))
+
+
 # ---------------------------------------------------------------------------
 # The destructive button's gates
 # ---------------------------------------------------------------------------
@@ -125,6 +139,57 @@ def test_prefix_evidence_is_badged_and_explained():
     assert "matched by name only" in src
     # Shape/word, not hue alone (principle 24) — a BaseBadge carries text.
     assert "<BaseBadge" in src
+
+
+def test_an_unconfirmable_member_is_not_pre_ticked():
+    """The arriving selection is the store's, and the store excludes `prefix`.
+
+    The panel used to build the default itself — `preview.members.map(m =>
+    m.name)` — which ticked every member regardless of evidence. The 503
+    refusal does not cover that: a `prefix` member also appears in the HEALTHY
+    state (tags read fine, one agent simply has no tag row), where
+    `membership_verified` is true and Remove is ENABLED. Opting OUT of a delete
+    is the wrong direction for the default, and it is the exact ranking #2373
+    gets right for `restart` and wrong for a destructive verb.
+
+    The rule itself is executed by `systemsTeardown.spec.js`; what only a source
+    assertion can see is that the PANEL still defers to it instead of growing a
+    second copy.
+    """
+    src = _src(_PANEL)
+    match = re.search(r"watch\(\s*\(\) => store\.teardownPreview,([\s\S]*?)\n\)", src)
+    assert match, "the preview watcher is no longer a single reviewable block"
+    body = match.group(1)
+    assert "store.teardownDefaultSelection" in body, (
+        "the panel must take its default selection from the store, where the "
+        "evidence rule is testable"
+    )
+    assert not re.search(r"members\s*\|\|\s*\[\]\s*\)\.map", body), (
+        "the panel is building its own all-members default again"
+    )
+
+
+def test_the_short_selection_is_explained_where_the_list_is():
+    """An unticked row with no explanation reads as a miscount, and an operator
+    who re-ticks it to "fix" the count has undone the safeguard by hand."""
+    body = _code_only(_src(_PREVIEW))
+    assert 'data-testid="teardown-unconfirmed-note"' in body
+    assert "unticked. Tick one only if you know it belongs to this system." in _prose(
+        _src(_PREVIEW)
+    ), "the note must say the rows start unticked AND what to do about it"
+
+
+def test_the_prefix_copy_asks_for_an_opt_in_not_an_opt_out():
+    """The per-member line has to agree with the default it sits next to.
+    "uncheck it if so" describes a box that arrives ticked; it now does not."""
+    body = _prose(_src(_PREVIEW))
+    assert "uncheck it" not in body.lower(), (
+        "the prefix member arrives UNTICKED — copy telling the user to uncheck "
+        "it describes the old default"
+    )
+    assert "tick it only if it belongs to this one." in body, (
+        "the prefix member needs an explicit opt-in instruction"
+    )
 
 
 def test_ephemeral_members_are_marked_as_unrecoverable_before_confirming():
