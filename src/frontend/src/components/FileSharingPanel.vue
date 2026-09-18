@@ -50,6 +50,11 @@
     </div>
 
     <!-- Files table -->
+    <!-- #1925 triage — NOT a tab strip: a bounded wide table. Horizontal scroll
+         INSIDE the container is the correct treatment for unbounded column width
+         (design-system principle 7); collapsing columns into a "More" menu would
+         hide data, not navigation. Left as-is deliberately so a later audit does
+         not re-flag it. -->
     <div
       v-if="status.enabled && files.length > 0"
       class="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700"
