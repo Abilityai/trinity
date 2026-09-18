@@ -23,7 +23,7 @@
       kicker="Network"
       title="Secure this instance"
       :lead="copy.headline"
-      :badge="stage === 'tunnel' ? 'Done' : 'Recommended'"
+      :badge="stage === 'tunnel' && reached ? 'Done' : 'Recommended'"
       schematic="secure"
     />
 
@@ -41,6 +41,9 @@
         guide has no root shell in the loop.
       -->
       <form v-if="stage === 'address'" class="max-w-md space-y-2" novalidate @submit.prevent="save">
+        <!-- Benefit and prerequisite are readable WITHOUT opening the
+             disclosure (#2691). The help text used to say only "the address
+             people will use to reach this instance", which states neither. -->
         <BaseInput
           v-model="url"
           type="url"
@@ -48,9 +51,15 @@
           placeholder="https://your-domain.com"
           :error="fieldError"
           :disabled="saving"
-          help="The address people will use to reach this instance."
+          :help="DOMAIN_BENEFIT"
           data-testid="first-run-public-url"
         />
+        <p
+          class="text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400"
+          data-testid="first-run-public-url-prerequisite"
+        >
+          {{ DOMAIN_PREREQUISITE }}
+        </p>
         <BaseButton
           type="submit"
           variant="secondary"
@@ -64,6 +73,28 @@
         </BaseButton>
       </form>
       <InlineError v-if="saveError" :message="saveError" @dismiss="saveError = ''" />
+
+      <!--
+        The save's own confirmation. Without it the only signals are the field
+        emptying and the posture badge changing, which is too little for an
+        action that re-points every live Telegram and WhatsApp webhook.
+
+        It states the half that is known (the value is stored) and the half
+        that is not (nothing has arrived at the name), because those are
+        genuinely different facts here and the second is what the operator
+        will otherwise assume. It is NOT a claim that the domain works —
+        `postureCopy` owns that, and only once a request has landed.
+      -->
+      <p
+        v-if="savedUrl"
+        class="text-[12.5px] leading-[1.5] text-status-success-700 dark:text-status-success-300"
+        data-testid="first-run-public-url-saved"
+        role="status"
+      >
+        Saved. Nothing has reached
+        <span class="font-mono">{{ savedUrl }}</span>
+        yet — open it in a browser to confirm it works.
+      </p>
 
       <!-- Native <details>: keyboard-accessible, no JS, no state. The reasoning
            has to be reachable, not unavoidable. -->
@@ -97,15 +128,18 @@
               other name. Still no verdict on the live connection.
             -->
             <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
-              Point a domain’s A record at this server, then save it as the
+              Point your domain’s A record at this server, then save it as the
               <span class="text-gray-600 dark:text-gray-300">Public URL</span>
               above (it also lives in Settings → General). Trinity does not issue certificates
-              itself, but whatever terminates TLS in front of it is configured to obtain one for
-              the name you save, the first time someone visits it — so the domain gets an
-              ordinary long-lived certificate instead of a short-lived IP one, and Trinity hands
-              out the name instead of the IP. Only the name you save is allowed, so nobody else
-              can point a domain here and have certificates issued. Give DNS time to settle
-              first: until the record points here, the name has nothing to answer it.
+              itself — the web server in front of it is configured to obtain one for the name
+              you save, the first time someone visits. After that Trinity hands out the name
+              instead of the IP. Only the name you save is allowed, so nobody else can point a
+              domain here and have certificates issued. Point the domain at this server before
+              you save: the certificate is
+              obtained on the first request that arrives for the name, so if the record is
+              missing or points elsewhere, that request never gets here — the visitor sees a
+              certificate error, and Trinity, which is not part of that exchange, carries on
+              showing the name as saved.
             </p>
           </div>
 
@@ -124,16 +158,11 @@
             <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
               <template v-if="stage === 'address'">With that domain on Cloudflare, a</template><template v-else>With your domain on Cloudflare, a</template>
               tunnel lets this server stop listening on the public internet altogether:
-              <span class="font-mono text-gray-600 dark:text-gray-300">cloudflared</span>
-              connects outward to Cloudflare, and traffic arrives back through that
-              connection. Inbound integrations — Telegram, WhatsApp, VoIP, public agent
-              links, webhook triggers — keep working, because they still reach a public
-              hostname. Trinity ships the service behind the
-              <span class="font-mono text-gray-600 dark:text-gray-300">tunnel</span>
-              compose profile, driven by
-              <span class="font-mono text-gray-600 dark:text-gray-300">TUNNEL_TOKEN</span>
-              in <span class="font-mono text-gray-600 dark:text-gray-300">.env</span>, so that
-              last step happens on the host rather than from this page.
+              Cloudflare holds a connection open from the inside, and visitors arrive
+              through it. Telegram, WhatsApp, voice calls, public agent links and webhooks
+              keep working, because they still reach a public address. Setting it up takes a
+              few minutes on the server itself, so it happens on the host rather than from
+              this page — the guide below walks through it.
             </p>
           </div>
 
@@ -141,6 +170,24 @@
             These two stack. A name settles how the instance is addressed; a tunnel
             settles who can reach it at all. The tunnel needs the name, so it is the
             second step rather than a different one.
+          </p>
+
+          <!-- #2692: the full walkthrough — both steps end to end, plus the VPN
+               option this page deliberately does not carry. First docs link this
+               step has ever had; until the next release cut it 404s, which is
+               the same release the page itself ships in. -->
+          <p class="text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
+            <a
+              :href="HARDENING_DOCS_URL"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-500 dark:hover:text-action-primary-400"
+              data-testid="first-run-secure-docs"
+            >
+              Read the full hardening guide
+            </a>
+            — both steps end to end, and a private-network option for an instance only you
+            need to reach.
           </p>
         </div>
       </details>
@@ -156,7 +203,13 @@ import BaseButton from '../../base/BaseButton.vue'
 import BaseInput from '../../base/BaseInput.vue'
 import InlineError from '../../InlineError.vue'
 import FirstRunStepHeader from '../FirstRunStepHeader.vue'
-import { hardeningStage, postureCopy } from '../hardeningGuide'
+import {
+  DOMAIN_BENEFIT,
+  DOMAIN_PREREQUISITE,
+  HARDENING_DOCS_URL,
+  hardeningStage,
+  postureCopy,
+} from '../hardeningGuide'
 
 const props = defineProps({ ctx: { type: Object, default: () => ({}) } })
 const emit = defineEmits(['complete', 'skip'])
@@ -166,26 +219,43 @@ const settingsStore = useSettingsStore()
 // `https-domain` means step one landed: the step reads done and the copy speaks
 // only to the (optional) tunnel.
 const stage = computed(() => hardeningStage(props.ctx.tlsPosture))
-const copy = computed(() => postureCopy(props.ctx.tlsPosture) || postureCopy('unconfigured'))
+// #2691: saved is not the same as working. The tick waits for a request to
+// actually arrive for the saved name — the only proof available from in here,
+// and the one thing a DNS lookup at save time could not tell us, since a
+// proxied or load-balanced domain resolves somewhere else by design.
+const reached = computed(() => !!props.ctx.publicUrlReached)
+const copy = computed(
+  () => postureCopy(props.ctx.tlsPosture, reached.value) || postureCopy('unconfigured')
+)
 
 const url = ref('')
 const saving = ref(false)
 const fieldError = ref('')
 const saveError = ref('')
+// The saved value, kept so the confirmation can name it after the field clears.
+const savedUrl = ref('')
 
 async function save() {
   const value = url.value.trim().replace(/\/+$/, '')
   // Named, actionable, with an example (principle 17). The posture is derived
   // from this string, so a bare hostname would read as "no public URL".
-  if (!/^https?:\/\/[^\s/]+\.[^\s/]+/.test(value)) {
+  // `https` only (#2691): the pattern was `https?`, so `http://…` saved
+  // cleanly, the step emitted `complete` and advanced, and the badge then read
+  // "Advertises HTTP" — the step congratulating the operator for reaching the
+  // posture it exists to move them off.
+  if (!/^https:\/\/[^\s/]+\.[^\s/]+/.test(value)) {
     fieldError.value = 'Enter the full address, including https:// — for example https://trinity.example.com'
     return
   }
   fieldError.value = ''
   saveError.value = ''
+  // A new attempt retires the previous confirmation, or a failure would show
+  // an error next to a success that no longer describes anything.
+  savedUrl.value = ''
   saving.value = true
   try {
     await settingsStore.updateSetting('public_chat_url', value)
+    savedUrl.value = value
     url.value = ''
     // The chassis re-reads the flags, which re-derives `install_tls_posture`.
     emit('complete')

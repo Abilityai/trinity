@@ -488,9 +488,13 @@ async def initialize_git_in_container(
         'git config --global user.name "Trinity Agent"',
         'git config --global init.defaultBranch main',
         'git init',
+        # ent#615: credential-LESS. The credential is seeded into the `trinity`
+        # credential helper's ladder BEFORE this runs (and the whole call fails
+        # honestly if it could not be placed), so `git fetch`/`git push` below
+        # authenticate without it ever entering the URL, `.git/config` or argv.
         f'git remote get-url origin >/dev/null 2>&1 && '
-        f'git remote set-url origin https://oauth2:{github_pat}@github.com/{github_repo}.git || '
-        f'git remote add origin https://oauth2:{github_pat}@github.com/{github_repo}.git',
+        f'git remote set-url origin https://github.com/{github_repo}.git || '
+        f'git remote add origin https://github.com/{github_repo}.git',
         'git add .',
         'git commit -m "Initial commit from Trinity Agent" || echo "Nothing to commit"',
         'git push -u origin main --force'
@@ -1008,18 +1012,34 @@ None - this is a one-time configuration operation
 
 ### Git Authentication
 
-Repository remote URL includes PAT:
+The remote is **credential-less** (ent#615):
 ```
-https://oauth2:{PAT}@github.com/{owner}/{name}.git
+https://github.com/{owner}/{name}.git
 ```
 
-This allows push/pull without interactive authentication.
+Push/pull authenticate without interactive auth because git asks the
+`trinity` credential helper (`/usr/local/bin/git-credential-trinity`,
+registered in `/etc/gitconfig`) over **stdin** — a channel that never reaches
+argv and is never persisted. The helper resolves, in order,
+`/home/developer/.env` → the container's baked `GITHUB_PAT` →
+`/home/developer/.trinity/git-credential`.
 
-**Security implications**:
-- PAT is visible in git remote URL inside container
-- Container compromise could expose PAT
-- Use fine-grained PATs with minimal permissions
-- Rotate PATs regularly
+**This block used to read "PAT is visible in git remote URL inside container /
+Container compromise could expose PAT" as an ACCEPTED RISK. ent#615 is its
+changelog.** The URL was also expanded into `git-remote-https`'s argv on every
+fetch and push, so the token reached `ps`, the orphan sweep's reaped-cmdline
+logging, Vector, the host log files and the logs API — i.e. another agent's
+context, which is what made it more than a container-compromise risk.
+
+**What is still true**:
+- The agent can read its own credential (`printenv`, `cat .env`, or by
+  invoking the helper). Root ownership of the helper is integrity, not
+  confidentiality. The structural fix is **ent#558 (AAuth)**.
+- Use fine-grained PATs with minimal permissions; the cheapest real reduction
+  in blast radius is a **per-agent, repo-scoped** PAT via the agent's Git tab
+  (`agent_git_config.github_pat_encrypted`), which ent#615 does not change.
+- Rotate PATs regularly — and rotate once after adopting ent#615, since every
+  pre-existing backup and log still holds what the URLs used to carry.
 
 ---
 
@@ -1545,9 +1565,10 @@ operator decision per agent.
 
 ### Git Authentication
 
-PAT embedded in remote URL allows push/pull without interactive auth:
+The remote carries no credential; the `trinity` credential helper supplies one
+per operation over stdin (ent#615):
 ```bash
-git remote add origin https://oauth2:{PAT}@github.com/{owner}/{name}.git
+git remote add origin https://github.com/{owner}/{name}.git
 ```
 
 This works with both classic and fine-grained PATs.

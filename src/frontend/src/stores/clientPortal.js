@@ -7,6 +7,7 @@
  * endpoints — 404 in OSS/unentitled builds, but the route guard
  * ent#356 moved the module into OSS core, so it ships in every build.
  */
+import { markRaw } from 'vue'
 import { defineStore } from 'pinia'
 import {
   collaborationRecency, normalizeRoomRow, WORKSPACE_ROOT } from '@/components/portal/portalUtils'
@@ -17,14 +18,43 @@ import {
   shouldRequestBriefing,
 } from '@/components/portal/portalBriefingState'
 import axios from 'axios'
+import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
 import { useAuthStore } from './auth'
+
+// --- carry-log bounds (#2794 follow-up) --------------------------------------
+//
+// Entries retain the `File` object, so the log is bounded three ways and the
+// tightest one wins. Age is the honest bound (a carry is a seconds-to-minutes
+// gesture); count and bytes exist so a pathological session cannot pin
+// hundreds of megabytes in memory waiting for an age-out that may never come.
+export const CARRY_MAX_AGE_MS = 15 * 60 * 1000
+export const CARRY_MAX_ENTRIES = 20
+export const CARRY_MAX_BYTES = 64 * 1024 * 1024
+
+/** Newest-last, within every bound. Pure — exported for the unit suite. */
+export function pruneCarryLog(entries, now = Date.now()) {
+  let kept = (Array.isArray(entries) ? entries : [])
+    .filter((e) => e && e.file && now - e.at <= CARRY_MAX_AGE_MS)
+  if (kept.length > CARRY_MAX_ENTRIES) kept = kept.slice(kept.length - CARRY_MAX_ENTRIES)
+  // Drop oldest until the retained bytes fit. A single file over the cap is
+  // kept regardless: the alternative is silently refusing to carry the one
+  // file the person actually cares about.
+  let bytes = kept.reduce((n, e) => n + (e.size || 0), 0)
+  while (kept.length > 1 && bytes > CARRY_MAX_BYTES) {
+    bytes -= kept[0].size || 0
+    kept = kept.slice(1)
+  }
+  return kept
+}
 // #2162: the page size for a windowed report read. A dependency-free leaf
 // shared with the operator reports store — never re-typed here, since the
 // backend already owns REPORT_ROWS_PAGE_DEFAULT and a third hand-written copy
 // is the shape that drifts while each side's tests pin its own version.
 import { REPORT_ROWS_PAGE as ROWS_PAGE } from '@/utils/reportPaging'
 
-const PORTAL_TOKEN_KEY = 'trinity.portalToken'
+// #2791: exported so the cross-tab listener and the shared 401 verdict can ask
+// whether a CLIENT session is live without re-deriving the key.
+export const PORTAL_TOKEN_KEY = 'trinity.portalToken'
 // #2261 — per-TAB, so an operator working in another tab is untouched by a
 // client's idle timeout (that is the whole reason expiry may not end the
 // platform session). sessionStorage, not localStorage: it must survive a
@@ -84,11 +114,12 @@ export const portalHttp = axios.create()
 //
 // A callback rather than a router import: the store is imported BY the views the
 // router loads, so importing the router here is a cycle.
-let _onPlatformSessionLost = null
-
-export function setPlatformSessionLostHandler(fn) {
-  _onPlatformSessionLost = fn
-}
+// #2791: the per-module callback this file used to own is gone — the reaction is
+// registered once, on `utils/platformSession.js`, and reached from all three
+// transports. Kept as a thin re-export so an out-of-tree caller (or a test that
+// has not been updated) still resolves to the one handler rather than silently
+// registering a second.
+export { setPlatformUnauthorizedHandler as setPlatformSessionLostHandler }
 
 portalHttp.interceptors.request.use((config) => {
   // The store is the ONLY source of a workspace credential. Whatever arrived on
@@ -190,8 +221,17 @@ function installRotationInterceptor() {
       // token) must never reach it: their tab may well hold an operator's JWT,
       // and bouncing would destroy a session that did nothing wrong.
       if (error?.response?.status === 401) {
+        // #2791: the third 401 site now reports to the SAME handler as
+        // `api.js` and the global interceptor, which owns the verdict.
+        //
+        // `isPlatformSession` stays as the local gate, and it is not redundant
+        // with the shared verdict: it is the only thing that knows this tab's
+        // client session was SUPPRESSED (#2261's `platformFallbackSuppressed`),
+        // a state no amount of reading localStorage can reconstruct. The shared
+        // verdict then adds what this site could never see — whether the token
+        // that failed is still the stored one.
         try {
-          if (useClientPortalStore().isPlatformSession) _onPlatformSessionLost?.()
+          if (useClientPortalStore().isPlatformSession) notifyPlatformUnauthorized(error)
         } catch {
           // Pinia not active (module-scope request, or teardown): no session to
           // reason about, so there is nothing to bounce.
@@ -349,6 +389,26 @@ export const useClientPortalStore = defineStore('clientPortal', {
     //
     // The rail owner drains it (`usePortalRailFeeds`); nothing else reads it.
     pendingUploadNotes: {},
+
+    // --- Carry log (#2794 follow-up) ---
+    // Files uploaded to an agent that have NOT yet gone out with a message, so
+    // an escalation into a room can take them along.
+    //
+    // It lives on the store rather than in the composer because there are TWO
+    // upload surfaces and only one of them is the composer: the rail's Files
+    // panel (`PortalRailFiles.vue::uploadBatch`) sends straight to its "Send
+    // to" target and keeps no pending state at all. A user who attaches there
+    // and then @mentions a second agent got nothing carried and — because the
+    // composer had no attachments — not even a notice saying so. `uploadDocument`
+    // is the ONE funnel all three surfaces already share (#2582), so recording
+    // here is what makes the carry surface-agnostic.
+    //
+    // Bounded three ways because these entries retain the `File` itself:
+    // by count, by age, and by total retained bytes (see `noteUploadForCarry`).
+    uploadCarryLog: [],
+    // agent -> ms timestamp. Everything logged at or before it has already gone
+    // out with a message (or belongs to a previous visit) and is not carried.
+    uploadsCarriedAt: {},
   }),
 
   getters: {
@@ -1355,7 +1415,49 @@ export const useClientPortalStore = defineStore('clientPortal', {
         { headers: this.authHeader }
       )
       this.noteUploadPending(agentName)
+      this.noteUploadForCarry(agentName, file)
       return data
+    },
+
+    /**
+     * Remember a successful upload so an escalation can carry it (#2794).
+     *
+     * Only ever called from `uploadDocument`, i.e. after the server took the
+     * file — a refused upload is not carryable and must not be logged.
+     */
+    noteUploadForCarry(agentName, file) {
+      if (!agentName || !file) return
+      const now = Date.now()
+      const entry = {
+        agent: agentName,
+        name: file.name,
+        size: Number(file.size) || 0,
+        // `markRaw` for the reason `usePortalFileDrop` gives: a proxied `File`
+        // fails deep inside `FormData.append`, where the cause is invisible.
+        file: markRaw(file),
+        at: now,
+      }
+      const next = this.uploadCarryLog.concat(entry)
+      this.uploadCarryLog = pruneCarryLog(next, now)
+    },
+
+    /**
+     * Everything logged for this agent up to now has been accounted for — it
+     * went out with a message, or the conversation was just opened. The
+     * composer's chips clear at exactly these moments; this is the same act for
+     * the surfaces that have no chips.
+     */
+    markUploadsCarried(agentName) {
+      if (!agentName) return
+      this.uploadsCarriedAt = { ...this.uploadsCarriedAt, [agentName]: Date.now() }
+    },
+
+    /** Files sent to `agentName` that have not gone out with a message yet. */
+    carryableUploadsFor(agentName) {
+      if (!agentName) return []
+      const since = this.uploadsCarriedAt[agentName] || 0
+      const fresh = pruneCarryLog(this.uploadCarryLog, Date.now())
+      return fresh.filter((e) => e.agent === agentName && e.at > since)
     },
 
     /** Mark one agent's inbox listing stale. Drained by the rail owner (#2582). */
@@ -1588,6 +1690,18 @@ export const useClientPortalStore = defineStore('clientPortal', {
       const { data } = await portalHttp.get('/api/enterprise/client-portal/work', {
         headers: this.authHeader,
         params,
+      })
+      return data
+    },
+
+    // trinity-enterprise#620: the live activity lines alone — what each
+    // running execution of these agents is doing right now, from the agents'
+    // heartbeats. Polled every few seconds by the Work store ONLY while a
+    // card is live; the full `fetchWork` stays at its 12 s cadence.
+    async fetchWorkActivity(agentNames) {
+      const { data } = await portalHttp.get('/api/enterprise/client-portal/work/activity', {
+        headers: this.authHeader,
+        params: { agents: (agentNames || []).filter(Boolean).join(',') },
       })
       return data
     },

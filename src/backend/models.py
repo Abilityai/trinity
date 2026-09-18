@@ -2625,11 +2625,43 @@ class SshAccessRequest(BaseModel):
 # =============================================================================
 
 
+# trinity-enterprise#620: the per-execution activity the Workspace Work card
+# shows. Bounds are enforced HERE, not trusted from the agent: the payload is
+# agent-authored and is later rendered to people, so every string is capped
+# and every id shape-checked. Anything over the caps 422s the whole beat —
+# the 30s monitor stays authoritative for liveness (#307), so a refused beat
+# costs a card line, never a health verdict.
+HEARTBEAT_ACTIVITY_MAX_EXECUTIONS = 20
+HEARTBEAT_ACTIVITY_SUMMARY_MAX = 120
+HEARTBEAT_ACTIVITY_TOOL_MAX = 64
+_HEARTBEAT_EXECUTION_ID_RE = r"^[A-Za-z0-9_\-]{1,128}$"
+
+
+class HeartbeatExecutionActivity(BaseModel):
+    """What ONE running execution is doing right now (trinity-enterprise#620).
+
+    `tool` is the agent's display name for the tool (`Read`, `Bash`,
+    `mcp:trinity`, `Task:explore`) — `None` between tools ("Thinking");
+    `summary` is the agent's bounded human summary of the input (a shortened
+    path, a quoted pattern, the head of a command), never the raw input.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: str = Field(pattern=_HEARTBEAT_EXECUTION_ID_RE)
+    tool: Optional[str] = Field(default=None, max_length=HEARTBEAT_ACTIVITY_TOOL_MAX)
+    summary: Optional[str] = Field(default=None, max_length=HEARTBEAT_ACTIVITY_SUMMARY_MAX)
+    since: Optional[str] = Field(default=None, max_length=40)
+
+
 class HeartbeatPayload(BaseModel):
     """Lightweight liveness payload POSTed by the agent every ~5s."""
     memory_mb: Optional[float] = None
     active_executions: Optional[int] = None
     uptime_s: Optional[float] = None
+    # trinity-enterprise#620 — optional so a pre-#620 image's beat still lands.
+    executions: Optional[List[HeartbeatExecutionActivity]] = Field(
+        default=None, max_length=HEARTBEAT_ACTIVITY_MAX_EXECUTIONS
+    )
 
 
 # =============================================================================
@@ -2950,15 +2982,21 @@ class FanOutRequest(BaseModel):
     """Request model for fan-out parallel task execution."""
     tasks: List[FanOutTask]
     agent: str = "self"
-    # Optional overall fan-out deadline. When None, no outer deadline is
-    # applied — each sub-task is still bounded by the target agent's
-    # configured execution_timeout_seconds (TIMEOUT-001).
+    # Optional deadline on WAITING for the batch (#2524) — reaching it returns
+    # `deadline_exceeded` without stopping the subtasks. When None, the wait
+    # covers the whole batch: ceil(N / concurrency) × the agent's
+    # execution_timeout_seconds (TIMEOUT-001), plus a buffer.
     timeout_seconds: Optional[int] = None
     max_concurrency: int = 3
     policy: str = "best-effort"
     model: Optional[str] = None
     system_prompt: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
+    # #2524: return `{fan_out_id, status="accepted"}` immediately, without
+    # holding the connection for the whole batch. The caller polls
+    # `GET /api/agents/{name}/fan-out/{fan_out_id}`. Default False keeps the
+    # blocking contract every existing caller depends on.
+    async_mode: Optional[bool] = False
 
     @field_validator("tasks")
     @classmethod
@@ -3038,10 +3076,12 @@ class FanOutResponse(BaseModel):
 class FanOutBatchTask(BaseModel):
     """One subtask of a batch, as recorded on its execution row."""
     execution_id: str
+    # The caller's own `FanOutTask.id`, persisted on the row as
+    # `fan_out_task_id` since #2524. NULL on rows written before that column.
+    task_id: Optional[str] = None
     status: str
-    # The dispatched message. It is the only thing tying a row back to the task
-    # the caller named — `FanOutTask.id` is a request-local label and is not
-    # persisted anywhere on the row.
+    # The dispatched message — the only link back to the task the caller named
+    # on rows that predate `task_id`.
     message: Optional[str] = None
     response: Optional[str] = None
     error: Optional[str] = None

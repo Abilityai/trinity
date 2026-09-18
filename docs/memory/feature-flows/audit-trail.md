@@ -410,6 +410,25 @@ Wraps each tool's `execute` function:
 
 Never blocks or delays tool execution. Never throws.
 
+**Returned denials are labelled (#2807).** Every access gate on the tool
+surface RETURNS its denial (the `{"error": "Access denied", ...}` envelope
+agents parse), so throw/no-throw alone audited every refusal as
+`success: true`. The deny sites now serialise through one helper,
+`access.ts::accessDenied`, which stamps `context.outcome = {kind: "denied",
+reason}` on the per-call tool context (the #905 `requestId` seam), and
+`withAudit` reads it after `execute`: the row carries `success: false`,
+`denied: true`, `error: <reason>`; a thrown backend 403 is marked `denied` too.
+The envelope the caller receives is byte-identical. Compound denials whose
+caller-facing reason is deliberately uniform (loop ids, report ids) pass the
+internal reason for the admin-only row. The wrapper's backend URL and secret
+are injected by `createServer` (`configureAudit`), one source of truth with the
+tools' own client. Guarded by `src/mcp-server/src/audit-denial.test.ts`: a
+`!allowed` branch or an `error: "Access denied"` envelope that bypasses the
+helper fails `npm test`; `access-wiring.test.ts` proves the label over the real
+transport, and J10's `test_the_operator_can_see_that_a_call_was_refused` proves
+it against a live stack on every PR. A refused call's `details`:
+`{"tool": "chat_with_agent", "duration_ms": 32, "success": false, "error": "Permission denied: Agent 'a' is not permitted to communicate with 'b'. ...", "denied": true}`.
+
 ### Internal Audit Endpoint
 
 `POST /api/internal/audit` accepts:

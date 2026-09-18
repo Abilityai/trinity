@@ -61,7 +61,7 @@ _ALLOWED_CALLERS = {
         "platform-only: idempotent id per portal client's legacy dir (ent#308)",
     ("database.py", "DatabaseManager.create_operator_queue_item"):
         "the facade delegation itself (the _operator_queue_ops.create_item spelling)",
-    ("services/agent_client.py", "_emit_dormant_alert"):
+    ("services/agent_client/circuit.py", "_emit_dormant_alert"):  # 1028: package split
         "platform-only: edge-triggered after consecutive failed CB probes (cb-dormant)",
     ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
         "platform-only: raised from probe_archive_writability() at the start of an "
@@ -72,6 +72,18 @@ _ALLOWED_CALLERS = {
         "platform-only: edge-triggered on the durable prior-status transition "
         "(ok->failed), plus a staleness re-alarm throttled to weekly; volume is "
         "bound by the daily job cadence and no agent input reaches it (#2216)",
+    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_refused"):
+        "platform-only: the ent#615 sweep refused to strip a credential URL it "
+        "could not replace. Raised from a start hook / boot one-shot, so the "
+        "cadence is the platform's, and the id is bucketed per agent per UTC "
+        "day so a restart loop is <=1 row/agent/day; no agent input reaches it",
+    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_unreadable"):
+        "platform-only: the ent#615 sweep could not READ the tree it swept, so "
+        "its all-zero report is not evidence of a clean agent. Same emitters as "
+        "its refusal sibling (start hook / boot one-shot), same per-agent-per-UTC-"
+        "day bucketed id, no agent input reaches it — a SEPARATE id family "
+        "because the two need different operator action and sharing one would "
+        "let whichever fired first suppress the other all day",
     ("services/lease_reaper_service.py", "_create_park_item"):
         "platform-only + LOAD-BEARING: #1402 poison-park parks ONLY on a successful "
         "create — must never be throttled (the reason a db-sink bound was rejected)",

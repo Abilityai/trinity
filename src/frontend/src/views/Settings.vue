@@ -320,12 +320,33 @@
                       </svg>
                       <span class="text-status-success-600 dark:text-status-success-400">Saved</span>
                     </template>
-                    <template v-else-if="publicUrlCurrent">
+                    <!-- #2691: a saved URL is a string an admin typed. On a
+                         provisioned install the tick waits until a request for
+                         that exact name has actually arrived here and a
+                         certificate was obtained for it — the same distinction
+                         the first-run step draws. Only the provisioned Caddyfile
+                         calls the gate that latches it, so everywhere else (own
+                         proxy, tunnel, tailnet) the wait would never end: those
+                         keep the plain saved tick. -->
+                    <template v-else-if="publicUrlCurrent && (sessionsStore.publicUrlReached || !sessionsStore.hardeningGuideEligible)">
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
                       <span class="text-status-success-600 dark:text-status-success-400">
                         {{ publicUrlCurrent }}
+                      </span>
+                    </template>
+                    <template v-else-if="publicUrlCurrent">
+                      <!-- Same icon box as every other branch, so the line does
+                           not shift when the latch flips. A clock, not the
+                           warning triangle the unconfigured branch uses: same
+                           token, different shape, different meaning — nothing
+                           is wrong here, it just has not happened yet. -->
+                      <svg class="h-4 w-4 text-state-autonomous-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                        {{ publicUrlCurrent }} — saved, waiting for the first visit to confirm it resolves here
                       </span>
                     </template>
                     <template v-else>
@@ -337,9 +358,18 @@
                       </span>
                     </template>
                   </div>
+                  <!-- #2691: the old text named three consumers out of a dozen
+                       and no side effect. The corrected list and the two shared
+                       lines live in `onboarding/hardeningGuide.js`, so this
+                       field and the first-run step cannot drift apart. -->
                   <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
                     The externally-accessible URL of this Trinity instance (e.g. <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">https://your-domain.com</code>).
-                    Used for Telegram webhooks, Slack OAuth callbacks, and shareable public links.
+                    {{ DOMAIN_BENEFIT }}
+                    It is the address Telegram, WhatsApp and VoIP call back on, the one Slack's
+                    OAuth returns to, and the base for every shareable public link, workspace
+                    link and file download — voice calls fail outright without it, and the rest
+                    fall back to an address nobody outside can use.
+                    {{ DOMAIN_PREREQUISITE }} {{ DOMAIN_SIDE_EFFECT }}
                   </p>
                 </div>
 
@@ -574,6 +604,22 @@
                         v-else
                         class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
                       >not set</span>
+                      <!-- #2695: "configured" is presence; this is whether the key can
+                           TRANSCRIBE. ElevenLabs permissions are per endpoint, so a key
+                           that speaks may still refuse speech-to-text — and then the
+                           Workspace mic is hidden, which this is the one place to see. -->
+                      <span
+                        v-if="sttCapability.tone !== 'none'"
+                        data-testid="elevenlabs-stt-capability"
+                        :data-tone="sttCapability.tone"
+                        class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium"
+                        :class="sttCapability.tone === 'ok'
+                          ? 'bg-status-success-100 text-status-success-800 dark:bg-status-success-900 dark:text-status-success-200'
+                          : sttCapability.tone === 'bad'
+                            ? 'bg-status-danger-100 text-status-danger-800 dark:bg-status-danger-900 dark:text-status-danger-200'
+                            : 'bg-status-warning-100 text-status-warning-800 dark:bg-status-warning-900 dark:text-status-warning-200'"
+                        :title="sttCapability.hint"
+                      >{{ sttCapability.label }}</span>
                     </label>
                     <div class="flex gap-2">
                       <input
@@ -597,6 +643,22 @@
                         class="px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
                       >Clear</button>
                     </div>
+                    <p
+                      v-if="sttCapability.tone === 'bad' || sttCapability.tone === 'unverified'"
+                      data-testid="elevenlabs-stt-hint"
+                      class="mt-1 text-xs"
+                      :class="sttCapability.tone === 'bad'
+                        ? 'text-status-danger-600 dark:text-status-danger-400'
+                        : 'text-status-warning-700 dark:text-status-warning-300'"
+                    >{{ sttCapability.hint }}</p>
+                    <!-- #2696: the operator half of a client's "voice input failed" —
+                         the client got a category sentence; the provider's status
+                         word lives only here, on the admin panel. -->
+                    <p
+                      v-if="sttLastFailure"
+                      data-testid="elevenlabs-stt-last-failure"
+                      class="mt-1 text-xs text-status-danger-600 dark:text-status-danger-400"
+                    >{{ sttLastFailure.text }}<span v-if="sttLastFailure.at"> — {{ new Date(sttLastFailure.at * 1000).toLocaleString() }}</span></p>
                   </div>
 
                   <!-- Default voice id -->
@@ -2138,6 +2200,7 @@ import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
 import { readOpsBool, opsBoolValue } from '../utils/opsSettings'
+import { describeSttCapability, describeSttLastFailure } from '../utils/sttCapability'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
@@ -2155,6 +2218,14 @@ import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
 import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
+// #2691: one home for what the Public URL buys, what must be true first, and
+// what saving it re-points — shared with the first-run step so the explanation
+// does not depend on which surface the operator arrives through.
+import {
+  DOMAIN_BENEFIT,
+  DOMAIN_PREREQUISITE,
+  DOMAIN_SIDE_EFFECT,
+} from '../components/onboarding/hardeningGuide'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
 import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
@@ -2564,7 +2635,18 @@ const elevenLabs = reactive({
   keySource: 'none',   // override | env | none
   apiKeyInput: '',
   defaultVoiceId: '',
+  // #2695: what the provider said when asked whether this key may transcribe —
+  // capable | refused | unknown | unconfigured, plus its own status word.
+  sttCapability: 'unconfigured',
+  sttDetail: null,
+  sttLastFailure: null,   // #2696: {category, provider_status, detail, at} | null
 })
+const sttLastFailure = computed(() => describeSttLastFailure(elevenLabs.sttLastFailure))
+const sttCapability = computed(() => describeSttCapability({
+  key_configured: elevenLabs.keyConfigured,
+  stt_capability: elevenLabs.sttCapability,
+  stt_detail: elevenLabs.sttDetail,
+}))
 const savingElevenLabs = ref(false)
 const elevenLabsSaveSuccess = ref(false)
 const elevenLabsError = ref('')
@@ -3067,6 +3149,11 @@ function applyElevenLabsState(state) {
   elevenLabs.keyConfigured = !!state.key_configured
   elevenLabs.keySource = state.key_source || 'none'
   elevenLabs.defaultVoiceId = state.default_voice_id || ''
+  // An older backend sends no capability field: `undefined` reads as
+  // "unverified", never as "capable" — see describeSttCapability.
+  elevenLabs.sttCapability = state.stt_capability
+  elevenLabs.sttDetail = state.stt_detail ?? null
+  elevenLabs.sttLastFailure = state.stt_last_failure ?? null
 }
 
 async function loadElevenLabsSettings() {

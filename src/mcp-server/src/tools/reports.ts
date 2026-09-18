@@ -13,6 +13,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied } from "../access.js";
 
 
 /**
@@ -314,7 +315,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           const access = await checkAgentAccess(apiClient, authContext, params.agent_name);
           if (!access.allowed) {
             console.log(`[list_reports] Access denied: ${access.reason}`);
-            return JSON.stringify({ error: "Access denied", reason: access.reason }, null, 2);
+            return accessDenied(context, { error: "Access denied", reason: access.reason });
           }
         }
 
@@ -405,12 +406,12 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           if (authContext?.scope === "agent") {
             if (!owner) {
               console.error("[get_report] response carried no agent_name — refusing");
-              return JSON.stringify({ error: "Report not found" }, null, 2);
+              return accessDenied(context, { error: "Report not found" }, "response carried no agent_name — refusing");
             }
             const access = await checkAgentAccess(apiClient, authContext, owner);
             if (!access.allowed) {
               console.log(`[get_report] Access denied: ${access.reason}`);
-              return JSON.stringify({ error: "Report not found" }, null, 2);
+              return accessDenied(context, { error: "Report not found" }, access.reason);
             }
           }
 

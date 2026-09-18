@@ -1210,7 +1210,7 @@ class TestStructuralInvariants:
         drift). An earlier draft of this test grepped for the literal and failed
         on correct code.
         """
-        tree = ast.parse((_BACKEND / "routers" / "settings.py").read_text())
+        tree = ast.parse((_BACKEND / "routers" / "settings" / "generic.py").read_text())  # 1028: catch-all module
 
         handler = next(
             (

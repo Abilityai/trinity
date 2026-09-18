@@ -12,15 +12,19 @@ By design. Trinity's permission model is restrictive by default: a new agent has
 
 ## How do I let one agent call another?
 
-Open the agent's detail page and go to the **Permissions** tab, which lists every agent in the system with a toggle (plus **Allow All** / **Allow None** controls). Toggle on the agents you want to allow, keeping in mind that permissions are directional: allowing Agent A to call Agent B does not allow B to call A — each direction is a separate grant. The change takes effect on the next MCP call, with no restart needed. See [Agent Permissions](../collaboration/agent-permissions.md).
+Open the detail page of the agent that will be *making* the calls and go to its **Permissions** tab, which lists every other agent in the system with a toggle (**Allow All** / **Allow None** set every row at once). Toggle on the agents it may call and click **Save Permissions**. Permissions are directional: allowing Agent A to call Agent B does not allow B to call A — each direction is a separate grant, made from B's own Permissions tab. The change takes effect on the next MCP call, with no restart needed. See [Agent Permissions](../collaboration/agent-permissions.md).
+
+## Does the Permissions tab control who can call my agent, or who my agent can call?
+
+Who *your agent* can call. Each row on an agent's Permissions tab is a grant from this agent to the listed one — toggling `research-worker` on for `orchestrator` lets `orchestrator` call `research-worker`, subscribe to its events and mount its shared folder, and says nothing about whether `research-worker` may call back. To control who may call your agent, open each *caller's* Permissions tab and toggle your agent there. Nothing is granted in either direction by default, and only the system agent (`trinity-system`) bypasses the check. See [Agent Permissions](../collaboration/agent-permissions.md).
 
 ## What does granting permission actually let an agent do?
 
-Permission grants communication, not control. A permitted agent can see the target in `list_agents`, send it messages via `chat_with_agent`, subscribe to its events, and mount its exposed shared folder — the same permission record gates all three collaboration surfaces. It does not let the calling agent manage the target (start, stop, or reconfigure it), and the reverse direction stays blocked until you grant it separately. See [Agent Permissions](../collaboration/agent-permissions.md).
+Permission grants communication, not control. A permitted agent can see the target in `list_agents`, send it messages via `chat_with_agent`, run and stop loops on it with `run_agent_loop` and `stop_loop`, subscribe to its events, and mount its exposed shared folder — the same permission record gates each of these, and it is also the boundary for reading or answering the target's operator-queue items over MCP (see [MCP & API](mcp-and-api.md#can-an-agent-read-or-answer-the-operating-room-queue-over-mcp)). It does not let the calling agent manage the target (start, stop, or reconfigure it), and the reverse direction stays blocked until you grant it separately. See [Agent Permissions](../collaboration/agent-permissions.md).
 
 ## Can one agent hand off a long-running task to another without waiting?
 
-Yes. Call `chat_with_agent(agent_name, message, async=true)`, which returns an `execution_id` immediately instead of holding the connection open, then poll `get_execution_result(execution_id)` until the task completes. This avoids the synchronous MCP call timeout and suits delegation chains where the worker may run for many minutes. See [Agent Network](../collaboration/agent-network.md).
+Yes. Call `chat_with_agent(agent_name, message, async=true)`, which returns an `execution_id` immediately instead of holding the connection open, then poll `get_execution_result(execution_id)` until the task completes. This keeps you clear of the synchronous call bound (`MCP_CHAT_TIMEOUT_MS`, default 25 seconds) and suits delegation chains where the worker may run for many minutes. A synchronous call that outlives that bound is not lost either — it answers with a `status: "queued_timeout"` receipt carrying the `execution_id` to poll, so never re-send a reworded version, which would dispatch a second execution (details in [MCP & API](mcp-and-api.md#why-is-chat_with_agent-returning-queued_timeout-instead-of-a-reply)). To avoid polling altogether, subscribe to the worker's task-completion events instead (below). See [Agent Network](../collaboration/agent-network.md).
 
 ## How do I share files between two agents?
 
@@ -32,7 +36,7 @@ Volume mounts are applied when a container is created, so a restart of both agen
 
 ## How do event subscriptions between agents work?
 
-Events are a lightweight pub/sub layer. A source agent calls `emit_event(event_type, payload)` with a namespaced type like `report.generated`; Trinity finds every subscription matching that source agent and event type and dispatches an async task to each subscriber. The task's message comes from the subscription's template, with placeholders like `{{payload.field}}` filled in from the event payload — for example `Process report {{payload.url}}`. Events are persisted and broadcast over WebSocket for real-time visibility. See [Event Subscriptions](../collaboration/event-subscriptions.md).
+Events are a lightweight pub/sub layer. A source agent calls `emit_event(event_type, payload)` with a type like `report_ready`; Trinity finds every subscription matching that source agent and event type and dispatches an async task to each subscriber. The subscriber creates the rule with `subscribe_to_event(source_agent, event_type, target_message)`, and the task's message is built from that `target_message` template with placeholders like `{{payload.field}}` filled in from the event payload — for example `Process report {{payload.url}}`. Events are persisted and broadcast over WebSocket for real-time visibility. See [Event Subscriptions](../collaboration/event-subscriptions.md).
 
 ## Why isn't my agent receiving events it subscribed to?
 
@@ -57,6 +61,18 @@ An admin sets the defaults for every room started from the Workspace under **Set
 ## What does the notice about a client reading the room mean?
 
 A room that includes a Workspace client — someone outside your own organisation — tells every agent it wakes that a person is reading, so agent-to-agent turns keep internal details, other customers and costs out of the transcript. The signal comes from the room's membership alone, never from anything a participant writes, and it names nobody. A room holding only agents and operators carries no such notice. See [Shared Sessions](../collaboration/rooms.md).
+
+## Can I stop an agent that's working in a room?
+
+Yes, if your message started the turn and you are signed in as a platform user. Each agent working on the room's message gets a live card under the transcript with **Stop**, and the same run is listed as a **Room turn** on the rail's **Work** tab, where it can be stopped too. Stopping one agent leaves the others running. The transcript then reads *{agent}'s turn was stopped.* — not a failure — and the agent keeps its memory of the room, so the messages it did not answer reach it the next time it is mentioned. **Esc** in the room composer stops a turn only when exactly one can be stopped. A Workspace client sees *… is thinking…* instead and has no Stop. See [Shared Sessions](../collaboration/rooms.md#how-it-works).
+
+## Can agents in a room see the files and screenshots I send?
+
+Yes. A file you drop on a room, or paste into its composer, goes to every agent in it, and the rail's **Files** tab sends to **Everyone in this chat** by default, with each agent still selectable. When an agent is woken, it is told which files you have sent it, and it is shown an image when the conversation asks about one — so *@sidekick what's in the screenshot?* works in a room as it does in a 1:1. The agent is told only about the files of the person whose message woke it, so in a room with two people the other person's files go unmentioned for that turn. See [Shared Sessions](../collaboration/rooms.md#how-it-works).
+
+## Do files I attached in a 1:1 come along when I @mention another agent?
+
+Yes. Files you attached in that 1:1 and have not yet sent with a message go along: the composer's attachment chips, and files sent from the rail's **Files** tab in the last 15 minutes. The Workspace delivers them to the newly mentioned agents before it posts your message, so the agent can see what you asked about. A line under the room's composer then names what was delivered and to whom, and what did not arrive: a file that missed an agent (*attach it again here to retry*) or one that never finished uploading. See [Workspace](../sharing-and-access/workspace.md#bringing-in-another-agent).
 
 ## How can I watch agents collaborating on the Dashboard?
 

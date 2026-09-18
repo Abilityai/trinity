@@ -94,6 +94,7 @@ When a breaker is open, the agent header and the agent's Dashboard tile show a "
 
 An answer to one of the agent's parked requests (an approval, a question) always reaches the agent, but by default it is only read on the agent's *next* turn. An agent with no schedule has no next turn, so an approved action would wait indefinitely. Turn on **Wake this agent when an operator answers** in **Settings → Reliability** and answering starts one turn so the agent acts on it right away. Off by default.
 
+- Only the owner or an admin can change it, and never with an agent's key: an agent's own key is refused with `403` even though it acts for the owner. Each wake is a turn the owner pays for, so an agent cannot switch on its own wake-ups. An agent can still read the setting.
 - API: `GET /api/agents/{name}/operator-resume` and `PUT /api/agents/{name}/operator-resume` (`{"enabled": true}`)
 - See [Approvals](../automation/approvals.md) for the operator side.
 
@@ -108,7 +109,7 @@ Controls which API key the agent uses for Claude.
 
 Choose the Claude model used for tasks and scheduled executions.
 
-- Available models lead with the current flagships: **Fable 5.1** (most capable, best for the longest tasks) and **Sonnet 5** (fast and smart, with a 1M-token context window), alongside the current Opus and Haiku generations. Fable 5 is still offered and still supported; it is simply no longer the latest in its tier.
+- Available models lead with the current generation: **Opus 5**, **Fable 5.1** (most capable, best for the longest tasks) and **Sonnet 5** (fast and smart, with a 1M-token context window), followed by the prior Opus, Sonnet and Haiku generations. Fable 5 is still offered and still supported; it is simply no longer the latest in its tier.
 - Custom model input is supported.
 - Selection is persisted to `localStorage`; `model_used` is recorded in the execution audit trail.
 - **Platform default**: when an agent has no model override, executions use the platform default model configured in Settings → Platform. The UI now surfaces this fallback so empty selections aren't mistaken for failures.

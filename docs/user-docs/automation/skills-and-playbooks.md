@@ -21,11 +21,19 @@ Trinity syncs from **one or more** GitHub repositories: a bundled public communi
 
 Manage sources in **Settings → Agents → Skills Library**. The panel lists sources in resolution order — the first row is marked **wins conflicts**, the seeded catalog **bundled**, and each row shows whether it tracks a **branch** or is **pinned** to a tag, with the ref. Per source you can **Sync**, **Disable**/**Enable**, or **Remove**; **Sync all** pulls every enabled source. **+ Add a skills repository** asks for a **Name**, a **Repository URL** (github.com only), what to **Track** — *Branch (follows new commits)* or *Tag (pinned — a moved tag is refused)* — and the branch or tag name. Errors are shown verbatim under the source, so a refused tag names the tag and says what to do.
 
+A private source repository authenticates with the platform GitHub PAT. Trinity offers that token only to `github.com` and hands it to git with each request, so it is not written into the library's checkout in the platform data directory. A checkout cloned by an earlier release can still hold the token in its remote URL — one more reason to rotate the platform token after upgrading (see [Upgrading](../guides/deploying/upgrading.md#github-token-out-of-agent-remotes-automatic-then-rotate)).
+
 **When two sources ship the same skill name**, resolution is by priority (lower wins), then by age. Custom sources default to priority 100 and the bundled community source to 1000 — so **your own repository always wins** a name clash, and a source you add later needs no reordering.
 
 Nothing is overwritten silently. The winning skill carries a `shadowed_by` marker naming the sources whose copy is unreachable, shown in the library listing, on the source status, and as a warning at injection time. Skill names stay bare (`pdf-export`, never `community/pdf-export`), so an agent's `/skill-name` invocation never changes because a source was added.
 
 Deleting a source does **not** unassign its skills — they keep resolving through whatever source still provides them.
+
+#### Upgraded from a single-library install
+
+An installation that predates multiple sources carries one legacy skills-library URL setting. On the first sync after upgrading, an install with no sources adopts that URL as a custom source named **Migrated library** (tracking the branch it tracked before) and clears the setting — no admin action needed. If the install already has sources, the URL is matched against them by repository, so `https://github.com/Org/repo.git`, `https://github.com/Org/repo/` and `github.com/Org/repo` all count as the same source, and nothing happens.
+
+A legacy URL that names a repository which is **not** one of your sources is refused — adding a source is an admin action, never an automatic one — and Trinity files one low-priority **Legacy skills-library adoption refused** heads-up in the Operations queue, from `_skills-sync`. It is one row per refused URL, however many syncs run; a different URL raises its own. Dismiss it by **cancelling** it (`POST /api/operator-queue/{id}/cancel`, or **Clear All** on the Needs Response tab, which cancels every open item) rather than clicking **Got it**: an acknowledged alert waits for an agent reply that never comes and cannot be cleared, while a cancelled one stays gone. If you want that repository, add it as a source in the panel above. The legacy setting itself can no longer be written through the settings API.
 
 #### Repository layout
 
@@ -135,12 +143,15 @@ A skill's `SKILL.md` frontmatter can declare:
 - `description:` — shown in the library and in autocomplete.
 - `automation:` — the skill's intended automation level.
 - `user_invocable:` — whether the skill appears as a runnable playbook (default true).
-- `allowed-tools:` — the tools the skill may use.
+- `allowed-tools:` — the tools the skill may use, as Claude Code reads it. Write it in Claude Code's comma-separated form (`allowed-tools: Read, Bash, Bash(git:*)`) or as a YAML list (`[Read, Bash]`); both give the same list, and a comma inside parentheses (`Bash(npm run lint, npm test)`) stays part of one entry. Trinity reports this list in the agent's skill listing but does not enforce it — a Trinity run is restricted by the schedule, loop, or task's own allowed tools.
+- `argument-hint:` — the argument syntax shown in `/` autocomplete. The unquoted bracket idiom (`argument-hint: [file]`) is kept as written.
 - `requires:` with `packages`, `binaries`, and `env` lists.
 
 At injection, Trinity runs a **declaration-only** dependency check and produces per-skill warnings (a missing binary, a missing environment variable) instead of failing. Declared package installs are surfaced but not performed. Environment checks report variable **names** only — values are never read.
 
 A skill whose frontmatter fails to parse gets a named warning and a description falling back to its first paragraph. It is never silently dropped.
+
+Inside the agent, the Playbooks tab, the `/` popup, and the chat empty state read each frontmatter field on its own. A field the agent cannot use — a list or mapping where text belongs, or an `allowed-tools` value that is a bare `yes`, a number, or has unbalanced parentheses — is dropped by itself, and the agent log warns once, naming the file and field. The skill keeps its description and every other field. Agents on an older base image instead lost the whole record over one such field, most often a comma-separated `allowed-tools`, and showed "No description available". The fix ships in the agent base image, so an existing agent picks it up after the base image is rebuilt (or re-pulled) and the agent is started cold — see [Upgrading → Base Image Upgrade](../guides/deploying/upgrading.md#base-image-upgrade-if-needed).
 
 ### Running playbooks
 
@@ -199,6 +210,7 @@ Source management is **REST-only and human-only** — there is no MCP tool for i
 - Auto-sync is one library-wide timer over every enabled source, not a per-source cadence.
 - Skill names share one flat namespace. Shadowed copies are not offered as separate entries because they are unreachable.
 - Assignment happens per agent. There is no fleet-wide "assign to everything" action.
+- A skill's `allowed-tools` frontmatter is informational in Trinity, not a restriction. Limit a run's tools on the schedule, loop, or task instead.
 - The declared-`skills_root` layout supports a single flat directory, one level deep. Nested layouts require a future schema version, which current installations refuse (falling back to the probe) rather than misread.
 
 ## See Also

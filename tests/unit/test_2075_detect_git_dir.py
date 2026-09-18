@@ -33,6 +33,32 @@ if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
 
+# The names below are the lint_sys_modules.py "named snapshot/restore" pair: every key
+# `_load_git_service` evicts is under this prefix, and the fixture restores the family.
+_STUBBED_MODULE_NAMES = ["services.git_service"]  # prefix — the whole family is restored
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Put the whole `services.git_service*` family back exactly as it was (#2859).
+
+    `_load_git_service` evicts the family and re-imports it under stubs. The
+    `monkeypatch.delitem` calls restore every key that EXISTED before the test,
+    but the submodules the re-import CREATES were never recorded, so they stayed
+    cached after monkeypatch's undo removed the package key — and the next file
+    to import the package got a fresh parent with no `.token_scrub`/`.conflicts`
+    attribute (13 failures in test_ent615, #2859). This runs after monkeypatch's
+    undo (autouse fixtures tear down last) and makes the end state the start state.
+    """
+    saved = {k: v for k, v in sys.modules.items() if k.startswith("services.git_service")}
+    try:
+        yield
+    finally:
+        for key in [k for k in list(sys.modules) if k.startswith("services.git_service")]:
+            del sys.modules[key]
+        sys.modules.update(saved)
+
+
 def _load_git_service(monkeypatch):
     """Import git_service with heavy dependencies mocked out.
 
@@ -63,7 +89,9 @@ def _load_git_service(monkeypatch):
     monkeypatch.setitem(sys.modules, "services.git_service", None)
     monkeypatch.delitem(sys.modules, "services.git_service")
 
-    import services.git_service as gs
+    # #1028: git_service is a package; the alias names the module that
+    # owns the functions under test, so patches land where the code looks.
+    import services.git_service.gitignore as gs
     return gs
 
 

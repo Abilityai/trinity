@@ -169,6 +169,10 @@
              apart doing different things (open a panel / pick a file). The
              rail strip still opens Files, and ent#524's drop-anywhere is
              untouched. -->
+        <!-- ent#625: the theme switch is the LAST control in the header, in a
+             slot the shell fills, so the conversation owns its header row and
+             the shell owns the control — the same seam the room's header has. -->
+        <slot name="header-end" />
       </div>
     </header>
 
@@ -621,6 +625,7 @@
                 @keydown="onComposerKeydown"
                 @click="onComposerCaret"
                 @select="onComposerCaret"
+                @paste="dropHandlers.onPaste"
               ></textarea>
             </div>
             <!-- ent#547: the call toggle stays LIVE while everything else goes
@@ -747,6 +752,7 @@ import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
 import { askAboutItPrefill, childrenForChat, itemById } from './portalWork'
+import { activityFromStreamEvent, resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
@@ -1027,10 +1033,19 @@ const liveCardItem = computed(() => {
     can_stop: false,
   }
 })
-// Two clocks, one rule: while the stream is live its last line is the step.
-const liveStepLine = computed(() => (
-  streaming.value && liveActivity.value.length ? liveActivity.value[liveActivity.value.length - 1] : null
-))
+// trinity-enterprise#620: the activity line — the stream's facts while this
+// turn streams (instant), else what the Work read folded onto the row (the
+// same heartbeat feed every other card uses). One vocabulary either way.
+// `elapsed` is read so the age check re-runs each second the card is live.
+const liveStepLine = computed(() => {
+  void elapsed.value
+  return resolveActivityText({
+    live: sending.value,
+    streamActivity: streaming.value ? liveStreamActivity.value : null,
+    activity: workStore.activityFor(liveCardItem.value),
+    nowMs: Date.now(),
+  })
+})
 // Delegated work this turn handed on — found by the CHAT, not the agent.
 const liveChildren = computed(() => childrenForChat(workStore.now, currentSessionId.value, activeExecutionId.value))
 // The durable verdict the terminal card renders from (#2320's record, or this
@@ -1101,6 +1116,7 @@ const {
   batchNotice,
   addFiles,
   clear: clearAttachments,
+  settled: attachmentsSettled,
   handlers: dropHandlers,
 } = usePortalFileDrop((file) => store.uploadDocument(props.agent.name, file))
 const offline = ref(typeof navigator !== 'undefined' && navigator.onLine === false)
@@ -1110,6 +1126,7 @@ const scrollEl = ref(null)
 // holding. The rule lives in the composable, shared with `PortalRoom` — the two
 // surfaces had two copies of the same unconditional `scrollTop = scrollHeight`.
 const {
+  following,
   unread: unreadBelow,
   showJumpToLatest,
   onScroll: onTranscriptScroll,
@@ -1228,7 +1245,7 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   // ent#525 (review E3): a reattached turn is still a turn the person may
   // stop — without the id, `canCancelTurn` stayed false after every reload.
   activeExecutionId.value = executionId || null
-  liveActivity.value = []
+  liveStreamActivity.value = null
   elapsed.value = 0
   clearInterval(elapsedTimer)
   elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
@@ -1275,7 +1292,7 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   finally {
     sending.value = false
     streaming.value = false
-    liveActivity.value = []
+    liveStreamActivity.value = null
     activeExecutionId.value = null
     clearInterval(elapsedTimer)
     // #2624: a reply settling is an ARRIVAL, not an intent — this turn was
@@ -1319,6 +1336,23 @@ watch(() => props.prefill, (v) => {
 })
 
 onMounted(async () => {
+  // #2794 follow-up: there is deliberately NO carry boundary here.
+  //
+  // The first version drew one — "files sent before this conversation opened
+  // belong to a previous visit" — and it was wrong twice over. Mounting is not
+  // evidence that anything was SENT: the rail is a SIBLING of the stage and
+  // survives every navigation, so the ordinary gesture is to attach from
+  // wherever you are and then open the chat you want to escalate from. That
+  // mount consumed the upload the person had just made, and the escalation
+  // carried nothing and said nothing (reproduced: upload to A from B's rail,
+  // open A, @mention — no carry, no notice). A thread switch or ⌘J remounts
+  // this component too, so the same gesture failed several ways.
+  //
+  // The two things that genuinely consume a pending upload are a message going
+  // out and an escalation taking it, and both mark it themselves. "A previous
+  // visit" is already covered twice over: the log is bounded by
+  // `CARRY_MAX_AGE_MS`, and it is plain Pinia state, so a page load starts it
+  // empty regardless.
   window.addEventListener('online', onNet)
   window.addEventListener('offline', onNet)
   document.addEventListener('click', onDocClick)
@@ -1692,7 +1726,7 @@ async function deliver(text) {
         adoptSession(started.session_id)
       }
       streaming.value = true
-      liveActivity.value = []
+      liveStreamActivity.value = null
       try {
         await store.streamPortalExecution(props.agent.name, started.execution_id, onStreamEvent)
       } catch (streamErr) {
@@ -1701,7 +1735,7 @@ async function deliver(text) {
         console.debug('[workspace] lost the stream, reading the result instead', streamErr)
       } finally {
         streaming.value = false
-        liveActivity.value = []
+        liveStreamActivity.value = null
       }
       data = await awaitPersistedReply(
         started.session_id || currentSessionId.value, baseline,
@@ -1779,6 +1813,9 @@ async function deliver(text) {
     // refresh on a conversation nobody is talking in.
     deliverableTick.value += 1
     clearAttachments()
+    // …and the rail's half of the same set (#2794 follow-up): this turn has
+    // gone out, so nothing sent before it is still pending.
+    store.markUploadsCarried(props.agent?.name)
     return true
   } catch (err) {
     return { error: deliveryFailureReason(err) }
@@ -1887,27 +1924,24 @@ async function cancelTurn() {
   }
 }
 
-// ent#286 — live turn state. `liveActivity` holds a short, human-readable trail
-// of what the agent is doing right now; it is transient and never persisted.
+// ent#286 — live turn state. `liveStreamActivity` holds the two facts the
+// agent's stream last established (`{tool, summary}`); transient, never
+// persisted. (trinity-enterprise#620 replaced the six-label trail: the
+// earlier handler matched `evt.type === 'tool_use'`, a shape the raw
+// stream-json frames never carry, so the card only ever said nothing.)
 const streaming = ref(false)
-const liveActivity = ref([])
+const liveStreamActivity = ref(null)
 // Bumped after each completed turn; `PortalDeliverables` watches it.
 const deliverableTick = ref(0)
-const LIVE_ACTIVITY_MAX = 6
 
-// One log entry from the agent's stream → at most one line of visible activity.
-// Deliberately conservative: the stream is Claude's raw log, so anything not
-// recognised is ignored rather than rendered as noise at a client.
+// One raw frame from the agent's stream → the facts the activity line is
+// composed from, or nothing. `activityFromStreamEvent` reads the real
+// shape (`message.content[].type === 'tool_use'`) and summarises the input
+// the way the agent's own tracker does; the card composes the words.
 function onStreamEvent(evt) {
   if (!evt || evt.type === 'stream_end') return
-  let label = null
-  if (evt.type === 'tool_use' || evt.tool_name) label = `Using ${evt.tool_name || 'a tool'}…`
-  else if (evt.type === 'thinking') label = 'Thinking…'
-  else if (evt.type === 'error') label = 'Hit a problem — recovering…'
-  if (!label) return
-  if (liveActivity.value[liveActivity.value.length - 1] === label) return  // don't stutter
-  liveActivity.value.push(label)
-  if (liveActivity.value.length > LIVE_ACTIVITY_MAX) liveActivity.value.shift()
+  const next = activityFromStreamEvent(evt)
+  if (next) liveStreamActivity.value = next
 }
 
 // The stream ends when the AGENT's execution ends, but the reply is persisted
@@ -2054,9 +2088,19 @@ function markFailed(index, content, error, { retryable = true } = {}) {
   row.retryable = retryable
 }
 
+// #2794: an escalation now AWAITS the in-flight uploads, so the composer is
+// clearable-and-emptied for as long as that takes — seconds, not a microtask.
+// Without a guard a second Enter in that window re-enters `send()`, clears the
+// new text, and emits a second escalation that `Portal.vue`'s own `escalating`
+// flag then drops on the floor: the message is gone with no error and no
+// composer to recover it from. Held here rather than reusing `sending`, which
+// means "a turn is running" and is read by the header, the Stop control and
+// the reattach poller.
+const escalatingNow = ref(false)
+
 async function send() {
   const text = input.value.trim()
-  if (!text || sending.value) return
+  if (!text || sending.value || escalatingNow.value) return
   // The composer is about to be cleared programmatically, which fires no input
   // event — so the popup and its Esc sentinel are cleared here rather than left
   // armed against a message that no longer exists.
@@ -2075,7 +2119,37 @@ async function send() {
     if (others.length) {
       input.value = ''
       autoGrowAfterUpdate()
-      emit('escalate-to-room', { agents: [props.agent.name, ...others], message: text })
+      // #2794: the attachments go WITH the message. Until now the event
+      // carried only text, so a file the person had watched a chip confirm
+      // reached the original agent and nobody else, and the room showed no
+      // trace of it — they believed both agents had it.
+      //
+      // Awaited first, because "never silently dropped" is the rule and this
+      // is the only moment at which waiting is still possible. Uploads are
+      // seconds; sending now and explaining afterwards asks the person to fix
+      // something whose state they can no longer see. `settled()` never
+      // rejects — a failed upload is recorded on its own chip, and the shell
+      // reports it from there.
+      escalatingNow.value = true
+      try {
+        await attachmentsSettled()
+        // NOT cleared: on success this component unmounts as the room opens and
+        // the chips go with it; on failure the shell hands the text back and the
+        // chips are still standing beside it, which is the recovery AC without
+        // any new plumbing. Handing over a COPY so a later gesture in this
+        // composer cannot mutate what the shell is carrying.
+        emit('escalate-to-room', {
+          agents: [props.agent.name, ...others],
+          message: text,
+          attachments: attachments.value.slice(),
+        })
+      } finally {
+        // Released even on the success path: the emit is synchronous and this
+        // component is not unmounted until the route change renders, so a flag
+        // left set would outlive a FAILED escalation and leave the composer
+        // the shell just restored permanently dead.
+        escalatingNow.value = false
+      }
       return
     }
   }
@@ -2113,6 +2187,18 @@ async function submitUserText(text) {
   const res = await deliver(text)
   return settleDelivery(index, text, res)
 }
+
+// trinity-enterprise#620 AC #5: when the person's OWN send starts work, the
+// live card mounts under their message — on a long thread that can be below
+// the fold of the pin above. Re-pin once the card is in the DOM, but only
+// while the reader is still following: an incoming message while they are
+// scrolled up must never move the transcript (#2624), and that rule holds
+// for the card too if they scrolled away between the send and the mount.
+watch(sending, async (isSending) => {
+  if (!isSending) return
+  await nextTick()
+  if (following.value) await pinToBottom()
+})
 
 // Both `deliver()` callers have to settle a turn the same way, so they share
 // one function rather than one of them carrying the rules. Review finding:

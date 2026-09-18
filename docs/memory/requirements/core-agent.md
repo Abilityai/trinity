@@ -3012,3 +3012,122 @@ to localStorage in the clear.
 - **Tests**: `tests/unit/test_ent403_workspace_model.py`;
   `src/frontend/tests/unit/portalModelChoice.spec.js`.
 - **Flow**: `docs/memory/feature-flows/workspace-model-choice.md`
+### 5.33 Workspace — theme switch, light / dark / system (trinity-enterprise#625)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_THEME_SWITCH`
+- **Description**: The Workspace is styled for both themes and follows the global
+  `useThemeStore` (`stores/theme.js` toggles the root `dark` class from the
+  `trinity-theme` key), but its only control was the NavBar's appearance menu,
+  and the Workspace deliberately has no NavBar. A platform user who picked light
+  mode could not change it from the Workspace; an external client (no platform
+  session, no stored preference) got the OS answer and could not change it at
+  all. A **theme switch** now sits at the top right of the central column.
+- **AC-1 — placement**: the switch is the LAST control in the conversation header
+  and the room header (`PortalConversation.vue` / `PortalRoom.vue`), via a
+  `#header-end` slot the shell (`views/Portal.vue`) fills with
+  `PortalThemeSwitch` — present for a new chat, a thread, a room and the agent
+  landing (one branch since ent#523); the stage skeleton heads the branch chain
+  and gets none.
+- **AC-2 — one store**: the switch reads and writes `useThemeStore` — the same
+  `setTheme('light'|'dark'|'system')` the NavBar calls, the same `trinity-theme`
+  key. No portal-local key, no second store: a choice made here is what the
+  platform UI shows next, and vice versa.
+- **AC-3 — honest default**: with nothing stored the choice is `system` and the
+  trigger shows the RESOLVED state ("System · dark"); the trigger's icon follows
+  the resolved theme, never the choice (`utils/themeSwitch.js`).
+- **AC-4 — no session dependency**: `PortalThemeSwitch.vue` imports the theme
+  store only (pinned: never `stores/auth`, `agents` or `clientPortal`), so an
+  external client gets it.
+- **AC-5 — layout stability**: switching flips only the root class; the control
+  lives in a slot with no `:key`, so scroll, composer draft and the active thread
+  are untouched. The popover is absolutely positioned to the header's right
+  edge, so opening it widens nothing; below `sm` the label folds and the trigger
+  is icon-only, so it does not collide with the title band.
+- **AC-6 — both themes, tokens only**: the new files carry zero raw non-gray
+  palette classes and stay off the raw-colour baseline (the guard holds them to
+  zero); the NavBar's inline picker is REPLACED by the shared primitive, so its
+  baseline entry shrinks (35 → 23 non-gray) and is re-frozen exactly, scoped to
+  that one entry.
+- **AC-7 — keyboard + a11y**: the trigger carries `aria-label="Theme: <label>"`,
+  `aria-haspopup`/`aria-expanded`; the options are a `radiogroup` of
+  `role="radio"` buttons with `aria-checked` (the current choice is announced),
+  roving tabindex and arrow-key selection; Esc and click-outside close and
+  focus returns to the trigger.
+- **AC-8 — executed test**: `tests/unit/portalThemeSwitch.spec.js` MOUNTS the
+  component (`@vue/test-utils`, per-file `// @vitest-environment jsdom` — the
+  suite's first mounted component test; `vitest.config.js` gains the Vue
+  plugin) and drives it: renders "System · dark" from an empty store, opens to
+  three checked/unchecked radios, a click calls `setTheme('dark')`, writes the
+  shared key, flips the root class, closes and re-labels the trigger; a NavBar
+  choice is reflected here. Four mutations (click never reaches the store, label
+  hides the resolved state, Esc ignored, `aria-checked` frozen) each go red.
+- **Shared primitive**: `components/base/ThemeChoice.vue` (+ `ThemeIcon.vue`)
+  is the ONE light/dark/system picker, consumed by the NavBar's user menu and
+  the Workspace switch, so the two cannot drift.
+- **Flow**: `docs/memory/feature-flows/dark-mode-theme.md`
+### 5.34 Workspace Work card — the activity line, and the chat scrolls to the card on your own send (trinity-enterprise#620)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_WORK_ACTIVITY_LINE`
+- **Description**: While an agent works, the Work card (in the chat and in the
+  rail's Work tab) says **what it is doing right now** in one short line —
+  "Reading `.../routers/agents.py`", "Running `pytest tests/unit …`",
+  "Searching for `"sync_health"`", "Fetching docs.example.com",
+  "Using github", "Delegating to scout: Map the Work card", "Thinking" — for
+  the chat's own turn AND for delegated, scheduled and room runs. The line is
+  one row of fixed height that slides up when it changes. When the person's
+  own message starts work, the transcript scrolls so the live card is in view.
+- **Why it was invisible**: the card had a "current step" slot fed by the
+  ent#286 stream, but the handler matched `evt.type === 'tool_use'` — a shape
+  the raw stream-json frames never carry (`type:'assistant'`,
+  `message.content[].type`) — so only the backend-injected `error` ever
+  labelled; and no run other than the chat's own had any live path at all.
+- **AC-1 — one vocabulary**: `src/frontend/src/utils/workActivity.js`
+  composes the line from two facts, `tool` (the agent's display name:
+  `Read`, `Bash`, `mcp:trinity`, `Task:explore`, null between tools) and
+  `summary` (the agent's bounded input summary, never the raw input). The
+  operator Chat tab (`execution-status.js`) and Agent Detail
+  (`useSessionActivity`) compose from it too — three vocabularies became one.
+  The stream path summarises client-side with a port of the agent server's
+  `get_input_summary`, held to parity by `tests/fixtures/tool_input_summary.json`
+  (asserted by pytest and vitest).
+- **AC-2 — fixed row, slide, no re-animation**: `PortalWorkCard.vue` reserves a
+  `h-4 overflow-hidden` row for the card's whole live life; a keyed
+  `<Transition>` slides the new line up over the old (a swap under
+  `prefers-reduced-motion`); `createActivityLineQueue` keys the row on the
+  TEXT, so an identical line never re-keys; text truncates with an ellipsis.
+- **AC-3 — every live card, honest silence**: the agent server tracks the
+  active tool **per execution** (`session_activity.by_execution`, keyed by the
+  backend execution id at both live parse sites and the Codex parser) and the
+  5 s heartbeat carries `executions: [{execution_id, tool, summary, since}]`
+  for the process registry's running set. The Work read folds it onto a live,
+  non-stale row of a rostered agent as `WorkItem.activity`; a cheap sibling
+  read `GET …/work/activity?agents=` (Redis only) is polled every 2.5 s while a
+  card is live. No beat, an old image, a stale row, an off-roster agent → no
+  line, never an invented one; the existing three-state steps rule is untouched.
+- **AC-4 — no flicker, never stuck**: minimum display 700 ms per line, a burst
+  collapses to its latest member, a quiet run keeps its last line with the
+  clock moving; a heartbeat-fed line older than 30 s (server `age_seconds` +
+  time since the read) is dropped, the beat itself expires in 15 s, and a
+  finished run leaves the heartbeat by construction (registry intersection).
+- **AC-5 — scroll on your own send only**: after `deliver()` flips `sending`,
+  one `nextTick` + `pinToBottom()` **guarded by `following`** — an incoming
+  message while the reader is scrolled up never moves the transcript (#2624).
+- **AC-6 — disclosure**: the line never rides the unfiltered `/ws`; both reads
+  are roster-scoped (set membership, off-roster dropped), the summary passes
+  the SAME `sanitize_text` + bound as titles, a delegation to an off-roster
+  agent reads "another agent", and the heartbeat model bounds the payload
+  (≤20 entries, summary ≤120, tool ≤64, id shape-checked, extra keys refused).
+  `execution_log`, `tool_calls`, `response` stay out of the payload.
+- **AC-7 — both themes, reduced motion**: gray ink ladder only; the slide is
+  `transition: none` under `prefers-reduced-motion: reduce`.
+- **AC-8 — terminal unchanged**: the row renders only while `isLive`; the
+  queue is cleared at terminal and the ent#525 verdict rendering is untouched.
+- **Tests**: `tests/unit/test_ent620_agent_activity.py` (per-execution slot,
+  the heartbeat builder, pruning, bounds, fail-open), `test_ent620_work_activity.py`
+  (model bounds/refusals, the read, the fold's gates, sanitiser + mask, age
+  ceiling, the `/activity` route's 404/422/rate limit, the projection still
+  excludes the log), `test_ent620_summary_parity.py`;
+  `src/frontend/tests/unit/workActivity.spec.js` (vocabulary, the real frame
+  shape, parity, queue rules, resolver, placement guards). Mutations: eight,
+  each red.
+- **Flow**: `docs/memory/feature-flows/workspace-work.md`

@@ -45,8 +45,23 @@
     <p v-if="showAgent && item.agent_name" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400 truncate">{{ item.agent_name }}</p>
     <p v-else-if="showAgent && !item.agent_name" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">another agent</p>
 
-    <!-- What it is doing right now: the stream's last line wins while live. -->
-    <p v-if="live && liveStep" class="mt-1.5 text-xs text-gray-600 dark:text-gray-300 truncate" data-testid="portal-work-step">{{ liveStep }}</p>
+    <!-- What it is doing right now (trinity-enterprise#620): ONE row of fixed
+         height, reserved for the whole live life of the card, so a line
+         arriving or changing never grows the card or shifts what is below.
+         A new line slides up over the previous one (a swap under
+         reduced motion); the row is keyed on the line's queue key, so an
+         identical line never re-animates. Empty = no live signal — the card
+         says nothing rather than something invented (AC #3). -->
+    <div v-if="live" class="mt-1.5 relative h-4 overflow-hidden" data-testid="portal-work-activity" aria-live="polite">
+      <Transition name="portal-activity">
+        <p
+          v-if="shownStep"
+          :key="shownStep.key"
+          class="absolute inset-x-0 top-0 h-4 leading-4 text-xs text-gray-600 dark:text-gray-300 truncate"
+          data-testid="portal-work-step"
+        >{{ shownStep.text }}</p>
+      </Transition>
+    </div>
 
     <!-- Steps: the stages, or the honest sentence. -->
     <template v-if="live">
@@ -101,8 +116,9 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
+import { createActivityLineQueue } from '@/utils/workActivity'
 import BaseButton from '@/components/base/BaseButton.vue'
 import {
   formatElapsed, holderLine, isHonestTerminal, isLive, kindLabel, stageRows, stepsLine,
@@ -111,7 +127,10 @@ import {
 
 const props = defineProps({
   item: { type: Object, required: true },
-  // The stream's last line (chat only, while streaming).
+  // The activity line's TEXT (#620) — composed by the host through
+  // `resolveActivityText` from the stream (own turn) or the Work read
+  // (every other run). The card owns the motion: minimum display time,
+  // no re-animation on an identical line, the row's fixed height.
   liveStep: { type: String, default: null },
   // Seconds elapsed, driven by the host's clock — see `liveElapsedSeconds`.
   elapsedSeconds: { type: Number, default: null },
@@ -130,6 +149,26 @@ const props = defineProps({
 defineEmits(['stop', 'open-work', 'ask-about-it'])
 
 const live = computed(() => isLive(props.item))
+
+// ---- the activity row's motion (#620) ------------------------------------------
+// A burst of tool calls becomes a calm sequence: each line holds for
+// ACTIVITY_MIN_DISPLAY_MS, only the latest pending line is kept, and the
+// queue's key changes only when the TEXT changes. `shownStep` is what the
+// row renders; a 250 ms tick promotes a pending line once the minimum passed.
+const queue = createActivityLineQueue()
+const shownStep = ref(null)
+let _tick = null
+function _sync(next) { shownStep.value = next ? { text: next.text, key: next.key } : null }
+watch(() => (live.value ? props.liveStep : null), (text) => { _sync(queue.offer(text ?? null)) }, { immediate: true })
+watch(live, (isLive) => {
+  if (isLive) {
+    if (!_tick) _tick = setInterval(() => { _sync(queue.tick()) }, 250)
+  } else {
+    if (_tick) { clearInterval(_tick); _tick = null }
+    queue.clear(); _sync(null)   // the line is gone at terminal (AC #8)
+  }
+}, { immediate: true })
+onBeforeUnmount(() => { if (_tick) clearInterval(_tick) })
 const statusWord = computed(() => workStatusLabel(props.item))
 const kindWord = computed(() => kindLabel(props.item.kind))
 const clock = computed(() => (live.value ? formatElapsed(props.elapsedSeconds) : null))
@@ -173,3 +212,27 @@ function stageGlyph(state) {
   return 'text-gray-400 shrink-0'
 }
 </script>
+
+<style scoped>
+/* trinity-enterprise#620: the activity line slides up into its fixed row. Both
+   the leaving and the entering line are absolutely positioned inside the
+   `h-4 overflow-hidden` row, so nothing outside it moves. */
+.portal-activity-enter-active,
+.portal-activity-leave-active {
+  transition: transform 180ms ease-out, opacity 180ms ease-out;
+}
+.portal-activity-enter-from {
+  transform: translateY(100%);
+  opacity: 0;
+}
+.portal-activity-leave-to {
+  transform: translateY(-100%);
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .portal-activity-enter-active,
+  .portal-activity-leave-active {
+    transition: none;
+  }
+}
+</style>

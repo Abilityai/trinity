@@ -331,7 +331,7 @@ def test_the_named_consumers_are_actually_on_the_shared_loader():
         "services/skill_packaging.py",
         "services/credential_requirements_service.py",
         "services/compatibility/static_checks.py",
-        "services/git_service.py",
+        "services/git_service/trinity_files.py",
         "services/agent_service/lifecycle.py",
         "services/agent_service/crud.py",
         "services/system_agent_service.py",

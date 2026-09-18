@@ -46,7 +46,7 @@ Channel and voice triggers (`telegram`, `slack`, `whatsapp`, `voip`, `voice`, `p
 The fleet execution list lives on the **Executions** tab of the [Operations page](operating-room.md) (`/operations?tab=executions`). The legacy `/executions` route redirects there.
 
 1. Lists all executions across the fleet. Admins see every agent; other users see only agents they own or that are shared with them.
-2. Stat cards show Total, **Completion**, and Cost for the selected time window. Running and queued counts are always live, regardless of the window.
+2. Stat cards show Total, **Completion**, Failed, and Cost for the selected time window. Running and queued counts are always live, regardless of the window.
 3. Filter by agent, status, trigger type, time range (1h to 30d, or all time), and free-text search over task messages.
 4. The list loads 50 rows at a time; **Load more** appends the next page.
 5. A "N running now" strip appears whenever executions are in flight.
@@ -92,9 +92,9 @@ Durations are always non-negative, and a run that ends through a recovery path (
 
 ### Work in the Workspace
 
-Platform users see their executions inside the [Workspace](../sharing-and-access/workspace.md) too, in the vocabulary of the chat rather than the ledger. An external client sees none of this.
+Platform users see their executions inside the [Workspace](../sharing-and-access/workspace.md) too, in the vocabulary of the chat rather than the ledger. An external client sees only the live card under their own message, never the Work tab.
 
-**The live card.** When a message starts a longer job, a card under it shows the status word, how long it has been going, what the agent is doing right now, and — where the agent publishes a pipeline — the steps with the agent holding each one. Its controls are only those the platform can honour: **Stop** (where a stop would be accepted — your own turn or a job it handed on), **Open in Work** (the rail, on this tab), and after a job that failed, timed out, was stopped or was lost, **Ask about it**, which pre-fills the composer with a question naming the job and how it ended and never sends on its own. A card for a finished job survives a reload; a reply that lands replaces it.
+**The live card.** When a message starts a longer job, a card under it shows the status word, how long it has been going, what the agent is doing right now, and — where the agent publishes a pipeline — the steps with the agent holding each one. Its controls are only those the platform can honour: **Stop** (where a stop would be accepted — your own turn, a job it handed on, or a room turn your message started), **Open in Work** (the rail, on this tab), and after a job that failed, timed out, was stopped or was lost, **Ask about it**, which pre-fills the composer with a question naming the job and how it ended and never sends on its own. A card for a finished job survives a reload; a reply that lands replaces it.
 
 Steps are one of three sentences, never two: the stages themselves, *{agent} doesn't report steps.* when a reachable agent publishes none, or *Steps could not be read right now.* when nobody can tell (a stopped or unreachable agent, or two runs on the same agent).
 

@@ -27,21 +27,47 @@ import pytest
 _backend = os.path.join(os.path.dirname(__file__), '..', '..', 'src', 'backend')
 sys.path.insert(0, _backend)
 
-# Load module directly to avoid services/__init__.py import chain.
+# Load the PACKAGE directly to avoid the services/__init__.py import chain.
+# #1028: agent_client is a package now, so the load needs package plumbing —
+# `submodule_search_locations` plus a sys.modules registration BEFORE exec, or
+# the __init__'s relative imports cannot resolve their parent.
+import sys
+_pkg_dir = os.path.join(_backend, "services", "agent_client")
 _spec = importlib.util.spec_from_file_location(
     "agent_client",
-    os.path.join(_backend, "services", "agent_client.py"),
+    os.path.join(_pkg_dir, "__init__.py"),
+    submodule_search_locations=[_pkg_dir],
 )
 agent_client = importlib.util.module_from_spec(_spec)
+# Import-time stub monkeypatch can't reach (the exec below needs the parent
+# registered first); the autouse _restore_sys_modules fixture below reverts it.
+_STUBBED_MODULE_NAMES = ["agent_client"]
+sys.modules["agent_client"] = agent_client  # noqa — restored by the fixture
 _spec.loader.exec_module(agent_client)
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+# The pool internals under test live in the http_pool module.
+_http_pool = agent_client.http_pool
 
 AgentClient = agent_client.AgentClient
 AgentCircuitOpenError = agent_client.AgentCircuitOpenError
 AgentNotReachableError = agent_client.AgentNotReachableError
 AgentConnectionDroppedError = agent_client.AgentConnectionDroppedError
 AgentClientError = agent_client.AgentClientError
-_client_pool = agent_client._client_pool
-_get_http_client = agent_client._get_http_client
+_client_pool = _http_pool._client_pool
+_get_http_client = _http_pool._get_http_client
 close_all_clients = agent_client.close_all_clients
 is_circuit_failure = agent_client.is_circuit_failure
 
@@ -171,7 +197,7 @@ class TestExceptionHierarchy:
         """No exception type should be in both CIRCUIT_FAILURE and TRANSIENT
         tuples — that would make classification ambiguous."""
         cf = set(agent_client.CIRCUIT_FAILURE_EXCEPTIONS)
-        tt = set(agent_client.TRANSIENT_TRANSPORT_EXCEPTIONS)
+        tt = set(agent_client.circuit.TRANSIENT_TRANSPORT_EXCEPTIONS)
         assert cf.isdisjoint(tt), f"overlap: {cf & tt}"
 
 
@@ -221,7 +247,7 @@ async def _make_drop_fixture(monkeypatch, agent_name: str, raise_exc: Exception)
     fake_circuit.allow_request.return_value = True
     fake_circuit.failure_count = 0
     monkeypatch.setattr(
-        agent_client, "_get_circuit", lambda _name: fake_circuit
+        agent_client.circuit, "_get_circuit", lambda _name: fake_circuit
     )
 
     client = AgentClient(agent_name)
@@ -389,19 +415,19 @@ async def test_connect_error_during_grace_reclassified_as_dropped(monkeypatch):
     fake_circuit = MagicMock()
     fake_circuit.allow_request.return_value = True
     fake_circuit.failure_count = 0
-    monkeypatch.setattr(agent_client, "_get_circuit", lambda _name: fake_circuit)
+    monkeypatch.setattr(agent_client.circuit, "_get_circuit", lambda _name: fake_circuit)
 
     client = AgentClient("test-grace-connect")
     base_url = client.base_url
 
     # Pre-stamp the grace window so _acquire_client returns a fresh client.
-    agent_client._stamp_drop(base_url)
+    agent_client.http_pool._stamp_drop(base_url)
 
     async def _raise_connect():
         raise httpx.ConnectError("connection refused")
 
     _TrackingAsyncClient.reset(on_request=_raise_connect)
-    monkeypatch.setattr(agent_client.httpx, "AsyncClient", _TrackingAsyncClient)
+    monkeypatch.setattr(agent_client.http_pool.httpx, "AsyncClient", _TrackingAsyncClient)
 
     with pytest.raises(AgentConnectionDroppedError):
         await client._request("GET", "/health")
@@ -412,7 +438,7 @@ async def test_connect_error_during_grace_reclassified_as_dropped(monkeypatch):
     assert len(_TrackingAsyncClient.instances) == 1
     assert _TrackingAsyncClient.instances[0].aclose_called is True
     # Cleanup: clear the drop stamp so other tests don't observe grace.
-    agent_client._recent_drops.pop(base_url, None)
+    agent_client.http_pool._recent_drops.pop(base_url, None)
 
 
 @pytest.mark.asyncio
@@ -422,24 +448,24 @@ async def test_timeout_during_grace_reclassified_as_dropped(monkeypatch):
 
     fake_circuit = MagicMock()
     fake_circuit.allow_request.return_value = True
-    monkeypatch.setattr(agent_client, "_get_circuit", lambda _name: fake_circuit)
+    monkeypatch.setattr(agent_client.circuit, "_get_circuit", lambda _name: fake_circuit)
 
     client = AgentClient("test-grace-timeout")
     base_url = client.base_url
-    agent_client._stamp_drop(base_url)
+    agent_client.http_pool._stamp_drop(base_url)
 
     async def _raise_timeout():
         raise httpx.TimeoutException("timed out")
 
     _TrackingAsyncClient.reset(on_request=_raise_timeout)
-    monkeypatch.setattr(agent_client.httpx, "AsyncClient", _TrackingAsyncClient)
+    monkeypatch.setattr(agent_client.http_pool.httpx, "AsyncClient", _TrackingAsyncClient)
 
     with pytest.raises(AgentConnectionDroppedError):
         await client._request("GET", "/health")
 
     fake_circuit.record_failure.assert_not_called()
     assert _TrackingAsyncClient.instances[0].aclose_called is True
-    agent_client._recent_drops.pop(base_url, None)
+    agent_client.http_pool._recent_drops.pop(base_url, None)
 
 
 @pytest.mark.asyncio
@@ -453,17 +479,17 @@ async def test_fresh_clients_closed_during_drop_burst(monkeypatch):
 
     fake_circuit = MagicMock()
     fake_circuit.allow_request.return_value = True
-    monkeypatch.setattr(agent_client, "_get_circuit", lambda _name: fake_circuit)
+    monkeypatch.setattr(agent_client.circuit, "_get_circuit", lambda _name: fake_circuit)
 
     client = AgentClient("test-grace-leak")
     base_url = client.base_url
-    agent_client._stamp_drop(base_url)
+    agent_client.http_pool._stamp_drop(base_url)
 
     async def _raise_read_err():
         raise httpx.ReadError("read")
 
     _TrackingAsyncClient.reset(on_request=_raise_read_err)
-    monkeypatch.setattr(agent_client.httpx, "AsyncClient", _TrackingAsyncClient)
+    monkeypatch.setattr(agent_client.http_pool.httpx, "AsyncClient", _TrackingAsyncClient)
 
     # Fire a burst of calls inside the grace window. All raise; none must leak.
     for _ in range(8):
@@ -475,7 +501,7 @@ async def test_fresh_clients_closed_during_drop_burst(monkeypatch):
     for inst in _TrackingAsyncClient.instances:
         assert inst.aclose_called is True, "fresh client was not closed"
     # Cleanup.
-    agent_client._recent_drops.pop(base_url, None)
+    agent_client.http_pool._recent_drops.pop(base_url, None)
 
 
 @pytest.mark.asyncio
@@ -487,13 +513,13 @@ async def test_pooled_client_not_closed_on_success(monkeypatch):
 
     fake_circuit = MagicMock()
     fake_circuit.allow_request.return_value = True
-    monkeypatch.setattr(agent_client, "_get_circuit", lambda _name: fake_circuit)
+    monkeypatch.setattr(agent_client.circuit, "_get_circuit", lambda _name: fake_circuit)
 
     client = AgentClient("test-pool-keepalive")
     base_url = client.base_url
 
     # Make sure no grace window is active for this base_url.
-    agent_client._recent_drops.pop(base_url, None)
+    agent_client.http_pool._recent_drops.pop(base_url, None)
 
     class _OkResponse:
         status_code = 200

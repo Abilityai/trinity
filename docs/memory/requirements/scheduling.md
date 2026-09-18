@@ -1317,10 +1317,36 @@ schedules:
   batch that is still running — which is every batch a receipt is issued
   for.
 
+### 37.4 Async Fan-Out Join + Sync Edge Adapter (#2524)
+- **Status**: 🚧 In Progress (PR #2532)
+- **Implements**: Issue #2524 (#1081 Phase 4)
+- **Description**: A fan-out batch is joined from its execution rows so it can
+  run on the durable pull queue, and callers that must block get an adapter
+  instead of reading a `QUEUED` dispatch result.
+- **Requirements**:
+  - Every subtask row carries `fan_out_id` and the caller's `fan_out_task_id`;
+    the sync aggregate is rebuilt from the rows, in input order, and the #2670
+    GET exposes `task_id`.
+  - A subtask row is created only when its subtask holds a `max_concurrency`
+    slot. No undispatched subtask may exist as a `RUNNING` or `QUEUED` row.
+  - `async_mode: true` returns `{fan_out_id, status: "accepted", total}`
+    without waiting (backend and MCP `fan_out`).
+  - The outer deadline bounds the wait, never the work: still-open subtasks
+    (including undispatched ones) report `running`, the batch reports
+    `deadline_exceeded`. With no deadline the wait covers the whole batch
+    (`ceil(N / min(max_concurrency, max_parallel_tasks))` waves).
+  - `fan_out`, `a2a` and `operator_response` are in `PULL_REACHABLE_TRIGGERS`;
+    `a2a` and `operator_response` block on the row's terminal via
+    `dispatch_and_await_terminal`, and the ent#329 receipt is never `queued`.
+- **Known limits**: the not-yet-dispatched tail of a batch is held in-process
+  and is lost on backend restart; `error_code` exists only on push results;
+  the in-process waiter registry makes the 5s DB poll the wake path on
+  multi-worker deployments.
+
 ## 38. Sequential Agent Loops (#740)
 
 ### 38.1 `run_agent_loop` MCP Tool + Backend Loop Service (#740 — Phase 1)
-- **Status**: 🚧 In Progress
+- **Status**: ✅ Implemented
 - **Implements**: Issue #740
 - **Description**: Server-side primitive for sequential bounded
   repetition of agent tasks. Complements `chat_with_agent` (single
@@ -1347,8 +1373,14 @@ schedules:
     `should_stop`; the current iteration finishes, the loop exits.
     Returns `{status: "stopping" | "already_done"}`.
 - **MCP tools**: `run_agent_loop`, `get_loop_status`, `stop_loop`.
-  Permission rules match `chat_with_agent` (owner/admin/shared or
-  explicit `agent_permissions` for agent-scoped keys).
+  Permission model (trinity-enterprise#628): an agent-scoped key reaches
+  itself and its `agent_permissions` targets — the same `{self} ∪ permitted`
+  edge `chat_with_agent` enforces — gated at the MCP layer at registration
+  (`src/mcp-server/src/access.ts`, `TOOL_ACCESS_POLICY`); the loop-id tools
+  resolve the loop's agent first. User keys are decided by the backend
+  (owner/admin/shared). The REST routes themselves are owner-equivalent for an
+  agent key (Invariant #8) — a tool-surface gate, not a capability boundary;
+  trinity-enterprise#629 owns that question.
 - **Execution model**: each iteration goes through the standard
   `task_execution_service.execute_task()` path → `capacity_manager`
   admit/slot → execute → release. Each iteration is recorded in
@@ -1395,8 +1427,10 @@ schedules:
 - **Out of scope (Phase 1)**: dedicated dashboard surface for loops
   (current timeline is sufficient — iterations appear as normal
   rows; a follow-up PR may add a collapse-group affordance);
-  auto-resume after restart; cross-agent loops (`agent` parameter
-  is `"self"` only for v1, matching `fan_out`).
+  auto-resume after restart. (An earlier revision listed cross-agent
+  loops as out of scope, "`agent` = self only, matching `fan_out`"; the
+  shipped tool accepts `agent_name` and the permission model above is the
+  rule — corrected under trinity-enterprise#628.)
 
 ### 38.2 Loop-level wall-clock deadline (#1156)
 - **Status**: ✅ Implemented

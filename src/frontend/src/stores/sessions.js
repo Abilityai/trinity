@@ -55,7 +55,6 @@ export const useSessionsStore = defineStore('sessions', {
     featureFlagsFailed: false,
     sessionTabEnabled: false,
     voiceAvailable: false,
-    workspaceAvailable: false,
     voipAvailable: false,
     brainOrbAvailable: false,      // trinity-enterprise#58 — Brain Orb platform flag
     a2aAvailable: false,           // trinity-enterprise#158 — A2A config tab (enterprise_features)
@@ -80,6 +79,10 @@ export const useSessionsStore = defineStore('sessions', {
     installSource: 'unknown',
     hardeningGuideEligible: false,
     installTlsPosture: 'unconfigured',
+    // #2691: whether that advertised name has ever actually served a request.
+    // Defaults false and falls back to false on a failed read — the closed
+    // value, so a flags failure never shows a tick over an unproven domain.
+    publicUrlReached: false,
     // ent#437: the four booleans the Finish-setup consent card gates on. They
     // ride the flags document so the card decides from a payload the page
     // already awaits and never calls the admin status route on a Dashboard load
@@ -134,12 +137,11 @@ export const useSessionsStore = defineStore('sessions', {
         // #2559: no reader in `src/` since the Agent Detail voice overlay was
         // retired — the Talk door is ungated and the Workspace asks the roster
         // for its own capability. Kept because this is a free parse of a payload
-        // already fetched for six other flags, and the backend key is
-        // load-bearing server-side (`settings.py` derives `workspace_available`
-        // from it). Registered on the same follow-up as the now caller-less
+        // already fetched for the other flags. (The former `workspace_available`
+        // derivation is gone: ent#438 retired the surface it named.) Registered
+        // on the same follow-up as the now caller-less
         // `/api/agents/{name}/voice/*` routes.
         this.voiceAvailable = !!r.data?.voice_available
-        this.workspaceAvailable = !!r.data?.workspace_available
         this.voipAvailable = !!r.data?.voip_available
         this.brainOrbAvailable = !!r.data?.brain_orb_available
         this.brainOrbVoiceAvailable = !!r.data?.brain_orb_voice_available
@@ -157,6 +159,7 @@ export const useSessionsStore = defineStore('sessions', {
         this.installSource = r.data?.install_source || 'unknown'
         this.hardeningGuideEligible = !!r.data?.hardening_guide_eligible
         this.installTlsPosture = r.data?.install_tls_posture || 'unconfigured'
+        this.publicUrlReached = !!r.data?.public_url_reached
         // ent#437: an absent field reads as hidden (`dismissed`), never as a
         // fresh ask — an older backend must not pop the card on every load.
         this.telemetrySharingEnabled = !!r.data?.telemetry_sharing_enabled
@@ -172,7 +175,6 @@ export const useSessionsStore = defineStore('sessions', {
         this.featureFlagsFailed = true
         this.sessionTabEnabled = false
         this.voiceAvailable = false
-        this.workspaceAvailable = false
         this.voipAvailable = false
         this.brainOrbAvailable = false
         this.brainOrbVoiceAvailable = false
@@ -187,6 +189,7 @@ export const useSessionsStore = defineStore('sessions', {
         this.installSource = 'unknown'
         this.hardeningGuideEligible = false
         this.installTlsPosture = 'unconfigured'
+        this.publicUrlReached = false
         // ent#437 fails in the HIDDEN direction: a failed flags fetch must not
         // pop a consent ask, so `dismissed` reads true until a real answer.
         this.telemetrySharingEnabled = false

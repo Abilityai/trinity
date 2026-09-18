@@ -29,13 +29,13 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
-from config import PORTAL_SOURCE_CHANNEL
+from config import PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL
 from database import db as core_db
 from utils.helpers import parse_iso_timestamp
 
 from .. import db as portal_db
 from ..service import roster_agent_names
-from .models import PortalWork, WorkItem, WorkKind, WorkOutcome, WorkSteps
+from .models import PortalWork, PortalWorkActivity, WorkActivity, WorkItem, WorkKind, WorkOutcome, WorkSteps
 from . import pipeline_state
 
 logger = logging.getLogger(__name__)
@@ -85,11 +85,11 @@ def work_kind(row: dict) -> WorkKind:
         return "room"
     if trigger in ("schedule", "scheduled"):
         return "schedule"
-    if channel == PORTAL_SOURCE_CHANNEL:
-        if trigger == "public":
-            return "turn"
-        if trigger in ("mcp", "agent", "fan_out", "a2a"):
-            return "delegated"
+    if channel == PORTAL_SOURCE_CHANNEL and trigger == "public":
+        return "turn"
+    # #2792: a room turn (stamped `room`) delegates the same way a 1:1 turn does.
+    if channel in (PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL) and trigger in ("mcp", "agent", "fan_out", "a2a"):
+        return "delegated"
     return "other"
 
 
@@ -132,6 +132,70 @@ def clean_error(error_summary: Optional[str]) -> Optional[str]:
     return text if len(text) <= ERROR_MAX else text[: ERROR_MAX - 1].rstrip() + "…"
 
 
+# ----------------------------------------------------------- activity (#620)
+
+# A live line older than this is a line the agent stopped renewing — the
+# heartbeat's own TTL is 15 s, so this only matters if a reader holds a
+# payload across a beat; the client applies the same ceiling to the value.
+ACTIVITY_MAX_AGE_S = 30
+ACTIVITY_SUMMARY_MAX = TITLE_MAX
+_DELEGATION_TARGET_RE = re.compile(r"^(agent_name|agent|target|name):\s*([A-Za-z0-9._-]+)(.*)$")
+
+
+def clean_activity(entry: Optional[dict], roster: Iterable[str], *, now: datetime) -> Optional[WorkActivity]:
+    """The agent's `{tool, summary, since, ts}` → what the caller may see.
+
+    Same sanitiser as titles (`sanitize_text` — a path or a command can carry
+    a token as easily as a message can), same bound, and a delegation whose
+    summary names an off-roster agent is masked to "another agent" (the
+    `mask` rule for every name on this surface). Nothing else the heartbeat
+    carries reaches the payload: no pid, no raw input.
+    """
+    if not isinstance(entry, dict):
+        return None
+    ts = entry.get("ts")
+    age: Optional[int] = None
+    if isinstance(ts, (int, float)):
+        age = max(0, int(now.timestamp() - float(ts)))
+        if age > ACTIVITY_MAX_AGE_S:
+            return None
+    tool = entry.get("tool")
+    tool = tool if isinstance(tool, str) and tool.strip() else None
+    summary = entry.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        from utils.credential_sanitizer import sanitize_text
+        summary = _WS_RE.sub(" ", sanitize_text(summary)).strip()
+        m = _DELEGATION_TARGET_RE.match(summary)
+        if m and (tool or "").startswith("mcp:"):
+            target = m.group(2)
+            if target not in set(roster):
+                summary = f"{m.group(1)}: another agent{m.group(3)}"
+        if len(summary) > ACTIVITY_SUMMARY_MAX:
+            summary = summary[: ACTIVITY_SUMMARY_MAX - 1].rstrip() + "…"
+    else:
+        summary = None
+    since = entry.get("since")
+    return WorkActivity(
+        tool=tool[:64] if tool else None,
+        summary=summary,
+        since=since if isinstance(since, str) else None,
+        age_seconds=age,
+    )
+
+
+def _activity_by_agent(agent_names: Iterable[str]) -> Dict[str, Dict[str, dict]]:
+    """One Redis read per agent; never raises (a missing beat is an empty map)."""
+    from services import heartbeat_service
+    out: Dict[str, Dict[str, dict]] = {}
+    for agent in agent_names:
+        try:
+            out[agent] = heartbeat_service.read_execution_activity(agent)
+        except Exception:  # noqa: BLE001
+            logger.debug("work: activity read failed for %s", agent, exc_info=True)
+            out[agent] = {}
+    return out
+
+
 def _ts(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
@@ -158,6 +222,27 @@ def is_stale(elapsed: Optional[int], turn_timeout_seconds: int) -> bool:
     return elapsed is not None and elapsed > stale_bound_seconds(turn_timeout_seconds)
 
 
+#: Kinds the terminate route will accept. An ALLOWLIST, never a blocklist of
+#: kinds we happen to have thought of: an unrecognised trigger projects as
+#: `other`, and offering Stop on a row whose cancel semantics nobody has read
+#: is how the button becomes a lie.
+#:
+#: `room` (#2795) is here because the route genuinely accepts it, not because a
+#: tile wanted a button. `shared_sessions.service._wake_agent` runs every room
+#: turn through `execute_task(..., source_user_email=current_user.email)`, and
+#: the agent is a room participant, which on the Workspace can only be an agent
+#: already on the poster's roster — so both gates the route actually applies
+#: (`_require_roster`, then `execution_belongs_to_caller`'s
+#: `source_user_email` match) are satisfied by construction. Its absence was
+#: the whole of the server-side half of #2795: the Work tab listed the run and
+#: hid the only control that would have ended it.
+#:
+#: `loop` stays out deliberately — a loop is stopped from the Loops tab, where
+#: stopping the LOOP is what the person means; cancelling one iteration leaves
+#: the runner to start the next one.
+STOPPABLE_KINDS = frozenset({"turn", "delegated", "room"})
+
+
 def can_stop(item_kind: WorkKind, status: str, *, mine: bool, on_roster: bool, stale: bool) -> bool:
     """What `POST .../executions/{id}/terminate` will accept, decided once here
     so the button is never a lie: the route requires the agent on the roster
@@ -165,7 +250,7 @@ def can_stop(item_kind: WorkKind, status: str, *, mine: bool, on_roster: bool, s
     a person can see."""
     return (mine and on_roster and not stale
             and status in ("running", "queued")
-            and item_kind in ("turn", "delegated"))
+            and item_kind in STOPPABLE_KINDS)
 
 
 def mask(name: Optional[str], roster: Iterable[str]) -> Optional[str]:
@@ -210,9 +295,11 @@ def _project(row: dict, *, email: str, roster: set, turn_timeout: int,
         duration_ms=row.get("duration_ms"),
         elapsed_seconds=None if stale else elapsed,
         stale=stale,
-        # Only a PORTAL stamp is a chat id the client can open; a Telegram or
-        # Slack destination is not the client's business.
-        chat_id=row.get("source_channel_chat_id") if channel == PORTAL_SOURCE_CHANNEL else None,
+        # Only a Workspace stamp — a 1:1 thread (`portal`) or a room (`room`,
+        # #2792) — is a chat id the client can open; a Telegram or Slack
+        # destination is not the client's business.
+        chat_id=(row.get("source_channel_chat_id")
+                 if channel in (PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL) else None),
         mine=mine,
         can_stop=can_stop(kind, status, mine=mine, on_roster=on_roster, stale=stale),
         delegated_by=mask(row.get("source_agent_name"), roster),
@@ -339,6 +426,39 @@ async def get_work(email: str, names: List[str], chat_id: Optional[str] = None) 
         if it.steps is None:
             it.steps = WorkSteps(state="unknown")
 
+    # Activity (#620): the agent's last beat, folded onto its live rows. Only
+    # a rostered agent (an unnamed child's agent is not the caller's to read),
+    # only a non-stale in-flight row, and only what `clean_activity` admits.
+    activity = _activity_by_agent(by_agent.keys())
+    for it in now_items:
+        if it.agent_name and not it.stale and it.status in IN_FLIGHT:
+            it.activity = clean_activity(activity.get(it.agent_name, {}).get(it.id), roster, now=now)
+
     return PortalWork(agents=agents, now=now_items, earlier=earlier_items,
                       earlier_total=earlier_total, window_days=WINDOW_DAYS,
                       earlier_limit=EARLIER_LIMIT)
+
+
+async def get_work_activity(email: str, names: List[str]) -> PortalWorkActivity:
+    """The live lines alone (trinity-enterprise#620): every execution the
+    named rostered agents reported in their last heartbeat, cleaned the same
+    way `get_work` cleans them. Redis only — no ledger read, no pipeline
+    files — so the Work tab can poll it every few seconds while a card is
+    live without moving the full read off its 12 s cadence.
+
+    Same gate as `get_work`: set-membership against the caller's roster, an
+    off-roster name dropped never answered. The execution ids it returns are
+    the agent's own running set; a row the ledger no longer calls in-flight
+    is dropped client-side by joining onto `now`, and an agent's beat expires
+    in 15 s regardless.
+    """
+    roster = roster_agent_names(email, include_owned=True)
+    agents = [n for n in names if n in roster]
+    now = datetime.now(timezone.utc)
+    items: Dict[str, WorkActivity] = {}
+    for agent, by_id in _activity_by_agent(agents).items():
+        for eid, entry in by_id.items():
+            cleaned = clean_activity(entry, roster, now=now)
+            if cleaned is not None:
+                items[str(eid)] = cleaned
+    return PortalWorkActivity(agents=agents, items=items)

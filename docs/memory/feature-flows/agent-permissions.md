@@ -415,48 +415,35 @@ if (authContext?.scope === "agent" && authContext?.agentName) {
 
 ### chat_with_agent Permission Check
 
-**File**: `src/mcp-server/src/tools/chat.ts:29-100`
+**Files**: `src/mcp-server/src/access.ts` (`checkAgentEdge` — the canonical agent-scope gate, ent#628) and `src/mcp-server/src/tools/chat.ts` (`checkAgentAccess` — the chat family's wrapper, which keeps the user-scope rule)
 
 ```typescript
-async function checkAgentAccess(
-  client: TrinityClient,
-  authContext: McpAuthContext | undefined,
-  targetAgentName: string
-): Promise<AgentAccessCheckResult> {
-  // If no auth context, allow (auth may be disabled)
-  if (!authContext) {
-    return { allowed: true };
-  }
-
-  // Phase 11.1: System-scoped keys bypass ALL permission checks
-  if (authContext.scope === "system") {
-    console.log(`[System Agent Access] ${authContext.agentName || "system"} -> ${targetAgentName} (bypassing permissions)`);
-    return { allowed: true };
-  }
-
-  // Phase 9.10: Agent-scoped keys use permission system
-  if (authContext.scope === "agent" && authContext.agentName) {
+// src/mcp-server/src/access.ts — ONE implementation of the agent-scope edge (ent#628).
+// Shared by chat_with_agent / fan_out / chat_with_<slug> (via chat.ts) and by every
+// tool whose TOOL_ACCESS_POLICY row is `enforce` (run_agent_loop — wrapped by server.ts,
+// no call in the tool body); the loop-id tools call it after resolving the loop's agent.
+export async function checkAgentEdge(client, authContext, targetAgentName) {
+  if (!authContext) return { allowed: true };                    // dev mode installs no authenticate → the backend gates
+  if (authContext.scope === "system") return { allowed: true };  // Phase 11.1: the system agent talks to everyone
+  if (authContext.scope === "agent") {
     const callerAgentName = authContext.agentName;
-
-    // Self-call is always allowed
-    if (callerAgentName === targetAgentName) {
-      return { allowed: true };
-    }
-
-    // Check if target is in permitted list
-    const isPermitted = await client.isAgentPermitted(callerAgentName, targetAgentName);
-    if (isPermitted) {
-      return { allowed: true };
-    }
-
-    // Not permitted
-    return {
-      allowed: false,
-      reason: `Permission denied: Agent '${callerAgentName}' is not permitted to communicate with '${targetAgentName}'. Configure permissions in the Trinity UI.`
-    };
+    if (!callerAgentName) return uniformDenial(targetAgentName); // a key row with no agent name is denied, not promoted
+    if (callerAgentName === targetAgentName) return { allowed: true };
+    if (await client.isAgentPermitted(callerAgentName, targetAgentName)) return { allowed: true }; // read fails CLOSED ([] on error)
+    return { allowed: false, reason: `Permission denied: Agent '${callerAgentName}' is not permitted to communicate with '${targetAgentName}'. Configure permissions in the Trinity UI.` };
   }
+  if (authContext.scope === "user") return { allowed: true };    // the backend decides, by role and per-user grant
+  return uniformDenial(targetAgentName);                         // #2323: an allowlist over scope, never a fallthrough
+}
 
-  // User-scoped keys: use existing ownership/sharing rules (lines 69-99)
+// src/mcp-server/src/tools/chat.ts — the chat family's wrapper around it
+async function checkAgentAccess(client, authContext, targetAgentName) {
+  if (!authContext) return { allowed: true };
+  if (authContext.scope === "system" || authContext.scope === "agent") {
+    return checkAgentEdge(client, authContext, targetAgentName);
+  }
+  if (authContext.scope !== "user") return uniformDenial(targetAgentName);
+  // User-scoped keys: same owner / shared-with-user / admin, uniform #186 denial otherwise (#2824 tracks the admin-by-username test)
 }
 ```
 
@@ -584,6 +571,8 @@ Events logged to audit service:
 ### Automated Tests
 
 **File**: `tests/test_agent_permissions.py` (16 tests, all passing)
+
+**Journey**: `tests/journeys/test_j10_agent_calls_agent_journey.py` (J10, #2349) asserts the MCP-layer enforcement end to end with a real agent-scoped key — `list_agents` = self ∪ permitted, `chat_with_agent`/`fan_out` refused without an edge and admitted with one, and the delete cascade read back from the source agent's own permission list. `run_agent_loop` is refused without an edge too (trinity-enterprise#628): the MCP server gates it at registration through `src/mcp-server/src/access.ts` — `TOOL_ACCESS_POLICY` declares how every tool treats an agent target, `server.ts` refuses to register a tool without a row, and `enforce` rows run `checkAgentEdge` before the tool executes; the loop-id tools resolve the loop's agent first and answer a compound `not found or not accessible` on denial. This is a tool-surface gate: the REST route behind each tool is still owner-equivalent for an agent key (Invariant #8), which is trinity-enterprise#629's ruling.
 
 | Test Class | Tests | Coverage |
 |------------|-------|----------|

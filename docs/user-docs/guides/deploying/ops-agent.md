@@ -23,6 +23,8 @@ cp .env.example .env
 
 Then open the directory in Claude Code. The repo ships with its own `.claude/skills/` so all the ops commands shown below work out of the box.
 
+If you have the [abilities](https://github.com/abilityai/abilities) `trinity` plugin installed, `/trinity:deploy` does this for you: it walks through deploying Trinity (cloud, remote SSH server, or localhost) or connecting to an existing instance, then clones this repo into a per-instance directory with `.env` already filled in.
+
 ## Configuration
 
 The ops agent connects to a Trinity instance via a `.env` file in its workspace.
@@ -35,16 +37,21 @@ The ops agent connects to a Trinity instance via a `.env` file in its workspace.
 | `SSH_PASSWORD` | Optional | — | Password fallback if no key |
 | `SSH_PORT` | Optional | `22` | SSH port |
 | `TRINITY_PATH` | Optional | `~/trinity` (`.env.example` ships `/home/ubuntu/trinity`) | Trinity install directory on the server |
-| `COMPOSE_FILE` | Optional | `docker-compose.prod.yml` | The compose file the instance runs on |
+| `COMPOSE_FILE` | Optional | `docker-compose.prod.yml` | The compose file the instance runs on (`docker-compose.hosted.yml` on a hosted install). It also decides whether `/update` builds images or pulls them |
+| `TRINITY_BRANCH` | Optional | `main` | The branch `/update` pulls |
+| `FRONTEND_PORT` / `BACKEND_PORT` / `MCP_PORT` / `SCHEDULER_PORT` | Optional | `80` / `8000` / `8080` / `8001` | Service ports on the instance, as the scripts probe them |
 | `ADMIN_PASSWORD` | Required | — | Trinity admin password for API calls |
 | `MCP_API_KEY` | Optional | — | MCP API key for agent queries |
 | `ANTHROPIC_API_KEY` | Optional | — | Passed through for agent containers |
+| `TUNNEL_FRONTEND` / `TUNNEL_BACKEND` / `TUNNEL_MCP` | Optional | `13000` / `18000` / `18080` | Local ports `tunnel.sh` forwards to on a remote instance |
 
 **Local mode:** Leave `SSH_HOST` empty. All commands run directly against the local Docker daemon.
 
 **Remote mode:** Set `SSH_HOST`. Commands are forwarded over SSH — no agent container is needed on the remote server.
 
-**Hosted (pull-only) installs:** the ops agent's `/update` and `update.sh` rebuild the platform images from source. On an instance installed with `./scripts/deploy/start.sh --hosted` (prebuilt GHCR images, including the DigitalOcean 1-Click), upgrade with `start.sh --hosted` instead — see [Upgrading → Hosted installs](upgrading.md#hosted-pull-only-installs). Health checks, logs, restarts and backups work the same on either install.
+**Hosted (pull-only) installs:** on an instance installed with `./scripts/deploy/start.sh --hosted` (prebuilt GHCR images, including both DigitalOcean paths), set `COMPOSE_FILE=docker-compose.hosted.yml`. `/update` and `update.sh` then switch to hosted mode: instead of building, they run `start.sh --hosted --unattended` on the server, which pulls the platform images and the agent base image. The release comes from `TRINITY_IMAGE_TAG` in the **server's** `.env`, so pin it there — see [Upgrading → Hosted installs](upgrading.md#hosted-pull-only-installs). Health checks, logs, restarts and backups work the same on either install.
+
+**A DigitalOcean Droplet** created by the [installer script](digitalocean.md) or the 1-Click needs `SSH_USER=root`, `TRINITY_PATH=/opt/trinity`, `COMPOSE_FILE=docker-compose.hosted.yml` and `FRONTEND_PORT=8081` (Caddy owns ports 80 and 443 there). The backend port is not reachable from outside the Droplet, so the scripts call it on the server itself over SSH, or you reach it through `tunnel.sh`.
 
 ## Day-to-Day Operations
 
@@ -54,7 +61,7 @@ The ops agent connects to a Trinity instance via a `.env` file in its workspace.
 ./scripts/status.sh
 ```
 
-Checks all six Trinity services: backend (`8000`), frontend (`80`), MCP server (`8080`), scheduler (`8001`), Redis, and Vector (`8686`). Reports container status, HTTP endpoint responses, and the current git version.
+Lists every `trinity-*` and `agent-*` container with its status, then probes the backend (`/health` on `BACKEND_PORT`), the frontend (HTTP code on `FRONTEND_PORT`), Redis (`redis-cli ping`) and the scheduler (its Docker health status), and prints the checkout's current git commit. It does not probe the MCP server or Vector — use the six-probe list in [Monitoring](monitoring.md) for those.
 
 ### View and diagnose logs
 
@@ -86,7 +93,18 @@ Restarts all platform services using `docker compose restart` — not `down/up`,
 ./scripts/update.sh
 ```
 
-Pulls the latest Trinity code, rebuilds platform images (`backend`, `frontend`, `mcp-server`, `scheduler`), restarts, and verifies health — including a check that the running `version` matches the image it runs in, so a stale platform image is called out rather than missed. Does **not** rebuild the agent base image — that image changes rarely and rebuilding it forces every agent to be re-deployed; the script tells you when the pulled range touched it, and `/rebuild-agent` rolls a rebuilt image out to agents.
+In order, the script:
+
+1. **Checks `CREDENTIAL_ENCRYPTION_KEY`.** It stops before touching anything if the key is empty in the server's `.env`, because the backend refuses to start without it once credentials are stored encrypted.
+2. **Backs up the database** with `backup.sh`, and aborts if the backup fails.
+3. **Pulls** the latest code from `TRINITY_BRANCH` (default `main`).
+4. **Updates the containers.** On a source-built install it rebuilds the platform images (`backend`, `frontend`, `mcp-server`, `scheduler`) and runs `docker compose up -d`. On a hosted install it runs `start.sh --hosted --unattended`.
+5. **Sweeps agent restart policies.** Agent containers created by older releases are moved to `unless-stopped`, so they come back after a host reboot. A stopped agent stays stopped.
+6. **Verifies.** It checks backend and scheduler health, and whether the running `version` matches the image it runs in, so a stale platform image is called out rather than missed. It also warns if the PostgreSQL migration history has more than one head, which stops schema migrations from applying.
+
+It does **not** rebuild the agent base image on a source-built install. That image changes rarely, and rebuilding it forces every agent to be re-deployed. The script tells you when the pulled range touched it, or on a hosted install that a new one was pulled. Agents adopt a new base image on a cold stop and start, and `/rebuild-agent` rolls it out to agents.
+
+> **Never `docker compose down`.** Agent containers restart automatically (`unless-stopped`), and `down` recreates the agent network, which sends every agent into a restart loop. Stop the stack with `docker compose stop` (upstream's `scripts/deploy/stop.sh`) instead.
 
 ### Backup database
 
@@ -116,7 +134,7 @@ Takes an on-demand copy into `~/backups/` on the host: for SQLite an online back
 ./scripts/tunnel.sh
 ```
 
-Opens SSH port-forwarding so you can access the Trinity UI (`http://localhost`) and API locally while the instance runs on a remote server.
+Opens SSH port-forwarding so you can reach the Trinity UI and API locally while the instance runs on a remote server — the UI at `http://localhost:13000` by default (`TUNNEL_FRONTEND`), the API at `http://localhost:18000` (`TUNNEL_BACKEND`). With `SSH_HOST` empty it prints the direct local address instead.
 
 ## Rollback
 
@@ -133,24 +151,28 @@ If an update breaks the instance:
 ./scripts/restart.sh
 ```
 
+On a **hosted** install there is nothing to rebuild. Set `TRINITY_IMAGE_TAG` in the server's `.env` back to the previous release and re-run `start.sh --hosted`, which also pulls that release's agent base image.
+
+**Rolling back to a release before v0.9.5 needs the pre-update database.** v0.9.5 encrypts the credentials entered in Settings and deletes their plaintext copies, and older releases read only the plaintext. Restore the backup taken before the update (the `/update` backup, or the platform's own `pre-migration-*.db` copy), or re-enter those credentials in Settings after the rollback. `/rollback` takes the backup file as its second argument.
+
 ## Skills
 
 Open the repo in Claude Code and use the slash commands it ships with:
 
 | Skill | What it does |
 |-------|-------------|
-| `/status` | Health check — backend, scheduler, containers, version |
+| `/status` | Health check — backend, scheduler, containers, version, and whether the install is source-built or hosted |
 | `/logs <service> [lines] [errors]` | View logs for any service or agent |
 | `/restart [service\|all]` | Restart services with health verification |
-| `/update` | Pull latest, rebuild containers, restart, verify (source-built installs) |
-| `/agents [list\|start\|stop\|logs\|exec]` | Manage agent containers |
+| `/update [--wait\|--force]` | Back up the DB, pull latest, rebuild containers (or run `start.sh --hosted` on a hosted install), restart, verify; `--wait` waits for running executions, `--force` skips that check |
+| `/agents [list\|start\|stop\|logs\|exec\|policy\|dump]` | Manage agent containers; `policy` lists each agent's restart policy and restart count, `dump <name>` writes a stuck agent server's thread stacks to its log without restarting it |
 | `/rebuild-agent <name\|--all>` | Rebuild agent containers from the latest base image |
 | `/diagnose` | Full error scan — logs, restarts, disk, DB integrity |
 | `/telemetry` | CPU, memory, disk, container resource stats |
 | `/rollback [commit] [backup]` | Roll back to a previous commit, optionally restoring a DB backup |
 | `/cleanup [--execute]` | Prune Docker images, build cache, old backups |
 | `/migrate-to-postgres` | Migrate the database from SQLite to PostgreSQL — validate in parallel, then cut over; one-line rollback |
-| `/provision [provider]` | Step-by-step provisioning for Hetzner, GCP, AWS, DigitalOcean or localhost |
+| `/provision [provider]` | Step-by-step provisioning for Hetzner, GCP, AWS, DigitalOcean or localhost; for DigitalOcean it offers the one-command installer first |
 | `/sync-ops-knowledge` | Review recent Trinity changes and update the agent's own instructions |
 
 ## Minimum Server Requirements

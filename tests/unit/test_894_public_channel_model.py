@@ -101,7 +101,7 @@ class TestPublicChannelModel:
 
 class TestCallSiteWiring:
     SITES = {
-        "src/backend/routers/public.py": 2,          # sync + async-background paths
+        "src/backend/services/public_chat_service.py": 2,  # sync + async-background paths (moved by #1028)
         "src/backend/adapters/message_router.py": 1,
         "src/backend/routers/paid.py": 1,
     }

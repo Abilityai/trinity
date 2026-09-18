@@ -20,10 +20,21 @@
  *
  * Two rules are load-bearing and are why the arms below are not symmetric:
  *
- *   1. Absence of a verdict is its own state (#2029). `conflict` and
- *      `unknown` post NO status — `success` would be a false all-clear on a
- *      check that never ran, and nothing corrects that; `failure` would blame
- *      the PR for something that is not this defect.
+ *   1. Absence of a verdict is its own state (#2029). `unknown` posts NO
+ *      status — `success` would be a false all-clear on a check that never
+ *      ran, and nothing corrects that. `conflict` used to be treated the same
+ *      way, and that is the #2828 defect: it meant "the PR conflicts with dev
+ *      ANYWHERE", so a `learnings.md` append collision — the single most
+ *      common conflict in this repo — silenced the one guard for the
+ *      silent-schema-fork class on exactly the busy days a fork is likeliest.
+ *      The workflow now evaluates the version line through an unrelated
+ *      conflict (the merged tree is written on exit 1 too) and reserves
+ *      `conflict` for a revision file that itself conflicts. THAT is
+ *      genuinely unevaluable, and it is published as a visible `error`
+ *      status rather than silence: the author has to act on it either way,
+ *      and "not evaluated" reading like "nothing to say" is what let two
+ *      forks ride to the train green. An `error` is neither an all-clear nor
+ *      a fork verdict; it is the honest third state GitHub has a colour for.
  *   2. A clean PR never GAINS a sticky comment. It only ever edits one that
  *      already exists, into a resolved body. Publishing a green comment on
  *      every migration PR is noise the signal then hides in.
@@ -123,7 +134,7 @@ function forkDescription(heads) {
   return truncate(`${count} ${noun} if merged into dev: ${heads.join(', ')}`);
 }
 
-function forkBody({ detail, heads, devHead, headSha, runUrl }) {
+function forkBody({ detail, heads, devHead, headSha, runUrl, conflictsElsewhere }) {
   const rechain = devHead
     ? `rechain this PR's revision off \`${devHead}\` (the current \`dev\` head)`
     : "rechain this PR's revision off the current `dev` head";
@@ -146,6 +157,7 @@ function forkBody({ detail, heads, devHead, headSha, runUrl }) {
     '',
     '</details>',
     '',
+    ...elsewhereLines(conflictsElsewhere),
     `**Fix**: ${rechain}, or — if the forked revision may already be applied somewhere — add a merge ` +
       `revision (${merge}), whose tuple \`down_revision\` converges the line from any starting state. ` +
       'See Architectural Invariant #3.',
@@ -157,22 +169,54 @@ function forkBody({ detail, heads, devHead, headSha, runUrl }) {
   ].join('\n');
 }
 
-function conflictBody({ headSha, runUrl }) {
+/**
+ * A revision file that is edited on BOTH sides. Distinct from a conflict
+ * elsewhere in the repo, which the workflow evaluates straight through
+ * (#2828) — this is the one shape whose merged tree is not a graph anyone
+ * will apply, so it cannot be checked and must be said out loud.
+ */
+function conflictBody({ detail, headSha, runUrl }) {
+  const files = String(detail ?? '').trim();
   return [
     MARKER,
-    '🚧 **Alembic head check could not run — this PR conflicts with `dev`.**',
+    '🚧 **Alembic head check could not run — a revision file in this PR conflicts with `dev`.**',
     '',
-    '`git merge-tree` reported conflicts, so there is no merged tree to check. GitHub cannot compute ' +
-      '`refs/pull/N/merge` in this state either, which is why a conflicting PR shows **no** checks at all.',
+    'The version line itself is in conflict, so its merged state is not a graph anyone will apply and ' +
+      'the head check has no honest answer. This is NOT the usual `learnings.md`-style collision, which ' +
+      'the check evaluates straight through (#2828): a revision file was changed on both sides.',
     '',
-    'Merge `dev` into this branch and push. The head check re-runs automatically on the next push to ' +
-      '`dev` touching `src/backend/migrations/versions/**`.',
+    ...(files ? ['<details><summary>Conflicting revision file(s)</summary>', '', ...fenced(files), '', '</details>', ''] : []),
+    'Merge `dev` into this branch, resolve the revision file (a revision already on `dev` is immutable — ' +
+      'rename yours and re-parent it), and push. The head check re-runs on the next push to `dev` ' +
+      'touching `src/backend/migrations/versions/**`.',
     '',
     footer({ headSha, runUrl }),
   ].join('\n');
 }
 
-function resolvedBody({ devHead, headSha, runUrl }) {
+/**
+ * One line naming the paths the PR conflicts with `dev` on OUTSIDE the
+ * version line (#2828). The verdict was reached on the real three-way merge
+ * of the version directories, so these do not change it — but the author
+ * still has to resolve them before merging, and a green status that hid
+ * them would be the next surprise. Paths are author-controlled: fenced, and
+ * capped so a pathological PR cannot pad the comment.
+ */
+function elsewhereLines(conflictsElsewhere) {
+  const paths = Array.isArray(conflictsElsewhere) ? conflictsElsewhere.map(String).filter(Boolean) : [];
+  if (paths.length === 0) return [];
+  const shown = paths.slice(0, 20);
+  const more = paths.length > shown.length ? [`… and ${paths.length - shown.length} more`] : [];
+  return [
+    `_Evaluated on the version line only — this PR also conflicts with \`dev\` in ${paths.length} ` +
+      `unrelated file(s), which do not change this verdict but must be resolved before merge:_`,
+    '',
+    ...fenced([...shown, ...more].join('\n')),
+    '',
+  ];
+}
+
+function resolvedBody({ devHead, headSha, runUrl, conflictsElsewhere }) {
   const head = devHead ? ` (\`${devHead}\`)` : '';
   return [
     MARKER,
@@ -180,6 +224,7 @@ function resolvedBody({ devHead, headSha, runUrl }) {
     '',
     'Previously flagged; resolved.',
     '',
+    ...elsewhereLines(conflictsElsewhere),
     footer({ headSha, runUrl }),
   ].join('\n');
 }
@@ -237,7 +282,10 @@ function verdictFor(result) {
     devHead = null,
     runUrl = null,
     dryRun = false,
+    conflictsElsewhere = [],
   } = result || {};
+  const elsewhere = Array.isArray(conflictsElsewhere) ? conflictsElsewhere.filter(Boolean) : [];
+  const elsewhereTag = elsewhere.length ? ` (also conflicts with dev in ${elsewhere.length} unrelated file(s))` : '';
 
   const nothing = (summary) => ({
     status: null,
@@ -254,13 +302,21 @@ function verdictFor(result) {
   }
 
   if (outcome === 'conflict') {
+    // #2828: `conflict` is now the version line ITSELF conflicting — the one
+    // unevaluable shape — and it is VISIBLE: an `error` status (GitHub's
+    // "could not run" colour, neither the all-clear `success` nor the
+    // this-PR-is-wrong `failure`) plus the sticky. "Not evaluated" as silence
+    // is how two forks reached the train green.
     const decision = {
-      // No status: `success` is a false all-clear on a check that never ran,
-      // and `failure` blames this PR for a conflict, not for a head fork.
-      status: null,
-      comment: { body: conflictBody({ headSha, runUrl }) },
+      status: {
+        state: 'error',
+        context: CONTEXT,
+        description: truncate('not evaluated — a revision file conflicts with dev; resolve it and push'),
+        target_url: runUrl || undefined,
+      },
+      comment: { body: conflictBody({ detail, headSha, runUrl }) },
       createIfMissing: true,
-      summary: `PR #${prNumber}: conflicts with dev — head check not evaluated`,
+      summary: `PR #${prNumber}: a revision file conflicts with dev — head check not evaluated`,
     };
     return dryRun ? { ...decision, status: null, comment: null } : decision;
   }
@@ -274,9 +330,9 @@ function verdictFor(result) {
         description: forkDescription(heads),
         target_url: runUrl || undefined,
       },
-      comment: { body: forkBody({ detail, heads, devHead, headSha, runUrl }) },
+      comment: { body: forkBody({ detail, heads, devHead, headSha, runUrl, conflictsElsewhere: elsewhere }) },
       createIfMissing: true,
-      summary: `PR #${prNumber}: FORK — ${heads.length || '?'} heads when merged into dev`,
+      summary: `PR #${prNumber}: FORK — ${heads.length || '?'} heads when merged into dev${elsewhereTag}`,
     };
     return dryRun ? { ...decision, status: null, comment: null } : decision;
   }
@@ -286,14 +342,14 @@ function verdictFor(result) {
       status: {
         state: 'success',
         context: CONTEXT,
-        description: truncate('1 head when merged into dev'),
+        description: truncate(`1 head when merged into dev${elsewhereTag}`),
         target_url: runUrl || undefined,
       },
       // Body is built so an EXISTING sticky can be resolved. `createIfMissing`
       // is false, so a PR that was never flagged never gains a comment.
-      comment: { body: resolvedBody({ devHead, headSha, runUrl }) },
+      comment: { body: resolvedBody({ devHead, headSha, runUrl, conflictsElsewhere: elsewhere }) },
       createIfMissing: false,
-      summary: `PR #${prNumber}: clean — 1 head when merged into dev`,
+      summary: `PR #${prNumber}: clean — 1 head when merged into dev${elsewhereTag}`,
     };
     return dryRun ? { ...decision, status: null, comment: null } : decision;
   }

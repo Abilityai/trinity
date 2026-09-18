@@ -1,57 +1,22 @@
 # Deploying Trinity
 
-Trinity runs your agents 24/7 with scheduling, monitoring, and multi-agent coordination. Choose cloud-hosted for simplicity or self-hosted for complete control.
+Trinity runs your agents 24/7 with scheduling, monitoring, and multi-agent coordination. You run it yourself, on your own machine or server, so your agents and their data stay inside your own perimeter. Setup takes about two minutes with prebuilt images, or up to 15 minutes when you build from source.
 
 > 📺 **Watch:** [I Built a DevOps Agent That Deploys Other Agents](https://youtu.be/8RozanPd14Y) *(Apr 2026)* · [Control My DGX Spark From Anywhere](https://youtu.be/epDBrEtg4nE) *(Jan 2026)* · [all videos](../videos.md)
 
-## Cloud vs Self-Hosted
-
-| | Cloud Hosted (ability.ai) | Self Hosted |
-|---|---|---|
-| **Infrastructure** | Zero to manage | You manage |
-| **Setup time** | 30 seconds | 2 minutes (prebuilt images) to 15 minutes (build from source) |
-| **Data location** | ability.ai servers | Your perimeter |
-| **Pricing** | Pay-per-agent | Free forever |
-| **Best for** | Teams focused on building | Enterprises with compliance requirements |
-
-### Self-hosted install paths
+## Install Paths
 
 | Path | Command | Best for | Guide |
 |---|---|---|---|
 | **Local, build from source** | `./scripts/deploy/start.sh` | Your own machine, development, hot reload | [Local Development](deploying/local-development.md) |
 | **Server, prebuilt images** | `./scripts/deploy/start.sh --hosted` | Any Linux VM — serving in about two minutes, no on-box builds | [Single Server → Prebuilt images](deploying/single-server.md#option-a-prebuilt-images-recommended) |
 | **Server, build from source** | `docker compose -f docker-compose.prod.yml up -d` | Servers that build their own images (custom patches, enterprise overlay) | [Single Server → Build from source](deploying/single-server.md#option-b-build-from-source) |
-| **DigitalOcean Marketplace 1-Click** | Create a Droplet from the Trinity image | HTTPS at the Droplet's IP with zero input; upgrade to a domain later | [Single Server → DigitalOcean 1-Click](deploying/single-server.md#digitalocean-marketplace-1-click) |
+| **DigitalOcean Marketplace 1-Click** | Create a Droplet from the Trinity image | HTTPS at the Droplet's IP with zero input; claim the admin account in the browser; upgrade to a domain later | [Single Server → DigitalOcean 1-Click](deploying/single-server.md#digitalocean-marketplace-1-click) |
+| **DigitalOcean, from your terminal** | `scripts/deploy/trinity-do-create.sh` (needs `doctl`) | Same result as the 1-Click, but you choose the admin password and paste a Claude subscription token before the Droplet exists | [Deploy on DigitalOcean](deploying/digitalocean.md) |
 
-All four paths share one installer (`scripts/deploy/start.sh`), one `.env` contract, and one set of day-two procedures ([Upgrading](deploying/upgrading.md), [Backup and Restore](deploying/backup-and-restore.md), [Monitoring](deploying/monitoring.md)).
+All five paths share one installer (`scripts/deploy/start.sh`), one `.env` contract, and one set of day-two procedures ([Upgrading](deploying/upgrading.md), [Backup and Restore](deploying/backup-and-restore.md), [Monitoring](deploying/monitoring.md)).
 
-## Option A: Cloud Hosted (ability.ai)
-
-### Step 1: Create an account
-
-Sign up at [ability.ai](https://ability.ai).
-
-### Step 2: Get your MCP connection URL
-
-After signup, go to **Settings > API Keys** and copy your MCP server URL.
-
-### Step 3: Connect from Claude Code
-
-```bash
-/trinity:connect
-```
-
-The skill asks for your connection URL and saves it to your config.
-
-### Step 4: Deploy your first agent
-
-```bash
-/trinity:onboard
-```
-
-Done. Your agent is now running on ability.ai.
-
-## Option B: Self Hosted (local, from source)
+## Option A: Local, from Source
 
 > **Tip:** the install runs one-shot with `./scripts/deploy/start.sh --unattended` (generates and prints the admin password), or is driven end to end by an AI coding agent via the runbook at [`docs/AGENT_INSTALL_GUIDE.md`](../../AGENT_INSTALL_GUIDE.md). `./quickstart.sh` is an alias for `start.sh` (`--defaults` means `--unattended`).
 
@@ -97,7 +62,9 @@ This builds `trinity-agent-base:latest` — the Docker image every agent contain
 
 Starts all platform services (backend, frontend, MCP server, Redis, scheduler, Vector, OTel collector), waits up to 180 seconds for the backend to report healthy, then prints the access URLs and a next-steps card (including the generated admin password under `--unattended`).
 
-Open `http://localhost` (or `http://localhost:$FRONTEND_PORT` if you remapped) and log in with `admin` + the password from `.env`. Because `ADMIN_PASSWORD` was set, the admin account already exists — there is no setup screen. See [First-Time Setup](../getting-started/setup.md) for what a fresh install contains.
+Open `http://localhost` (or `http://localhost:$FRONTEND_PORT` if you remapped) and log in with `admin` + the password from `.env`. Because `ADMIN_PASSWORD` was set, the admin account already exists — there is no setup screen. The Dashboard then opens the first-run setup sequence; connecting a Claude credential is its one required step. See [First-Time Setup](../getting-started/setup.md) for what a fresh install contains.
+
+To change the admin password later, edit `ADMIN_PASSWORD` in `.env` and recreate the backend container (`docker compose up -d backend`) — a plain `restart` does not re-read `.env`. The backend re-applies the value on every boot; there is no change-password form in the UI.
 
 ### Step 5: Connect from Claude Code
 
@@ -124,7 +91,7 @@ Alternatively, for email-verified login: when prompted, enter your email and fol
 /trinity:onboard
 ```
 
-## Option C: Server with Prebuilt Images
+## Option B: Server with Prebuilt Images
 
 On a server, pull-only is the path you want: every platform image and the agent base image are published to GHCR on each release, so nothing is compiled on the box.
 
@@ -137,11 +104,17 @@ echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env  # pin a release; `latest` moves on ever
 
 The repository checkout must stay beside the compose file (it mounts `./config/*`), and upgrades are a re-run of `start.sh --hosted` with a new `TRINITY_IMAGE_TAG` — not a bare `docker compose pull`. Full details, the tunnel and TLS choices, and the "which compose files go together" table: [Single Server → Prebuilt images](deploying/single-server.md#option-a-prebuilt-images-recommended).
 
-## Option D: DigitalOcean Marketplace 1-Click
+## Option C: DigitalOcean Marketplace 1-Click
 
-Create a Droplet from the Trinity image (4 GB RAM minimum, 8 GB recommended). First boot generates the admin password, obtains a Let's Encrypt certificate for the Droplet's own IP, and runs `start.sh --hosted --unattended` from the images baked into the snapshot — Trinity is serving over HTTPS about ninety seconds later with no input from you. The password is printed in the login banner (Droplet → Console, or `ssh root@<droplet-ip>` if you chose SSH-key auth); change it by editing `ADMIN_PASSWORD` in `/opt/trinity/.env` and restarting the backend.
+Create a Droplet from the Trinity image (4 GB RAM minimum, 8 GB recommended). First boot obtains a Let's Encrypt certificate for the Droplet's own IP and runs `start.sh --hosted --unattended` from the images baked into the snapshot — Trinity is serving over HTTPS about ninety seconds later with no input from you. **No admin account exists yet:** open `https://<droplet-ip>` and the first visitor creates it (email + password) at `/setup`, logged straight in. Do that right after creating the Droplet — until then, anyone who finds the IP can claim it. No terminal is needed and no password is ever printed. To choose the password before first boot instead, supply it as cloud-init user-data (or use the installer script below).
 
-After the first login, a **Secure this instance** card on the Dashboard walks you through adding a real domain and, optionally, a Cloudflare Tunnel. Details: [Single Server → DigitalOcean 1-Click](deploying/single-server.md#digitalocean-marketplace-1-click).
+After the first login, the first-run setup opens with a **Secure this instance** step that walks you through adding a real domain and, optionally, a Cloudflare Tunnel. Details: [Single Server → DigitalOcean 1-Click](deploying/single-server.md#digitalocean-marketplace-1-click).
+
+## Option D: DigitalOcean from your terminal
+
+`scripts/deploy/trinity-do-create.sh` runs on your own machine with `doctl` signed in. It asks for the admin password and a Claude subscription token, creates a stock Ubuntu Droplet whose first boot runs the same provisioning as the 1-Click, and prints the HTTPS address when it answers. Because you chose the password up front, the admin is provisioned at boot and there is no claim window.
+
+Step by step, from installing `doctl` to adding a domain: [Deploy on DigitalOcean](deploying/digitalocean.md). Reference summary beside the 1-Click: [Single Server → DigitalOcean installer](deploying/single-server.md#digitalocean-installer-script).
 
 ## Key URLs (Self-Hosted)
 
@@ -179,8 +152,10 @@ Full procedure with pre-flight, verification and rollback: [Upgrading](deploying
 
 ```bash
 # 1. Back up the database first (the platform also takes a pre-migration copy at boot)
-docker run --rm -v trinity_trinity-data:/data -v $(pwd):/backup alpine \
-  cp /data/trinity.db /backup/trinity.db.backup-$(date +%Y%m%d)
+docker run --rm \
+  -v trinity_trinity-data:/data \
+  -v ~/backups:/backup \
+  alpine cp /data/trinity.db /backup/trinity-$(date +%Y%m%d-%H%M%S).db
 
 # 2. Pull latest changes
 git pull origin main
@@ -215,14 +190,14 @@ Run after any change to confirm the platform services are healthy:
 
 It checks Docker, the six core containers, the HTTP health endpoints, the base agent image, and that `.env` carries `SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY` and `ADMIN_PASSWORD`. Or check manually:
 
-| Probe | Command |
-|-------|---------|
-| Backend | `curl -sf http://localhost:8000/health` |
-| Scheduler | `curl -sf http://localhost:8001/health` |
-| Frontend | `curl -sf http://localhost` |
-| Redis | `docker exec trinity-redis redis-cli ping` |
-| MCP Server | `curl -sf http://localhost:8080/health` |
-| Vector | `curl -sf http://localhost:8686/health` |
+| Probe | Command | Expected |
+|---|---|---|
+| Backend | `curl -s http://localhost:8000/health` | `{"status":"healthy",...}` |
+| Scheduler | `curl -s http://localhost:8001/health` | `{"status":"healthy","active_schedules":N}` |
+| Frontend | `curl -s -o /dev/null -w '%{http_code}' http://localhost` | `200` |
+| Redis | `docker exec trinity-redis redis-cli ping` | `PONG` |
+| MCP Server | `curl -s http://localhost:8080/health` | HTTP 200 |
+| Vector | `docker exec trinity-vector wget -q -O - http://localhost:8686/health` | Non-empty response |
 
 > The scheduler's port 8001 is not published to the host by any compose file, so probe it from inside its container: `docker exec trinity-scheduler curl -sf http://localhost:8001/health`. `verify-platform.sh` treats a failed scheduler probe as a warning for this reason.
 
@@ -231,13 +206,17 @@ It checks Docker, the six core containers, the HTTP health endpoints, the base a
 Monitor these metrics to catch problems before they cascade:
 
 | Metric | Warning | Critical | Action |
-|--------|---------|----------|--------|
-| Agent context usage | >70% | >90% | Restart the agent |
-| Host CPU | >70% | >90% | Scale down active agents |
-| Host memory | >80% | >95% | Restart idle agents |
-| Disk usage | >70% | >85% | Archive or prune logs |
-| Container restarts | >3/hour | >10/hour | Check logs for crash loop |
-| DB size | >500 MB | >1 GB | Run log archival |
+|---|---|---|---|
+| Backend `/health` | — | not 200 | Restart `trinity-backend` |
+| Scheduler `/health` | — | not 200 | Restart `trinity-scheduler` |
+| Agent context usage | >75% | >90% | Reset agent context or restart agent container |
+| Host CPU | >80% | >95% | Investigate runaway processes |
+| Host memory | >85% | >95% | Check container memory limits |
+| Disk free | <20% | <5% | Prune Docker, archive logs |
+| Error rate (per hour) | >10 | >50 | Inspect `platform.json` log |
+| Container restarts | any | repeated | `docker logs <container>` |
+| `trinity.db` size | >1 GB | >5 GB | Archive old data |
+| Vector log size | >5 GB | >10 GB | Trigger archival rotation |
 
 ## Common Recovery Patterns
 
@@ -281,7 +260,7 @@ claude  # launch the ops agent
 | `/status` | Health check — backend, containers, Redis, version |
 | `/logs <service>` | View logs for any service or agent |
 | `/restart [service\|all]` | Restart services with health verification |
-| `/update` | Pull latest, rebuild, restart, verify (source-built installs; hosted installs upgrade with `start.sh --hosted`) |
+| `/update` | Back up, pull latest, rebuild, restart, verify — on a hosted install (`COMPOSE_FILE=docker-compose.hosted.yml`) it runs `start.sh --hosted` instead of building |
 | `/diagnose` | Full error scan — logs, restarts, disk, DB integrity |
 | `/rollback` | Rollback to previous commit + optional DB restore |
 | `/cleanup` | Prune Docker images, build cache, old backups |
@@ -295,8 +274,10 @@ Step-by-step guides for each deployment scenario:
 | Guide | What it covers |
 |---|---|
 | [Local Development](deploying/local-development.md) | Docker Desktop, dev compose, hot reload, what `start.sh` generates |
-| [Single Server](deploying/single-server.md) | Linux VPS: prebuilt images (`--hosted`) or build from source, the DigitalOcean 1-Click, every `.env` key and which compose forwards it, Redis dual-password setup, which compose files go together |
+| [Deploy on DigitalOcean](deploying/digitalocean.md) | One command from your terminal to an HTTPS Droplet: `doctl`, a Claude subscription token, an optional domain |
+| [Single Server](deploying/single-server.md) | Linux VPS: prebuilt images (`--hosted`) or build from source, the DigitalOcean 1-Click and installer script, every `.env` key and which compose forwards it, Redis dual-password setup, which compose files go together |
 | [Public Access](deploying/public-access.md) | Cloudflare Tunnel, TLS postures, webhook surface, Slack/Telegram/WhatsApp integrations, `/mcp` through the tunnel |
+| [Hardening a Marketplace Install](deploying/hardening.md) | Bare IP → domain → tunnel or private network, and how to verify each stage |
 | [Upgrading](deploying/upgrading.md) | Pre-flight → backup → rebuild or re-pull → restart → verify → rollback |
 | [Backup and Restore](deploying/backup-and-restore.md) | Automatic nightly backups, manual copies, restore procedure, PostgreSQL |
 | [Monitoring](deploying/monitoring.md) | Six-probe health check, resource thresholds, recovery patterns |

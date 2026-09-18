@@ -190,7 +190,10 @@ def test_submit_from_settings_missing_email(ois_env):
 def router_env():
     """Provide the settings router with its collaborators mocked."""
     try:
-        from routers import settings as router_mod
+        # #1028: the operator-intake handlers live in the package's `flags`
+        # module; the generic catch-all in `generic`. Patch the owners.
+        from routers.settings import flags as router_mod
+        from routers.settings import generic as generic_mod
         import services.operator_intake_service as ois_mod
     except ImportError:
         pytest.skip("backend venv required")
@@ -348,6 +351,8 @@ def test_generic_put_catch_all_refuses_operator_intake_keys(router_env):
     router_mod, _ois_mod, _store, _audit = router_env
     from fastapi import HTTPException
     from db_models import SystemSettingUpdate
+    # #1028: the catch-all under test lives in the package's `generic` module.
+    from routers.settings import generic as generic_mod
 
     body = SystemSettingUpdate(value="true")
     fake_request = MagicMock()  # unused inside the early-return guard path
@@ -359,7 +364,7 @@ def test_generic_put_catch_all_refuses_operator_intake_keys(router_env):
     ):
         with pytest.raises(HTTPException) as ei:
             asyncio.run(
-                router_mod.update_setting(key, body, fake_request, _admin_user())
+                generic_mod.update_setting(key, body, fake_request, _admin_user())
             )
         assert ei.value.status_code == 422
         assert "operator-intake" in ei.value.detail

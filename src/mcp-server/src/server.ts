@@ -32,6 +32,7 @@ import { createFileTools } from "./tools/files.js";
 import { createPipelineTools } from "./tools/pipelines.js";
 import { createMemoryTools } from "./tools/memory.js";
 import { createLoopTools } from "./tools/loops.js";
+import { policyFor, resolveClient, withAgentAccess, type ToolAccessPolicy } from "./access.js";
 import { createReminderTools } from "./tools/reminders.js";
 import { createOperatorQueueTools } from "./tools/operator_queue.js";
 import { createConnectorTools } from "./tools/connector.js";
@@ -40,8 +41,9 @@ import { createGitTools } from "./tools/git.js";
 import { createA2ATools } from "./tools/a2a.js";
 import { createA2ACallTools } from "./tools/a2a_call.js";
 import { createCredentialVaultTools } from "./tools/credential_vault.js";
-import { createAssignmentTools } from "./tools/assignments.js";
-import { withAudit } from "./audit.js";
+// `./tools/assignments.js` (get_agent_assignments, ent#500) exists but is deliberately NOT
+// imported here — see the note beside `createCredentialVaultTools` in `toolGroups`.
+import { configureAudit, withAudit } from "./audit.js";
 import { installLogRedaction } from "./log-redaction.js";
 import type { McpAuthContext } from "./types.js";
 
@@ -54,6 +56,12 @@ export interface ServerConfig {
   trinityPassword?: string;
   port?: number;
   requireApiKey?: boolean;
+  /**
+   * #2807: the shared secret the audit wrapper posts rows with. Read from
+   * INTERNAL_API_SECRET by default; a test passes a literal and points
+   * `trinityApiUrl` at a stub backend so it can read the rows back.
+   */
+  internalApiSecret?: string;
   /**
    * #946 pull pilot. When true, an agent→agent (scope='agent', non-self)
    * sequential chat_with_agent is routed through the durable async /task path
@@ -417,7 +425,12 @@ export async function createServer(config: ServerConfig = {}) {
     // created. When on, it yields an anonymous sentinel session that may only
     // reach the inline-auth tools until verify_login upgrades it.
     inlineAuthEnabled = process.env.MCP_INLINE_AUTH_ENABLED === "true",
+    internalApiSecret = process.env.INTERNAL_API_SECRET || "",
   } = config;
+
+  // #2807: the audit wrapper posts to the same backend the tools proxy to —
+  // one source of truth for the URL, and the secret travels with it.
+  configureAudit({ apiUrl: trinityApiUrl, secret: internalApiSecret });
 
   // Create Trinity API client (base URL only)
   // When requireApiKey is true, tools will create per-request clients with user's MCP API key
@@ -564,11 +577,26 @@ export async function createServer(config: ServerConfig = {}) {
   function addToolWithAudit(
     tool: any,
     canAccess?: (auth: any) => boolean,
-    auditTargetId?: string
+    auditTargetId?: string,
+    explicitPolicy?: ToolAccessPolicy
   ): void {
+    // ent#628: every tool declares how it treats an agent target, and the
+    // declaration is checked against the tool's real parameters HERE — a tool
+    // with no row in TOOL_ACCESS_POLICY (or an explicit policy, for dynamic
+    // tools) cannot register. `enforce` rows run the permission edge before
+    // `execute`; the gate sits inside the audit span so a denial is a recorded
+    // call, labelled `denied` by the stamp `accessDenied` leaves on the call
+    // context (#2807).
+    const policy = policyFor(tool, explicitPolicy);
+    const execute =
+      policy.kind === "enforce"
+        ? withAgentAccess(tool.name, tool.execute, policy, (ctx) =>
+            resolveClient(client, requireApiKey, ctx?.session)
+          )
+        : tool.execute;
     const wrapped: any = {
       ...tool,
-      execute: withAudit(tool.name, tool.execute, auditTargetId),
+      execute: withAudit(tool.name, execute, auditTargetId),
     };
     // ent#46: per-auth tool visibility. FastMCP filters the advertised tool
     // list per session by canAccess(authContext). A tool's own canAccess (if
@@ -621,7 +649,11 @@ export async function createServer(config: ServerConfig = {}) {
     createA2ATools(client, requireApiKey),           // A2A control plane — exposure/card/allow-list/endpoints (ent#160)
     createA2ACallTools(client, requireApiKey),       // A2A runtime — outbound call_a2a_agent / get_a2a_task (#736)
     createCredentialVaultTools(client, requireApiKey), // Credential vault runtime — list/fetch (license-blind proxy, ent#279)
-    createAssignmentTools(client, requireApiKey),     // Role assignments — read who an agent serves (license-blind proxy, ent#500)
+    // get_agent_assignments (tools/assignments.ts, ent#500) is FENCED — not registered.
+    // 0.9.5 release ruling (work-order F1): the assignments layer is not shipping in this
+    // cut, so the tool that reads it must not be advertised. The module and its unit tests
+    // stay; re-enable by importing `createAssignmentTools` and adding it here (the
+    // `access.ts` policy row and the ent#500 visibility test go back with it).
   ];
   // Operator tools: visible ONLY to fully-credentialed operator scopes.
   for (const group of toolGroups) {
@@ -655,9 +687,12 @@ export async function createServer(config: ServerConfig = {}) {
   function registerDynamicTool(
     tool: any,
     canAccess: (auth: any) => boolean,
-    auditTargetId: string
+    auditTargetId: string,
+    policy: ToolAccessPolicy
   ): void {
-    addToolWithAudit(tool, canAccess, auditTargetId);
+    // A computed tool name has no row in TOOL_ACCESS_POLICY, so the policy is
+    // an argument: a dynamic tool cannot register without declaring one either.
+    addToolWithAudit(tool, canAccess, auditTargetId, policy);
     dynamicToolNames.add(tool.name);
   }
   function unregisterDynamicTool(name: string): void {

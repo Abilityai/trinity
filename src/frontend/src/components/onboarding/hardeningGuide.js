@@ -30,6 +30,50 @@ export function hardeningStage(installTlsPosture) {
 }
 
 /**
+ * The two lines that must be readable WITHOUT opening the disclosure (#2691):
+ * what saving this buys, and what has to be true first. Walked live on a fresh
+ * droplet, nobody in the room could say either — the field's help text said
+ * only "the address people will use to reach this instance", and the
+ * prerequisite was four sentences deep inside <details>.
+ *
+ * Shared with Settings → General so the meaning does not depend on which
+ * surface you arrive through, and so the two cannot drift apart.
+ */
+export const DOMAIN_BENEFIT =
+  'People reach Trinity at your own address instead of a bare IP, with a proper certificate and no browser warning.'
+// No "see below" — this string renders on BOTH the first-run step and
+// Settings → General (`Settings.vue`), and the two surfaces have different
+// things below them. A pointer that resolves on one and dangles on the other
+// is the drift the shared constant exists to prevent.
+export const DOMAIN_PREREQUISITE =
+  'Point the domain at this server first, then save it here.'
+
+/**
+ * Saving this value re-points live integrations, immediately (#2691).
+ *
+ * Every Telegram webhook is re-registered and every WhatsApp binding rewritten
+ * to the new base the moment a non-empty value is stored. On a name that is not
+ * live yet, working bots move to an address that answers nothing, and nothing
+ * in the product says so. Stated on the admin surface that owns the setting
+ * (Settings → General) rather than in the first-run flow, where an operator has
+ * no channels configured yet and the sentence would be noise.
+ */
+/**
+ * The step-by-step walkthrough this step links out to (#2692) —
+ * `docs/user-docs/guides/deploying/hardening.md` in the public repo, published
+ * by the docs site under `getting-started/deploying/`.
+ *
+ * The published site, not a `github.com/.../blob/main/...` URL: the one other
+ * docs link in the first-run flow (`steps/credentialSteps.js`) points at a blob
+ * path and 404s today, because `main` is behind `dev` between release cuts.
+ * This 404s until the release that carries the page too, which is the same one.
+ */
+export const HARDENING_DOCS_URL = 'https://docs.ability.ai/getting-started/deploying/hardening'
+
+export const DOMAIN_SIDE_EFFECT =
+  'Saving re-points Telegram and WhatsApp webhooks to this address straight away, so set it once the domain is live.'
+
+/**
  * What the card is allowed to say, per posture.
  *
  * The binding constraint (an explicit AC) is honesty about what is actually
@@ -85,18 +129,41 @@ export const POSTURE_COPY = {
     detail:
       'Trinity cannot inspect the certificate from here — it only knows the address it was told to advertise. If a marketplace image or the DigitalOcean install script set this up, expect a short-lived certificate tied to the IP, renewed automatically while the server is running. Certificates on that profile last about six days, so a server left switched off for longer than that comes back to a browser warning until renewal catches up. Either way, an IP address is awkward to share and answers to the whole public internet, so a real name is worth adding.',
   },
+  // Saved, but nothing has arrived at the name yet. This is the honest state
+  // for every domain the moment it is entered, and it is where a typo or an
+  // absent DNS record stays forever (#2691).
   'https-domain': {
-    badge: 'Domain set',
+    badge: 'Domain saved',
+    badgeVariant: 'info',
+    headline:
+      'Your domain is saved. The first visit to it is what proves the name works \u2014 until then Trinity cannot tell.',
+    detail:
+      'Trinity now gives people this name instead of the IP address. The certificate for it is obtained on the first request that actually arrives for the name, so nothing here can confirm the domain until someone opens it. If DNS does not point at this server, that visit never gets here: the browser shows an error, and Trinity, which is not part of that exchange, carries on showing the name as saved. Open it in a browser to find out.',
+  },
+  // The one state in this file that rests on something OBSERVED rather than
+  // parsed: a request for exactly this name arrived and a certificate followed.
+  // It survives a proxy, a load balancer or a reserved IP in between, which is
+  // why it is the tick rather than a DNS lookup taken at save time.
+  'https-domain-reached': {
+    badge: 'Domain reached',
     badgeVariant: 'success',
     headline:
-      'Your domain is set. One optional step is left \u2014 a Cloudflare Tunnel can take this server off the public internet.',
+      'Your domain has been reached. One optional step is left \u2014 a Cloudflare Tunnel can take this server off the public internet.',
     detail:
-      'Step one is done: Trinity now hands out a name rather than an IP, and whatever terminates TLS in front of it can pick up that name. The step below is about reach rather than address \u2014 unless something in front of this server already restricts it, it still answers anyone who finds the address. This one is optional, and dismissing it here is a fine answer.',
+      'A request for your domain reached this server, and a certificate was obtained for it. One thing is left, and it is optional \u2014 this server still answers anyone who finds the address. A Cloudflare Tunnel closes that off, so the only way in is through Cloudflare. Fine to skip while you are trying Trinity out; worth doing from Settings \u2192 General before this instance matters.',
   },
 }
 
-/** Copy for a posture, or `null` when the guide should not be speaking at all. */
-export function postureCopy(posture) {
+/**
+ * Copy for a posture, or `null` when the guide should not be speaking at all.
+ *
+ * `reached` splits the domain posture in two, and that split is the point of
+ * #2691: the posture itself is parsed from a string an admin typed, so it can
+ * only ever say "saved". Claiming the domain WORKS takes evidence, and the only
+ * evidence available is that a request for that exact name arrived here.
+ */
+export function postureCopy(posture, reached = false) {
+  if (posture === DOMAIN_POSTURE && reached) return POSTURE_COPY['https-domain-reached']
   return POSTURE_COPY[posture] || null
 }
 

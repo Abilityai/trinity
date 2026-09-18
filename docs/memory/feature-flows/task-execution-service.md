@@ -101,11 +101,39 @@
 > `except`-handler switch block so a cascade (retry still failing) does NOT switch a second time.
 > The retry **is** the readiness probe — a small `_SWITCH_RETRY_DELAY_S` pre-delay only, no
 > circuit-aware `/health` poll (would poison the transport breaker on cold start), no trust in
-> `restart_result`'s string status; the retry timeout is capped to the **remaining** original
-> budget (`min(remaining, _AUTO_RETRY_MAX_TIMEOUT_S)`). Same `execution_id` ⇒ #1084 `effect_guard`
+> `restart_result`'s string status; the retry timeout is the **remaining** original budget —
+> and nothing else (#2789). It was `min(remaining, _AUTO_RETRY_MAX_TIMEOUT_S)`, i.e. also
+> clamped by #678's reader-race ceiling, which is sized for a re-dispatch of a turn that never
+> started; this retry is a full **re-run of the user's turn** on a fresh subscription and earns
+> the budget the turn was given. A 3600s agent got 300s, the agent server killed its own process
+> group at exactly 300s mid tool-use (`stop_reason=tool_use`), and the turn was discarded after
+> being billed — so no turn honestly longer than five minutes could survive a seat switch.
+> `remaining_s` is a hard wall-clock bound (`effective_timeout` = the operator's
+> `execution_timeout_seconds` + `_AGENT_HTTP_SLACK_S`) **only when measured from the TURN's clock**
+> — `_AttemptState.turn_started_at`, never reset, read by `_turn_elapsed_seconds` after the
+> settle delay. `start_time` is re-stamped before each inline retry so `_handle_timeout` can
+> classify the attempt it measures, which makes it the wrong clock for a budget: on the
+> #678→#792 interplay (502 → reader-race retry → 429 → switch) a budget derived from it counted
+> only the reader-race retry and re-granted nearly the whole turn a third time (6610s of slot
+> time on a 3600s cap — the slot lease, the watchdog and the portal marker are all sized on the
+> cap). With the turn clock, first attempt + reader-race retry + SUB-003 retry cannot exceed
+> TIMEOUT-001 + the reader-race ceiling, which is what `portal_attempt_ceiling_seconds` derives;
+> `test_the_interplay_cannot_outrun_the_turns_budget` drives that path on a controlled clock. The agent-side budget keeps the same
+> 10s slack under the HTTP budget that the first dispatch has, so the agent's structured 504
+> still beats the backend's own `ReadTimeout` and the terminal keeps its error detail.
+> Attribution follows the applied budget: `state.applied_timeout_seconds` carries whichever
+> ceiling was actually in force for the latest attempt (`_handle_timeout` measures the retry,
+> because `state.start_time` is reset before it), so a retry that ran its full allowance is no
+> longer labelled #2106 `NETWORK` against an original limit it was never given — the old reading
+> was "aborted after 300s of 3600 seconds allowed", which sent operators to raise a limit that
+> was never reached. `_log_retry_budget` states the retry's budget where it is decided — the #678 ceiling
+> as a WARNING ("clamped"), the SUB-003 re-run's first-attempt spend as INFO with the
+> breakdown, escalating to WARNING only when under the reader-race ceiling is left (a re-run
+> that short is likely hopeless and still billed) — so neither is inferred from a terminal.
+> Same `execution_id` ⇒ #1084 `effect_guard`
 > dedups wired sinks. Boundaries (follow-ups): the #1083 `DISPATCH_ASYNC` path routes 429s through
 > the result-callback (bypasses this sync path); a concurrent switch-lock *loser* (gets `None`)
-> doesn't retry. Tests: `tests/unit/test_792_subscription_retry.py`.
+> doesn't retry. Tests: `tests/unit/test_792_subscription_retry.py`, `tests/unit/test_2789_subswitch_retry_budget.py`.
 
 > **Updated 2026-05-30 (#526, RELIABILITY-007):** This service is the single
 > point where the per-agent **dispatch** circuit breaker records execution
@@ -141,7 +169,7 @@
 
 > **Updated 2026-05-11 (#686 UC1):** Interactive `/chat` endpoint now mirrors the service's dispatched-sentinel pattern + real-UUID persistence inline in `routers/chat.py` (parallel of #279). The dispatched-sentinel mechanism is no longer exclusive to `TaskExecutionService.execute_task()`.
 
-> **Updated 2026-09-03 (#2391):** `execute_task` is no longer a `reject`-only producer. `build_pull_queue_payload` returns a `PersistentTaskPayload` when — and only when — `pull_pilot.pull_owns_dispatch(agent, triggered_by)` is true (a `PULL_MODE_PILOT_AGENTS` agent on `schedule` / `webhook` / `reminder` — plus `loop` since #2523 made `loop_service` terminal-driven), which selects `overflow_policy="queue_persistent"`; the row is enqueued, `execute_task` returns `TaskExecutionStatus.QUEUED` before any activity, agent call or dispatch marker, and the agent's own worker claims it. Everything else keeps `"reject"` byte-for-byte, so scheduled capacity semantics are unchanged for every non-pilot agent. Two hard preconditions: an existing `execution_id` (the enqueue is a CAS RUNNING→QUEUED on that row) and `slot_already_held=False` (queueing under a held slot would leak it for the lease TTL). #1083 fire-and-forget cannot stack on it — a queued row is never dispatched, so no 202 can arrive.
+> **Updated 2026-09-03 (#2391):** `execute_task` is no longer a `reject`-only producer. `build_pull_queue_payload` returns a `PersistentTaskPayload` when — and only when — `pull_pilot.pull_owns_dispatch(agent, triggered_by)` is true (a `PULL_MODE_PILOT_AGENTS` agent on `schedule` / `webhook` / `reminder` — plus `loop` since #2523 made `loop_service` terminal-driven, and `fan_out` since #2524 made its aggregate a DB query), which selects `overflow_policy="queue_persistent"`; the row is enqueued, `execute_task` returns `TaskExecutionStatus.QUEUED` before any activity, agent call or dispatch marker, and the agent's own worker claims it. Everything else keeps `"reject"` byte-for-byte, so scheduled capacity semantics are unchanged for every non-pilot agent. Two hard preconditions: an existing `execution_id` (the enqueue is a CAS RUNNING→QUEUED on that row) and `slot_already_held=False` (queueing under a held slot would leak it for the lease TTL). #1083 fire-and-forget cannot stack on it — a queued row is never dispatched, so no 202 can arrive.
 
 > **Updated 2026-04-26 (#428):** Slot acquisition/release now goes through [`CapacityManager`](capacity-management.md) (`acquire(overflow_policy="reject")` + `release()`) rather than calling `SlotService` directly. The `slot_already_held` parameter still applies — routers pre-acquire via `CapacityManager` and pass `slot_already_held=True` so the service's `finally` block remains the single release point.
 

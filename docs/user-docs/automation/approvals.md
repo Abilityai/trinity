@@ -77,19 +77,20 @@ See the [Operating Room doc](../operations/operating-room.md) for the full queue
 
 ### MCP Tools
 
-Agents can inspect the queue programmatically (read-only):
+Agents can inspect the queue and resolve a pending item programmatically:
 
 | Tool | Description |
 |------|-------------|
 | `list_operator_queue` | List queue items, broad or filtered by `agent_name` |
 | `get_operator_queue_item` | Fetch a single item by id |
+| `respond_to_operator_queue(item_id, response, response_text?)` | Submit the decision for a pending item — the same rules as the `respond` route: `response` must be an offered option, and an item that is no longer pending returns a structured error |
 
-Agent-scoped API keys see only items for the calling agent itself plus agents it has been explicitly permitted to access. Responding and cancelling remain human actions through the UI or the routes above.
+Agent-scoped API keys see only items for the calling agent itself plus agents it has been explicitly permitted to access, and can respond only to those. Cancelling remains a human action through the UI or the routes above.
 
 ## Limitations
 
 - An answer wakes the agent only when its owner has turned wake-on-answer on; otherwise it waits for the agent's next turn. If the agent has neither a schedule nor a heartbeat, the agent is expected to say in the request how it should be re-triggered.
-- Wake-on-answer is a per-agent switch, never per request — an agent cannot decide that answering it costs the answerer a turn.
+- Wake-on-answer is a per-agent switch, never per request — an agent cannot decide that answering it costs the answerer a turn. Only the agent's owner or an admin can change the switch, and an agent's own key is refused.
 - A wake that fails after the answer was recorded shows as a failed execution and an audit entry on the operator side; the Workspace confirmation reports the intent to start work, not its outcome.
 
 ## See Also

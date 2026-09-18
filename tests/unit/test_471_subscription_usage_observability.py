@@ -496,12 +496,18 @@ class TestHeadroomParsing:
 
         assert parse_unified_headers({"content-type": "application/json"}) is None
 
-    def test_already_percent_value_tolerated(self, tmp_db):
+    def test_header_is_a_fraction_never_a_percent(self, tmp_db):
+        """#2419: the header is a fraction of the cap and is honoured past 1.0.
+        The assertion this replaced (`"42.5" == 42.5`) pinned a speculative
+        "already-percent" tolerance that turned an overage reading of 1.2 into
+        1.2%. A percent-shaped input now reads loud-wrong (4250%), the same as
+        the provider's own client — never quiet-plausible."""
         from services.subscription_headroom_service import _parse_utilization
 
         assert _parse_utilization("0.15") == 15.0
         assert _parse_utilization("1.0") == 100.0
-        assert _parse_utilization("42.5") == 42.5
+        assert _parse_utilization("1.2") == 120.0
+        assert _parse_utilization("42.5") == 4250.0
         assert _parse_utilization("garbage") is None
         assert _parse_utilization(None) is None
 

@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 130 tools across 33 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 125 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
+Trinity's MCP server exposes 129 tools across 33 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 124 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -68,7 +68,7 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `agents.ts` | 22 | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT, runtime-data export/import, compatibility report |
 | `chat.ts` | 4 | `chat_with_agent`, `get_chat_history`, `get_agent_logs`, `fan_out` — chat and parallel dispatch, all gateway-timeout safe |
 | `executions.ts` | 4 | `list_recent_executions`, `get_execution_result`, `get_fan_out_result`, `get_agent_activity_summary` — execution queries, polling for async tasks and fan-out batches, activity monitoring |
-| `schedules.ts` | 8 | Schedule CRUD and execution history |
+| `schedules.ts` | 8 | Schedule CRUD (including retries, post-run validation and Workspace delivery) and execution history |
 | `skills.ts` | 9 | Skill management and assignment, plus the skill-runner tools `run_skill` and `list_runnable_skills` (enterprise-gated — return `"disabled"` in community builds) |
 | `tags.ts` | 5 | Agent tagging |
 | `systems.ts` | 4 | `deploy_system`, `list_systems`, `restart_system`, `get_system_manifest` — see [System Manifest](../collaboration/system-manifest.md) |
@@ -95,7 +95,7 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `a2a.ts` | 7 | A2A management plane — per-agent exposure and card, inbound allow-list, outbound endpoint registry (entitlement-gated; see [A2A Protocol](a2a-protocol.md)) |
 | `a2a_call.ts` | 2 | `call_a2a_agent`, `get_a2a_task` — task a registered external A2A agent by endpoint name and poll it |
 | `credential_vault.ts` | 2 | `list_available_credentials`, `fetch_credential` — pull a granted vault credential by name at runtime (see [Credential Management](../credentials/credential-management.md#credential-vault)) |
-| `assignments.ts` | 1 | `get_agent_assignments` — read who an agent works for (read-only; degrades to a not-available result where unsupported) |
+| `assignments.ts` | 0 (fenced) | `get_agent_assignments` is built but **not registered** in 0.9.5 — it returns with the assignments layer |
 | `connector.ts` | 3 | `list_playbooks`, `run_playbook`, `ask` — the consumption-only set a **connector key** sees; operator tools stay hidden from connector keys |
 | `auth.ts` | 2 | `request_login`, `verify_login` — registered only when inline email auth is on, advertised only to keyless sessions |
 
@@ -131,8 +131,8 @@ The agent's **Settings** tab surfaces this key so you can see and repair it. You
 
 Two actions:
 
-- **Verify** runs a one-shot probe inside the container and reports what its configuration actually contains — including whether it is carrying a foreign user key, another agent's key, or a duplicate entry. A stopped agent degrades to "unavailable" rather than erroring.
-- **Regenerate** rotates the key: a new one is minted, delivered to the container, and the superseded keys are deleted. A running agent is rebuilt to pick it up; a stopped agent is updated in the database and stays stopped. **No plaintext is ever returned.**
+- **Check what the container is using** (**Re-check** afterwards) runs a one-shot probe inside the container and reports what its configuration actually contains — including whether it is carrying a foreign user key, another agent's key, or a duplicate entry. A stopped agent degrades to "unavailable" rather than erroring.
+- **Regenerate key** (**Issue a key** when none exists) rotates the key: a new one is minted, delivered to the container, and the superseded keys are deleted. A running agent is rebuilt to pick it up; a stopped agent is updated in the database and stays stopped. **No plaintext is ever returned.**
 
 Trinity also self-heals: if an agent starts with a missing or mismatched key, the start path re-mints and re-injects one automatically.
 
@@ -144,14 +144,20 @@ These routes are owner-only and reachable only from an interactive (browser) ses
 | `/api/agents/{name}/mcp-key/verify` | POST | Probe the container's actual configuration |
 | `/api/agents/{name}/mcp-key/regenerate` | POST | Rotate and deliver a new key |
 
+### Refused Calls
+
+When a tool refuses a call because the caller may not reach the target agent, it returns a result rather than a transport error: `{"error": "Access denied", "reason": "..."}` (some tools also carry `success: false`). When an agent-scoped key names an agent it has no permission for, `chat_with_agent`, `fan_out` and `run_agent_loop` give the reason `Permission denied: Agent '<caller>' is not permitted to communicate with '<target>'`. Tools addressed by an id rather than an agent name — `get_loop_status` and `stop_loop` — answer a uniform `Loop '<id>' not found or not accessible` instead, so the reply never reveals whose loop it is.
+
+Every refusal is recorded in the audit log as a refusal, not as a successful call: the `mcp_operation` entry carries `success: false`, `denied: true`, and the reason. A backend `403` that surfaces through a tool is marked `denied` too. See [Audit Trail](../operations/audit-trail.md#refused-mcp-calls).
+
 ### Key Tools Worth Knowing
 
 | Tool | Why it exists |
 |------|---------------|
-| `chat_with_agent` | Send a message to another agent. **Gateway-timeout safe in every sync mode** — sequential chat (`parallel=false`) and the sync task route (`parallel=true, async=false`) alike: if the call exceeds `MCP_CHAT_TIMEOUT_MS` (default 25s), it returns `{status: "queued_timeout", agent, execution_id, message}` so the caller polls `get_execution_result` instead of duplicate-queueing the request. The receipt is only issued when the running execution can be attributed to *your* call unambiguously; otherwise the error says so and names `list_recent_executions`. Calls carry a deterministic idempotency key, so an identical re-send dedupes server-side and answers with the original `execution_id` — a **reworded** re-send is a new call and dispatches a second execution. For work you know will outlive the gateway, use `parallel=true, async=true` from the start. |
-| `fan_out` | Dispatch N independent tasks to an agent in parallel and collect all the results. **Gateway-timeout safe**: a batch runs longer than any single task in it, so this is the tool most likely to outlive the 25s ceiling — when it does, it returns `{status: "fan_out_timeout", agent, fan_out_id, execution_ids, task_count, message}` and the batch keeps running. Poll `get_fan_out_result(agent_name, fan_out_id)`. Re-sending the *identical* call is deduplicated server-side and answers with the same batch; **rewording it dispatches all N tasks again**. See [Fan-Out](../automation/fan-out.md). |
-| `get_fan_out_result` | Poll a fan-out batch: `running` while any task can still change, then `completed`, `partial` (some succeeded — normal for a best-effort batch) or `failed`, with per-task status and results. |
-| `run_agent_loop` | Run the same task against an agent repeatedly (bounded, sequential), with templated messages and an optional stop signal. Poll with `get_loop_status`; stop gracefully with `stop_loop`. See [Agent Loops](../automation/agent-loops.md). |
+| `chat_with_agent` | Send a message to another agent. **Gateway-timeout safe in every sync mode** — sequential chat (`parallel=false`) and the sync task route (`parallel=true, async=false`) alike: if the call exceeds `MCP_CHAT_TIMEOUT_MS` (default 25s), it returns `{status: "queued_timeout", agent, execution_id, message}` so the caller polls `get_execution_result` instead of duplicate-queueing the request. The receipt is only issued when the running execution can be attributed to *your* call unambiguously; otherwise the error says so and names `list_recent_executions`. Calls carry a deterministic idempotency key, so an identical re-send dedupes server-side and answers with the original `execution_id` — a **reworded** re-send is a new call and dispatches a second execution. For work you know will outlive the gateway, use `parallel=true, async=true` from the start. See [Agent Network](../collaboration/agent-network.md) for the async pattern. |
+| `fan_out` | Dispatch N independent tasks to an agent in parallel and collect all the results. **Gateway-timeout safe**: a batch runs longer than any single task in it, so this is the tool most likely to outlive the 25s ceiling — when it does, it returns `{status: "fan_out_timeout", agent, fan_out_id, execution_ids, task_count, message}` and the batch keeps running. Poll `get_fan_out_result(agent_name, fan_out_id)`. Re-sending the *identical* call is deduplicated server-side and answers with the same batch; **rewording it dispatches all N tasks again**. For a batch you know will run long, pass `async_mode: true`: the tool returns `{fan_out_id, status: "accepted"}` at once and you poll. `timeout_seconds` bounds only the wait — tasks still open at the deadline report `running` and keep going. See [Fan-Out](../automation/fan-out.md). |
+| `get_fan_out_result` | Poll a fan-out batch: `running` while any task can still change, then `completed`, `partial` (some succeeded — normal for a best-effort batch) or `failed`, with per-task status and results. Each result carries the `task_id` you gave the task. |
+| `run_agent_loop` | Run the same task against an agent repeatedly (bounded, sequential), with templated messages and an optional stop signal. Poll with `get_loop_status`; stop gracefully with `stop_loop`. An agent-scoped key can loop only on itself or on agents it has permission to call — the same rule as `chat_with_agent` — and the refusal happens before any loop starts. `get_loop_status` and `stop_loop` apply the same rule to the loop's agent. See [Agent Loops](../automation/agent-loops.md). |
 | `list_operator_queue` | Read the Operating Room queue (approvals, questions, alerts). Agent-scoped keys see only the calling agent plus its permitted agents. Resolve an item with `respond_to_operator_queue`. |
 | `set_reminder` | Schedule a durable one-shot deferred self-trigger — the agent re-invokes itself later with a message it picks. Survives restarts; list with `list_reminders`, cancel with `cancel_reminder`. |
 | `run_skill` | Run a named skill headlessly (enterprise-gated; returns `"disabled"` in community builds). Discover runnable skills with `list_runnable_skills`. |
@@ -174,7 +180,9 @@ These routes are owner-only and reachable only from an interactive (browser) ses
 |----------|--------|-------------|
 | `/api/mcp/keys` | POST | Create API key |
 | `/api/mcp/keys` | GET | List API keys |
-| `/api/mcp/keys/{key_id}` | DELETE | Revoke API key |
+| `/api/mcp/keys/{key_id}` | GET | One key's metadata (never the secret) |
+| `/api/mcp/keys/{key_id}/revoke` | POST | Deactivate a key; its record stays for audit |
+| `/api/mcp/keys/{key_id}` | DELETE | Permanently delete a key |
 | `/api/settings/mcp-url` | GET/PUT/DELETE | The advertised MCP URL: read the effective and auto-detected values, set an override, or clear it (admin) |
 
 ### MCP Endpoint
@@ -189,11 +197,13 @@ These routes are owner-only and reachable only from an interactive (browser) ses
 - Agent-scoped keys cannot access tools outside their assigned agent (plus explicitly permitted agents).
 - MCP clients must be manually reconnected after a backend restart.
 - `chat_with_agent` and `fan_out` sync modes cap at `MCP_CHAT_TIMEOUT_MS` (default 25s). Longer calls switch to poll-mode via the returned `execution_id` (or `fan_out_id`); a receipt is issued only when the running work can be attributed to your call unambiguously.
+- A `model` passed to `chat_with_agent` (it applies with `parallel=true`) must look like a model id — a short alias such as `sonnet` or a full id such as `claude-sonnet-4-6`. Anything else is refused with `422` before the task starts. See [Chat API](../api-reference/chat-api.md#model-override).
 - Fan-out is self-only: an agent fans out to itself, not to another agent.
 
 ## See Also
 
 - [Fan-Out](../automation/fan-out.md) — parallel dispatch and polling a batch
+- [Agent Network](../collaboration/agent-network.md) — agent-to-agent calls, async delegation and the timeout receipt
 - [Chat API](../api-reference/chat-api.md) — the REST routes the chat and task tools call
 - [Nevermined Payments](nevermined-payments.md)
 - [Slack Integration](slack-integration.md)

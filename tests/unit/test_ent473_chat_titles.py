@@ -386,7 +386,9 @@ def test_the_settings_read_carries_the_health(monkeypatch):
     reads `title_generation` from it, so it has to be there."""
     import asyncio
     from types import SimpleNamespace
-    from routers import settings as settings_router
+    # #1028: routers/settings.py is a package; the portal-policy read lives
+    # in routers/settings/flags.py.
+    from routers.settings import flags as settings_router
     from services.entitlement_service import entitlement_service
     monkeypatch.setattr(entitlement_service, "list_entitled_features", lambda: [])
     # The route's admin gate is the real one (#2323's allowlist); this test is
@@ -462,8 +464,19 @@ def test_the_spawn_sits_between_the_persist_and_the_turn():
     persist = src.index("_persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id)")
     spawn = src.index('_spawn_title_generation(agent_name, session_id, client_message, "",')
     # The first thing the turn path does after the spawn.
-    turn = src.index("images, image_names, doc_files = await _collect_inbox_for_turn")
+    #
+    # #2794 moved the manifest COMPOSITION out to `collect_inbox_context` so a
+    # room could reuse it, which left the old anchor
+    # (`images, image_names, doc_files = await _collect_inbox_for_turn`) still
+    # present in the file — but inside that new function, several thousand lines
+    # BELOW the spawn. The assertion would have stayed green while pinning the
+    # order of two lines in different functions, i.e. proving nothing. The anchor
+    # has to be the call `portal_chat` itself makes.
+    turn = src.index("manifest_prefix, images = await collect_inbox_context(")
     assert persist < spawn < turn
+    # And that anchor must be unique, or the index() above can silently drift to
+    # a second occurrence the next time this is refactored.
+    assert src.count("manifest_prefix, images = await collect_inbox_context(") == 1
 
 
 def test_there_is_exactly_one_spawn_site_and_it_carries_no_reply():

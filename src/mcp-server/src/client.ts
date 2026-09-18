@@ -29,6 +29,7 @@ import type {
   FanOutBatchStatus,
   FanOutDispatchResult,
   FanOutTimeoutReceipt,
+  LoopStatus,
 } from "./types.js";
 
 /**
@@ -1385,6 +1386,7 @@ export class TrinityClient {
       model?: string;
       system_prompt?: string;
       allowed_tools?: string[];
+      async_mode?: boolean;
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
@@ -1433,6 +1435,9 @@ export class TrinityClient {
     };
     if (options?.timeout_seconds !== undefined) {
       body.timeout_seconds = options.timeout_seconds;
+    }
+    if (options?.async_mode) {
+      body.async_mode = true;
     }
 
     // #2670: bounded by OUR ceiling, not the backend's. The old
@@ -2974,8 +2979,8 @@ export class TrinityClient {
     );
   }
 
-  async getLoopStatus(loopId: string): Promise<unknown> {
-    return this.request(
+  async getLoopStatus(loopId: string): Promise<LoopStatus> {
+    return this.request<LoopStatus>(
       "GET",
       `/api/loops/${encodeURIComponent(loopId)}`
     );

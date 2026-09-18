@@ -687,6 +687,7 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
                  availability: str = "unknown", *,
                  is_platform: bool, runtime: str,
                  model_context: ModelContext,
+                 stt_ready: bool | None,
                  can_manage_canvases: bool = False) -> PortalAgentCard:
     """One roster row → one card. Shared by the roster and the single-agent
     lookup (#2160) so the two cannot disagree about how a card is built.
@@ -702,6 +703,15 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
     of this function. `model_context` is resolved once per load for the same
     reason `availability` is threaded: it is instance-level, and re-reading it
     per card would put a settings read back on every row.
+
+    #2695: `stt_ready` is the CAPABILITY verdict (`stt_capability_service`),
+    resolved once per load like `tts_ready` — threaded in, never probed here.
+    `None` means "same as `tts_ready`", which is what the bit meant before the
+    probe existed and what a caller that has not asked the provider still gets.
+    It carries NO default for the ent#403 reason above, and the guard in
+    `test_ent403_workspace_model.py` pins that: the omitted value resolves to the
+    PRE-FIX presence behaviour, so a default would let a third call site added
+    later silently un-fix #2695 with the whole suite green.
     """
     from services import tts_service
     name = r["agent_name"]
@@ -743,10 +753,13 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
             )
         ),
         # #2212: voice INPUT needs the platform key only — no agent voice, since
-        # nothing is spoken back. `tts_ready` IS `transcribe_portal_audio`'s own
-        # gate (`tts_service.is_available()`), so the mic the client sees and the
-        # endpoint it would call cannot disagree.
-        stt_available=bool(tts_ready),
+        # nothing is spoken back. #2695: AND that key must actually be permitted
+        # to transcribe — ElevenLabs permissions are per endpoint, and a key with
+        # Text-to-Speech but no Speech-to-Text rendered a mic that failed on
+        # every press. `stt_ready` is `transcribe_portal_audio`'s own gate (key
+        # present AND the capability verdict not `refused`), so the mic the
+        # client sees and the endpoint it would call still cannot disagree.
+        stt_available=bool(tts_ready and (stt_ready if stt_ready is not None else True)),
         availability=availability,
         # ent#553 — threaded in like `availability`, never computed here: the
         # caller knows its own principal kind and this builder is shared with
@@ -844,8 +857,12 @@ async def get_agent_card(email: str | None, agent_name: str,
     # answer differently is the defect, not the cost. Negligible beside this
     # function's existing availability read and its bounded briefing HTTP.
     runtime = await _agent_runtime(agent_name)
-    card = _row_to_card(row, tts_service.is_available(), _default_voice_id(),
+    tts_ready = tts_service.is_available()
+    card = _row_to_card(row, tts_ready, _default_voice_id(),
                         availability=availability,
+                        # #2695: the same capability read the roster makes, so
+                        # the page and the sidebar cannot disagree about the mic.
+                        stt_ready=await _stt_ready(tts_ready),
                         # `include_owned` IS the platform-session bit here — the
                         # roster unions owned agents only for a platform session
                         # (ent#357), which is the same door ent#403 gates on.
@@ -913,6 +930,11 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     """
     from services import tts_service
     tts_ready = tts_service.is_available()  # global key check, once per roster load
+    # #2695: and whether that key may TRANSCRIBE — one cached provider verdict
+    # per key, resolved once per load beside `tts_ready`. Bounded (a slow or
+    # unreachable provider answers `unknown` within `WAIT_BUDGET_SECONDS` and
+    # the mic stays), so this is one awaited O(1) read, not a fan-out (#2163).
+    stt_ready = await _stt_ready(tts_ready)
     # #2157: the platform default voice is likewise instance-level — read once,
     # not once per card, so adding the fallback costs the roster no extra query.
     default_voice = _default_voice_id()
@@ -956,6 +978,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
                      is_platform=include_owned,
                      runtime=runtimes.get(r["agent_name"], _DEFAULT_RUNTIME),
                      model_context=model_context,
+                     stt_ready=stt_ready,
                      # ent#553 — resolved through `may_manage_canvases`, the SAME
                      # predicate the write routes enforce with, rather than a
                      # faster per-row comparison against `r["owner"]`. That
@@ -1515,14 +1538,30 @@ _STT_MAX_BYTES = 12 * 1024 * 1024   # ~ a minute of Opus; caps the upload
 _STT_TIMEOUT = 60.0
 
 
+async def _stt_ready(tts_ready: bool) -> bool:
+    """THE mic gate (#2212 + #2695): key present AND the key's speech-to-text
+    capability not refused by the provider. One function, read by the roster,
+    the agent page and `transcribe_portal_audio`, so the control a client sees
+    and the endpoint it calls resolve the same answer. Fail-soft by
+    construction — `allowed` is everything but a definitive refusal."""
+    if not tts_ready:
+        return False
+    from services import stt_capability_service
+    cap = await stt_capability_service.ensure_capability()
+    return cap.allowed
+
+
 async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
                                   content_type: str, audio: bytes,
                                   include_owned: bool = False) -> str:
     """Transcribe a client's recorded audio to text (portal voice input, #78).
     Roster-scoped (miss → 404). Fail-soft: any provider/format problem raises a
     ClientPortalError so the client just types instead of getting a 500. Gated on
-    the same ElevenLabs key as TTS."""
+    the same ElevenLabs key as TTS — and, since #2695, on that key being
+    PERMITTED to transcribe (`_stt_ready`), the same gate the card's
+    `stt_available` bit is built from."""
     from services import tts_service   # shares the ElevenLabs key/availability check
+    from services import stt_capability_service
     import config
 
     if not agent_on_roster(agent_name, email, include_owned):
@@ -1531,7 +1570,7 @@ async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
         raise ClientPortalError(400, "No audio")
     if len(audio) > _STT_MAX_BYTES:
         raise ClientPortalError(413, "Recording is too long")
-    if not tts_service.is_available():
+    if not await _stt_ready(tts_service.is_available()):
         raise ClientPortalError(404, "Voice input is not available")
 
     logger.debug("portal STT: %d bytes, content_type=%r, filename=%r",
@@ -1555,7 +1594,17 @@ async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
         raise ClientPortalError(502, "Voice input failed — please type instead")
     if resp.status_code != 200:
         logger.warning("portal STT provider error %s: %s", resp.status_code, resp.text[:500])
-        raise ClientPortalError(422, "Could not transcribe the audio")
+        # #2696: say WHY. One category per provider condition — permission,
+        # rejected key, quota/plan, rate limit, bad audio, provider outage —
+        # each with its own client sentence and status, instead of one opaque
+        # 422 that made an operator read this log line to answer the question.
+        # The client sentence never carries the provider's body; the status
+        # word is remembered for the admin Settings panel. #2695: a 401/403
+        # also teaches the capability cache, so the next roster load hides
+        # the mic instead of offering it again.
+        failure = stt_capability_service.record_live_failure(
+            elevenlabs_key, resp.status_code, resp.text)
+        raise ClientPortalError(failure.http_status, failure.client_message)
     text = ((resp.json() or {}).get("text") or "").strip()
     if not text:
         logger.warning("portal STT empty transcript — provider body: %s", resp.text[:500])
@@ -2844,35 +2893,12 @@ async def portal_chat(agent_name: str, message: str, email: str,
         _spawn_title_generation(agent_name, session_id, client_message, "",
                                 attempt=title_attempt)
 
-    # #78: make the agent aware of the client's uploaded files. Images are handed
-    # to the model as VISION blocks (so "what's in the picture" works) and MUST
-    # NOT be read as text — reading a binary floods the stream-json pipe and can
-    # trip the #728 subprocess-drain deadlock (a zombie claude pegging a core).
-    # Text files are listed by path so the agent can read them. Best-effort — a
-    # listing/read hiccup never blocks the chat.
-    # #78: make the agent aware of the client's files. Images are attached as
-    # vision blocks ONLY when this turn references them ("only when told"), never
-    # every turn; documents are listed for on-demand reading. The agent must NEVER
-    # read an image file as text — that floods the stream-json pipe (#728), which
-    # is exactly why we hand images over as vision INPUT instead.
-    images, image_names, doc_files = await _collect_inbox_for_turn(agent_name, email, message)
-    manifest_parts = []
-    if images:
-        manifest_parts.append(
-            "The client's image(s) are shown to you directly below as images — "
-            "do NOT open/cat/read image files as text: " + ", ".join(image_names)
-        )
-    elif image_names:
-        manifest_parts.append(
-            "The client has image(s) in your inbox (ask to see one and it'll be shown to you; "
-            "do NOT read image files as text): " + ", ".join(image_names)
-        )
-    if doc_files:
-        listing = ", ".join(f"{d['filename']} ({_human_size(d['size_bytes'])})" for d in doc_files)
-        manifest_parts.append(
-            f"The client has uploaded these files to your inbox at `{_client_inbox(email)}/` — "
-            f"read any that are relevant: {listing}"
-        )
+    # #78: make the agent aware of the client's files — see `collect_inbox_context`,
+    # which owns both halves (the sentence and the vision blocks). #2794 moved the
+    # composition there because a ROOM turn needs the identical thing, and two
+    # copies of "how an agent is told about a file" is how one surface silently
+    # stops telling it (the room was the surface that never told it at all).
+    manifest_prefix, images = await collect_inbox_context(agent_name, email, message)
     # Compose the execution message: prior conversation (context) → file manifest
     # → the client's actual message. Each section is optional.
     #
@@ -2880,9 +2906,6 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # when resuming (the session already remembers); `cold_message` always keeps
     # it, and is what the engine sends if the resume fails and it retries cold —
     # the retry has no session memory, so it needs the replay back.
-    manifest_prefix = ""
-    if manifest_parts:
-        manifest_prefix = "[Client Portal] " + " ".join(manifest_parts) + "\n\n"
     history_prefix = (convo_context + "\n\n") if convo_context else ""
     # #2694: the resumed turn carries the DELTA (what the session never heard),
     # never the whole-thread replay; the cold message carries the replay, which
@@ -3270,18 +3293,21 @@ def _inflight_exec_key(execution_id: str) -> str:
 def portal_attempt_ceiling_seconds(turn_timeout: int) -> int:
     """What ONE attempt can actually cost — which is not `timeout_seconds`:
 
-      + 10   `execute_task` dispatches with `timeout_seconds + 10` (HTTP slack)
+      + slack `execute_task` dispatches with `timeout_seconds + _AGENT_HTTP_SLACK_S` (HTTP slack)
       + cap  the #678 reader-race auto-retry runs a SECOND http call, capped at
              `_AUTO_RETRY_MAX_TIMEOUT_S`, ON TOP of whatever attempt 1 burned
-             (unlike the SUB-003 retry, which is capped to the remaining budget)
+             (unlike the SUB-003 retry, which is capped to the remaining budget
+             — true by construction only since #2789, which stopped that retry
+             sharing this ceiling; if it ever shares it again this derivation
+             under-counts by a whole ceiling and the marker expires mid-turn)
 
     The retry cap is IMPORTED, not copied, so it cannot drift — and imported
     function-locally, like every other service this module reaches for (the
     execution stack's import chain is heavier than this module's own cost, and
     ~19 test files import `client_portal.service` bare).
     """
-    from services.task_execution_service import _AUTO_RETRY_MAX_TIMEOUT_S
-    return turn_timeout + 10 + int(_AUTO_RETRY_MAX_TIMEOUT_S)
+    from services.task_execution_service import _AGENT_HTTP_SLACK_S, _AUTO_RETRY_MAX_TIMEOUT_S
+    return turn_timeout + int(_AGENT_HTTP_SLACK_S) + int(_AUTO_RETRY_MAX_TIMEOUT_S)
 
 
 def portal_max_turn_seconds(turn_timeout: int) -> int:
@@ -4729,6 +4755,56 @@ async def _collect_inbox_for_turn(agent_name: str, email: str, message: str):
                     images.append({"media_type": mt, "data": b64})
                     total += u["size_bytes"]
     return images, image_names, doc_files
+
+
+async def collect_inbox_context(agent_name: str, email: str, message: str) -> tuple[str, list[dict]]:
+    """How ONE agent is told about ONE client's files for ONE turn.
+
+    Returns ``(manifest_prefix, images)``:
+
+    * ``manifest_prefix`` — the ``"[Client Portal] …\n\n"`` sentence to put in
+      front of the turn's message, or ``""`` when the inbox is empty. It names
+      the images, names the documents with their sizes and the directory to read
+      them from, and in every branch tells the agent NOT to read an image as
+      text (#728: a binary through the stream-json pipe is the zombie-claude
+      deadlock, reproduced on an 83 KB JPEG).
+    * ``images`` — vision blocks for ``execute_task(images=…)``, attached only
+      when this turn actually references them ("only when told", #78).
+
+    **This is the one place that composition lives (#2794).** It was inline in
+    `portal_chat`, which meant the 1:1 conversation was the only surface that
+    ever told an agent a file existed: a multi-agent ROOM built its turn prompt
+    from the transcript alone, so an agent @mentioned about a picture the client
+    had just sent it answered, correctly and uselessly, "I don't see any image
+    attached" — about a file sitting in its own inbox. Rooms now call this too.
+    Do not re-inline it: a third surface that composes its own sentence is the
+    same bug wearing a different name.
+
+    Best-effort in both halves — a listing or read failure yields ``("", [])``
+    rather than raising, because a file the agent cannot be told about must
+    still not cost the client their turn.
+    """
+    images, image_names, doc_files = await _collect_inbox_for_turn(agent_name, email, message)
+    parts: list[str] = []
+    if images:
+        parts.append(
+            "The client's image(s) are shown to you directly below as images — "
+            "do NOT open/cat/read image files as text: " + ", ".join(image_names)
+        )
+    elif image_names:
+        parts.append(
+            "The client has image(s) in your inbox (ask to see one and it'll be shown to you; "
+            "do NOT read image files as text): " + ", ".join(image_names)
+        )
+    if doc_files:
+        listing = ", ".join(f"{d['filename']} ({_human_size(d['size_bytes'])})" for d in doc_files)
+        parts.append(
+            f"The client has uploaded these files to your inbox at `{_client_inbox(email)}/` — "
+            f"read any that are relevant: {listing}"
+        )
+    if not parts:
+        return "", images
+    return "[Client Portal] " + " ".join(parts) + "\n\n", images
 
 
 async def list_client_uploads(agent_name: str, email: str, include_owned: bool = False) -> dict:

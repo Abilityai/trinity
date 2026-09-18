@@ -17,7 +17,7 @@ performance index, and for `idx_agent_evaluations_rating_target` it would
 silently turn "one rating per person per thing" into "one row per click".
 """
 
-from sqlalchemy import Column, Float, ForeignKey, Index, MetaData, Table, Text, text
+from sqlalchemy import BigInteger, Column, Float, ForeignKey, Index, MetaData, Table, Text, text
 from sqlalchemy import Integer as _Integer
 from sqlalchemy.types import TypeDecorator
 
@@ -267,6 +267,11 @@ schedule_executions = Table(
     Column("queued_at", Text),
     Column("backlog_metadata", Text),
     Column("fan_out_id", Text),
+    # #2524: the CALLER's subtask id within a fan-out batch. The aggregate
+    # is a query over `fan_out_id` now, so the id the caller keyed its tasks
+    # by has to live on the row — it used to be a dict key in the service's
+    # process, which no async batch or status endpoint can reach.
+    Column("fan_out_task_id", Text),
     Column("retry_count", Integer),
     Column("loop_id", Text),
     Column("claim_token", Text),  # #1081 Phase 0 — dark pull-coordination columns
@@ -914,7 +919,13 @@ agent_sync_state = Table(
     Column("behind_main", Integer),
     Column("ahead_working", Integer),
     Column("behind_working", Integer),
-    Column("git_dir_bytes", Integer),  # #1596: agent .git on-disk size
+    # #1596: agent .git on-disk size. BigInteger, not Integer (#2800): SQLAlchemy
+    # Integer is int4 on PostgreSQL (ceiling 2 GiB), and a byte count whose whole
+    # job is to observe bloat is exactly the value that exceeds it — a 44 GiB
+    # repo made every sync-state upsert raise NumericValueOutOfRange. SQLite is
+    # unaffected (its INTEGER is already 64-bit), which is why the default
+    # backend never showed it.
+    Column("git_dir_bytes", BigInteger),
     Column("pack_count", Integer),  # #1595: packs from `git count-objects -v`
     Column("loose_objects", Integer),  # #1595: loose objects (gc-health signal)
     Column("maintenance_failures", Integer),  # #1595: consecutive failed maintenance

@@ -7,6 +7,7 @@
 import { z } from "zod";
 import { ApiError, TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied } from "../access.js";
 
 /**
  * Create schedule management tools with the given client
@@ -109,10 +110,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[list_agent_schedules] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const schedules = await apiClient.listAgentSchedules(agent_name);
@@ -190,6 +191,29 @@ export function createScheduleTools(
           .optional()
           .default(60)
           .describe("Seconds between retry attempts (30-600). Default: 60. Rate-limited failures use 2x delay."),
+        validation_enabled: z
+          .boolean()
+          .optional()
+          .describe(
+            "Run a post-execution validation pass on this schedule's runs (default: false). " +
+            "This is not free and not purely observational: a technically-successful run is " +
+            "followed by ONE additional execution on the same agent, with a clean context, " +
+            "admitted through the normal capacity path. On FAIL or PARTIAL the platform records " +
+            "business_status = failed_validation on the parent execution and raises one " +
+            "high-priority operator alert; it does NOT retry, because retries key on technical " +
+            "failure and validation only runs after technical success."
+          ),
+        validation_prompt: z
+          .string()
+          .optional()
+          .describe("Custom auditor instructions for the validation pass. If omitted, the default prompt is used."),
+        validation_timeout_seconds: z
+          .number()
+          .int()
+          .min(30)
+          .max(600)
+          .optional()
+          .describe("Timeout for the validation task in seconds (30-600). Default: 120."),
         deliver_to_workspace_email: z
           .string()
           .optional()
@@ -215,6 +239,9 @@ export function createScheduleTools(
           model?: string;
           max_retries?: number;
           retry_delay_seconds?: number;
+          validation_enabled?: boolean;
+          validation_prompt?: string;
+          validation_timeout_seconds?: number;
           deliver_to_workspace_email?: string;
         },
         context?: { session?: McpAuthContext }
@@ -226,11 +253,11 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, args.agent_name, "write");
         if (!accessCheck.allowed) {
           console.log(`[create_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
             hint: "Agents can only create schedules on themselves, not other agents.",
-          }, null, 2);
+          });
         }
 
         const schedule = await apiClient.createAgentSchedule(args.agent_name, {
@@ -245,6 +272,9 @@ export function createScheduleTools(
           model: args.model,
           max_retries: args.max_retries,
           retry_delay_seconds: args.retry_delay_seconds,
+          validation_enabled: args.validation_enabled,
+          validation_prompt: args.validation_prompt,
+          validation_timeout_seconds: args.validation_timeout_seconds,
           deliver_to_workspace_email: args.deliver_to_workspace_email,
         });
 
@@ -289,10 +319,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[get_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const schedule = await apiClient.getAgentSchedule(agent_name, schedule_id);
@@ -353,6 +383,26 @@ export function createScheduleTools(
           .max(600)
           .optional()
           .describe("New retry delay in seconds (30-600). If omitted, keeps current value."),
+        validation_enabled: z
+          .boolean()
+          .optional()
+          .describe(
+            "Turn the post-execution validation pass on or off. If omitted, keeps current value. " +
+            "Enabling it adds ONE extra execution on the same agent after each technically-successful " +
+            "run; a FAIL or PARTIAL verdict records business_status = failed_validation on the parent " +
+            "and raises one operator alert, and does NOT trigger a retry."
+          ),
+        validation_prompt: z
+          .string()
+          .optional()
+          .describe("New custom auditor instructions. If omitted, keeps current value."),
+        validation_timeout_seconds: z
+          .number()
+          .int()
+          .min(30)
+          .max(600)
+          .optional()
+          .describe("New validation timeout in seconds (30-600). If omitted, keeps current value."),
         deliver_to_workspace_email: z
           .string()
           .nullable()
@@ -377,6 +427,9 @@ export function createScheduleTools(
           model?: string;
           max_retries?: number;
           retry_delay_seconds?: number;
+          validation_enabled?: boolean;
+          validation_prompt?: string;
+          validation_timeout_seconds?: number;
           deliver_to_workspace_email?: string;
         },
         context?: { session?: McpAuthContext }
@@ -388,11 +441,11 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, args.agent_name, "write");
         if (!accessCheck.allowed) {
           console.log(`[update_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
             hint: "Agents can only update their own schedules.",
-          }, null, 2);
+          });
         }
 
         // Build updates object (exclude undefined fields)
@@ -408,6 +461,10 @@ export function createScheduleTools(
         if (args.model !== undefined) updates.model = args.model;
         if (args.max_retries !== undefined) updates.max_retries = args.max_retries;
         if (args.retry_delay_seconds !== undefined) updates.retry_delay_seconds = args.retry_delay_seconds;
+        // exclude_unset contract: an omitted field leaves the stored value alone.
+        if (args.validation_enabled !== undefined) updates.validation_enabled = args.validation_enabled;
+        if (args.validation_prompt !== undefined) updates.validation_prompt = args.validation_prompt;
+        if (args.validation_timeout_seconds !== undefined) updates.validation_timeout_seconds = args.validation_timeout_seconds;
         // `null` is meaningful here and `undefined` is not: the backend handler
         // uses exclude_unset, so omitting keeps the target and an explicit null
         // clears it. A truthiness check would make it unsettable.
@@ -457,11 +514,11 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "write");
         if (!accessCheck.allowed) {
           console.log(`[delete_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
             hint: "Agents can only delete their own schedules.",
-          }, null, 2);
+          });
         }
 
         // Get schedule name before deletion for response
@@ -509,10 +566,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[toggle_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const result = enabled
@@ -554,10 +611,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[trigger_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         // #1970: carry the caller identity through so the resulting execution
@@ -655,10 +712,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[get_schedule_executions] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         // Clamp limit to max 100

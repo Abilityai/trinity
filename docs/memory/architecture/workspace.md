@@ -39,6 +39,35 @@ session that *expires* on a browser which later gained a platform login, and the
 token's server-side validity post-sign-out (no self-service revoke; ent#281's primitive
 is per-email).
 
+**One platform credential, one 401 verdict, one handler (#2791).** The paragraph above
+describes *which session a tab is in*; this is the layer under it. The platform JWT used
+to live in two places that could disagree — the in-memory
+`axios.defaults.headers.common['Authorization']` copy and `localStorage['token']` re-read
+per request — with **no** `storage` listener anywhere under `src/frontend/src` and three
+separate 401 handlers. Because the Workspace opens in its own tab (ent#456) and polls
+every 20s, a stale Workspace tab could log a freshly re-established platform session out
+within seconds: its poll went out on the OLD token, 401'd, and the handler called
+`authStore.logout()`, deleting the NEW session's token. `utils/platformSession.js` is now
+the only reader (`readStoredToken`), the only verdict (`sessionLostVerdict` →
+`ignore | stale | logout`, where **stale** means *the credential that failed has already
+been replaced, so adopt the current session rather than destroy it*) and the only handler
+registry; `main.js` installs a global axios **request** interceptor so every bare-`axios`
+caller derives the header per request, and a `storage` listener so a login or logout in
+one tab reaches every other. The `axios.defaults` copy is written nowhere — a **tree-wide**
+source guard says so, because the first cut of this fix guarded `auth.js` alone while
+`App.vue` still wrote it on every boot, and axios merges that default into the request
+*before* the interceptor chain runs, so the per-request rebuild was inert for the life of
+the tab (the merge-train review's C1); the two sync actions and `logout()` delete it as a
+belt. The reaction itself (`reactToPlatformUnauthorized`), the storage listener
+(`reactToStorageEvent`) and the request rebuild (`applyRequestCredential`) are functions
+of their collaborators, executed by unit tests with fakes — `main.js` is wiring only. The
+logout revoke carries its token **explicitly**, because #2258's clear-before-revoke
+ordering means storage is already empty by then. The Workspace veto in the verdict reads
+the **per-tab** portal token from the store, not shared `localStorage`, so a client
+signing in in another tab cannot strand an operator's Workspace tab on an expired JWT.
+Full model and the verdict table:
+[workspace-session-signout.md](../feature-flows/workspace-session-signout.md).
+
 **Membership is a DB fact; container state is a projection onto the card (#2196).** The
 roster is built from `agent_ownership` / `agent_sharing` and is **never** filtered by
 whether a container exists. A live ownership row with no container is a routine state
@@ -763,7 +792,34 @@ host is a supported topology (ent#79), and no static header can carry it (CORS w
 it a second time). The scope word is load-bearing: only that one route is rewritten, and
 `download_url` itself stays absolute and shareable for the anchor-click Download.
 
+## The Work card's activity line (trinity-enterprise#620)
+
+While an agent works, its card — in the chat and in the rail's Work tab — carries ONE fixed-height
+row saying what it is doing now. Two feeds, one vocabulary (`utils/workActivity.js`): the chat's
+own turn parses the SSE frames' real shape (`message.content[].type === 'tool_use'`; the earlier
+handler matched a shape that never occurs, which is why the card was blank), every other run —
+delegated, scheduled, room — reads the agent's heartbeat, which now carries a bounded
+`executions[]` from the agent server's per-execution activity slot. The backend never composes
+the words: `WorkItem.activity {tool, summary, since, age_seconds}` is folded onto live, non-stale
+rows of rostered agents through the title sanitiser and the roster mask, and a Redis-only
+`GET …/work/activity` sibling is polled every 2.5 s while a card is live. The card owns the
+motion (`createActivityLineQueue`: ≥700 ms per line, a burst collapses, identical lines never
+re-key, cleared at terminal; slide-up `<Transition>`, a swap under reduced motion). A person's
+own send re-pins the transcript once the card mounts, guarded by `following` (#2624).
+
 ## The compact header — Info as a rail tab, one paperclip, voice at the composer (ent#547, #2580)
+
+**Theme switch (trinity-enterprise#625).** The header's LAST control, in both the conversation
+and the room, is a `#header-end` slot that `views/Portal.vue` fills with
+`components/portal/PortalThemeSwitch.vue` — a trigger showing the RESOLVED theme (icon +
+"System · dark", icon-only below `sm`) over a popover holding `components/base/ThemeChoice.vue`,
+the one light/dark/system picker the NavBar's user menu now consumes too. It drives
+`useThemeStore` and nothing else (no auth/agents/clientPortal import — pinned), so an external
+client gets it; only the root `dark` class flips, and the slot carries no `:key`, so scroll,
+draft and thread survive a switch. The decidable half is `utils/themeSwitch.js`. Its spec is
+the frontend suite's first mounted component test: `vitest.config.js` registers
+`@vitejs/plugin-vue`, and a spec opts into jsdom per file (`// @vitest-environment jsdom`);
+the default environment stays `node`.
 
 The band is **compact**, and the three controls that were not about the conversation have
 left the header. Ruled by the operator on 2026-09-07 after testing `dev`.

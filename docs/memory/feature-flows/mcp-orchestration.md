@@ -717,7 +717,7 @@ nothing it could otherwise have had.
 
 Live harness: `src/mcp-server/scripts/verify_914.ts <agent> [chat|task|fanout|all]`.
 
-### Agent-to-Agent Access Control (`chat.ts:29-100`)
+### Agent-to-Agent Access Control (`src/access.ts` `checkAgentEdge` — ent#628; `chat.ts` `checkAgentAccess` wraps it for the chat family)
 ```typescript
 async function checkAgentAccess(
   client: TrinityClient,
@@ -737,8 +737,18 @@ async function checkAgentAccess(
   // - Self: Always allowed
   // - Target in permitted list: Allowed
   // - Otherwise: Denied (even if same owner)
+  // - A key row with no agent name: Denied (not promoted to the user rule)
+
+  // Any other scope: Denied — an allowlist, never a fallthrough (#2323)
 }
 ```
+
+Since ent#628 the agent-scope rule has ONE implementation, `src/mcp-server/src/access.ts::checkAgentEdge`, and
+every registered tool declares in `TOOL_ACCESS_POLICY` whether it is gated at registration (`enforce`),
+gates itself after resolving its target (`in-tool`), is ungated at the MCP layer with a named owner
+(`baselined` → trinity-enterprise#629), or has no agent target (`none`); `server.ts` refuses to register a
+tool without a row. It is a tool-surface gate — the REST routes behind the tools resolve an agent key to
+its owner (Invariant #8).
 
 ---
 

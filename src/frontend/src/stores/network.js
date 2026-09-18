@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { readStoredToken } from '@/utils/platformSession'
 import { ref, computed } from 'vue'
 import axios from 'axios'
 import { useAgentsStore } from './agents'
@@ -231,7 +232,7 @@ export const useNetworkStore = defineStore('network', () => {
 
   async function fetchPermissionEdges() {
     try {
-      const token = localStorage.getItem('token')
+      const token = readStoredToken()
       if (!token) return
 
       // Single bulk API call instead of N per-agent calls (#359)
@@ -630,7 +631,7 @@ export const useNetworkStore = defineStore('network', () => {
     // Reset intentional disconnect flag when intentionally connecting
     intentionalDisconnect.value = false
 
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     if (!token) {
       console.log('[Collaboration] No auth token, skipping WebSocket connection')
       return
@@ -820,7 +821,7 @@ export const useNetworkStore = defineStore('network', () => {
   // error is re-thrown for the caller to surface as a named notification.
 
   function _authHeaders() {
-    return { Authorization: `Bearer ${localStorage.getItem('token')}` }
+    return { Authorization: `Bearer ${readStoredToken()}` }
   }
 
   async function _refetchAgentTags(agentName) {
@@ -1790,7 +1791,7 @@ export const useNetworkStore = defineStore('network', () => {
     const newState = !currentState
 
     try {
-      const token = localStorage.getItem('token')
+      const token = readStoredToken()
       const response = await axios.put(
         `/api/agents/${agentName}/autonomy`,
         { enabled: newState },
@@ -1850,7 +1851,7 @@ export const useNetworkStore = defineStore('network', () => {
     runningToggleLoading.value[agentName] = true
 
     try {
-      const token = localStorage.getItem('token')
+      const token = readStoredToken()
       const newStatus = isRunning ? 'stopped' : 'running'
       await axios.post(
         `/api/agents/${agentName}/${isRunning ? 'stop' : 'start'}`,

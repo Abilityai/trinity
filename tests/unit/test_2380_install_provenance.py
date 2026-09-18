@@ -90,7 +90,27 @@ def _settings_service_module():
 
 
 def _router():
+    """The composed router package — use for `.router` only."""
     import routers.settings as m
+    return m
+
+
+# #1028: `routers/settings.py` is a package now, and the collaborators tests
+# patch (`db`, `settings_service`) are deliberately NOT re-exported on the
+# package. That is what makes a stale patch raise AttributeError instead of
+# applying to a module nobody reads — a silently-inapplicable patch on `db` is
+# a test that asserts nothing while hitting the real accessor. So each helper
+# below names the module that actually owns the handler under test.
+
+def _generic():
+    """`GET/PUT/DELETE /{key}` — the catch-all guards."""
+    import routers.settings.generic as m
+    return m
+
+
+def _flags_mod():
+    """`GET /feature-flags`."""
+    import routers.settings.flags as m
     return m
 
 
@@ -891,9 +911,9 @@ def client(monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    rs = _router()
+    rs = _generic()          # the module whose collaborators this fixture stubs
     app = FastAPI()
-    app.include_router(rs.router)
+    app.include_router(_router().router)
     app.dependency_overrides[rs.get_current_user] = lambda: _principal()
 
     # Nothing below the guards may reach a real DB or audit sink. The PUT
@@ -965,7 +985,7 @@ class TestRouterGuards:
     def test_the_refusal_precedes_any_write(self, client, monkeypatch):
         """The guard must sit above the sink, not beside it — a 422 returned
         after the row was already written would be the worst of both."""
-        rs = _router()
+        rs = _generic()
         writes = []
         monkeypatch.setattr(rs.db, "set_setting", lambda k, v: writes.append((k, v)))
         monkeypatch.setattr(rs.db, "delete_setting", lambda k: writes.append(("del", k)))
@@ -979,7 +999,7 @@ class TestRouterGuards:
     def test_a_non_admin_is_still_refused_first(self, client, monkeypatch):
         """The provenance guards must not have opened a hole above the admin
         gate — `assert_admin` runs before either of them."""
-        rs = _router()
+        rs = _generic()
         client.app.dependency_overrides[rs.get_current_user] = lambda: _principal(
             role="user"
         )
@@ -994,18 +1014,17 @@ class TestRouterGuards:
 # ROUTER — /feature-flags
 # ===========================================================================
 
-def _flags(monkeypatch, *, source, marketplace, posture, guide=None):
+def _flags(monkeypatch, *, source, marketplace, posture, guide=None, reached=False):
     """Drive `get_public_feature_flags` with every DB-backed service stubbed.
 
     Mirrors `test_2217_canary_status.py`: a pure handler test that still
     catches a dropped or misnamed key.
     """
-    rs = _router()
+    rs = _flags_mod()
 
     stub_settings = types.SimpleNamespace(
         is_brain_orb_enabled=lambda: False,
         is_session_tab_enabled=lambda: False,
-        is_workspace_enabled=lambda: False,
         is_brain_orb_voice_enabled=lambda: False,
         is_brain_orb_write_enabled=lambda: False,
         get_elevenlabs_api_key=lambda: None,
@@ -1017,6 +1036,10 @@ def _flags(monkeypatch, *, source, marketplace, posture, guide=None):
         # meaning; the do-script case passes it explicitly.
         is_hardening_guide_eligible=lambda: (marketplace if guide is None else guide),
         get_install_tls_posture=lambda: posture,
+        # #2691: whether that advertised name has ever actually served a
+        # request. Its own cases live in test_2691_public_url_reachability.py;
+        # here it only has to exist, so the posture assertions still run.
+        is_public_url_reached=lambda: reached,
     )
     monkeypatch.setattr(rs, "settings_service", stub_settings)
     monkeypatch.setattr(

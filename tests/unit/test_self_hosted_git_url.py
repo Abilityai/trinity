@@ -97,35 +97,59 @@ def unset_git_env(monkeypatch):
     monkeypatch.delenv("TRINITY_GIT_API_BASE", raising=False)
 
 
-def test_git_remote_url_default_is_github(unset_git_env):
+# ent#615 rewrote this block. `_git_remote_url(pat, repo)` is GONE — it was the
+# chokepoint that embedded `oauth2:<pat>@` in every persisted remote, and a
+# persisted remote is read by `ps`, by the orphan sweep's reaped-cmdline
+# logging and by git's own stderr. `_credentialless_remote_url(repo)` is the
+# only remote-URL builder left; the credential arrives per-operation through
+# the `trinity` git credential helper. #387's base-URL composition is
+# unchanged and is what these still pin.
+
+
+def test_remote_url_default_is_github(unset_git_env):
     """#387 backward-compat: default composition still points at github.com."""
     gs = _load_git_service()
-    url = gs._git_remote_url("ghp_fake", "owner/repo")
-    assert url == "https://oauth2:ghp_fake@github.com/owner/repo.git"
+    assert gs._credentialless_remote_url("owner/repo") == (
+        "https://github.com/owner/repo.git"
+    )
 
 
-def test_git_remote_url_respects_gitea_override(monkeypatch):
+def test_remote_url_respects_gitea_override(monkeypatch):
     """Dev/self-host: gitea base URL is honored end-to-end."""
     monkeypatch.setenv("TRINITY_GIT_BASE_URL", "http://trinity-gitea-dev:3000")
     gs = _load_git_service()
-    url = gs._git_remote_url("ghp_fake", "owner/repo")
-    assert url == "http://oauth2:ghp_fake@trinity-gitea-dev:3000/owner/repo.git"
+    assert gs._credentialless_remote_url("owner/repo") == (
+        "http://trinity-gitea-dev:3000/owner/repo.git"
+    )
 
 
-def test_git_remote_url_preserves_https_override(monkeypatch):
+def test_remote_url_preserves_https_override(monkeypatch):
     """GHES override keeps the https scheme (no forced downgrade)."""
     monkeypatch.setenv("TRINITY_GIT_BASE_URL", "https://ghes.example.com")
     gs = _load_git_service()
-    url = gs._git_remote_url("ghp_fake", "owner/repo")
-    assert url == "https://oauth2:ghp_fake@ghes.example.com/owner/repo.git"
+    assert gs._credentialless_remote_url("owner/repo") == (
+        "https://ghes.example.com/owner/repo.git"
+    )
 
 
-def test_git_remote_url_strips_trailing_slash(monkeypatch):
+def test_remote_url_strips_trailing_slash(monkeypatch):
     """A trailing slash in the base URL must not produce `//owner/...`."""
     monkeypatch.setenv("TRINITY_GIT_BASE_URL", "https://gitea.example.com/")
     gs = _load_git_service()
-    url = gs._git_remote_url("ghp_fake", "owner/repo")
-    assert url == "https://oauth2:ghp_fake@gitea.example.com/owner/repo.git"
+    assert gs._credentialless_remote_url("owner/repo") == (
+        "https://gitea.example.com/owner/repo.git"
+    )
+
+
+def test_the_token_bearing_builder_is_gone(unset_git_env):
+    """ent#615 AC1: no builder in git_service produces userinfo at all."""
+    gs = _load_git_service()
+    assert not hasattr(gs, "_git_remote_url"), (
+        "_git_remote_url is back — every remote it builds carries the platform "
+        "token into .git/config and into git's child argv"
+    )
+    for repo in ("owner/repo", "o/r.git"):
+        assert "@" not in gs._credentialless_remote_url(repo)
 
 
 # ---------------------------------------------------------------------------
@@ -191,12 +215,17 @@ def test_crud_propagates_base_url_env():
 # fresh bash with controlled env. If the snippet drifts, the test breaks —
 # which is the point.
 
+# ent#615: there is ONE composition and it carries no credential. The
+# `oauth2:${GITHUB_PAT}@` branch that used to sit beside this is what put the
+# platform token in `.git/config` and in `git-remote-https`'s argv on every
+# fetch. #387's base-URL composition — the thing this file is actually about —
+# is unchanged.
 _COMPOSE_SNIPPET = r'''
 GIT_BASE_URL="${TRINITY_GIT_BASE_URL:-https://github.com}"
 GIT_BASE_URL="${GIT_BASE_URL%/}"
 GIT_HOST_PATH="${GIT_BASE_URL#*://}"
 GIT_SCHEME="${GIT_BASE_URL%%://*}"
-CLONE_URL="${GIT_SCHEME}://oauth2:${GITHUB_PAT}@${GIT_HOST_PATH}/${GITHUB_REPO}.git"
+CLONE_URL="${GIT_SCHEME}://${GIT_HOST_PATH}/${GITHUB_REPO}.git"
 printf '%s' "$CLONE_URL"
 '''
 
@@ -227,15 +256,16 @@ def test_startup_snippet_matches_startup_sh():
     assert 'GIT_HOST_PATH="${GIT_BASE_URL#*://}"' in sh
     assert 'GIT_SCHEME="${GIT_BASE_URL%%://*}"' in sh
     assert (
-        'CLONE_URL="${GIT_SCHEME}://oauth2:${GITHUB_PAT}@${GIT_HOST_PATH}/${GITHUB_REPO}.git"'
-        in sh
+        'CLONE_URL="${GIT_SCHEME}://${GIT_HOST_PATH}/${GITHUB_REPO}.git"' in sh
     )
+    # ent#615 AC1: and the token-bearing form is not merely unused, it is gone.
+    assert "oauth2:${GITHUB_PAT}@" not in sh
 
 
 def test_startup_sh_default_clone_url():
     """#387 backward-compat: unset env yields the classic GitHub URL."""
     out = _run_snippet({})
-    assert out == "https://oauth2:p@github.com/o/r.git"
+    assert out == "https://github.com/o/r.git"
 
 
 def test_startup_sh_respects_base_url_override():
@@ -243,7 +273,7 @@ def test_startup_sh_respects_base_url_override():
     out = _run_snippet(
         {"TRINITY_GIT_BASE_URL": "http://trinity-gitea-dev:3000"}
     )
-    assert out == "http://oauth2:p@trinity-gitea-dev:3000/o/r.git"
+    assert out == "http://trinity-gitea-dev:3000/o/r.git"
 
 
 def test_startup_sh_strips_trailing_slash_in_base_url():
@@ -251,7 +281,7 @@ def test_startup_sh_strips_trailing_slash_in_base_url():
     out = _run_snippet(
         {"TRINITY_GIT_BASE_URL": "https://gitea.example.com/"}
     )
-    assert out == "https://oauth2:p@gitea.example.com/o/r.git"
+    assert out == "https://gitea.example.com/o/r.git"
 
 
 def test_startup_sh_shellcheck_clean():

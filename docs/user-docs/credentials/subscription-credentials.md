@@ -8,7 +8,7 @@ Share Claude Max/Pro subscription tokens across multiple agents, with automatic 
 
 - **Subscription** -- A Claude Max or Pro subscription token (from `claude setup-token`, prefix `sk-ant-oat01-`) registered with Trinity. Stored encrypted (AES-256-GCM). Injected as an environment variable into assigned agents.
 - **Auto-assign** -- New agents get a subscription automatically. Trinity skips any subscription that failed in the last 2 hours, then picks the one with the most cached headroom (furthest from whichever of its two limits is nearer). When no usable reading exists, it falls back to fewest-agents-first with an alphabetical tie-break.
-- **Headroom** -- How much of a subscription's two Anthropic limits is already spent: the **5h** window and the **7d** window, each as a utilization percentage with a reset time. Trinity reads them from the provider by sending a minimal probe (~a dozen tokens of the subscription's own quota, visible in the Anthropic console). Both windows are fixed windows with a scheduled reset — consumption climbs inside the window and drops at the reset, so a percentage is not a rolling average.
+- **Headroom** -- How much of a subscription's two Anthropic limits is already spent: the **5h** window and the **7d** window, each as a utilization percentage with a reset time. Trinity reads them from the provider by sending a minimal probe (~a dozen tokens of the subscription's own quota, visible in the Anthropic console). Both windows are fixed windows with a scheduled reset — consumption climbs inside the window and drops at the reset, so a percentage is not a rolling average. A plan that can run past its limit reports more than 100%, and Trinity shows it that way — for example `7d: 120%`. That subscription counts as past its limit everywhere: in auto-assign and switch ranking, and in weekly-limit alerts.
 - **Observed vs actual** -- Every usage reading carries its source. `actual (Anthropic)` means a provider probe answered and says how old the reading is; `observed (estimate from recorded consumption)` means Trinity is summing its own execution records because no fresh probe exists. Observed figures are always available; provider figures enrich them.
 - **Failure event** -- One recorded refusal of a subscription by the provider, classified as **rate-limit** (quota) or **auth** (the token was rejected). The distinction matters everywhere: a dead token is never reported as a rate limit, and the provider's own "approaching the limit" warning tier is never reported as a limit either.
 - **Auto-switch** -- When an agent's subscription refuses a turn, Trinity moves the agent to a different subscription and re-issues the turn once, so the turn completes. The new token is applied via a **hot-reload** of the running container — no recreate — so in-flight executions keep running. Default ON.
@@ -23,6 +23,10 @@ Share Claude Max/Pro subscription tokens across multiple agents, with automatic 
 2. In Trinity, open **Settings** → **Integrations** → **Claude Subscriptions**.
 3. Under **Add Subscription**, enter a **Name**, choose a **Type** (**Claude Max** / **Claude Pro** / **Unknown**), and paste the **Token**. The field turns red until the token starts with `sk-ant-oat01-`.
 4. Click **Register Subscription**. Registering a name that already exists replaces its token and hot-reloads every running agent on it.
+
+The first-run setup's Claude step registers a subscription the same way, after checking the token with Anthropic first (see [Platform Keys](platform-keys.md#claude)).
+
+**Agents with no credential are brought onto it.** On an install with no platform API key, registering a subscription assigns it to every Claude-runtime agent that has no subscription and is not opted out of platform credentials — the starter fleet of a fresh install, for example. Running agents are restarted in the background, one at a time; an agent in the middle of a task is left alone and picks the subscription up on its next start. Agents that already have a working API key or another subscription are not moved. The same sweep runs when the platform API key is **removed** from Settings, since that is the usual order when migrating off a metered key: register the subscription, then delete the key. Each adoption is recorded in the audit log.
 
 The table lists each subscription's **Name**, **Type**, **Agents** count, **Pressure**, and **Created** date, with a **Delete** action. Deleting a subscription clears it from every assigned agent (the confirmation names how many). A running agent keeps its current token until it is next restarted, after which it uses the platform API key.
 
@@ -81,7 +85,7 @@ The status line under the control says whether the alert is actually running —
 With **Automatically switch subscriptions when usage limits are reached** on (the default), a rate-limited or rejected subscription no longer costs the user their message:
 
 1. **Before the first attempt** — if the agent's subscription is already known not to serve (a fresh provider reading says it is refusing, or it hit a rate limit in the last 2 hours with no fresh reading to the contrary), Trinity switches the agent before dispatching, so the first message after a limit does not burn a failed attempt.
-2. **Mid-turn** — if the provider refuses the turn (rate limit or rejected token), Trinity records the failure event, switches the agent, hot-reloads the token, and re-issues the turn once on the new subscription. A turn gets at most one remediation.
+2. **Mid-turn** — if the provider refuses the turn (rate limit or rejected token), Trinity records the failure event, switches the agent, hot-reloads the token, and re-issues the turn once on the new subscription. A turn gets at most one remediation. The re-issued turn gets the rest of the agent's execution timeout: whatever time the turn has already used is subtracted, and nothing else. A long turn is not cut short, and the whole turn never runs longer than the timeout. If the re-issued turn runs out of time, the error reports the time it was actually given.
 3. **Choosing the destination** — candidates that failed in the last 2 hours are skipped, unless there is positive evidence they recovered (a fresh reading says the provider is serving them, or the window they failed in has since reset). Survivors are ranked by cached headroom — furthest from the nearer of the 5h/7d walls first, in 10-point bands, with fewest-agents as the tie-break — and any candidate the provider is currently refusing is dropped. Ranking reads cached readings only; it never probes.
 4. **Nothing to switch to** — with **Fall back to the platform API key** on and a platform key configured, the agent's subscription assignment is cleared and the agent is restarted on the API key so the turn completes. This is not a temporary redirect: reassign a subscription deliberately when you want spend back on it. With the fallback off (or no key), the turn fails and the error names the earliest known reset time.
 
@@ -113,7 +117,8 @@ All four controls live under the subscriptions table in **Settings → Integrati
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/subscriptions` | GET | List subscriptions with assigned agents — admins see the fleet, everyone else their own |
-| `/api/subscriptions` | POST | Register (or, by name, replace) a subscription. Admin |
+| `/api/subscriptions` | POST | Register (or, by name, replace) a subscription; the response carries `connected_agents`, the number of credential-less agents brought onto it. Admin |
+| `/api/subscriptions/test` | POST | Check a token before registering it (`{token}`): one minimal request on the plan, nothing stored. Returns `valid`, a `status` such as `ok`, `rate_limited` or `invalid_token`, and the fix to apply. Admin |
 | `/api/subscriptions/{id}` | GET | One subscription with its agents. Admin. `{id}` accepts the UUID or the name on every route below |
 | `/api/subscriptions/{id}` | DELETE | Delete a subscription; clears its agents. Admin |
 | `/api/subscriptions/{id}/usage` | GET | 5h/7d observed usage, 24h failure events by kind, `rate_limited_now`, `source`, and the `headroom` block (per-window utilization, status, reset, snapshot age). Admin |
@@ -158,6 +163,7 @@ Usage, headroom, and the settings toggles have no MCP tool; use the REST endpoin
 ## See Also
 
 - [Credential Management](credential-management.md)
+- [Platform Keys](platform-keys.md) — the API-key alternative, and the first-run Claude step
 - [Dashboard](../operations/dashboard.md) — the Subscription pressure tile and per-agent pressure chips
 - [Operations Page](../operations/operating-room.md) — where weekly-limit alerts land
 - [First-Time Setup](../getting-started/setup.md) — the Settings page overview

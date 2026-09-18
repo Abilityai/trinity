@@ -110,7 +110,8 @@ test.beforeAll(async ({ baseURL }) => {
   }
   if (!AGENT_A) {
     if (usable.length === 0) throw new Error('No non-system, non-ephemeral agent available to test schedules')
-    AGENT_A = usable[0]
+    // Prefer the long-lived harness agent (#2080) over usable[0] (#2802).
+    AGENT_A = usable.includes('test-harness-agent') ? 'test-harness-agent' : usable[0]
   }
   AGENT_B = usable.find((n) => n !== AGENT_A) || ''
   // HARD requirement, not a skip: T4/T5 are the only evidence that the watcher
@@ -240,8 +241,11 @@ async function switchAgentInSpa(page, targetAgent) {
   // List mode is what renders a per-agent row; wait for its toolbar so a slow
   // agent fetch can't be mistaken for a missing row.
   await expect(page.getByPlaceholder('Search agents...')).toBeVisible({ timeout: 20000 })
+  // One name link per list layout (desktop / tablet / mobile); which one renders
+  // depends on the list's width, so take the visible one.
   const targetLink = page
     .locator(`[data-agent="${targetAgent}"] a[href="/agents/${targetAgent}"]`)
+    .filter({ visible: true })
     .first()
   await expect(targetLink).toBeVisible({ timeout: 20000 })
   await targetLink.click()
@@ -400,12 +404,12 @@ test.describe('Schedules tab toggle scroll stability (#1634)', () => {
     await page.goto(`/agents/${AGENT_A}`)
     await openSchedulesTab(page)
 
-    await expect(page.getByText('Loading schedules...')).toBeVisible({ timeout: 15000 })
+    await expect(page.getByText(/Loading schedules/)).toBeVisible({ timeout: 15000 })
     await expect(page.getByTestId('schedule-row')).toHaveCount(0)
 
     release()
 
-    await expect(page.getByText('Loading schedules...')).toHaveCount(0, { timeout: 20000 })
+    await expect(page.getByText(/Loading schedules/)).toHaveCount(0, { timeout: 20000 })
     await expect(page.getByTestId('schedule-row').first()).toBeVisible({ timeout: 20000 })
   })
 
@@ -438,12 +442,12 @@ test.describe('Schedules tab toggle scroll stability (#1634)', () => {
     await switchAgentInSpa(page, AGENT_B)
 
     // The spinner must be back...
-    await expect(page.getByText('Loading schedules...')).toBeVisible({ timeout: 20000 })
+    await expect(page.getByText(/Loading schedules/)).toBeVisible({ timeout: 20000 })
     // ...and agent A's rows must be gone, not lingering under B's header.
     await expect(page.locator(`[data-testid="schedule-row"]:has-text("${FIXTURE_PREFIX}")`)).toHaveCount(0)
 
     release()
-    await expect(page.getByText('Loading schedules...')).toHaveCount(0, { timeout: 20000 })
+    await expect(page.getByText(/Loading schedules/)).toHaveCount(0, { timeout: 20000 })
     // B never had fixture rows seeded.
     await expect(page.locator(`[data-testid="schedule-row"]:has-text("${FIXTURE_PREFIX}")`)).toHaveCount(0)
   })
@@ -479,12 +483,12 @@ test.describe('Schedules tab toggle scroll stability (#1634)', () => {
 
     // Land on A and switch away WHILE A's GET is still in flight.
     await page.goto(`/agents/${AGENT_A}?tab=schedules`)
-    await expect(page.getByText('Loading schedules...')).toBeVisible({ timeout: 15000 })
+    await expect(page.getByText(/Loading schedules/)).toBeVisible({ timeout: 15000 })
 
     await switchAgentInSpa(page, AGENT_B)
 
     // B's load owns the panel and has completed.
-    await expect(page.getByText('Loading schedules...')).toHaveCount(0, { timeout: 20000 })
+    await expect(page.getByText(/Loading schedules/)).toHaveCount(0, { timeout: 20000 })
     await expect(page.locator(`[data-testid="schedule-row"]:has-text("${FIXTURE_PREFIX}")`)).toHaveCount(0)
 
     // NOW let A's superseded response land. Without the guard it writes A's rows
@@ -496,6 +500,6 @@ test.describe('Schedules tab toggle scroll stability (#1634)', () => {
     await expect(page.locator(`[data-testid="schedule-row"]:has-text("${FIXTURE_PREFIX}")`)).toHaveCount(0)
     // The late response must not have cleared a flag B's load owns, nor left the
     // panel stuck loading.
-    await expect(page.getByText('Loading schedules...')).toHaveCount(0)
+    await expect(page.getByText(/Loading schedules/)).toHaveCount(0)
   })
 })

@@ -118,6 +118,20 @@ PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT = 30  # hard ceiling from first sign-in
 # assume from the name; there is no longer one answer that covers both.
 PORTAL_SOURCE_CHANNEL = "portal"
 
+# #2792 — a Workspace ROOM turn's surface, and the destination stamp
+# (`source_channel_chat_id` = the room id) that lets the room tell its own live
+# work apart from everything else its participants are doing. Deliberately NOT
+# the portal value above: every reader of `"portal"` branches on "this is a 1:1
+# Workspace thread" — `_resolve_portal` looks the chat id up as a portal
+# SESSION, and the voice-reply route promises a speaker control a room does not
+# have. This value is in NEITHER map, so a room turn and its delegated children
+# have no report-back leg and no voice destination by construction. The one
+# reader that does accept it is the Workspace work projection
+# (`client_portal/work/service.py`), where a room id is a chat the client can
+# open. A resolver for rooms, if one is ever wanted, is a deliberate entry in
+# `channel_completion_report._CHANNEL_RESOLVERS`, not a side effect of a stamp.
+ROOM_SOURCE_CHANNEL = "room"
+
 # Bounds enforced on READ, so a bad row cannot widen the window (#506).
 PORTAL_SESSION_MIN_IDLE_MINUTES = 15
 PORTAL_SESSION_MAX_ABSOLUTE_DAYS = 90
@@ -367,9 +381,9 @@ GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL") or "gemini-3.5-flash"
 GEMINI_TRANSCRIPTION_MODEL = os.getenv("GEMINI_TRANSCRIPTION_MODEL") or "gemini-3.5-flash"
 
 # VoIP Telephony Configuration (VOIP-001, #1056 — Phase 1, outbound)
-# Default OFF — mirrors the workspace_available opt-in (#860). The feature
-# also requires a per-agent voip_bindings row to function. `voip_available`
-# in GET /api/settings/feature-flags is `VOIP_ENABLED and bool(GEMINI_API_KEY)`.
+# Default OFF. The feature also requires a per-agent voip_bindings row to
+# function. `voip_available` in GET /api/settings/feature-flags is
+# `VOIP_ENABLED and bool(GEMINI_API_KEY)`.
 VOIP_ENABLED = os.getenv("VOIP_ENABLED", "false").lower() == "true"
 # Outbound A2A calls (#736) — a Trinity agent tasking an EXTERNAL A2A agent.
 # RUNTIME-RESOLVED like the Brain Orb flags, deliberately: no import-time

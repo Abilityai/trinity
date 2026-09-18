@@ -40,7 +40,7 @@ On a local install use `http://localhost:8080/mcp`, the MCP server's own publish
 
 ## How many MCP tools are there, and what can they do?
 
-The MCP server exposes 130 tools across 33 modules. The largest family is agent management (22 tools — create, start/stop, rename, delete, credential injection, SSH access, GitHub sync, runtime-data export/import); the rest cover chat and fan-out, execution queries, schedules, skills, tags, system manifests, subscriptions, fleet health, git operations, loops, shared rooms, reminders, the operator queue, notifications and proactive messages, structured reports, event pub/sub, and outbound A2A calls, plus single-purpose tools like `share_file`, `write_user_memory`, `send_voice_reply`, and `call_user`. Two newer families are worth knowing: the canvas tools (`set_canvas`, `patch_canvas`, `get_canvas`) render an agent's durable block layout beside the conversation in the Workspace — see [Agent Canvas](../agents/agent-canvas.md) — and the vault tools (`list_available_credentials`, `fetch_credential`) let an agent pull a granted credential by name at runtime — see [Credential Management](../credentials/credential-management.md#credential-vault). A few tools answer `"disabled"` or "not available" on an instance without the matching entitlement. See [MCP Server](../integrations/mcp-server.md#tool-categories).
+The MCP server exposes 129 tools across 33 modules. The largest family is agent management (22 tools — create, start/stop, rename, delete, credential injection, SSH access, GitHub sync, runtime-data export/import); the rest cover chat and fan-out, execution queries, schedules, skills, tags, system manifests, subscriptions, fleet health, git operations, loops, shared rooms, reminders, the operator queue, notifications and proactive messages, structured reports, event pub/sub, and outbound A2A calls, plus single-purpose tools like `share_file`, `write_user_memory`, `send_voice_reply`, and `call_user`. Two newer families are worth knowing: the canvas tools (`set_canvas`, `patch_canvas`, `get_canvas`, `list_canvases`, `clear_canvas`) render an agent's durable block layout beside the conversation in the Workspace — see [Agent Canvas](../agents/agent-canvas.md) — and the vault tools (`list_available_credentials`, `fetch_credential`) let an agent pull a granted credential by name at runtime — see [Credential Management](../credentials/credential-management.md#credential-vault). A few tools answer `"disabled"` or "not available" on an instance without the matching entitlement. See [MCP Server](../integrations/mcp-server.md#tool-categories).
 
 ## Can I expose one of my agents as its own MCP tool?
 
@@ -48,11 +48,11 @@ Yes. On the agent's **Settings** tab, the **Expose via MCP** section has an owne
 
 ## Why can't my agent call another agent over MCP?
 
-Agent-to-agent access is deny-by-default: an agent's own key only reaches itself plus agents it has been explicitly granted. Grants live in the agent's Permissions tab — until one exists, `list_agents` won't even show the other agent to the caller, and `chat_with_agent` blocks the target. Add a permission from the source agent to the target agent and the call goes through. See [Agent Permissions](../collaboration/agent-permissions.md).
+Agent-to-agent access is deny-by-default: an agent's own key only reaches itself plus agents it has been explicitly granted. Grants live in the agent's Permissions tab — until one exists, `list_agents` won't even show the other agent to the caller, and `chat_with_agent` and `run_agent_loop` block the target with an `Access denied` result. Add a permission from the source agent to the target agent and the call goes through. See [Agent Permissions](../collaboration/agent-permissions.md).
 
-## How do I revoke an MCP API key?
+## What's the difference between revoking and deleting an MCP key?
 
-Delete the key under **Settings → MCP Keys**, or call `DELETE /api/mcp/keys/{key_id}` with your JWT. Revocation deactivates the key so future validations fail. You can only manage your own keys (admins can list everyone's). A connector key minted from an agent's **Expose via MCP** panel is revoked from that panel. See [Authentication](../api-reference/authentication.md).
+Two routes, two outcomes. `POST /api/mcp/keys/{key_id}/revoke` **deactivates** the key: future validations fail, but its record stays for the audit trail, where every key-authenticated call is attributed by key id, name and scope. `DELETE /api/mcp/keys/{key_id}` **permanently deletes** it. Both take your JWT, and you can only manage your own keys (admins can list everyone's) — **Settings → MCP Keys** is the UI for them. Two kinds of key are handled elsewhere: a connector key minted from an agent's **Expose via MCP** panel is revoked from that panel, and an agent's own injected key is rotated from the agent's Settings tab rather than deleted by hand (see the MCP key panel question below). See [Authentication → API Endpoints](../api-reference/authentication.md#api-endpoints).
 
 ## How do I authenticate against the REST API?
 
@@ -79,13 +79,17 @@ JWT tokens are invalidated when the backend restarts, so every logged-in session
 
 It makes retries safe on endpoints that trigger an execution (`/chat`, `/task`, `/fan-out`, VoIP calls, webhook triggers). Send any unique string per logical request; if you resend the same key within 24 hours, Trinity returns the original result with the header `X-Idempotent-Replay: true` instead of creating a second execution. A duplicate sent while the first request is still running returns 409 with the original `execution_id` to poll (for `/fan-out`, that field carries the batch's `fan_out_id`). A first attempt that was rejected before dispatch, or a sync `/task` that failed, timed out, or was cancelled, releases the key so a legitimate retry goes through. The header is optional and fail-open — omitting it preserves normal behavior. See [Chat API](../api-reference/chat-api.md#idempotency).
 
-## What happens when a chat call from an MCP client takes too long?
+## Why is `chat_with_agent` returning `queued_timeout` instead of a reply?
 
 Synchronous `chat_with_agent` calls — sequential chat (`parallel=false`) and the sync task route (`parallel=true, async=false`) alike — give up at `MCP_CHAT_TIMEOUT_MS` (default 25 seconds), before the MCP gateway does. Instead of a transport error such as `fetch failed`, the tool returns a receipt `{status: "queued_timeout", agent, execution_id, message}`; the task keeps running on the agent, and you poll `get_execution_result` with that `execution_id`. The receipt is issued only when the running execution can be attributed to *your* call unambiguously — otherwise the error says so and points you at `list_recent_executions`. Calls carry a deterministic idempotency key, so an identical re-send answers with the same `execution_id`, but a **reworded** re-send is a new call and dispatches a second execution. For work you know will run long, use `parallel=true, async=true` from the start. See [MCP Server](../integrations/mcp-server.md#key-tools-worth-knowing).
 
-## What does `fan_out` return when the batch outlives the call, and how do I get the results?
+## How do I poll a fan-out batch that outlived the call?
 
 A batch runs longer than any single task in it, so `fan_out` is the tool most likely to hit the 25-second ceiling. When it does, it answers with a receipt — `{status: "fan_out_timeout", agent, fan_out_id, execution_ids, task_count, message}` — and the batch keeps running; nothing is lost. Poll `get_fan_out_result(agent_name, fan_out_id)` (or `GET /api/agents/{name}/fan-out/{fan_out_id}`): the batch reads `running` while any task can still change, then `completed`, `partial` (some succeeded — normal for a best-effort batch), or `failed`, with per-task execution status and results. Every fan-out response carries the `fan_out_id`, timed out or not. Don't re-send to "try again": an identical re-send is deduplicated and answers with the same batch, but **rewording it dispatches all N tasks a second time**. See [Fan-Out](../automation/fan-out.md#polling-a-batch).
+
+## Can I start a fan-out and collect the results later?
+
+Yes. Pass `async_mode: true` to `fan_out` (or in the body of `POST /api/agents/{name}/fan-out`). The call returns at once with `{fan_out_id, status: "accepted"}` and the tasks run in the background. Poll `get_fan_out_result(agent_name, fan_out_id)` and match each result to your task by its `task_id`. Without `async_mode`, `timeout_seconds` only limits how long the call waits: tasks still open at the deadline report `running` and keep going, so poll the batch for their outcome. See [Fan-Out](../automation/fan-out.md#fire-and-forget-async_mode).
 
 ## How do I run a long task via the API and check its result later?
 
@@ -99,13 +103,21 @@ Call `POST /api/agents/{name}/executions/{id}/terminate`. It answers `terminated
 
 Yes. `POST /api/agents/{name}/chat` and `POST /api/agents/{name}/task` accept a `files` array of `{name, mimetype, size, data_base64}` (raw base64 or a `data:` URI). Images reach the agent as vision content; every other file lands in `/home/developer/uploads/` inside the container. Accepted types are images, plain text, CSV, JSON, and ZIP — a ZIP is stored unextracted for the agent to unpack itself. PDF, tar/gzip/rar, audio, and video are rejected. The web limits are 3 files per message, 5 MB per file, and 10 MB of images in total. See [Chat API](../api-reference/chat-api.md#file-attachments).
 
+## Why was my chat or task call refused with "is not a model id"?
+
+The `model` you sent can't name a model. `POST /chat`, `POST /task`, and a session turn check the value before anything runs, and answer `422` with the offending value in the message. Use a short alias (`sonnet`, `opus`, `haiku`, `fable`) or a full id that starts with a known family, such as `claude-sonnet-4-6`; leave the field empty to use the agent's default. A refused call starts no execution and does not use up its `Idempotency-Key`, so you can fix the value and retry with the same key. See [Chat API](../api-reference/chat-api.md#model-override).
+
 ## Is there a command-line tool for Trinity?
 
-Yes — install it with `pip install trinity-cli` (or `brew install abilityai/tap/trinity-cli`), then run `trinity init` to connect: it prompts for your instance URL and email, verifies a 6-digit code, and auto-provisions an MCP API key into `~/.trinity/config.json`. Named profiles (`trinity profile list` / `use` / `remove`) let you switch between local, staging, and production instances, with `TRINITY_URL` / `TRINITY_API_KEY` environment variables as overrides. Current coverage includes agents, deploy, chat, logs, health, skills, schedules, and tags, with `--format json` for scripting. See [Trinity CLI](../cli/trinity-cli.md).
+Yes — install it with `pip install trinity-cli` (or `brew install abilityai/tap/trinity-cli`), then run `trinity init` to connect: it prompts for your instance URL and email, verifies a 6-digit code, and auto-provisions an MCP API key into `~/.trinity/config.json` (`--profile <name>` saves the instance under a named profile; `--admin` logs in with the admin password instead of a code). Named profiles (`trinity profile list` / `use` / `remove`) let you switch between local, staging, and production instances, with `TRINITY_URL` / `TRINITY_API_KEY` environment variables as overrides; `trinity login` re-authenticates a profile (`--instance <url> --profile <name>` adds or repoints one), `trinity status` shows which profile and instance you are on, and `trinity logout` clears the current profile's stored credentials. Current coverage includes agents, deploy, chat, logs, health, skills, schedules, and tags, with `--format json` for scripting. See [Trinity CLI](../cli/trinity-cli.md).
 
 ## Where can I browse the full REST API?
 
 The backend serves interactive Swagger documentation at `http://localhost:8000/docs` (adjust the host for your deployment). It lists every endpoint with request/response schemas, and you can authorize with your Bearer token and try calls directly from the browser. The user docs cover the most-used endpoints in the API reference section. See [Authentication](../api-reference/authentication.md) and [Agent API](../api-reference/agent-api.md).
+
+## Which endpoints work without a token, and where is the health check?
+
+The health check is `GET /health` — at the root, not under `/api` — and it answers 503 while schema migrations are incomplete, so a deploy script can wait on it. The other token-free routes are the login and setup flow — `/api/auth/mode`, `/api/auth/email/request`, `/api/auth/email/verify`, `/api/token`, `/api/setup/status` and `/api/setup/admin-password` (which provisions the *first* admin only and answers 403 once a usable admin account exists) — and `POST /api/access/request`, public self-signup that adds the submitted email to the login allow-list; it is disabled by default and answers 403 until an admin enables public access requests. Everything else needs a JWT or an MCP key. See [Authentication → Unauthenticated Endpoints](../api-reference/authentication.md#unauthenticated-endpoints).
 
 ## Why doesn't my MCP client see Trinity's tools after a backend restart?
 
@@ -117,7 +129,7 @@ If your admin has enabled inline authentication, yes: connect with a keyless con
 
 ## What is the MCP key panel on an agent's Settings tab for?
 
-Every agent carries its own agent-scoped key so it can call Trinity's MCP server — and that key is what makes the agent-to-agent permission matrix apply. A container carrying a *user*-scoped key would operate with the owner's identity and bypass the matrix entirely. The panel shows the key's health (`active`, `never_used`, `stale`, `missing`, `env_absent`, `env_mismatch`), a **Verify** action that probes what the container's config actually contains, and a **Regenerate** action that rotates and delivers a new key. The secret is never displayed. Trinity also self-heals a missing or mismatched key on the agent's next start. See [MCP Server](../integrations/mcp-server.md).
+Every agent carries its own agent-scoped key so it can call Trinity's MCP server — and that key is what makes the agent-to-agent permission matrix apply. A container carrying a *user*-scoped key would operate with the owner's identity and bypass the matrix entirely. The panel shows the key's health (`active`, `never_used`, `stale`, `missing`, `env_absent`, `env_mismatch`, or `exempt` for the system agent) and two actions: **Check what the container is using** (**Re-check** afterwards) runs a one-shot probe inside the container and reports what its configuration actually contains — a foreign user key, another agent's key, a duplicate entry; a stopped agent reads "unavailable" rather than erroring — and **Regenerate key** (**Issue a key** when none exists) mints a new one, delivers it to the container and deletes the superseded keys, rebuilding a running agent to pick it up. The secret is never displayed, and these routes work only from an interactive browser session — API keys of any scope are rejected, because rotating a credential should not be doable with the credential itself. Trinity also self-heals a missing or mismatched key on the agent's next start. See [MCP Server → Each Agent's Own MCP Key](../integrations/mcp-server.md#each-agents-own-mcp-key).
 
 ## Why does my automation get a 403 on an endpoint my account is admin on?
 
@@ -134,3 +146,7 @@ No — the terminal tab that once lived on the agent page has been retired, and 
 ## Can I ask Trinity questions about Trinity from my MCP client?
 
 Yes — the `ask_trinity` tool answers from the documentation, and returns a `session_id` you can pass back for follow-ups (it tells you when a session reset dropped your context). It is also published standalone as the `trinity-docs-mcp` npx package, which needs no Trinity instance and no API key. See [MCP Server](../integrations/mcp-server.md).
+
+## Can an agent read or answer the Operating Room queue over MCP?
+
+Yes. `list_operator_queue` reads the queue — approvals, questions, alerts — and `get_operator_queue_item` fetches one item; an agent-scoped key sees only the calling agent plus the agents it has permission to reach, so one agent cannot browse another's asks without a grant. `respond_to_operator_queue` resolves an item, within the same boundary. The human side — where an agent's question appears and how you answer it — is in the [Operations FAQ](operations-and-monitoring.md). See [MCP Server → Key Tools Worth Knowing](../integrations/mcp-server.md#key-tools-worth-knowing).

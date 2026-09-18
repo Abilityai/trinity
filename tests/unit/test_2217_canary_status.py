@@ -382,13 +382,13 @@ def test_feature_flags_carries_canary_enabled(monkeypatch):
     import asyncio
     from types import SimpleNamespace
 
-    from routers import settings as settings_module
+    # #1028: `get_public_feature_flags` lives in the package's `flags` module.
+    from routers.settings import flags as settings_module
 
     # Stub the module-level settings/telemetry/db surfaces the handler reads.
     stub_settings = SimpleNamespace(
         is_brain_orb_enabled=lambda: False,
         is_session_tab_enabled=lambda: False,
-        is_workspace_enabled=lambda: False,
         is_brain_orb_voice_enabled=lambda: False,
         is_brain_orb_write_enabled=lambda: False,
         get_elevenlabs_api_key=lambda: None,
@@ -403,6 +403,8 @@ def test_feature_flags_carries_canary_enabled(monkeypatch):
         is_marketplace_install=lambda: False,
         is_hardening_guide_eligible=lambda: False,
         get_install_tls_posture=lambda: "unconfigured",
+        # #2691 — whether the saved Public URL has been reached over TLS.
+        is_public_url_reached=lambda: False,
     )
     monkeypatch.setattr(settings_module, "settings_service", stub_settings)
     monkeypatch.setattr(

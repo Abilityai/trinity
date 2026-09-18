@@ -5,7 +5,7 @@ Run Trinity on a Linux VPS or dedicated server with a stable URL. Two install me
 - **Option A — prebuilt images** (`./scripts/deploy/start.sh --hosted`): every platform image and the agent base image are pulled from GHCR. A fresh VM is serving in about two minutes. **This is the path you want on a server.**
 - **Option B — build from source** (`docker compose -f docker-compose.prod.yml`): the server compiles its own images, including the ~1.9 GB agent base image (5–10 minutes). Use it when you carry local patches or the enterprise overlay.
 
-Both use the production compose shape: no hot-reload, health checks and `unless-stopped` restart policies on every service, Redis off the agent network. A third path, the [DigitalOcean Marketplace 1-Click](#digitalocean-marketplace-1-click), is Option A baked into a Droplet image.
+Both use the production compose shape: no hot-reload, health checks and `unless-stopped` restart policies on every service, Redis off the agent network. Two more paths are Option A on a DigitalOcean Droplet: the [Marketplace 1-Click](#digitalocean-marketplace-1-click) (a snapshot with the images already pulled) and the [installer script](#digitalocean-installer-script) (creates a stock Droplet from your terminal). Both provision Docker, Caddy with an HTTPS certificate for the Droplet's own IP, and a host firewall before running the same `start.sh --hosted`.
 
 ## Prerequisites
 
@@ -93,7 +93,7 @@ cp .env.example .env
 | Variable | How to generate | Notes |
 |---|---|---|
 | `SECRET_KEY` | `openssl rand -hex 32` | JWT signing key. Never reuse across instances. |
-| `ADMIN_PASSWORD` | Choose a strong password | Minimum 12 characters. Drives both `admin` login and the MCP server's legacy auth path. **Required** — `docker-compose.prod.yml` refuses to render if unset. |
+| `ADMIN_PASSWORD` | Choose a strong password | Minimum 12 characters. Drives both `admin` login and the MCP server's legacy auth path. **Required** — `docker-compose.prod.yml` refuses to render if it is unset or blank. (`docker-compose.hosted.yml` refuses only an unset one; a blank is accepted solely for the marketplace browser-claim path, marked `ADMIN_PASSWORD_SOURCE=browser`.) |
 | `ADMIN_USERNAME` | Optional, default `admin` | The admin account's username. Forwarded by all three compose files. |
 | `CREDENTIAL_ENCRYPTION_KEY` | `openssl rand -hex 32` | Encrypts OAuth tokens, channel bot tokens, subscription credentials and the credential-bearing platform settings. **If lost, all encrypted credentials become unrecoverable.** |
 | `INTERNAL_API_SECRET` | `openssl rand -hex 32` | Authenticates scheduler-to-backend calls. Set it explicitly — do not rely on the `SECRET_KEY` fallback. |
@@ -223,9 +223,9 @@ The `cloudflared` tunnel service is **not started** by default — it requires a
 
 Open your domain (or `http://your-server-ip`, or `http://your-server-ip:$FRONTEND_PORT`) in a browser. Log in with:
 - **Username:** `admin` (or `ADMIN_USERNAME` if you changed it)
-- **Password:** the `ADMIN_PASSWORD` you set in `.env` (re-applied on every backend start — change it there, not in the UI)
+- **Password:** the `ADMIN_PASSWORD` you set in `.env` (re-applied on every backend boot — change it there, not in the UI, then recreate the backend container with `docker compose -f <file> up -d backend`; a plain `restart` does not re-read `.env`)
 
-There is no setup wizard on a server install: setting `ADMIN_PASSWORD` (mandatory in both server compose files) provisions the admin account during startup, and the unauthenticated first-run form refuses to run once a usable admin exists. What you see instead is the Dashboard with a fresh install's starter fleet and a **Finish setup** card offering to bind a sign-in email (so you can log in with email + password) — see [First-Time Setup](../../getting-started/setup.md).
+There is no setup wizard on a server install: setting `ADMIN_PASSWORD` provisions the admin account during startup, and the unauthenticated first-run form refuses to run once a usable admin exists. The one exception is a Marketplace 1-Click Droplet created without a password, which deliberately boots with no admin and is claimed in the browser — see [DigitalOcean 1-Click](#digitalocean-marketplace-1-click). What you see instead is the Dashboard with a fresh install's starter fleet and the first-run setup sequence — a **Sign-in email** step (so you can log in with email + password), the required **Connect Claude** step, and optional keys — see [First-Time Setup](../../getting-started/setup.md).
 
 After login, go to **Settings → Access → Email Whitelist** to allow team members to log in via email verification.
 
@@ -261,7 +261,7 @@ docker compose -f docker-compose.hosted.yml restart backend frontend mcp-server 
 docker compose -f docker-compose.prod.yml down
 ```
 
-Since agent containers are created with Docker's `unless-stopped` restart policy, a `down` no longer leaves them merely orphaned: dockerd retries each one in a backoff loop against a network that no longer exists, and the roster shows them as stopped while it churns. Recovery: `docker compose -f <file> up -d` (recreates the network), then `docker rm -f` each stale agent container and start it again from the UI or **Operations → Restart All** — the workspace volume holds the agent's data and is untouched by a container removal.
+Since agent containers are created with Docker's `unless-stopped` restart policy, a `down` no longer leaves them merely orphaned: dockerd retries each one in a backoff loop against a network that no longer exists, and the roster shows them as stopped while it churns. Recovery: `docker compose -f <file> up -d` (recreates the network), then `docker rm -f` each stale agent container and start it again from the UI (or **Fleet Restart** on the mobile admin page, which restarts every running agent) — the workspace volume holds the agent's data and is untouched by a container removal.
 
 `./scripts/deploy/stop.sh` runs `stop`, never `down`, and reads the running stack's compose label to pick `docker-compose.hosted.yml` when needed. It does **not** detect a source-built production stack — on one of those, use the explicit `docker compose -f docker-compose.prod.yml stop`.
 
@@ -305,11 +305,13 @@ Trinity serves plain HTTP and terminates TLS **outside** the application. There 
 | **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport, instance not on the public internet | HTTP over a WireGuard tunnel is encrypted — this is a finished posture, not a compromise. |
 | **Reverse proxy you run** (Caddy / nginx + Let's Encrypt) | HTTPS at your own domain | You already operate a proxy, or you need a domain the tunnel can't serve. |
 
-Plain HTTP on a public IPv4 with none of the above is the one combination to avoid: credentials and JWTs cross the network in the clear. The DigitalOcean 1-Click below is the deliberate exception — it ships its own Caddy with a short-lived certificate for the Droplet's IP. Tunnel setup: [Public Access](public-access.md).
+Plain HTTP on a public IPv4 with none of the above is the one combination to avoid: credentials and JWTs cross the network in the clear. A provisioned DigitalOcean Droplet — the 1-Click or the installer script below — is the deliberate exception: it ships its own Caddy with a short-lived certificate for the Droplet's IP, and the first-run setup then prompts you to add a domain and a tunnel. Tunnel setup: [Public Access](public-access.md).
 
 ## DigitalOcean Marketplace 1-Click
 
 The Trinity 1-Click is a Droplet image with Docker, Caddy, ufw and a pinned Trinity release already pulled — Option A baked into a snapshot, so first boot pulls nothing.
+
+Prefer to choose the admin password and hand over a Claude subscription before the Droplet exists? `trinity-do-create.sh` gives the same result from your own terminal — see [Deploy on DigitalOcean](digitalocean.md). The sections below (first boot, sign-in, managing the Droplet) apply to both, with four differences: an installer Droplet has its admin account from first boot, takes about six minutes rather than ninety seconds (it installs and pulls everything on first boot), records `do-script` instead of `do-marketplace` as its provenance, and has no login banner.
 
 ### Sizing
 
@@ -325,22 +327,19 @@ The baked images occupy a significant share of the disk before any agent exists;
 
 First boot runs once per Droplet, about ninety seconds, with no input from you:
 
-1. **Admin password** — generated (24 characters) and written to `/etc/trinity/admin-credentials`, or taken from a file you supplied through user-data (below).
-2. **`.env`** — written at `/opt/trinity/.env` with `ADMIN_PASSWORD`, `FRONTEND_PORT=8081` (the web UI moves off `:80` so Caddy can own 80/443), `TRINITY_IMAGE_TAG=<the baked release>`, `TRINITY_INSTALL_SOURCE=do-marketplace` (the install-provenance marker) and `FRONTEND_URL=https://<droplet-ip>`. `start.sh` generates the remaining secrets as on any install.
-3. **Firewall** — ufw allows 22, 80 and 443 only, and a `DOCKER-USER` rule set drops internet traffic to every port the compose file publishes (8000, 8080, 8081, 8686, the OTel ports). Docker publishes past ufw, so this rule set is what actually closes those ports; a systemd unit re-applies it on every boot.
-4. **Caddy** — a Caddyfile for `https://<droplet-ip>` with a Let's Encrypt short-lived IP certificate (about six days, renewed automatically), reverse-proxying to the web UI on `127.0.0.1:8081`; `http://` redirects to `https://`. First boot then verifies the certificate was actually issued and records the result — the login banner prints `http://` if it was not.
+1. **Admin account** — **none is created.** Unless you supplied a password through user-data (below), `ADMIN_PASSWORD` stays blank and `ADMIN_PASSWORD_SOURCE=browser` records that this is deliberate; the first person to open the instance creates the admin in the browser. Nothing is generated, so nothing is printed.
+2. **`.env`** — written at `/opt/trinity/.env` with `FRONTEND_PORT=8081` (the web UI moves off `:80` so Caddy can own 80/443), `TRINITY_IMAGE_TAG=<the baked release>`, `TRINITY_INSTALL_SOURCE=do-marketplace` (the install-provenance marker) and `FRONTEND_URL=https://<droplet-ip>`. `start.sh` generates the remaining secrets as on any install.
+3. **Firewall** — ufw allows 22, 80 and 443 only. Docker publishes container ports past ufw, so a separate `DOCKER-USER` rule set (re-applied by a systemd unit on every boot) drops **everything** arriving at a container from off-box, whatever the port — there is no port list to keep in step with the compose file. It also blocks containers from reaching the cloud metadata service, so an agent cannot read the Droplet's user-data. Everything you use is served by Caddy on 80/443.
+4. **Caddy** — a Caddyfile for `https://<droplet-ip>` with a Let's Encrypt short-lived IP certificate (about six days, renewed automatically), reverse-proxying to the web UI on `127.0.0.1:8081`; `http://` redirects to `https://`. A second catch-all site issues a certificate on demand for the domain you later save as the Public URL (and refuses every other name). First boot verifies the IP certificate was actually issued and records the result — the login banner prints `http://` if it was not.
 5. **Trinity** — `./scripts/deploy/start.sh --hosted --unattended` from `/opt/trinity`.
 
-### Get your admin password
+### Claim the admin account
 
-The password is printed in the login banner. How you reach it depends on the authentication you chose when creating the Droplet:
+Open `https://<droplet-ip>` as soon as the Droplet is up. You land on a **Create your admin account** form: enter your email (it becomes your sign-in identity), choose a password (12+ characters with uppercase, lowercase, a digit and a special character), and you are signed straight in. No terminal, no console, no password to copy.
 
-- **Password auth** — open **Droplet → Console** in the DigitalOcean control panel and log in as `root`. No SSH client needed.
-- **SSH-key auth** — DigitalOcean leaves the root account locked, so the Console cannot accept a login. Connect with your key: `ssh root@<droplet-ip>`.
+> **The window between creating the Droplet and that first visit is the accepted risk of this path: anyone who finds the IP first can claim the instance.** It holds nothing at that moment and can simply be destroyed and recreated. To keep the window short, open the URL right after creating the Droplet (first boot takes about ninety seconds), or restrict port 443 to your own IP with a cloud firewall until you have claimed it (leave 80 open — Let's Encrypt validates the IP certificate over it, and it serves only a redirect). If a Droplet you have never opened shows the **login** page instead of the form, someone else got there first: destroy it and create another.
 
-Either way the banner prints the Trinity password, the URL to open, and whether HTTPS came up. Re-read it any time with `cat /etc/trinity/admin-credentials`. The banner never echoes a password you chose yourself.
-
-To choose the password yourself, paste this into **Additional Options → Startup scripts** when creating the Droplet:
+To skip the claim window, choose the password before first boot. Paste this into **Additional Options → Startup scripts** when creating the Droplet:
 
 ```yaml
 #cloud-config
@@ -350,20 +349,24 @@ write_files:
     content: "your-password-here"
 ```
 
-It must be `#cloud-config` with `write_files`, not a shell script — a shell script runs after first boot has already generated a password and started Trinity. The file is shredded once the password has been read.
+It must be `#cloud-config` with `write_files`, not a shell script — a shell script runs after first boot has already started Trinity. The file is shredded once the password has been read, the admin is provisioned at boot, and the form never appears; sign in as `admin` with that password. (The [installer script](#digitalocean-installer-script) does the same from your terminal.)
+
+The login banner (Droplet → Console) prints the URL to open, whether HTTPS came up, and which of the two paths this Droplet took — never a password.
 
 ### Sign in and harden
 
-Open `https://<droplet-ip>` and sign in as `admin`. The certificate is a real Let's Encrypt certificate for the IP address, so there is no browser warning. To replace the generated password, edit `ADMIN_PASSWORD` in `/opt/trinity/.env` and restart the backend (`docker compose -f docker-compose.hosted.yml restart backend`) — the backend re-applies that value on every start, and there is no change-password form in the UI.
+The certificate is a real Let's Encrypt certificate for the IP address, so there is no browser warning.
 
-Because the install recorded `do-marketplace` as its provenance, the Dashboard shows a **Secure this instance** card to admins until it is dismissed. It is a two-step upgrade prompt, not a breakage warning:
+**Passwords.** On a Droplet claimed in the browser, `.env` keeps `ADMIN_PASSWORD` blank on purpose — the password lives only in the database, and reboots and `start.sh --hosted` upgrades leave it alone. There is no change-password form in the UI. To change or reset the password on any Droplet, set `ADMIN_PASSWORD` in `/opt/trinity/.env` and re-run `./scripts/deploy/start.sh --hosted` (or `docker compose -f docker-compose.hosted.yml up -d backend`); the backend adopts the value on the next boot. A plain `restart` does not re-read `.env`.
 
-1. **Give it a real name** — point a domain's A record at the Droplet and set it as the **Public URL** in **Settings → General** (the card's **Add a domain** button takes you there). Trinity then hands out the name instead of the IP; whatever terminates TLS in front of it can pick up the name and use an ordinary long-lived certificate. Setting the domain advances the card to step two.
-2. **Serve it without exposing it** — with that domain on Cloudflare, a Cloudflare Tunnel lets the server stop listening on the public internet while inbound integrations (Telegram, WhatsApp, VoIP, public agent links, webhook triggers) keep working. Set `TUNNEL_TOKEN` in `/opt/trinity/.env` and re-run `start.sh --hosted` — see [Public Access](public-access.md). This step is optional; dismissing it ends the guide.
+Because the install recorded `do-marketplace` as its provenance, the first-run setup that opens on the Dashboard begins with a **Secure this instance** step for admins. It is a two-stage upgrade prompt, not a breakage warning:
 
-The card describes only what the instance *advertises* (the configured Public URL); nothing inspects a certificate or opens a socket. Dismissal is per browser and per step. Provenance itself is recorded once at first boot and cannot be edited afterwards — the marker in `.env` is never re-read, and the API refuses to write or clear it — so the card never appears on an install that was not provisioned from a marketplace image.
+1. **Give it a real name** — point a domain's A record at the Droplet, then save it as the **Public URL** on the step itself (the same field lives in **Settings → General**). Caddy on the Droplet obtains a Let's Encrypt certificate for that name the first time someone visits it — give DNS a moment to settle — so adding a domain is a Settings field and nothing else. Trinity then hands out the name instead of the IP. Saving a domain completes the step.
+2. **Serve it without exposing it** — with that domain on Cloudflare, a Cloudflare Tunnel lets the server stop listening on the public internet while inbound integrations (Telegram, WhatsApp, VoIP, public agent links, webhook triggers) keep working. Set `TUNNEL_TOKEN` in `/opt/trinity/.env` and re-run `start.sh --hosted` — see [Public Access](public-access.md). This stage is guidance only and optional.
 
-Add a model credential (**Settings → Integrations**), then create your first agent — the seeded starter fleet is already running.
+The step describes only what the instance *advertises* (the configured Public URL); nothing inspects a certificate or opens a socket. Skipping it is remembered per browser; re-open the sequence any time from **Settings → General → Re-run setup** or by adding `?onboarding=1` to the Dashboard URL. Provenance itself is recorded once at first boot and cannot be edited afterwards — the marker in `.env` is never re-read, and the API refuses to write or clear it — so the step never appears on an install that was not provisioned this way.
+
+Connect a Claude credential in the **Connect Claude** step (the one required step; it is also under **Settings → Integrations**), then create your first agent — the seeded starter fleet is already running.
 
 ### Managing the Droplet
 
@@ -392,6 +395,24 @@ sudo ./scripts/deploy/start.sh --hosted
 
 **Support.** GitHub Issues on `abilityai/trinity`, label `do-marketplace`. DigitalOcean does not build or support Trinity.
 
+## DigitalOcean installer script
+
+`scripts/deploy/trinity-do-create.sh` gives you the 1-Click result from your own terminal, with the admin password chosen before the Droplet exists — so there is no claim window. It needs [`doctl`](https://docs.digitalocean.com/reference/doctl/how-to/install/) installed and signed in (`doctl auth init` with a write-scoped API token). The step-by-step walkthrough — from installing `doctl` to adding a domain, with the installer's error messages and how to remove the Droplet — is [Deploy on DigitalOcean](digitalocean.md).
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/<release-tag>/scripts/deploy/trinity-do-create.sh)
+```
+
+It asks four questions and writes nothing to your computer:
+
+1. **Admin password** (twice; 12+ characters, guessable prefixes refused). Your username will be `admin`.
+2. **Claude subscription token** — run `claude setup-token` in another terminal and paste the `sk-ant-oat01-…` value. An API key is not accepted here; add one later under **Settings → Integrations** if you prefer.
+3. **Region** and **Droplet name** (defaults offered), then a confirmation that names the monthly cost.
+
+It then creates an Ubuntu 24.04 Droplet (4 vCPU / 8 GB — Trinity's recommended size), attaches every SSH key already on your account, and hands the Droplet a first-boot script that clones the pinned release to `/opt/trinity`, runs `start.sh --provision --cloud digitalocean --hosted --unattended` (Docker, Caddy with the IP certificate, the firewall, then the install itself), registers your Claude subscription and assigns it to the seeded agents. Both secrets travel only in the Droplet's own user-data; the firewall blocks containers from reading it back. The script polls `https://<ip>/` with certificate verification for up to fifteen minutes and prints the address when it answers. If it times out, open the Droplet's Console and read `/var/log/trinity-install.log`.
+
+The install records `do-script` as its provenance, so the first-run **Secure this instance** step appears exactly as on the 1-Click. Day-two operations are identical — see [Managing the Droplet](#managing-the-droplet). The script pins the release it was fetched from; set `TRINITY_IMAGE_TAG` in the environment before running it to pick another.
+
 ## `.env` reference
 
 Every key in `.env.example`, with the compose files that forward it. **A key a compose file does not forward does nothing on that install.** Legend: `dev` = `docker-compose.yml`, `prod` = `docker-compose.prod.yml`, `hosted` = `docker-compose.hosted.yml`. Keys marked "commented" ship commented out in `.env.example` and take effect only when you uncomment them.
@@ -406,7 +427,8 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `INTERNAL_API_SECRET` | dev · prod · hosted | Scheduler-to-backend and internal-route secret. Generated if blank. |
 | `AGENT_AUTH_SECRET` | dev · prod · hosted | Master for per-agent in-container auth tokens. Generated if blank; never rotate. |
 | `ADMIN_USERNAME` | dev · prod · hosted | Admin account username (default `admin`). |
-| `ADMIN_PASSWORD` | dev · prod · hosted | Admin password; also the MCP server's legacy password auth. Mandatory in prod/hosted. |
+| `ADMIN_PASSWORD` | dev · prod · hosted | Admin password; also the MCP server's legacy password auth. Prod refuses to render if unset or blank; hosted refuses only unset (blank is the marketplace browser-claim path). |
+| `ADMIN_PASSWORD_SOURCE` (commented) | hosted | `browser` marks a deliberately blank `ADMIN_PASSWORD` on a marketplace image: no admin is provisioned and the first visitor creates one at `/setup`. Written by first boot; leave unset on every other install (a blank password without it is refused). |
 | `ANTHROPIC_API_KEY` | dev · prod · hosted | Platform-wide Claude API key for agents (or set it in Settings). |
 | `PUBLIC_ACCESS_REQUESTS_ENABLED` | dev · prod · hosted | `true` lets anyone reaching the backend add their own email to the login whitelist (`POST /api/access/request`). Default `false`. |
 | `DOCKER_GID` | dev · prod · hosted | Group of the Docker socket inside the backend container (default `999`; `start.sh` detects it). |
@@ -464,7 +486,6 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `VOICE_ENABLED` | dev · prod · hosted | Voice chat platform-wide (default on). |
 | `VOICE_MODEL` (commented) | dev · prod · hosted | Gemini Live model override. Keep commented unless overriding. |
 | `WORKSPACE_VOICE_MAX_DURATION` | dev · prod · hosted | Max length of one Workspace voice call, seconds (default 1800). |
-| `WORKSPACE_ENABLED` | dev · prod · hosted | Voice Workspace canvas beta flag. |
 | `VOIP_ENABLED` | dev · prod · hosted | Outbound phone calls via Twilio (default off; also needs a per-agent binding). |
 | `A2A_OUTBOUND_ENABLED` | dev · prod · hosted | Let agents task external A2A agents (default off; also needs registered endpoints). |
 | `VOIP_MAX_CALL_DURATION` / `VOIP_DEFAULT_DAILY_CALL_CAP` / `VOIP_CALL_RATE_LIMIT` / `VOIP_CALL_RATE_WINDOW` / `VOIP_TICKET_TTL_SECONDS` / `VOIP_INTENT_TTL_SECONDS` | dev · prod · hosted | Telephony spend and abuse controls. |
@@ -474,6 +495,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | Key | Forwarded by | What it does |
 |---|---|---|
 | `REPORT_RATE_LIMIT` | dev · prod · hosted | Structured reports an agent may create per 60 s. |
+| `CANVAS_MAX_PER_AGENT` | dev · prod · hosted | Canvases an agent may hold before writes are refused (default 100). |
 | `PORTAL_CHAT_BURST_LIMIT` / `PORTAL_CHAT_HOURLY_LIMIT` | dev · prod · hosted | Workspace chat sends per (email, agent). |
 | `PORTAL_UPLOAD_BURST_LIMIT` / `PORTAL_UPLOAD_HOURLY_LIMIT` | dev · prod · hosted | Workspace uploads per email. |
 | `PORTAL_FILE_BURST_LIMIT` / `PORTAL_FILE_HOURLY_LIMIT` / `PORTAL_FILE_DELETE_BURST_LIMIT` | dev · prod · hosted | Workspace file downloads and deletes per email. |
@@ -488,7 +510,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 
 | Key | Forwarded by | What it does |
 |---|---|---|
-| `TRINITY_INSTALL_SOURCE` | dev · prod · hosted | Install-provenance marker (`do-marketplace`, `vultr-marketplace`, `script`); read once at first boot and recorded permanently. Leave empty unless you build a marketplace image. |
+| `TRINITY_INSTALL_SOURCE` | dev · prod · hosted | Install-provenance marker (`do-marketplace`, `vultr-marketplace`, `do-script`, `script`); written by `start.sh --provision`, read once at first boot and recorded permanently. Leave empty on an ordinary install. |
 | `BACKEND_URL` | dev · prod · hosted | Backend base URL used to build OAuth callback URLs (default `http://localhost:8000`). |
 | `FRONTEND_PORT` | dev · prod · hosted | Host port for the web UI (default 80). |
 | `FRONTEND_URL` | dev · prod · hosted | Public UI URL for email links and OAuth callbacks. |
@@ -563,6 +585,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER` / `OTEL_EXPORTER_OTLP_PROTOCOL` / `OTEL_METRIC_EXPORT_INTERVAL` | dev · prod · hosted | Exporter settings. |
 | `TELEMETRY_CONTAINER_STATS_TTL` / `TELEMETRY_DOCKER_POOL_SIZE` | dev · prod · hosted | Container-stats cache freshness and Docker fetch parallelism. |
 | `CANARY_ENABLED` / `CANARY_SLACK_WEBHOOK_URL` | dev · prod · hosted | Continuous invariant watcher (staging/dev) and its Slack webhook. |
+| `SYNC_HEALTH_POLL_INTERVAL_SECONDS` | dev · prod · hosted | Seconds between git sync-health polls of each git-enabled agent (default 60). Each poll runs a `git fetch` inside the agent, so raise it to cut that load on a large fleet. An invalid or non-positive value falls back to 60. |
 
 ## See Also
 

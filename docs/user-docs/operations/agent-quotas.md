@@ -73,7 +73,7 @@ When quota is exceeded:
 
 ```json
 {
-  "error": "Agent quota exceeded. You have 10/10 agents.",
+  "error": "Agent quota exceeded. You have 10/10 agents. Delete an agent to create a new one.",
   "code": "QUOTA_EXCEEDED",
   "current": 10,
   "limit": 10

@@ -20,6 +20,7 @@
     "2638": "SubscriptionsPanel.vue raw_gray 165 -> 173 (+8): the API-key fallback toggle row. Not paid down because there is nothing to pay it down TO \u2014 `gray` is the sanctioned chrome family and tailwind.config.js defines no semantic neutral to replace it with (status-*/state-*/brand-*/accent-*/action-* are all meaning-carrying). The 8 classes are the label, the help text and the toggle's off-state, copied verbatim from the three identical toggles immediately above it; inventing a one-off semantic token for the fourth would make it the odd one out and leave the other three unconverted. Re-frozen in its own commit as the guard's own message prescribes, and scoped to this ONE entry rather than regenerated, so no unrelated drift is absorbed with it.",
     "_2718_note": "2026-09-12, #2718: hardcoded_colors 456 -> 447 in 8 files, none of it a code change. The scanner counted a `#` followed by three or six hex digits anywhere in a <template>, so issue references in rendered copy ((ent#184), (#526), >#847</a>) were read as colours; ExecutionsPanel, OverviewPanel, ScheduleAnalyticsCard, settings/OperatorIntakePanel, settings/TelemetrySharingPanel, views/Settings and views/enterprise/Index each lose their only phantom, ReliabilityPanel both of its. Nothing else moves: raw_nongray, raw_gray and semantic_tokens are untouched, and no sample changes line.",
     "_2616_note": "2026-09-10, #2616: components/portal/PortalMarkdown.vue raw_gray 13 -> 34 (+21). The Workspace transcript had no typographic treatment at all; covering tables, headings, ordered lists, blockquotes and rules costs a surface/border/ink pair per element in BOTH themes, and those are gray by definition (the contract's 'everything else is gray'). raw_nongray stays 0 and hardcoded_colors stays 0.",
+    "_ent625_note": "2026-09-16, trinity-enterprise#625: components/NavBar.vue raw_nongray 35 -> 23, raw_gray 125 -> 113. The inline light/dark/system picker in the user menu is replaced by the shared ThemeChoice primitive (semantic tokens), which the new Workspace theme switch consumes too. A SHRINK, recorded exactly as the guard's stale-ceiling check requires; scoped to this one entry so no unrelated drift is absorbed. The new files (base/ThemeChoice.vue, base/ThemeIcon.vue, portal/PortalThemeSwitch.vue) carry 0 raw_nongray and stay off the baseline, where the guard holds them to zero.",
     "ent554": "components/canvas/CanvasPanel.vue raw_gray 46 -> 62 (+16): the Share / Download PDF buttons, the share panel's dividers and its option detail + note text. The branch predates the #2605 freeze, so the guard first bit at the merge train. Not paid down: `gray` is the sanctioned chrome family and there is no semantic neutral to move it to; the classes copy the panel's existing header chrome verbatim. Re-frozen in its own commit as the guard prescribes, scoped to this ONE entry."
   },
   "files": {
@@ -274,8 +275,8 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/NavBar.vue": {
-      "raw_nongray": 35,
-      "raw_gray": 125,
+      "raw_nongray": 23,
+      "raw_gray": 113,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/NeverminedPanel.vue": {
@@ -570,7 +571,7 @@
     },
     "src/frontend/src/components/onboarding/ActivationChecklist.vue": {
       "raw_nongray": 0,
-      "raw_gray": 16,
+      "raw_gray": 17,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/operator/NotificationsPanel.vue": {

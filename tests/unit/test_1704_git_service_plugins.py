@@ -22,6 +22,9 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+
+# #1028: gitignore-owned names read as data by these tests.
+from services.git_service import gitignore as gs_gitignore
 import yaml
 
 _project_root = Path(__file__).resolve().parents[2]
@@ -46,6 +49,10 @@ _STUBBED_MODULE_NAMES = [
 @pytest.fixture(autouse=True)
 def _restore_sys_modules():
     saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    # The git_service package and every submodule are restored as one set — a
+    # parent restored without its children (or vice versa) is exactly the
+    # half-state that breaks `git_service.<sub>` reads in the next file.
+    saved_git = {k: v for k, v in sys.modules.items() if k.startswith("services.git_service")}
     try:
         yield
     finally:
@@ -54,6 +61,9 @@ def _restore_sys_modules():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = value
+        for key in [k for k in list(sys.modules) if k.startswith("services.git_service")]:
+            del sys.modules[key]
+        sys.modules.update(saved_git)
 
 
 def _load_git_service():
@@ -70,8 +80,17 @@ def _load_git_service():
     sys.modules["database"].db = Mock()
     sys.modules["database"].AgentGitConfig = Mock
     sys.modules["database"].GitSyncResult = Mock
-    sys.modules.pop("services.git_service", None)
-    import services.git_service as gs
+    # #1028 made git_service a package. Evicting only the parent leaves its
+    # submodules cached, so the re-imported package never re-binds
+    # `.token_scrub` / `.conflicts` / ... and every later `git_service.<sub>`
+    # attribute read in another test file fails (the red-dev leak, M1 of the
+    # 0.9.5 work order). Evict the whole family so the package re-imports whole.
+    for key in [k for k in list(sys.modules) if k.startswith("services.git_service")]:
+        del sys.modules[key]
+    # #1028: git_service is a package; the alias names the module that
+    # owns the functions under test, so patches land where the code looks.
+    import services.git_service.trinity_files as gs
+    from services.git_service import gitignore as gs_gitignore
 
     return gs
 
@@ -175,31 +194,31 @@ def test_materialize_plugins_does_not_touch_gitignore():
 
 def test_plugins_yaml_is_an_authored_path():
     gs = _load_git_service()
-    assert ".trinity/plugins.yaml" in gs._TRINITY_AUTHORED_PATHS
+    assert ".trinity/plugins.yaml" in gs_gitignore._TRINITY_AUTHORED_PATHS
 
 
 def test_plugins_yaml_is_re_included():
     gs = _load_git_service()
-    assert "!.trinity/plugins.yaml" in gs._GITIGNORE_PATTERNS
+    assert "!.trinity/plugins.yaml" in gs_gitignore._GITIGNORE_PATTERNS
 
 
 def test_plugins_yaml_is_exempt_from_rm_cached():
     gs = _load_git_service()
-    cmd = gs._build_rm_cached_ignored_command("/home/developer")
+    cmd = gs_gitignore._build_rm_cached_ignored_command("/home/developer")
     assert ":!.trinity/plugins.yaml" in cmd
 
 
 def test_claude_plugins_cache_stays_gitignored_and_not_re_included():
     """#1705 intact — the plugin CACHE must not be committed."""
     gs = _load_git_service()
-    assert ".claude/plugins/" in gs._GITIGNORE_PATTERNS
-    assert "!.claude/plugins/" not in gs._GITIGNORE_PATTERNS
-    assert ".claude/plugins/" not in gs._TRINITY_AUTHORED_PATHS
+    assert ".claude/plugins/" in gs_gitignore._GITIGNORE_PATTERNS
+    assert "!.claude/plugins/" not in gs_gitignore._GITIGNORE_PATTERNS
+    assert ".claude/plugins/" not in gs_gitignore._TRINITY_AUTHORED_PATHS
 
 
 def test_claude_json_stays_gitignored_and_not_re_included():
     """The raw Claude manifest (session state + secrets) must not be committed."""
     gs = _load_git_service()
-    assert ".claude.json" in gs._GITIGNORE_PATTERNS
-    assert "!.claude.json" not in gs._GITIGNORE_PATTERNS
-    assert ".claude.json" not in gs._TRINITY_AUTHORED_PATHS
+    assert ".claude.json" in gs_gitignore._GITIGNORE_PATTERNS
+    assert "!.claude.json" not in gs_gitignore._GITIGNORE_PATTERNS
+    assert ".claude.json" not in gs_gitignore._TRINITY_AUTHORED_PATHS

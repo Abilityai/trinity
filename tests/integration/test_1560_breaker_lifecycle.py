@@ -72,11 +72,19 @@ def _load(name: str, rel: str):
     return module
 
 
-agent_client = _load("agent_client_1560", "services/agent_client.py")
+# #1028: `services/agent_client.py` is the package `services/agent_client/`, so
+# `_load` on that path raised FileNotFoundError at collection. Plain-imported for
+# the same reason as the sibling integration files: the module imports
+# `services.agent_auth` at import time, so the file load never delivered the
+# `services/__init__` isolation it claimed. `dispatch_breaker` is still a single
+# module and keeps its loader.
+import services.agent_client as agent_client  # noqa: E402
+from services.agent_client import circuit as _ac_circuit  # noqa: E402
+
 dispatch_breaker = _load("dispatch_breaker_1560", "services/dispatch_breaker.py")
 
-_CIRCUIT = agent_client._CIRCUIT_HASH_PREFIX
-_PROBE = agent_client._CIRCUIT_PROBE_LOCK_SUFFIX
+_CIRCUIT = _ac_circuit._CIRCUIT_HASH_PREFIX
+_PROBE = _ac_circuit._CIRCUIT_PROBE_LOCK_SUFFIX
 
 
 # `clear_agent_breakers` resolves its dependencies through call-time lazy imports,
@@ -87,7 +95,6 @@ _PROBE = agent_client._CIRCUIT_PROBE_LOCK_SUFFIX
 # cross-file pollution class of #762. This is the sanctioned escape hatch
 # (precedent: tests/unit/test_telegram_webhook_backfill.py).
 _STUBBED_MODULE_NAMES = [
-    "agent_client_1560",
     "dispatch_breaker_1560",
     "agent_runtime_state_1560",
     "heartbeat_service_1560",
@@ -139,7 +146,7 @@ def agent_name(redis_client):
         f"agent:heartbeat:seen:{name}",
         f"agent:heartbeat:misses:{name}",
     )
-    agent_client._reset_circuit_redis_client()
+    _ac_circuit._reset_circuit_redis_client()
 
 
 def _clear_agent_breakers(name: str) -> None:
