@@ -1,7 +1,7 @@
 # Trinity Scheduler Service Dockerfile
 # Standalone scheduler for agent task execution
 
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 # Set working directory
 WORKDIR /app
