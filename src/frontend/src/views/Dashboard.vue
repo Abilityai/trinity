@@ -15,12 +15,23 @@
       <div class="relative flex flex-col flex-1 overflow-hidden">
         <!-- Compact Header -->
         <div class="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-2">
-          <div class="flex items-center justify-between">
+          <!-- #2197 — `flex-wrap` + `gap-y-2`: the last resort when the #1830
+               ladder has nothing left to give. Below ~700px the controls'
+               min-content exceeds the row on its own, and with the stats
+               cluster free to shrink to ZERO the line never wrapped — it
+               degenerated to a 0px-wide stats box whose (clipped, invisible)
+               children still sat under the controls' first button, and a
+               controls cluster running ~70px past the row's right edge. -->
+          <div class="flex flex-wrap items-center justify-between gap-y-2">
             <!-- Left: Stats — elastic (#1830). `flex-1 min-w-0` makes this the
                  only cluster that gives ground, and `container-type: inline-size`
                  (see .stats-cluster below) turns its leftover width into the
-                 query axis the progressive-hide ladder degrades against. -->
-            <div class="stats-cluster flex items-center min-w-0 flex-1 overflow-hidden">
+                 query axis the progressive-hide ladder degrades against.
+                 #2197 adds `min-w-[4.5rem]` — the ladder's own agents-only floor
+                 (~71px). Without a floor "elastic" means "collapses to nothing",
+                 so the pressure never reaches the controls and nothing wraps;
+                 the floor is what converts the overflow into a wrap. -->
+            <div class="stats-cluster flex items-center min-w-[4.5rem] flex-1 overflow-hidden">
               <div class="flex items-center space-x-3 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
                 <span class="flex items-center space-x-1">
                   <span class="w-1.5 h-1.5 rounded-full bg-status-success-500"></span>
@@ -45,7 +56,16 @@
             </div>
 
             <!-- Right: Controls -->
-            <div class="flex items-center space-x-2 flex-shrink-0">
+            <!-- #2197 — `flex-wrap` + `gap-2`, and NO `flex-shrink-0`. The
+                 cluster's min-content is ~613px on an entitled build (mode
+                 toggles, two selects, Tidy up / Reset, Create Agent), which no
+                 container query can shrink, so pinned at its max-content it
+                 simply overflowed the row at 640px. Allowed to shrink, it wraps
+                 its own buttons onto a second line instead — `gap-2` rather than
+                 `space-x-2` because a wrapped `space-x` row mis-indents every
+                 line after the first. Single-row rendering above ~1024px is
+                 unchanged: flex only wraps once it must. -->
+            <div class="flex flex-wrap items-center gap-2 min-w-0">
               <!-- Create Agent (trinity-enterprise#260) — chassis-level so agent
                    creation is reachable from every mode, not just the List tab.
                    The label degrades to icon-only below `md` (pre-decided in the
