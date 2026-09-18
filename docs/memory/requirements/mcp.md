@@ -740,6 +740,60 @@ sign.
   success.
 - **Flow**: `docs/memory/feature-flows/a2a-outbound-call.md`
 
+### 32.6 AAuth Agent Identity on the A2A Seam — prototype (ent#623)
+- **Status**: 🧪 Prototype on a branch, flag OFF by default — not a platform
+  promise. Productization is decided after the 2026-09-18 call.
+- **Implements**: trinity-enterprise#623 (evaluation home: ent#558)
+- **Description**: A Trinity agent calls an agent on a *different* Trinity
+  instance and is authenticated as **itself** under AAuth's
+  agent-identity-only mode, with no bearer secret of either instance configured
+  on the other. Each instance is its own Agent Provider (self-hosted
+  bootstrap): it publishes `/.well-known/aauth-agent.json` + a JWKS and
+  self-issues `aa-agent+jwt` agent tokens; requests are signed per RFC 9421
+  with the key conveyed by `Signature-Key: sig=jwt;jwt="…"`.
+- **FR-1 — Flag + issuer**: `aauth_prototype_enabled` (`system_settings` →
+  `AAUTH_PROTOTYPE_ENABLED` → OFF) and `aauth_issuer` (`system_settings` →
+  `AAUTH_ISSUER`; `https://<host>`, no port/path, lowercase). Flag OFF, or no
+  valid issuer, leaves inbound, outbound and the card byte-identical to §32.2 /
+  §32.5.
+- **FR-2 — Identity**: `aauth:<agent-name>@<issuer-host>` — per agent, never
+  per owner; no owner role travels with it. One instance signing key
+  (Ed25519, AES-256-GCM at rest in `system_settings`, Invariant #12); each
+  agent token binds a short-lived per-agent key via `cnf.jwk`.
+- **FR-3 — Inbound verification (B)** runs before the body is parsed as
+  JSON-RPC, only when the request carries `Signature-Key`: header/param shape →
+  token claims → exposure + trusted-issuer pre-gate (the issuer host must
+  appear in an `aauth:` allow-list entry for this agent, so B never fetches
+  metadata for a domain an operator did not list) → metadata + JWKS (pinned
+  public-HTTPS egress, 8 s deadline, same-origin `jwks_uri`) → token signature
+  → HTTP signature (POST also covers `content-digest` + `content-type`) →
+  digest over the body → replay (Redis, fail-closed). Failures are `401` +
+  `Signature-Error` + RFC 9457 problem details.
+- **FR-4 — Allow-list is strict for AAuth**: an AAuth caller must be listed by
+  exact identity; an empty list, a missing provider or a provider error all
+  refuse (fail-closed — the inverse of §32.2 FR-7's bearer gate). `aauth:`
+  entries never count toward the bearer gate, so adding an AAuth peer cannot
+  lock out bearer callers. Verified-but-unlisted → `403`.
+- **FR-5 — Dual acceptance**: the bearer path is untouched on the same
+  endpoint while the flag is on; the served card declares an `aauth` scheme
+  **after** `bearerAuth`.
+- **FR-6 — Attribution**: the caller identity, verification result and
+  allow-list decision land on the callee's audit row (actor type
+  `external_agent`) and on an `agent_activities` row. `tasks/get` /
+  `tasks/cancel` answer an AAuth caller only for tasks that identity started;
+  `message/stream` is refused for AAuth callers.
+- **FR-7 — Outbound (A)**: an operator-registered endpoint may be marked
+  `auth_scheme: aauth` (no credential; switching to it clears one; non-default
+  ports refused). Only the agent's **own** key may place such a call — a human
+  principal cannot make the backend sign as an agent. The request is signed
+  over the final bytes sent. For a path-bearing `aauth` endpoint the card is
+  read from `<endpoint>/.well-known/agent-card.json` first.
+- **Out of scope**: Person Server, missions, budgets, sub-agents, key
+  rotation, hardware-backed keys, UI. Stated limits: software key in the
+  backend; identity keyed by agent name (a recreated name inherits it); the
+  backend signs on the agent's behalf; inbound AAuth is inert without the
+  private allow-list module.
+
 ---
 
 ## 45. Per-Agent MCP Exposure — Dedicated Dynamic Tools (#846)

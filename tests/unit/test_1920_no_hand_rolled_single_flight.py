@@ -90,6 +90,8 @@ _ALLOWED = {
     "services/db_backup_service.py": "db-backup duplicate-I/O lease (#2216, landed on dev while #1920 was open) — "
     "already token + compare-and-delete, so NOT the #1919 bug class; consolidation only, tracked follow-up",
     # --- genuine non-lock nx=True uses (continued) ---
+    "services/aauth/verifier.py": "AAuth replay once-guard (ent#623) — records that a signed request was "
+    "already seen within its signature window; never released, expires by TTL. Not a lock.",
     "services/docker_service.py": "port_alloc:{port} SSH-port reservation (#2215) — an allocation over a keyspace of "
     "many keys, not a mutex: no release, no token, TTL-expiry only, and it deliberately PROPAGATES Redis errors so the "
     "caller decides. SingleFlightLock would be actively wrong here — its internal fail-open returns True on a Redis "

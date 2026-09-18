@@ -373,6 +373,19 @@ async def update_setting(
             ),
         )
 
+    # ent#623: the AAuth instance signing key is an AES-256-GCM envelope that
+    # IS this instance's identity to every AAuth peer. A plaintext write would
+    # corrupt it (AAuth then fails closed, confusingly); a replaced envelope
+    # would silently change the identity peers trust. Nothing writes it but
+    # `services.aauth.keys`, which creates it once.
+    from services.aauth.keys import SIGNING_KEY_SETTING
+
+    if key == SIGNING_KEY_SETTING:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is managed by the AAuth key service and cannot be set through the API",
+        )
+
     if key in LEGACY_SKILLS_LIBRARY_KEYS:
         raise HTTPException(
             status_code=422,
@@ -567,6 +580,16 @@ async def delete_setting(
                 f"{INSTALL_SOURCE_SETTING_KEY} records how this instance was "
                 "installed and cannot be cleared through the API."
             ),
+        )
+
+    # ent#623: deleting the AAuth signing key re-keys this instance on next
+    # use — every AAuth peer's cached trust silently stops matching.
+    from services.aauth.keys import SIGNING_KEY_SETTING
+
+    if key == SIGNING_KEY_SETTING:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is managed by the AAuth key service and cannot be cleared through the API",
         )
 
     # ent#14: blocked here as well as on PUT, unlike the #1644 retention acks.

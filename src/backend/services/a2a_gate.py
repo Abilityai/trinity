@@ -155,6 +155,39 @@ def filter_exposed_skills(
     return [s for s in skills if str(s.get("id")) in allowed_ids]
 
 
+def explicit_inbound_identities(agent_name: str) -> Optional[List[str]]:
+    """The AAuth identities explicitly allow-listed for ``agent_name`` (ent#623).
+
+    ────────────────────────────────────────────────────────────────────────
+    FAIL-CLOSED — the deliberate inverse of :func:`check_inbound_allowed`.
+    ────────────────────────────────────────────────────────────────────────
+    ``check_inbound_allowed`` fails open because its caller is already an
+    authenticated Trinity principal with owner/shared access. An AAuth caller is
+    not: it is any key-holder on the internet, and this list is the ONLY thing
+    that admits it. So here:
+
+    * no provider, a provider without ``inbound_identities``, a provider that
+      raises, or a malformed return → ``None`` → the caller is refused;
+    * an empty list means "nobody", never "no restriction".
+
+    Returns the list as the provider stores it; callers compare exactly.
+    """
+    provider = _provider
+    method = getattr(provider, "inbound_identities", None) if provider is not None else None
+    if method is None:
+        return None
+    try:
+        identities = method(agent_name)
+    except Exception:  # noqa: BLE001 — a policy error refuses, never admits
+        logger.error("[a2a_gate] inbound_identities failed for %s; refusing AAuth", agent_name, exc_info=True)
+        return None
+    if not isinstance(identities, (list, tuple)):
+        logger.error("[a2a_gate] inbound_identities returned %s for %s; refusing AAuth",
+                     type(identities).__name__, agent_name)
+        return None
+    return [str(i) for i in identities]
+
+
 def check_inbound_allowed(agent_name: str, caller_identity: str) -> bool:
     """Whether ``caller_identity`` may task ``agent_name`` over A2A inbound.
 

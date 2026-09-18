@@ -4482,6 +4482,8 @@ class A2AOutboundEndpointUpsert(BaseModel):
     url: str = Field(..., min_length=1, max_length=2048)
     credentials: Optional[SecretStr] = Field(default=None)
     clear_credentials: bool = False
+    # ent#623: None = keep the stored scheme (a new endpoint defaults to bearer).
+    auth_scheme: Optional[Literal["bearer", "aauth"]] = None
 
     @field_validator("credentials")
     @classmethod

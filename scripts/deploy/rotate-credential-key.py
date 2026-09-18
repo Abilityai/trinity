@@ -71,6 +71,7 @@ ENCRYPTED_COLUMNS = [
 _STANDALONE_ENVELOPE_SETTINGS = (
     "elevenlabs_api_key_encrypted",  # ent#117
     "a2a_outbound_endpoints_encrypted",  # #736
+    "aauth_signing_key_encrypted",  # ent#623
 )
 
 

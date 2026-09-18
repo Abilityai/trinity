@@ -56,6 +56,60 @@ class A2AEndpointNotFound(Exception):
     """No endpoint matched the caller's reference (or no provider resolved one)."""
 
 
+class A2AAAuthRefused(Exception):
+    """An `aauth` endpoint call refused before any egress (ent#623)."""
+
+    def __init__(self, status_code: int, reason: str, detail: str):
+        super().__init__(detail)
+        self.status_code = status_code
+        self.reason = reason
+        self.detail = detail
+
+
+def _aauth_signer(agent_name: str, caller_agent_name: Optional[str]) -> a2a_client.RequestSigner:
+    """The request signer for an `aauth` endpoint, or a named refusal (ent#623).
+
+    Two refusals, both before any egress:
+
+    * **Only the agent itself.** The identity the peer logs and gates on must
+      name the agent that placed the call. `AuthorizedAgentByName` also admits
+      the owner, shared users and admins; for a bearer endpoint that only
+      affects attribution, but here it would let a human make the backend sign
+      as the agent. So the caller must be the agent's own key.
+    * **AAuth must be live** (flag ON and a valid issuer) — an `aauth` endpoint
+      is never silently called unauthenticated.
+    """
+    from services.aauth import signer as aauth_signer
+
+    if caller_agent_name != agent_name:
+        raise A2AAAuthRefused(
+            403,
+            "aauth_agent_only",
+            "This endpoint authenticates as the calling agent's AAuth identity, so "
+            "only the agent itself may call it (use the agent's own key).",
+        )
+    try:
+        # Mints (or reuses) the token, so the instance key is proven loadable
+        # HERE — before the card fetch — rather than inside `_rpc`, where a
+        # `SigningUnavailable` would escape every handler as a 500.
+        aauth_signer.agent_token(agent_name)
+    except aauth_signer.SigningUnavailable as exc:
+        raise A2AAAuthRefused(400, "aauth_disabled", f"AAuth signing is unavailable: {exc}") from None
+
+    def _sign(method: str, url: str, body: bytes, content_type: str) -> Dict[str, str]:
+        try:
+            return aauth_signer.sign_request(
+                agent_name=agent_name, method=method, url=url,
+                body=body, content_type=content_type,
+            )
+        except aauth_signer.SigningUnavailable as exc:
+            # The flag was flipped (or the key became unreadable) mid-call: a
+            # named refusal the router maps, never an unhandled 500.
+            raise A2ACallError("aauth_signing_unavailable", str(exc)) from None
+
+    return _sign
+
+
 @dataclass
 class OutboundOutcome:
     """What the router turns into a response + an audit row."""
@@ -64,6 +118,7 @@ class OutboundOutcome:
     endpoint_id: str
     endpoint_name: str
     replayed: bool = False
+    auth_scheme: str = "bearer"
 
 
 def is_outbound_enabled() -> bool:
@@ -97,7 +152,8 @@ def _enforce_bounds(agent_name: str) -> None:
 
 
 async def _record_activity(agent_name: str, endpoint_name: str, host: str,
-                           state: str, error: Optional[str] = None) -> None:
+                           state: str, error: Optional[str] = None,
+                           auth_scheme: str = "bearer") -> None:
     """One `agent_activities` row per outbound call (F12).
 
     The audit log is admin-gated and unwatched; `agent_activities` is the stream
@@ -123,6 +179,7 @@ async def _record_activity(agent_name: str, endpoint_name: str, host: str,
                 "endpoint": endpoint_name,
                 "host": host,
                 "state": state,
+                **({"auth": "aauth"} if auth_scheme == "aauth" else {}),
             },
         )
         await activity_service.complete_activity(
@@ -143,6 +200,7 @@ async def call_agent(
     context_id: Optional[str] = None,
     task_id: Optional[str] = None,
     execution_id: Optional[str] = None,
+    caller_agent_name: Optional[str] = None,
 ) -> OutboundOutcome:
     """Resolve, validate, dedup and place one outbound A2A call."""
     if not is_outbound_enabled():
@@ -153,6 +211,10 @@ async def call_agent(
     endpoint = a2a_outbound.resolve_endpoint(agent_name, endpoint_ref)
     if endpoint is None:
         raise A2AEndpointNotFound(endpoint_ref)
+    signer = (
+        _aauth_signer(agent_name, caller_agent_name)
+        if endpoint.auth_scheme == "aauth" else None
+    )
 
     # Validate BEFORE claiming an effect key: a refused URL must not burn one.
     validated = await a2a_client.validate_endpoint(endpoint.url)
@@ -198,6 +260,7 @@ async def call_agent(
                     endpoint_id=endpoint.id,
                     endpoint_name=endpoint.name,
                     replayed=True,
+                    auth_scheme=endpoint.auth_scheme,
                 )
 
             result = await a2a_client.call_endpoint(
@@ -207,6 +270,7 @@ async def call_agent(
                 context_id=context_id,
                 task_id=task_id,
                 validated=validated,
+                **({"signer": signer} if signer is not None else {}),
             )
             guard.snapshot = {
                 "state": result.state,
@@ -221,12 +285,14 @@ async def call_agent(
         raise
     except A2ACallError as exc:
         await _record_activity(agent_name, endpoint.name, validated.hostname,
-                               "failed", error=exc.reason)
+                               "failed", error=exc.reason, auth_scheme=endpoint.auth_scheme)
         raise
 
-    await _record_activity(agent_name, endpoint.name, result.host, result.state)
+    await _record_activity(agent_name, endpoint.name, result.host, result.state,
+                           auth_scheme=endpoint.auth_scheme)
     return OutboundOutcome(
-        result=result, endpoint_id=endpoint.id, endpoint_name=endpoint.name
+        result=result, endpoint_id=endpoint.id, endpoint_name=endpoint.name,
+        auth_scheme=endpoint.auth_scheme,
     )
 
 
@@ -235,6 +301,7 @@ async def poll_task(
     agent_name: str,
     endpoint_ref: str,
     task_id: str,
+    caller_agent_name: Optional[str] = None,
 ) -> OutboundOutcome:
     """Poll a remote task on a registered endpoint.
 
@@ -251,6 +318,10 @@ async def poll_task(
     endpoint = a2a_outbound.resolve_endpoint(agent_name, endpoint_ref)
     if endpoint is None:
         raise A2AEndpointNotFound(endpoint_ref)
+    signer = (
+        _aauth_signer(agent_name, caller_agent_name)
+        if endpoint.auth_scheme == "aauth" else None
+    )
 
     validated = await a2a_client.validate_endpoint(endpoint.url)
     result = await a2a_client.get_task(
@@ -258,9 +329,11 @@ async def poll_task(
         credential=endpoint.credential,
         task_id=task_id,
         validated=validated,
+        **({"signer": signer} if signer is not None else {}),
     )
     return OutboundOutcome(
-        result=result, endpoint_id=endpoint.id, endpoint_name=endpoint.name
+        result=result, endpoint_id=endpoint.id, endpoint_name=endpoint.name,
+        auth_scheme=endpoint.auth_scheme,
     )
 
 
@@ -282,6 +355,8 @@ def audit_details(outcome: OutboundOutcome, *, extra: Optional[Dict[str, Any]] =
         details["remote_task_id"] = outcome.result.task_id
     if outcome.replayed:
         details["replayed"] = True
+    if outcome.auth_scheme == "aauth":
+        details["auth"] = "aauth"
     if extra:
         details.update(extra)
     return details

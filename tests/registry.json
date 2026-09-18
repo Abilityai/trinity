@@ -3102,6 +3102,30 @@
         "subscriptions"
       ],
       "description": "The unified utilization header is a fraction of the cap and is honoured past 1.0 (#2419): parser table (1.2 -> 120.0, a percent-shaped 42.5 reads loud-wrong as 4250.0, nan/inf/1e307/negative -> None, -0.0 -> 0.0), synthetic overage header set through the REAL chain (parse -> _to_model -> classify_headroom SATURATED, selection_verdict 120.0, ranker sorts it last, decide_tier CRIT, _history_row passthrough), and the [#2419] INFO arrival log in _probe that records the raw header strings when a window reads past 100%. Direct imports + attribute monkeypatching, no backend."
+    },
+    {
+      "file": "unit/test_ent623_aauth_core.py",
+      "feature": "abilityai/trinity-enterprise#623",
+      "added": "2026-09-17",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "AAuth prototype core: aa-agent+jwt (Ed25519 JWS), RFC 9421 profile (std-base64 Signature, covered components, @authority normalisation), every verifier refusal code (trusted-issuer pre-gate fetches nothing, body read only after the signature over Content-Digest verifies, replay fail-closed), a request signed by the JS reference @hellocoop/httpsig verifies, signer token cache, instance-key first-use race + undecryptable-row fail-closed, bounded discovery (same-origin jwks_uri, negative cache, deadline)."
+    },
+    {
+      "file": "unit/test_ent623_aauth_a2a.py",
+      "feature": "abilityai/trinity-enterprise#623",
+      "added": "2026-09-17",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "AAuth on the A2A seam: flag-off signed request is a plain bearer 401; bearer still works with the flag on (dual acceptance) and a bearer-less 401 advertises AAuth; allow-listed identity runs with no Trinity user and is named on audit/activity; unlisted 403; bad signature 401 problem+json before the body is parsed; every missing/erroring allow-list provider refuses; message/stream refused; tasks/get scoped to the starting identity; card lists aauth after bearerAuth; discovery documents 404 when inert; outbound registry auth_scheme rules; aauth calls refuse human principals and an inert flag before egress and are signed over the exact bytes sent to the registered host."
     }
   ]
 }

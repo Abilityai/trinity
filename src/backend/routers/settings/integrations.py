@@ -648,6 +648,7 @@ async def upsert_a2a_outbound_endpoint(
             body.url,
             credential,
             clear_credential=body.clear_credentials,
+            auth_scheme=body.auth_scheme,
         )
     except a2a_outbound.EndpointValidationError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -666,7 +667,9 @@ async def upsert_a2a_outbound_endpoint(
             "endpoint": record["name"],
             "url": record["url"],
             "credential_set": bool(credential),
-            "credential_cleared": bool(body.clear_credentials),
+            # ent#623: switching an endpoint to aauth drops its stored secret.
+            "credential_cleared": bool(body.clear_credentials) or body.auth_scheme == "aauth",
+            "auth_scheme": record["auth_scheme"],
         },
     )
     return {"success": True, "endpoint": record}

@@ -65,7 +65,7 @@ import ssl
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -112,6 +112,11 @@ A2A_MAX_RESPONSE_CHARS = 32 * 1024   # what the agent's context window can affor
 A2A_DIALECT_CACHE_TTL = 300.0
 
 _USER_AGENT = "Trinity-A2A-Client/1"
+
+#: ent#623: `signer(method, logical_url, body, content_type) -> headers`. When
+#: set, the RPC carries those headers INSTEAD of `Authorization`, computed over
+#: the logical URL (registered host, not the pinned IP) and the exact body bytes.
+RequestSigner = Callable[[str, str, bytes, str], Dict[str, str]]
 
 
 class A2ACallError(Exception):
@@ -513,8 +518,37 @@ def _card_url_for(validated: ValidatedPublicUrl) -> str:
     return urlunsplit((parts.scheme, parts.netloc, "/.well-known/agent-card.json", "", ""))
 
 
+async def fetch_card_for(
+    client: httpx.AsyncClient, validated: ValidatedPublicUrl, *, path_relative_first: bool
+) -> Dict[str, Any]:
+    """`fetch_card`, optionally trying `<registered>/.well-known/agent-card.json` first.
+
+    ent#623, `aauth` endpoints only: a Trinity peer serves its per-agent card
+    under the agent path (`/a2a/{name}/.well-known/agent-card.json`); its origin
+    card does not exist (behind nginx it is the SPA's `index.html` with a 200,
+    so a 404-triggered fallback would never fire). Same pin, same caps, same
+    uncredentialed fetch — only the path differs. Bearer endpoints keep the
+    origin-only rule.
+    """
+    parts = urlsplit(validated.url)
+    base_path = (parts.path or "").rstrip("/")
+    if path_relative_first and base_path:
+        relative = urlunsplit((parts.scheme, parts.netloc, base_path + "/.well-known/agent-card.json", "", ""))
+        try:
+            return await fetch_card(client, validated, card_url=relative)
+        except A2ACallError as exc:
+            # Fall back only when the peer has no usable card THERE. A timeout
+            # or an unreachable host must propagate: retrying the origin would
+            # add a second card budget on top of the first and push the call
+            # past `A2A_TOTAL_DEADLINE`, which cancels the signed POST after the
+            # peer may already have accepted it.
+            if exc.reason not in ("card_http_error", "card_invalid"):
+                raise
+    return await fetch_card(client, validated)
+
+
 async def fetch_card(
-    client: httpx.AsyncClient, validated: ValidatedPublicUrl
+    client: httpx.AsyncClient, validated: ValidatedPublicUrl, card_url: Optional[str] = None
 ) -> Dict[str, Any]:
     """Fetch the peer's Agent Card. **Uncredentialed**, pinned, capped.
 
@@ -528,7 +562,7 @@ async def fetch_card(
     raw = await _read_capped(
         client,
         "GET",
-        _pinned_url(_card_url_for(validated), address),
+        _pinned_url(card_url or _card_url_for(validated), address),
         sni=validated.hostname,
         host_header=_host_header(validated),
         max_bytes=A2A_CARD_MAX_BYTES,
@@ -731,15 +765,19 @@ async def _rpc(
     credential: Optional[str],
     method: str,
     params: Dict[str, Any],
+    signer: Optional[RequestSigner] = None,
 ) -> Dict[str, Any]:
     """One credentialed JSON-RPC POST, pinned + capped. Returns the parsed body."""
     import json
 
     address = validated.addresses[0]
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if credential:
-        headers["Authorization"] = f"Bearer {credential}"
     envelope = a2a_protocol.build_request(uuid.uuid4().hex, method, params)
+    content = json.dumps(envelope).encode("utf-8")
+    if signer is not None:
+        headers.update(signer("POST", rpc_url, content, headers["Content-Type"]))
+    elif credential:
+        headers["Authorization"] = f"Bearer {credential}"
 
     raw = await _read_capped(
         client,
@@ -749,7 +787,7 @@ async def _rpc(
         host_header=_host_header(validated),
         max_bytes=A2A_RPC_MAX_BYTES,
         headers=headers,
-        content=json.dumps(envelope).encode("utf-8"),
+        content=content,
         error_prefix="rpc",
         secret=credential,
     )
@@ -799,6 +837,7 @@ async def call_endpoint(
     task_id: Optional[str] = None,
     client_factory=None,
     validated: Optional[ValidatedPublicUrl] = None,
+    signer: Optional[RequestSigner] = None,
 ) -> A2AResult:
     """Send one message to a registered A2A endpoint and return its answer.
 
@@ -823,7 +862,7 @@ async def call_endpoint(
         timeout = httpx.Timeout(A2A_RPC_TIMEOUT, connect=A2A_CONNECT_TIMEOUT)
         factory = client_factory or _http_client
         async with factory(timeout) as client:
-            card = await fetch_card(client, endpoint)
+            card = await fetch_card_for(client, endpoint, path_relative_first=signer is not None)
             try:
                 dialect = a2a_protocol.resolve_dialect(card.get("protocolVersion"))
             except UnsupportedProtocolVersion as exc:
@@ -837,7 +876,8 @@ async def call_endpoint(
                 )
             }
             body = await _rpc(
-                client, endpoint, rpc_url, credential, dialect.send_message, params
+                client, endpoint, rpc_url, credential, dialect.send_message, params,
+                signer=signer,
             )
             result = _raise_for_rpc_error(body, credential)
             state, text, remote_task_id, remote_context_id = _parse_task(result)
@@ -862,6 +902,7 @@ async def get_task(
     task_id: str,
     client_factory=None,
     validated: Optional[ValidatedPublicUrl] = None,
+    signer: Optional[RequestSigner] = None,
 ) -> A2AResult:
     """Poll a remote task by id (`tasks/get`) on the same resolved endpoint.
 
@@ -877,7 +918,7 @@ async def get_task(
             cache_key = _target_cache_key(endpoint)
             cached = _cached_target(cache_key)
             if cached is None:
-                card = await fetch_card(client, endpoint)
+                card = await fetch_card_for(client, endpoint, path_relative_first=signer is not None)
                 try:
                     dialect = a2a_protocol.resolve_dialect(card.get("protocolVersion"))
                 except UnsupportedProtocolVersion as exc:
@@ -893,7 +934,8 @@ async def get_task(
                 dialect, rpc_url = cached
 
             body = await _rpc(
-                client, endpoint, rpc_url, credential, dialect.get_task, {"id": task_id}
+                client, endpoint, rpc_url, credential, dialect.get_task, {"id": task_id},
+                signer=signer,
             )
             result = _raise_for_rpc_error(body, credential)
             state, text, remote_task_id, remote_context_id = _parse_task(result)
