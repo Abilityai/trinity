@@ -212,6 +212,67 @@ describe('teardown — the preview is bound to its name', () => {
   })
 })
 
+describe('teardown — an unconfirmable member is opt-IN, never pre-ticked', () => {
+  // The panel's watcher applies `teardownDefaultSelection` verbatim, so this IS
+  // the arriving selection. The decision lives in the store precisely so it can
+  // be executed here: `environment: 'node'` mounts no component, so the same
+  // rule written into the `.vue` watcher was a fact no runnable test could see,
+  // and it shipped wrong.
+  let store
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    store = useSystemsStore()
+    vi.clearAllMocks()
+  })
+
+  async function previewOf(members) {
+    axios.delete.mockResolvedValue({ data: { ...PREVIEW, members } })
+    store.setTeardownName('acme')
+    await store.previewTeardown()
+  }
+
+  it('ticks the confirmed member and leaves the prefix match alone', async () => {
+    await previewOf(PREVIEW.members)
+    expect(store.teardownDefaultSelection).toEqual(['acme-web'])
+    expect(store.teardownUnconfirmedMembers).toEqual(['acme-db'])
+  })
+
+  it('does it in the HEALTHY state too — the 503 refusal does not cover this', async () => {
+    // The whole point. `membership_verified: false` disables Remove anyway, so
+    // a default that were only safe there would be safe nowhere that matters:
+    // tags read fine, one agent has no tag row, Remove is ENABLED.
+    await previewOf(PREVIEW.members)
+    expect(store.teardownMembershipUnverified).toBe(false)
+    expect(store.teardownDefaultSelection).not.toContain('acme-db')
+  })
+
+  it('ticks `tag`-only evidence — a deploy tag is confirmation, prefix is not', async () => {
+    await previewOf([
+      { name: 'acme-web', evidence: 'both' },
+      { name: 'acme-db', evidence: 'tag' },
+      { name: 'acme-extra-worker', evidence: 'prefix' },
+    ])
+    expect(store.teardownDefaultSelection).toEqual(['acme-web', 'acme-db'])
+  })
+
+  it('selects NOTHING when the server confirmed nothing', async () => {
+    // An untagged legacy system. Remove stays disabled on the empty-selection
+    // gate until the operator affirms a member by hand, which is the intended
+    // outcome for a set the server cannot vouch for at all.
+    await previewOf([
+      { name: 'acme-web', evidence: 'prefix' },
+      { name: 'acme-db', evidence: 'prefix' },
+    ])
+    expect(store.teardownDefaultSelection).toEqual([])
+    expect(store.teardownUnconfirmedMembers).toHaveLength(2)
+  })
+
+  it('is empty before anything is previewed, rather than throwing', () => {
+    expect(store.teardownDefaultSelection).toEqual([])
+    expect(store.teardownUnconfirmedMembers).toEqual([])
+  })
+})
+
 describe('teardown — failures stay actionable', () => {
   let store
   beforeEach(() => {

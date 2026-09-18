@@ -214,12 +214,15 @@ const nameFieldId = useId()
 const acknowledged = ref(false)
 const checked = ref([])
 
-// A fresh preview re-checks everything: the operator opts members OUT, which is
-// the right default for a set the server says belongs to this system.
+// A fresh preview ticks what the server CONFIRMED and leaves the rest to the
+// operator — the rule and its reasoning live in the store (`teardownDefault
+// Selection`) so a node-environment vitest can execute it. Ticking everything
+// made the escape hatch an opt-OUT on a delete, in the one state the 503
+// refusal does not cover: a `prefix` member with the tags reading fine.
 watch(
   () => store.teardownPreview,
-  (preview) => {
-    checked.value = (preview?.members || []).map((m) => m.name)
+  () => {
+    checked.value = [...store.teardownDefaultSelection]
     acknowledged.value = false
   }
 )

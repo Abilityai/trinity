@@ -219,8 +219,43 @@ export const useSystemsStore = defineStore('systems', () => {
       && teardownPreview.value.membership_verified === false
   )
 
-  /** The members a preview offers for removal, all pre-checked. */
-  const teardownCandidates = computed(() => teardownPreview.value?.members || [])
+  /**
+   * The members that start TICKED on a fresh preview — everything the server
+   * could confirm, and nothing it could not.
+   *
+   * A member whose `evidence` is `prefix` matched this system's NAME with no
+   * deploy tag behind it: the server is saying it cannot tell whether that
+   * agent belongs here. Pre-ticking it makes the escape hatch an opt-OUT on a
+   * verb that deletes, and #2373's ranking — under-capture is cheaper than
+   * over-capture — inverts for exactly that verb, which is why teardown
+   * refuses rather than degrades everywhere else.
+   *
+   * The 503 refusal does NOT already cover this. It fires only when the tag
+   * read FAILED (`membership_verified: false`, Remove disabled). A `prefix`
+   * member also appears in the healthy state — tags read fine, that one agent
+   * simply has no tag row — where membership is verified, Remove is ENABLED,
+   * and the unconfirmable agent would have arrived pre-ticked.
+   *
+   * It lives here rather than in the panel's watcher so it is reachable by a
+   * test: `vitest.config.js` pins `environment: 'node'` with no component
+   * mounting, so a default expressed in a `.vue` watcher is a fact no runnable
+   * assertion can see.
+   */
+  const teardownDefaultSelection = computed(
+    () => (teardownPreview.value?.members || [])
+      .filter((m) => m.evidence !== 'prefix')
+      .map((m) => m.name)
+  )
+
+  /**
+   * The members left unticked by the rule above, so the panel can say why the
+   * selection is short rather than letting it read as a miscount.
+   */
+  const teardownUnconfirmedMembers = computed(
+    () => (teardownPreview.value?.members || [])
+      .filter((m) => m.evidence === 'prefix')
+      .map((m) => m.name)
+  )
 
   // --- internal ------------------------------------------------------------
   // Clears the preview PAYLOAD only. `previewedText` deliberately survives: it is
@@ -500,7 +535,8 @@ export const useSystemsStore = defineStore('systems', () => {
     canDeploy,
     teardownPreviewIsCurrent,
     teardownMembershipUnverified,
-    teardownCandidates,
+    teardownDefaultSelection,
+    teardownUnconfirmedMembers,
     // actions
     setManifestText,
     reset,
