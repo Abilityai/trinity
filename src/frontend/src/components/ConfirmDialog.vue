@@ -21,7 +21,7 @@
                 <svg
                   :class="[
                     'h-6 w-6',
-                    variant === 'danger' ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-warning-600 dark:text-status-warning-400'
+                    variant === 'danger' ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-warning-700 dark:text-status-warning-400'
                   ]"
                   fill="none"
                   viewBox="0 0 24 24"

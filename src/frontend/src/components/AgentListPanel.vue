@@ -33,7 +33,7 @@
     <div class="mb-3 flex items-center gap-3 flex-wrap">
       <!-- Name search -->
       <div class="relative">
-        <svg class="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 dark:text-gray-500 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg class="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 dark:text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
         </svg>
         <input
@@ -253,7 +253,7 @@
            the widest contribution. -->
       <div
         data-testid="list-header"
-        class="hidden list-wide:grid list-wide:grid-cols-subgrid list-wide:col-span-full items-center py-2 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider"
+        class="hidden list-wide:grid list-wide:grid-cols-subgrid list-wide:col-span-full items-center py-2 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider"
       >
         <div class="w-4 list-wide:ml-8"></div>
         <div class="w-2.5"></div>
@@ -413,7 +413,7 @@
                   ></div>
                 </div>
                 <span class="text-[10px] font-semibold tabular-nums" :class="getSuccessBarColor(agent.name).replace('bg-', 'text-')">{{ getSuccessBarPercent(agent.name) }}%</span>
-                <span v-if="has7dStats(agent.name)" class="text-[9px] text-gray-400 dark:text-gray-500 tabular-nums">(7d: {{ get7dSuccessRate(agent.name) }}%)</span>
+                <span v-if="has7dStats(agent.name)" class="text-[9px] text-gray-500 dark:text-gray-400 tabular-nums">(7d: {{ get7dSuccessRate(agent.name) }}%)</span>
               </template>
               <template v-else-if="has7dOnlyStats(agent.name)">
                 <div class="w-20 flex-shrink-0 bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">
@@ -424,13 +424,13 @@
                   ></div>
                 </div>
                 <span class="text-[10px] font-semibold tabular-nums" :class="get7dSuccessBarColor(agent.name).replace('bg-', 'text-')">{{ get7dSuccessRate(agent.name) }}%</span>
-                <span class="text-[9px] text-gray-400 dark:text-gray-500">(7d)</span>
+                <span class="text-[9px] text-gray-500 dark:text-gray-400">(7d)</span>
               </template>
               <template v-else>
                 <div class="w-20 flex-shrink-0 bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">
                   <div class="h-full rounded-full bg-gray-300 dark:bg-gray-600" style="width: 0%"></div>
                 </div>
-                <span class="text-[10px] text-gray-400 dark:text-gray-500">&mdash;</span>
+                <span class="text-[10px] text-gray-500 dark:text-gray-400">&mdash;</span>
               </template>
             </div>
 
@@ -455,7 +455,7 @@
             <!-- Arrow link -->
             <router-link
               :to="`/agents/${agent.name}`"
-              class="text-gray-400 dark:text-gray-500 hover:text-action-primary-600 dark:hover:text-action-primary-400 transition-colors"
+              class="text-gray-500 dark:text-gray-400 hover:text-action-primary-600 dark:hover:text-action-primary-400 transition-colors"
             >
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
@@ -519,7 +519,7 @@
                 </span>
                 <span
                   v-if="getAgentTags(agent).length > 3"
-                  class="text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap flex-shrink-0"
+                  class="text-[10px] text-gray-500 dark:text-gray-400 whitespace-nowrap flex-shrink-0"
                 >
                   +{{ getAgentTags(agent).length - 3 }}
                 </span>
@@ -590,7 +590,7 @@
               </div>
               <router-link
                 :to="`/agents/${agent.name}`"
-                class="text-gray-400 dark:text-gray-500 hover:text-action-primary-600 dark:hover:text-action-primary-400 transition-colors"
+                class="text-gray-500 dark:text-gray-400 hover:text-action-primary-600 dark:hover:text-action-primary-400 transition-colors"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
@@ -655,7 +655,7 @@
               </template>
               <template v-else>
                 <div class="w-24 bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden"></div>
-                <span class="text-[10px] text-gray-400 dark:text-gray-500">&mdash;</span>
+                <span class="text-[10px] text-gray-500 dark:text-gray-400">&mdash;</span>
               </template>
             </div>
             <!-- Always rendered (the lg contract): a `v-if` here moved the
@@ -676,7 +676,7 @@
                   <span class="font-medium text-gray-700 dark:text-gray-300" :title="costIsApproximate(agent.name) ? 'API-price equivalent of subscription usage — not a bill' : null">{{ costIsApproximate(agent.name) ? '≈' : '' }}{{ formatCostCompact(getExecutionStats(agent.name).totalCost) }}</span>
                 </template>
               </template>
-              <span v-else class="text-gray-400 dark:text-gray-500">--</span>
+              <span v-else class="text-gray-500 dark:text-gray-400">--</span>
             </div>
           </div>
           <!-- Secondary line (tablet) — same contract as list-wide: always rendered,
@@ -712,7 +712,7 @@
               </span>
               <span
                 v-if="getAgentTags(agent).length > 3"
-                class="text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap flex-shrink-0"
+                class="text-[10px] text-gray-500 dark:text-gray-400 whitespace-nowrap flex-shrink-0"
               >
                 +{{ getAgentTags(agent).length - 3 }}
               </span>
@@ -775,7 +775,7 @@
               />
               <router-link
                 :to="`/agents/${agent.name}`"
-                class="text-gray-400 dark:text-gray-500 hover:text-action-primary-600 dark:hover:text-action-primary-400 transition-colors"
+                class="text-gray-500 dark:text-gray-400 hover:text-action-primary-600 dark:hover:text-action-primary-400 transition-colors"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
@@ -827,7 +827,7 @@
          contradicting CTAs at once. This card renders only when the panel's
          OWN name/status filters narrowed a non-empty prop to zero. -->
     <div v-if="displayAgents.length === 0 && agents.length > 0" class="text-center py-12 bg-white dark:bg-gray-800 rounded-xl shadow">
-      <ServerIcon class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" />
+      <ServerIcon class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" />
       <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">No matching agents</h3>
       <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Try adjusting your filters.</p>
       <div class="mt-4">
@@ -1063,7 +1063,7 @@ const getStatusDotColor = (agentName) => {
 
 const getActivityLabelClass = (agentName) => {
   const state = getActivityState(agentName)
-  if (state === 'Active' || state === 'Idle') return 'text-status-success-600 dark:text-status-success-400'
+  if (state === 'Active' || state === 'Idle') return 'text-status-success-700 dark:text-status-success-400'
   return 'text-gray-500 dark:text-gray-400'
 }
 

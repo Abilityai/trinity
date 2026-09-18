@@ -28,7 +28,7 @@
 
     <!-- Post-voice processing (#73) -->
     <div class="mt-6 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40 p-4">
-      <div class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500 mb-2">Post-voice processing</div>
+      <div class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2">Post-voice processing</div>
 
       <template v-if="!writeAvailable">
         <p class="text-sm text-gray-500 dark:text-gray-400">
@@ -77,7 +77,7 @@
         class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
         :class="running
           ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm'
-          : 'bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'"
+          : 'bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'"
       >
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <circle cx="12" cy="12" r="9" stroke-width="1.6" />
@@ -86,7 +86,7 @@
         </svg>
         Open Brain Orb
       </button>
-      <p v-if="!running" class="mt-2 text-xs text-gray-400 dark:text-gray-500">
+      <p v-if="!running" class="mt-2 text-xs text-gray-500 dark:text-gray-400">
         Start the agent to open its Brain Orb.
       </p>
     </div>

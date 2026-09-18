@@ -199,7 +199,7 @@
           </div>
         </div>
       </div>
-      <div v-else-if="binding.configured && binding.webhook_url" class="mt-3 text-xs text-gray-400 dark:text-gray-500">
+      <div v-else-if="binding.configured && binding.webhook_url" class="mt-3 text-xs text-gray-500 dark:text-gray-400">
         No group chats yet. Add the bot to a Telegram group to see it here.
       </div>
 
