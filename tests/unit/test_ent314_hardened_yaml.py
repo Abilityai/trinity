@@ -279,9 +279,6 @@ def test_no_service_parses_yaml_without_the_shared_loader():
     self-fulfilling-scope failure this test's own docstring describes, one
     directory up.
     """
-    import ast
-
-    offenders = []
     # The WHOLE backend, not just services/: an earlier draft scanned only the
     # directory it had just fixed, which is the same self-fulfilling scope that
     # let `agent_service/crud.py` sit unguarded. `utils/safe_yaml.py` is the one
@@ -290,16 +287,51 @@ def test_no_service_parses_yaml_without_the_shared_loader():
     # `_AGENT_SERVER` is a separate image that structurally cannot import
     # `src/backend`, so it carries a byte-identical vendored copy (Invariant #5)
     # — hence two exempt paths, one per tree.
-    roots = [
+    offenders = _bare_safe_load_offenders([
         (_BACKEND, {"utils/safe_yaml.py"}),
         (_AGENT_SERVER, {"safe_yaml.py"}),
-    ]
+    ])
+
+    assert not offenders, (
+        "author-controlled YAML must go through the shared hardened loader "
+        f"(ent#314 / #1965). Unguarded parses: {offenders}"
+    )
+
+
+# Vendored / generated trees the scan may walk into but must never judge.
+# Matched as PATH SEGMENTS, not substrings (#2890): the old test did
+# `"/venv/" in rel` on a path RELATIVE to the root, and a virtualenv sitting at
+# the root of a scanned tree — `src/backend/venv/`, i.e. where a virtualenv
+# actually lives — yields `rel = "venv/lib/..."` with no leading slash, so the
+# exclusion never matched and vendored `starlette`/`uvicorn` sources were
+# reported as unguarded parses on a clean checkout. A guard that cries wolf
+# gets dismissed, and this one backs Invariant #5.
+_VENDORED_PARTS = frozenset({"venv", ".venv", "site-packages", "node_modules", "__pycache__"})
+
+
+def _is_vendored(rel_parts: tuple) -> bool:
+    return bool(_VENDORED_PARTS.intersection(rel_parts))
+
+
+def _bare_safe_load_offenders(roots) -> list:
+    """Every `*.safe_load(...)` call under `roots` that is not the guard itself.
+
+    `roots` is `[(root_dir, {exempt relative paths}), ...]`. Pure over the
+    filesystem so a temporary fixture tree can prove both directions — a root
+    venv is skipped, a first-party file is still caught (#2890).
+    """
+    import ast
+
+    offenders = []
     for root, exempt in roots:
         if not root.exists():  # pragma: no cover - partial checkout
             continue
         for path in root.rglob("*.py"):
-            rel = str(path.relative_to(root))
-            if rel in exempt or "/venv/" in rel or rel.startswith("migrations/"):
+            rel_path = path.relative_to(root)
+            rel = rel_path.as_posix()
+            if _is_vendored(rel_path.parts):
+                continue
+            if rel in exempt or rel.startswith("migrations/"):
                 continue
             if rel in _BARE_SAFE_LOAD_ALLOWED:
                 continue
@@ -315,11 +347,48 @@ def test_no_service_parses_yaml_without_the_shared_loader():
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                     if node.func.attr == "safe_load":
                         offenders.append(f"{root.name}/{rel}:{node.lineno}")
+    return offenders
 
-    assert not offenders, (
-        "author-controlled YAML must go through the shared hardened loader "
-        f"(ent#314 / #1965). Unguarded parses: {offenders}"
-    )
+
+_BARE = "import yaml\n\ndef load(text):\n    return yaml.safe_load(text)\n"
+
+
+@pytest.mark.parametrize(
+    "vendored",
+    [
+        "venv/lib/python3.12/site-packages/starlette/routing.py",
+        ".venv/lib/python3.12/site-packages/uvicorn/config.py",
+        "node_modules/some-tool/helper.py",
+        "services/venv/lib/python3.12/site-packages/x.py",  # nested — the case the old check DID cover
+        "services/__pycache__/stale.py",
+    ],
+)
+def test_2890_vendored_trees_are_skipped_but_first_party_is_still_caught(tmp_path, vendored):
+    """The two directions the fix must hold at once. The vendored file carries
+    the same bare parse as the first-party one; only the first-party one may be
+    reported. Position-independent: the venv at the ROOT of the tree is the case
+    the substring check missed, and the nested one is the case it did not."""
+    root = tmp_path / "backend"
+    (root / vendored).parent.mkdir(parents=True)
+    (root / vendored).write_text(_BARE, encoding="utf-8")
+    (root / "services").mkdir(exist_ok=True)
+    (root / "services" / "svc.py").write_text(_BARE, encoding="utf-8")
+    (root / "utils").mkdir()
+    (root / "utils" / "safe_yaml.py").write_text(_BARE, encoding="utf-8")  # the guard itself
+
+    offenders = _bare_safe_load_offenders([(root, {"utils/safe_yaml.py"})])
+
+    assert offenders == ["backend/services/svc.py:4"], offenders
+
+
+def test_2890_exclusion_is_segment_based_not_substring_based():
+    """`"/venv/" in rel` is defeated by position; `parts` is not. A directory
+    merely NAMED like a vendored one (`my-venv-tool/`) is still scanned."""
+    assert _is_vendored(("venv", "lib", "x.py"))
+    assert _is_vendored(("services", ".venv", "x.py"))
+    assert _is_vendored(("a", "site-packages", "x.py"))
+    assert not _is_vendored(("my-venv-tool", "x.py"))
+    assert not _is_vendored(("services", "venvs_report.py"))
 
 
 def test_the_named_consumers_are_actually_on_the_shared_loader():
