@@ -176,7 +176,7 @@ watch(() => agentName.value, loadInitial)
 
       <p v-if="error" class="px-4 py-2 text-sm text-status-danger-600 dark:text-status-danger-400">{{ error }}</p>
       <p v-if="fixMessage" class="px-4 py-2 text-sm"
-         :class="fixMessage.ok ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
+         :class="fixMessage.ok ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
         {{ fixMessage.text }}
       </p>
 
@@ -192,7 +192,7 @@ watch(() => agentName.value, loadInitial)
             </span>
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2 flex-wrap">
-                <span class="text-xs font-mono text-gray-400 dark:text-gray-500">{{ c.check_id }}</span>
+                <span class="text-xs font-mono text-gray-500 dark:text-gray-400">{{ c.check_id }}</span>
                 <span class="text-sm text-gray-800 dark:text-gray-200">{{ c.message }}</span>
                 <span v-if="c.status === 'fail'" class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded"
                   :class="c.severity === 'hard' ? 'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/40 dark:text-status-danger-300' : (c.severity === 'soft' ? 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-900/40 dark:text-status-warning-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300')">{{ c.severity }}</span>
@@ -203,7 +203,7 @@ watch(() => agentName.value, loadInitial)
                 class="mt-1 text-xs text-gray-500 dark:text-gray-400 prose-xs dark:prose-invert max-w-none"
                 v-html="renderMarkdown(c.explanation)"
               ></div>
-              <p v-else-if="c.status === 'skipped' && c.skip_reason === 'no_api_key'" class="mt-0.5 text-xs text-gray-400 dark:text-gray-500">
+              <p v-else-if="c.status === 'skipped' && c.skip_reason === 'no_api_key'" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
                 Skipped — no Anthropic API key configured
               </p>
             </div>

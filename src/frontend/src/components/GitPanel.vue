@@ -13,11 +13,11 @@
 
     <!-- Git Not Enabled -->
     <div v-else-if="!gitStatus?.git_enabled" class="text-center py-8">
-      <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
       </svg>
       <p class="mt-2 text-gray-500 dark:text-gray-400">Git sync not enabled for this agent</p>
-      <p class="text-sm text-gray-400 dark:text-gray-500 mt-1">Push this agent to a GitHub repository to enable sync</p>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Push this agent to a GitHub repository to enable sync</p>
 
       <!-- Initialize Button -->
       <button
@@ -328,9 +328,9 @@
                   {{ patStatus.configured ? 'Agent-specific PAT' : 'Using Global PAT' }}
                 </p>
                 <p class="text-xs text-gray-500 dark:text-gray-400">
-                  <span v-if="patStatus.configured" class="text-status-success-600 dark:text-status-success-400">Custom PAT configured for this agent</span>
+                  <span v-if="patStatus.configured" class="text-status-success-700 dark:text-status-success-400">Custom PAT configured for this agent</span>
                   <span v-else-if="patStatus.has_global" class="text-blue-600 dark:text-blue-400">Using system-wide GitHub PAT from Settings</span>
-                  <span v-else class="text-status-warning-600 dark:text-status-warning-400">No PAT configured - git operations may fail</span>
+                  <span v-else class="text-status-warning-700 dark:text-status-warning-400">No PAT configured - git operations may fail</span>
                 </p>
               </div>
             </div>
@@ -450,6 +450,18 @@
         </div>
       </div>
     </div>
+
+    <!-- #1924 -->
+    <ConfirmDialog
+      :visible="confirmClearPat"
+      variant="warning"
+      title="Clear this agent's token"
+      message="Remove the agent-specific GitHub token? This agent falls back to the platform's shared token, which may not reach its repository."
+      confirm-text="Clear token"
+      cancel-text="Keep token"
+      @confirm="performClearPat"
+      @cancel="confirmClearPat = false"
+    />
   </div>
 </template>
 
@@ -457,6 +469,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import BindRepoPanel from './BindRepoPanel.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 
 const props = defineProps({
   agentName: {
@@ -599,9 +612,14 @@ const savePat = async () => {
   }
 }
 
-const clearPat = async () => {
-  if (!confirm('Clear the agent-specific PAT and revert to using the global PAT?')) return
+// #1924: was a native confirm() — no named verb, no restated consequence,
+// and the unsafe action focused.
+const confirmClearPat = ref(false)
 
+const clearPat = () => { confirmClearPat.value = true }
+
+const performClearPat = async () => {
+  confirmClearPat.value = false
   patSaving.value = true
   try {
     await agentsStore.clearGitHubPAT(props.agentName)

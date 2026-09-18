@@ -1,10 +1,13 @@
 <template>
-  <div
-    v-if="isOpen"
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-    @click.self="close"
+  <!-- #1923: BaseModal owns the overlay, Esc-to-close, the focus trap and
+       focus return. The panel markup below is unchanged. -->
+  <BaseModal
+    :model-value="isOpen"
+    panel-class="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md mx-4"
+    :aria-label="isEditing ? 'Edit System View' : 'Create System View'"
+    @close="close"
   >
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md mx-4">
+    <div>
       <!-- Header -->
       <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700">
         <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100">
@@ -171,7 +174,7 @@
                 </button>
               </span>
             </div>
-            <p v-else class="text-xs text-gray-400 dark:text-gray-500">
+            <p v-else class="text-xs text-gray-500 dark:text-gray-400">
               Add at least one tag to filter agents
             </p>
           </div>
@@ -240,10 +243,22 @@
         </div>
       </form>
     </div>
-  </div>
+    <ConfirmDialog
+      :visible="confirmDelete"
+      variant="danger"
+      title="Delete system view"
+      :message="`Delete “${props.editingView?.name}”? The view and its saved tag filter are removed. Agents and tags are not affected.`"
+      confirm-text="Delete view"
+      cancel-text="Keep view"
+      @confirm="performDelete"
+      @cancel="confirmDelete = false"
+    />
+  </BaseModal>
 </template>
 
 <script setup>
+import BaseModal from './base/BaseModal.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useSystemViewsStore } from '@/stores/systemViews'
 import { isOrgTag } from '@/utils/gridOrg'
@@ -379,12 +394,18 @@ async function handleSubmit() {
   }
 }
 
-async function handleDelete() {
-  if (!props.editingView) return
+// #1924: native confirm() names no verb ("OK"), restates no consequence and
+// focuses the unsafe action. ConfirmDialog does all three.
+const confirmDelete = ref(false)
 
-  if (!confirm(`Delete "${props.editingView.name}"? This action cannot be undone.`)) {
-    return
-  }
+function handleDelete() {
+  if (!props.editingView) return
+  confirmDelete.value = true
+}
+
+async function performDelete() {
+  confirmDelete.value = false
+  if (!props.editingView) return
 
   isSubmitting.value = true
   error.value = null
