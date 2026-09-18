@@ -134,7 +134,16 @@ describe('#2640 — the column swap is animated, not discrete', () => {
     // `--ws-rail`, which on a wide rail is a bigger step than the 211px snap
     // #2640 removed.
     expect(SHELL).toMatch(/enter-from-class="!w-0"/)
-    expect(SHELL).toMatch(/leave-to-class="!w-0"/)
+    // #2711 (review): the LEAVE became conditional, so the literal attribute is
+    // now a binding. The property this line protects is unchanged — the column
+    // still animates to zero width when it leaves a swap — because
+    // `railEverHeldRail` is true wherever #2676 cares: the canvas only takes
+    // the row from a rail that was on screen. What the condition removes is the
+    // case #2676 never had, a column that is given back without ever having
+    // held a rail (an empty or failed roster), which must go in one frame
+    // rather than slide away.
+    expect(SHELL).toMatch(/leave-to-class="railEverHeldRail \? '!w-0' : ''"/)
+    expect(SHELL).toMatch(/leave-active-class="railEverHeldRail \? RAIL_MOTION : ''"/)
     expect(SHELL).toMatch(/transition-\[width\] duration-300 ease-out overflow-hidden/)
     // The width is the RENDERED one, so a collapsed rail animates its 48px and
     // an open one animates whatever it was dragged to — one binding, both
