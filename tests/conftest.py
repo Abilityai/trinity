@@ -361,6 +361,7 @@ def _restore_sys_modules_baseline_762():
     _restore_invariant_sys_modules()
 
 from testkit.api_client import TrinityApiClient, ApiConfig
+from testkit import readiness as _readiness_2889
 from testkit.cleanup import (
     ResourceTracker,
     cleanup_test_agent,
@@ -778,6 +779,128 @@ def pytest_collection_modifyitems(config, items):
             # Also skip tests that use created_agent fixture
             if "created_agent" in item.fixturenames or "stopped_agent" in item.fixturenames:
                 item.add_marker(skip_agent)
+
+    # #2889: every test that executes a REAL model turn opts into the session
+    # preflight below. Appending to `item.fixturenames` is what makes a session
+    # fixture reachable from a marker after collection (`_fillfixtures` walks
+    # that list live at setup; `add_marker(usefixtures)` is inert this late).
+    for item in items:
+        if item.get_closest_marker("requires_model") is None:
+            continue
+        names = getattr(item, "fixturenames", None)
+        if isinstance(names, list) and "model_provider_preflight" not in names:
+            names.append("model_provider_preflight")
+
+
+def pytest_runtest_setup(item):
+    """#2889: once ONE model turn has proven the credential cannot execute,
+    every later `requires_model` test fails immediately with that same cause —
+    a 120 s call per test to rediscover an exhausted credit balance is exactly
+    the "32 individually reported" shape the issue names."""
+    if item.get_closest_marker("requires_model") is None:
+        return
+    seen = _readiness_2889.session_provider_failure()
+    if not seen:
+        return
+    verdict = seen["verdict"]
+    pytest.fail(
+        "provider preflight: an earlier model turn in this session already failed "
+        f"on the configured credential ({seen['what']}, code={verdict.code}); "
+        f"evidence: {verdict.evidence}",
+        pytrace=False,
+    )
+
+
+# One probe per session, bounded: the readiness retry exists because the
+# preflight is the FIRST turn after `ensure_test_agent` reports `running`.
+_PREFLIGHT_READINESS_ATTEMPTS = 3
+_PREFLIGHT_READINESS_BACKOFF_S = 10
+
+
+@pytest.fixture(scope="session")
+def model_provider_preflight(api_client: TrinityApiClient, api_config: ApiConfig):
+    """Fail fast, once, when the configured credential cannot execute (#2889 AC 4).
+
+    Two reads, cheapest first:
+
+    1. `claude_auth_configured` from `GET /api/settings/feature-flags` — the one
+       definition of "this instance holds a platform key or a subscription"
+       (the same flag `tests/journeys/conftest.py::skip_unless_agent_can_answer`
+       reads, #2812). False ⇒ nothing can answer; fail with that sentence.
+    2. If the runner provisioned a long-lived agent (`TEST_AGENT_NAME`, exported
+       by `tests/run-full.sh`), one real `/task` turn on it, classified by
+       `testkit.readiness`. A turn that runs and fails (credit balance, dead
+       token, OOM) fails the preflight; a transport 503 is retried a bounded
+       number of times, then fails as "never became ready" — a preflight cannot
+       skip, because that would skip every dependent.
+
+    Without `TEST_AGENT_NAME` the probe is skipped (creating an agent per
+    session duplicates what `created_agent` does per module) and the per-site
+    classifier plus `pytest_runtest_setup` provide the fail-fast instead.
+
+    A session fixture that raises is cached by pytest: every dependent test
+    errors at setup with THIS message, without re-running the probe — one
+    cause, not N. The journeys' gate checks CONFIGURATION; this checks
+    EXECUTABILITY. Both read the same flag.
+    """
+    try:
+        flags = api_client.get("/api/settings/feature-flags")
+    except Exception as exc:  # noqa: BLE001 — a preflight must name its own failure
+        pytest.fail(f"provider preflight: GET /api/settings/feature-flags raised {exc!r}", pytrace=False)
+    if flags.status_code == 200:
+        configured = (flags.json() or {}).get("claude_auth_configured")
+        if configured is False:
+            pytest.fail(
+                "provider preflight: the instance reports claude_auth_configured=False "
+                "(no platform Anthropic key and no registered subscription) — no model "
+                "turn can succeed on this stack",
+                pytrace=False,
+            )
+
+    agent_name = api_config.test_agent_name
+    if not agent_name:
+        return {"probed": False, "reason": "TEST_AGENT_NAME not set"}
+
+    last_verdict = None
+    for attempt in range(1, _PREFLIGHT_READINESS_ATTEMPTS + 1):
+        try:
+            resp = api_client.post(
+                f"/api/agents/{agent_name}/task",
+                json={"message": "Reply with the single word OK."},
+                timeout=120.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            pytest.fail(f"provider preflight: POST /task on '{agent_name}' raised {exc!r}", pytrace=False)
+        if resp.status_code == 404:
+            pytest.fail(
+                f"provider preflight: TEST_AGENT_NAME='{agent_name}' names an agent this "
+                "instance does not have — the runner's ensure_test_agent step did not hold",
+                pytrace=False,
+            )
+        if resp.status_code != 503:
+            # 200/202 answered; anything else (429 capacity, 5xx) is not a verdict
+            # on the credential — leave it to the per-site checks.
+            return {"probed": True, "agent": agent_name, "status": resp.status_code}
+        last_verdict = _readiness_2889.classify_unavailable(resp)
+        if not last_verdict.readiness:
+            if last_verdict.indicts_credential:
+                _readiness_2889.record_provider_failure("preflight POST /task", last_verdict)
+            pytest.fail(
+                "provider preflight: the configured credential cannot execute — "
+                + _readiness_2889.execution_failure_reason(
+                    f"preflight POST /task on '{agent_name}'", last_verdict
+                ),
+                pytrace=False,
+            )
+        if attempt < _PREFLIGHT_READINESS_ATTEMPTS:
+            time.sleep(_PREFLIGHT_READINESS_BACKOFF_S)
+
+    pytest.fail(
+        f"provider preflight: agent '{agent_name}' never became reachable after "
+        f"{_PREFLIGHT_READINESS_ATTEMPTS} attempts ({_PREFLIGHT_READINESS_BACKOFF_S}s apart); "
+        f"last evidence: {last_verdict.evidence if last_verdict else '<none>'}",
+        pytrace=False,
+    )
 
 
 @pytest.fixture(autouse=True)

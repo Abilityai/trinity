@@ -6,6 +6,7 @@ Covers REQ-AS-CHAT-001 through REQ-AS-CHAT-005.
 """
 
 import pytest
+from testkit.readiness import require_agent_answer
 from testkit.assertions import (
     assert_status,
     assert_status_in,
@@ -18,6 +19,7 @@ class TestSendMessage:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_send_message_executes(self, agent_proxy_client):
         """POST /api/chat executes message with Claude Code."""
         api_client, agent_name = agent_proxy_client
@@ -28,8 +30,7 @@ class TestSendMessage:
             timeout=120.0
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /chat")
         if response.status_code == 429:
             pytest.skip("Agent queue full")
 
