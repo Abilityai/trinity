@@ -6,6 +6,7 @@ Covers parallel task dispatch, result collection, validation, and error handling
 """
 
 import pytest
+from testkit.readiness import require_agent_answer
 from testkit.api_client import TrinityApiClient
 from testkit.assertions import (
     assert_status,
@@ -129,6 +130,7 @@ class TestFanOutValidation:
 class TestFanOutResponseFormat:
     """FANOUT-001: Response format tests."""
 
+    @pytest.mark.requires_model
     def test_fan_out_endpoint_exists(
         self, api_client: TrinityApiClient, created_agent
     ):
@@ -144,13 +146,13 @@ class TestFanOutResponseFormat:
 
         # Should not be 404 (endpoint exists)
         # May be 503 if agent not ready, or 200 if it works
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready (503)")
+        require_agent_answer(response, what="POST /fan-out")
 
         assert response.status_code != 404, "Fan-out endpoint should exist"
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_fan_out_single_task(
         self, api_client: TrinityApiClient, created_agent
     ):
@@ -164,8 +166,7 @@ class TestFanOutResponseFormat:
             timeout=150.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready (503)")
+        require_agent_answer(response, what="POST /fan-out")
 
         assert_status(response, 200)
         data = response.json()
@@ -187,6 +188,7 @@ class TestFanOutResponseFormat:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_fan_out_multiple_tasks(
         self, api_client: TrinityApiClient, created_agent
     ):
@@ -207,8 +209,7 @@ class TestFanOutResponseFormat:
             timeout=330.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready (503)")
+        require_agent_answer(response, what="POST /fan-out")
 
         assert_status(response, 200)
         data = response.json()
@@ -230,6 +231,7 @@ class TestFanOutExecution:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_fan_out_creates_execution_records(
         self, api_client: TrinityApiClient, created_agent
     ):
@@ -246,8 +248,7 @@ class TestFanOutExecution:
             timeout=150.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready (503)")
+        require_agent_answer(response, what="POST /fan-out")
 
         assert_status(response, 200)
         data = response.json()

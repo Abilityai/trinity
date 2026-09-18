@@ -8,6 +8,7 @@ Covers REQ-CHAT-001 through REQ-CHAT-004.
 import pytest
 import time
 from testkit.api_client import TrinityApiClient
+from testkit.readiness import require_agent_answer
 from testkit.assertions import (
     assert_status,
     assert_status_in,
@@ -22,6 +23,7 @@ class TestSendChatMessage:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_send_message_returns_response(
         self,
         api_client: TrinityApiClient,
@@ -35,8 +37,7 @@ class TestSendChatMessage:
         )
 
         # May get 503 if agent busy, 429 if queue full
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready (503)")
+        require_agent_answer(response, what="POST /chat")
         if response.status_code == 429:
             pytest.skip("Agent queue full (429)")
 
@@ -48,6 +49,7 @@ class TestSendChatMessage:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_chat_response_has_metadata(
         self,
         api_client: TrinityApiClient,
@@ -60,8 +62,9 @@ class TestSendChatMessage:
             timeout=120.0,
         )
 
-        if response.status_code in [503, 429]:
-            pytest.skip(f"Agent not ready ({response.status_code})")
+        require_agent_answer(response, what="POST /chat")
+        if response.status_code == 429:
+            pytest.skip(f"Agent queue full (429)")
 
         assert_status(response, 200)
         data = response.json()
@@ -399,6 +402,7 @@ class TestChatExecutionTracking:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_chat_creates_execution_record(
         self,
         api_client: TrinityApiClient,
@@ -423,8 +427,9 @@ class TestChatExecutionTracking:
             timeout=120.0,
         )
 
-        if response.status_code in [503, 429]:
-            pytest.skip(f"Agent not ready ({response.status_code})")
+        require_agent_answer(response, what="POST /chat")
+        if response.status_code == 429:
+            pytest.skip(f"Agent queue full (429)")
 
         assert_status(response, 200)
         time.sleep(2)
@@ -442,6 +447,7 @@ class TestChatExecutionTracking:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_chat_execution_has_chat_trigger(
         self,
         api_client: TrinityApiClient,
@@ -458,8 +464,9 @@ class TestChatExecutionTracking:
             timeout=120.0,
         )
 
-        if response.status_code in [503, 429]:
-            pytest.skip(f"Agent not ready ({response.status_code})")
+        require_agent_answer(response, what="POST /chat")
+        if response.status_code == 429:
+            pytest.skip(f"Agent queue full (429)")
 
         assert_status(response, 200)
         time.sleep(2)
@@ -480,6 +487,7 @@ class TestChatExecutionTracking:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_chat_response_includes_task_execution_id(
         self,
         api_client: TrinityApiClient,
@@ -492,8 +500,9 @@ class TestChatExecutionTracking:
             timeout=120.0,
         )
 
-        if response.status_code in [503, 429]:
-            pytest.skip(f"Agent not ready ({response.status_code})")
+        require_agent_answer(response, what="POST /chat")
+        if response.status_code == 429:
+            pytest.skip(f"Agent queue full (429)")
 
         assert_status(response, 200)
         data = response.json()
