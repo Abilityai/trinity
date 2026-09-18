@@ -2338,8 +2338,36 @@ unchanged), on top of the section's existing `creator` gate.
 
 The preview is a **checklist**, which is the design and not decoration: a member whose
 `evidence` is `prefix` may belong to a sibling system, the server cannot tell, and the
-badge plus the opt-out is the mechanism. The confirmed list is sent back on execute and
-intersected with freshly re-resolved membership.
+badge plus the per-member box is the mechanism. The confirmed list is sent back on execute
+and intersected with freshly re-resolved membership.
+
+Which boxes arrive **ticked** is the load-bearing half, and it is decided in the store
+(`teardownDefaultSelection`) rather than the panel's watcher — `vitest.config.js` pins
+`environment: 'node'`, so a default written into a `.vue` watcher is a rule no runnable
+test can execute, and it shipped wrong for exactly that reason. A confirmed member
+(`tag`/`both`) is ticked and is an **opt-out**; a `prefix` member is **unticked** and is
+an **opt-in**, with the short selection explained above the list so it does not read as a
+miscount. The 503 refusal does not already cover this: a `prefix` member also appears in
+the **healthy** state — tags read fine, that one agent simply has no tag row — where
+`membership_verified` is true and Remove is ENABLED. #2373's ranking (under-capture is
+cheaper than over-capture) is right for `restart` and inverts for a verb that deletes,
+which is the same argument that makes teardown refuse rather than degrade.
+
+The refusal banner names **no** specific fault. `membership_verified` is one boolean over
+two independent faults (`tags_readable AND roster_complete`) and cannot say which fired,
+so the banner states the consequence — identical either way — and quotes the server's own
+warning for the cause. Naming the tag read there was a false statement on the roster arm,
+where the tags are perfectly readable and it is the agent LIST that is incomplete. Warning
+routing partitions: the banner claims the membership pair while it is rendering, the
+protected-agents and ephemeral lines are suppressed because they have dedicated blocks,
+and Notes takes the remainder by subtracting what the banner took — never by a second
+independent regex, which is two chances to drop a line silently.
+
+The "Also removed" tag line carries **no count**. `SystemTeardownTag.member_count` is
+`len(members)` — every candidate, tagged or matched by name — so rendering it as
+"(N tagged)" overstates the tag whenever any member is `prefix`, and in the refusal state
+it quoted a figure from the very read the banner above says failed. The total the operator
+needs is already stated on the list itself.
 
 Remove is gated on **four** conditions, each blocking something the others do not: the
 preview is current for the typed name, membership was verified, the consequence is
@@ -2396,8 +2424,8 @@ worse bug than the one being fixed. An unreadable Docker therefore supplements n
 | File | Covers |
 |---|---|
 | `tests/unit/test_ent454_teardown_membership.py` | The membership properties + the named collision incidents + the one-constant auto-view description (asserted *through* `create_system_view`, never by restating the literal) |
-| `tests/unit/test_ent454_teardown_frontend.py` | 25 source-anchored template facts a node-environment vitest cannot see: the four Remove gates, the `prefix` badge, the entitlement gate wrapping the whole panel, one definition of the feature id, tone-on-`status`, and the capability-aware install warning |
-| `src/frontend/tests/unit/systemsTeardown.spec.js` | The store: the gated URL and verb, `agents` under axios's `data` (the only place axios reads a DELETE body — passing it positionally sends nothing and the server then removes *every* member), the preview↔name binding, the `failed`-at-500 result, and timeout-as-unknown-outcome |
+| `tests/unit/test_ent454_teardown_frontend.py` | Source-anchored template facts a node-environment vitest cannot see: the four Remove gates, the `prefix` badge, the entitlement gate wrapping the whole panel, one definition of the feature id, tone-on-`status`, the capability-aware install warning, and the four rendered-UI defects found by click-through (the panel defers to the store's default selection, the short selection is explained, the refusal names no fault the flag cannot identify, the tag line claims no count). Copy assertions go through `_prose`, which strips comments *and* collapses wrapping — one of them matched its own JSDoc line on the first run, and another broke on a re-wrap that changed no words |
+| `src/frontend/tests/unit/systemsTeardown.spec.js` | The store: the gated URL and verb, `agents` under axios's `data` (the only place axios reads a DELETE body — passing it positionally sends nothing and the server then removes *every* member), the preview↔name binding, the `failed`-at-500 result, timeout-as-unknown-outcome, and the arriving **default selection** — that `prefix` is excluded in the HEALTHY state too, that `tag`-only evidence still counts as confirmation, and that a wholly-untagged system selects nothing |
 | `src/mcp-server/src/tools/systems.teardown.test.ts` | The tool: preview-first default, verb/path/body, and the three distinct degradations |
 
 ## Post-deploy endpoints (#2373)
@@ -2492,6 +2520,7 @@ the moment an admin moved the fleet default.
 
 | Date | Changes |
 |------|---------|
+| 2026-09-18 | **trinity-enterprise#454** (rendered-UI round): four defects that only a click-through could see, none of which any CI layer renders. The teardown preview **pre-ticked every member regardless of `evidence`** — an opt-OUT on a delete, in the healthy state the 503 refusal does not cover; the default moved to the store (`teardownDefaultSelection`, `prefix` excluded) where a node-environment vitest can execute it, and the per-member copy flipped to an opt-IN. The refusal banner named the **tag read** for a flag that covers two faults, false whenever the *ownership* read was the one that failed; it now states the shared consequence and quotes the server for the cause, with warning routing partitioned so no line is dropped or doubled. The "Also removed" tag line quoted **`(N tagged)`** from `member_count`, which is `len(members)` — wrong whenever any member is `prefix`, and quoted from the failed read itself in the refusal state; dropped. And the refusal advised *"try the preview again in a moment"* for a schema/permission fault that never clears. |
 | 2026-09-13 | **trinity-enterprise#454**: deploy gained its inverse. The verb is an entitlement-gated module (private tree); this repo gained the edition-agnostic half — `system_membership` / `SystemMembership` beside `system_member_names` (now a thin wrapper over the same body, so #2373's ONE predicate stays one and a destructive consumer can rank a tag-read failure as a *refusal* at its own call site instead of forking it), the `SYSTEM_VIEW_AUTO_DESCRIPTION` constant shared by the auto-view's writer and any reader that has to find it again, the license-blind `teardown_system` MCP tool, and the gated "Remove a deployed system" panel. `ManifestPreview`'s "there is no un-deploy" warning now tracks the capability rather than being retired on every edition. Membership is pinned as Hypothesis **properties** — #2373's fallback was wrong three times and each wrong rule passed the case test written for its predecessor. |
 | 2026-07-31 | **trinity-enterprise#126**: UI install surface (a stacked `#systems` section on the Library page — rebased onto ent#263, which renamed Templates -> Library and chose stacked sections over the `?tab=` strip this originally shipped; `components/systems/*` over the new `stores/systems.js`) + the read-only bundled-manifest catalog `GET /manifests` / `/manifests/{id}`. Dry-run gains `permission_edges` / `schedules_preview` / `system_view_requested` from **pure resolvers shared with the writers** (`configure_permissions` / `create_schedules` now loop over them), pinned by characterization tests captured green before the refactor. `_preflight_template` now validates **merged** resources through the create path's own `normalize_cpu` / `normalize_memory` — a shipped bundled manifest carried `cpu: 1.0`, previewed `valid`, and failed 100% of its agents (that manifest, a broken duplicate of the live seed, is deleted). `status` becomes five-valued (`invalid` added). `parse_manifest` warns on unrecognised top-level keys (coercing them with `str()` — YAML 1.1 renders bare `on`/`off`/`yes`/`no` as booleans, so a mixed-type key set made `sorted` raise and turned the hygiene check into the unnamed 500 it existed to prevent). Catalog `reason`s exit through `_failure_reason`; symlinked manifests are refused for catalog/read parity. Merged with trinity#1884 (landed on `dev` mid-review), which moves the manifest size cap into `parse_manifest` alongside its alias-budget and duplicate-key guards — so ent#126's request-model cap is dropped and `MANIFEST_MAX_BYTES` stays a single definition in `models.py` that both modules import. |
 | 2026-07-24 | **trinity-enterprise#124**: deploy orchestration extracted to `system_service.deploy_manifest` (router now a thin HTTP wrapper; `create_agent_fn` seam defaults to the ws-broadcasting `routers/agents` facade); first-run default seed added (`system_seed_service.py`, persisted `first_run_fresh` verdict shared with the Cornelius seeder, bundled `config/manifests/default-system.yaml`, `TRINITY_DEFAULT_SYSTEM_MANIFEST` override/disable). Partial-deploy warning no longer points at #124 for converge support. |
@@ -2506,7 +2535,7 @@ the moment an admin moved the fleet default.
 
 ---
 
-**Last Updated**: 2026-09-13 (trinity-enterprise#454 — teardown, public half)
+**Last Updated**: 2026-09-18 (trinity-enterprise#454 — teardown's four rendered-UI defects)
 **Status**: Complete. Deploy + the post-deploy endpoints + the UI install surface are
 OSS; **teardown is entitlement-gated** and its design lives in the private tree.
 **Feature Flag**: none on the deploy half (always enabled); the teardown surface is gated
