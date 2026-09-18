@@ -464,6 +464,24 @@ def test_skipped_failed_and_aborted_render_as_three_different_things():
         assert reason in src, f"no operator copy for skip reason {reason}"
 
 
+def test_the_result_drops_the_preview_only_instruction():
+    """A result screen must not print an instruction for the screen before it.
+
+    The server's prefix warning ends *"Uncheck anything that does not belong
+    before confirming"*. On the RESULT that is advice for a decision already
+    taken, under a report of what was already removed — and it is the opt-OUT
+    wording the preview stopped using. Seen only by tearing a system down for
+    real; the preview's own filter did not cover this component.
+    """
+    body = _code_only(_src(_RESULT))
+    assert "PREVIEW_ONLY" in body and "matched by NAME ONLY" in body, (
+        "the result must filter the preview-time instruction out of Notes"
+    )
+    assert re.search(r"warnings = computed\([\s\S]{0,200}?filter", body), (
+        "result warnings are rendered unfiltered"
+    )
+
+
 def test_a_discarded_ghost_is_not_reported_as_recoverable():
     src = _src(_RESULT)
     assert "'discarded'" in src

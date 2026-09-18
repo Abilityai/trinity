@@ -187,7 +187,23 @@ const skipped = computed(() => members.value.filter((m) => m.outcome === 'skippe
 const failed = computed(
   () => members.value.filter((m) => m.outcome === 'failed' || m.outcome === 'aborted')
 )
-const warnings = computed(() => props.result.warnings || [])
+/**
+ * Preview-time instructions do not belong on a result.
+ *
+ * The server's prefix warning ends *"Uncheck anything that does not belong
+ * before confirming"* — an instruction for a screen that no longer exists,
+ * printed underneath a report of what has already been removed. It is also
+ * the opt-OUT wording the preview stopped using.
+ *
+ * Only that one line is dropped. Every other warning is a statement of fact
+ * about what happened (agents excluded, members with no container, ephemeral
+ * members with no recovery window) and still reads correctly after the event.
+ */
+const PREVIEW_ONLY = /matched by NAME ONLY/i
+
+const warnings = computed(
+  () => (props.result.warnings || []).filter((w) => !PREVIEW_ONLY.test(w))
+)
 
 const SKIP_COPY = {
   system_agent: 'A platform agent — never removable by a teardown.',
