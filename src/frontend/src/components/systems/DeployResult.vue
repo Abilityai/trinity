@@ -133,6 +133,19 @@
         >
           Install another system
         </button>
+        <!-- ent#454: "that was the wrong manifest" is a real outcome of this
+             screen, and before teardown existed the answer was eleven manual
+             deletes. A de-emphasised ghost action, not a peer of the two
+             above — it is the recovery, not the next step. Rendered only when
+             the verb exists on this build. -->
+        <button
+          v-if="teardownAvailable"
+          class="rounded-lg px-4 py-2 text-sm font-medium text-status-danger-700 dark:text-status-danger-300 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/20"
+          data-testid="remove-system"
+          @click="$emit('remove-system', result.system_name)"
+        >
+          Remove this system
+        </button>
       </div>
     </section>
   </div>
@@ -153,12 +166,21 @@
  * as their own prominent panel rather than a footnote.
  */
 import { computed } from 'vue'
+import { useEnterpriseStore } from '../../stores/enterprise'
+import { TEARDOWN_FEATURE_ID } from '../../stores/systems'
 
 const props = defineProps({
   result: { type: Object, required: true }
 })
 
-defineEmits(['view-fleet', 'install-another'])
+defineEmits(['view-fleet', 'install-another', 'remove-system'])
+
+const enterpriseStore = useEnterpriseStore()
+// ent#454: teardown is an entitlement-gated module. Without it, this build has
+// no un-deploy, so the action must not be offered.
+const teardownAvailable = computed(
+  () => enterpriseStore.enterpriseFeatures.includes(TEARDOWN_FEATURE_ID)
+)
 
 const created = computed(() => props.result.agents_created || [])
 const failed = computed(() => props.result.failed || [])
