@@ -28,8 +28,15 @@ describe('#1925 tab-strip adoption', () => {
   it.each(CONVERTED)('%s has no horizontally-scrolling nav strip', (rel) => {
     const src = read(rel)
     // Strip HTML comments first: this very file's rationale mentions the class
-    // by name, and a guard satisfied by its own prose guards nothing.
-    const code = src.replace(/<!--[\s\S]*?-->/g, '')
+    // by name, and a guard satisfied by its own prose guards nothing. Looped to
+    // a fixpoint: a single pass can leave a `<!--` behind when comments nest,
+    // and CodeQL's js/incomplete-multi-character-sanitization flags the one-shot
+    // form as HTML-injection-shaped even in a source-text guard like this one.
+    let code = src
+    for (let prev = null; prev !== code; ) {
+      prev = code
+      code = code.replace(/<!--[\s\S]*?-->/g, '')
+    }
     expect(code).not.toMatch(/overflow-x-auto/)
   })
 
