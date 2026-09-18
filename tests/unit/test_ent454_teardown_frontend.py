@@ -349,6 +349,25 @@ def test_no_test_id_is_shared_with_the_install_panel_it_sits_beside():
     )
 
 
+def test_the_tag_line_claims_no_count_it_cannot_support():
+    """`SystemTeardownTag.member_count` is `len(members)` — every candidate,
+    tagged or matched by name. Rendering it as "(N tagged)" overstates the tag
+    whenever any member is `prefix`, and in the refusal state it quotes a
+    figure from the very read the banner above says failed: two statements
+    about one read, opposite in confidence, on one screen.
+
+    The total the operator needs is already stated on the list itself.
+    """
+    body = _prose(_src(_PREVIEW))
+    assert "tag.member_count" not in body, (
+        "member_count counts every candidate, not the tagged ones — it cannot "
+        "be rendered as a tag count"
+    )
+    assert "tagged)" not in body
+    # The sentence keeps its actual job.
+    assert "not a separate record to delete" in body
+
+
 def test_the_member_list_is_bounded():
     """A fleet is unbounded data: internal scroll + a stated total, never a page
     that grows without limit (principle 28)."""

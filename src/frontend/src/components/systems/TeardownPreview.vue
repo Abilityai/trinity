@@ -169,9 +169,16 @@
             kept — {{ v.reason || 'not removable' }}
           </BaseBadge>
         </li>
+        <!-- No count here. `SystemTeardownTag.member_count` is `len(members)`
+             — every candidate, tagged or matched by name — so calling it
+             "N tagged" overstates the tag whenever any member is `prefix`,
+             and in the refusal state it quotes a figure from the very read
+             the banner above says failed. The total the operator needs is
+             already stated on the list ("N of M selected"); the sentence's
+             job is that the tag is not its own deletable record. -->
         <li v-if="preview.tag" class="text-gray-700 dark:text-gray-300">
-          The <strong>{{ preview.tag.name }}</strong> tag goes with the agents
-          ({{ preview.tag.member_count }} tagged) — it is not a separate record to delete.
+          The <strong>{{ preview.tag.name }}</strong> tag goes with the agents —
+          it is not a separate record to delete.
         </li>
       </ul>
     </section>
