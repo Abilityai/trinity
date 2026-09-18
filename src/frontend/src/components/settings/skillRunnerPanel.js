@@ -127,6 +127,24 @@ export function isDuplicateGrant(grants, callerAgent, skillName) {
   )
 }
 
+/**
+ * The grant rows out of `GET /api/enterprise/skill-runner/access`.
+ *
+ * The service answers `{ grants: [...] }` (`service.list_access` wraps
+ * `db.list_access`), and the panel first shipped reading the payload AS the
+ * array — so `grants` was always `[]`, every grant rendered as "No agent can
+ * run any skill yet", and the only human writer for the ACL had no revoke
+ * path. A bare list is accepted too, so a server that unwraps later does not
+ * silently empty the panel the other way. Anything else — a missing field, a
+ * dict-shaped grants value, `null` — is an empty list, never a throw: the
+ * status half of the same `load()` must still render.
+ */
+export function grantsFrom(payload) {
+  if (Array.isArray(payload)) return payload
+  const rows = payload && typeof payload === 'object' ? payload.grants : null
+  return Array.isArray(rows) ? rows : []
+}
+
 /** Can the grant form be submitted? Returns a reason when not. */
 export function grantFormState(grants, callerAgent, skillName, { busy = false } = {}) {
   if (busy) return { canSubmit: false, reason: null }

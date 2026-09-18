@@ -10,7 +10,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   blockingReason, blockingAction, runnerState, runnerSummary, actionState,
-  headerCounts, isDuplicateGrant, grantFormState, revokePrompt, filterGrants,
+  headerCounts, isDuplicateGrant, grantFormState, revokePrompt, filterGrants, grantsFrom,
   RUNNER_ABSENT, RUNNER_STOPPED, RUNNER_RUNNING,
 } from '../../src/components/settings/skillRunnerPanel.js'
 
@@ -129,6 +129,35 @@ describe('header counts', () => {
 
   it('renders nothing without a status', () => {
     expect(headerCounts(null)).toEqual([])
+  })
+})
+
+describe('grants payload shape', () => {
+  // `service.list_access` wraps the rows: `{ grants: [...] }`. The panel first
+  // shipped reading the payload AS the array, so every grant rendered as the
+  // empty state and nothing could be revoked from the UI.
+  const row = { id: 1, caller_agent: 'recon', skill_name: 'summarize', granted_by: 'admin', created_at: 'x' }
+
+  it('unwraps the { grants } envelope the service actually sends', () => {
+    expect(grantsFrom({ grants: [row] })).toEqual([row])
+  })
+
+  it('still accepts a bare list', () => {
+    expect(grantsFrom([row])).toEqual([row])
+  })
+
+  it('is an empty list on any other shape, never a throw', () => {
+    for (const bad of [null, undefined, {}, { grants: null }, { grants: {} }, 'nope', 42]) {
+      expect(grantsFrom(bad)).toEqual([])
+    }
+  })
+
+  it('the panel reads the envelope through grantsFrom, not Array.isArray(a.data)', () => {
+    const panelSrc = readFileSync(
+      fileURLToPath(new URL('../../src/components/settings/SkillRunnerPanel.vue', import.meta.url)), 'utf8'
+    )
+    expect(panelSrc).toMatch(/grants\.value = grantsFrom\(a\.data\)/)
+    expect(panelSrc).not.toMatch(/Array\.isArray\(a\.data\) \? a\.data/)
   })
 })
 

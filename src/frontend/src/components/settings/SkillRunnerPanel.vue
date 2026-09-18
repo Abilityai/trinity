@@ -171,7 +171,7 @@ import BaseInput from '../base/BaseInput.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import {
   blockingReason, blockingAction, runnerSummary, actionState,
-  headerCounts, grantFormState, revokePrompt, filterGrants,
+  headerCounts, grantFormState, revokePrompt, filterGrants, grantsFrom,
 } from './skillRunnerPanel.js'
 
 defineEmits(['navigate-tab'])
@@ -223,7 +223,7 @@ async function load() {
     ])
     status.value = s.data
     enabled.value = Boolean(s.data?.enabled)
-    grants.value = Array.isArray(a.data) ? a.data : []
+    grants.value = grantsFrom(a.data)
     lastLoadedAt.value = new Date()
   } catch (e) {
     loadError.value = e
