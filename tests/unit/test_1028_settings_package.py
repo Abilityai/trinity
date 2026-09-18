@@ -170,6 +170,11 @@ _ADDED_SINCE_SPLIT = {
     ("/api/settings/api-keys/gemini", ("PUT",), "update_gemini_key"),
     ("/api/settings/api-keys/gemini", ("DELETE",), "delete_gemini_key"),
     ("/api/settings/api-keys/gemini/test", ("POST",), "test_gemini_key"),
+    # #2202 — a named route for a named setting: `public_chat_url` is unset in
+    # the normal state, and the generic `/{key}` answers 404 for that, which
+    # logged a failed request on every Settings tab. Lives in `mcp_url` beside
+    # its precedent `/mcp-url`.
+    ("/api/settings/public-chat-url", ("GET",), "get_public_chat_url"),
 }
 
 
