@@ -374,6 +374,32 @@ def test_no_test_id_is_shared_with_the_install_panel_it_sits_beside():
     )
 
 
+def test_the_servers_opt_out_sentence_is_not_rendered_beside_the_opt_in_one():
+    """The prefix warning must be suppressed now that it has a block above it.
+
+    The server's line ends *"Uncheck anything that does not belong before
+    confirming"* — the OPT-OUT instruction this change reversed. Rendered in
+    "Notes" it sat six lines under the panel's own *"tick it only if it
+    belongs"*, so one screen gave opposite instructions about the same row,
+    and the stale half read as authoritative because it came from the server.
+
+    This is the rule the component's docstring already states — a warning with
+    a dedicated block above is not repeated as prose — applied to the warning
+    that only just gained one.
+    """
+    body = _code_only(_src(_PREVIEW))
+    assert "matched by NAME ONLY" in body, (
+        "the prefix warning must be routed out of Notes; the panel's own note "
+        "and per-member badge cover it"
+    )
+    # Suppressed, not claimed by the banner: it is raised in the HEALTHY state
+    # too, where no banner renders at all.
+    m = re.search(r"const SUPPRESSED = /([^/]+)/i", body)
+    assert m and "matched by NAME ONLY" in m.group(1), (
+        "it belongs in SUPPRESSED (dedicated block above), not MEMBERSHIP_FAULT"
+    )
+
+
 def test_the_tag_line_claims_no_count_it_cannot_support():
     """`SystemTeardownTag.member_count` is `len(members)` — every candidate,
     tagged or matched by name. Rendering it as "(N tagged)" overstates the tag

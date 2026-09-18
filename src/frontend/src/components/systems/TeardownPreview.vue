@@ -317,7 +317,14 @@ const ephemeralCount = computed(
  * nor silently dropped.
  */
 const MEMBERSHIP_FAULT = /could not be verified|roster could not be completed/i
-const SUPPRESSED = /were excluded|no recovery window/i
+// `matched by NAME ONLY` joined this list the moment the short-selection note
+// gave that warning a dedicated block. Left in "Notes" it was not merely
+// duplicated — the server's sentence ends "Uncheck anything that does not
+// belong before confirming", which is the OPT-OUT instruction this change
+// reversed. The screen said tick and untick about the same row, six lines
+// apart, and the stale half read as the authoritative one because it came
+// from the server.
+const SUPPRESSED = /were excluded|no recovery window|matched by NAME ONLY/i
 
 /**
  * Claimed by the banner — and ONLY while the banner is actually rendering.
