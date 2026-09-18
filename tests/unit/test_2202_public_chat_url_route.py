@@ -65,9 +65,11 @@ def _admin():
 
 def _call(mod, user):
     import asyncio
-    return asyncio.get_event_loop().run_until_complete(
-        mod.get_public_chat_url(request=MagicMock(), current_user=user)
-    )
+    # `asyncio.run`, not `get_event_loop().run_until_complete`: there is no
+    # current loop on the main thread in a fresh interpreter (the CI seeds), and
+    # the old form raised RuntimeError there while passing locally by luck of
+    # whatever loop a sibling test had left behind (train #2896).
+    return asyncio.run(mod.get_public_chat_url(request=MagicMock(), current_user=user))
 
 
 def test_unset_key_answers_none_not_404(settings_router):
