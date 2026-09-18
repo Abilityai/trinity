@@ -169,6 +169,31 @@ def test_an_unconfirmable_member_is_not_pre_ticked():
     )
 
 
+def test_the_default_is_applied_on_MOUNT_too_not_only_on_a_fresh_preview():
+    """The store outlives the component, so the watcher must be `immediate`.
+
+    `Library.vue` mounts the systems section lazily (`v-if="… visited.has(
+    'systems')"`) and nothing resets teardown state on unmount, so leaving the
+    page and coming back remounts this panel onto a preview that is STILL
+    current. A non-immediate watcher never fires for it: the removal set
+    rendered with every box empty and "Select at least one agent", making this
+    component's own stated default untrue on the second visit.
+
+    Fail-safe in both directions — which is exactly why it survived: nothing
+    breaks, the panel is just wrong and slightly insulting to re-tick by hand.
+    Caught by driving the real panel in a browser, not by any assertion.
+    """
+    src = _src(_PANEL)
+    match = re.search(
+        r"watch\(\s*\(\) => store\.teardownPreview,([\s\S]*?)\n\)", src
+    )
+    assert match, "the preview watcher is no longer a single reviewable block"
+    assert "immediate: true" in match.group(1), (
+        "the preview watcher must be immediate, or a remount shows a current "
+        "preview with an empty selection"
+    )
+
+
 def test_the_short_selection_is_explained_where_the_list_is():
     """An unticked row with no explanation reads as a miscount, and an operator
     who re-ticks it to "fix" the count has undone the safeguard by hand."""

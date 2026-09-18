@@ -219,12 +219,19 @@ const checked = ref([])
 // Selection`) so a node-environment vitest can execute it. Ticking everything
 // made the escape hatch an opt-OUT on a delete, in the one state the 503
 // refusal does not cover: a `prefix` member with the tags reading fine.
+// `immediate`, because the store outlives this component. Leaving Library and
+// coming back remounts the panel (the section is `v-if`-mounted lazily, and
+// nothing resets teardown state on unmount) onto a preview that is still
+// current — and a non-immediate watcher never fires for it, so the removal set
+// rendered with EVERY box empty and "Select at least one agent". Fail-safe, but
+// it made this component's stated default untrue on the second visit.
 watch(
   () => store.teardownPreview,
   () => {
     checked.value = [...store.teardownDefaultSelection]
     acknowledged.value = false
-  }
+  },
+  { immediate: true }
 )
 
 watch(
