@@ -562,3 +562,46 @@ export interface ReportSummary {
   period_end?: string | null;
   created_at: string;
 }
+
+// ---------------------------------------------------------------------------
+// Execution search (enterprise `execution_search`, abilityai/trinity-enterprise#653)
+// ---------------------------------------------------------------------------
+
+export type ExecutionSearchField = "message" | "response" | "error";
+
+export interface ExecutionSearchParams {
+  query: string;
+  agents?: string[];
+  fields?: ExecutionSearchField[];
+  status?: string;
+  triggered_by?: string;
+  hours?: number;
+  limit?: number;
+  offset?: number;
+  context?: number;
+}
+
+export interface ExecutionSearchMatch {
+  field: ExecutionSearchField;
+  excerpt: string;
+}
+
+export interface ExecutionSearchHit {
+  id: string;
+  agent_name: string;
+  status: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+  triggered_by: string | null;
+  message: string;
+  matches: ExecutionSearchMatch[];
+}
+
+export interface ExecutionSearchResult {
+  query: string;
+  fields: ExecutionSearchField[];
+  hours: number;
+  count: number;
+  hits: ExecutionSearchHit[];
+}

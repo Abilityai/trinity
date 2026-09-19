@@ -30,6 +30,8 @@ import type {
   FanOutDispatchResult,
   FanOutTimeoutReceipt,
   LoopStatus,
+  ExecutionSearchParams,
+  ExecutionSearchResult,
 } from "./types.js";
 
 /**
@@ -1765,6 +1767,30 @@ export class TrinityClient {
     return this.request<ScheduleExecution[]>(
       "GET",
       `/api/agents/${encodeURIComponent(agentName)}/schedules/${encodeURIComponent(scheduleId)}/executions?limit=${limit}`
+    );
+  }
+
+  /**
+   * Search the execution corpus (enterprise `execution_search`, ent#653).
+   *
+   * Proxies `GET /api/enterprise/execution-search`. The route is
+   * entitlement-gated and refuses agent-scoped keys; an OSS build has no
+   * route at all (404) — the tool turns both into an honest envelope.
+   */
+  async searchExecutions(params: ExecutionSearchParams): Promise<ExecutionSearchResult> {
+    const qs = new URLSearchParams();
+    qs.set("q", params.query);
+    if (params.agents && params.agents.length > 0) qs.set("agents", params.agents.join(","));
+    if (params.fields && params.fields.length > 0) qs.set("fields", params.fields.join(","));
+    if (params.status) qs.set("status", params.status);
+    if (params.triggered_by) qs.set("triggered_by", params.triggered_by);
+    if (params.hours !== undefined) qs.set("hours", String(params.hours));
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    if (params.offset !== undefined) qs.set("offset", String(params.offset));
+    if (params.context !== undefined) qs.set("context", String(params.context));
+    return this.request<ExecutionSearchResult>(
+      "GET",
+      `/api/enterprise/execution-search?${qs.toString()}`
     );
   }
 

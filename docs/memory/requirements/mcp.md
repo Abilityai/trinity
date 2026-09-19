@@ -22,6 +22,7 @@
 - **GitHub Issue**: #19
 - **Description**: MCP tools for querying execution history, polling async results, and monitoring agent activity
 - **Key Features**: `list_recent_executions`, `get_execution_result`, `get_agent_activity_summary`; enables async polling pattern for agent-to-agent collaboration beyond 60s MCP timeout
+- **`search_executions`** (abilityai/trinity-enterprise#653, 2026-09-19): substring grep over the execution corpus (prompt/response/error) with bounded excerpts, proxying the entitlement-gated enterprise execution-search route. Available to the system agent and user-scoped keys only — agent-scoped keys are refused at the backend and never see the tool (per-tool `canAccess` allow-list). Absent/unentitled module → `available:false`, never an empty result.
 - **Spec**: `docs/requirements/MCP_EXECUTION_QUERY_TOOLS.md`
 
 ### 7.4 Configurable MCP Server URL (MCP-URL-001)
