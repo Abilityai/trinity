@@ -3152,12 +3152,16 @@ to localStorage in the clear.
   placed at its end (a phone is not focused on arrival — the soft keyboard
   would cover the transcript; #2579's New chat focus is an explicit gesture,
   this is not).
-- **AC-3 — the Draft mark**: one small, quiet pencil beside an `sr-only`
-  "Draft" (`PortalDraftMark.vue`, gray tertiary ink, never a pill, shape + word
-  so it is not colour alone) on the agent row (any listed thread of that agent
-  with a draft, or its unsaved new chat), on the chat tab (`OverflowTabs`'
-  optional per-tab `draft` field — inline, More menu and the mirror row that
-  measures widths), on the thread/room row and on a search-result row. A room
+- **AC-3 — the Draft mark**: the quiet word "Draft"
+  (`components/base/DraftMark.vue`, gray tertiary ink, mono-caps overline,
+  never a pill) on the agent row (any listed thread of that agent with a
+  draft, or its unsaved new chat), on the chat tab (`OverflowTabs`' optional
+  per-tab `hasDraft` field — inline, More menu and the mirror row that
+  measures widths), on the thread/room row and on a search-result row. The
+  word, not a glyph: on these exact surfaces the pencil is already the rename
+  affordance (`PortalEditableTitle`), the dot is the tab strip's activity
+  signal and the star is the per-viewer pin — two facts sharing one shape is
+  the failure principle 24 names. A room
   draft marks the room row only — the room row is always listed, so it is the
   draft's own door; it does not light its participants' agent rows. A drafted
   agent is lifted above the sidebar's "N more" collapse the way an asked one
