@@ -1780,6 +1780,7 @@ export class TrinityClient {
   async searchExecutions(params: ExecutionSearchParams): Promise<ExecutionSearchResult> {
     const qs = new URLSearchParams();
     qs.set("q", params.query);
+    if (params.mode) qs.set("mode", params.mode);
     if (params.agents && params.agents.length > 0) qs.set("agents", params.agents.join(","));
     if (params.fields && params.fields.length > 0) qs.set("fields", params.fields.join(","));
     if (params.status) qs.set("status", params.status);

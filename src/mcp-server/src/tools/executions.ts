@@ -337,13 +337,20 @@ export function createExecutionTools(
     searchExecutions: {
       name: "search_executions",
       description:
-        "Search past executions across the agents you can access — a substring, case-insensitive grep over " +
-        "the task prompt (message), the agent's response and the error text. Returns bounded excerpts around " +
-        "each match, never full bodies: use get_execution_result(agent_name, execution_id) for the full row. " +
+        "Search past executions across the agents you can access — a case-insensitive grep over the task " +
+        "prompt (message), the agent's response and the error text. mode=substring (default) matches the " +
+        "literal query; mode=regex matches a POSIX regular expression (PostgreSQL only; no inline flags — " +
+        "matching is already case-insensitive). Returns bounded excerpts around each match, never full " +
+        "bodies: use get_execution_result(agent_name, execution_id) for the full row. " +
         "Requires the enterprise execution-search module; answers available=false where it is absent. " +
         "Access: the system agent and user-scoped keys only — agent-scoped keys are refused.",
       parameters: z.object({
-        query: z.string().min(1).max(200).describe("Substring to find (case-insensitive; % and _ are literal)"),
+        query: z.string().min(1).max(200).describe("Substring to find (case-insensitive; % and _ are literal) — or, with mode=regex, a POSIX regular expression"),
+        mode: z
+          .enum(["substring", "regex"])
+          .optional()
+          .default("substring")
+          .describe("substring (literal) | regex (POSIX ARE, PostgreSQL only)"),
         agents: z
           .array(z.string())
           .max(50)
@@ -373,6 +380,7 @@ export function createExecutionTools(
       execute: async (
         params: {
           query: string;
+          mode?: "substring" | "regex";
           agents?: string[];
           fields?: Array<"message" | "response" | "error">;
           status?: string;
@@ -401,6 +409,7 @@ export function createExecutionTools(
         try {
           const result = await apiClient.searchExecutions({
             query: params.query,
+            mode: params.mode ?? "substring",
             agents: params.agents,
             fields: params.fields,
             status: params.status,
@@ -412,7 +421,7 @@ export function createExecutionTools(
           });
           // The query text is deliberately not logged — a user hunting for a leaked
           // value would otherwise write it into the MCP server's log stream.
-          console.log(`[search_executions] ${result.count} hit(s) over ${result.hours}h (${result.fields.join(",")})`);
+          console.log(`[search_executions] ${result.count} hit(s) over ${result.hours}h (${result.mode}; ${result.fields.join(",")})`);
           return JSON.stringify({ available: true, ...result }, null, 2);
         } catch (e) {
           // Honest, distinct status — an OSS build has no route (404) and an

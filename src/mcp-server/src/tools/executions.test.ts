@@ -20,7 +20,7 @@ import { ApiError, TrinityClient } from "../client.js";
 import { TOOL_ACCESS_POLICY, AGENT_TARGET_PARAMS } from "../access.js";
 import type { ExecutionSearchParams, ExecutionSearchResult, McpAuthContext } from "../types.js";
 
-const EMPTY: ExecutionSearchResult = { query: "x", fields: ["message", "response", "error"], hours: 24, count: 0, hits: [] };
+const EMPTY: ExecutionSearchResult = { query: "x", mode: "substring", fields: ["message", "response", "error"], hours: 24, count: 0, hits: [] };
 
 function makeFake(opts: { throws?: ApiError; result?: ExecutionSearchResult } = {}) {
   const calls: ExecutionSearchParams[] = [];
@@ -91,9 +91,16 @@ describe("search_executions — in-tool gate and proxying", () => {
     assert.equal(out.available, true);
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0], {
-      query: "deploy", agents: ["alpha", "beta"], fields: ["response"], status: undefined,
+      query: "deploy", mode: "substring", agents: ["alpha", "beta"], fields: ["response"], status: undefined,
       triggered_by: undefined, hours: 168, limit: 5, offset: 0, context: 120,
     });
+  });
+
+  it("passes mode=regex through untouched", async () => {
+    const { fake, calls } = makeFake();
+    const tool = createExecutionTools(fake, false).searchExecutions;
+    await tool.execute({ query: "deploy.*prod", mode: "regex" }, session("system"));
+    assert.equal(calls[0].mode, "regex");
   });
 
   it("proxies a user-scoped session", async () => {
@@ -161,7 +168,7 @@ describe("search_executions — wiring", () => {
       return EMPTY;
     };
     await client.searchExecutions({
-      query: "50% done_now", agents: ["alpha", "beta"], fields: ["message", "error"],
+      query: "50% done_now", mode: "regex", agents: ["alpha", "beta"], fields: ["message", "error"],
       status: "failed", triggered_by: "mcp", hours: 720, limit: 5, offset: 10, context: 60,
     });
     assert.ok(seen);
@@ -169,6 +176,7 @@ describe("search_executions — wiring", () => {
     const url = new URL(seen!.path, "http://x");
     assert.equal(url.pathname, "/api/enterprise/execution-search");
     assert.equal(url.searchParams.get("q"), "50% done_now");
+    assert.equal(url.searchParams.get("mode"), "regex");
     assert.equal(url.searchParams.get("agents"), "alpha,beta");
     assert.equal(url.searchParams.get("fields"), "message,error");
     assert.equal(url.searchParams.get("status"), "failed");

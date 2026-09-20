@@ -569,8 +569,11 @@ export interface ReportSummary {
 
 export type ExecutionSearchField = "message" | "response" | "error";
 
+export type ExecutionSearchMode = "substring" | "regex";
+
 export interface ExecutionSearchParams {
   query: string;
+  mode?: ExecutionSearchMode;
   agents?: string[];
   fields?: ExecutionSearchField[];
   status?: string;
@@ -600,6 +603,7 @@ export interface ExecutionSearchHit {
 
 export interface ExecutionSearchResult {
   query: string;
+  mode: ExecutionSearchMode;
   fields: ExecutionSearchField[];
   hours: number;
   count: number;
