@@ -74,7 +74,7 @@
 
           <!-- ent#279 — System Credential Vault (enterprise, gated by `credential_vault`) -->
           <CredentialVaultPanel v-if="activeTab === 'credential-vault'" />
-          <SkillRunnerPanel v-if="activeTab === 'skill-runner'" @navigate-tab="activeTab = $event" />
+          <SkillRunnerPanel v-if="activeTab === 'skill-runner'" @navigate-tab="selectTab" />
 
           <!-- Retention Tab Content (#1039) -->
           <div v-if="activeTab === 'retention'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">

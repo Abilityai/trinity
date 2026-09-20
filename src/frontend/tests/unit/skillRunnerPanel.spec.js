@@ -45,7 +45,7 @@ describe('blocking state', () => {
 
   it('offers somewhere to go when blocked — a dead end is the bug', () => {
     expect(blockingAction(status({ library: lib({ configured: false }) })))
-      .toEqual({ label: 'Open the Skills library', tab: 'skills' })
+      .toEqual({ label: 'Open the Skills library', tab: 'agents' })
   })
 
   it('offers no action for a read failure, which no navigation fixes', () => {

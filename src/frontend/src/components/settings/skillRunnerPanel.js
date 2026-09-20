@@ -40,7 +40,7 @@ export function blockingAction(status) {
   const lib = (status && status.library) || {}
   if (!status || lib.error) return null
   if (!lib.configured || !lib.synced) {
-    return { label: 'Open the Skills library', tab: 'skills' }
+    return { label: 'Open the Skills library', tab: 'agents' }
   }
   return null
 }
