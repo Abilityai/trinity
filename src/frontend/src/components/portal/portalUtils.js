@@ -103,7 +103,7 @@ export function askBadgeTitle(count) {
 // mentioned asks, so a blocked agent's title was the bare "Open ws-sage" — the
 // pending decision was unreachable for a screen-reader user as well as
 // invisible. Asks lead: a decision outranks unread chatter.
-export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle = '' } = {}) {
+export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle = '', hasDraft = false } = {}) {
   const who = label && label !== name ? `${label} (${name})` : (label || name || '')
   const asks = Number(askCount) || 0
   const reads = Number(unread) || 0
@@ -111,6 +111,8 @@ export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle
   const parts = []
   if (asks > 0) parts.push(`${asks} ${asks === 1 ? 'ask' : 'asks'} waiting on you`)
   if (reads > 0) parts.push(`${reads} unread ${reads === 1 ? 'reply' : 'replies'}`)
+  // trinity-enterprise#657: the Draft mark beside the name, in words too.
+  if (hasDraft) parts.push('an unsent draft')
 
   const base = parts.length ? `${who} — ${parts.join(', ')}` : `Open ${who}`
   return chipTitle ? `${base} — ${chipTitle}` : base
@@ -128,14 +130,20 @@ export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle
 // exactly where they were and the visible list simply grows.
 export const AGENT_COLLAPSE_LIMIT = 5
 
-export function visibleAgentRows(roster, { expanded = false, askCounts = {}, limit = AGENT_COLLAPSE_LIMIT } = {}) {
+//
+// trinity-enterprise#657: an agent holding an UNSENT DRAFT is lifted the same
+// way — "a Draft mark visible without opening the chat" is false for a row
+// hidden under "N more". Same append-not-float rule, same reason.
+export function visibleAgentRows(roster, { expanded = false, askCounts = {}, draftAgents = null, limit = AGENT_COLLAPSE_LIMIT } = {}) {
   const list = Array.isArray(roster) ? roster : []
   if (expanded) return list
 
   const head = list.slice(0, limit)
   const shown = new Set(head.map((a) => a?.name))
   const counts = askCounts || {}
-  const waiting = list.filter((a) => a?.name && !shown.has(a.name) && (Number(counts[a.name]) || 0) > 0)
+  const drafted = draftAgents instanceof Set ? draftAgents : new Set()
+  const waiting = list.filter((a) => a?.name && !shown.has(a.name)
+    && ((Number(counts[a.name]) || 0) > 0 || drafted.has(a.name)))
   return waiting.length ? [...head, ...waiting] : head
 }
 
@@ -333,8 +341,15 @@ export const NEW_CHAT_TAB_LABEL = 'New chat'
 // whose title is literally "Main" would otherwise be indistinguishable from it.
 export const MAIN_TAB_LABEL = 'Main'
 
-export function agentChatTabs(threads, agentName, { activeId = null, draft = false } = {}) {
+// trinity-enterprise#657: `draftKeys` is the drafts store's key set. A tab
+// whose thread holds unsent text carries `hasDraft` (keyed on the TAB id, not
+// the thread row — the born-here provisional tab has no row yet), and an
+// unsaved chat with a `new:<agent>` draft is listed as the provisional tab
+// even while another chat is open, so the place the person left their words
+// stays reachable: the agent row lands on Main, and this tab is the only door.
+export function agentChatTabs(threads, agentName, { activeId = null, draft = false, draftKeys = null } = {}) {
   if (!agentName) return []
+  const holds = (key) => !!(key && draftKeys && typeof draftKeys.has === 'function' && draftKeys.has(key))
   const mine = (Array.isArray(threads) ? threads : [])
     .filter((t) => t && !t.is_room && t.agent_name === agentName)
     // ent#523: an archived chat IS a tab. The operator ruled it explicitly —
@@ -369,21 +384,28 @@ export function agentChatTabs(threads, agentName, { activeId = null, draft = fal
       // so in the strip rather than only in its position.
       pinned: !!t.is_main,
       thread: t,
+      hasDraft: holds(`thread:${t.id || t.session_id}`),
     }))
   // #2579: the provisional tab. Only on an explicit draft, and only while no
   // real row already carries the active id — once the list catches up with the
   // adopted thread the real tab takes over in the same slot.
-  if (draft && !tabs.some((t) => t.id === activeId)) {
+  //
+  // trinity-enterprise#657: ALSO listed, inactive, while a `new:<agent>` draft
+  // exists. Decided up front and inserted once — both cases share the slot.
+  const activeIsProvisional = draft && !tabs.some((t) => t.id === activeId)
+  const newChatDraft = holds(`new:${agentName}`)
+  if (activeIsProvisional || newChatDraft) {
     const after = tabs.length && tabs[0].pinned ? 1 : 0
     tabs.splice(after, 0, {
       // Keyed to the adopted id when there is one, so the tab the person is
       // looking at keeps its identity across the gap between "the thread now
       // exists" and "the list says so".
-      id: activeId || NEW_CHAT_TAB_ID,
+      id: activeIsProvisional ? (activeId || NEW_CHAT_TAB_ID) : NEW_CHAT_TAB_ID,
       label: NEW_CHAT_TAB_LABEL,
       provisional: true,
       pinned: false,
       thread: null,
+      hasDraft: activeIsProvisional && activeId ? holds(`thread:${activeId}`) : newChatDraft,
     })
   }
   return tabs
@@ -1082,11 +1104,12 @@ export const SEARCH_PLACEHOLDER = 'Search agents and chats…'
  */
 export function searchAgents(roster, query, {
   askCounts = {},
+  draftAgents = null,
   expanded = false,
   limit = SIDEBAR_AGENT_RESULT_LIMIT,
 } = {}) {
   const { items } = filterAgentCandidates(roster, query, { requireMentionable: false })
-  const visible = visibleAgentRows(items, { expanded, askCounts, limit })
+  const visible = visibleAgentRows(items, { expanded, askCounts, draftAgents, limit })
   return {
     items,
     visible,

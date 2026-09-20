@@ -40,6 +40,7 @@ export const FIXED_TAB_WIDTH = 'w-40'
  * frame while the `width: max-content` mirror still reports the real 160.
  */
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import DraftMark from './base/DraftMark.vue'
 
 const props = defineProps({
   // [{ id, label, badge?, signal?: 'live'|'updated', pinned?: boolean }]
@@ -51,6 +52,9 @@ const props = defineProps({
   // `signal` (ent#474) draws the rail's activity dot after the label — the
   // ringed "live" shape or the plain "updated" one — in the visible row, the
   // overflow menu AND the mirror row, so the measured width includes it.
+  // `hasDraft` (trinity-enterprise#657) draws the quiet Draft mark after the
+  // label — "this tab holds unsent text" — in the same three places, and in
+  // the re-measure key, because it changes the tab's width when it toggles.
   tabs: { type: Array, required: true },
   // active tab id
   modelValue: { type: [String, null], required: true },
@@ -105,7 +109,7 @@ const activeInOverflow = computed(() =>
 // Re-measure when the tab set OR any label/badge changes (widths shift).
 // `flush: 'post'` runs after the mirror row has rendered the new content.
 const tabsSignature = computed(() =>
-  props.tabs.map((t) => `${t.id}:${t.label}:${t.badge ?? ''}:${t.signal ?? ''}:${t.pinned ? 'p' : ''}`).join('|')
+  props.tabs.map((t) => `${t.id}:${t.label}:${t.badge ?? ''}:${t.signal ?? ''}:${t.pinned ? 'p' : ''}:${t.hasDraft ? 'd' : ''}`).join('|')
   + `#${moreMeasureText.value}`
 )
 watch(tabsSignature, () => measure(), { flush: 'post' })
@@ -251,6 +255,7 @@ onUnmounted(() => {
       >
         <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
         <span class="min-w-0 truncate">{{ tab.label }}</span>
+        <DraftMark v-if="tab.hasDraft" class="ml-1.5" />
         <span
           v-if="tab.badge"
           class="ml-1.5 shrink-0 px-1.5 py-0.5 text-[10px] font-semibold bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300 rounded-full leading-none"
@@ -334,6 +339,10 @@ onUnmounted(() => {
       >
         <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
         <span :class="fixedWidth ? 'max-w-[20rem] truncate' : ''">{{ tab.label }}</span>
+        <!-- Its own `v-if`, placed BEFORE the badge/signal pair below: that pair
+             is a `v-if`/`v-else-if` chain, and an element inserted between its
+             arms would silently repoint the `v-else-if` (#2794). -->
+        <DraftMark v-if="tab.hasDraft" />
         <span
           v-if="tab.badge"
           class="px-1.5 py-0.5 text-[10px] font-semibold bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300 rounded-full leading-none"
@@ -375,6 +384,7 @@ onUnmounted(() => {
         >
           <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
           {{ tab.label }}
+          <DraftMark v-if="tab.hasDraft" class="ml-1.5" />
           <span
             v-if="tab.badge"
             class="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold rounded-full leading-none"

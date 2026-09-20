@@ -400,6 +400,9 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import { workSignalFromRoom } from './portalRail'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import { useComposerDraft } from '@/composables/useComposerDraft'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
 import { shouldCancelOnEscape, cancelOutcome } from '@/utils/turnCancel'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import {
@@ -455,6 +458,14 @@ const loading = ref(true)
 const sending = ref(false)
 const sendError = ref(null)
 const input = ref('')
+// trinity-enterprise#657: the room's unsent text outlives this instance. The
+// room is keyed on its id (the shell remounts per room), so the key never
+// changes in-instance; `send()` giving the text back on failure makes it a
+// draft again through the same write-through. Growing and focusing the field
+// waits for `load()` — the composer sits behind `v-if="!isClosed"`.
+const drafts = usePortalDraftsStore()
+const draftKey = computed(() => draftKeyFor({ roomId: props.roomId }))
+const { restored: draftRestored } = useComposerDraft({ key: draftKey, input })
 const scrollEl = ref(null)
 // #2624: an arriving message must not move a transcript the reader is holding.
 // The 3s poll below is the worst offender on this surface — several agents can
@@ -942,6 +953,28 @@ onMounted(async () => {
   document.addEventListener('click', onDocClick)
   window.addEventListener('resize', onViewportResize)
   await load({ full: true })
+  // ent#475's prefill, applied at MOUNT as well as by the watcher above — the
+  // sibling conversation has always done both (`PortalConversation.onMounted`).
+  // The watcher is not `immediate`, so a prefill set while this component was
+  // still mounting reaches nothing; trinity-enterprise#657 made that reachable
+  // (a room post that fails after `openRoom` hands the text back this way), and
+  // a text-losing path must not depend on which of two async settlings won.
+  if (props.prefill) input.value = props.prefill
+  // trinity-enterprise#657: a closed room has no composer, so a draft left in
+  // it has no field to come back to — clear it rather than mark a row the
+  // person cannot type into. Otherwise a restored draft gets the caret at its
+  // end, on a fine pointer only (a phone would get the keyboard over the room).
+  if (isClosed.value) drafts.clear(draftKey.value)
+  else if (draftRestored && !props.prefill
+      && shouldFocusOnRestore(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) {
+    nextTick(() => {
+      const el = textarea.value
+      if (!el || el.disabled) return
+      el.focus()
+      const end = el.value.length
+      try { el.setSelectionRange(end, end) } catch { /* not a text control */ }
+    })
+  }
   // #2259: and only NOW — the composer sits behind `v-if="!isClosed"`, so before
   // the room resolves there is no textarea to measure and an eager call would
   // silently no-op on the null ref. Without this the field mounts with `overflow-y`

@@ -194,7 +194,9 @@
       :active-id="currentSessionId"
       :disabled="voiceCallActive"
       :draft="newChat || bornHere"
+      :draft-keys="drafts.keys"
       @select="(t) => emit('open-thread', t)"
+      @new-chat="emit('new-chat')"
     />
 
     <!-- #2579: the shell's line under the strip (today: the admin-only notice
@@ -760,6 +762,9 @@ import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
+import { useComposerDraft } from '@/composables/useComposerDraft'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
@@ -941,6 +946,17 @@ const PLATFORM_LINE_CLASS = 'my-3 text-center text-xs text-gray-400 dark:text-gr
 // dark ink ladder's floor for meta text is gray-400, never gray-500.
 const META_INK_CLASS = 'text-gray-400 dark:text-gray-400'
 const input = ref('')
+// trinity-enterprise#657: the composer's text outlives this instance. The key
+// is the conversation's identity — the thread once known, the agent's unsaved
+// chat while `newChat`, nothing while a cold root is still resolving — and the
+// binding is write-through, so `send()` emptying the field IS the clear. A
+// stored draft lands in the (empty) composer here, at setup; growing and
+// focusing the field waits for `onMounted`, where the textarea exists.
+const drafts = usePortalDraftsStore()
+const draftKey = computed(() => draftKeyFor({
+  sessionId: currentSessionId.value, agentName: props.agent?.name, newChat: props.newChat,
+}))
+const { restored: draftRestored } = useComposerDraft({ key: draftKey, input })
 const sending = ref(false)
 // ent#523 — Reset, offered on Main only.
 const resetting = ref(false)
@@ -1359,6 +1375,19 @@ onMounted(async () => {
   document.addEventListener('keydown', onEscapeKeydown)
   window.addEventListener('resize', onViewportResize)
   if (props.prefill) input.value = props.prefill
+  // trinity-enterprise#657: a restored draft gets the caret at its end — on a
+  // fine pointer only (a phone would get the soft keyboard over the thread).
+  // After the prefill line on purpose: an explicit "Ask about it" replaces the
+  // composer today, and the write-through then makes IT the draft.
+  if (draftRestored && !props.prefill && shouldFocusOnRestore(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) {
+    nextTick(() => {
+      const el = textarea.value
+      if (!el || el.disabled) return
+      el.focus()
+      const end = el.value.length
+      try { el.setSelectionRange(end, end) } catch { /* not a text control */ }
+    })
+  }
   // ent#451: `newChat` also has to hold on FIRST paint — the picker mounts a
   // fresh conversation rather than updating one, so the watcher above never
   // runs for it.
