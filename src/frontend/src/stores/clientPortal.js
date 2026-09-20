@@ -20,6 +20,9 @@ import {
 import axios from 'axios'
 import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
 import { useAuthStore } from './auth'
+// A cycle by shape (that store reads this one's `clientEmail`), safe by use:
+// neither side touches the other at module evaluation, only inside actions.
+import { usePortalDraftsStore } from './portalDrafts'
 
 // --- carry-log bounds (#2794 follow-up) --------------------------------------
 //
@@ -607,6 +610,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // OTP form). The `wasPlatform` read must happen before either clear.
     async signOutEverywhere() {
       const wasPlatform = this.isPlatformSession
+      // trinity-enterprise#657: an explicit sign-out takes the person's unsent
+      // drafts with it — they are message text, and on a shared browser the
+      // portal token is removed at this same moment. BEFORE `signOut()`: that
+      // nulls `clientEmail`, which swaps the drafts store's identity to null,
+      // and a clear after it would remove nothing. Expiry (`endSession`) does
+      // not clear — it is not the person's act, and a draft is what they come
+      // back for.
+      usePortalDraftsStore().clearBucket()
       const authStore = useAuthStore()
       if (authStore.isAuthenticated) await authStore.logout()
       this.signOut()

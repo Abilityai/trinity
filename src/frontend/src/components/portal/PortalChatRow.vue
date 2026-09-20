@@ -54,6 +54,11 @@
     />
     <span v-else class="text-sm truncate flex-1" :class="unread ? 'font-semibold' : ''">{{ title }}</span>
 
+    <!-- trinity-enterprise#657: unsent text in this chat. Stamped onto the
+         thread by the shell's `decorate()` beside `starred`/`unread`, so every
+         row site (starred, the date groups, the drawer's sidebar) gets it. -->
+    <DraftMark v-if="thread.hasDraft" />
+
     <span
       v-if="unread"
       class="shrink-0 min-w-[1.125rem] px-1 h-[1.125rem] rounded-full bg-action-primary-600 text-white text-[10px] font-semibold flex items-center justify-center"
@@ -80,6 +85,7 @@ import { computed } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
+import DraftMark from '@/components/base/DraftMark.vue'
 import { rowAgents, threadTitle } from './portalUtils'
 
 const props = defineProps({
