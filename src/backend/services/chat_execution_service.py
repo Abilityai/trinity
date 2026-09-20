@@ -52,6 +52,7 @@ from services.docker_service import get_agent_container
 from services import agent_call_limiter
 from services.agent_call_limiter import BackendAgentCallBudgetExhausted
 from services.model_context import DEFAULT_CONTEXT_WINDOW
+from services.execution_envelope import TaskExecutionErrorCode
 from services.task_execution_service import (
     _compute_context_used,
     agent_post_with_retry,
@@ -569,6 +570,52 @@ def _parse_agent_http_error(e, name: str):
     return error_msg, agent_status_code, partial_metadata
 
 
+# #2889: the machine-readable class of a sync dispatch failure, as an ADDITIVE
+# response header. The body of a sync /chat|/task 503 is prose reconstructed
+# from the agent's own error text, so every consumer that needed to tell
+# "agent server not reachable" from "the turn ran and failed on the credential"
+# re-derived it by substring — the live test tiers ran ~40 such sites and
+# laundered an exhausted credit balance into an "agent not ready" skip. The
+# backend already computes `TaskExecutionErrorCode` for the immediate /task
+# path (`TaskExecutionResult.error_code`) and drops it at `_map_task_failure`;
+# the /chat path holds the same input (`agent_status_code`) and applies the
+# same rule task_execution_service does (agent 503 → AUTH, 429 → BILLING, no
+# agent response at all → NETWORK). A header, not a body change: the detail
+# stays a string on every path that emits one today, so nothing parsing it
+# breaks, and a dict-bodied path (the auto-switch shapes) carries it the same
+# way.
+ERROR_CODE_HEADER = "X-Trinity-Error-Code"
+
+
+def _error_code_headers(code, extra: Optional[dict] = None) -> Optional[dict]:
+    """Headers dict carrying ``X-Trinity-Error-Code`` for a known code, else
+    ``extra`` unchanged (``None`` when there is nothing to send).
+
+    Accepts the enum member or its string value; anything else (a stub, ``None``)
+    contributes no header — a wrong value is worse than an absent one, since the
+    reader treats an absent header as "classify from the body".
+    """
+    value = getattr(code, "value", code)
+    if not isinstance(value, str) or not value:
+        return extra
+    headers = dict(extra or {})
+    headers[ERROR_CODE_HEADER] = value
+    return headers
+
+
+def _classify_agent_http_failure(agent_status_code) -> TaskExecutionErrorCode:
+    """The /chat path's twin of task_execution_service's producer-side rule:
+    the agent answered 503 → AUTH, 429 → BILLING, never answered → NETWORK,
+    any other agent status → AGENT_ERROR."""
+    if agent_status_code is None:
+        return TaskExecutionErrorCode.NETWORK
+    if agent_status_code == 503:
+        return TaskExecutionErrorCode.AUTH
+    if agent_status_code == 429:
+        return TaskExecutionErrorCode.BILLING
+    return TaskExecutionErrorCode.AGENT_ERROR
+
+
 async def _apply_sub003_autoswitch(name: str, error_msg: str, agent_status_code):
     """SUB-003 (#441): auto-switch on rate-limit (429) OR auth-class failures.
     ALWAYS raises: ChatDispatchError (switch/plain) OR the HTTPException that
@@ -578,6 +625,8 @@ async def _apply_sub003_autoswitch(name: str, error_msg: str, agent_status_code)
         handle_subscription_failure,
         is_auth_failure,
     )
+
+    code_headers = _error_code_headers(_classify_agent_http_failure(agent_status_code))
 
     if agent_status_code == 429:
         try:
@@ -603,8 +652,9 @@ async def _apply_sub003_autoswitch(name: str, error_msg: str, agent_status_code)
                     ),
                     "retry_after": 15,
                 },
+                headers=code_headers,
             )
-        raise ChatDispatchError(429, error_msg)
+        raise ChatDispatchError(429, error_msg, headers=code_headers)
 
     if agent_status_code == 503 or is_auth_failure(error_msg):
         try:
@@ -630,10 +680,15 @@ async def _apply_sub003_autoswitch(name: str, error_msg: str, agent_status_code)
                     ),
                     "retry_after": 15,
                 },
+                headers=code_headers,
             )
-        raise ChatDispatchError(503, f"Failed to communicate with agent: {error_msg}")
+        raise ChatDispatchError(
+            503, f"Failed to communicate with agent: {error_msg}", headers=code_headers
+        )
 
-    raise ChatDispatchError(503, f"Failed to communicate with agent: {error_msg}")
+    raise ChatDispatchError(
+        503, f"Failed to communicate with agent: {error_msg}", headers=code_headers
+    )
 
 
 async def _finalize_http_failure(
@@ -1589,16 +1644,22 @@ def _map_task_failure(name, result, *, idem):
     """
     if result.status in ("failed", "cancelled"):
         idempotency_service.fail(idem)
+        # #2889: the immediate path's result carries the producer-side code;
+        # the backlog-reconstruct path builds its result from the row and has
+        # none — the header is simply absent there.
+        code_headers = _error_code_headers(getattr(result, "error_code", None))
         if "at capacity" in (result.error or ""):
             raise ChatDispatchError(
-                429, f"Agent '{name}' is at capacity. Try again later."
+                429, f"Agent '{name}' is at capacity. Try again later.",
+                headers=code_headers,
             )
         elif "timed out" in (result.error or ""):
-            raise ChatDispatchError(504, result.error)
+            raise ChatDispatchError(504, result.error, headers=code_headers)
         else:
             raise ChatDispatchError(
                 503,
                 result.error or "Failed to execute task. The agent may be unavailable.",
+                headers=code_headers,
             )
 
 
