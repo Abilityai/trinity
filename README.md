@@ -23,6 +23,8 @@
   <img src="https://img.shields.io/badge/docker-required-blue.svg" alt="Docker">
 </p>
 
+> Find this useful? ⭐ [Star the repo](https://github.com/abilityai/trinity) — it's how other people find Trinity.
+
 > [!NOTE]
 > **📦 Just released: [v0.9.5](docs/releases/0.9.5.md)** (September 17, 2026). **Workspace** is where the work happens now:
 > - chats per topic
@@ -182,6 +184,8 @@ For a fully non-interactive bring-up, run `./scripts/deploy/start.sh --unattende
 - **Web UI**: http://localhost
 - **API Docs**: http://localhost:8000/docs
 - **MCP Server**: http://localhost:8080/mcp
+
+> **Up and running? ⭐ [Star the repo](https://github.com/abilityai/trinity)** — it's how other people find Trinity. **Ran into a rough edge?** [File an issue](https://github.com/abilityai/trinity/issues/new) — we read them.
 
 > **Don't want to run it on your laptop?** Trinity is self-hosted, and the least work is a server of your own: the guided **[DigitalOcean install](https://docs.ability.ai/getting-started/deploying/digitalocean)** gets you a Droplet behind HTTPS in about ten minutes. Questions about a deployment? [Talk to an engineer →](mailto:hello@ability.ai) — an engineer reads this, not a CRM. Reply in one business day, your time zone.
 
