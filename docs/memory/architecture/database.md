@@ -977,3 +977,6 @@ successful-looking sync. Revocation = cut a new tag without the offending skill.
 
 ---
 
+### PostgreSQL extensions the schema relies on (ent#653)
+
+`0064_executions_search_indexes` runs `CREATE EXTENSION IF NOT EXISTS pg_trgm` and builds GIN trigram indexes on `schedule_executions.message/response/error` (so `ILIKE '%needle%'` and the `~*` regex operator are index-assisted instead of a body scan), plus the portable `idx_executions_started_at` for the admin path of every fleet read. The extension ships with the stock `postgres` images and managed Postgres offerings; the revision **fails the boot** if it cannot be created rather than continuing without the indexes — a silent seq-scan fallback is the failure mode nobody notices until the table is large. A deploy role without `CREATE EXTENSION` privilege must have an admin run it once beforehand.

@@ -1,3 +1,4 @@
+# mcp: none — fleet dashboard list/stats/timeline (UI); the agent-facing corpus search is the enterprise execution-search route behind search_executions (abilityai/trinity-enterprise#653)
 """
 Fleet-level execution endpoints (EXEC-022 / Issue #18).
 

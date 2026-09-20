@@ -9,6 +9,7 @@ import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { accessDenied } from "../access.js";
+import { ApiError } from "../client.js";
 
 /**
  * Create execution query tools with the given client
@@ -33,6 +34,10 @@ export function createExecutionTools(
     }
     return client;
   };
+
+  /** Scopes that may use `search_executions` (ent#653) — the system agent and
+   *  user-scoped (human/ops) keys. An allow-list, never a deny-check. */
+  const SEARCH_SCOPES: ReadonlySet<string> = new Set(["system", "user"]);
 
   /**
    * Check if agent-scoped key can access target agent for read operations.
@@ -323,6 +328,118 @@ export function createExecutionTools(
           by_type: byType,
           by_agent: agent_name ? undefined : byAgent,
         }, null, 2);
+      },
+    },
+
+    // ========================================================================
+    // search_executions - grep the execution corpus (enterprise, ent#653)
+    // ========================================================================
+    searchExecutions: {
+      name: "search_executions",
+      description:
+        "Search past executions across the agents you can access — a case-insensitive grep over the task " +
+        "prompt (message), the agent's response and the error text. mode=substring (default) matches the " +
+        "literal query; mode=regex matches a POSIX regular expression (PostgreSQL only; no inline flags — " +
+        "matching is already case-insensitive). Returns bounded excerpts around each match, never full " +
+        "bodies: use get_execution_result(agent_name, execution_id) for the full row. " +
+        "Requires the enterprise execution-search module; answers available=false where it is absent. " +
+        "Access: the system agent and user-scoped keys only — agent-scoped keys are refused.",
+      parameters: z.object({
+        query: z.string().min(1).max(200).describe("Substring to find (case-insensitive; % and _ are literal) — or, with mode=regex, a POSIX regular expression"),
+        mode: z
+          .enum(["substring", "regex"])
+          .optional()
+          .default("substring")
+          .describe("substring (literal) | regex (POSIX ARE, PostgreSQL only)"),
+        agents: z
+          .array(z.string())
+          .max(50)
+          .optional()
+          .describe("Scope to these agents (default: every agent you can access)"),
+        fields: z
+          .array(z.enum(["message", "response", "error"]))
+          .optional()
+          .describe("Which columns to search (default: message, response, error)"),
+        status: z.string().optional().describe("Filter by status: running, queued, success, failed, error, cancelled, skipped"),
+        triggered_by: z.string().optional().describe("Filter by trigger: schedule, manual, agent, mcp, chat, ..."),
+        // Mirrors the backend's `_VALID_HOURS` (routers/executions.py); the
+        // route 422s by name on anything else, so a drift here is loud, not silent.
+        hours: z
+          .union([z.literal(0), z.literal(1), z.literal(6), z.literal(24), z.literal(168), z.literal(720)])
+          .optional()
+          .default(24)
+          .describe("Window in hours (0 = all-time). Only these values are accepted"),
+        limit: z.number().int().min(1).max(100).optional().default(20),
+        offset: z.number().int().min(0).optional().default(0),
+        context: z.number().int().min(20).max(400).optional().default(120).describe("Excerpt radius in characters"),
+      }),
+      // ALLOW-LIST of the scopes that may see this tool (#848: never a deny-check —
+      // a null or unknown principal must fail closed). Agent-scoped sessions never
+      // have it advertised; the backend route refuses them regardless.
+      canAccess: (auth: any) => SEARCH_SCOPES.has(auth?.scope ?? ""),
+      execute: async (
+        params: {
+          query: string;
+          mode?: "substring" | "regex";
+          agents?: string[];
+          fields?: Array<"message" | "response" | "error">;
+          status?: string;
+          triggered_by?: string;
+          hours?: number;
+          limit?: number;
+          offset?: number;
+          context?: number;
+        },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const authContext = context?.session;
+        // Absent auth is only legitimate in dev mode (no API key required); a
+        // present scope must be on the allow-list.
+        const scope = authContext?.scope;
+        const permitted = scope === undefined ? !requireApiKey : SEARCH_SCOPES.has(scope);
+        if (!permitted) {
+          console.log(`[search_executions] Access denied: scope '${scope ?? "none"}' is not system/user`);
+          return accessDenied(context, {
+            error: "Access denied",
+            reason: "search_executions is available to the system agent and user-scoped keys only",
+          });
+        }
+
+        const apiClient = getClient(authContext);
+        try {
+          const result = await apiClient.searchExecutions({
+            query: params.query,
+            mode: params.mode ?? "substring",
+            agents: params.agents,
+            fields: params.fields,
+            status: params.status,
+            triggered_by: params.triggered_by,
+            hours: params.hours ?? 24,
+            limit: params.limit ?? 20,
+            offset: params.offset ?? 0,
+            context: params.context ?? 120,
+          });
+          // The query text is deliberately not logged — a user hunting for a leaked
+          // value would otherwise write it into the MCP server's log stream.
+          console.log(`[search_executions] ${result.count} hit(s) over ${result.hours}h (${result.mode}; ${result.fields.join(",")})`);
+          return JSON.stringify({ available: true, ...result }, null, 2);
+        } catch (e) {
+          // Honest, distinct status — an OSS build has no route (404) and an
+          // unentitled or refused call is a 403; neither is "no results".
+          if (e instanceof ApiError && (e.status === 404 || e.status === 403)) {
+            return JSON.stringify({
+              available: false,
+              count: 0,
+              hits: [],
+              message:
+                e.status === 404
+                  ? "Execution search is not available on this platform."
+                  : "Execution search is not enabled for this caller.",
+              detail: e.body,
+            }, null, 2);
+          }
+          throw e;
+        }
       },
     },
   };

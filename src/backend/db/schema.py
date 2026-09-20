@@ -1769,6 +1769,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_executions_status ON schedule_executions(status)",
     # PERF-001: Composite index for Tasks list queries
     "CREATE INDEX IF NOT EXISTS idx_executions_agent_started ON schedule_executions(agent_name, started_at DESC)",
+    # ent#653: the ADMIN path of every fleet read (`agent_names=None`) has no
+    # agent filter, so the composite above never applies and `ORDER BY
+    # started_at DESC LIMIT n` was a full scan + sort. The trigram indexes the
+    # execution search rides are PostgreSQL-only and live in Alembic
+    # `0064_executions_search_indexes`; this one is portable.
+    "CREATE INDEX IF NOT EXISTS idx_executions_started_at ON schedule_executions(started_at DESC)",
     # VALIDATE-001: Business status for validation results
     "CREATE INDEX IF NOT EXISTS idx_executions_business_status ON schedule_executions(business_status)",
     "CREATE INDEX IF NOT EXISTS idx_executions_validates ON schedule_executions(validates_execution_id)",
