@@ -74,6 +74,7 @@
 
           <!-- ent#279 — System Credential Vault (enterprise, gated by `credential_vault`) -->
           <CredentialVaultPanel v-if="activeTab === 'credential-vault'" />
+          <SkillRunnerPanel v-if="activeTab === 'skill-runner'" @navigate-tab="selectTab" />
 
           <!-- Retention Tab Content (#1039) -->
           <div v-if="activeTab === 'retention'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
@@ -2211,6 +2212,7 @@ import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
 import CredentialVaultPanel from '../components/settings/CredentialVaultPanel.vue'
+import SkillRunnerPanel from '../components/settings/SkillRunnerPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
 import FirstRunRerunPanel from '../components/settings/FirstRunRerunPanel.vue'
@@ -2284,6 +2286,11 @@ const ALL_TABS = [
   { id: 'security',     label: 'Security',     adminOnly: false, requires: '2fa' },
   { id: 'sso',          label: 'SSO',          adminOnly: true,  requires: 'sso' },
   { id: 'credential-vault', label: 'Vault',    adminOnly: true,  requires: 'credential_vault' },
+  // ent#242 — the skill runner's operator half. `requires:` hides the tab
+  // outright when unentitled; the server gates every route regardless
+  // (`requires_entitlement("skill_runner")` + `require_human_admin`), so
+  // this is UX, not containment.
+  { id: 'skill-runner', label: 'Skill Runner', adminOnly: true,  requires: 'skill_runner' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
   { id: 'retention',    label: 'Retention',    adminOnly: true  },
   // ent#184 — local product-event activation funnel. Capture is OSS-core;
