@@ -224,7 +224,7 @@ Driven directly by the token families — the badge variant *is* the token famil
 
 ### Modal shell & ConfirmDialog
 
-**One shell for every dialog.**
+**One shell for every dialog** — `components/base/BaseModal.vue` (#1923): overlay, Esc, focus trap, focus return and a **shared, ref-counted** scroll lock (`utils/focusTrap.js::bodyScrollLock` — modals nest, and a per-instance write to `body.style.overflow` unlocks the page when an inner dialog mounts or closes). The overlay carries `tabindex="-1"` so Esc still fires after a click on non-focusable text. The decidable rules live in `utils/focusTrap.js`; the wiring is proven by mounting the shell in `tests/unit/baseModal.spec.js` (per-file jsdom, #2918). Adopted so far by NavBar's and SystemViewEditor's dialogs; `ConfirmDialog` is the confirm recipe.
 **Recipe:** overlay gray-950 at 55% (`rgba(10,14,22,.55)`) · card — surface bg, 1px border, radius 10, shadow-lg, `max-width: 400px`, padding 20 · title 15.5/650 · body 13.5 secondary ink · actions right-aligned, 10px gap, **safe choice first** (left), destructive last.
 **Behavior:** Esc closes; click-outside closes; focus is trapped; **initial focus lands on the safe action, never the destructive one**. Destructive confirms restate the consequence: "This permanently removes the agent and its workspace. 3 schedules will be cancelled. This cannot be undone." (principle 19).
 

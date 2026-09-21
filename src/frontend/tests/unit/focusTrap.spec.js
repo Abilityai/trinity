@@ -4,16 +4,14 @@
  * Six bespoke modals shipped with no Esc-to-close and no focus trap: keyboard
  * users could not dismiss them, and Tab walked out behind the overlay.
  *
- * These test the RULES, not the wiring. This repo's vitest is `environment:
- * 'node'` with no jsdom/happy-dom and no `@vue/test-utils`, so the DOM half —
- * that the listener is attached, that focus() is actually called — is not
- * reachable here and belongs to e2e. Everything that can be decided from data
- * is decided in `utils/focusTrap.js` precisely so it is not left untested.
+ * These test the RULES. The wiring — that the listener is attached, that
+ * focus() is actually called, that the lock is held and released — is proven
+ * by MOUNTING the shell in `baseModal.spec.js` (per-file jsdom opt-in, #2918).
  */
 import { describe, it, expect } from 'vitest'
 import {
   TABBABLE_SELECTOR, tabbable, nextFocusIndex, isDismissKey, isTabKey,
-  initialFocusIndex, isDestructive, isBackdropClick,
+  initialFocusIndex, isDestructive, isBackdropClick, createScrollLock,
 } from '../../src/utils/focusTrap.js'
 
 const el = (over = {}) => ({
@@ -148,5 +146,28 @@ describe('backdrop click', () => {
     expect(isBackdropClick({ target: overlay }, overlay)).toBe(true)
     expect(isBackdropClick({ target: { id: 'panel' } }, overlay)).toBe(false)
     expect(isBackdropClick(null, overlay)).toBe(false)
+  })
+})
+
+describe('createScrollLock — a ref count over one global value', () => {
+  it('the first holder hides overflow, the last release restores what was there', () => {
+    const style = { overflow: 'auto' }
+    const lock = createScrollLock(() => style)
+    lock.acquire()
+    expect(style.overflow).toBe('hidden')
+    lock.acquire()                       // a nested modal
+    lock.release()                       // the nested one closes
+    expect(style.overflow).toBe('hidden')   // the outer still holds it
+    expect(lock.holders).toBe(1)
+    lock.release()
+    expect(style.overflow).toBe('auto')  // restored, not cleared
+    expect(lock.holders).toBe(0)
+  })
+
+  it('a release with no holder is a no-op, never a clear', () => {
+    const style = { overflow: 'hidden' }   // some other component's lock
+    const lock = createScrollLock(() => style)
+    lock.release()
+    expect(style.overflow).toBe('hidden')
   })
 })

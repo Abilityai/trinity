@@ -3,6 +3,7 @@
     <div
       v-if="modelValue"
       ref="overlay"
+      tabindex="-1"
       class="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-gray-900/60 p-4"
       role="dialog"
       aria-modal="true"
@@ -32,11 +33,25 @@
  * about content. Consumers keep their existing panel markup, so adopting it is
  * deleting two wrapper divs rather than rewriting a dialog.
  *
- * **Every decision is in `utils/focusTrap.js`, not here.** This repo's vitest
- * runs `environment: 'node'` with no DOM, so a rule written inline would be one
- * no unit test could reach; the rules are tested there and this file is the
- * wiring. What that leaves untested is the wiring itself — listener attachment,
- * the focus() calls — which needs a browser and belongs to e2e.
+ * **Every decision is in `utils/focusTrap.js`, not here**, as functions over
+ * plain data; this file is the wiring. The wiring is proven too:
+ * `tests/unit/baseModal.spec.js` mounts this shell under jsdom (the repo's
+ * per-file opt-in, #2918) and drives Esc, Tab, focus return and the lock. An
+ * earlier version of this comment said the repo could not mount a component,
+ * which was false and is exactly how two defects in the wiring shipped
+ * unnoticed (the review on #2778).
+ *
+ * **`tabindex="-1"` on the overlay is load-bearing.** `@keydown` is on the
+ * overlay and key events bubble UP from `document.activeElement`, so Esc only
+ * works while focus is inside. Clicking non-focusable dialog text lands focus
+ * on the nearest focusable ancestor — this overlay, now that it has a tabindex
+ * — and a modal with no tabbable child can still be Esc-dismissed because
+ * `overlay.focus()` is no longer a no-op on a plain div.
+ *
+ * **The scroll lock is shared and ref-counted** (`bodyScrollLock`): modals
+ * nest, and a per-instance write to `document.body.style.overflow` unlocked
+ * the page whenever an inner dialog mounted or closed while the outer was
+ * open, and cleared other components' locks on unmount.
  *
  * `Teleport` matters: several of these modals are declared inside panels that
  * establish a stacking context, and a `z-50` overlay nested in one renders
@@ -46,7 +61,7 @@
 import { ref, watch, nextTick, onBeforeUnmount } from 'vue'
 import {
   TABBABLE_SELECTOR, tabbable, nextFocusIndex, isDismissKey, isTabKey,
-  initialFocusIndex, isBackdropClick,
+  initialFocusIndex, isBackdropClick, bodyScrollLock,
 } from '../../utils/focusTrap.js'
 
 const props = defineProps({
@@ -68,6 +83,21 @@ const emit = defineEmits(['update:modelValue', 'close'])
 
 const overlay = ref(null)
 let lastFocused = null
+// Whether THIS instance holds one count on the shared lock — so a close or an
+// unmount releases exactly what this instance took, never a sibling's.
+let holdingLock = false
+
+function takeLock() {
+  if (holdingLock) return
+  bodyScrollLock.acquire()
+  holdingLock = true
+}
+
+function dropLock() {
+  if (!holdingLock) return
+  bodyScrollLock.release()
+  holdingLock = false
+}
 
 function items() {
   if (!overlay.value) return []
@@ -102,14 +132,16 @@ watch(() => props.modelValue, async (open) => {
   if (open) {
     // Remember who opened it so focus can go home on dismiss.
     lastFocused = document.activeElement
-    document.body.style.overflow = 'hidden'
+    takeLock()
     await nextTick()
     const list = items()
     const idx = initialFocusIndex(list)
     if (idx !== null) list[idx].focus()
     else overlay.value?.focus?.()
   } else {
-    document.body.style.overflow = ''
+    // A closed instance that never held the lock (a nested dialog mounting
+    // closed inside an open one) releases nothing — that was the bug.
+    dropLock()
     // Focus returns to the trigger — without this a keyboard user is dropped
     // at the top of the document and has to tab back to where they were.
     lastFocused?.focus?.()
@@ -118,6 +150,7 @@ watch(() => props.modelValue, async (open) => {
 }, { immediate: true })
 
 // A modal unmounted while open (route change, v-if on an ancestor) must not
-// leave the page permanently unscrollable.
-onBeforeUnmount(() => { document.body.style.overflow = '' })
+// leave the page permanently unscrollable — and one unmounted while closed
+// must not unlock a page someone else is holding.
+onBeforeUnmount(dropLock)
 </script>

@@ -274,7 +274,7 @@
     <!-- #1923: overlay, Esc, focus trap and focus return come from BaseModal. -->
     <BaseModal
       :model-value="showBuildInfoModal && !!buildInfo.info.value"
-      panel-class="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full mx-4 p-6"
+      panel-class="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full p-6"
       aria-label="Build Info"
       @close="showBuildInfoModal = false"
     >

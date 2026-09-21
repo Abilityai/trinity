@@ -3,7 +3,7 @@
        focus return. The panel markup below is unchanged. -->
   <BaseModal
     :model-value="isOpen"
-    panel-class="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md mx-4"
+    panel-class="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md"
     :aria-label="isEditing ? 'Edit System View' : 'Create System View'"
     @close="close"
   >

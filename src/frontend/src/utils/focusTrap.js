@@ -1,17 +1,17 @@
 /**
  * The decidable half of the modal keyboard contract (#1923, design-system p23).
  *
- * Pure, and separate from `BaseModal.vue`, because this repo's vitest runs
- * `environment: 'node'` with no DOM, no jsdom/happy-dom and no
- * `@vue/test-utils` — a focus trap written entirely inside an SFC is a rule no
- * unit test can reach, and source-text assertions would only prove it was
- * TYPED (the ent#392 precedent, and the failure mode the merge-train playbook
- * names as its most common ejection).
+ * Pure, and separate from `BaseModal.vue`, so every decision is a function over
+ * plain data that a node-environment test can drive exhaustively — a focus
+ * trap written entirely inside an SFC would be a rule proven only by reading
+ * it. The component supplies the DOM: the element list, the key event, the
+ * focus() calls.
  *
- * So every decision lives here as a function over plain data, and the component
- * supplies the DOM: the element list, the key event, the focus() calls. What
- * these cannot cover is the wiring itself — that the listener is attached, that
- * the elements are queried at the right moment. That belongs to e2e.
+ * The wiring is NOT left to e2e (an earlier version of this docblock claimed
+ * the repo could not mount a component; it can — `vitest.config.js` carries
+ * `plugins: [vue()]` + jsdom + `@vue/test-utils` for a per-file opt-in, #2918).
+ * `tests/unit/baseModal.spec.js` mounts the shell and proves Esc, the trap,
+ * focus return and the scroll lock against a real DOM.
  */
 
 /**
@@ -117,3 +117,40 @@ export function isDestructive(el) {
 export function isBackdropClick(event, overlayEl) {
   return Boolean(event) && Boolean(overlayEl) && event.target === overlayEl
 }
+
+/**
+ * A ref-counted scroll lock over one element's `overflow` (#1923 review).
+ *
+ * The lock is GLOBAL state — `document.body.style.overflow` — and modals nest:
+ * a `<ConfirmDialog>` declared inside another modal's slot mounts (closed)
+ * while the outer one is opening, and later opens on top of it. A lock written
+ * per instance breaks both ways: the inner instance's mount or close would
+ * unlock the page while the outer is still open, and an unconditional clear on
+ * unmount would clobber a lock some other component holds
+ * (`ChannelConfigDialog`, `FirstRunOverlay`). So: the first holder saves the
+ * previous value and hides overflow; the last release restores it; every
+ * holder in between is a count. `getStyle` is injectable for tests.
+ */
+export function createScrollLock(getStyle = () => document.body.style) {
+  let holders = 0
+  let previous = ''
+  return {
+    acquire() {
+      if (holders === 0) {
+        const style = getStyle()
+        previous = style.overflow
+        style.overflow = 'hidden'
+      }
+      holders += 1
+    },
+    release() {
+      if (holders === 0) return
+      holders -= 1
+      if (holders === 0) getStyle().overflow = previous
+    },
+    get holders() { return holders },
+  }
+}
+
+/** The one lock every `BaseModal` shares. */
+export const bodyScrollLock = createScrollLock()
