@@ -20,10 +20,17 @@
  * ghost's error state borderless"), one primitive over. Two primitives hitting
  * one trap is the reason this is a guard and not just a fix.
  *
- * Structure, not computed style: vitest runs `environment: 'node'` here with no
- * mount harness, so — like its siblings — these are source assertions. A source
- * guard cannot observe the cascade, but it pins the one edit that reintroduces
- * it, which is a colour keyword migrating back into the shared string.
+ * @source-text-pin: the defect is a CASCADE tie broken by stylesheet emission
+ * order, and neither jsdom nor @vue/test-utils evaluates a stylesheet — a mount
+ * would report the class list it was handed and prove nothing. This is the
+ * deliberate-pin case #2918's ratchet carves out, not a missing mount.
+ *
+ * (`vitest.config.js` pins `environment: 'node'` only as the DEFAULT; a spec
+ * opts into jsdom per file and mounts, which 22 specs already do. That harness
+ * exists and is reachable — it simply cannot see a cascade, which is why this
+ * one spec stays at the source level.) A source guard cannot observe the
+ * cascade, but it pins the one edit that reintroduces it: a colour keyword
+ * migrating back into the shared string.
  *
  * Comments are STRIPPED before matching. The block comment in BaseButton.vue
  * names `border-transparent` and `border-gray-300` in exactly the shapes
