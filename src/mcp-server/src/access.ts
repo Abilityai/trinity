@@ -263,9 +263,11 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- systems.ts ---
   deploy_system: { kind: "none", why: "a system manifest, not an agent" },
   // NOT `none`: unlike its siblings this tool does name agents (`agents`, the
-  // confirmed removal set) and deletes them. `agents` is absent from
-  // AGENT_TARGET_PARAMS, so a `none` row would have passed the shape check and
-  // said something false.
+  // confirmed removal set) and deletes them. `agents` IS in
+  // AGENT_TARGET_PARAMS, so a `none` row here would not merely have said
+  // something false — `policyFor` throws on it at startup, and the server
+  // would refuse to boot. The shape check is what makes this row load-bearing
+  // rather than decorative.
   teardown_system: { kind: "baselined", owner: TEARDOWN_HUMAN_ONLY },
   list_systems: { kind: "none", why: "no agent target" },
   restart_system: { kind: "none", why: "a system name, not an agent" },
