@@ -17,6 +17,13 @@ const REASON_TEXT = Object.freeze({
   injection_error: 'the install failed',
 })
 
+/** #2914 — one sentence for a name conflict, shared by the partial and conflict arms. */
+function conflictClause(names) {
+  const list = names.length ? ` (${names.join(', ')})` : ''
+  const noun = names.length === 1 ? 'a skill' : 'skills'
+  return `the agent already has its own ${noun} with that name${list} — its copy is kept and runs. Unassign the library skill, or rename the agent's.`
+}
+
 /**
  * @param {{status?: string, reason?: string, skills?: Record<string,{status:string,error?:string}>}|null|undefined} report
  * @param {{ saved?: boolean }} [opts]  `saved` prefixes "Saved" (the Skills tab); the Library control omits it.
@@ -35,11 +42,37 @@ export function deliveryText(report, { saved = true } = {}) {
       const failed = Object.entries(report.skills || {})
         .filter(([, v]) => v && v.status === 'failed')
         .map(([k]) => k)
+      const conflicts = Object.entries(report.skills || {})
+        .filter(([, v]) => v && v.status === 'conflict')
+        .map(([k]) => k)
+      // #2914: a conflict is not a failed install — a retry via Sync would
+      // refuse again by design. Name it apart, and only ask for a Sync when
+      // something actually failed.
+      if (!failed.length && conflicts.length) {
+        return {
+          tone: DELIVERY_TONE.bad,
+          text: `${lead}; ${conflictClause(conflicts)}`,
+          needsSync: false,
+        }
+      }
       const names = failed.length ? ` (${failed.join(', ')})` : ''
+      const tail = conflicts.length ? ` ${conflictClause(conflicts)}` : ''
       return {
         tone: DELIVERY_TONE.bad,
-        text: `${lead}; some skills did not install${names}. Sync now to retry.`,
+        text: `${lead}; some skills did not install${names}. Sync now to retry.${tail}`,
         needsSync: true,
+      }
+    }
+    case 'conflict': {
+      // #2914: every requested name collides with a skill the agent wrote
+      // itself. Nothing was written; the agent's own copy is what runs.
+      const conflicts = Object.entries(report.skills || {})
+        .filter(([, v]) => v && v.status === 'conflict')
+        .map(([k]) => k)
+      return {
+        tone: DELIVERY_TONE.bad,
+        text: `${lead} but not delivered: ${conflictClause(conflicts)}`,
+        needsSync: false,
       }
     }
     case 'pending_start':

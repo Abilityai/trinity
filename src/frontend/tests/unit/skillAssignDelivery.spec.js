@@ -108,6 +108,32 @@ describe('skills store — agent_skills_changed ticks', () => {
     const [, , cfg] = api.put.mock.calls[0]
     expect(cfg.timeout).toBeGreaterThan(20000)
   })
+
+  // #2914 — the conflict badge reads the ROW (`delivery_status`), so it shows
+  // on a fresh load, not only after a sync from this screen.
+  it('conflictNames derives from the assignment rows', async () => {
+    const store = useSkillsStore()
+    store.setAgent('scout')
+    api.get.mockResolvedValueOnce({ data: { configured: false } })
+    api.get.mockResolvedValueOnce({ data: [
+      { skill_name: 'backlog', delivery_status: 'conflict' },
+      { skill_name: 'research', delivery_status: null },
+    ] })
+    await store.load('scout')
+    expect([...store.conflictNames]).toEqual(['backlog'])
+  })
+
+  it('inject re-reads the rows so a resolved conflict clears without a reload', async () => {
+    const store = useSkillsStore()
+    store.setAgent('scout')
+    store.assigned = [{ skill_name: 'backlog', delivery_status: 'conflict' }]
+    api.post.mockResolvedValueOnce({ data: { success: true, results: { backlog: { status: 'injected' } } } })
+    api.get.mockResolvedValueOnce({ data: [{ skill_name: 'backlog', delivery_status: null }] })
+    await store.inject()
+    expect(api.get).toHaveBeenCalledWith('/api/agents/scout/skills')
+    expect(store.conflictNames.size).toBe(0)
+    expect(store.injectionResults.backlog.status).toBe('injected')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -152,6 +178,37 @@ describe('deliveryText', () => {
     const v = deliveryText({ status: 'partial', skills: { a: { status: 'injected' }, b: { status: 'failed', error: 'x' } } })
     expect(v.tone).toBe(DELIVERY_TONE.bad)
     expect(v.text).toContain('(b)')
+    expect(v.needsSync).toBe(true)
+  })
+
+  // #2914 — a name conflict is not a failed install: Sync would refuse again
+  // by design, so the text names the agent's own skill and the two ways out,
+  // and never points at Sync.
+  it('conflict names the agent-authored skill and the two ways out, never Sync', () => {
+    const v = deliveryText({ status: 'conflict', conflicts: ['backlog'],
+                             skills: { backlog: { status: 'conflict', error: 'name_conflict: …' } } })
+    expect(v.tone).toBe(DELIVERY_TONE.bad)
+    expect(v.text).toMatch(/^Saved but not delivered: the agent already has its own a skill with that name \(backlog\)/)
+    expect(v.text).toMatch(/its copy is kept and runs/)
+    expect(v.text).toMatch(/Unassign the library skill, or rename the agent's/)
+    expect(v.text).not.toMatch(/Sync/)
+    expect(v.needsSync).toBe(false)
+  })
+
+  it('partial with only conflicts beside the delivered names does not ask for a Sync', () => {
+    const v = deliveryText({ status: 'partial', conflicts: ['backlog'],
+                             skills: { research: { status: 'injected' }, backlog: { status: 'conflict' } } })
+    expect(v.tone).toBe(DELIVERY_TONE.bad)
+    expect(v.text).toContain('(backlog)')
+    expect(v.text).not.toMatch(/Sync/)
+    expect(v.needsSync).toBe(false)
+  })
+
+  it('partial with a failure AND a conflict asks for a Sync for the failure and still names the conflict', () => {
+    const v = deliveryText({ status: 'partial', skills: {
+      a: { status: 'injected' }, b: { status: 'failed', error: 'x' }, c: { status: 'conflict' } } })
+    expect(v.text).toMatch(/did not install \(b\)\. Sync now to retry\./)
+    expect(v.text).toContain('(c)')
     expect(v.needsSync).toBe(true)
   })
 

@@ -71,21 +71,59 @@
 
         <ul v-else class="mt-2 space-y-2">
           <li v-for="s in store.assignedSkills" :key="s.name"
-              class="rounded-lg border border-gray-200 dark:border-gray-700 px-4 py-3">
+              class="rounded-lg border px-4 py-3"
+              :class="isConflict(s.name)
+                ? 'border-status-warning-300 dark:border-status-warning-700'
+                : 'border-gray-200 dark:border-gray-700'"
+              :data-testid="isConflict(s.name) ? 'skill-conflict' : undefined">
             <div class="flex items-start justify-between gap-3">
               <div class="min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
                   <span class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ s.name }}</span>
                   <span v-if="s.version" class="text-[11px] font-mono text-gray-400">{{ s.version.slice(0, 7) }}</span>
+                  <!-- #2914: the durable name-conflict verdict rides the
+                       assignment row, so it shows on load — not only after a
+                       sync from this screen. It replaces the per-run badge for
+                       that skill; the two would say the same thing. -->
+                  <BaseBadge v-if="isConflict(s.name)" variant="warning" dot>
+                    {{ statusLabel('conflict') }}
+                  </BaseBadge>
                   <!-- The injection verdict. Absent = never synced this session,
                        which is stated rather than shown as success. -->
-                  <span v-if="resultFor(s.name)"
+                  <span v-else-if="resultFor(s.name)"
                         class="text-[11px] px-1.5 py-0.5 rounded-full font-medium"
                         :class="statusClass(resultFor(s.name).status)">
                     {{ statusLabel(resultFor(s.name).status) }}
                   </span>
                 </div>
                 <p v-if="s.description" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ s.description }}</p>
+
+                <!-- #2914: which skill, what is running, and the two ways out.
+                     The library package was NOT written — the agent's own
+                     directory is intact and is the copy Claude runs. Sync does
+                     not change this by design. -->
+                <div v-if="isConflict(s.name)"
+                     class="mt-2 text-xs text-status-warning-700 dark:text-status-warning-300">
+                  <p>
+                    This agent already has its own <code class="font-mono">.claude/skills/{{ s.name }}/</code>
+                    — a skill it authored, not this library package. Its copy was left intact and is
+                    what runs; the library version was not installed.
+                  </p>
+                  <p class="mt-1">
+                    Unassign the library skill to keep the agent's, or rename / remove the agent's
+                    directory and sync again to install the library version.
+                  </p>
+                  <BaseButton
+                    v-if="canManage"
+                    variant="secondary"
+                    size="sm"
+                    class="mt-2"
+                    data-testid="skill-conflict-unassign"
+                    :loading="store.saving"
+                    loading-label="Unassigning…"
+                    @click="onUnassign(s.name)"
+                  >Unassign library skill</BaseButton>
+                </div>
 
                 <!-- Named warnings, verbatim and translated. A skill that landed
                      with a missing binary is NOT a success, and this is the line
@@ -178,6 +216,8 @@ import { useRole } from '../composables/useRole'
 // ent#263 shared contract seam — one rendering of the #183 package facts
 // consumed by BOTH this per-agent tab and the Library page's fleet browse.
 import SkillContractChips from './skills/SkillContractChips.vue'
+import BaseBadge from './base/BaseBadge.vue'
+import BaseButton from './base/BaseButton.vue'
 import { deps } from './skills/contract'
 
 const props = defineProps({
@@ -198,6 +238,27 @@ function resultFor(name) {
 }
 
 /**
+ * #2914: a name conflict is durable state on the assignment row (it must show
+ * to an operator who never saw the assign response). The row is authoritative
+ * — both `saveAssignments` and `inject` re-read it — so the session's sync
+ * verdict is OR-ed in only as belt-and-braces, never allowed to hide the row.
+ */
+function isConflict(name) {
+  return store.conflictNames.has(name) || resultFor(name)?.status === 'conflict'
+}
+
+/** The conflict's first way out: drop the library assignment, keep the agent's own skill. */
+async function onUnassign(name) {
+  savedNote.value = ''
+  const next = [...store.assignedNames].filter(n => n !== name)
+  if (await store.saveAssignments(next)) {
+    resetDraft()
+    savedNote.value = `Unassigned ${name} — the agent's own skill stays.`
+    savedTone.value = 'ok'
+  }
+}
+
+/**
  * #183 statuses. `fallback` is the one worth naming precisely: the package
  * could not be delivered whole, so a reduced form went in — a green tick there
  * would be a lie.
@@ -208,12 +269,13 @@ function statusLabel(status) {
     unchanged: 'up to date',
     fallback: 'partial',
     failed: 'failed',
+    conflict: 'name conflict',   // #2914: not installed — the agent's own copy runs
   }[status] || status
 }
 
 function statusClass(status) {
   if (status === 'failed') return 'bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-700 dark:text-status-danger-300'
-  if (status === 'fallback') return 'bg-status-warning-100 dark:bg-status-warning-900/50 text-status-warning-800 dark:text-status-warning-300'
+  if (status === 'fallback' || status === 'conflict') return 'bg-status-warning-100 dark:bg-status-warning-900/50 text-status-warning-800 dark:text-status-warning-300'
   if (status === 'unchanged') return 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'
   return 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300'
 }

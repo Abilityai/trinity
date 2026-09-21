@@ -42,9 +42,11 @@ row is committed and authoritative, delivery is best-effort, NOTHING fails the w
 the HTTP status stays 200 and the body carries an honest report:
 
 ```
-delivery: {status, reason?, skills: {name: {status, error?}}}
+delivery: {status, reason?, conflicts?, skills: {name: {status, error?}}}
   injected        every requested skill landed (or was already present and current)
-  partial         some did; the rest carry their error
+  partial         some did; the rest carry their error (a `conflict` among them is listed in `conflicts[]`)
+  conflict        (#2914) every requested name collides with an agent-authored skill dir — nothing
+                  written, the agent's copy runs; `conflicts[]` names them, Sync would refuse again
   pending_start   the container is stopped — the start path (`skills-on-agent-start.md`) delivers
   in_progress     the injection outlived SKILL_DELIVERY_BUDGET_SECONDS (20 s) and continues in
                   the background; the WS trigger fires when it lands
@@ -116,7 +118,13 @@ The Skills tab's Save note takes its tone from it and arms the Sync nudge only w
 delivery did NOT land; the Library control (`components/skills/AssignedAgents.vue`) renders
 the same rule under its Assign button, since it has no Sync button of its own. MCP passes
 the `delivery` block through verbatim (`skills.ts`, Invariant #13) and its descriptions
-name the vocabulary.
+name the vocabulary. A `conflict` (#2914) reads "Saved but not delivered: the agent
+already has its own skill with that name (…) — its copy is kept and runs. Unassign the
+library skill, or rename the agent's." and never arms the Sync nudge (Sync refuses
+again by design); the Skills tab additionally reads `delivery_status` off the assignment
+rows (`stores/skills.js::conflictNames`) so the badge, the explanation and the inline
+"Unassign library skill" action show on a fresh load, and `inject()` re-reads the rows so
+a resolved conflict clears without a reload.
 
 ## Removal (ent#236)
 
@@ -141,7 +149,7 @@ _finalize_removed_dirs (ONE exec): rmdir the emptied dirs (incl. the skill root)
 |---|---|
 | Only platform-written files die | delete set is the previous injection's own manifest — agent-authored files and runtime artifacts (`__pycache__`, models) are never in it |
 | Directories survive if not empty | `os.rmdir` refuses a non-empty dir, so a skill dir holding agent files stays |
-| Unmanaged dir untouched | no `.trinity-skill.json` ⇒ `not_managed` + `unmanaged_dir_kept` (the mirror of injection's overwrite-only `unmanaged_dir_overwritten` — overwrite is recoverable, deletion is not) |
+| Unmanaged dir untouched | no `.trinity-skill.json` ⇒ `not_managed` + `unmanaged_dir_kept` (the mirror of injection's `conflict` refusal, #2914 — neither side ever writes into a directory the platform did not create) |
 | Meta removed last | while it exists the package is still managed, so an interrupted removal resumes. Included even when the manifest is missing/garbage, or the dir would stay in every future reconcile's inventory with nothing to delete |
 | Truncation (>200 paths) | `removal_truncated` and the meta is **kept** — dropping it would strand the remaining files as unmanaged orphans |
 | Unassign never fails | DB row is authoritative and already committed; a stopped agent / busy lock / dead transport degrades to `removal_deferred:*` and the start-path reconcile finishes it |
@@ -210,7 +218,7 @@ agent /home/developer/.claude/skills/<name>/  (+ .trinity-skill.json provenance)
 | Idempotent start | agent meta `version` == library tree SHA → `unchanged`, no transfer (dep check still runs so CLAUDE.md annotations stay fresh) |
 | Deleted library files propagate | manifest diff prune on next inject |
 | Agent runtime files survive | prune only touches previous-manifest paths — `__pycache__`, downloaded models, agent notes untouched |
-| Same-named agent-authored dir | no meta → overwrite-only + `unmanaged_dir_overwritten`, never pruned |
+| Same-named agent-authored dir | no meta → **refused** as `conflict` before any archive/restore/finalize (#2914): the agent's copy stays byte-for-byte and tracked; the row is stamped `agent_skills.delivery_status='conflict'` (cleared once the name lands, gone on unassign) so the Skills tab shows it on load with an inline Unassign; `force` does not override. Was overwrite + `unmanaged_dir_overwritten` before #2914 |
 | Repo bloat guard | injected names appended to agent's `.gitignore` + untracked, so the 15-min auto-sync (which deliberately commits `.claude/`) never commits platform packages (#1595/#1596 class); Playbooks keep committing |
 | Concurrency | Redis `skill_inject:{name}` SETNX+TTL fail-open lock via the shared `redis_breaker_util.SingleFlightLock` (#1920; injected `_redis_client`, `_acquire_inject_lock` still raises `SkillInjectionBusy` on contention) — outside `agent:*` (`compat_fix` precedent); manual inject → 409, start path → skip |
 | Caps | `SKILL_MAX_BYTES` (10 MiB) / `SKILLS_TOTAL_MAX_BYTES` (50 MiB), env-tunable; over-cap → named error, other skills continue |
@@ -221,6 +229,7 @@ agent /home/developer/.claude/skills/<name>/  (+ .trinity-skill.json provenance)
 {
   "success": true,
   "skills_injected": 2, "skills_unchanged": 17, "skills_failed": 0,
+  "skills_conflict": 1, "conflicts": ["backlog"],
   "results": {
     "clip-video": {
       "success": true, "status": "injected", "files_written": 7,
@@ -230,11 +239,13 @@ agent /home/developer/.claude/skills/<name>/  (+ .trinity-skill.json provenance)
 }
 ```
 
-`status` ∈ `injected | unchanged | fallback | failed`. Warning codes:
+`status` ∈ `injected | unchanged | fallback | failed | conflict` (`conflict` = #2914
+name-conflict refusal: `success: false`, `error: name_conflict: …`, not counted in
+`skills_failed`). Warning codes:
 `missing_binary:*`, `missing_env:*`, `packages_not_checked`, `dep_check_skipped`,
 `skill_too_large` (error), `symlink_skipped:*`, `protected_name_skipped:*`,
 `restore_skipped:*`, `stale_delete_failed:*`, `prune_truncated`,
-`unmanaged_dir_overwritten`, `repair_reinjected`, `multi_file_dropped_old_image`,
+`repair_reinjected`, `multi_file_dropped_old_image`,
 `frontmatter_invalid`, `invalid_skill_name`, `gitignore_update_failed`,
 `finalize_partial:*`.
 
