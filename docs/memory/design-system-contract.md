@@ -91,6 +91,11 @@ Consistency:
 20. Tokens only; primitives only; both themes always.
 21. Domain-scoped stores; single API client; loading flags live in stores, not components.
 
+## Testing a component — the harness mounts (#2918)
+
+- `src/frontend/vitest.config.js` runs `environment: 'node'` by **default**, but it carries `plugins: [vue()]`, `jsdom` and `@vue/test-utils` precisely so a spec can opt in **per file**: put `// @vitest-environment jsdom` on line 1, `import { mount } from '@vue/test-utils'`, mount the SFC, and assert on the rendered DOM, emitted events and store calls. Copy `tests/unit/portalThemeSwitch.spec.js` (theme switch → store → `<html class>`) or `portalComposerDraft.spec.js`. The belief that "this repo's vitest cannot mount" is false and is what routed a fleet-delete confirmation (#2756) and a modal's Esc/focus-trap contract (#2778) into regex-only coverage.
+- **A regex over the component's source is not a test of the component.** `readFileSync(...Panel.vue)` + `toContain('canRemove')` proves the predicate was *written*; `||` for `&&` and an inverted `toggle()` pass it byte-identically. It is acceptable for a spelling pin or an AST-shaped call-site guard, and **not** acceptable as the only coverage for a predicate that gates a destructive action, a keyboard contract, or a store write. `tests/unit/sourceTextRatchet.spec.js` enforces the direction: per-spec counts of source-text reads of `components/`/`views/` SFCs are frozen in `src/frontend/source-text-baseline.json` and may only shrink; a **new** spec is held to zero unless its docblock says why a mount cannot prove what it pins (`// @source-text-pin: <reason>`). Regenerate after paying one down: `node src/frontend/scripts/scan-source-text-specs.mjs src/frontend --baseline src/frontend/source-text-baseline.json`.
+
 ## PR self-check
 
 Before requesting review, verify:
@@ -109,3 +114,4 @@ Before requesting review, verify:
 - [ ] Unbounded sets bounded (internal scroll/pagination/virtualization) with the total stated
 - [ ] One primary action on the view; destructive flows restate consequence with safe-action focus
 - [ ] Numbers use `tabular-nums`; times show relative + absolute-on-hover
+- [ ] Every predicate that gates a destructive verb, a keyboard contract, or a store write is proven by a test that **mounts** the component (`// @vitest-environment jsdom` + `@vue/test-utils`), not by a regex over its source; `tests/unit/sourceTextRatchet.spec.js` holds a new spec to zero source-text reads unless it carries `@source-text-pin: <reason>` (#2918)
