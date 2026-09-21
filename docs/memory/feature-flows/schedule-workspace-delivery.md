@@ -208,8 +208,8 @@ scheduler ──► POST /api/internal/execute-task {deliver_to_workspace_email}
 `public_user_memory_writes` (ent#637) — `id, agent_name, user_email, execution_id,
 triggered_by, schedule_id, previous_notes, new_notes, written_at, undone_at, undone_by`;
 index `(agent_name, user_email, written_at)`; CASCADE in `AGENT_REFS`. Both tracks: SQLite
-`public_user_memory_writes_table`, Alembic `0065_public_user_memory_writes` off
-`0064_executions_search_indexes`.
+`public_user_memory_writes_table`, Alembic `0066_public_user_memory_writes` off
+`0065_agent_skills_delivery_status` (#2920 — the three 2026-09-21 schema PRs are chained).
 
 `agent_schedules.deliver_to_workspace_email TEXT` — nullable, no backfill, no index (it is
 read only through a row already loaded by id). Both tracks per Invariant #3: SQLite

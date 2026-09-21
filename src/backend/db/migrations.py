@@ -4328,7 +4328,7 @@ def _migrate_public_user_memory_writes_table(cursor, conn):
     the execution, its trigger and the schedule. This is also ent#419's third
     layer (write history with rollback), built here because this AC needed it.
 
-    Mirrored by the Alembic revision 0065_public_user_memory_writes.
+    Mirrored by the Alembic revision 0066_public_user_memory_writes.
     """
     cursor.execute(
         """

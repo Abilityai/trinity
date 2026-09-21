@@ -542,7 +542,7 @@ CREATE TABLE public_user_memory_writes (
 );
 CREATE INDEX idx_public_user_memory_writes_lookup ON public_user_memory_writes(agent_name, user_email, written_at);
 ```
-Both tracks: SQLite `public_user_memory_writes_table`, Alembic `0065_public_user_memory_writes`;
+Both tracks: SQLite `public_user_memory_writes_table`, Alembic `0066_public_user_memory_writes`;
 `AgentRef("public_user_memory_writes", "agent_name", Policy.CASCADE)`. Written only by
 `db/public_links.py::write_user_memory_agent_notes`, in the same transaction as the notes
 replace, so `previous_notes` is what the row held at that instant. Not keyed to

@@ -14,14 +14,14 @@ history with rollback).
 ``agent_name`` is a CASCADE entry in ``db/agent_cleanup.py`` so the rows follow
 the agent's lifecycle like ``public_user_memory`` itself.
 
-Revision ID: 0065_public_user_memory_writes
-Revises: 0064_executions_search_indexes
+Revision ID: 0066_public_user_memory_writes
+Revises: 0065_agent_skills_delivery_status
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0065_public_user_memory_writes"
-down_revision = "0064_executions_search_indexes"
+revision = "0066_public_user_memory_writes"
+down_revision = "0065_agent_skills_delivery_status"
 branch_labels = None
 depends_on = None
 

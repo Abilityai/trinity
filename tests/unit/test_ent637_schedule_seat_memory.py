@@ -429,10 +429,12 @@ def test_the_sqlite_runner_carries_the_migration():
 
 
 def test_the_alembic_revision_exists_and_chains_off_the_head():
-    rev = REPO / "src/backend/migrations/versions/0065_public_user_memory_writes.py"
+    rev = REPO / "src/backend/migrations/versions/0066_public_user_memory_writes.py"
     body = rev.read_text()
-    assert 'revision = "0065_public_user_memory_writes"' in body
-    assert 'down_revision = "0064_executions_search_indexes"' in body
+    assert 'revision = "0066_public_user_memory_writes"' in body
+    # Chained off #2920's revision (the three 2026-09-21 schema PRs are stacked
+    # so `dev` never carries two heads off 0064).
+    assert 'down_revision = "0065_agent_skills_delivery_status"' in body
     assert 'has_table("public_user_memory_writes")' in body
     assert "DROP TABLE IF EXISTS public_user_memory_writes" in body
 
