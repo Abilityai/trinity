@@ -23,6 +23,8 @@
   <img src="https://img.shields.io/badge/docker-required-blue.svg" alt="Docker">
 </p>
 
+> Find this useful? ⭐ [Star the repo](https://github.com/abilityai/trinity) — it's how other people find Trinity.
+
 > [!NOTE]
 > **📦 Just released: [v0.9.5](docs/releases/0.9.5.md)** (September 17, 2026). **Workspace** is where the work happens now:
 > - chats per topic
@@ -183,7 +185,11 @@ For a fully non-interactive bring-up, run `./scripts/deploy/start.sh --unattende
 - **API Docs**: http://localhost:8000/docs
 - **MCP Server**: http://localhost:8080/mcp
 
-> **Don't want to run it on your laptop?** Trinity is self-hosted, and the least work is a server of your own: the guided **[DigitalOcean install](https://docs.ability.ai/getting-started/deploying/digitalocean)** gets you a Droplet behind HTTPS in about ten minutes. Questions about a deployment? [Talk to an engineer →](mailto:hello@ability.ai) — an engineer reads this, not a CRM. Reply in one business day, your time zone.
+> **Up and running? ⭐ [Star the repo](https://github.com/abilityai/trinity)** — it's how other people find Trinity. **Ran into a rough edge?** [File an issue](https://github.com/abilityai/trinity/issues/new) — we read them.
+
+> **Don't want to run it on your laptop?** Trinity is self-hosted, and the least work is a server of your own. The **[DigitalOcean 1-Click](https://marketplace.digitalocean.com/apps/trinity?refcode=d1f053807871&action=deploy)** deploys Trinity from the DigitalOcean Marketplace: pick at least 4 GB RAM (8 GB recommended), open `https://<your-droplet-ip>` as soon as it is up, and create your admin account. Prefer a script? The guided **[DigitalOcean install](https://docs.ability.ai/getting-started/deploying/digitalocean)** gets you a Droplet behind HTTPS in about ten minutes. Questions about a deployment? [Talk to an engineer →](mailto:hello@ability.ai) — an engineer reads this, not a CRM. Reply in one business day, your time zone.
+>
+> [![Deploy to DigitalOcean](https://www.deploytodo.com/do-btn-blue.svg)](https://marketplace.digitalocean.com/apps/trinity?refcode=d1f053807871&action=deploy)
 
 > **On DigitalOcean?** The guided installer (`scripts/deploy/trinity-do-create.sh`) takes a few steps and about ten minutes. You install `doctl`, create a Claude subscription token, choose an admin password, and run one command. The result is Trinity on its own Droplet behind HTTPS. See [Deploy on DigitalOcean](https://docs.ability.ai/getting-started/deploying/digitalocean).
 

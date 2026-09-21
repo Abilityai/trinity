@@ -3114,6 +3114,18 @@
         "unit"
       ],
       "description": "A denial every MCP gate RETURNS (the `{error: \"Access denied\"}` envelope agents parse) was audited as `success: true`, because withAudit labels by throw/no-throw. The deny sites now serialise through access.ts::accessDenied, which stamps `context.outcome = {kind: denied, reason}` on the per-call context, and the wrapper reads it after execute: `success: false`, `denied: true`, `error: <reason>`; a thrown backend 403 is marked too. Pins the row for chat_with_agent, a dedicated chat_with_<slug> tool, fan_out, get_report's uniform refusal and the ent#628 enforce wrapper (audit POST captured through a fetch stub, envelopes byte-identical), that the stamp lives on the root context and never on the shared session object, that a stamp-then-throw and a plain throw are labelled correctly -- and, the mechanism half, that every `!allowed` branch and every `error: \"Access denied\"` envelope under src/ reaches the helper."
+    },
+    {
+      "file": "mcp-server/src/tools/executions.test.ts",
+      "feature": "abilityai/trinity-enterprise#653",
+      "added": "2026-09-19",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "access-control",
+        "unit"
+      ],
+      "description": "`search_executions` is a system-agent / human capability: the per-tool canAccess is an ALLOW-LIST of system/user scope (agent, connector, unknown, missing and null principals fail closed), an agent-scoped session is refused in-tool with the audited denial envelope and never reaches the client, permitted scopes are proxied with parameters intact, an absent (OSS 404) or unentitled (403) module answers available:false rather than no-results, and the real TrinityClient builds the enterprise route's query string (driven with `request` stubbed)."
     }
   ]
 }

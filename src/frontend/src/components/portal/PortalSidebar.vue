@@ -184,6 +184,10 @@
                meant. Same token as that header badge; deliberately a DIFFERENT
                colour from the unread pill beside it, because they are
                different obligations. -->
+          <!-- trinity-enterprise#657: unsent text in one of this agent's chats
+               (or in an unsaved new chat with it). Quiet and gray beside the two
+               pills — a state of the person's own work, not an obligation. -->
+          <span v-if="hasDraftFor(a.name)" class="shrink-0 flex items-center" data-testid="agent-draft"><DraftMark /></span>
           <span
             v-if="askCountFor(a.name)"
             class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-500 text-white text-[11px] font-semibold flex items-center justify-center"
@@ -267,6 +271,9 @@
               <span class="block text-sm truncate">{{ r.title || 'Chat' }}</span>
               <span v-if="r.snippet" class="block text-xs text-gray-400 truncate">{{ r.snippet }}</span>
             </span>
+            <!-- trinity-enterprise#657: a search hit is a third row site with no
+                 ChatRow, so the mark is read from the store here. -->
+            <DraftMark v-if="searchRowHasDraft(r)" />
           </div>
         </button>
       </div>
@@ -335,7 +342,10 @@ import PortalAvatar from './PortalAvatar.vue'
 import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
+import DraftMark from '@/components/base/DraftMark.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { agentsWithDrafts, threadKey } from './portalDrafts'
 import {
   groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread, availabilityChip,
   reservesAvailabilitySlot,
@@ -391,6 +401,16 @@ const askCount = computed(() => asksStore.askCount)
 const asksPerAgent = computed(() => asksByAgent(asksStore.openAsks))
 const askCountFor = (name) => asksPerAgent.value[name] || 0
 
+// trinity-enterprise#657: the agents whose row carries the Draft mark. A
+// listed thread's `hasDraft` rides the thread object (the shell's `decorate`,
+// like `unread`); an UNSAVED chat has no thread row, so its agents come from
+// the store — read here for the reason the asks are: one list, never a prop
+// free to disagree with it. Rooms are not propagated (the room row is listed).
+const draftsStore = usePortalDraftsStore()
+const draftAgents = computed(() => agentsWithDrafts(props.threads, draftsStore.newChatDraftAgents))
+const hasDraftFor = (name) => draftAgents.value.has(name)
+const searchRowHasDraft = (r) => draftsStore.keys.has(threadKey(r?.session_id))
+
 // A row key has to include the kind: thread ids and room ids are independent
 // spaces, so two chats of different kinds could collide on a bare id.
 const rowKey = (t) => `${t.is_room ? 'room' : 'thread'}:${t.id || t.session_id}`
@@ -433,6 +453,7 @@ function agentRowTitle(a) {
     unread: waitingFor(a.name),
     askCount: askCountFor(a.name),
     chipTitle: chip ? chip.title : '',
+    hasDraft: hasDraftFor(a.name),
   })
 }
 
@@ -454,6 +475,7 @@ const agentsExpanded = ref(false)
 // never collapsed out of its own result). Both live inside `searchAgents`.
 const agentResults = computed(() => searchAgents(props.roster, props.search, {
   askCounts: asksPerAgent.value,
+  draftAgents: draftAgents.value,
   expanded: agentsExpanded.value,
 }))
 
@@ -492,7 +514,9 @@ const orderedRoster = computed(() => orderRosterAgents(
 
 const shownAgents = computed(() => (isSearching.value
   ? agentResults.value.visible
-  : visibleAgentRows(orderedRoster.value, { expanded: agentsExpanded.value, askCounts: asksPerAgent.value })))
+  : visibleAgentRows(orderedRoster.value, {
+      expanded: agentsExpanded.value, askCounts: asksPerAgent.value, draftAgents: draftAgents.value,
+    })))
 
 // #2641: computed over `shownAgents` — the rows actually RENDERED — not over
 // the whole roster. A stopped agent hidden by search or by the collapse limit

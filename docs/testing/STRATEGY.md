@@ -56,6 +56,14 @@ Two rules keep the three honest:
   is not allowlisted, and a journey may not skip at all (see the acceptance
   bar). Verification means running the command and showing the output — a
   "done" without evidence is not done (CLAUDE.md, Rules of Engagement).
+- **A model turn's 503 is classified, never blanket-skipped (#2889).** The
+  backend answers 503 both for "agent server unreachable" and for "the turn
+  ran and failed" (an exhausted credit balance, a dead token), and a bare
+  `if status == 503: pytest.skip(...)` accepts both. Model-turn tests route the
+  response through `testkit.readiness.require_agent_answer` — it reads the
+  backend's `X-Trinity-Error-Code`; only `network` skips, and the skip names
+  its evidence — and carry `@pytest.mark.requires_model`, which opts them into
+  the session preflight that fails once with one cause (`tests/README.md`).
 
 Feature flows carry a `## Testing` section — a manual runbook for that flow
 (most flows have one), created with the add-testing skill (`/add-testing`,

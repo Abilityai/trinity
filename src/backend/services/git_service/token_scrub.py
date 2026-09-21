@@ -147,6 +147,10 @@ def _alarm_git_token_scrub_unreadable(agent_name: str) -> None:
     `find` enumerated nothing and the probe failed — so an all-zero report says
     nothing about whether a token is there. Nothing is destroyed; the
     remediation simply did not run. Fail-soft.
+
+    Reached only when the repository is unreachable, never when there simply is
+    no repository (#2930) — the caller splits those, so the capabilities
+    explanation below describes the case that actually fired.
     """
     try:
         from database import db
@@ -256,7 +260,21 @@ async def scrub_git_remote_tokens(
         # did not happen, on exactly the hardened installs that will act on the
         # report. Alarmed, not logged: an INFO line indistinguishable from
         # success is how #1638 shipped.
-        _alarm_git_token_scrub_unreadable(agent_name)
+        #
+        # #2930: `root_readable=0` had ONE more cause, and it is the common one.
+        # An agent from a `local:` template has no repository at all, so the
+        # readability test fails on existence, not on permissions — every stock
+        # starter filed this alert on every fresh install, telling a first-time
+        # operator to loosen a capability setting that was not involved. "There
+        # is nothing to sweep" is not an operator's problem; "there is something
+        # I could not look at" still is, and the two are separated by asking
+        # about ROOT (the capability question) rather than about the repo.
+        if report["root_traversable"] and not report["git_present"]:
+            logger.debug(
+                "ent#615: %s has no git repository — nothing to sweep", agent_name
+            )
+        else:
+            _alarm_git_token_scrub_unreadable(agent_name)
     if report["gitmodules_hits"]:
         # A token in the TRACKED `.gitmodules` is already committed and pushed.
         # The sweep cannot fix that; finding one turns "rotate the platform PAT

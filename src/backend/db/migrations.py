@@ -3760,6 +3760,24 @@ def _migrate_portal_chat_state(cursor, conn):
     conn.commit()
 
 
+def _migrate_executions_started_at_index(cursor, conn):
+    """ent#653 — standalone `started_at` index on `schedule_executions`.
+
+    The admin path of every fleet read (`GET /api/executions`, the enterprise
+    execution search) carries no `agent_name` filter, so the composite
+    `idx_executions_agent_started` never applies and `ORDER BY started_at DESC
+    LIMIT n` was a full scan + sort. Portable DDL; the PostgreSQL track adds the
+    same index in Alembic `0064_executions_search_indexes` alongside the
+    trigram (pg_trgm) indexes the search itself rides, which SQLite cannot
+    express and therefore does not get.
+    """
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_started_at "
+        "ON schedule_executions(started_at DESC)"
+    )
+    conn.commit()
+
+
 def _migrate_portal_file_dismissals_table(cursor, conn):
     """Per-viewer dismissal of an agent-shared file (#2582 / ent#548).
 
@@ -4407,4 +4425,5 @@ MIGRATIONS = [
     ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
     ("portal_messages_voice_source", _migrate_portal_messages_voice_source),
     ("portal_file_dismissals_table", _migrate_portal_file_dismissals_table),
+    ("executions_started_at_index", _migrate_executions_started_at_index),
 ]

@@ -3,6 +3,7 @@
 Source text for the DigitalOcean Vendor Portal listing. Rule 11 of DigitalOcean's
 1-Click build standard asks for this in-repo, so the catalog page and the image
 are versioned together rather than the copy living only in the portal.
+`logo.png` (1024x1024, transparent) and `logo.svg` beside this file are the catalog logo uploaded to the portal — upload the PNG; some renderers size an SVG from `width`/`height` and show nothing without them.
 
 ---
 
@@ -127,18 +128,27 @@ docker compose -f docker-compose.hosted.yml restart
 docker compose -f docker-compose.hosted.yml logs -f backend
 ```
 
-**Updating.** Pull the release you want and restart:
+**Updating.** The release is pinned in `.env`. Point it at the release you
+want, pull the matching tree, and restart:
 
 ```bash
 cd /opt/trinity
 sudo git fetch --tags && sudo git checkout <tag>
+sudo sed -i "s/^TRINITY_IMAGE_TAG=.*/TRINITY_IMAGE_TAG=<tag>/" .env
 sudo ./scripts/deploy/start.sh --hosted
 ```
 
+Both steps matter. The checkout updates the scripts and the compose file;
+`TRINITY_IMAGE_TAG` is what compose resolves every image from
+(`start.sh` reads it from the environment or `.env`, never from the checkout).
+Changing only one leaves the instance running one release's scripts against
+another's images, and it reports success either way. The version shown in the
+web interface reflects the images, so use it to confirm the upgrade landed.
+
 Database backups run nightly and before every migration, under
-`~/trinity-data/backups/`. They are on the same disk as the database, so they
-protect against corruption and mistakes, not against losing the Droplet — take
-Droplet snapshots as well.
+`/opt/trinity/trinity-data/backups/`. They are on the same disk as the database,
+so they protect against corruption and mistakes, not against losing the Droplet
+— take Droplet snapshots as well.
 
 ## Support
 

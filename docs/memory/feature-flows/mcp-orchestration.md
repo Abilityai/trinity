@@ -520,6 +520,12 @@ list_recent_executions({ agent_name: "worker-1", limit: 5 })
 
 // And: get_agent_activity_summary for monitoring
 get_agent_activity_summary({ agent_name: "worker-1", hours: 24 })
+
+// And, for the system agent / user-scoped keys only (abilityai/trinity-enterprise#653):
+// a substring grep over past executions' prompt/response/error with bounded
+// excerpts. Proxies an entitlement-gated enterprise route — answers
+// available:false where the module is absent; agent-scoped keys never see it.
+search_executions({ query: "timeout contacting", agents: ["worker-1"], hours: 168 })
 ```
 
 **Polling for results via REST API**:

@@ -94,9 +94,35 @@ What it does beyond running pytest:
   a pass in every summary line pytest prints, which is how whole tiers came to
   be silently uncovered. Adding an allowlist entry requires writing down why
   the condition is acceptable.
+- **A model turn's 503 is classified, never blanket-skipped (#2889)** — a test
+  that POSTs `/chat`, `/task` or `/fan-out` routes the response through
+  `testkit.readiness.require_agent_answer(resp, what="POST /task")` and carries
+  `@pytest.mark.requires_model`. The helper reads the backend's
+  `X-Trinity-Error-Code` header (falling back to transport vocabulary in the
+  body): `network` is a readiness race and skips with the evidence in the reason
+  (still unallowlisted, so the audit keeps flagging it); anything the agent
+  answered — an exhausted credit balance, a dead token, an OOM — **fails** the
+  test and names the body. The marker opts the test into the session-scoped
+  `model_provider_preflight` fixture (`tests/conftest.py`), which fails once,
+  with one cause, when `claude_auth_configured` is false or — with
+  `TEST_AGENT_NAME` set — when one real `/task` probe proves the credential
+  cannot execute; a credential-class verdict seen mid-session fails every later
+  `requires_model` test at setup instead of spending a 120 s call each.
+  `tests/unit/test_2889_readiness_classifier.py` fails CI on a bare
+  `if resp.status_code == 503: pytest.skip(...)` after a model-turn POST.
 - **Nothing can hang it** — every tier carries `--timeout` and
   `--timeout-method=thread` (`signal` re-enters the interpreter from a handler
   and turned one hung read into a pytest INTERNALERROR).
+- **Every declared tier is accounted for** (#2888) — the summary is checked
+  against `DECLARED_TIERS`: a tier with no result row that the caller did not
+  deselect (`--tier`, `--no-pg`) is reported as `NEVER RAN` and fails the run,
+  deselected tiers are listed as `SKIP` and the verdict says `partial`, and any
+  exit before the summary is announced as an abort naming the tiers it left
+  unrun. This is the backstop for the failure mode the previous version had:
+  its unclassified-directory guard (now `tests/harness/check_test_dirs.py`,
+  handed the directory explicitly rather than globbing relative to the cwd)
+  exited 1 before the `api`, `standalone` and `postgres` tiers on every run
+  for three weeks, and nothing said so.
 
 Logs land in `tests/reports/full-<timestamp>/`, one per tier, plus a per-tier
 PASS/FAIL summary table at the end.

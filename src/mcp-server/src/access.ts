@@ -198,6 +198,7 @@ export type ToolAccessPolicy =
 export const AGENT_TARGET_PARAMS: ReadonlySet<string> = new Set([
   "agent_name",
   "agent",
+  "agents",
   "target_agent",
   "source_agent",
 ]);
@@ -335,6 +336,11 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   get_execution_result: { kind: "in-tool", how: EXECUTIONS_GATE },
   get_fan_out_result: { kind: "in-tool", how: EXECUTIONS_GATE },
   get_agent_activity_summary: { kind: "in-tool", how: EXECUTIONS_GATE },
+  search_executions: {
+    kind: "baselined",
+    owner:
+      "backend rejects agent principals on the enterprise execution-search route (reject_agent_principal, abilityai/trinity-enterprise#653); the tool's own canAccess allow-lists system/user scope",
+  },
   // --- events.ts ---
   emit_event: { kind: "none", why: "emits as the calling agent (EVT-001)" },
   subscribe_to_event: { kind: "baselined", owner: EVENT_EDGE },

@@ -10,6 +10,7 @@ import time
 import asyncio
 import concurrent.futures
 from testkit.api_client import TrinityApiClient
+from testkit.readiness import require_agent_answer
 from testkit.assertions import (
     assert_status,
     assert_status_in,
@@ -21,6 +22,7 @@ from testkit.assertions import (
 class TestParallelTaskEndpoint:
     """REQ-PARALLEL-001: Parallel task endpoint tests."""
 
+    @pytest.mark.requires_model
     def test_task_endpoint_exists(
         self,
         api_client: TrinityApiClient,
@@ -35,8 +37,7 @@ class TestParallelTaskEndpoint:
 
         # Should not be 404 (endpoint exists)
         # May be 503 if agent not ready
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready (503)")
+        require_agent_answer(response, what="POST /task")
 
         assert response.status_code != 404, "Task endpoint should exist"
 
@@ -69,6 +70,7 @@ class TestParallelTaskResponse:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_task_returns_response(
         self,
         api_client: TrinityApiClient,
@@ -81,8 +83,7 @@ class TestParallelTaskResponse:
             timeout=120.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready (503)")
+        require_agent_answer(response, what="POST /task")
 
         assert_status(response, 200)
         data = assert_json_response(response)
@@ -94,6 +95,7 @@ class TestParallelTaskResponse:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_task_has_metadata(
         self,
         api_client: TrinityApiClient,
@@ -106,8 +108,7 @@ class TestParallelTaskResponse:
             timeout=120.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /task")
 
         assert_status(response, 200)
         data = response.json()
@@ -117,6 +118,7 @@ class TestParallelTaskResponse:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_task_has_execution_log(
         self,
         api_client: TrinityApiClient,
@@ -129,8 +131,7 @@ class TestParallelTaskResponse:
             timeout=120.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /task")
 
         assert_status(response, 200)
         data = response.json()
@@ -145,6 +146,7 @@ class TestParallelTaskOptions:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_task_with_model_override(
         self,
         api_client: TrinityApiClient,
@@ -160,14 +162,14 @@ class TestParallelTaskOptions:
             timeout=120.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /task")
 
         # Should work (200) or fail gracefully if model not available
         assert_status_in(response, [200, 400, 500])
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_task_with_timeout(
         self,
         api_client: TrinityApiClient,
@@ -183,8 +185,7 @@ class TestParallelTaskOptions:
             timeout=120.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /task")
 
         assert_status_in(response, [200, 504])  # 504 if timeout
 
@@ -194,6 +195,7 @@ class TestParallelTaskStateless:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_task_does_not_affect_chat_history(
         self,
         api_client: TrinityApiClient,
@@ -214,8 +216,7 @@ class TestParallelTaskStateless:
             timeout=120.0,
         )
 
-        if task_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(task_response, what="POST /task")
 
         assert_status(task_response, 200)
 
@@ -231,6 +232,7 @@ class TestParallelTaskStateless:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_tasks_have_unique_session_ids(
         self,
         api_client: TrinityApiClient,
@@ -244,8 +246,7 @@ class TestParallelTaskStateless:
             timeout=120.0,
         )
 
-        if response1.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response1, what="POST /task")
 
         assert_status(response1, 200)
         session_id_1 = response1.json().get("session_id")
@@ -268,6 +269,7 @@ class TestParallelExecution:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_multiple_tasks_can_start_without_queue(
         self,
         api_client: TrinityApiClient,
@@ -296,8 +298,7 @@ class TestParallelExecution:
 
         # Neither should return 429 (queue full)
         # Tasks may return 503 if agent not ready, that's OK
-        if response1.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response1, what="POST /task")
 
         # 429 would indicate queuing, which shouldn't happen for /task
         assert response1.status_code != 429, "Parallel tasks should not be queued"
@@ -305,6 +306,7 @@ class TestParallelExecution:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_task_timeout_returns_504(
         self,
         api_client: TrinityApiClient,
@@ -321,8 +323,7 @@ class TestParallelExecution:
             timeout=30.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /task")
 
         # Should either complete quickly or timeout
         assert_status_in(response, [200, 504])
@@ -366,6 +367,7 @@ class TestAsyncModeResponse:
     """REQ-PARALLEL-007: Async mode response format tests."""
 
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_returns_immediately(
         self,
         api_client: TrinityApiClient,
@@ -381,8 +383,7 @@ class TestAsyncModeResponse:
             timeout=10.0,  # Should return in < 1 second, not wait for task completion
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready (503)")
+        require_agent_answer(response, what="POST /task")
 
         assert_status(response, 200)
         data = assert_json_response(response)
@@ -397,6 +398,7 @@ class TestAsyncModeResponse:
             "Message should mention polling endpoint"
 
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_false_works_synchronously(
         self,
         api_client: TrinityApiClient,
@@ -412,8 +414,7 @@ class TestAsyncModeResponse:
             timeout=120.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready (503)")
+        require_agent_answer(response, what="POST /task")
 
         assert_status(response, 200)
         data = assert_json_response(response)
@@ -425,6 +426,7 @@ class TestAsyncModeResponse:
             "Should not return async 'accepted' status"
 
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_default_is_synchronous(
         self,
         api_client: TrinityApiClient,
@@ -437,8 +439,7 @@ class TestAsyncModeResponse:
             timeout=120.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready (503)")
+        require_agent_answer(response, what="POST /task")
 
         assert_status(response, 200)
         data = assert_json_response(response)
@@ -453,6 +454,7 @@ class TestAsyncModeExecution:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_creates_execution_record(
         self,
         api_client: TrinityApiClient,
@@ -469,8 +471,7 @@ class TestAsyncModeExecution:
             timeout=10.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /task")
 
         assert_status(response, 200)
         data = response.json()
@@ -498,6 +499,7 @@ class TestAsyncModeExecution:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_polling_endpoint_returns_execution(
         self,
         api_client: TrinityApiClient,
@@ -514,8 +516,7 @@ class TestAsyncModeExecution:
             timeout=10.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /task")
 
         assert_status(response, 200)
         data = response.json()
@@ -545,6 +546,7 @@ class TestAsyncModeExecution:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_execution_completes(
         self,
         api_client: TrinityApiClient,
@@ -561,8 +563,7 @@ class TestAsyncModeExecution:
             timeout=10.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /task")
 
         if response.status_code == 429:
             pytest.skip("Agent at capacity from prior async tests")
@@ -605,6 +606,7 @@ class TestAsyncModeExecution:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_with_options(
         self,
         api_client: TrinityApiClient,
@@ -622,8 +624,7 @@ class TestAsyncModeExecution:
             timeout=10.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /task")
 
         if response.status_code == 429:
             pytest.skip("Agent at capacity from prior async tests")
@@ -637,6 +638,7 @@ class TestAsyncModeExecution:
             assert "execution_id" in data
 
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_multiple_concurrent_tasks(
         self,
         api_client: TrinityApiClient,
@@ -656,8 +658,7 @@ class TestAsyncModeExecution:
                 timeout=10.0,
             )
 
-            if response.status_code == 503:
-                pytest.skip("Agent server not ready")
+            require_agent_answer(response, what="POST /task")
 
             if response.status_code == 429:
                 pytest.skip("Agent at capacity from prior async tests")
@@ -684,6 +685,7 @@ class TestAsyncModeActivities:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_creates_task_activity(
         self,
         api_client: TrinityApiClient,
@@ -711,8 +713,7 @@ class TestAsyncModeActivities:
             timeout=10.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /task")
 
         if response.status_code == 429:
             pytest.skip("Agent at capacity from prior async tests")
@@ -749,6 +750,7 @@ class TestAsyncModeUnifiedExecutor:
       - save_to_session guarded on SUCCESS (E1 fix)
     """
 
+    @pytest.mark.requires_model
     def test_async_mode_at_capacity_queues_task(
         self,
         api_client: TrinityApiClient,
@@ -787,8 +789,7 @@ class TestAsyncModeUnifiedExecutor:
                 },
                 timeout=10.0,
             )
-            if first.status_code == 503:
-                pytest.skip("Agent not ready")
+            require_agent_answer(first, what="POST /task")
             if first.status_code == 429:
                 pytest.skip("Slots still occupied from prior tests — rerun isolated")
             assert_status(first, 200)
@@ -816,6 +817,7 @@ class TestAsyncModeUnifiedExecutor:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_activity_has_parallel_mode_flag(
         self,
         api_client: TrinityApiClient,
@@ -832,8 +834,7 @@ class TestAsyncModeUnifiedExecutor:
             json={"message": "What is 2+2?", "async_mode": True},
             timeout=10.0,
         )
-        if resp.status_code == 503:
-            pytest.skip("Agent not ready")
+        require_agent_answer(resp, what="POST /task")
         if resp.status_code == 429:
             pytest.skip("Agent at capacity from prior test")
         assert_status(resp, 200)
