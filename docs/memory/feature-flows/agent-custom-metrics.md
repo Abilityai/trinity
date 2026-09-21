@@ -1,13 +1,90 @@
 # Agent Custom Metrics - Feature Flow
 
-> **Status (#2492)**: the frontend half is GONE — `MetricsPanel.vue` was deleted as unreferenced (it had zero importers; the metrics API below remains live and MCP/agent-side declarations still work). Re-adding a renderer is a feature decision, not a revert.
+> **Status (ent#477)**: `template.yaml metrics:` now has a **backend reader and
+> a per-agent registry**. The declaration half of this flow is no longer
+> "parsed in the container on every read, validated nowhere" — see
+> [The declared metric registry](#the-declared-metric-registry-ent477) below,
+> which is the current shape. The `metrics.json` VALUE path documented further
+> down is **superseded** by `record_metrics` (ent#478) and re-backed by ent#479;
+> it is unchanged in code and still the only source of values today.
+
+> **Status (#2492)**: the frontend half is GONE — `MetricsPanel.vue` was deleted as unreferenced (it had zero importers; the metrics API below remains live and MCP/agent-side declarations still work). Re-adding a renderer is a feature decision, not a revert. ent#479 owns the definitions/values renderer.
 
 > **Updated**: 2026-01-23 - Verified line numbers and added Dashboard Widget system documentation (dashboard.yaml).
 
 **Feature ID**: 9.9
 **Status**: Implemented
 **Date**: 2025-12-10
-**Last Updated**: 2026-01-23
+**Last Updated**: 2026-09-21 (ent#477 — declared metric registry)
+
+## The declared metric registry (ent#477)
+
+The block an author writes is now read by the **backend**, validated, and
+persisted per agent. That is what gives ent#478 a schema to validate recorded
+points against and ent#479 definitions to render with.
+
+```
+template.yaml `metrics:`
+  │
+  ├─ create (github: / local: / snapshot import)
+  │     crud.py resolver → tr.declared_metrics = metric_registry
+  │                          .declared_metrics_from_template(...)
+  │     crud._materialize_agent_files → reconcile_declared_metrics(source="create")
+  │                                     (non-fatal, ghost-skipped, inside the
+  │                                      destructive rollback fence)
+  │
+  ├─ git pull ✓ / reset-to-main ✓ / sync strategy=pull_first ✓
+  │     routers/git.py::_refresh_metric_registry  (non-fatal; the summary goes
+  │       to the log + the existing _audit_git details, NOT the response body)
+  │
+  ├─ container start  (T1)
+  │     lifecycle.start_agent_internal → metric_registry
+  │       .spawn_refresh_from_running_agent(source="start")   fire-and-forget
+  │
+  └─ POST /api/agents/{name}/metrics/definitions/refresh
+        routers/agent_files.py  (AuthorizedAgentByName, running agent only)
+
+  every live path ───► metric_registry.refresh_from_running_agent
+                          docker exec `timeout N head -c 256K template.yaml`
+                          → utils.safe_yaml.load_template_yaml
+                          → services/template_metrics.normalize_declared_metrics
+                          → db.metric_definitions.reconcile()
+                                insert · update · revive · retire
+                                (UNIQUE(agent_name, name), one transaction)
+                  ▲
+  GET /api/agents/{name}/metrics/definitions ── AuthorizedAgentByName ──┘
+  services/compatibility/static_checks.c_d009 ── metric_shape_errors (no DB)
+```
+
+**Key properties**
+
+| Property | Why |
+|---|---|
+| The reader (`services/template_metrics.py`) is a stdlib-only leaf and **never raises** | The creation path sits inside the destructive rollback fence; `template_service` imports the sibling leaves, so an import back would close a cycle |
+| An entry with **any** error is dropped and named | The registry must never hold a half-valid definition — ent#478 validates points against these rows |
+| An **unreadable** template changes nothing | A failed exec is absence of evidence, not "the author removed the block" (#2196). Only a template that *parsed* and carries no `metrics:` retires rows |
+| A **`type` change is refused** | Points are stored by name; a shape flip makes prior points uninterpretable. `type_conflict` records the refusal and the definitions read surfaces it |
+| Rows are retired, never deleted | Points recorded under a name still need a definition to interpret them |
+| The live read uses `execute_command_in_container`, never the volume path | The stopped-agent read spawns a throwaway container, and no request-triggered route may create one as a side effect of a read (409 instead) |
+
+**Files**
+
+| Layer | File |
+|---|---|
+| Reader (leaf) | `src/backend/services/template_metrics.py` |
+| Store | `src/backend/db/metric_definitions.py` (+ `schema.py`, `tables.py`, `migrations.py`, `migrations/versions/0065_metric_definitions.py`, `agent_cleanup.py`, `database.py` facade) |
+| Service | `src/backend/services/metric_registry.py` |
+| Hooks | `services/agent_service/crud.py`, `routers/git.py`, `services/agent_service/lifecycle.py` |
+| Routes | `src/backend/routers/agent_files.py` |
+| Compatibility | `services/compatibility/{spec,static_checks}.py` — `D-009` |
+
+**Known gap**: an agent that runs `git pull` itself without restarting is
+covered by no hook. The remedy is the refresh route (and, from ent#478, an
+undeclared-metric 422 carrying `hint: "refresh"`).
+
+Requirement: `docs/memory/requirements/lifecycle-observability.md` §47.
+
+---
 
 ## Overview
 

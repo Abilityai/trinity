@@ -797,6 +797,33 @@ CREATE TABLE agent_compatibility_results (
 );
 ```
 
+**metric_definitions** (trinity-enterprise#477 — see [requirements §47](../requirements/lifecycle-observability.md) and [agent-custom-metrics.md](../feature-flows/agent-custom-metrics.md)). The per-agent **declared metric registry**: one row per metric an agent's `template.yaml metrics:` block declares, reconciled at create / git pull / reset / sync-`pull_first` / container start / explicit refresh. Dual-track migration (SQLite `metric_definitions_table` + Alembic `0065_metric_definitions`); cascade/rename via `AGENT_REFS` (CASCADE both halves — ent#478 validates points against these rows, so a stale row under a reused agent name would ACCEPT another tenant's points). `UNIQUE(agent_name, name)` is the **rule, not a performance index** — it is `reconcile`'s `on_conflict_do_update` target, so it is declared in `db/tables.py` too (the ent#366 lesson: autogenerate proposes dropping an index the model does not know about, and accepting that turns one reconcile into a second row per metric on every pull). **No CHECK constraints**: `test_1819_rename_cascade_parity` seeds a placeholder row per AGENT_REFS table from NOT NULL introspection, and a `CHECK (type IN …)` breaks that seed — the enums are enforced by the one writer's one parser (`services/template_metrics.py`). Rows are **retired, never deleted** (`status`), because points stored by name still need a definition to interpret them; `type_conflict` records a type change the store **refused** (a shape flip would make prior points uninterpretable) and is cleared when the template agrees again:
+```sql
+CREATE TABLE metric_definitions (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    name TEXT NOT NULL,                  -- ^[a-z][a-z0-9_]{0,63}$ — ent#478's join key
+    type TEXT NOT NULL,                  -- counter|gauge|percentage|status|duration|bytes
+    label TEXT, description TEXT, unit TEXT,
+    warning_threshold REAL, critical_threshold REAL,
+    status_values_json TEXT,             -- [{value, color, label}] for type=status
+    cadence TEXT,                        -- as declared ("1h", "PT15M")
+    cadence_seconds INTEGER,             -- normalized ONCE; ent#479 never re-parses
+    direction TEXT NOT NULL DEFAULT 'neutral',      -- up_good|down_good|neutral
+    aggregation TEXT NOT NULL DEFAULT 'last',       -- last|sum|avg
+    dimensions_json TEXT,                -- allowed dimension keys (JSON array)
+    extensions_json TEXT,                -- the `x-` escape hatch, ≤20 keys / 1 KB
+    definition_hash TEXT,                -- sha256 of the canonical normalized entry
+    type_conflict TEXT,                  -- a REFUSED type change, surfaced by the read
+    status TEXT NOT NULL DEFAULT 'active',          -- active|retired
+    source TEXT,                         -- create|import|pull|reset|sync|start|refresh
+    first_declared_at TEXT, last_synced_at TEXT, retired_at TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(agent_name, name)
+);
+-- idx_metric_definitions_agent_status (agent_name, status)
+```
+
 **user_ui_preferences** (trinity-enterprise#413, OSS-core — see [Dashboard Grid View](../feature-flows/dashboard-grid-view.md#layout-model)).
 Dual-track migration (SQLite `user_ui_preferences_table` + Alembic `0053_user_ui_preferences`).
 A GENERIC per-user UI-preference record: `(user_id, key)` → an opaque JSON object, size-capped

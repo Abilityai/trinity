@@ -858,3 +858,120 @@ AI tier is not.
 replay/shadow evaluation (blocked on #1084 fail-closed + #1408).
 
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
+
+---
+
+## 47. Declared Metric Registry (trinity-enterprise#477)
+
+**Epic**: ent#476 (agent-declared metrics). **Siblings**: ent#478 (`record_metrics` + `metric_points`), ent#479 (read + freshness), ent#482 (wizards), ent#483 (validator parity), ent#80 (cross-agent query).
+
+### 47.1 The gap
+
+`template.yaml metrics:` has been a documented block since the Custom Metrics section was written, and it has **never had a backend reader**. The only code that looked at it lived inside the agent container (`agent_server/routers/info.py`), parsing it afresh on every read and validating nothing — which is why compatibility check `D-006` ("`metrics:` has no backend reader") was retired rather than implemented. The consequence: nothing on the platform side knows what an agent claims to measure, so there is no schema to validate a recorded point against and no definition to render a value with.
+
+### 47.2 What ships
+
+A per-agent **metric registry** (`metric_definitions`) built from the declared block by one tolerant reader, reconciled at every point the template can change.
+
+**Declared fields** (frozen, operator ruling 2026-09-21). Documented before: `name`, `type` (`counter` | `gauge` | `percentage` | `status` | `duration` | `bytes`), `label`, `description`, `unit`, `warning_threshold`, `critical_threshold`, and status `values[]` (`{value, color, label}`). Added here:
+
+| Field | Meaning | Grammar |
+|---|---|---|
+| `cadence` | expected interval between points; ent#479's stale rule is "no point within 2× cadence" | `<n>(s\|m\|h\|d\|w)` or ISO 8601 `PnW` / `P[nD][T[nH][nM][nS]]`, normalized to `cadence_seconds`, `60s ≤ c ≤ 366d`. **Years and months are rejected** — they are not fixed durations, so they cannot normalize to a seconds count a freshness rule can compare against |
+| `direction` | which way is good | `up_good` \| `down_good` \| `neutral` (default `neutral`) |
+| `aggregation` | how a window collapses | `last` \| `sum` \| `avg` (default `last`) |
+| `dimensions[]` | the dimension keys ent#478 will accept on a point | each matching the `name` charset, ≤ 10 |
+
+`x-` prefixed keys pass through untouched and are preserved in `extensions_json` (≤ 20 keys, ≤ 1 KB), so a tool that annotates a declaration survives a round-trip.
+
+**Caps**: 50 metrics per agent, 50 status values, 10 dimensions; `label` ≤ 200, `description` ≤ 1000, `unit` ≤ 32, status `value` ≤ 64. `name` matches `^[a-z][a-z0-9_]{0,63}$` — it is the join key ent#478 stores points under and ent#479 renders, so a case-only variant is a validation error, never a second series.
+
+### 47.3 Reader contract — total, never fatal
+
+`services/template_metrics.py` is a stdlib-only leaf, a third instance of the ent#89 `schedules:` / #1704 `plugins:` idiom: two public functions (`metric_shape_errors`, `normalize_declared_metrics`) over one private `_parse`, so the reported errors and the accepted entries are structurally unable to disagree.
+
+- **Never raises.** A `template.yaml` is untrusted input (bundled, arbitrary `github:` repos, or uploaded `local:`), and the creation path runs inside the destructive rollback fence — one raise there would cost a successful agent creation.
+- **An entry with any error is DROPPED** and named. The registry never holds a half-valid definition, because ent#478 validates incoming points against these rows and a row assembled from the half that parsed would accept points its author never declared.
+- **Unknown keys are named with a did-you-mean**; a bad type never becomes a boot failure.
+- **Errors echo indices, key names, type names and closed-enum values only** — never `name`, `label` or `description`. The list is persisted into `agent_compatibility_results.checks_json` and rendered in the UI (the ent#89 `_safe_echo` rule).
+
+### 47.4 Reconcile — set-diff, template-is-truth
+
+`MetricDefinitionOperations.reconcile(agent_name, declared, source)` is one SELECT, a batched conflict-safe upsert and one retire UPDATE inside a single transaction. Four outcomes per metric: **insert**, **update** (the `definition_hash` moved), **revive** (a retired name declared again), **retire** (an active row the template no longer declares).
+
+Update-in-place is correct here where the ent#89 schedules materializer had to be skip-by-name, because **the template is the only writer** — there is no operator edit surface for a definition, so an update cannot clobber a human choice.
+
+Rows are **never deleted** by reconcile, only retired: points recorded under a name still need a definition to interpret them.
+
+**A `type` change is REFUSED** (ruling T5). `metric_points` are keyed by `(agent_name, name)`, so flipping `status` → `gauge` would leave every prior point uninterpretable. The stored row keeps its type, the declared-but-refused type is recorded in `type_conflict` (cleared the moment the template agrees again), and the refusal is named in the reconcile summary, logged at WARNING, and surfaced by the definitions read. **Changing a metric's type is a new metric name; the old one retires** — an honest series break.
+
+### 47.5 Triggers
+
+| Trigger | Source of the template | `source` |
+|---|---|---|
+| Agent creation — `github:`, `local:`, snapshot import | the dict the creation resolver already parsed (one read, no second source that can disagree) | `create` |
+| `POST …/git/pull` success | live `template.yaml`, read from the running container | `pull` |
+| `POST …/git/reset-to-main-preserve-state` success | same | `reset` |
+| `POST …/git/sync` success **with `strategy=pull_first`** | same | `sync` |
+| Container start | same, fire-and-forget beside the #2069 readiness-gated slot | `start` |
+| `POST …/metrics/definitions/refresh` | same | `refresh` |
+
+The start hook and the explicit refresh route exist because of the **dominant** staleness path: an agent edits its own `metrics:` block in-container and the 15-minute auto-sync **pushes** it, so no backend `pull` ever fires and no git hook ever sees the change.
+
+**Every hook is non-fatal**, and the live read never uses the stopped-agent volume path (which spawns a throwaway container — no request-triggered route may create a container as a side effect of a read). Transport is `docker_service.execute_command_in_container` (fixed argv, output capped at 256 KB before the parse), the compatibility collector's own door, and the parse is the backend's hardened loader — the same parse creation used.
+
+**Never retire on absence of evidence** (#2196). A failed exec, an empty read, an oversized file, an unparseable template and a stopped agent are all *unreadable*, and the registry is left exactly as it was. Only a template that **parsed** and genuinely carries no `metrics:` retires its rows.
+
+### 47.6 API
+
+- `GET /api/agents/{name}/metrics/definitions?include_retired=` — `AuthorizedAgentByName`. Returns `{agent_name, declared, definitions[], message, policy}`. `declared` keys on active rows; the empty state names the next action rather than returning a bare `[]`. Retired definitions are served only on request. `type_conflict` is surfaced here — D-009 is a pure static check with no DB read, so this response and the refresh summary are the only two places an author learns a declaration is being refused.
+- `POST /api/agents/{name}/metrics/definitions/refresh` — `AuthorizedAgentByName`, running agent only. **409 `agent_not_running`**, **503 `template_unreadable`** (named reasons on `X-Refresh-Unavailable`, never a generic 500). A *use*, not a grant: it re-reads the caller's own accessible agent's file and can reach no other agent, so an agent's own scoped key may refresh its own registry and a shared user who can already `pull` may too. Idempotent by construction, so Invariant #18 does not apply (no execution is created).
+
+No MCP tool ships here (ruling T3): ent#479's `get_metrics` returns definitions + values + staleness in one tool, and a second read tool would be folded or orphaned. The `# mcp:` header on `routers/agent_files.py` names it, so `/validate-architecture` reads the two routes as deliberate.
+
+### 47.7 Compatibility — D-009
+
+**`D-009` "template.yaml `metrics:` entries are well-formed"** — SOFT, STATIC, fail-CLOSED, delegating to `metric_shape_errors`. A finding is exactly an entry the registry refused to hold, because both answers come out of the same `_parse`.
+
+SOFT on the T-018 precedent: a malformed entry is dropped and ent#478 then rejects its points with a named 422, so the author is told twice; HARD would flip a whole agent to incompatible over a mistyped label.
+
+**D-006 is not revived.** Its premise ("`metrics:` has no backend reader") expired with this issue, but a retired id is never reissued — persisted `checks_json` rows would be re-read as a verdict about a different check. D-006 → D-009 is recorded as a mapping in `spec.py` and the spec doc's retired table.
+
+### 47.8 Retention / cap contract — names now, enforcement in ent#478
+
+The frozen schema calls for Settings-surfaced retention and a daily point cap. **Neither knob is minted in this issue** (ruling T2): a window with no sweeper and a cap with no write boundary are controls that change a number nothing reads — a dishonest affordance (Product Quality Bar 4). What ships is the **contract**, published in the definitions response flagged `enforced: false`:
+
+| Name | Default | Bounds | Enforced by |
+|---|---|---|---|
+| `metrics_retention_days` | `365` | `0-3650`, where `0` = disabled | ent#478, together with its `_guard_allows` sweep site |
+| `metrics_daily_point_cap` | `100000` | per agent per day | ent#478, at the `record_metrics` write boundary |
+
+Two facts ent#478 inherits, verified against the code rather than assumed:
+
+1. **There is no env tier.** `SettingsService.get_ops_setting` resolves a `system_settings` row, else the `OPS_SETTINGS_DEFAULTS` entry — the frozen schema's "`system_settings` → env → default" ladder **does not exist today** and has to be built alongside the sweep.
+2. **`0` means "disabled"** on every sibling retention window, which is why the bounds are `0-3650` and not `1-3650`.
+
+`RETENTION_OPS_KEYS` membership requires a `_guard_allows` sweep site (`test_1771a_retention_edges`) and is mirrored by the private retention module, so registering `metrics_retention_days` ahead of its sweeper turns two unrelated suites red.
+
+### 47.9 Legacy `metrics.json` — superseded, not removed
+
+`GET /api/agents/{name}/metrics` is **unchanged in code**. The `metrics.json` write path it reads is *superseded* by `record_metrics` (ent#478), which validates each point against this registry. The URL keeps its shape and ent#479 re-backs it with the point store — also replacing the 30-day staleness rule with the `2 × cadence` rule `cadence_seconds` makes possible. There is no third write path.
+
+### 47.10 Lifecycle
+
+`metric_definitions` is registered in `AGENT_REFS` with `Policy.CASCADE` on both halves. A purge must not leave definitions addressed to a name that is gone (ent#478 would then accept points against a reused agent name — cross-tenant), and a rename must carry them or the agent's next reconcile mints a second full set under the new name while the old set stays visible.
+
+### 47.11 Known gap
+
+No backend hook covers an agent that runs `git pull` **itself** without restarting. The remedy is the explicit refresh route (and, from ent#478, an undeclared-metric 422 carrying `hint: "refresh"`).
+
+### Acceptance
+
+- [x] `template.yaml metrics:` has a backend reader that is total, bounded, and names every malformed entry
+- [x] A per-agent registry persists declared definitions on both DB tracks, with `UNIQUE(agent_name, name)`
+- [x] Creation (all three resolver branches), pull, reset, sync-`pull_first`, container start and an explicit refresh all reconcile it
+- [x] A removed metric retires; a re-declared one revives the same row; an unreadable template changes nothing
+- [x] A `type` change is refused, recorded in `type_conflict`, and surfaced
+- [x] `GET`/`POST` definitions routes gate on `AuthorizedAgentByName` with named 409/503 reasons
+- [x] `D-009` reports what the registry refused; `D-006` stays retired
+- [x] The retention/cap contract is written down with its owner; no knob is minted

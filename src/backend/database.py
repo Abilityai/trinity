@@ -151,6 +151,7 @@ from db.access_requests import AccessRequestOperations
 from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
 from db.compatibility import CompatibilityOperations
+from db.metric_definitions import MetricDefinitionOperations
 from db.sync_state import SyncStateOperations
 from db.idempotency import IdempotencyOperations
 from db.loops import LoopOperations
@@ -1015,6 +1016,7 @@ class DatabaseManager:
         self._audit_ops = PlatformAuditOperations()
         self._canary_ops = CanaryOperations()
         self._compatibility_ops = CompatibilityOperations()  # #668 agent compatibility
+        self._metric_definition_ops = MetricDefinitionOperations()  # ent#477 metric registry
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
@@ -3811,6 +3813,26 @@ class DatabaseManager:
     def count_agents_with_hard_compatibility_findings(self) -> int:
         """Fleet aggregation: number of agents with ≥1 HARD compatibility finding."""
         return self._compatibility_ops.count_agents_with_hard_findings()
+
+    # =========================================================================
+    # Declared metric registry (ent#477 — delegated to db/metric_definitions.py)
+    # =========================================================================
+    #
+    # `DatabaseManager` delegates BY NAME — there is no `__getattr__` passthrough
+    # — so a method reachable only through `db.<name>(...)` must be listed here
+    # or it `AttributeError`s at runtime while every mocked test stays green
+    # (learning 2026-07-06). `test_ent477_metric_registry.py` derives the
+    # required set by scanning `services/metric_registry.py` for `db.<name>(`.
+
+    def list_metric_definitions(self, agent_name: str, include_retired: bool = False):
+        """Declared metric definitions for an agent. See MetricDefinitionOperations."""
+        return self._metric_definition_ops.list_for_agent(
+            agent_name, include_retired=include_retired
+        )
+
+    def reconcile_metric_definitions(self, agent_name: str, declared, source: str):
+        """Set-diff the declared metrics into the registry; returns a summary dict."""
+        return self._metric_definition_ops.reconcile(agent_name, declared, source)
 
     # =========================================================================
     # Idempotency keys (RELIABILITY-006, #525 — delegated to db/idempotency.py)

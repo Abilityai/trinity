@@ -4292,6 +4292,62 @@ def _migrate_schedule_workspace_delivery(cursor, conn):
     )
     conn.commit()
 
+def _migrate_metric_definitions_table(cursor, conn):
+    """trinity-enterprise#477 — the declared metric registry.
+
+    One row per metric an agent's `template.yaml metrics:` block declares.
+    `UNIQUE(agent_name, name)` is the conflict target `MetricDefinitionOperations
+    .reconcile` upserts against — without it two workers reconciling the same
+    agent concurrently would each insert, and ent#478 would then find two
+    definitions for one point name.
+
+    No CHECK constraints on the enum columns: `test_1819_rename_cascade_parity`
+    seeds a placeholder row per AGENT_REFS table from NOT NULL introspection,
+    and a CHECK would break that seed. The enums are enforced by the one
+    reader (`services/template_metrics.py`).
+
+    Mirrored by the Alembic revision 0065_metric_definitions.
+    """
+    cursor.execute("PRAGMA table_info(metric_definitions)")
+    if cursor.fetchall():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS metric_definitions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL,
+            label TEXT,
+            description TEXT,
+            unit TEXT,
+            warning_threshold REAL,
+            critical_threshold REAL,
+            status_values_json TEXT,
+            cadence TEXT,
+            cadence_seconds INTEGER,
+            direction TEXT NOT NULL DEFAULT 'neutral',
+            aggregation TEXT NOT NULL DEFAULT 'last',
+            dimensions_json TEXT,
+            extensions_json TEXT,
+            definition_hash TEXT,
+            type_conflict TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            source TEXT,
+            first_declared_at TEXT,
+            last_synced_at TEXT,
+            retired_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(agent_name, name)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_metric_definitions_agent_status "
+        "ON metric_definitions(agent_name, status)"
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4426,4 +4482,5 @@ MIGRATIONS = [
     ("portal_messages_voice_source", _migrate_portal_messages_voice_source),
     ("portal_file_dismissals_table", _migrate_portal_file_dismissals_table),
     ("executions_started_at_index", _migrate_executions_started_at_index),
+    ("metric_definitions_table", _migrate_metric_definitions_table),
 ]

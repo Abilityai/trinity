@@ -126,6 +126,59 @@ async def get_git_status(
     return status
 
 
+async def _refresh_metric_registry(agent_name: str, source: str) -> Dict:
+    """Re-read `template.yaml` and reconcile the metric registry (ent#477).
+
+    Every git write that can bring a NEW `template.yaml` into the container
+    (`pull`, `reset-to-main-preserve-state`, `sync` with `strategy=pull_first`)
+    is a point at which the declared metrics may have changed under the
+    registry's feet — and none of them ever re-read the file before ent#477.
+
+    Non-fatal by construction and deliberately **shape-preserving**: the result
+    goes to the log and to the existing `_audit_git` success `details`, never to
+    the response body. The git panel and the MCP `git_pull` tool both consume
+    these responses, and an opaque extra key on a pull result is worse than a
+    log line for the one operator who needs it (S10).
+
+    An unreadable template (agent stopped, exec failed, YAML refused) leaves
+    the registry exactly as it was — absence of evidence is never a retirement
+    (#2196).
+    """
+    from services import metric_registry
+
+    try:
+        summary = await metric_registry.refresh_from_running_agent(
+            agent_name, source=source
+        )
+    except metric_registry.RefreshUnavailable as e:
+        logger.info(
+            "[ent#477] metric registry not refreshed after %s on %s: %s",
+            source, agent_name, e.reason,
+        )
+        return {"status": "unavailable", "reason": e.reason}
+    except Exception as e:  # noqa: BLE001 — a registry refresh never fails a git op
+        logger.warning(
+            "[ent#477] metric registry refresh failed after %s on %s: %s",
+            source, agent_name, e,
+        )
+        return {"status": "error"}
+
+    if summary.changed:
+        logger.info(
+            "[ent#477] metric registry updated after %s on %s: %s",
+            source, agent_name, summary.to_dict(),
+        )
+    return {
+        "status": "ok",
+        "declared": summary.declared,
+        "created": summary.created,
+        "updated": summary.updated,
+        "revived": summary.revived,
+        "retired": summary.retired,
+        "type_change_refused": summary.type_change_refused,
+    }
+
+
 @router.post("/{agent_name}/git/sync")
 async def sync_to_github(
     agent_name: OwnedAgentByName,
@@ -198,19 +251,29 @@ async def sync_to_github(
             headers=conflict_headers,
         )
 
+    sync_details = {
+        "commit_sha": result.commit_sha,
+        "files_changed": result.files_changed,
+        "branch": result.branch,
+        "strategy": body.strategy,
+        "removed_paths": result.removed_paths,  # #2529
+    }
+    # ent#477 (S1) — `pull_first` is the ONE sync strategy that pulls, and it is
+    # the path the in-container 15-minute auto-sync heartbeat does not take
+    # (that one pushes, so no backend hook sees it at all — the container-start
+    # hook and the explicit refresh route are what cover an agent editing its
+    # own template). A plain `normal`/`force_push` sync brought nothing in.
+    if body.strategy == "pull_first":
+        sync_details["metric_registry"] = await _refresh_metric_registry(
+            agent_name, "sync"
+        )
     await _audit_git(
         action="sync",
         request=request,
         current_user=current_user,
         agent_name=agent_name,
         success=True,
-        details={
-            "commit_sha": result.commit_sha,
-            "files_changed": result.files_changed,
-            "branch": result.branch,
-            "strategy": body.strategy,
-            "removed_paths": result.removed_paths,  # #2529
-        },
+        details=sync_details,
     )
 
     return {
@@ -320,7 +383,11 @@ async def pull_from_github(
         current_user=current_user,
         agent_name=agent_name,
         success=True,
-        details={"strategy": body.strategy},
+        details={
+            "strategy": body.strategy,
+            # ent#477 — a pull can bring a new `metrics:` block in.
+            "metric_registry": await _refresh_metric_registry(agent_name, "pull"),
+        },
     )
 
     return result
@@ -746,6 +813,8 @@ async def reset_to_main_preserve_state(
             "commit_sha": result.get("commit_sha"),
             "files_preserved": result.get("files_preserved"),
             "working_branch": result.get("working_branch"),
+            # ent#477 — adopting the main baseline replaces `template.yaml`.
+            "metric_registry": await _refresh_metric_registry(agent_name, "reset"),
         },
     )
 

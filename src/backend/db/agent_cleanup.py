@@ -215,6 +215,13 @@ AGENT_REFS: List[AgentRef] = [
     # tenant's reports (cross-tenant disclosure).
     AgentRef("agent_reports",                "agent_name",        Policy.CASCADE),
     AgentRef("agent_evaluations",            "agent_name",        Policy.CASCADE),
+    # ent#477 — the declared metric registry. CASCADE on both halves: a purge
+    # must not leave definitions addressed to a name that is gone (ent#478
+    # validates incoming points against them, so a stale row would ACCEPT
+    # points for a reused agent name), and a rename must carry them or the
+    # agent's next reconcile mints a second full set under the new name while
+    # the old set stays visible to the definitions read.
+    AgentRef("metric_definitions",           "agent_name",        Policy.CASCADE),
     # ent#438 — the agent canvas is agent-authored output on the same footing
     # as a report: CASCADE so a purge wipes it and a rename re-keys it. The
     # rename half is load-bearing rather than tidy — `agent_name` is half the

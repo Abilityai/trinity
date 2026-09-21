@@ -10,7 +10,7 @@
 
 ---
 
-### Agents (37 endpoints)
+### Agents (39 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/agents` | List all agents |
@@ -39,6 +39,8 @@
 | GET | `/api/agents/{name}/a2a/agent-card` | A2A Agent Card (protocol `0.3.0`) for external orchestrator discovery — authenticated (`AuthorizedAgentByName`) (#737) |
 | POST | `/api/agents/{name}/a2a/call` | **Outbound** — task an EXTERNAL A2A agent (#736). `AuthorizedAgentByName` **+ an agent-scoped self-check** (an agent key may call only AS ITSELF; a *permitted sibling* may not place calls under a neighbour's name). Under the OSS provider endpoints are **platform-scope**, so what this protects is **attribution** — the rate-limit key, the audit row and the activity row all name the agent that actually spent the call — not a per-agent credential boundary that does not exist yet; it holds the line for a future per-agent provider. `reject_agent_principal` deliberately absent: a *use*, not a *grant* (Invariant #8). Target is a registry **name**, never a URL. Bounded per-agent + fleet; `effect_guard`-deduped on `{endpoint_id, resolved_url, context_id, task_id}` with a **required** `dedup_label`. 404 when `A2A_OUTBOUND_ENABLED` is off |
 | POST | `/api/agents/{name}/a2a/task` | Poll a remote A2A task by id on the same registered endpoint (#736). Same gates; deliberately NOT `effect_guard`-wrapped — a poll is a read, and deduping it would answer "has it finished yet?" from a snapshot of the last time it had not |
+| GET | `/api/agents/{name}/metrics/definitions` | The agent's DECLARED metric registry (ent#477) — what `template.yaml metrics:` declares, as the backend reconciled it, NOT what it has measured. `AuthorizedAgentByName`; `?include_retired` serves definitions the template no longer declares (kept so points stored under their name stay interpretable). Answers on a STOPPED agent (it is a DB read). Carries `declared` + a next-action `message` for the empty state, `type_conflict` for a refused type change, and the unenforced retention/cap `policy` ent#478 implements |
+| POST | `/api/agents/{name}/metrics/definitions/refresh` | Re-read the agent's live `template.yaml` and reconcile its registry (ent#477). `AuthorizedAgentByName` — a **use**, not a grant (the same principal can already `pull`; an agent's own scoped key may refresh itself). The third trigger beside creation and the git hooks, because an agent that edits its own block in-container and auto-syncs PUSHES it, so no backend `pull` ever fires. **Running agent only**: 409 `agent_not_running` (the stopped-agent read spawns a throwaway container, and no request-triggered route may create one as a side effect of a read), 503 `template_unreadable` — both named on `X-Refresh-Unavailable`, and both leave the registry untouched (#2196). Idempotent by construction, so Invariant #18 does not apply |
 | GET | `/api/agents/{name}/files` | List workspace files (tree) |
 | GET | `/api/agents/{name}/files/download` | Download file |
 | POST | `/api/agents/{name}/files/mkdir` | Create workspace directory (#37) |

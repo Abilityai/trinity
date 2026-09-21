@@ -1232,6 +1232,44 @@ def c_d008(snap):
     return _with_dashboard(snap, f)
 
 
+def c_d009(snap):
+    """STATIC: the `metrics:` block is well-formed (ent#477).
+
+    Delegates to the one reader — `template_metrics.metric_shape_errors` — so
+    the report and the registry can never disagree about which entries are
+    valid: an entry named here is exactly an entry the registry refused to
+    hold, because both answers come out of the same `_parse`.
+
+    Twin of T-018 for the `schedules:` block, including the fail-CLOSED handler
+    below. Function-local import for the same reason T-018 uses one: the leaf
+    must stay importable without dragging the compatibility package with it.
+    """
+    def f(d):
+        try:
+            from services.template_metrics import metric_shape_errors
+            errors = metric_shape_errors(d.get("metrics"))
+        except Exception as e:  # noqa: BLE001
+            # Fail CLOSED, deliberately — the T-018 reasoning verbatim.
+            # `run_static` turns a raise into `skipped` and `_counts` tallies
+            # only `status == "fail"`, so a raising SOFT check drops
+            # soft_count 1->0 and flips the whole report from `issues` to
+            # `compatible` exactly when this check's finding was the only
+            # failure. That is the entire population D-009 exists to serve. And
+            # `build_report` persists `checks_json`, so one transient raise is
+            # replayed as a clean bill of health on every stopped-agent read.
+            #
+            # Type name ONLY: `detail` is persisted to
+            # agent_compatibility_results.checks_json and rendered in the UI,
+            # and `str(e)` can embed untrusted template content.
+            return _fail("metrics block could not be evaluated",
+                         {"error_type": type(e).__name__})
+        if errors:
+            return _fail("template.yaml `metrics:` entries are malformed",
+                         {"errors": errors[:25]})
+        return _ok("metrics block entries are well-formed")
+    return _with_template(snap, f)
+
+
 # ===========================================================================
 # X — Cross-File Consistency (static parts)
 # ===========================================================================
@@ -1529,7 +1567,7 @@ STATIC_CHECKS = {
     "P-001": c_p001, "P-002": c_p002, "P-004": c_p004, "P-006": c_p006,
     "A-001": c_a001, "A-002": c_a002, "A-004": c_a004,
     "D-001": c_d001, "D-002": c_d002, "D-003": c_d003, "D-004": c_d004,
-    "D-005": c_d005, "D-008": c_d008,
+    "D-005": c_d005, "D-008": c_d008, "D-009": c_d009,
     "X-003": c_x003, "X-004": c_x004, "X-007": c_x007,
     "I-006": c_i006,
     "DP-001": c_dp001, "DP-002": c_dp002, "DP-003": c_dp003,
