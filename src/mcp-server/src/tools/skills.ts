@@ -81,6 +81,9 @@ interface SkillInjectionResult {
   skills_injected: number;
   skills_unchanged?: number;
   skills_failed: number;
+  // #2914: same-named agent-authored dirs the platform refused to write into.
+  skills_conflict?: number;
+  conflicts?: string[];
   results: Record<string, {
     success: boolean;
     status?: string;
@@ -95,8 +98,11 @@ interface SkillInjectionResult {
  */
 // #2703 — the backend's per-skill delivery report, passed through verbatim.
 interface SkillDelivery {
-  status: "injected" | "partial" | "pending_start" | "in_progress" | "not_delivered";
+  status: "injected" | "partial" | "conflict" | "pending_start" | "in_progress" | "not_delivered";
   reason?: string;
+  // #2914: names refused because the agent already has its own skill dir of
+  // that name. Present whenever at least one requested name collided.
+  conflicts?: string[];
   skills: Record<string, { status: string; error?: string }>;
 }
 
@@ -230,7 +236,10 @@ export function createSkillsTools(
         "Assign a skill to an agent and deliver it. On a running agent the package is injected " +
         "immediately; the response's `delivery` block says what happened per skill: " +
         "`injected` (available now), `pending_start` (agent stopped — applies on next start), " +
-        "`in_progress` (still installing; the listing updates when it lands), or " +
+        "`in_progress` (still installing; the listing updates when it lands), " +
+        "`conflict` (the agent already has its OWN skill directory of that name — the " +
+        "agent-authored copy is kept and runs, the library package was not written; " +
+        "unassign the library skill or rename the agent's — a sync will refuse again), or " +
         "`not_delivered` with a `reason` (`injection_in_progress`, `agent_not_ready`, " +
         "`docker_unavailable`, `injection_error`) — the assignment is kept either way and " +
         "sync_agent_skills is the manual retry. " +
@@ -311,7 +320,9 @@ export function createSkillsTools(
         "packages (SKILL.md + scripts/ + resources) under .claude/skills/. " +
         "Unconditional repair: re-injects even unchanged skills. Agent must be " +
         "running. Per-skill warnings (missing deps, skipped files) are " +
-        "reported even on success.",
+        "reported even on success. A skill whose name matches a directory the " +
+        "agent authored itself is reported under `conflicts` and left untouched " +
+        "(the agent's copy runs); syncing again does not change that.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to sync skills to"),
       }),
@@ -334,13 +345,19 @@ export function createSkillsTools(
         for (const [name, r] of Object.entries(result.results || {})) {
           if (r.warnings && r.warnings.length > 0) warnings[name] = r.warnings;
         }
+        // #2914: a conflict is not a failure (success stays true — the platform
+        // did exactly what it should: nothing) but it is never delivered, so it
+        // must not vanish into the success message.
+        const conflicts = result.conflicts ?? [];
         if (result.success) {
           return JSON.stringify({
             success: true,
             message: `Injected ${result.skills_injected} skills to agent ${agent_name}` +
-              (result.skills_unchanged ? ` (${result.skills_unchanged} already up to date)` : ""),
+              (result.skills_unchanged ? ` (${result.skills_unchanged} already up to date)` : "") +
+              (conflicts.length ? ` — ${conflicts.length} name conflict(s), agent's own copy kept: ${conflicts.join(", ")}` : ""),
             skills_injected: result.skills_injected,
             skills_unchanged: result.skills_unchanged ?? 0,
+            ...(conflicts.length ? { skills_conflict: conflicts.length, conflicts } : {}),
             ...(Object.keys(warnings).length > 0 ? { warnings } : {})
           }, null, 2);
         } else {
@@ -362,7 +379,10 @@ export function createSkillsTools(
     getAgentSkills: {
       name: "get_agent_skills",
       description:
-        "Get the list of skills assigned to an agent.",
+        "Get the list of skills assigned to an agent. Each entry carries " +
+        "`delivery_status`: `conflict` when the agent has its own skill directory of " +
+        "that name (the agent's copy runs; the library package was not installed), " +
+        "null otherwise.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent"),
       }),
@@ -379,18 +399,23 @@ export function createSkillsTools(
           skill_name: string;
           assigned_by: string;
           assigned_at: string;
+          delivery_status?: string | null;
         }>>(
           "GET",
           `/api/agents/${encodeURIComponent(agent_name)}/skills`
         );
 
+        const conflicts = skills.filter(s => s.delivery_status === "conflict").map(s => s.skill_name);
         return JSON.stringify({
           agent_name,
           skill_count: skills.length,
+          ...(conflicts.length ? { conflicts } : {}),
           skills: skills.map(s => ({
             name: s.skill_name,
             assigned_by: s.assigned_by,
-            assigned_at: s.assigned_at
+            assigned_at: s.assigned_at,
+            // #2914: durable — survives the assign response the caller never saw.
+            delivery_status: s.delivery_status ?? null,
           }))
         }, null, 2);
       },
