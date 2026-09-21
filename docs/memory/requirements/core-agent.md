@@ -852,6 +852,8 @@ is existing output gaining an audience.
 - **FR-7 — Files**: file scoping is unchanged in this pass, as the issue directs — the
   per-agent inbox boundary stays where it is (it is where the last two portal security
   bugs lived). Shared files therefore keep listing per agent and are not yet addressable.
+  *(Closed by trinity-enterprise#549: a shared file now has an addressee — see
+  `content-files.md` §13.10.)*
 - **FR-8 — Ratings deferred**: AC #6 asks deliverable cards to carry the rating
   affordance from trinity-enterprise#366, which is not built. The card is the surface it
   will attach to; nothing here pre-empts its shape.
@@ -2859,9 +2861,11 @@ to localStorage in the clear.
   previous session (this also avoids a one-time false-dot burst on deploy). A
   preview no longer inflates the owner's `download_count` — a ranged prefix read
   is still audited, marked `ranged_prefix: true`, but does not bump the counter.
-  Every rostered client of an agent already sees every active share of that
-  agent; a dismissal is a preference, not authorization (follow-up with the
-  audience model, ent#484/#489).
+  A dismissal is a preference, not authorization. When this shipped every
+  rostered client of an agent saw every active share of that agent;
+  trinity-enterprise#549 gave a share an addressee (`content-files.md` §13.10),
+  so the tab lists the viewer's own files and a dismissal is a preference over
+  those.
 - **Flow**: `docs/memory/feature-flows/workspace-rail.md` (Slice 3),
   `file-sharing-outbound.md`
 

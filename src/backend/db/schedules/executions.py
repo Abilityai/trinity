@@ -849,6 +849,45 @@ class ScheduleExecutionsMixin:
                 rows.append(d)
             return rows
 
+
+    def get_running_in_conversation(
+        self, agent_name: str, source_channel: str, chat_id: str,
+    ) -> List[ScheduleExecution]:
+        """THIS agent's RUNNING executions in one conversation (ent#549).
+
+        Behind `services/turn_audience.resolve_turn_audience`: an agent that
+        cites a finished execution of its own has proved which CONVERSATION a
+        side effect came from, never which person — the person is whoever the
+        turn running in that conversation now belongs to. Exactly one row is an
+        answer; none or several is "could not tell".
+
+        All three predicates are required, and an empty one returns nothing
+        rather than widening: `agent_name` is the authenticated caller (a chat
+        id alone would let one agent read another's turn — the #2433 rule that
+        a local lookup must bind every identifier the remote authority used
+        to), and the channel keeps a Telegram chat id from colliding with a
+        room id.
+
+        RUNNING only, unlike `get_running_for_chat`: a QUEUED row has no process
+        that could be making a tool call. `idx_executions_status` drives it, as
+        it does there — a handful of rows on any install.
+        """
+        if not (agent_name and source_channel and chat_id):
+            return []
+        stmt = (
+            select(schedule_executions)
+            .where(and_(
+                schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                schedule_executions.c.agent_name == agent_name,
+                schedule_executions.c.source_channel == source_channel,
+                schedule_executions.c.source_channel_chat_id == chat_id,
+            ))
+            .order_by(schedule_executions.c.started_at.desc())
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_schedule_execution(r) for r in rows]
+
     def stamp_execution_channel_context(
         self,
         execution_id: str,

@@ -879,6 +879,9 @@ TABLES = {
             consumed_at TEXT,
             download_count INTEGER DEFAULT 0,
             last_downloaded_at TEXT,
+            addressed_to_email TEXT,
+            addressed_to_channel TEXT,
+            audience_source TEXT,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
                 ON DELETE CASCADE ON UPDATE CASCADE
         )
@@ -886,9 +889,9 @@ TABLES = {
 
     # #2582 / ent#548 — per-viewer dismissal of an agent-shared file.
     #
-    # `agent_shared_files` carries no audience, so `portal_documents` lists every
-    # active share of an agent to every rostered client. "Remove it from MY list"
-    # therefore needs its own storage: the one generic per-user preference store
+    # A file has ONE addressee (ent#549), so "remove it from MY list" is a
+    # preference over the viewer's own files. It still needs its own storage:
+    # the one generic per-user preference store
     # (`user_ui_preferences`) is FK'd to `users.id`, and a Workspace client has no
     # user row. No `enterprise_` prefix — that prefix on the portal tables is
     # retained history, not a convention to extend.
