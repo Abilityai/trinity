@@ -333,7 +333,16 @@
             Install a multi-agent system from a manifest — pick a bundled one, upload a
             file, or paste YAML. Preview shows exactly what it would create before anything runs.
           </p>
-          <SystemInstallPanel />
+          <SystemInstallPanel @remove-system="removeSystem" />
+
+          <!-- The inverse (ent#454). Entitlement-gated: the panel renders
+               nothing when `system_teardown` is absent from
+               `enterprise_features`, so an OSS build's Systems section looks
+               exactly as it did. Below install, because installing is the
+               common case and removing is the recovery. -->
+          <div class="mt-6">
+            <SystemTeardownPanel :initial-name="teardownTarget" />
+          </div>
         </section>
 
         <!-- Skills section (ent#263): fleet-level browse over the shared
@@ -364,6 +373,7 @@ import NavBar from '../components/NavBar.vue'
 import CreateAgentModal from '../components/CreateAgentModal.vue'
 import LibrarySkillsSection from '../components/LibrarySkillsSection.vue'
 import SystemInstallPanel from '../components/systems/SystemInstallPanel.vue'
+import SystemTeardownPanel from '../components/systems/SystemTeardownPanel.vue'
 import OverflowTabs from '../components/OverflowTabs.vue'
 import api from '../api'
 import { useRole } from '../composables/useRole'
@@ -378,6 +388,16 @@ const { hasMinRole, isAdmin } = useRole()
 // Mirrors POST /api/systems/deploy's require_role("creator") (AC #6). The
 // server is the enforcement point; this only decides whether to render.
 const canInstallSystems = computed(() => hasMinRole('creator'))
+
+// ent#454: a deploy result can hand its own system name to the teardown panel,
+// so "I just installed the wrong thing" has a path into the inverse instead of
+// eleven manual deletes (AC #7). A plain ref rather than store state — it is a
+// one-shot handoff between two sibling panels on one page, and the teardown
+// panel owns the name from then on.
+const teardownTarget = ref('')
+function removeSystem (name) {
+  teardownTarget.value = name || ''
+}
 
 // ---------------------------------------------------------------------------
 // Tabs (ent#384)
