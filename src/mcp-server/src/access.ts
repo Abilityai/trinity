@@ -207,6 +207,8 @@ const ENT629 =
   "abilityai/trinity-enterprise#629 — the backend route is owner-equivalent for an agent key (Invariant #8); MCP gate pending that ruling";
 const ADMIN_ONLY =
   "backend rejects agent principals (require_admin / assert_admin / reject_agent_principal, #1890)";
+const TEARDOWN_HUMAN_ONLY =
+  "backend fence: the gated route requires role 'creator' AND a HUMAN caller — reject_agent_principal plus a credential-kind refusal, because one call removes N agents without delete_agent's per-agent spawn-scope check (abilityai/trinity-enterprise#454)";
 const REMINDER_SELF_GATE = "backend self-gate: reminders.py::_self_gate refuses an agent key naming another agent";
 const CONNECTOR_SCOPE = "connector scope — the key is bound to one agent; backend _enforce_connector_scope (ent#46)";
 const ROOMS_SERVICE = "room membership is the rooms service's decision (ent#169, ent#443), not a per-agent permission edge";
@@ -260,6 +262,13 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   fan_out: { kind: "in-tool", how: CHAT_GATE },
   // --- systems.ts ---
   deploy_system: { kind: "none", why: "a system manifest, not an agent" },
+  // NOT `none`: unlike its siblings this tool does name agents (`agents`, the
+  // confirmed removal set) and deletes them. `agents` IS in
+  // AGENT_TARGET_PARAMS, so a `none` row here would not merely have said
+  // something false — `policyFor` throws on it at startup, and the server
+  // would refuse to boot. The shape check is what makes this row load-bearing
+  // rather than decorative.
+  teardown_system: { kind: "baselined", owner: TEARDOWN_HUMAN_ONLY },
   list_systems: { kind: "none", why: "no agent target" },
   restart_system: { kind: "none", why: "a system name, not an agent" },
   get_system_manifest: { kind: "none", why: "a system name, not an agent" },
