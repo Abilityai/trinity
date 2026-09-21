@@ -20,7 +20,7 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 
 ## Primitives first
 
-- Compose `BaseButton`, `BaseInput`, `BaseSelect`, `BaseToggle`, `BaseTextarea`, `BaseBadge`, `BaseCard`, the modal shell (`ConfirmDialog`), `OverflowTabs`, the bounded data table, and the failed-state pair `LoadFailed` (failed fetch) / `InlineError` (failed verb). Never hand-roll a lookalike — identical pixels from a class string is still a defect.
+- Compose `BaseButton`, `BaseInput`, `BaseSelect`, `BaseToggle`, `BaseTextarea`, `BaseBadge`, `BaseCard`, the modal shell (`BaseModal` — Esc, focus trap, focus return and a shared ref-counted scroll lock; `ConfirmDialog` is the confirm recipe on top of it), `OverflowTabs`, the bounded data table, and the failed-state pair `LoadFailed` (failed fetch) / `InlineError` (failed verb). Never hand-roll a lookalike — identical pixels from a class string is still a defect.
 - BaseButton: 4 variants (primary/secondary/danger/ghost) × 2 sizes (md 13.5 pad 7×14 · sm 12.5 pad 4×10), radius 6px. Disabled = opacity .45. In-flight = 16px spinner + progressive label. Focus ring on all variants.
 - BaseInput/BaseSelect: field bg, border-strong, radius 6px, pad 8×11; focus = accent border + 3px ring; errors name the problem, the fix, and an example — never a bare red border.
 - BaseSelect: 2 variants — `field` (default, the recipe above) and `ghost` (#2662: borderless, transparent, content-width, 44px tall, hover tints the ground only). Use `ghost` where a select is a lightweight preference beside content rather than a field in a form; a form keeps `field`. Reach for the variant, never a hand-rolled select in chat chrome. `ghost` flips the chevron up while the picker is open via `:open` (#2662) — the app's chevron idiom, which selects were excluded from only because a native picker cannot report its state; `field` deliberately does not, that being a change to Settings surfaces #2662 does not own. The selector is `[&:open~svg]` — a GENERAL sibling, so the chevron must FOLLOW the select as a sibling; an element between the two is harmless. What kills it silently is wrapping the svg, or moving it above the select.
@@ -91,6 +91,11 @@ Consistency:
 20. Tokens only; primitives only; both themes always.
 21. Domain-scoped stores; single API client; loading flags live in stores, not components.
 
+## Testing a component — the harness mounts (#2918)
+
+- `src/frontend/vitest.config.js` runs `environment: 'node'` by **default**, but it carries `plugins: [vue()]`, `jsdom` and `@vue/test-utils` precisely so a spec can opt in **per file**: put `// @vitest-environment jsdom` on line 1, `import { mount } from '@vue/test-utils'`, mount the SFC, and assert on the rendered DOM, emitted events and store calls. Copy `tests/unit/portalThemeSwitch.spec.js` (theme switch → store → `<html class>`) or `portalComposerDraft.spec.js`. The belief that "this repo's vitest cannot mount" is false and is what routed a fleet-delete confirmation (#2756) and a modal's Esc/focus-trap contract (#2778) into regex-only coverage.
+- **A regex over the component's source is not a test of the component.** `readFileSync(...Panel.vue)` + `toContain('canRemove')` proves the predicate was *written*; `||` for `&&` and an inverted `toggle()` pass it byte-identically. It is acceptable for a spelling pin or an AST-shaped call-site guard, and **not** acceptable as the only coverage for a predicate that gates a destructive action, a keyboard contract, or a store write. `tests/unit/sourceTextRatchet.spec.js` enforces the direction: per-spec counts of source-text reads of `components/`/`views/` SFCs are frozen in `src/frontend/source-text-baseline.json` and may only shrink; a **new** spec is held to zero unless its docblock says why a mount cannot prove what it pins (`// @source-text-pin: <reason>`). Regenerate after paying one down: `node src/frontend/scripts/scan-source-text-specs.mjs src/frontend --baseline src/frontend/source-text-baseline.json`.
+
 ## PR self-check
 
 Before requesting review, verify:
@@ -109,3 +114,4 @@ Before requesting review, verify:
 - [ ] Unbounded sets bounded (internal scroll/pagination/virtualization) with the total stated
 - [ ] One primary action on the view; destructive flows restate consequence with safe-action focus
 - [ ] Numbers use `tabular-nums`; times show relative + absolute-on-hover
+- [ ] Every predicate that gates a destructive verb, a keyboard contract, or a store write is proven by a test that **mounts** the component (`// @vitest-environment jsdom` + `@vue/test-utils`), not by a regex over its source; `tests/unit/sourceTextRatchet.spec.js` holds a new spec to zero source-text reads unless it carries `@source-text-pin: <reason>` (#2918)

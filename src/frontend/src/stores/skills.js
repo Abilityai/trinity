@@ -74,6 +74,14 @@ export const useSkillsStore = defineStore('skills', () => {
     library.value.filter(s => assignedNames.value.has(s.name))
   )
 
+  // #2914 — names whose assignment row carries `delivery_status: 'conflict'`:
+  // the agent has its own `.claude/skills/<name>/`, the platform refused to
+  // write over it, and the agent's copy is what runs. Durable (it rides the
+  // row, not the session's last injection), so the tab shows it on load.
+  const conflictNames = computed(() => new Set(
+    assigned.value.filter(s => s.delivery_status === 'conflict').map(s => s.skill_name)
+  ))
+
   /**
    * Why the tab has nothing to show, as a single discriminator so the panel
    * never renders a dead empty state (explicit AC).
@@ -167,6 +175,14 @@ export const useSkillsStore = defineStore('skills', () => {
       const { data } = await api.post(`/api/agents/${agentName.value}/skills/inject`)
       injectionResults.value = data?.results || {}
       lastInjectionAt.value = new Date().toISOString()
+      // #2914: the sync also rewrites each row's durable verdict (`conflict`
+      // stamped or cleared), and the conflict badge reads the ROW so it
+      // survives a reload — so re-read the rows, not just this run's results.
+      // Best-effort: the results above are already the honest answer.
+      try {
+        const { data: rows } = await api.get(`/api/agents/${agentName.value}/skills`)
+        assigned.value = rows || []
+      } catch { /* keep the previous rows; the injection results still render */ }
       return data
     } catch (e) {
       // 409 = an injection is already running (SkillInjectionBusy). Say so
@@ -196,7 +212,7 @@ export const useSkillsStore = defineStore('skills', () => {
     loading, saving, injecting, error,
     injectionResults, lastInjectionAt, lastDelivery,
     changedAt, noteSkillsChanged,
-    assignedNames, assignedSkills, emptyReason,
+    assignedNames, assignedSkills, conflictNames, emptyReason,
     setAgent, load, saveAssignments, inject, clear,
   }
 })

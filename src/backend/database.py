@@ -2697,6 +2697,10 @@ class DatabaseManager:
     def delete_agent_skills(self, agent_name: str):
         return self._skills_ops.delete_agent_skills(agent_name)
 
+    def set_skill_delivery_status(self, agent_name: str, conflicted: list, resolved: list):
+        # #2914: the inject path's per-row verdict (`conflict` / cleared).
+        return self._skills_ops.set_skill_delivery_status(agent_name, conflicted, resolved)
+
     def is_skill_assigned(self, agent_name: str, skill_name: str):
         return self._skills_ops.is_skill_assigned(agent_name, skill_name)
 
