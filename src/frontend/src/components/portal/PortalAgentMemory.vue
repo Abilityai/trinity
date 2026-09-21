@@ -34,10 +34,12 @@
             class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-[12.5px]"
             :class="w.undone_at ? 'opacity-60' : ''"
             :data-testid="w.kind === 'scheduled_run' ? 'portal-memory-write-scheduled' : 'portal-memory-write'">
-          <div class="flex items-center gap-2">
-            <span class="min-w-0 flex-1 truncate text-gray-400">
+          <div class="flex items-start gap-2">
+            <!-- Wraps rather than truncates: the time and the "undone" mark
+                 are the two facts this line exists to show. -->
+            <span class="min-w-0 flex-1 text-gray-400">
               <span class="font-medium text-gray-900 dark:text-gray-100">{{ writeLabel(w) }}</span>
-              · <span :title="w.written_at">{{ relative(w.written_at) }}</span><template v-if="w.undone_at"> · undone</template>
+              · <span class="whitespace-nowrap" :title="w.written_at">{{ relative(w.written_at) }}</span><template v-if="w.undone_at"> · undone</template>
             </span>
             <BaseButton
               v-if="w.undoable"
