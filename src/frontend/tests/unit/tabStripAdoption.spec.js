@@ -6,13 +6,18 @@ import { fileURLToPath } from 'node:url'
 /**
  * #1925 — a RATCHET, not the feature's coverage.
  *
+ * @source-text-pin: an adoption guard over a SET of call sites — that every
+ *   audited strip is wired to the primitive and none has drifted back to a
+ *   hidden-scrollbar scroller (#1789). A mount proves one strip renders; the
+ *   set can only be pinned by reading each file. Behaviour is executed by
+ *   `overflowFit.spec.js` and `navLinks.spec.js`.
+ *
  * What the strips actually DO is driven for real by `overflowFit.spec.js` (the
  * fit arithmetic) and `navLinks.spec.js` (the link set and its active/badge
  * rules). Those execute the shipped code. This file exists for the one thing a
- * unit test cannot execute in a `environment: 'node'` suite — that the three
- * audited surfaces are still WIRED to the primitive and have not drifted back
- * to a hidden-scrollbar scroller, which is how #1789 left NavBar hiding links
- * with no signal that any existed.
+ * mount cannot prove — that the three audited surfaces are still WIRED to the
+ * primitive and have not drifted back to a hidden-scrollbar scroller, which is
+ * how #1789 left NavBar hiding links with no signal that any existed.
  */
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../src')
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8')
