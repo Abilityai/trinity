@@ -216,6 +216,24 @@ async def update_setting(
             ),
         )
 
+    # #2899: the fleet-wide agent resource defaults go through the dedicated
+    # route, which validates against the same VALID_CPU / VALID_MEMORY sets the
+    # container-create path enforces. This generic PUT takes `Dict[str, str]`
+    # with no validation, and a junk default here is not a cosmetic setting: it
+    # is read at create time as the fallback for every agent whose template and
+    # caller declare no `resources`, where `normalize_cpu` / `normalize_memory`
+    # reject it with a 400 — i.e. one bad write silently stops agent creation
+    # fleet-wide, for the exact population (the bundled starters) that relies on
+    # the default. Same shape as the #506 ceiling above.
+    if key in (AGENT_DEFAULT_CPU_KEY, AGENT_DEFAULT_MEMORY_KEY):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/agent-defaults/resources "
+                "(validated against the cpu/memory values container creation accepts)"
+            ),
+        )
+
     # #1609: proactive caps go through the dedicated range-validated route.
     if key in PROACTIVE_RATE_LIMIT_DEFAULTS:
         raise HTTPException(

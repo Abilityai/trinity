@@ -1360,3 +1360,147 @@ class TestCompatFixLock:
         with caplog.at_level("WARNING"):
             assert fixes._lock("agent-x") is None  # fail-open, not FixBusy
         assert any("fix lock unavailable" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# T-004 / T-005 agree with the create path; X-004 exempts the injected server (#2899)
+# ---------------------------------------------------------------------------
+
+def _resources_template(block: str) -> str:
+    """`_GOOD_TEMPLATE` with its `resources:` lines replaced by `block`."""
+    head = _GOOD_TEMPLATE.split("resources:")[0]
+    tail = _GOOD_TEMPLATE.split("  memory: 2g\n", 1)[1]
+    return head + block + tail
+
+
+# (yaml `resources:` block, expected T-004 status, expected T-005 status).
+# The pass/fail split is NOT a second copy of the value set — every row is
+# asserted against the create path's own normalizers below.
+_RESOURCE_ROWS = [
+    ("", "pass", "pass"),                                        # absent entirely
+    ("resources:\n", "pass", "pass"),                            # declared null
+    ("resources: {}\n", "pass", "pass"),                         # declared empty
+    ('resources:\n  cpu: "2"\n', "pass", "pass"),                # one key only
+    ('resources:\n  cpu: "2"\n  memory: 2g\n', "pass", "pass"),
+    ("resources:\n  cpu: 2\n  memory: 2g\n", "pass", "pass"),    # unquoted int
+    ('resources:\n  cpu: "4"\n  memory: 4G\n', "pass", "pass"),  # case-folded
+    ('resources:\n  cpu: ""\n  memory: ""\n', "pass", "pass"),   # empty = default
+    ('resources:\n  cpu: "0.5"\n  memory: 512Mi\n', "fail", "fail"),
+    ('resources:\n  cpu: "3"\n  memory: 512m\n', "fail", "fail"),
+    ('resources:\n  cpu: "64"\n  memory: 64g\n', "fail", "fail"),
+]
+
+
+@pytest.mark.parametrize("block,t004,t005", _RESOURCE_ROWS)
+def test_resource_checks_match_the_create_path(block, t004, t005):
+    """The two HARD resource checks must accept exactly what agent creation
+    accepts. They failed an ABSENT block before #2899 — which is how every
+    bundled starter (and `local:default`) greeted its owner with two must-fix
+    findings — while T-005's own regex passed `512m`, a value the create path
+    rejects with a 400. Both directions are asserted here."""
+    snap = _template_snapshot(_resources_template(block))
+    assert _run_one("T-004", snap)[0] == t004, block
+    assert _run_one("T-005", snap)[0] == t005, block
+
+
+@pytest.mark.parametrize("block,t004,_t005", _RESOURCE_ROWS)
+def test_resource_verdicts_are_the_normalizers_verdicts(block, t004, _t005):
+    """The row table above is only evidence if the expected column is the
+    create path's behaviour rather than this test's opinion. Ask the create
+    path directly: a value it raises on must be a T-004 fail, and one it
+    returns for must be a T-004 pass."""
+    from services.agent_service.capabilities import VALID_CPU, normalize_cpu
+
+    data = static_checks._template(_template_snapshot(_resources_template(block)))[0] or {}
+    resources = data.get("resources")
+    cpu = (resources or {}).get("cpu") if isinstance(resources, dict) else None
+    try:
+        normalize_cpu(cpu, VALID_CPU[0])
+        create_path = "pass"
+    except ValueError:
+        create_path = "fail"
+    assert create_path == t004, f"{block!r}: create path says {create_path}, check says {t004}"
+
+
+@pytest.mark.parametrize("scalar", ["[]", '"2"', "0", "false", "[1, 2]"])
+def test_non_mapping_resources_is_one_hard_finding(scalar):
+    """`resources: []` reaches `config.resources.get(...)` in the create path
+    and raises AttributeError, so it is a real defect — but ONE: T-005 skips
+    rather than reporting the same malformed block a second time."""
+    snap = _template_snapshot(_resources_template(f"resources: {scalar}\n"))
+    assert _run_one("T-004", snap)[0] == "fail"
+    status, _msg, detail = _run_one("T-005", snap)
+    assert status == "skipped"
+    assert (detail or {}).get("skip_reason") == "invalid_resources"
+
+
+def test_absent_resources_message_names_the_platform_default():
+    """The passing message has to say WHY absence is fine, or the next reader
+    re-files this as a missing check."""
+    snap = _template_snapshot(_resources_template(""))
+    for cid in ("T-004", "T-005"):
+        _status, msg, _detail = _run_one(cid, snap)
+        assert "not declared" in msg and "default" in msg, (cid, msg)
+
+
+_MCP_TEMPLATE = """\
+name: acme-bot
+description: does things
+mcp_servers:
+  - name: trinity
+    description: Remote agent orchestration
+  - name: playwright
+    description: Browser automation
+"""
+
+_MCP_JSON_TEMPLATE = '{"mcpServers": {"playwright": {"command": "npx", "args": ["-y", "mcp"]}}}'
+
+
+def test_x004_ignores_the_platform_injected_server():
+    """`trinity` is written into `.mcp.json` by the agent's own boot
+    (`agent_server/services/trinity_mcp.py`), so declaring it in template.yaml
+    and omitting it from `.mcp.json.template` is correct, not drift."""
+    snap = _template_snapshot(
+        "name: acme-bot\ndescription: does things\n"
+        "mcp_servers:\n  - name: trinity\n    description: Orchestration\n"
+    )
+    snap["files"][".mcp.json.template"] = _f('{"mcpServers": {}}')
+    assert _run_one("X-004", snap)[0] == "pass"
+
+
+def test_x004_still_reports_a_real_mismatch_beside_it():
+    """The exemption must not swallow the finding it sits next to."""
+    snap = _template_snapshot(_MCP_TEMPLATE)
+    snap["files"][".mcp.json.template"] = _f('{"mcpServers": {}}')
+    status, _msg, detail = _run_one("X-004", snap)
+    assert status == "fail"
+    assert detail["only_in_template_yaml"] == ["playwright"]
+
+
+def test_x004_reports_a_trinity_block_shipped_in_mcp_json_template():
+    """The other direction stays a finding: a template that ships its own
+    `trinity` entry is overwritten when Trinity MCP is configured and left
+    standing when it is not — worth telling the author about."""
+    snap = _template_snapshot("name: acme-bot\ndescription: does things\nmcp_servers: []\n")
+    snap["files"][".mcp.json.template"] = _f(
+        '{"mcpServers": {"trinity": {"type": "http", "url": "http://example"}}}'
+    )
+    status, _msg, detail = _run_one("X-004", snap)
+    assert status == "fail"
+    assert detail["only_in_mcp_json"] == ["trinity"]
+
+
+def test_resource_failure_message_is_bounded_and_printable():
+    """`template.yaml` is agent-writable and the normalizer quotes the bad value
+    back, so the finding must carry a CLIPPED value — it reaches the UI row, the
+    MCP payload and persisted `checks_json` (#950 L1)."""
+    # `\e` is YAML's escape for ESC inside a double-quoted scalar, so the
+    # loader hands the check a real control character (a raw one would be a
+    # parse error, which the hardened loader already refuses).
+    hostile = "9" * 5000 + "\\e[31m"
+    snap = _template_snapshot(_resources_template(f'resources:\n  cpu: "{hostile}"\n'))
+    status, msg, detail = _run_one("T-004", snap)
+    assert status == "fail"
+    assert len(msg) < 200, len(msg)
+    assert "\x1b" not in msg and "\x1b" not in json.dumps(detail)
+    assert len(detail["cpu"]) <= 40
