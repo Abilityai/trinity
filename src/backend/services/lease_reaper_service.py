@@ -10,10 +10,13 @@ lease-reaper" seam (#429), bounded by the DECIDED #1402 poison-task mechanism.
 An expired lease is taken to mean a dead worker; nothing checks liveness, and
 no heartbeat renews a lease (#2846). That holds because the claim clamps the
 turn limit to the agent timeout the lease is sized from, so a healthy turn
-always ends inside its lease. The remaining case is a turn whose own kill
-fails: only workers in the SAME agent container can re-claim it, so it can
-run twice at once only if that container stays responsive while the kill
-does not — a frozen agent-server claims nothing.
+ends inside its lease on every runtime that enforces its own turn limit
+(Claude, Codex; Gemini checks it only when a new output line arrives). The
+remaining case is a turn whose own kill fails: only the agent's own workers
+can re-claim it (the claim is agent-key-scoped), and today they all run in
+one agent-server process, so it can run twice at once only if that process
+stays responsive while the kill does not — a frozen agent-server claims
+nothing. Replicas of one agent would break that last assumption.
 
 Decision logic (do NOT re-litigate — implemented as decided in #1402):
 

@@ -228,7 +228,7 @@ def _turn_limit(requested: Any, cap: int) -> Tuple[int, Optional[int]]:
 
 
 def _shortened_note(execution: Any) -> str:
-    """Suffix for a timeout error when the claim shortened the row's limit.
+    """Suffix for a timeout error when the row asked for more than the agent allows.
 
     Best-effort: runs before the terminal CAS write, so it must never raise.
     """
@@ -236,8 +236,9 @@ def _shortened_note(execution: Any) -> str:
         meta = json.loads(execution.backlog_metadata or "{}")
         nested = meta.get("task_overrides") if isinstance(meta, dict) else None
         requested = (nested or {}).get("timeout_seconds") or meta.get("timeout_seconds")
-        # ponytail: reads the agent's CURRENT timeout, not the claim-time one;
-        # differs only if it was changed again mid-run.
+        # Compares against the agent's CURRENT timeout, so the note states
+        # the two numbers rather than claiming the claim shortened this run
+        # (the timeout may have changed after the claim).
         cap = int(db.get_execution_timeout(execution.agent_name))
     except Exception:  # noqa: BLE001 — a missing note must not block the terminal
         return ""
@@ -245,8 +246,8 @@ def _shortened_note(execution: Any) -> str:
     if shortened_from is None:
         return ""
     return (
-        f" (turn limit shortened from {shortened_from}s to {limit}s because "
-        f"the agent's timeout is lower than this job's)"
+        f" (this job asked for {shortened_from}s but the agent's timeout is "
+        f"{limit}s; raise the agent's timeout to give it longer)"
     )
 
 

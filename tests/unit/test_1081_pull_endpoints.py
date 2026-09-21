@@ -399,7 +399,7 @@ class TestClaimTurnLimit:
             content="Task execution timed out after 600 seconds", error_code="timeout",
         )
         error = db.get_execution(claim["execution_id"]).error
-        assert "shortened from 1800s to 600s" in error
+        assert "asked for 1800s but the agent's timeout is 600s" in error
 
     def test_timeout_failure_within_cap_has_no_note(self, seed_agent, enqueue):
         claim = self._claim_with(seed_agent, enqueue, cap=600, meta={"timeout_seconds": 300})
@@ -410,7 +410,7 @@ class TestClaimTurnLimit:
             claim["execution_id"], claim["claim_token"], status="failed",
             content="Task execution timed out after 300 seconds", error_code="timeout",
         )
-        assert "shortened" not in db.get_execution(claim["execution_id"]).error
+        assert "asked for" not in db.get_execution(claim["execution_id"]).error
 
     def test_note_failure_never_blocks_the_terminal_write(self, seed_agent, enqueue):
         claim = self._claim_with(seed_agent, enqueue, cap=600, meta={"timeout_seconds": 1800})
