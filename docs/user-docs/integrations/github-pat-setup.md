@@ -28,14 +28,14 @@ A GitHub PAT is required for:
 
 When an agent has a GitHub repo and a resolved PAT (per-agent override or the platform PAT), Trinity:
 
-- bakes the token into the agent repo's `origin` remote URL (`https://oauth2:<token>@github.com/...`) for **git**, and
+- hands it to **git** through a credential helper, so the agent repo's `origin` remote URL carries no token (`https://github.com/<org>/<repo>.git`), and
 - exposes it inside the container as **`GITHUB_PAT`** *and* **`GH_TOKEN`** / **`GITHUB_TOKEN`** — the variables the `gh` CLI and GitHub REST API read.
 
 So both work automatically:
 
 | Operation | Auto-authenticated by Trinity's token? |
 |-----------|----------------------------------------|
-| `git` push / pull / clone (agent's own repo) | **Yes** — token is in the remote URL |
+| `git` push / pull / clone (agent's own repo) | **Yes** — git asks Trinity's credential helper for the token on each operation |
 | `gh issue`, `gh pr`, `gh api`, `gh repo` … | **Yes** — `GH_TOKEN`/`GITHUB_TOKEN` are set, and `gh` is preinstalled in the base image |
 | GitHub REST API via `curl` / a github MCP server | **Yes** — `$GITHUB_PAT` (or `$GITHUB_TOKEN`) is in the environment |
 
@@ -53,6 +53,17 @@ No `gh auth login`, no per-command `GH_TOKEN="$GITHUB_PAT" …` prefix.
 **Scopes still matter.** A PAT scoped only for git contents can push code but will 403 on Issues/PRs. For issue management, make sure the token carries `repo` (classic) or **Issues: Read and write** (fine-grained) — see the scope tables above. Wiring makes the token available; it does not grant missing scopes.
 
 > **Older agents:** the `gh` binary ships in the agent base image — an agent created before this change picks it up on the next **base-image rebuild + recreate**. `git` keeps working regardless; the `GH_TOKEN`/`GITHUB_TOKEN` env vars are also injected on the next agent restart/recreate.
+
+### How git gets the token
+
+Each time git fetches, pulls, or pushes, it asks a credential helper that ships in the agent image (`git-credential-trinity`, registered in the container's system git config) for the token. The token passes over the helper's standard input and output. It is not written into `.git/config`, and it does not show up in the container's process list or logs.
+
+- **Where the helper looks.** It reads the agent's workspace `.env` first, then the container environment. A token you rotate, or set on the agent's **Git** tab, reaches `.env` straight away, so the next fetch or push uses it without a restart.
+- **Which host it answers.** Only the configured git host: `github.com`, or `TRINITY_GIT_BASE_URL` on a self-hosted install, matched exactly. A remote on any other host gets no token from Trinity.
+- **Pushing from the agent's terminal still works.** A plain `git push` authenticates through the helper. An agent with no token at all is pull-only: its push URL is deliberately disabled, so a push fails at once with an error that says to fork to own or add a GitHub token.
+- **The agent can still read its own token.** The helper keeps the token out of the remote URL and process listings. It does not hide the token from the agent: `GITHUB_PAT` stays in the workspace `.env` and the environment. To limit what one agent can reach, give it its own repo-scoped token on its **Git** tab.
+
+Upgrading from a release that stored the token in the remote URL needs no manual step. Trinity cleans existing agents' remotes when the backend starts and on every agent start, and it removes a token from a URL only after a replacement resolves. Agents still on an older base image are covered too: the backend installs the helper into the running container, so no rebuild is required. Afterwards, rotate the platform token: backups and log history from before the upgrade can still contain it. Operator runbook: [Git remote token scrub](../../migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md).
 
 ## Who Owns the Platform PAT
 
@@ -229,7 +240,7 @@ Most edits to an existing PAT happen **in-place in GitHub** — the token string
 - Scopes are editable in-place (check/uncheck boxes and save).
 - The token string itself only changes if you click **Regenerate**.
 
-After any change that produces a **new token string**, update it in Trinity via **Settings → GitHub Personal Access Token → Test → Save**. Trinity propagates the new token to every running agent that uses the platform PAT within seconds — the container environment, the workspace `.env`, and the git credential configuration are all updated, so a rotation takes effect for the agent's next push without a manual restart.
+After any change that produces a **new token string**, update it in Trinity via **Settings → GitHub Personal Access Token → Test → Save**. Trinity propagates the new token to every running agent that uses the platform PAT within seconds. It writes the token to the agent's workspace `.env`, which the agent's git credential helper reads first, and keeps the agent's remote URL free of any token. A rotation therefore takes effect on the agent's next fetch or push without a manual restart.
 
 Agents that carry their **own** per-agent token are deliberately untouched by a global rotation — update those on the agent's Git tab.
 
@@ -344,6 +355,7 @@ Uses the configured PAT to create (by default, private) or connect a GitHub repo
 - Fine-grained tokens require GitHub to be configured to allow them (enabled by default for personal accounts).
 - Organization-owned fine-grained tokens require org admin approval.
 - PAT propagation targets only currently-running agents. Stopped agents receive the updated PAT on next start.
+- The credential helper keeps the token out of remote URLs and process listings, not out of the agent's reach. An agent can read its own `GITHUB_PAT`.
 - See "Updating the Token Later" above for what can be edited in-place vs. what requires regenerating the token.
 
 ## See Also
@@ -352,8 +364,10 @@ Uses the configured PAT to create (by default, private) or connect a GitHub repo
 - [GitHub Sync](github-sync.md) — Using git sync after PAT is configured
 - [Creating Agents](../agents/creating-agents.md) — Creating agents from GitHub templates
 - [Platform Keys](../credentials/platform-keys.md) — The platform token alongside the Claude, email and Gemini keys
+- [Git remote token scrub](../../migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md) — Operator runbook: what upgrading does to existing agents' remotes
 
 **External references:**
+- [gitcredentials](https://git-scm.com/docs/gitcredentials) — Official Git docs: how git asks a credential helper for a username and password
 - [Managing your personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) — Official GitHub docs: how PATs work, creation, deletion, security
 - [About authentication to GitHub](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/about-authentication-to-github) — Official: full picture of GitHub authentication methods and when to use each
 - [Introducing fine-grained personal access tokens](https://github.blog/security/application-security/introducing-fine-grained-personal-access-tokens-for-github/) — GitHub Blog: why fine-grained PATs exist and what problems they solve

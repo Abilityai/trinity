@@ -694,6 +694,9 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { threadKey } from '@/components/portal/portalDrafts'
+import { safeStorage } from '@/utils/safeStorage'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalBrand from '@/components/portal/PortalBrand.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
@@ -754,6 +757,11 @@ import {
 
 const store = useClientPortalStore()
 const authStore = useAuthStore()
+// trinity-enterprise#657. Declared with its siblings rather than beside its
+// first reader (`decorate`, ~900 lines down): `onMainReset` reads it too, and a
+// `const` used above its declaration is a TDZ crash the moment any caller
+// becomes synchronous with setup.
+const drafts = usePortalDraftsStore()
 
 // #2261 — shown only when this tab suppressed the platform fallback (a client
 // session expired here) AND a platform session actually exists to continue as.
@@ -1128,10 +1136,8 @@ function seeHints() {
 
 // localStorage can throw on access (private mode, blocked site data); the rail
 // then runs session-only, which `loadRailState`/`saveRailState` already treat
-// as the default.
-function safeStorage() {
-  try { return typeof localStorage !== 'undefined' ? localStorage : null } catch { return null }
-}
+// as the default. `safeStorage` is the shared util (trinity-enterprise#657
+// made it the third consumer).
 
 // #2163 — hydrate the ACTIVE agent's briefing, driven from HERE rather than
 // from `PortalBriefing`'s mount. `PortalBriefing` renders only in the
@@ -1318,7 +1324,18 @@ async function onEscalateToRoom({ agents, message, attachments = [] } = {}) {
     if (message) {
       try {
         await store.postRoomMessage(roomId, message)
-      } catch { /* the room is open in front of them; retyping recovers */ }
+      } catch {
+        // trinity-enterprise#657: the room is open in front of them, but the
+        // 1:1's `send()` already emptied the composer, so without this the
+        // words were simply gone. Handed back through `prefill` — the outer
+        // catch's own mechanism — because `openRoom` above has already
+        // mounted the room, whose setup-time restore has passed; its `prefill`
+        // watcher puts the text in the field, and the write-through then keeps
+        // it as the room's draft. Cleared first so the same text re-triggers.
+        prefill.value = ''
+        await nextTick()
+        prefill.value = message
+      }
     }
   } catch (err) {
     // Escalation failed, so the user is still in the 1:1 with an emptied
@@ -1514,6 +1531,10 @@ async function onMainReset(result) {
   if (!result?.archived_session_id) return
   const id = result.main_session_id
   if (!id) return
+  // trinity-enterprise#657: Reset archives the history, not what the person
+  // was typing — a draft left on the archived tab would invite them to carry
+  // on in an archived chat. Moved before the remount so the new Main restores it.
+  drafts.move(threadKey(result.archived_session_id), threadKey(id))
   pendingSession.value = id
   convGen.value++
   router.push(`/workspace/c/${id}`)
@@ -1595,12 +1616,18 @@ const sidebarThreads = computed(() => threads.value.filter(
   (t) => !(t.is_main && !t.last_message_at),
 ))
 
+// trinity-enterprise#657: `hasDraft` rides the same projection as the star and
+// the unread count — the drafts store's keys are the shell's `chatKey`s, so a
+// later server-side draft would swap only the source. Re-stamped when the key
+// SET changes (a draft appearing or disappearing), never per keystroke.
 function decorate(list) {
+  const draftKeys = drafts.keys
   return list.map((t) => {
     const s = chatState.value[chatKey(t)]
-    return { ...t, starred: !!s?.starred, unread: Number(s?.unread) || 0 }
+    return { ...t, starred: !!s?.starred, unread: Number(s?.unread) || 0, hasDraft: draftKeys.has(chatKey(t)) }
   })
 }
+watch(() => drafts.keys, () => { threads.value = decorate(threads.value) })
 
 async function refreshThreads() {
   // #2198: both halves are caught. `fetchAllSessions` already returns its last

@@ -30,11 +30,14 @@ container. Only "what B actually said" needs a model, and skips with the
 allowlisted reason where no key exists — journey-smoke and the nightly are
 deliberately credential-free (`integration-nightly.yml` states why).
 
-**Findings carried as `strict=True` xfails, each with its own issue:**
+**Finding carried as a `strict=True` xfail, with its own issue:**
 - #2806 — no chain-depth guard on agent-to-agent chat chains
-- #2807 — a denied call is audited as a successful tool call
 
-**Closed here:** abilityai/trinity-enterprise#628 — `run_agent_loop` skipped the
+**Closed here:** #2807 — a refused call was audited as a successful tool call.
+The deny sites now stamp the call context and the MCP audit wrapper records the
+refusal (`src/mcp-server/src/access.ts::accessDenied`, read by
+`audit.ts::withAudit`); the row reads `success: false`, `denied: true`, and is
+asserted below. Also closed: abilityai/trinity-enterprise#628 — `run_agent_loop` skipped the
 permission gate. Since that fix the MCP server gates it at registration
 (`src/mcp-server/src/access.ts`, `TOOL_ACCESS_POLICY`), and the loop-id tools
 resolve the loop's agent before answering; both are asserted below. The gate is
@@ -331,18 +334,18 @@ def test_a_refused_call_still_leaves_an_audit_trail(pair, mcp_as_caller, journey
     assert (row.get("details") or {}).get("tool") == "chat_with_agent"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#2807 — the MCP server audits a checkAgentAccess denial as success: "
-           "withAudit decides by throw/no-throw and the deny path returns a string",
-)
 def test_the_operator_can_see_that_a_call_was_refused(pair, mcp_as_caller, journey_client):
-    """The audit row for a refused call says it was refused. Today it says
-    `success: true` and carries no denial marker (#2807)."""
+    """The audit row for a refused call says it was refused: `success: false`
+    and `denied: true`. Before #2807 it read `success: true` with no marker —
+    the MCP audit wrapper labelled by throw/no-throw and every gate on the
+    surface RETURNS its denial; the deny site now stamps the call context."""
     row = _refused_call_audit_row(pair, mcp_as_caller, journey_client)
     details = row.get("details") or {}
-    assert details.get("success") is False or details.get("denied") is True, (
-        f"the audit row for a refused call reads as a success: {details!r}"
+    assert details.get("denied") is True, (
+        f"the audit row for a refused call carries no refusal marker: {details!r}"
+    )
+    assert details.get("success") is False, (
+        f"the audit row for a refused call still reads as a success: {details!r}"
     )
 
 

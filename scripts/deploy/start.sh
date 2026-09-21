@@ -1183,6 +1183,12 @@ if [ "$MODEL_KEY_MISSING" = "1" ]; then
     echo "     token) to .env and re-run start.sh, or set it in Settings after login."
 fi
 echo ""
+# #2885: one ask, at the moment it just worked. Raw URL on its own line so it is
+# copyable in every terminal and linkified in modern ones. Prints on every start
+# by design — one line in a card that already repeats is not a nag.
+echo "  ⭐ If this was easy, star the repo — it's how other people find Trinity:"
+echo "     https://github.com/abilityai/trinity"
+echo ""
 echo "─────────────────────────────────────────────────────────────────────────"
 echo ""
 # #2280: hosted installs have no build context, so the stale-image remedy is a

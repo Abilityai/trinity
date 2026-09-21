@@ -262,6 +262,17 @@ recoverable only by widening the window.
   drops the button's min-content to padding, and flex's default shrink would squeeze the
   row for a frame while the `width: max-content` mirror still reports 160.
 
+**Per-tab fields.** A tab is `{ id, label, badge?, signal?, pinned?, hasDraft? }`.
+`badge` is the success pill, `signal` the rail's activity dot (`live` ringed /
+`updated` plain), `pinned` the bookmark before the label (ent#523's Main), and
+`hasDraft` (trinity-enterprise#657) the Draft mark after it. Three rules hold for
+every one of them, and each has already been broken once: it renders in the
+**mirror row** as well as the visible one (a glyph the visible row draws and the
+mirror does not is a tab measured narrower than it draws, i.e. a strip that
+overflows one tab too late); it enters the **re-measure key** (`tabsSignature`),
+or toggling it repacks nothing; and in the overflow-menu row it gets its **own**
+`v-if`, never another arm of the `badge`/`signal` chain (#2794's `v-else` lesson).
+
 ### Data table
 
 **Recipe:** header — chrome bg, mono 10.5 caps tracking .1em, weight 500, tertiary ink, `position: sticky; top: 0` while scrolling · rows ≥40px (padding 10×14), 1px dividers (gray-200 / gray-750), hover row → chrome bg · status cells use BaseBadge · numbers right-aligned, mono 12.5, tabular-nums.

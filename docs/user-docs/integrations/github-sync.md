@@ -18,6 +18,10 @@ Keep agents in sync with GitHub (or self-hosted Git) repositories using two mode
 
 Agents created from a Git template automatically get sync configured. The default mode is Source (pull-only).
 
+### How git authenticates inside the agent
+
+The agent's `origin` remote carries no token. On every fetch, pull, and push, git asks Trinity's credential helper for the agent's GitHub token, so the token stays out of `.git/config` and out of the container's process list and logs. When you set or rotate a token, it is written to the agent's workspace `.env`, which the helper reads first, so the next git operation uses it without a restart. On a self-hosted git server the helper answers only for `TRINITY_GIT_BASE_URL`. For what the agent can still read, and what upgrading does to existing agents, see [GitHub PAT Setup → How git gets the token](github-pat-setup.md#how-git-gets-the-token).
+
 ### Using sync in the UI
 
 1. Open the agent detail page to see Git status (branch, last sync, pending changes, `ahead`/`behind` counts).
@@ -44,6 +48,17 @@ The order is the point. Git is last-match-wins, so the managed defaults sit **ab
 A Push then reports what the sweep changed. The sync response and the `git_sync` MCP result carry `removed_paths` (tracked → untracked by this push), `unignored_paths` (newly un-ignored and committed by this same push), and `shadowed_negations` (a `!rule` of yours that a managed pattern still overrides — the deciding pattern is named); the Git tab's toast and the commit message state the untracked and un-ignored counts and paths. When a push actually changed what is tracked, Trinity also files an operator-queue notice — *Push untracked files that now match .gitignore*, *Push committed files that were previously gitignored*, or *Push changed which files are tracked (.gitignore sweep)* — naming the paths, so an unattended scheduled sync cannot untrack files for weeks without anyone noticing. Find it on the [Operations page](../operations/operating-room.md). A newly un-ignored path that was a secret is already in the remote's history: rotate it and remove the rule.
 
 One limit, reported rather than fixed: many default patterns are directory-form (`node_modules/`, `content/`), and git never descends into an excluded directory, so a negation *beneath* one is inert wherever it sits. Such rules appear under `shadowed_negations`.
+
+### Sync health polling
+
+Trinity reads the git status of every git-enabled agent once a minute. Each read runs a `git fetch` inside the agent, so on a large fleet you can poll less often by setting `SYNC_HEALTH_POLL_INTERVAL_SECONDS` in the backend's `.env` (default `60`; see [Single-Server Deployment → `.env` reference](../guides/deploying/single-server.md#observability)). When an agent's consecutive sync failures reach three, an alert lands in the [Operating Room](../operations/operating-room.md#sync-health-alerts).
+
+The read is built to stay out of the agent's way:
+
+- **It takes no git lock.** The status read never takes the repository's `.git/index.lock`, so the agent's own `git add` or `git commit` cannot fail because Trinity was looking.
+- **Callers share one read.** The background poll, the Git tab, and the `get_git_status` MCP tool share a single in-flight computation instead of stacking parallel fetches. The response's `computed_at` says when that snapshot was taken, so a result can be up to one fetch old.
+- **Stuck locks are reported, not deleted.** Trinity never removes a lock inside a running container, because deleting a lock that a live git process still holds can corrupt the index. When the same `index.lock` stays unchanged across at least three status reads spanning 15 minutes or more, the status response carries `index_lock_stuck` and the backend logs a warning once.
+- **A restart clears stale locks.** At container start no git process can be running, so the startup script removes leftover git locks — including those of submodules and linked worktrees — and logs each one. The status response then records the cleanup under `lock_recovery`, and the backend logs it once.
 
 ### Initializing sync for existing agents
 
@@ -121,7 +136,7 @@ Trailing slashes are stripped automatically. Defaults target `github.com` and `h
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents/{name}/git/status` | GET | Git sync status including `ahead`, `behind`, `common_ancestor_sha`, `pull_branch` |
+| `/api/agents/{name}/git/status` | GET | Git sync status including `ahead`, `behind`, `common_ancestor_sha`, `pull_branch`, plus `computed_at`, `lock_recovery`, and `index_lock_stuck` (see [Sync health polling](#sync-health-polling)) |
 | `/api/agents/{name}/git/sync` | POST | Trigger sync; the response carries `removed_paths`, `unignored_paths`, and `shadowed_negations` from the `.gitignore` sweep |
 | `/api/agents/{name}/git/log` | GET | Recent commits |
 | `/api/agents/{name}/git/pull` | POST | Pull from remote |
@@ -148,10 +163,12 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 - Binding to your own repository requires the agent to be running and is not available in Working Branch mode.
 - A **copy**-imported agent has no Git configuration at all. Use **Initialize GitHub Sync** rather than bind-to-own-repo.
 - Repository maintenance (repack/gc) runs on the agent's own home repository. Sub-repositories cloned into the workspace get no automatic maintenance.
+- A stuck `index.lock` is reported but never removed while the agent runs. Restart the agent to clear it.
 
 ## See Also
 
 - [GitHub PAT Setup](github-pat-setup.md) — Configure a Personal Access Token before using sync
 - [Creating Agents](../agents/creating-agents.md) — Creating agents from Git templates
-- [Monitoring](../operations/monitoring.md) — Sync-health alerts and repository-bloat warnings
-- [Operating Room](../operations/operating-room.md) — Where a push's `.gitignore` sweep notice lands
+- [Monitoring](../operations/monitoring.md) — The Health tab and agent heartbeats
+- [Operating Room](../operations/operating-room.md) — Where sync-health alerts and a push's `.gitignore` sweep notice land
+- [Git remote token scrub](../../migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md) — Operator runbook: what upgrading does to existing agents' remotes

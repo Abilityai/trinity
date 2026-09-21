@@ -54,6 +54,8 @@ Click **Mute** on the orb, or press **M**, to silence your microphone mid-sessio
 - Browser microphone permission granted, on a secure (https) page.
 - A signed-in platform user. External clients signed in with an email code do not get a call button.
 
+The composer's **Speak your message** microphone is a different feature. It only types what you say into the message field, runs on ElevenLabs or the browser's own speech engine rather than Gemini, and is available to clients too. Its requirements, and why it may be missing, are in [Workspace → Dictation](../sharing-and-access/workspace.md#dictation).
+
 ## Configuration
 
 | Variable | Description | Default |
@@ -184,7 +186,7 @@ The call owns only the blocks it draws: everything the agent put on the canvas i
 
 ## See Also
 
-- [Workspace](../sharing-and-access/workspace.md) — the chat the call lives in
+- [Workspace](../sharing-and-access/workspace.md) — the chat the call lives in, and [dictation](../sharing-and-access/workspace.md#dictation) in its composer
 - [Agent Canvas](../agents/agent-canvas.md) — the canvas the call draws on
 - [Agent Chat](../agents/agent-chat.md) — the text-only Chat tab on Agent Detail
 - [VoIP Telephony](voip-telephony.md) — the same voice engine on a phone line

@@ -33,9 +33,13 @@ A client session slides: it renews while you use the Workspace, ends after the i
 
 The button at the bottom of the sidebar signs out. For a platform user it is labelled **Sign out of Trinity**, because your Workspace session is your platform session and ending one ends the other. A client's expired session never turns into the operator's: on a browser that also holds an operator login, the form offers **Continue as user@example.com** as an explicit click rather than switching identity on its own.
 
+The main app and every Workspace tab in the same browser share one platform sign-in, and open tabs follow it. Sign out and back in on one tab, and a Workspace tab left open from the old session picks up the new one instead of ending it. Sign out on one tab, and the other tabs drop the session too, without a background tab jumping to the sign-in page. A client signed in with an email code is not sent to the operator sign-in page just because the same browser also holds an expired operator login.
+
 ### The layout
 
 Three columns on a desktop screen: the **sidebar** on the left, the **conversation** in the middle, and a **side panel** on the right (the rail, or the agent's canvas during a voice call). The seam beside the sidebar, and the one beside the rail while it is open, are drag handles — drag to resize, double-click to reset. The conversation takes whatever is left, and the panel's maximum follows the viewport, so a width set on a large screen is clamped on a smaller one. On a phone the sidebar becomes a drawer behind the **Menu** button, and the rail becomes a strip above the composer that opens a bottom sheet.
+
+**Theme.** The right end of every chat and room header carries the theme switch. It names what is on screen — **Light**, **Dark**, or **System · dark** / **System · light** when the choice follows your operating system — and on a phone it shows only the icon. Click it and pick **Light**, **Dark** or **System** (arrow keys move between them; Esc closes the menu without touching a running turn or call). It is the same setting as the theme control in the main app, remembered in this browser, and switching keeps your place, your draft and your thread. External clients get it too.
 
 ### The sidebar
 
@@ -70,8 +74,8 @@ One box: the message field on top, the controls in a row inside it. Enter sends;
 
 - **`/` and `@`** — type `/` at the start of a word for the agent's playbooks, or `@` for another agent. ↓ then Enter (or Tab for the top row) inserts the pick; Esc dismisses the list. Enter alone always sends. A `/` pick splices the playbook's starter prompt into the field without sending.
 - **Model** — platform users on a Claude-runtime agent get a dropdown beside Send. The default option reads **Agent's default (…)** and names what the agent would use; the other three are plain-language tiers — **Most capable**, **Balanced — fast and smart**, **Fastest**. The choice is remembered per agent on your account. Resolution is your explicit choice → the model the owner set for the agent's public channels → the platform default. If the agent can't complete a turn on a model you chose, the reply says so and the choice reverts to the agent's default.
-- **Attach** — the paperclip picks files, and dropping files anywhere on the conversation sends them (*Drop files to send to …*). Up to 20 files per drop, 25 MB each, uploaded one after another; each shows as a chip with its own progress, and a refused file names itself and the limit. Sent files land in the agent's inbox and appear under **Files you sent** in the rail.
-- **Speak your message** — the microphone dictates into the field where the browser or platform can transcribe. It is separate from the voice call.
+- **Attach** — the paperclip picks files, dropping files anywhere on the conversation sends them (*Drop files to send to …*), and pasting a copied image or file into the message field attaches it the same way. A paste that also carries text still types the text. Up to 20 files per drop, 25 MB each, uploaded one after another; each shows as a chip with its own progress, and a refused file names itself and the limit. Sent files land in the agent's inbox and appear under **Files you sent** in the rail.
+- **Speak your message** — the microphone dictates into the field. It is separate from the voice call, and it appears only where dictation can work; see [Dictation](#dictation).
 - **Voice call** — the leftmost button starts the real-time call in this chat; see [Voice Chat](../advanced/voice-chat.md).
 - **Speak replies aloud** — a speaker button above the composer, shown only when the agent has a voice configured, reads each reply in the agent's ElevenLabs voice on your side. Click again to mute. It is hidden during a call, when the orb owns playback. See [Voice Replies](../advanced/voice-replies.md).
 - **Send** becomes **Stop** while a turn runs.
@@ -80,7 +84,9 @@ An agent that is stopped or unreachable is labelled above the field before you t
 
 ### While the agent works
 
-Replies stream as they happen. Under your message a live card shows the agent's status, the elapsed time and its current step, with **Stop** and **Open in Work** — the same card the rail's [Work tab](../operations/executions.md) lists afterwards. What the agent is doing ("Using *ripgrep*…", "Thinking…") shows rather than a spinner.
+Replies stream as they happen. Under your message a live card shows the agent's status, the elapsed time and one line saying what the agent is doing right now, with **Stop** and **Open in Work** — the same card the rail's [Work tab](../operations/executions.md) lists afterwards. When you send, the chat scrolls down to the card, unless you had scrolled up to read something.
+
+The activity line reads the same way everywhere: *Reading .../src/app.py*, *Running pytest -q*, *Searching for "pattern"*, *Fetching example.com*, *Using github*, *Delegating to researcher*, *Writing a reply*, or *Thinking* between steps. A new line slides up over the old one and stays long enough to read; a burst of quick steps shows only the latest. On a quiet stretch the last line stays, and the line clears when the run ends. Your own turn's line comes from its live stream. Every other live run — a delegated job, a scheduled run, a room turn — takes its line from the agent's regular heartbeat, which a platform user sees on the Work tab's cards and on a room's cards. A heartbeat line older than 30 seconds is dropped rather than shown as current, and a card with nothing to report leaves the line empty rather than guessing.
 
 **Stop**, or **Esc** with nothing else open, cancels the in-flight turn and puts your words back in the composer (in front of anything you typed while waiting). A cancelled turn shows as cancelled, not as an error. Esc does nothing when no turn is running, and yields to whatever is open on top — the typeahead, the agent picker, dictation, a file preview.
 
@@ -112,7 +118,7 @@ The rail sits beside the conversation, collapsed to a strip of icons by default;
 | **Files** | Files you sent and files the agent shared | Everyone |
 | **Info** | The agent's context (below) | Everyone, in a 1:1 chat |
 
-**Files.** Drop a file on the tab, or click to send one (in a room, pick the recipient first). The list is grouped **Files you sent** / **Files from {agent}**. Click a name to preview it — images, Markdown and text up to 256 KB; ← and → step through the previewable files, Esc closes — or **Download** to save it. The bin icon deletes a file you sent, or removes a shared file from your list without touching the share. An agent's owner, signed in as a platform user, additionally gets **Delete for everyone**.
+**Files.** Drop a file on the tab, or click to send one. In a room, **Send to** defaults to **Everyone in this chat (N agents)** — one copy per agent, the same as dropping the file on the room itself — and still lists each agent for a single recipient. The receipt names who got it (*Sent “shot.png” to analyst and sidekick.*). A file counts as sent only when every recipient got it; otherwise the error line names the file and the agents it missed. The list is grouped **Files you sent** / **Files from {agent}**. Click a name to preview it — images, Markdown and text up to 256 KB; ← and → step through the previewable files, Esc closes — or **Download** to save it. The bin icon deletes a file you sent, or removes a shared file from your list without touching the share. An agent's owner, signed in as a platform user, additionally gets **Delete for everyone**.
 
 **Canvas.** One canvas shows at a time; pick another from the chips above it, where a pinned canvas carries 📌 and comes first. Once an agent has more than six, **Search canvases…** filters them by title or id. The header states two facts and draws no conclusion from them — *Updated 2h ago · agent last ran 40m ago*. **PDF** prints the open canvas through the browser's own print dialog. An agent's owner (or an admin), signed in as a platform user, also gets **Manage**: each row shows its age, a pin toggle and **Delete**, and a checkbox per row feeds **Delete selected** with one confirmation naming the count; everyone else has a read-only panel. Sharing a canvas at a link is done from the agent's Canvas tab on Agent Detail, not from the rail — see [Agent Canvas](../agents/agent-canvas.md). The canvas you have open travels with each message you send from that chat, so *add a column to this* names the right one. It is context, not permission: the agent still reaches only the canvases it could already reach, and a canvas deleted mid-conversation resolves to nothing.
 
@@ -129,13 +135,38 @@ Clicking an agent no longer opens a report about it. Its numbers sit in a band u
 
 It reports; it does not configure. There are no schedules, skills, logs, costs or model details here. A question the agent raised appears above the composer of the chat it belongs to, and answering it there tells you whether the agent is picking the work up — see [Approvals](../automation/approvals.md). Everything is read from stored data, so a stopped agent still renders. The old address `/workspace/a/{agent}` still works and lands in the chat.
 
+### Dictation
+
+The microphone in the composer (**Speak your message**) turns speech into text in the message field. Nothing sends until you press Enter. Clients and platform users both get it, and it uses one of two engines:
+
+- **Platform transcription** — the browser records a clip and Trinity transcribes it through ElevenLabs. Used when the browser can record and the platform's ElevenLabs key is allowed to call speech-to-text.
+- **The browser's own dictation** — used otherwise, in browsers that have a speech engine.
+
+When neither engine can work, the composer shows no microphone at all rather than one that fails on every press. ElevenLabs grants permissions per endpoint, so a key that speaks replies aloud may still lack **Speech to Text**. That turns platform transcription off; the browser's engine still works where there is one.
+
+A failed transcription gets a line above the message field that says why: the key lacks the speech-to-text permission, the key was rejected, the account is out of credits, too many voice messages in a short time, the recording could not be read, or the provider failed. You can always type instead.
+
+**For admins.** **Settings → General → Voice (ElevenLabs)** shows, beside the key's **configured** badge, whether the key can transcribe:
+
+| Badge | Means |
+|-------|-------|
+| **can transcribe** | Platform dictation is available |
+| **cannot transcribe — *reason*** | ElevenLabs refused the key for speech-to-text. Grant the key the Speech to Text permission at ElevenLabs, then save it again |
+| **transcription not verified** | ElevenLabs could not be reached to check. The microphone stays available until the check completes |
+
+Trinity checks each key once and repeats the check every few hours, and at once when you save the key again. A transcription the provider refuses (HTTP 401 or 403) also marks the key, so the next page load stops offering platform transcription. Under the badge, **Last voice-input failure** names the most recent failed transcription: the cause, the provider's HTTP status and status word, and the time. It stays for 24 hours, or until you save the key again. The key itself is never shown.
+
 ### Voice mode
 
-The call button in the composer starts a real-time voice call inside the chat you are in. The orb takes the conversation column, the agent's canvas takes the right column, and the header, tabs and composer stay visible but inert until you end the call (**End call**, the orb's End button, or **Esc**). Switching chats and **⌘J** wait until the call ends. The spoken turns land in the chat as one collapsed **Voice call · N min** block. Everything about the call — who can start one, what the agent can do during it, the time limit — is in [Voice Chat](../advanced/voice-chat.md).
+The call button in the composer starts a real-time voice call inside the chat you are in. The orb takes the conversation column, the agent's canvas takes the right column, and the header, tabs and composer stay visible but inert until you end the call (the theme switch keeps working) (**End call**, the orb's End button, or **Esc**). Switching chats and **⌘J** wait until the call ends. The spoken turns land in the chat as one collapsed **Voice call · N min** block. Everything about the call — who can start one, what the agent can do during it, the time limit — is in [Voice Chat](../advanced/voice-chat.md).
 
 ### Bringing in another agent
 
-Mention another agent from a 1:1 — type `@` and pick it — and Workspace opens a **room** containing both and posts your message there; the original 1:1 is left as it was. Inside a room, **+ Add agent** recruits another, and only a person can do that. Rooms carry participant avatars, a star and a budget warning as the conversation approaches its cap; a room's tabs, names and rules are covered in [Shared Sessions (Rooms)](../collaboration/rooms.md). Against an older backend without rooms, the picker is single-select and an `@name` stays ordinary text.
+Mention another agent from a 1:1 — type `@` and pick it — and Workspace opens a **room** containing both and posts your message there; the original 1:1 is left as it was.
+
+Files you attached in that 1:1 and have not yet sent with a message go along: the composer's attachment chips, and files sent from the rail's **Files** tab in the last 15 minutes. Workspace waits for uploads still in progress, then delivers each file to the agents that do not have it yet, *before* posting your message, so the mentioned agent can see what you asked about. A line under the room's composer then says what happened — *Sent with your message: shot.png — also delivered to sidekick.*, *shot.png didn't reach sidekick — attach it again here to retry.*, or that a file was not carried over because it never finished uploading — until you dismiss it or send your next message. If the room cannot be opened, your text comes back to the 1:1 composer with its attachment chips.
+
+Inside a room, **+ Add agent** recruits another, and only a person can do that. Rooms carry participant avatars, a star and a budget warning as the conversation approaches its cap. For a platform user, each agent working on the room's message gets its own live card with **Stop**. A room's cards, files, names and rules are covered in [Shared Sessions (Rooms)](../collaboration/rooms.md). Against an older backend without rooms, the picker is single-select and an `@name` stays ordinary text.
 
 ### Keyboard shortcuts
 
@@ -145,6 +176,8 @@ Mention another agent from a 1:1 — type `@` and pick it — and Workspace open
 | **Enter** / **Shift+Enter** | Composer | Send / new line |
 | **↓ ↑**, **Enter**, **Tab**, **Esc** | Composer, with the `/` or `@` list open | Move, insert the selected row, insert the top row, dismiss |
 | **Esc** | A turn is running, nothing else open | Stop the turn and restore your words |
+| **Esc** | Room composer, with exactly one turn you can stop and no list or picker open | Stop that turn (with two or more, Esc does nothing — use the card's **Stop**) |
+| **Esc** | Theme menu open | Close the menu |
 | **Esc** | During a voice call | End the call |
 | **Esc**, **←**, **→** | File preview | Close, previous file, next file |
 | **Enter** / **Esc** | Renaming a chat | Save / abandon |
@@ -183,6 +216,7 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 | `/agents/{name}/canvas/{id}/pin` | PUT | Pin or unpin — `{pinned}` (owner or admin) |
 | `/agents/{name}/ratings` | POST | Rate a message or a deliverable |
 | `/agents/{name}/voice/start` | POST | Start a voice call bound to a chat (platform users) |
+| `/agents/{name}/stt` | POST | Transcribe a recorded clip for dictation — returns `{text}`. `404` when dictation is unavailable; a provider error returns a sentence naming the cause (`503` key, permission or credits; `429` rate limit; `422` unreadable recording; `502` provider failure) |
 | `/chat-state` | GET | Star and unread state for every chat |
 | `/chat-state/{kind}/{id}/star` | PUT / DELETE | Star or unstar a chat |
 | `/chat-state/{kind}/{id}/read` | POST | Advance the read cursor |
@@ -196,7 +230,9 @@ Asks and the Work tab have their own routes under the same prefix — see [Appro
 
 - **Shared agents only.** A client sees an agent only if it is shared with their verified email.
 - **No admin access.** Clients can chat, send files, star and rename chats, rate replies and read reports — never configure, create, or manage agents.
-- **Platform users only** for the model dropdown, voice calls, and the Work and Loops tabs. A client sees none of them.
+- **Platform users only** for the model dropdown, voice calls, the Work and Loops tabs, and a room's live cards. A client sees none of them; in a room, a client sees *… is thinking…* instead and cannot stop a turn.
+- **Stop covers only work your own messages started** — your turns, the jobs they hand on, and room turns. Nobody else can stop them from the Workspace. A loop is stopped from the **Loops** tab; a scheduled or background run from the agent's **Tasks** tab.
+- **Dictation depends on the ElevenLabs key.** Without a key that may call speech-to-text, dictation falls back to the browser's own engine, and the microphone is hidden in a browser that has none.
 - **Multi-agent chat is available in every build.** Against an older backend that does not serve rooms, `@mention` escalation is unavailable and Workspace says so rather than failing obscurely.
 - **Rooms show no unread count.** Stars work for rooms; unread badges count 1:1 chats only. A chat that existed before you first read anything, and was never opened, reports nothing.
 - **Room settings are not editable here** beyond the name. Topic, budget and scribe are set through the API.

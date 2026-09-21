@@ -7,6 +7,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied } from "../access.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
 
 /**
@@ -128,11 +129,11 @@ export function createAgentTools(
 
             if (!permittedAgents.includes(name)) {
               console.log(`[get_agent_info] Agent '${callerAgentName}' denied access to '${name}' (not permitted)`);
-              return JSON.stringify({
+              return accessDenied(context, {
                 error: "Access denied",
                 reason: `Agent '${callerAgentName}' does not have permission to access '${name}'`,
                 hint: "Request permission from the agent owner or use the agent permissions API",
-              }, null, 2);
+              });
             }
           }
 
@@ -178,11 +179,11 @@ export function createAgentTools(
           if (agent_name !== callerAgentName) {
             const permittedAgents = await apiClient.getPermittedAgents(callerAgentName);
             if (!permittedAgents.includes(agent_name)) {
-              return JSON.stringify({
+              return accessDenied(context, {
                 success: false,
                 error: "Access denied",
                 reason: `Agent '${callerAgentName}' does not have permission to access '${agent_name}'`,
-              }, null, 2);
+              });
             }
           }
         }

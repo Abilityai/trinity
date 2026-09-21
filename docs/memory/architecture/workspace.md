@@ -792,6 +792,56 @@ host is a supported topology (ent#79), and no static header can carry it (CORS w
 it a second time). The scope word is load-bearing: only that one route is rewritten, and
 `download_url` itself stays absolute and shareable for the anchor-click Download.
 
+## The Work card's activity line (trinity-enterprise#620)
+
+While an agent works, its card — in the chat and in the rail's Work tab — carries ONE fixed-height
+row saying what it is doing now. Two feeds, one vocabulary (`utils/workActivity.js`): the chat's
+own turn parses the SSE frames' real shape (`message.content[].type === 'tool_use'`; the earlier
+handler matched a shape that never occurs, which is why the card was blank), every other run —
+delegated, scheduled, room — reads the agent's heartbeat, which now carries a bounded
+`executions[]` from the agent server's per-execution activity slot. The backend never composes
+the words: `WorkItem.activity {tool, summary, since, age_seconds}` is folded onto live, non-stale
+rows of rostered agents through the title sanitiser and the roster mask, and a Redis-only
+`GET …/work/activity` sibling is polled every 2.5 s while a card is live. The card owns the
+motion (`createActivityLineQueue`: ≥700 ms per line, a burst collapses, identical lines never
+re-key, cleared at terminal; slide-up `<Transition>`, a swap under reduced motion). A person's
+own send re-pins the transcript once the card mounts, guarded by `following` (#2624).
+
+## Unsent drafts are per person, in the browser, and keyed like a chat (trinity-enterprise#657)
+
+The composer's text outlives the stage that held it. Every switch remounts
+`PortalConversation` / `PortalRoom`, so the text lives in `stores/portalDrafts.js`
+(rules in `components/portal/portalDrafts.js`, binding in
+`composables/useComposerDraft.js`) keyed `thread:<id>` / `room:<id>` / `new:<agent>`
+— the first two are the shell's own `chatKey`, the scheme
+`enterprise_portal_chat_state` already uses, so a later server-side draft would
+swap the source and not the keys. **No server contract exists today**: no route,
+no column, no MCP surface.
+
+**The identity is the roster's `client_email`, and that is a deliberate departure
+from the column-layout rule one file over.** `useColumnResize.js::resolveLayoutIdentity`
+reads `auth0_user` and gives every portal client one shared `client` bucket,
+because widths must be resolved *synchronously before first paint*. Drafts have
+no such constraint (the stage gates on `rosterLoaded`, and `fetchRoster` sets
+`clientEmail` first), and a shared bucket that is harmless for a number would let
+one client on a shared browser read another's words. Stated here so the next
+per-viewer cache picks one of these two rules on purpose rather than inventing a
+third.
+
+**Persistence is key-granular.** The Workspace opens in its own tab (ent#456);
+`persistDraft` re-reads the bucket and applies one key, and a `storage` event
+re-reads it. A whole-map write would carry tab B's stale snapshot of tab A's
+keys and could re-persist a draft A had just *sent* — the one thing the feature
+must never do. `safeStorage()` moved to `utils/safeStorage.js` here (it was
+copied in `views/Portal.vue` and `composables/useColumnResize.js`, and the two
+copies read different globals: `window.localStorage` vs the bare one).
+
+Also corrected in passing: the `#2259` comment at `PortalRoom.vue`'s `onMounted`
+reads as though the composer does not exist before `load()` resolves. `isClosed`
+is false while `room` is null, so the form IS mounted — what `load()` gates is
+whether the room is *closed*, which is why the draft restore (and the draft
+clear for a closed room) sits after it.
+
 ## The compact header — Info as a rail tab, one paperclip, voice at the composer (ent#547, #2580)
 
 **Theme switch (trinity-enterprise#625).** The header's LAST control, in both the conversation

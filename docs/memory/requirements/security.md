@@ -38,7 +38,7 @@
   - `src/mcp-server/src/audit.ts` — `withAudit` transparent wrapper
   - All 71 tools auto-wrapped at registration time in `server.ts`
   - Fire-and-forget POST to `/api/internal/audit` (shared-secret auth via `INTERNAL_API_SECRET`)
-  - Captures tool name, auth context (user/agent/system scope), duration, success/failure with error message
+  - Captures tool name, auth context (user/agent/system scope), duration, success/failure with error message — a denial a tool RETURNS is labelled too (`success: false`, `denied: true`, `error: <reason>`; #2807), so an operator can tell a refused call from a permitted one
 - **Phase 4 Delivery (hash chain + export)**:
   - `POST /api/audit-log/hash-chain/enable?enabled=true|false` — runtime toggle
   - `POST /api/audit-log/verify?start_id=&end_id=` — chain integrity check

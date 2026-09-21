@@ -194,7 +194,9 @@
       :active-id="currentSessionId"
       :disabled="voiceCallActive"
       :draft="newChat || bornHere"
+      :draft-keys="drafts.keys"
       @select="(t) => emit('open-thread', t)"
+      @new-chat="emit('new-chat')"
     />
 
     <!-- #2579: the shell's line under the strip (today: the admin-only notice
@@ -752,6 +754,7 @@ import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
 import { askAboutItPrefill, childrenForChat, itemById } from './portalWork'
+import { activityFromStreamEvent, resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
@@ -759,6 +762,9 @@ import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
+import { useComposerDraft } from '@/composables/useComposerDraft'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
@@ -940,6 +946,17 @@ const PLATFORM_LINE_CLASS = 'my-3 text-center text-xs text-gray-400 dark:text-gr
 // dark ink ladder's floor for meta text is gray-400, never gray-500.
 const META_INK_CLASS = 'text-gray-400 dark:text-gray-400'
 const input = ref('')
+// trinity-enterprise#657: the composer's text outlives this instance. The key
+// is the conversation's identity — the thread once known, the agent's unsaved
+// chat while `newChat`, nothing while a cold root is still resolving — and the
+// binding is write-through, so `send()` emptying the field IS the clear. A
+// stored draft lands in the (empty) composer here, at setup; growing and
+// focusing the field waits for `onMounted`, where the textarea exists.
+const drafts = usePortalDraftsStore()
+const draftKey = computed(() => draftKeyFor({
+  sessionId: currentSessionId.value, agentName: props.agent?.name, newChat: props.newChat,
+}))
+const { restored: draftRestored } = useComposerDraft({ key: draftKey, input })
 const sending = ref(false)
 // ent#523 — Reset, offered on Main only.
 const resetting = ref(false)
@@ -1032,10 +1049,19 @@ const liveCardItem = computed(() => {
     can_stop: false,
   }
 })
-// Two clocks, one rule: while the stream is live its last line is the step.
-const liveStepLine = computed(() => (
-  streaming.value && liveActivity.value.length ? liveActivity.value[liveActivity.value.length - 1] : null
-))
+// trinity-enterprise#620: the activity line — the stream's facts while this
+// turn streams (instant), else what the Work read folded onto the row (the
+// same heartbeat feed every other card uses). One vocabulary either way.
+// `elapsed` is read so the age check re-runs each second the card is live.
+const liveStepLine = computed(() => {
+  void elapsed.value
+  return resolveActivityText({
+    live: sending.value,
+    streamActivity: streaming.value ? liveStreamActivity.value : null,
+    activity: workStore.activityFor(liveCardItem.value),
+    nowMs: Date.now(),
+  })
+})
 // Delegated work this turn handed on — found by the CHAT, not the agent.
 const liveChildren = computed(() => childrenForChat(workStore.now, currentSessionId.value, activeExecutionId.value))
 // The durable verdict the terminal card renders from (#2320's record, or this
@@ -1116,6 +1142,7 @@ const scrollEl = ref(null)
 // holding. The rule lives in the composable, shared with `PortalRoom` — the two
 // surfaces had two copies of the same unconditional `scrollTop = scrollHeight`.
 const {
+  following,
   unread: unreadBelow,
   showJumpToLatest,
   onScroll: onTranscriptScroll,
@@ -1234,7 +1261,7 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   // ent#525 (review E3): a reattached turn is still a turn the person may
   // stop — without the id, `canCancelTurn` stayed false after every reload.
   activeExecutionId.value = executionId || null
-  liveActivity.value = []
+  liveStreamActivity.value = null
   elapsed.value = 0
   clearInterval(elapsedTimer)
   elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
@@ -1281,7 +1308,7 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   finally {
     sending.value = false
     streaming.value = false
-    liveActivity.value = []
+    liveStreamActivity.value = null
     activeExecutionId.value = null
     clearInterval(elapsedTimer)
     // #2624: a reply settling is an ARRIVAL, not an intent — this turn was
@@ -1348,6 +1375,19 @@ onMounted(async () => {
   document.addEventListener('keydown', onEscapeKeydown)
   window.addEventListener('resize', onViewportResize)
   if (props.prefill) input.value = props.prefill
+  // trinity-enterprise#657: a restored draft gets the caret at its end — on a
+  // fine pointer only (a phone would get the soft keyboard over the thread).
+  // After the prefill line on purpose: an explicit "Ask about it" replaces the
+  // composer today, and the write-through then makes IT the draft.
+  if (draftRestored && !props.prefill && shouldFocusOnRestore(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) {
+    nextTick(() => {
+      const el = textarea.value
+      if (!el || el.disabled) return
+      el.focus()
+      const end = el.value.length
+      try { el.setSelectionRange(end, end) } catch { /* not a text control */ }
+    })
+  }
   // ent#451: `newChat` also has to hold on FIRST paint — the picker mounts a
   // fresh conversation rather than updating one, so the watcher above never
   // runs for it.
@@ -1715,7 +1755,7 @@ async function deliver(text) {
         adoptSession(started.session_id)
       }
       streaming.value = true
-      liveActivity.value = []
+      liveStreamActivity.value = null
       try {
         await store.streamPortalExecution(props.agent.name, started.execution_id, onStreamEvent)
       } catch (streamErr) {
@@ -1724,7 +1764,7 @@ async function deliver(text) {
         console.debug('[workspace] lost the stream, reading the result instead', streamErr)
       } finally {
         streaming.value = false
-        liveActivity.value = []
+        liveStreamActivity.value = null
       }
       data = await awaitPersistedReply(
         started.session_id || currentSessionId.value, baseline,
@@ -1913,27 +1953,24 @@ async function cancelTurn() {
   }
 }
 
-// ent#286 — live turn state. `liveActivity` holds a short, human-readable trail
-// of what the agent is doing right now; it is transient and never persisted.
+// ent#286 — live turn state. `liveStreamActivity` holds the two facts the
+// agent's stream last established (`{tool, summary}`); transient, never
+// persisted. (trinity-enterprise#620 replaced the six-label trail: the
+// earlier handler matched `evt.type === 'tool_use'`, a shape the raw
+// stream-json frames never carry, so the card only ever said nothing.)
 const streaming = ref(false)
-const liveActivity = ref([])
+const liveStreamActivity = ref(null)
 // Bumped after each completed turn; `PortalDeliverables` watches it.
 const deliverableTick = ref(0)
-const LIVE_ACTIVITY_MAX = 6
 
-// One log entry from the agent's stream → at most one line of visible activity.
-// Deliberately conservative: the stream is Claude's raw log, so anything not
-// recognised is ignored rather than rendered as noise at a client.
+// One raw frame from the agent's stream → the facts the activity line is
+// composed from, or nothing. `activityFromStreamEvent` reads the real
+// shape (`message.content[].type === 'tool_use'`) and summarises the input
+// the way the agent's own tracker does; the card composes the words.
 function onStreamEvent(evt) {
   if (!evt || evt.type === 'stream_end') return
-  let label = null
-  if (evt.type === 'tool_use' || evt.tool_name) label = `Using ${evt.tool_name || 'a tool'}…`
-  else if (evt.type === 'thinking') label = 'Thinking…'
-  else if (evt.type === 'error') label = 'Hit a problem — recovering…'
-  if (!label) return
-  if (liveActivity.value[liveActivity.value.length - 1] === label) return  // don't stutter
-  liveActivity.value.push(label)
-  if (liveActivity.value.length > LIVE_ACTIVITY_MAX) liveActivity.value.shift()
+  const next = activityFromStreamEvent(evt)
+  if (next) liveStreamActivity.value = next
 }
 
 // The stream ends when the AGENT's execution ends, but the reply is persisted
@@ -2179,6 +2216,18 @@ async function submitUserText(text) {
   const res = await deliver(text)
   return settleDelivery(index, text, res)
 }
+
+// trinity-enterprise#620 AC #5: when the person's OWN send starts work, the
+// live card mounts under their message — on a long thread that can be below
+// the fold of the pin above. Re-pin once the card is in the DOM, but only
+// while the reader is still following: an incoming message while they are
+// scrolled up must never move the transcript (#2624), and that rule holds
+// for the card too if they scrolled away between the send and the mount.
+watch(sending, async (isSending) => {
+  if (!isSending) return
+  await nextTick()
+  if (following.value) await pinToBottom()
+})
 
 // Both `deliver()` callers have to settle a turn the same way, so they share
 // one function rather than one of them carrying the rules. Review finding:

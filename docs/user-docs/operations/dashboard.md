@@ -35,7 +35,7 @@ When a type-to-filter query matches nothing, the Dashboard tells you so explicit
 
 - On first load each pane shows a skeleton in the shape of its content — rows for Timeline and List, tile outlines for Grid — until the fleet arrives. Skeletons are for "no data yet" only; a pane with data never regresses to one.
 - If the fleet can't be read, the pane shows **Couldn't load agents** (or **Couldn't load timeline data**) with a **Retry** button, instead of an empty list that looks like a fleet with no agents.
-- A fleet with no agents shows **No agents yet** and a **Get started** button that opens the Create Agent dialog. First-run setup is a separate overlay that opens over the Dashboard on a fresh install, and the **Getting started** checklist sits above the fleet until its milestones are done — both are described in [Setup](../getting-started/setup.md#your-first-dashboard).
+- A fleet with no agents shows **No agents yet** and a **Get started** button that opens the Create Agent dialog. First-run setup is a separate overlay that opens over the Dashboard on a fresh install. The **Getting started** checklist, on instances that have it, lives in the left **Systems** sidebar under the view list rather than in the fleet pane, so it never shifts the fleet down. It stays there until its milestones are done, and collapsing the sidebar hides it. Both are described in [Setup](../getting-started/setup.md#your-first-dashboard).
 - Background polls swap values in place. A poll that fails after a successful one keeps the numbers on screen and marks them stale rather than blanking them — for example, the Executions tile's stamp becomes `24h · stale`.
 
 ### Timeline View (default)

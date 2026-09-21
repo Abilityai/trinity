@@ -15,6 +15,11 @@
 #   4. Nothing can hang the run. Every tier carries a timeout and
 #      `--timeout-method=thread`, so one blocking socket costs one test, not
 #      the afternoon.
+#   5. A tier that was never REACHED is a failure too (#2888). Control flow is
+#      not trusted to arrive at every `run_tier` line: the summary is checked
+#      against DECLARED_TIERS, and an exit before the summary is announced as
+#      an abort that names the tiers it left unrun. For three weeks the guard
+#      at the api boundary `exit 1`'d the run, and nothing said so.
 #
 # Tiers run in sequence; ALL of them run even after one fails (a failing tier
 # must not hide the state of the others), and the script exits non-zero if any
@@ -47,13 +52,54 @@ PINNED_PY="$(grep -oE 'python:3\.[0-9]+' "${REPO_ROOT}/docker/backend/Dockerfile
 
 RESULTS=()          # "name<TAB>status<TAB>detail"
 FAILED=0
+RECORDED=" "        # " name name " — every row name that reached record()
+
+# Every tier this script can run, in run order. The end-of-run ledger checks
+# that each one either has a row in RESULTS or was deselected by the caller
+# (`--tier`, `--no-pg`); anything else is a tier the control flow never
+# reached, and that FAILS the run. Add a tier here when you add a `run_tier`
+# line — `tests/unit/test_2080_harness_contract.py` fails if the two drift.
+DECLARED_TIERS=(unit integration git-sync security scheduler agent-server journeys api standalone postgres)
+
+# Anything that ends the script before the summary is an ABORT, and an abort
+# must be loud: it names the tiers it left unrun and exits non-zero even if
+# the exiting command's own status was 0. This is the backstop for the
+# failure mode #2888 was — an `exit 1` two-thirds of the way down that read
+# like a finished run.
+SUMMARY_PRINTED=0
+PG_NAME=""          # set while the disposable postgres container is up
+on_exit() {
+    local rc=$?
+    if [ -n "$PG_NAME" ]; then docker rm -f "$PG_NAME" >/dev/null 2>&1 || true; fi
+    if [ "$SUMMARY_PRINTED" = 0 ]; then
+        printf '\n\033[1;31m== tests/run-full.sh ABORTED before the summary (exit %s)\033[0m\n' "$rc"
+        printf '   tiers that did not run:'
+        local t
+        for t in "${DECLARED_TIERS[@]}"; do
+            case "$RECORDED" in *" ${t} "*) ;; *) printf ' %s' "$t" ;; esac
+        done
+        printf '\n   This is NOT a full-suite result.\n\n'
+        [ "$rc" != 0 ] || rc=1
+    fi
+    exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 log()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 note() { printf '   %s\n' "$*"; }
 
 record() {  # name status detail
     RESULTS+=("$1	$2	$3")
+    RECORDED="${RECORDED}$1 "
     [ "$2" = "PASS" ] || FAILED=1
+}
+# A tier the caller deselected. Listed in the summary so the run states what
+# it did not cover, but not a failure — the omission was asked for.
+record_deselected() {  # name reason
+    RESULTS+=("$1	SKIP	$2")
+    RECORDED="${RECORDED}$1 "
 }
 
 # ---------------------------------------------------------------------------
@@ -199,21 +245,13 @@ NON_TIER_DIRS=(manual deploy harness fixtures testing_utils testkit)
 # And the list is CHECKED against the tree, because a derived list is only as
 # good as its inputs: a new directory under tests/ that nobody wired would still
 # be silently swept into `api`. Failing here names it instead.
-_unclassified=()
-for _d in tests/*/; do
-    _d="${_d#tests/}"; _d="${_d%/}"
-    case " ${TIER_DIRS[*]} ${NON_TIER_DIRS[*]} " in
-        *" ${_d} "*) ;;
-        *) _unclassified+=("${_d}") ;;
-    esac
-done
-if [ ${#_unclassified[@]} -gt 0 ]; then
-    printf '\n\033[1;31m== tests/run-full.sh: unclassified test directories\033[0m\n'
-    printf '   %s\n' "${_unclassified[@]}"
-    printf '   Add each to TIER_DIRS (with its own run_tier line) or to NON_TIER_DIRS.\n'
-    printf '   Left unwired they are collected a SECOND time by the api tier.\n\n'
-    exit 1
-fi
+#
+# The check takes TESTS_DIR explicitly — it does not glob relative to the cwd.
+# The inline version globbed `tests/*/` after the `cd` at the top of this file
+# had already made `tests/` the cwd, matched nothing, and exited 1 on the
+# literal `*` before `api`, `standalone` and `postgres` ever ran (#2888). A
+# guard that aborts the run must not depend on where the run is standing.
+python ./harness/check_test_dirs.py "$TESTS_DIR" "${TIER_DIRS[@]}" "${NON_TIER_DIRS[@]}" || exit 1
 
 api_ignores=()
 for _d in "${TIER_DIRS[@]}" "${NON_TIER_DIRS[@]}"; do api_ignores+=("--ignore=${_d}"); done
@@ -247,7 +285,6 @@ fi
 # PostgreSQL configured", which reads as green.
 if [ "$RUN_PG" = 1 ] && wants postgres; then
     log "tier: postgres (disposable container + alembic upgrade head)"
-    PG_NAME="trinity-tests-pg-${TIMESTAMP}"
     PG_PORT="${TRINITY_TEST_PG_PORT:-55433}"
     # Reap a container leaked by an earlier run that was killed before its trap
     # fired (Ctrl-C, a `timeout`, a crashed shell). Without this the next run
@@ -259,12 +296,16 @@ if [ "$RUN_PG" = 1 ] && wants postgres; then
         note "removing leaked postgres container(s) from an earlier run"
         docker rm -f $leaked >/dev/null 2>&1 || true
     fi
-    if ! docker run -d --rm --name "$PG_NAME" --label trinity-tests-pg=1 \
+    # PG_NAME is global: the EXIT trap (on_exit) removes the container on any
+    # exit path, so it is set only once `docker run` has succeeded and cleared
+    # again once the tier has removed it itself.
+    _pg_name="trinity-tests-pg-${TIMESTAMP}"
+    if ! docker run -d --rm --name "$_pg_name" --label trinity-tests-pg=1 \
             -e POSTGRES_PASSWORD=trinity_test -e POSTGRES_DB=trinity_test \
             -p "${PG_PORT}:5432" postgres:16-alpine >/dev/null 2>"${LOG_DIR}/pg.log"; then
         record postgres FAIL "could not start postgres:16-alpine (see ${LOG_DIR}/pg.log)"
     else
-        trap 'docker rm -f "$PG_NAME" >/dev/null 2>&1 || true' EXIT INT TERM
+        PG_NAME="$_pg_name"
         for _ in $(seq 1 30); do
             docker exec "$PG_NAME" pg_isready -U postgres -q 2>/dev/null && break
             sleep 1
@@ -279,7 +320,19 @@ if [ "$RUN_PG" = 1 ] && wants postgres; then
         export TEST_POSTGRES_URL="postgresql://postgres:trinity_test@localhost:${PG_PORT}/trinity_test"
 
         note "alembic upgrade head"
-        if (cd "${REPO_ROOT}/src/backend" && python -m alembic upgrade head) \
+        # config.py raises at import without Redis credentials (#589), and
+        # revision 0041 imports `services` — which imports config — so the
+        # upgrade needs the same dummies pg-migrations.yml sets. Migrations
+        # never touch Redis. Scoped to this subshell: the pytest tier below
+        # gets its own via unit/conftest.py. Found the day the postgres tier
+        # first ran again (#2888) — it had been broken since 0041 landed, a
+        # week before the guard stopped the tier from running at all.
+        if (cd "${REPO_ROOT}/src/backend" \
+                && REDIS_URL="${REDIS_URL:-redis://test:test@localhost:6379}" \
+                   REDIS_PASSWORD="${REDIS_PASSWORD:-test}" \
+                   REDIS_BACKEND_PASSWORD="${REDIS_BACKEND_PASSWORD:-test}" \
+                   CREDENTIAL_ENCRYPTION_KEY="${CREDENTIAL_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}" \
+                   python -m alembic upgrade head) \
                 >"${LOG_DIR}/alembic.log" 2>&1; then
             run_tier postgres 600 unit/ -k "postgres or alembic or migration or dual_backend"
         else
@@ -288,7 +341,7 @@ if [ "$RUN_PG" = 1 ] && wants postgres; then
         fi
         unset DATABASE_URL TEST_POSTGRES_URL
         docker rm -f "$PG_NAME" >/dev/null 2>&1 || true
-        trap - EXIT INT TERM
+        PG_NAME=""
     fi
 fi
 
@@ -303,8 +356,26 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Tier ledger — every declared tier has a row, or the run is not full (#2888)
+# ---------------------------------------------------------------------------
+# The rows are not trusted to have been written by the control flow above
+# reaching every `run_tier` line: each declared tier is looked up by name, and
+# one that is neither recorded nor deselected by the caller FAILS the run.
+for _t in "${DECLARED_TIERS[@]}"; do
+    case "$RECORDED" in *" ${_t} "*) continue ;; esac
+    if ! wants "$_t"; then
+        record_deselected "$_t" "deselected by --tier"
+    elif [ "$_t" = postgres ] && [ "$RUN_PG" = 0 ]; then
+        record_deselected postgres "deselected by --no-pg"
+    else
+        record "$_t" FAIL "tier NEVER RAN — the script did not reach it; not a full-suite result"
+    fi
+done
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
+SUMMARY_PRINTED=1
 echo ""
 echo "========================================="
 echo "  FULL SUITE SUMMARY  (${TIMESTAMP})"
@@ -320,7 +391,13 @@ if [ "$PY_MISMATCH" = 1 ]; then
     echo "        (TRINITY_TEST_ALLOW_PY_MISMATCH=1) — not a clean full-suite result"
 fi
 if [ "$FAILED" = 0 ]; then
-    echo "  RESULT: PASS"
+    if [ ${#WANTED_TIERS[@]} -gt 0 ] || [ "$RUN_PG" = 0 ]; then
+        # Green, but by request less than everything: say so on the verdict
+        # line, so this run cannot be quoted as a full-suite result.
+        echo "  RESULT: PASS (partial — see SKIP rows; not a full-suite result)"
+    else
+        echo "  RESULT: PASS"
+    fi
 else
     echo "  RESULT: FAIL"
 fi

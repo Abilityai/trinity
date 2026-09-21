@@ -4,7 +4,7 @@ Take a one-click Trinity droplet from a bare public IP to an instance you would 
 
 ## When to Run This
 
-- You created a Trinity instance from a cloud marketplace listing, or with the DigitalOcean install script, and it answers at a bare IP address.
+- You created a Trinity instance from a cloud marketplace listing, or with the [DigitalOcean install script](digitalocean.md), and it answers at a bare IP address.
 - The instance is about to hold real work, real credentials, or other people's data.
 - You want a memorable address instead of an IP, and an ordinary long-lived certificate instead of the short-lived IP one.
 
@@ -17,7 +17,7 @@ Not for you if Trinity already runs on a private network — the managed fleet's
 | Caddy on ports 80 and 443 | A browser-trusted Let's Encrypt certificate for the droplet's **IP address**, so there is no warning and no domain required. Certificates on this profile last about six days and renew while the server runs — an instance switched off for longer comes back to a browser warning until renewal catches up |
 | Host firewall | Inbound 22, 80 and 443 only |
 | Container ports | Not reachable from off-box. Docker publishes past ordinary firewall rules, so Trinity installs its own rules that drop anything arriving at a container from outside. The backend, MCP server and log collector are reachable only through Caddy, or from the droplet itself |
-| Admin account | None until someone claims it in a browser — **whoever opens it first becomes the admin** |
+| Admin account | On a 1-Click droplet created without a password: none until someone claims it in a browser — **whoever opens it first becomes the admin**. The install script, or a password supplied at create time, provisions it at first boot instead |
 
 Everything except the web interface is already closed. What stays open is Trinity itself: the web UI and the API answer anyone on the internet who finds the address, and your login is the only thing in the way.
 
@@ -49,7 +49,7 @@ What saving it does:
 - It authorises the web server in front to obtain a certificate **for that one name**. Caddy asks Trinity whether a name is allowed before requesting a certificate, and Trinity answers yes only for the saved name — so nobody else can point a domain at your droplet and have certificates issued on your account.
 - It re-registers existing Telegram webhooks and rewrites WhatsApp binding URLs to the new base **immediately**. On a name that is not live yet, working bots move to an address that answers nothing, which is why the DNS record comes first.
 
-The certificate is obtained on the first request that arrives for the name, so **visiting the site is what completes this step**. Until someone does, Trinity says so: Settings reads *saved, waiting for the first visit*, and the first-run setup step stays open.
+The certificate is obtained on the first request that arrives for the name, so **visiting the site is what completes this step**. Until someone does, Trinity says so: Settings reads *saved, waiting for the first visit*, and the first-run **Secure this instance** step shows **Domain saved** instead of **Domain reached**. (Saving alone marks that step done in the setup rail, so the step does not re-open.)
 
 ### Step 2: Choose how it is reached
 
@@ -67,9 +67,9 @@ All three end with nothing listening on the public interface. They differ in who
 
 **Tailnet only** — the interface is yours alone, and anything that calls in stops working. Pick it when nothing does.
 
-**Both** — the tunnel carries what calls in, the tailnet carries you. Pick it if you use Telegram, WhatsApp, voice, public chat links, agent websites or webhooks, and you want the interface private. Follow [Step 2a](#step-2a-cloudflare-tunnel), then [Step 2b](#step-2b-private-network-tailscale), then [Step 2c](#step-2c-both-the-tunnel-carries-the-callbacks-the-tailnet-carries-you) for the one setting that differs.
+**Both** — the tunnel carries what calls in, the tailnet carries you. Pick it if you use Telegram, WhatsApp, voice, public chat links, agent websites or webhooks, and you want the interface private. Follow [Step 2a](#step-2a-cloudflare-tunnel), then [Step 2b](#step-2b-private-network-tailscale), then [Step 2c](#step-2c-both--the-tunnel-carries-the-callbacks-the-tailnet-carries-you) for the one setting that differs.
 
-Everything Broken above is a third party making a request **to** your instance, which is exactly what a private network stops. Slack is unaffected because Trinity connects outward to Slack. Telegram is on the broken list today because Trinity registers a webhook; [#2849](https://github.com/abilityai/trinity/issues/2849) would let it connect outward too.
+Everything Broken above is a third party making a request **to** your instance, which is exactly what a private network stops. Slack is unaffected because Trinity connects outward to Slack. Telegram is on the broken list because Trinity registers a webhook for it.
 
 ### Step 2a: Cloudflare Tunnel
 

@@ -26,6 +26,14 @@ Yes — that is the intended path. The platform keys (Claude, GitHub, the Resend
 
 Credential values are never logged — all credential operations use structured logging with values masked. On top of that, a guardrail hook scans agent command output for known credential patterns (API keys, GitHub tokens, cloud access keys) and records only the pattern name when it finds a match, never the value itself, so you can review potential leaks without the log becoming one. A value an agent fetches from the Credential Vault is additionally scrubbed out of everything Trinity persists from that turn — transcript, execution log, response, notifications — and replaced with `***REDACTED***`. See [Agent Guardrails](../agents/agent-guardrails.md).
 
+## Is the GitHub token stored in my agent's git remote?
+
+No. An agent's git remotes carry no credential: git asks Trinity's credential helper for the token on each fetch or push, over standard input, so the token is not written into `.git/config` and does not appear in the container's process list or logs. Existing agents are converted automatically after an upgrade, and a token is removed from a URL only once a replacement resolves. This does not hide the token from the agent itself — `GITHUB_PAT` stays in its `.env` and environment so `git` and `gh` keep working. To limit what one agent can reach, give it its own repo-scoped token on its **Git** tab. See [GitHub PAT Setup](../integrations/github-pat-setup.md#how-git-gets-the-token).
+
+## Should I rotate the platform GitHub token after upgrading?
+
+Yes. Taking the token out of agent remotes protects your install from the upgrade onward, but backups, log archives, and container logs taken before the upgrade can still contain it. Mint a replacement, save it under **Settings → Integrations**, confirm a fetch works on a couple of agents, then revoke the old token on GitHub; the new token reaches running agents without a restart. Rotation is mandatory if the cleanup reports a token in a committed `.gitmodules` file, since that token is already in the repository's history; the operator runbook, [Git remote token scrub](../../migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md), has the verification commands. See [Upgrading](../guides/deploying/upgrading.md#github-token-out-of-agent-remotes-automatic-then-rotate).
+
 ## Is it safe to commit the `.credentials.enc` file to git?
 
 Yes — that is what it exists for. It is an AES-256-GCM encrypted archive of the agent's full credential set, safe to store in version control as an encrypted backup; on agent startup Trinity decrypts and re-injects it automatically. The encryption key lives only in your platform's environment, and it can be rotated online without downtime or data loss. See [Credential Management](../credentials/credential-management.md).
@@ -33,6 +41,10 @@ Yes — that is what it exists for. It is an AES-256-GCM encrypted archive of th
 ## What is recorded in the audit log?
 
 Administrative and security-relevant actions across the platform: agent lifecycle (create, start, stop, delete, rename, recover), logins and logouts, permission grants and denials, settings changes, credential inject/export/import, git operations, and every MCP tool call. Each entry records who acted (user, agent, MCP client, or system), what was affected, when, and where the request originated. When the call was authenticated with an MCP API key, the entry also names the key — its id, name, and scope — beside the accountable owner, so "what did that leaked key touch?" is answered by filtering the list on the key id; a browser session records no key fields. Admins can search, filter, and export it from the dashboard. See [Audit Trail](../operations/audit-trail.md).
+
+## Does a refused MCP tool call show up in the audit log?
+
+Yes, and it is labelled as a refusal. When a tool turns a call away — for example an agent calling `chat_with_agent`, `fan_out`, or `run_agent_loop` on an agent it has no permission for — the caller gets an `Access denied` result, and the `mcp_operation` entry records `success: false`, `denied: true`, and the reason. A backend `403` that surfaces through a tool is marked `denied` too. Other errors carry no `denied` flag, so a refused call is never mistaken for a permitted one or for a broken one. Where the caller only sees a generic "not found or not accessible", the admin-only entry keeps the specific reason. See [Audit Trail](../operations/audit-trail.md#refused-mcp-calls).
 
 ## Can audit log entries be edited or deleted?
 
@@ -78,6 +90,10 @@ Only an install with **no admin account** has an open window. On a normal instal
 ## Can an agent publish one of its canvases to the open internet on its own?
 
 No. An agent can write a canvas and mark it for its roster, but it cannot create, list, or revoke a share link — the share routes refuse an agent's own key outright, the same way the pin route does, and there is deliberately no MCP tool for them. Deciding who *outside* the platform may read a canvas is a person's call: only the agent's owner or an admin can click **Share**, the narrower **People who already have access** option is preselected, and **Anyone with the link** says plainly that it needs no sign-in. Links stay live until **Revoke**, and creating or revoking one is recorded in the audit log, as are canvas deletes and pins. Everything on a canvas is sanitised before it renders — scripts never execute, `<style>` tags are stripped — so a shared page cannot restyle or script the browser that opens it. See [Agent Canvas](../agents/agent-canvas.md#removing-canvases).
+
+## Can an agent turn on its own wake-on-answer?
+
+No. **Wake this agent when an operator answers** means each answer can start a turn the owner pays for, so the switch belongs to people. An agent's key acts for its owner, but `PUT /api/agents/{name}/operator-resume` refuses it with `403` before anything changes. Only the agent's owner or an admin can turn the switch on or off, from **Settings → Reliability**. An agent can still read the setting, so it can tell whether an answer will wake it. See [Agent Configuration](../agents/agent-configuration.md#wake-on-operator-answer).
 
 ## Is a webhook URL secure enough on its own?
 

@@ -74,6 +74,7 @@
                   :item="it"
                   compact
                   :elapsed-seconds="elapsedOf(it)"
+                  :live-step="stepOf(it)"
                   :children="childrenOf(it)"
                   :can-stop="it.can_stop"
                   :stopping="store.stoppingIds.includes(it.id)"
@@ -92,6 +93,7 @@
                 compact
                 :show-agent="!it.agent_name"
                 :elapsed-seconds="elapsedOf(it)"
+                :live-step="stepOf(it)"
                 :children="childrenOf(it)"
                 :can-stop="it.can_stop"
                 :stopping="store.stoppingIds.includes(it.id)"
@@ -150,6 +152,7 @@ import {
   EARLIER_PREVIEW, askAboutItPrefill, childrenForChat, earlierSlice, earlierSummary,
   liveElapsedSeconds, workView,
 } from './portalWork'
+import { resolveActivityText } from '@/utils/workActivity'
 
 const props = defineProps({
   participants: { type: Array, default: () => [] },
@@ -207,6 +210,13 @@ onBeforeUnmount(() => { if (tick) clearInterval(tick) })
 
 function elapsedOf(item) {
   return liveElapsedSeconds(item, { fetchedAtMs: store.fetchedAt, nowMs: nowMs.value })
+}
+// trinity-enterprise#620: the same line, same vocabulary as the in-chat card —
+// delegated, scheduled and room runs included. `nowMs` is read so the age
+// check re-runs on the tab's own tick; a line the agent stopped renewing
+// drops out rather than sticking.
+function stepOf(item) {
+  return resolveActivityText({ live: true, activity: store.activityFor(item), nowMs: nowMs.value })
 }
 function childrenOf(item) {
   return childrenForChat(store.now, item.chat_id, item.id)

@@ -138,6 +138,19 @@ export interface AgentAccessCheckResult {
 }
 
 /**
+ * #2807: the outcome a tool RETURNED rather than threw, stamped on the
+ * per-call tool context by `access.ts::accessDenied` and read by the audit
+ * wrapper after `execute` — the same seam #905 uses for `requestId`. `denied`
+ * is the only kind today; a returned non-denial failure is the registered
+ * follow-up and adds a kind here, not a second field.
+ */
+export interface ToolOutcome {
+  kind: "denied";
+  /** What the AUDIT row records — by default the reason the caller was given. */
+  reason: string;
+}
+
+/**
  * The backend's `LoopStatusResponse` (routers/loops.py), as far as the MCP
  * layer relies on it. `agent_name` is the field the loop-id tools gate on
  * (ent#628): a loop is addressed by id, so the agent it belongs to is only
@@ -548,4 +561,51 @@ export interface ReportSummary {
   period_start?: string | null;
   period_end?: string | null;
   created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Execution search (enterprise `execution_search`, abilityai/trinity-enterprise#653)
+// ---------------------------------------------------------------------------
+
+export type ExecutionSearchField = "message" | "response" | "error";
+
+export type ExecutionSearchMode = "substring" | "regex";
+
+export interface ExecutionSearchParams {
+  query: string;
+  mode?: ExecutionSearchMode;
+  agents?: string[];
+  fields?: ExecutionSearchField[];
+  status?: string;
+  triggered_by?: string;
+  hours?: number;
+  limit?: number;
+  offset?: number;
+  context?: number;
+}
+
+export interface ExecutionSearchMatch {
+  field: ExecutionSearchField;
+  excerpt: string;
+}
+
+export interface ExecutionSearchHit {
+  id: string;
+  agent_name: string;
+  status: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+  triggered_by: string | null;
+  message: string;
+  matches: ExecutionSearchMatch[];
+}
+
+export interface ExecutionSearchResult {
+  query: string;
+  mode: ExecutionSearchMode;
+  fields: ExecutionSearchField[];
+  hours: number;
+  count: number;
+  hits: ExecutionSearchHit[];
 }

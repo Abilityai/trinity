@@ -16,7 +16,7 @@ Clone the repository from GitHub, copy `.env.example` to `.env`, set `ADMIN_PASS
 
 ## Can I use Trinity without hosting it myself?
 
-Yes. Ability.ai offers a cloud-hosted option where you sign up, copy an MCP connection URL from Settings, and connect from Claude Code — no infrastructure to manage. Self-hosting is free forever and keeps all data inside your own perimeter, which suits teams with compliance requirements. See [Deploying Trinity](../guides/deploying-trinity.md).
+Not as a hosted service: Trinity is self-hosted, and there is no managed Trinity hosting offering at the moment. The least infrastructure work is a server of your own. The DigitalOcean installer creates a Droplet with HTTPS from one command in your terminal, and `./scripts/deploy/start.sh --hosted` runs prebuilt images on any Linux VM, so nothing is built on the server. Self-hosting is free and keeps all data inside your own perimeter. See [Deploying Trinity](../guides/deploying-trinity.md) and [Deploy on DigitalOcean](../guides/deploying/digitalocean.md).
 
 ## What happens the first time I open Trinity in my browser?
 
@@ -30,6 +30,9 @@ That is **first-run setup**: one guided sequence over a Dashboard that does not 
 
 Use **Settings → General → First-run setup → Re-run setup**, or add `?onboarding=1` to the Dashboard URL (`http://localhost/?onboarding=1`) — log in first, because the login page drops the parameter. This works however many agents you already have: completed steps show as done, a step you skipped earlier is offered again, and the sequence only ever opens by itself on a fresh install. Everything the steps touch also lives in Settings — the admin sign-in email under **General**, Claude and the other keys under **Integrations**, usage sharing under **General** — so you never need the sequence to finish configuration. See [Quick Start → Guided Onboarding](../getting-started/quick-start.md#guided-onboarding-first-run).
 
+## Where did the Getting started checklist go?
+
+It moved off the Dashboard body into the left **Systems** sidebar, under the list of views and above **New View**. If you do not see it, expand the sidebar: collapsing the sidebar hides the checklist along with the view labels. Its header shows your progress and collapses the list, and it refreshes whenever you return to the Dashboard. It also disappears once every milestone is done, or for good after **Don't show this again**, which cannot be undone. The checklist appears only on instances with the matching enterprise entitlement. See [Setup → Your First Dashboard](../getting-started/setup.md#your-first-dashboard).
 
 ## How do I log in to Trinity?
 
@@ -82,7 +85,7 @@ A template is a GitHub repository or local directory that defines an agent's ini
 
 ## Is Trinity free to use?
 
-Yes. Trinity is licensed under the Apache License 2.0 — free for any use, commercial included, with an explicit patent grant. You can run it on your own infrastructure, any cloud, or a managed instance. See the [LICENSE](https://github.com/abilityai/trinity/blob/main/LICENSE) file in the repository.
+Yes. Trinity is licensed under the Apache License 2.0 — free for any use, commercial included, with an explicit patent grant. You can run it on your own hardware or on any cloud provider's servers. See the [LICENSE](https://github.com/abilityai/trinity/blob/main/LICENSE) file in the repository.
 
 ## Are some features only available in an enterprise edition?
 

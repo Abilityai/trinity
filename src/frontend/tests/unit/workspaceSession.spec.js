@@ -106,6 +106,8 @@ import {
   useClientPortalStore, PLATFORM_LOGIN_ROUTE, portalHttp, setPlatformSessionLostHandler,
 } from '@/stores/clientPortal'
 import { __setAuthed, __logout } from '@/stores/auth'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { draftStorageKey } from '@/components/portal/portalDrafts'
 import {
   WORKSPACE_ROOT, signOutLabelFor, SIGN_OUT_LABEL_PLATFORM, SIGN_OUT_LABEL_CLIENT,
 } from '@/components/portal/portalUtils'
@@ -267,6 +269,41 @@ describe('signing out of the workspace signs out (#2258)', () => {
     expect(fresh.isClientSignedIn).toBe(false)
     expect(fresh.isPlatformSession).toBe(false)
     expect(localStorage.getItem(PORTAL_TOKEN_KEY)).toBeNull()
+  })
+
+  // trinity-enterprise#657: drafts are message text. An explicit sign-out takes
+  // the person's bucket with it — on a shared browser the portal token is
+  // removed at the same moment — and it has to happen BEFORE `signOut()` nulls
+  // `clientEmail`, or the drafts store's identity is already null and the
+  // clear removes nothing. Expiry keeps the bucket: a draft is what the person
+  // comes back for.
+  it('an explicit sign-out removes the person\'s drafts bucket from storage', async () => {
+    localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
+    setActivePinia(createPinia())
+    const store = useClientPortalStore()
+    store.clientEmail = 'ada@example.com'
+    const drafts = usePortalDraftsStore()
+    drafts.set('thread:1', 'unsent words')
+    const bucket = draftStorageKey('ada@example.com')
+    expect(localStorage.getItem(bucket)).not.toBeNull()
+
+    await store.signOutEverywhere()
+
+    expect(localStorage.getItem(bucket)).toBeNull()
+    expect(drafts.has('thread:1')).toBe(false)
+  })
+
+  it('an EXPIRED session keeps the drafts bucket — expiry is not the person\'s act', () => {
+    localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
+    setActivePinia(createPinia())
+    const store = useClientPortalStore()
+    store.clientEmail = 'ada@example.com'
+    usePortalDraftsStore().set('thread:1', 'unsent words')
+    const bucket = draftStorageKey('ada@example.com')
+
+    store.endSession({ expired: true, resumePath: '/workspace/c/abc' })
+
+    expect(localStorage.getItem(bucket)).not.toBeNull()
   })
 
   it('an EXPIRED portal session does not end a platform session — expiry is not a sign-out', () => {

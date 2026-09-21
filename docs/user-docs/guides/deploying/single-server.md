@@ -311,6 +311,8 @@ Plain HTTP on a public IPv4 with none of the above is the one combination to avo
 
 The Trinity 1-Click is a Droplet image with Docker, Caddy, ufw and a pinned Trinity release already pulled — Option A baked into a snapshot, so first boot pulls nothing.
 
+Prefer to choose the admin password and hand over a Claude subscription before the Droplet exists? `trinity-do-create.sh` gives the same result from your own terminal — see [Deploy on DigitalOcean](digitalocean.md). The sections below (first boot, sign-in, managing the Droplet) apply to both, with four differences: an installer Droplet has its admin account from first boot, takes about six minutes rather than ninety seconds (it installs and pulls everything on first boot), records `do-script` instead of `do-marketplace` as its provenance, and has no login banner.
+
 ### Sizing
 
 | Use case | RAM | vCPU | Boot disk |
@@ -395,7 +397,7 @@ sudo ./scripts/deploy/start.sh --hosted
 
 ## DigitalOcean installer script
 
-`scripts/deploy/trinity-do-create.sh` gives you the 1-Click result from your own terminal, with the admin password chosen before the Droplet exists — so there is no claim window. It needs [`doctl`](https://docs.digitalocean.com/reference/doctl/how-to/install/) installed and signed in (`doctl auth init` with a write-scoped API token).
+`scripts/deploy/trinity-do-create.sh` gives you the 1-Click result from your own terminal, with the admin password chosen before the Droplet exists — so there is no claim window. It needs [`doctl`](https://docs.digitalocean.com/reference/doctl/how-to/install/) installed and signed in (`doctl auth init` with a write-scoped API token). The step-by-step walkthrough — from installing `doctl` to adding a domain, with the installer's error messages and how to remove the Droplet — is [Deploy on DigitalOcean](digitalocean.md).
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/<release-tag>/scripts/deploy/trinity-do-create.sh)
@@ -584,6 +586,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER` / `OTEL_EXPORTER_OTLP_PROTOCOL` / `OTEL_METRIC_EXPORT_INTERVAL` | dev · prod · hosted | Exporter settings. |
 | `TELEMETRY_CONTAINER_STATS_TTL` / `TELEMETRY_DOCKER_POOL_SIZE` | dev · prod · hosted | Container-stats cache freshness and Docker fetch parallelism. |
 | `CANARY_ENABLED` / `CANARY_SLACK_WEBHOOK_URL` | dev · prod · hosted | Continuous invariant watcher (staging/dev) and its Slack webhook. |
+| `SYNC_HEALTH_POLL_INTERVAL_SECONDS` | dev · prod · hosted | Seconds between git sync-health polls of each git-enabled agent (default 60). Each poll runs a `git fetch` inside the agent, so raise it to cut that load on a large fleet. An invalid or non-positive value falls back to 60. |
 
 ## See Also
 

@@ -144,7 +144,7 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 - `max_runs=101` → 422.
 - `max_duration_seconds` below the effective per-run timeout → 400; start a loop with a tight `max_duration_seconds` and verify it stops `stopped` / `deadline_exceeded` before `max_runs`.
 - `max_cost_usd=0` or negative → 422 (Pydantic `gt=0`); start a loop with a tiny `max_cost_usd` on a non-free model and verify it stops `stopped` / `budget_exhausted` before `max_runs`, with the panel showing spend / budget.
-- Loop on a non-accessible agent: REST answers a uniform **404** (`get_authorized_agent`, #186); over MCP an agent key without an edge gets HTTP 200 with `{success:false, error:"Access denied", reason:"Permission denied: Agent '<A>' is not permitted to communicate with '<B>'…"}`; a loop-id read/stop after the edge is gone gets `{success:false, error:"Access denied", reason:"Loop '<id>' not found or not accessible", hint}`.
+- Loop on a non-accessible agent: REST answers a uniform **404** (`get_authorized_agent`, #186); over MCP an agent key without an edge gets HTTP 200 with `{success:false, error:"Access denied", reason:"Permission denied: Agent '<A>' is not permitted to communicate with '<B>'…"}`; a loop-id read/stop after the edge is gone gets `{success:false, error:"Access denied", reason:"Loop '<id>' not found or not accessible", hint}`. Both refusals are audited as refusals (`success: false`, `denied: true`; the admin-only row carries the internal, agent-naming reason) — #2807.
 - Stop on already-completed loop → `{"status": "already_done"}`.
 - Backend restart mid-loop → next `GET /api/loops/{loop_id}` shows `status="interrupted"`.
 

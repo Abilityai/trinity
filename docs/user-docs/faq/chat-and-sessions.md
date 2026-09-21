@@ -58,9 +58,13 @@ Yes, up to the agent's parallel-capacity limit (`max_parallel_tasks`, default 3)
 
 Turns on one conversation are serialized on purpose — two simultaneous resumes of the same session could corrupt its state. Send a second message while one is still running and you get a busy response with a retry hint rather than a queue. Wait for the current turn to finish, or start a separate chat for the parallel line of work. See [Continuous Conversations](../agents/agent-session.md).
 
+## How can I tell what the agent is doing while it works in the Workspace?
+
+Read the live card under your message. Besides the status and elapsed time, it carries one line naming the current step — *Reading .../src/app.py*, *Running pytest -q*, *Searching for "pattern"*, *Delegating to researcher*, *Writing a reply*, or *Thinking* between steps. A new line slides up over the old one, and the line clears when the run ends. When you send, the chat scrolls down to the card unless you had scrolled up. Platform users see the same line on the Work tab's cards and on a room's cards, fed by the agent's heartbeat, and a heartbeat line older than 30 seconds is dropped rather than shown as current. See [Workspace](../sharing-and-access/workspace.md#while-the-agent-works).
+
 ## How do I stop a turn that's stuck or running too long?
 
-In the Workspace and on the Chat tab, **Send** becomes **Stop** while a turn runs: click it, or press **Esc** with nothing else open, and the in-flight turn ends as cancelled (not failed) with your words put back in the composer, in front of anything you typed while waiting. The live card under your message in the Workspace carries the same **Stop**. Outside chat, the agent's **Tasks** tab and the Execution Detail page offer **Stop execution** for any running execution; if the work is still queued, cancelling removes it from the queue without touching the container. See [Agent Chat](../agents/agent-chat.md#stopping-a-turn) and [Executions](../operations/executions.md).
+In the Workspace and on the Chat tab, **Send** becomes **Stop** while a turn runs: click it, or press **Esc** with nothing else open, and the in-flight turn ends as cancelled (not failed) with your words put back in the composer, in front of anything you typed while waiting. The live card under your message in the Workspace carries the same **Stop**. In a room, a platform user gets a **Stop** on each working agent's card — see the [Collaboration FAQ](collaboration.md#can-i-stop-an-agent-thats-working-in-a-room). Outside chat, the agent's **Tasks** tab and the Execution Detail page offer **Stop execution** for any running execution; if the work is still queued, cancelling removes it from the queue without touching the container. See [Agent Chat](../agents/agent-chat.md#stopping-a-turn) and [Executions](../operations/executions.md).
 
 ## Why did my message fail, and why isn't there always a Retry button?
 
@@ -88,11 +92,15 @@ Replies render as markdown on both surfaces — headings, lists, tables and code
 
 ## How do I send files to my agent in the Workspace, and where do they end up?
 
-Click the paperclip, or drop files anywhere on the conversation (*Drop files to send to …*) — up to 20 files per drop, 25 MB each, uploaded one after another with a progress chip apiece; a refused file names itself and the limit. Sent files land in the agent's inbox inside its workspace and appear under **Files you sent** in the rail's **Files** tab, alongside **Files from {agent}** for anything it shared back. Click a name to preview it (images, Markdown and text up to 256 KB; ← and → step through the previewable files) or **Download** to save it. The bin icon deletes a file you sent or removes a shared file from your list without touching the share; an agent's owner signed in as a platform user also gets **Delete for everyone**. See [Workspace](../sharing-and-access/workspace.md#the-rail).
+Click the paperclip, drop files anywhere on the conversation (*Drop files to send to …*), or paste a copied image or file into the message field — up to 20 files per drop, 25 MB each, uploaded one after another with a progress chip apiece; a refused file names itself and the limit. Sent files land in the agent's inbox inside its workspace and appear under **Files you sent** in the rail's **Files** tab, alongside **Files from {agent}** for anything it shared back. Click a name to preview it (images, Markdown and text up to 256 KB; ← and → step through the previewable files) or **Download** to save it. The bin icon deletes a file you sent or removes a shared file from your list without touching the share; an agent's owner signed in as a platform user also gets **Delete for everyone**. See [Workspace](../sharing-and-access/workspace.md#the-rail).
 
 ## How do I know a reply has arrived when I'm not looking at the chat?
 
 Three ways. While anything is unread, the browser tab's title carries the count — `(3) Trinity — Workspace` — and the agent's row in the sidebar shows its own unread badge (questions the agent is waiting on you to answer are counted separately). Inside a chat, if you've scrolled up to re-read something, an arriving message doesn't pull you back down: a **N new messages** control appears, and sending, opening a chat or clicking it returns you to the bottom. Opening the chat clears the count; unread badges count 1:1 chats only, not rooms. See [Workspace](../sharing-and-access/workspace.md#reading-replies).
+
+## Can I switch the Workspace between light and dark mode?
+
+Yes. The theme switch sits at the right end of every chat and room header, and it names what is on screen — **Light**, **Dark**, or **System · dark** / **System · light** when it follows your operating system (just an icon on a phone). Click it and pick **Light**, **Dark** or **System**. It is the same setting as the main app's theme control and is remembered in this browser, and switching keeps your place, draft and thread. External clients signed in with an email code get it too. See [Workspace](../sharing-and-access/workspace.md#the-layout).
 
 ## What are the tabs in the rail beside the conversation?
 

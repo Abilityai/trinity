@@ -20,7 +20,7 @@ Who *your agent* can call. Each row on an agent's Permissions tab is a grant fro
 
 ## What does granting permission actually let an agent do?
 
-Permission grants communication, not control. A permitted agent can see the target in `list_agents`, send it messages via `chat_with_agent`, subscribe to its events, and mount its exposed shared folder — the same permission record gates all three collaboration surfaces, and it is also the boundary for reading or answering the target's operator-queue items over MCP (see [MCP & API](mcp-and-api.md#can-an-agent-read-or-answer-the-operating-room-queue-over-mcp)). It does not let the calling agent manage the target (start, stop, or reconfigure it), and the reverse direction stays blocked until you grant it separately. See [Agent Permissions](../collaboration/agent-permissions.md).
+Permission grants communication, not control. A permitted agent can see the target in `list_agents`, send it messages via `chat_with_agent`, run and stop loops on it with `run_agent_loop` and `stop_loop`, subscribe to its events, and mount its exposed shared folder — the same permission record gates each of these, and it is also the boundary for reading or answering the target's operator-queue items over MCP (see [MCP & API](mcp-and-api.md#can-an-agent-read-or-answer-the-operating-room-queue-over-mcp)). It does not let the calling agent manage the target (start, stop, or reconfigure it), and the reverse direction stays blocked until you grant it separately. See [Agent Permissions](../collaboration/agent-permissions.md).
 
 ## Can one agent hand off a long-running task to another without waiting?
 
@@ -61,6 +61,18 @@ An admin sets the defaults for every room started from the Workspace under **Set
 ## What does the notice about a client reading the room mean?
 
 A room that includes a Workspace client — someone outside your own organisation — tells every agent it wakes that a person is reading, so agent-to-agent turns keep internal details, other customers and costs out of the transcript. The signal comes from the room's membership alone, never from anything a participant writes, and it names nobody. A room holding only agents and operators carries no such notice. See [Shared Sessions](../collaboration/rooms.md).
+
+## Can I stop an agent that's working in a room?
+
+Yes, if your message started the turn and you are signed in as a platform user. Each agent working on the room's message gets a live card under the transcript with **Stop**, and the same run is listed as a **Room turn** on the rail's **Work** tab, where it can be stopped too. Stopping one agent leaves the others running. The transcript then reads *{agent}'s turn was stopped.* — not a failure — and the agent keeps its memory of the room, so the messages it did not answer reach it the next time it is mentioned. **Esc** in the room composer stops a turn only when exactly one can be stopped. A Workspace client sees *… is thinking…* instead and has no Stop. See [Shared Sessions](../collaboration/rooms.md#how-it-works).
+
+## Can agents in a room see the files and screenshots I send?
+
+Yes. A file you drop on a room, or paste into its composer, goes to every agent in it, and the rail's **Files** tab sends to **Everyone in this chat** by default, with each agent still selectable. When an agent is woken, it is told which files you have sent it, and it is shown an image when the conversation asks about one — so *@sidekick what's in the screenshot?* works in a room as it does in a 1:1. The agent is told only about the files of the person whose message woke it, so in a room with two people the other person's files go unmentioned for that turn. See [Shared Sessions](../collaboration/rooms.md#how-it-works).
+
+## Do files I attached in a 1:1 come along when I @mention another agent?
+
+Yes. Files you attached in that 1:1 and have not yet sent with a message go along: the composer's attachment chips, and files sent from the rail's **Files** tab in the last 15 minutes. The Workspace delivers them to the newly mentioned agents before it posts your message, so the agent can see what you asked about. A line under the room's composer then names what was delivered and to whom, and what did not arrive: a file that missed an agent (*attach it again here to retry*) or one that never finished uploading. See [Workspace](../sharing-and-access/workspace.md#bringing-in-another-agent).
 
 ## How can I watch agents collaborating on the Dashboard?
 
