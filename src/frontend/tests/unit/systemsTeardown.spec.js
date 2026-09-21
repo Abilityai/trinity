@@ -271,6 +271,40 @@ describe('teardown — an unconfirmable member is opt-IN, never pre-ticked', () 
     expect(store.teardownDefaultSelection).toEqual([])
     expect(store.teardownUnconfirmedMembers).toEqual([])
   })
+
+  // The rule is an allowlist of positive confirmation, not `!== 'prefix'`.
+  // `evidence` is free-form text off the wire and this feeds a verb that
+  // DELETES, so anything the client does not recognise has to fall to the
+  // unticked side. Under the denylist these three arrived PRE-TICKED and,
+  // because the panel's badge tested `=== 'prefix'` rather than the
+  // complement, they were also unbadged — swept into a delete with no signal.
+  it.each([
+    ['no evidence field at all', {}],
+    ['a null evidence', { evidence: null }],
+    ['a future fourth value', { evidence: 'roster' }],
+  ])('leaves a member with %s unticked, and says it is unconfirmed', async (_label, extra) => {
+    await previewOf([
+      { name: 'acme-web', evidence: 'tag', is_ephemeral: false },
+      { name: 'acme-odd', is_ephemeral: false, ...extra },
+    ])
+    expect(store.teardownDefaultSelection).toEqual(['acme-web'])
+    expect(store.teardownUnconfirmedMembers).toEqual(['acme-odd'])
+  })
+
+  it('partitions the roster: every member is pre-ticked or named unconfirmed, never both or neither', async () => {
+    const members = [
+      { name: 'a', evidence: 'tag' },
+      { name: 'b', evidence: 'both' },
+      { name: 'c', evidence: 'prefix' },
+      { name: 'd', evidence: 'roster' },
+      { name: 'e' },
+    ]
+    await previewOf(members)
+    const ticked = store.teardownDefaultSelection
+    const short = store.teardownUnconfirmedMembers
+    expect([...ticked, ...short].sort()).toEqual(members.map((m) => m.name).sort())
+    expect(ticked.filter((n) => short.includes(n))).toEqual([])
+  })
 })
 
 describe('teardown — failures stay actionable', () => {

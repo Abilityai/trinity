@@ -1,11 +1,14 @@
 """ent#454 — the teardown UI's non-negotiables, asserted at the source level.
 
-`vitest.config.js` pins `environment: 'node'` with no component mounting, so
-`tests/unit/systemsTeardown.spec.js` can cover the STORE but nothing in a
-`.vue` template. These are the template-level facts that would be a silent
-regression, and a source assertion is the only runnable guard for them here (a
-full render is a `ui`-labeled e2e follow-up — the `test_1577_proactive_toggle_
-guard.py` shape and the same reasoning).
+`vitest.config.js` pins `environment: 'node'` as the DEFAULT only: a spec opts
+into jsdom per file (`// @vitest-environment jsdom` + `@vue/test-utils`) and
+mounts, which 22 specs in `src/frontend/tests/unit/` already do. So a mounted
+guard for these facts is REACHABLE, and the honest description of this file is
+that it is the cheaper source-level stand-in, not the only option — the earlier
+wording here claimed no harness existed, which was false and is exactly what
+#2918 was filed about. The load-bearing decision was moved OUT of the template
+into the store for that reason, where `systemsTeardown.spec.js` executes it; a
+mounted render of the remaining template facts is the `ui`-labeled follow-up.
 
 Each assertion below is here because losing it produces a WORKING-LOOKING UI
 that does the wrong thing:
@@ -135,7 +138,12 @@ def test_prefix_evidence_is_badged_and_explained():
     member from one matched by name alone, which is the only distinction that
     stops a teardown of `acme` removing `acme-extra`'s agents."""
     src = _src(_PREVIEW)
-    assert "m.evidence === 'prefix'" in src
+    # Gated on the SHARED predicate, not a hand-written comparison. `evidence`
+    # is free-form text off the wire feeding a verb that DELETES, so a value
+    # the client does not recognise must be badged rather than silently
+    # treated as confirmed; a raw `=== 'prefix'` here is the denylist returning.
+    assert "!isConfirmedMember(m)" in src
+    assert "evidence === 'prefix'" not in src
     assert "matched by name only" in src
     # Shape/word, not hue alone (principle 24) — a BaseBadge carries text.
     assert "<BaseBadge" in src

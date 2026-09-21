@@ -117,7 +117,7 @@
                   {{ m.name }}
                 </span>
                 <!-- Shape as well as colour (principle 24): each badge is one fact. -->
-                <BaseBadge v-if="m.evidence === 'prefix'" variant="warning">
+                <BaseBadge v-if="!isConfirmedMember(m)" variant="warning">
                   matched by name only
                 </BaseBadge>
                 <BaseBadge v-if="m.is_ephemeral" variant="danger">
@@ -128,7 +128,7 @@
                 </BaseBadge>
               </span>
               <span
-                v-if="m.evidence === 'prefix'"
+                v-if="!isConfirmedMember(m)"
                 class="mt-1 block text-xs text-status-warning-700 dark:text-status-warning-300"
               >
                 No deploy tagged this agent as part of “{{ preview.system_name }}”.
@@ -271,6 +271,7 @@
  */
 import { computed } from 'vue'
 import BaseBadge from '../base/BaseBadge.vue'
+import { isConfirmedMember } from '../../stores/systems'
 
 const props = defineProps({
   preview: { type: Object, required: true },
@@ -288,11 +289,13 @@ const checkedCount = computed(() => props.checked.length)
  * Members the server matched by NAME with no deploy tag to confirm them.
  *
  * These start unticked — the decision and its reasoning live in the store's
- * `teardownDefaultSelection`, which the parent applies. This is the same
- * predicate read for the copy that explains the short selection; the panel and
- * the store must not disagree about which members it covers.
+ * `teardownDefaultSelection`, which the parent applies. The panel and the store
+ * must not disagree about which members it covers, so both now read the SAME
+ * exported predicate rather than two hand-mirrored polarities: this list is
+ * exactly the complement of the pre-ticked one, including for an `evidence`
+ * value neither was written for.
  */
-const unconfirmed = computed(() => members.value.filter((m) => m.evidence === 'prefix'))
+const unconfirmed = computed(() => members.value.filter((m) => !isConfirmedMember(m)))
 
 const recoverableCount = computed(
   () => members.value.filter((m) => props.checked.includes(m.name) && !m.is_ephemeral).length

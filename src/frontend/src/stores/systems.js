@@ -130,6 +130,25 @@ export function normalizeError (err, verb = 'deploy') {
   return { kind: 'invalid', message: `HTTP ${res.status}` }
 }
 
+/**
+ * Positive confirmation that a name really belongs to this system: the server
+ * found a deploy tag for it (`tag`), or a tag AND the name prefix (`both`).
+ * `prefix` means "matched by name only" — the server cannot tell whether that
+ * agent belongs to this system or a sibling one.
+ *
+ * ONE home for the rule, imported by both the store's default selection and
+ * the panel's "matched by name only" badge. They were two copies of the same
+ * predicate written in opposite polarities, which is two chances to disagree
+ * about a value neither anticipated — and they did disagree: a member with no
+ * `evidence` at all was pre-ticked by the store AND left unbadged by the panel,
+ * so it was swept into a delete with no signal at all.
+ *
+ * An allowlist, deliberately. The consumer DELETES, so an unrecognised value
+ * must fall to the safe side.
+ */
+export const CONFIRMED_EVIDENCE = Object.freeze(['tag', 'both'])
+export const isConfirmedMember = (m) => CONFIRMED_EVIDENCE.includes(m?.evidence)
+
 export const useSystemsStore = defineStore('systems', () => {
   // --- state ---------------------------------------------------------------
   const bundled = ref([])
@@ -236,24 +255,36 @@ export const useSystemsStore = defineStore('systems', () => {
    * simply has no tag row — where membership is verified, Remove is ENABLED,
    * and the unconfirmable agent would have arrived pre-ticked.
    *
-   * It lives here rather than in the panel's watcher so it is reachable by a
-   * test: `vitest.config.js` pins `environment: 'node'` with no component
-   * mounting, so a default expressed in a `.vue` watcher is a fact no runnable
-   * assertion can see.
+   * It lives here rather than in the panel's watcher because the store is the
+   * cheaper place to execute it: a node-environment spec drives it directly,
+   * with no mount. (`vitest.config.js` pins `environment: 'node'` only as the
+   * DEFAULT — a spec opts into jsdom per file and mounts, which 22 specs
+   * already do — so the rule is testable either way; it is the store version
+   * that is testable without one.)
+   *
+   * The predicate is an ALLOWLIST of positive confirmation, never `!== 'prefix'`.
+   * `evidence` is free-form text off the wire, and the one verb this feeds
+   * DELETES: a member arriving with `evidence` absent, null, or set to some
+   * future fourth value must fall to the SAFE side — unticked — rather than
+   * being pre-ticked by a denylist that has never heard of it. The producer
+   * emits exactly `tag` / `both` / `prefix` today (`system_service.py`), and
+   * only the first two are a deploy tag confirming the member.
    */
   const teardownDefaultSelection = computed(
     () => (teardownPreview.value?.members || [])
-      .filter((m) => m.evidence !== 'prefix')
+      .filter((m) => isConfirmedMember(m))
       .map((m) => m.name)
   )
 
   /**
    * The members left unticked by the rule above, so the panel can say why the
-   * selection is short rather than letting it read as a miscount.
+   * selection is short rather than letting it read as a miscount. Defined by
+   * SUBTRACTION from the rule above, so the two cannot disagree about a value
+   * neither was written for — the pair partitions the roster by construction.
    */
   const teardownUnconfirmedMembers = computed(
     () => (teardownPreview.value?.members || [])
-      .filter((m) => m.evidence === 'prefix')
+      .filter((m) => !isConfirmedMember(m))
       .map((m) => m.name)
   )
 
