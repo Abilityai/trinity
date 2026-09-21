@@ -2841,6 +2841,26 @@ class DatabaseManager:
             agent_name, user_email, conversation_summary
         )
 
+    # ent#637: the write boundary records history; the person reads + undoes it.
+    def write_public_user_memory_agent_notes(
+        self, agent_name: str, user_email: str, agent_notes: str, *,
+        execution_id: str = None, triggered_by: str = "", schedule_id: str = None,
+    ) -> dict:
+        return self._public_link_ops.write_user_memory_agent_notes(
+            agent_name, user_email, agent_notes,
+            execution_id=execution_id, triggered_by=triggered_by, schedule_id=schedule_id,
+        )
+
+    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
+        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
+
+    def undo_public_user_memory_write(
+        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str
+    ) -> str:
+        return self._public_link_ops.undo_user_memory_write(
+            agent_name, user_email, write_id, undone_by=undone_by
+        )
+
     # =========================================================================
     # Agent Tags (delegated to db/tags.py) - ORG-001
     # =========================================================================
