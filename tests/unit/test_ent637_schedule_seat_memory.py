@@ -274,6 +274,40 @@ def test_undo_cannot_reach_another_persons_write(real_db):
     assert real_db.get_or_create_user_memory("analyst", "alice@example.com")["agent_notes"] == "alice v1"
 
 
+# --- 3b. the Workspace projection -------------------------------------------
+
+def test_the_person_sees_a_run_now_fire_as_a_scheduled_run(monkeypatch):
+    """Found live: a Run-now fire is `triggered_by='manual'`, and keying the
+    label on the trigger rendered the seat's write as "In a conversation". The
+    boundary records `schedule_id` only for a seat run, so that is the key."""
+    from client_portal import agent_page
+    monkeypatch.setattr(agent_page.db, "get_or_create_public_user_memory",
+                        lambda a, e: {"agent_notes": "v2", "updated_at": "t2"})
+    monkeypatch.setattr(agent_page.db, "list_public_user_memory_writes", lambda a, e, n: [
+        {"id": "w2", "execution_id": "e2", "triggered_by": "manual", "schedule_id": "sch-1",
+         "previous_notes": "v1", "new_notes": "v2", "written_at": "t2", "undone_at": None},
+        {"id": "w1", "execution_id": "e1", "triggered_by": "public", "schedule_id": None,
+         "previous_notes": "", "new_notes": "v1", "written_at": "t1", "undone_at": None},
+    ])
+    monkeypatch.setattr(agent_page.db, "get_agent_schedule_names", lambda a: {"sch-1": "Daily brief"})
+    page = agent_page.memory("analyst", "seat@example.com")
+    assert page["notes"] == "v2"
+    assert [w["kind"] for w in page["writes"]] == ["scheduled_run", "conversation"]
+    assert page["writes"][0]["schedule_name"] == "Daily brief"
+    assert [w["undoable"] for w in page["writes"]] == [True, False]      # latest only
+
+
+def test_undo_refusals_are_named_and_a_miss_is_the_uniform_404(monkeypatch):
+    from client_portal import agent_page
+    for outcome, code, status in (("not_found", "not_found", 404),
+                                  ("already_undone", "already_undone", 409),
+                                  ("not_latest", "not_latest", 409)):
+        monkeypatch.setattr(agent_page.db, "undo_public_user_memory_write", lambda *a, **k: outcome)
+        with pytest.raises(agent_page.MemoryUndoRefused) as ei:
+            agent_page.undo_memory_write("analyst", "seat@example.com", "w1")
+        assert (ei.value.code, ei.value.status_code) == (code, status)
+
+
 # --- 4. one run, one seat ---------------------------------------------------
 
 def test_a_companion_serving_two_seats_keeps_them_apart(real_db, monkeypatch):

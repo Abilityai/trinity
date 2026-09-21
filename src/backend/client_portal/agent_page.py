@@ -557,7 +557,13 @@ class MemoryUndoRefused(Exception):
 
 
 def _write_kind(row: dict) -> str:
-    return "scheduled_run" if (row.get("triggered_by") or "").lower() == "schedule" else "conversation"
+    """`scheduled_run` for any write a SEAT run made — cron, Run now or webhook.
+
+    Keyed on `schedule_id`, which the write boundary records only for a seat
+    run, not on `triggered_by`: a Run-now fire is `manual`, and the live check
+    on ent#637 rendered exactly that as "In a conversation".
+    """
+    return "scheduled_run" if (row.get("schedule_id") or "").strip() else "conversation"
 
 
 def memory(agent_name: str, email: str) -> dict:
