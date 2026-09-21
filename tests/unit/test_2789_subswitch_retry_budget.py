@@ -514,21 +514,21 @@ def test_retry_budget_is_logged_with_its_cause(caplog):
     with caplog.at_level(logging.INFO):
         _log_retry_budget("agent-x", "subscription-switch", 3570, 3600, elapsed_s=30)
     assert [r.levelname for r in mine()] == ["INFO"], "elapsed time is not a clamp"
-    assert "clamped" not in caplog.records[0].message
-    assert "30s already spent" in caplog.records[0].message
+    assert "clamped" not in mine()[0].message
+    assert "30s already spent" in mine()[0].message
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
         _log_retry_budget("agent-x", "subscription-switch", 120, 3600, elapsed_s=3480)
-    assert [r.levelname for r in caplog.records] == ["WARNING"], "under the ceiling is worth a look"
-    assert "likely hopeless" in caplog.records[0].message
+    assert [r.levelname for r in mine()] == ["WARNING"], "under the ceiling is worth a look"
+    assert "likely hopeless" in mine()[0].message
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
         _log_retry_budget("agent-x", "subscription-switch", 3600, 3600, elapsed_s=0)
-    assert not caplog.records, "a retry that lost nothing must stay quiet"
+    assert not mine(), "a retry that lost nothing must stay quiet"
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
         _log_retry_budget("agent-x", "subscription-switch", 600, None, elapsed_s=30)
-    assert not caplog.records, "no configured limit means nothing was taken away"
+    assert not mine(), "no configured limit means nothing was taken away"
