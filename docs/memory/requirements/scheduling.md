@@ -1723,3 +1723,59 @@ failed iteration and proceeds, bounded so a fully-broken agent still terminates.
 - **Not this issue**: rooms as a destination and agent-initiated `post_to_room`
   (both trinity-enterprise#442), and a schedule-form toggle.
 - **Flow**: `docs/memory/feature-flows/schedule-workspace-delivery.md`
+
+### 10.19 A schedule that names a user can write that user's memory (trinity-enterprise#637)
+- **Status**: ✅ Implemented (2026-09-21) — OSS-core, on the same line as §10.18 and MEM-001
+- **Requirement ID**: SCHEDULE_SEAT_MEMORY
+- **GitHub Issue**: abilityai/trinity-enterprise#637 (operator ruling R26, 2026-09-15)
+- **Journey**: extends J11 (§10.18)
+- **Description**: A role companion's proactive brief is a scheduled run, and until
+  now a scheduled run could not touch an individual user's memory — `write_user_memory`
+  refused every `triggered_by='schedule'` execution, so a brief could not carry the
+  open loops and commitments that make the next brief better than the last. That
+  mechanical gap is what forced "one agent per seat"; the framework's rule is that
+  separate agents are for separate *work*, not separate people. Now a schedule that
+  names a user (§10.18's `deliver_to_workspace_email`, the **same field** — no second
+  address) runs as that seat: the run **reads** the seat's MEM-001 memory and may
+  **write** it through the one existing boundary.
+- **The seat is the delivery address, read off the execution row, never sent by the
+  agent.** §10.18's `resolve_and_stamp` already writes `source_channel='portal'` +
+  `source_channel_client=<email>` onto the pre-created row before dispatch, after
+  the roster and block checks. `services/schedule_seat_memory.seat_for_execution`
+  returns that client for a `schedule`-triggered row and nothing for any other
+  trigger; `routers/public_memory.py` accepts the write for exactly that case.
+  `source_user_email` is deliberately **not** stamped: `client_portal/work` reads it
+  as "mine" and two stream-ownership checks key on it, so a seat run would appear
+  as work the person started. A run with no named address has no seat and is
+  refused as today (AC 5 — behaviour unchanged for every other schedule).
+- **The run reads before it writes.** `write_user_memory` is whole-blob replace
+  ("read → update → write"), so a run that could write but not see the current
+  notes would erase them. The internal dispatch composes a caller prompt for the
+  seat — the MEM-001 memory block (`format_user_memory_block`) plus a short
+  seat-memory instruction — and passes it as `execute_task(system_prompt=…)` on
+  both the sync and async branches, only when the §10.18 stamp succeeded. The
+  public-channel persona prompt (#1205) is NOT folded in: a brief is not a public
+  surface.
+- **One run, one seat** (AC 4) by construction: the seat is the single
+  `source_channel_client` on the row, and memory is keyed `UNIQUE(agent_name,
+  user_email)` — a companion serving several seats runs one schedule per seat and
+  each run can only reach its own.
+- **The same gate as chat, not a back door** (AC 2). There is one write boundary —
+  `POST /api/agents/{name}/user-memory` → `db.write_user_memory_agent_notes` — and
+  the seat case is a second *resolver* of "which user", not a second writer. The
+  ent#419 anti-poisoning screen, when it lands, goes on that boundary and covers
+  scheduled writes without a second edit. ent#419's third layer (write history
+  with rollback) is built **here**, for every write through the boundary, because
+  AC 3 needs it.
+- **Visible and undoable** (AC 3). Every agent-notes write records a
+  `public_user_memory_writes` row (previous + new notes, execution id, trigger,
+  schedule id, time). The person sees, in the Workspace agent details, what the
+  agent remembers about them and which scheduled runs changed it (schedule name,
+  when, run) — `GET /api/enterprise/client-portal/agents/{name}/memory` — and can
+  undo the latest write (`POST …/memory/writes/{id}/undo`): the notes revert to
+  what they were before that write and the row is marked undone. Undo is
+  latest-first (a 409 names the later write), so a revert never silently discards
+  a change the person has not seen. Roster-scoped, the viewer's own memory only.
+- **Not this issue**: the memory redesign (R24) and the full Workspace memory
+  surface (trinity-enterprise#78); ent#419's screening and envelope.
+- **Flow**: `docs/memory/feature-flows/schedule-workspace-delivery.md` (seat-memory section)

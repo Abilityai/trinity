@@ -4317,6 +4317,42 @@ def _migrate_agent_skills_delivery_status(cursor, conn):
     conn.commit()
 
 
+def _migrate_public_user_memory_writes_table(cursor, conn):
+    """Write history for the per-user memory's agent_notes section (ent#637).
+
+    A schedule that names a user (ent#498's address) may now write that user's
+    MEM-001 memory from the run it triggers. The person must be able to see that
+    a scheduled run touched their memory — what, when, which run — and undo it,
+    so every agent-notes write through the one boundary
+    (`POST /api/agents/{name}/user-memory`) records the notes before and after,
+    the execution, its trigger and the schedule. This is also ent#419's third
+    layer (write history with rollback), built here because this AC needed it.
+
+    Mirrored by the Alembic revision 0065_public_user_memory_writes.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS public_user_memory_writes (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_email TEXT NOT NULL,
+            execution_id TEXT,
+            triggered_by TEXT NOT NULL,
+            schedule_id TEXT,
+            previous_notes TEXT NOT NULL DEFAULT '',
+            new_notes TEXT NOT NULL DEFAULT '',
+            written_at TEXT NOT NULL,
+            undone_at TEXT,
+            undone_by TEXT
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_public_user_memory_writes_lookup "
+        "ON public_user_memory_writes(agent_name, user_email, written_at)"
+    )
+    conn.commit()
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4452,4 +4488,5 @@ MIGRATIONS = [
     ("portal_file_dismissals_table", _migrate_portal_file_dismissals_table),
     ("executions_started_at_index", _migrate_executions_started_at_index),
     ("agent_skills_delivery_status", _migrate_agent_skills_delivery_status),
+    ("public_user_memory_writes_table", _migrate_public_user_memory_writes_table),
 ]

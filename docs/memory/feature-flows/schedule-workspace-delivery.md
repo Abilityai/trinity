@@ -158,7 +158,58 @@ needs a per-row discriminator `enterprise_portal_messages` does not carry.
 - **Rateable** like any agent message (#366) by construction: it is an ordinary `assistant`
   row in that session.
 
+## The run serves the seat — memory read and written (trinity-enterprise#637)
+
+The delivery half above carried a brief to a person; the **write half of the same seat**
+— its memory — did not exist. `write_user_memory` refused every `schedule` trigger, so a
+brief could not carry forward the open loops and commitments that make the next one
+better, and "one agent per seat" became the only safe pattern. Operator ruling R26
+removed that constraint. Same field, no second address:
+
+```
+scheduler ──► POST /api/internal/execute-task {deliver_to_workspace_email}
+                 │  resolve_and_stamp  (roster + block checks; the ent#498 stamp)
+                 │  schedule_seat_memory.build_seat_caller_prompt(agent, email)
+                 │     = MEM-001 memory block + "This run serves one person" note
+                 ▼
+              execute_task(..., system_prompt=<seat prompt>)   ← both sync and async
+                 │
+   agent ───► mcp write_user_memory(execution_id, memory_text)
+                 │  routers/public_memory: seat_for_execution(row)
+                 │     triggered_by == 'schedule' AND source_channel == 'portal'
+                 │     → source_channel_client is the seat
+                 ▼
+              db.write_public_user_memory_agent_notes(...)   ← ONE boundary, records history
+                 │
+   person ──► GET  /api/enterprise/client-portal/agents/{name}/memory
+              POST …/memory/writes/{id}/undo          (PortalAgentMemory.vue)
+```
+
+- **The seat is read off the row, never sent.** `source_channel_client` is written by the
+  ent#498 stamp after the access checks; the agent's call carries only `execution_id`.
+  `source_user_email` is deliberately NOT stamped for a seat run — `client_portal/work`
+  reads it as "work I started" and two stream-ownership checks key on it.
+- **Read before write.** The tool is whole-blob replace; a run that could write but not
+  see the current notes would erase them. So the memory block rides `system_prompt` on
+  both dispatch branches, composed only after the stamp landed. The #1205 public persona
+  prompt is not folded in: a brief is not a public surface.
+- **One boundary (AC 2).** The router keeps a single writer for every trigger; the ent#419
+  screen lands there once. ent#419's third layer — write history with rollback — is built
+  here: `public_user_memory_writes` (previous + new notes, execution, trigger, schedule).
+- **Visible and undoable (AC 3).** The Workspace agent details show what the agent
+  remembers about the viewer and the writes behind it (schedule name, when, what it
+  left); Undo reverts to `previous_notes` and marks the row. Latest-first: a `409
+  not_latest` names the later write rather than silently discarding an unseen change.
+- **One run, one seat (AC 4)** by construction; **no address → refused as before (AC 5)**,
+  with the refusal now saying *"names no one"*.
+
 ## Schema
+
+`public_user_memory_writes` (ent#637) — `id, agent_name, user_email, execution_id,
+triggered_by, schedule_id, previous_notes, new_notes, written_at, undone_at, undone_by`;
+index `(agent_name, user_email, written_at)`; CASCADE in `AGENT_REFS`. Both tracks: SQLite
+`public_user_memory_writes_table`, Alembic `0065_public_user_memory_writes` off
+`0064_executions_search_indexes`.
 
 `agent_schedules.deliver_to_workspace_email TEXT` — nullable, no backfill, no index (it is
 read only through a row already loaded by id). Both tracks per Invariant #3: SQLite
@@ -175,6 +226,13 @@ resolves no session.
 
 `tests/journeys/test_j11_brief_delivery_journey.py` — the J11 skeleton (`strict=True`
 xfail).
+
+`tests/unit/test_ent637_schedule_seat_memory.py` — the seat resolver over every trigger
+shape; the write boundary (seat wins, no-address refusal, other triggers unchanged, ONE
+writer); history + undo against a real SQLite file (latest-first, cross-person miss is
+`not_found`); two seats on one agent stay apart; the seat prompt on both dispatch
+branches. `src/frontend/tests/unit/portalAgentMemory.spec.js` mounts
+`PortalAgentMemory.vue` and drives Undo, its refusal, and the failed-vs-empty split.
 
 ## Related Flows
 

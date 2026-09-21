@@ -74,6 +74,8 @@ from .models import (
     PortalAllSessions,
     PortalSessions,
     PortalAgentPage,
+    PortalAgentMemory,
+    PortalMemoryUndo,
     PortalAgentReports,
     PortalChatState,
     PortalSessionSummary,
@@ -751,6 +753,47 @@ async def portal_agent_page(
         # and this is the same flag `get_agent_card` above already keys on.
         is_platform=principal.is_platform,
     )
+
+
+@router.get("/agents/{agent_name}/memory", response_model=PortalAgentMemory)
+def portal_agent_memory(
+    agent_name: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """What this agent remembers about YOU, and what changed it (ent#637).
+
+    A scheduled run addressed to the viewer may now write their memory; this is
+    where they see that it did — which run, when, what it left — and where Undo
+    lives. Roster-gated like every route here; the accessor is keyed on the
+    principal, so there is no way to ask for anyone else's.
+    """
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    return agent_page.memory(agent_name, email)
+
+
+@router.post("/agents/{agent_name}/memory/writes/{write_id}/undo",
+             response_model=PortalMemoryUndo)
+def portal_agent_memory_undo(
+    agent_name: str,
+    write_id: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Revert the viewer's notes to before one write (ent#637).
+
+    Latest-first: a NAMED 409 (`detail.code == "not_latest"` /
+    `"already_undone"`) rather than a silent revert that discards a later
+    change; an unknown id is the uniform 404.
+    """
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_memory_undo:{email}", 30, 60)
+    try:
+        return agent_page.undo_memory_write(agent_name, email, write_id)
+    except agent_page.MemoryUndoRefused as e:
+        raise HTTPException(status_code=e.status_code,
+                            detail={"code": e.code, "message": e.detail})
 
 
 @router.get("/agents/{agent_name}/canvas")

@@ -367,6 +367,16 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // "loaded" must never mean "failed and returned nothing" (contract #15).
     reportsLoaded: false,
     reportsError: null,
+    // ent#637 — what this agent remembers about the viewer and the writes
+    // behind it. Same generation guard as reports: a response landing after an
+    // agent switch is discarded, never shown under the new agent's name.
+    memoryAgent: null,
+    _memoryGeneration: 0,
+    memory: null,            // {agent_name, notes, updated_at, writes: [...]}
+    memoryLoaded: false,     // set ONLY by a fetch that succeeded (contract #15)
+    memoryError: null,
+    memoryUndoError: null,   // the failed verb's home, next to the control (contract #18)
+    memoryUndoing: null,     // write id in flight
     reportPayloads: {},
     // id -> {total, loaded}; present only for a payload the server actually
     // windowed, so a bounded document never renders a paging footer.
@@ -939,6 +949,67 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.reportRowMeta = {}
       this.reportErrors = {}
       this._reportInFlight = {}
+    },
+
+    // ---- ent#637: the viewer's memory with an agent ------------------------
+
+    resetAgentMemory(agentName = null) {
+      this._memoryGeneration += 1
+      this.memoryAgent = agentName
+      this.memory = null
+      this.memoryLoaded = false
+      this.memoryError = null
+      this.memoryUndoError = null
+      this.memoryUndoing = null
+    },
+
+    async loadAgentMemory(agentName) {
+      if (this.memoryAgent !== agentName) this.resetAgentMemory(agentName)
+      const gen = this._memoryGeneration
+      this.memoryError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/memory`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._memoryGeneration) return
+        this.memory = data
+        this.memoryLoaded = true
+      } catch {
+        if (gen !== this._memoryGeneration) return
+        this.memoryError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    /**
+     * Undo one write: the notes revert to what they were before it. The
+     * server decides what is undoable (latest, not already undone) and names
+     * a refusal (`not_latest` / `already_undone`) — rendered next to the
+     * control, never swallowed. On success the payload is re-read so the
+     * list and the notes come from the same read.
+     */
+    async undoMemoryWrite(agentName, writeId) {
+      const gen = this._memoryGeneration
+      this.memoryUndoError = null
+      this.memoryUndoing = writeId
+      try {
+        await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/memory/writes/${writeId}/undo`,
+          null, { headers: this.authHeader },
+        )
+        if (gen !== this._memoryGeneration) return true
+        await this.loadAgentMemory(agentName)
+        return true
+      } catch (e) {
+        if (gen !== this._memoryGeneration) return false
+        const d = e?.response?.data?.detail
+        this.memoryUndoError = (d && typeof d === 'object' && d.message)
+          || (typeof d === 'string' ? d : null)
+          || 'Could not undo that change. Try again.'
+        return false
+      } finally {
+        if (gen === this._memoryGeneration) this.memoryUndoing = null
+      }
     },
 
     async loadAgentReports(agentName) {

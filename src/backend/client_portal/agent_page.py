@@ -541,6 +541,82 @@ def build_page(email: str, agent_name: str, card: Optional[dict],
     }
 
 
+# ---------------------------------------------------------------------------
+# ent#637 — the viewer's memory with this agent, and the writes that changed it
+# ---------------------------------------------------------------------------
+
+MAX_MEMORY_WRITES = 20
+
+
+class MemoryUndoRefused(Exception):
+    def __init__(self, code: str, detail: str, status_code: int = 409):
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+        self.status_code = status_code
+
+
+def _write_kind(row: dict) -> str:
+    return "scheduled_run" if (row.get("triggered_by") or "").lower() == "schedule" else "conversation"
+
+
+def memory(agent_name: str, email: str) -> dict:
+    """What `agent_name` remembers about `email`, and the writes behind it.
+
+    Keyed on the PRINCIPAL's email, so a viewer can only ever read their own
+    memory — there is no path parameter for whose. The memory row is created on
+    demand by the accessor (that is MEM-001's shape), which is harmless here: an
+    empty row renders as "nothing yet". Schedule names come through the same
+    bounded, agent-scoped map the page uses, never `db.get_schedule` per row.
+    """
+    record = db.get_or_create_public_user_memory(agent_name, email)
+    rows = db.list_public_user_memory_writes(agent_name, email, MAX_MEMORY_WRITES)
+    names = _schedule_names(agent_name, rows)
+    latest_open = next((r["id"] for r in rows if not r.get("undone_at")), None)
+    writes = []
+    for r in rows:
+        writes.append({
+            "id": r["id"],
+            "kind": _write_kind(r),
+            "execution_id": r.get("execution_id"),
+            "schedule_name": names.get(r.get("schedule_id")),
+            "written_at": r["written_at"],
+            "undone_at": r.get("undone_at"),
+            "undoable": r["id"] == latest_open,
+            "notes": r.get("new_notes") or "",
+            "previous_notes": r.get("previous_notes") or "",
+        })
+    return {
+        "agent_name": agent_name,
+        "notes": record.get("agent_notes") or "",
+        "updated_at": record.get("updated_at"),
+        "writes": writes,
+    }
+
+
+def undo_memory_write(agent_name: str, email: str, write_id: str) -> dict:
+    """Revert the viewer's notes to what they were before `write_id` (ent#637).
+
+    Latest-first, enforced in the accessor's transaction: a 409 names the
+    reason (`not_latest` — undo the later write first; `already_undone`). A
+    miss is the uniform 404 — the id space is per (agent, viewer), so an id
+    from someone else's memory reads as nonexistent, never as forbidden.
+    """
+    outcome = db.undo_public_user_memory_write(agent_name, email, write_id, undone_by=email)
+    if outcome == "not_found":
+        raise MemoryUndoRefused("not_found", "That memory change was not found.", 404)
+    if outcome == "already_undone":
+        raise MemoryUndoRefused("already_undone", "That change has already been undone.")
+    if outcome == "not_latest":
+        raise MemoryUndoRefused(
+            "not_latest",
+            "A later change exists — undo the most recent one first, so nothing "
+            "you have not looked at is discarded.",
+        )
+    record = db.get_or_create_public_user_memory(agent_name, email)
+    return {"write_id": write_id, "notes": record.get("agent_notes") or ""}
+
+
 def _last_active(agent_name: str, *, is_platform: bool = False) -> Optional[str]:
     """When this agent last did anything, from its newest execution row.
 

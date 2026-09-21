@@ -9,8 +9,14 @@ Security model:
 - The caller never supplies a user email.
 - The backend resolves the email from the execution record identified by
   execution_id, after verifying the execution belongs to the calling agent
-  and was triggered by a user-facing channel (public/slack/telegram/whatsapp).
+  and was triggered by a user-facing channel (public/slack/telegram/whatsapp)
+  — or, since ent#637, is a scheduled run that ent#498 addressed to one
+  person (the seat is read off the row's Workspace destination, never sent).
 - This prevents an agent from writing memory for an arbitrary user.
+
+This is the ONE write boundary for agent_notes: every write records a
+`public_user_memory_writes` row (ent#419 layer 3, built for ent#637's undo), and
+the ent#419 screening gate, when it lands, goes here and covers every trigger.
 """
 
 import logging
@@ -22,6 +28,7 @@ from models import WriteUserMemoryRequest
 from database import db
 from dependencies import get_current_user, assert_agent_access
 from db_models import User
+from services import schedule_seat_memory
 
 logger = logging.getLogger(__name__)
 
@@ -61,16 +68,26 @@ async def write_user_memory(
         raise HTTPException(status_code=403, detail="Execution does not belong to this agent")
 
     triggered_by = (execution.triggered_by or "").lower()
-    if triggered_by not in _USER_FACING_TRIGGERS:
+    # ent#637: a scheduled run addressed to one person (ent#498) serves that
+    # seat. The seat comes off the row's Workspace destination — stamped
+    # backend-side after the roster/block checks — never from the caller, so
+    # MEM-001's "the agent never names the user" holds for this trigger too.
+    seat = schedule_seat_memory.seat_for_execution(execution)
+    if seat:
+        user_email = seat
+    elif triggered_by in _USER_FACING_TRIGGERS:
+        user_email = execution.source_user_email
+    else:
         raise HTTPException(
             status_code=422,
             detail=(
                 f"write_user_memory is only available during user-facing sessions "
-                f"(public, slack, telegram, whatsapp). This execution was triggered by '{triggered_by}'."
+                f"(public, slack, telegram, whatsapp) or a scheduled run that names "
+                f"a person. This execution was triggered by '{triggered_by}'"
+                + (" and names no one." if triggered_by == schedule_seat_memory.SCHEDULE_TRIGGER else ".")
             ),
         )
 
-    user_email = execution.source_user_email
     if not user_email or not _EMAIL_RE.match(user_email):
         raise HTTPException(
             status_code=422,
@@ -79,13 +96,22 @@ async def write_user_memory(
 
     # #895: write only the agent_notes section so the background
     # conversation summarizer can't clobber deliberate agent writes (and
-    # vice versa). The row is created on demand inside the helper.
-    db.update_public_user_memory_agent_notes(
-        agent_name, user_email, body.memory_text
+    # vice versa). The row is created on demand inside the helper. ent#637:
+    # the write is recorded (previous + new, which run) so the person can see
+    # it and undo it.
+    written = db.write_public_user_memory_agent_notes(
+        agent_name, user_email, body.memory_text,
+        execution_id=body.execution_id,
+        triggered_by=triggered_by,
+        schedule_id=getattr(execution, "schedule_id", None) if seat else None,
     )
 
     logger.info(
         f"[UserMemory] Updated agent_notes for {user_email} on {agent_name} "
-        f"({len(body.memory_text)} chars, execution={body.execution_id})"
+        f"({len(body.memory_text)} chars, execution={body.execution_id}, "
+        f"trigger={triggered_by}, write={written.get('write_id')})"
     )
-    return {"success": True, "agent_name": agent_name, "user_email": user_email}
+    return {
+        "success": True, "agent_name": agent_name, "user_email": user_email,
+        "write_id": written.get("write_id"),
+    }
