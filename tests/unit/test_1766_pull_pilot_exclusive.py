@@ -25,9 +25,10 @@ The three properties proven here make the pilot flag a true **either/or**:
      worker pool is the sole claimant. One guard covers every drain path
      (release callback, 60s orphan sweep, ``drain_on_release``).
   3. **Carve-out** — interactive triggers are excluded and still take the
-     synchronous push path (``TARGET_ARCHITECTURE.md`` Open Question 7's scope
-     cut), so human chat is not parked behind N batch tasks and per-session
-     ``--resume`` serialization is untouched.
+     synchronous push path — temporarily, until #2842/#2843 land (Open
+     Question 7 is decided for the queue, #1989) — so human chat is not parked
+     behind N batch tasks and per-session ``--resume`` serialization is
+     untouched.
 
 Plus the inertness property the whole dark-ship rests on: with an empty
 allowlist (the default) every path is byte-for-byte unchanged.
@@ -221,7 +222,7 @@ class TestPullOwnsDispatch:
 
     @pytest.mark.parametrize("trigger", ["manual", "user", "chat", "voip", "voice", None])
     def test_pilot_does_not_own_interactive_triggers(self, pilot, trigger):
-        """Open Question 7 scope cut: human turns keep the synchronous path."""
+        """Human turns keep the synchronous path until #2842/#2843 land (#1989)."""
         from services.agent_service.pull_mode import pull_owns_dispatch
 
         assert pull_owns_dispatch("alice", trigger) is False
