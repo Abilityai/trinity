@@ -450,6 +450,18 @@
         </div>
       </div>
     </div>
+
+    <!-- #1924 -->
+    <ConfirmDialog
+      :visible="confirmClearPat"
+      variant="warning"
+      title="Clear this agent's token"
+      message="Remove the agent-specific GitHub token? This agent falls back to the platform's shared token, which may not reach its repository."
+      confirm-text="Clear token"
+      cancel-text="Keep token"
+      @confirm="performClearPat"
+      @cancel="confirmClearPat = false"
+    />
   </div>
 </template>
 
@@ -457,6 +469,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import BindRepoPanel from './BindRepoPanel.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 
 const props = defineProps({
   agentName: {
@@ -599,9 +612,14 @@ const savePat = async () => {
   }
 }
 
-const clearPat = async () => {
-  if (!confirm('Clear the agent-specific PAT and revert to using the global PAT?')) return
+// #1924: was a native confirm() — no named verb, no restated consequence,
+// and the unsafe action focused.
+const confirmClearPat = ref(false)
 
+const clearPat = () => { confirmClearPat.value = true }
+
+const performClearPat = async () => {
+  confirmClearPat.value = false
   patSaving.value = true
   try {
     await agentsStore.clearGitHubPAT(props.agentName)
