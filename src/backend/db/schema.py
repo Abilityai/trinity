@@ -225,6 +225,12 @@ TABLES = {
             -- default off — a plain token-in-URL webhook is unchanged.
             webhook_secret_encrypted TEXT,
             webhook_auth_enabled INTEGER DEFAULT 0,
+            -- ent#498: the ONE Workspace user this schedule's output is
+            -- delivered to. NULL (every pre-existing row) = today's behaviour,
+            -- output goes nowhere but the execution record. Stored lowercased
+            -- so it is comparable to enterprise_portal_sessions.client_email
+            -- and to the sharing roster, both of which key on that form.
+            deliver_to_workspace_email TEXT,
             deleted_at TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )

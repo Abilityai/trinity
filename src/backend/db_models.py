@@ -150,6 +150,11 @@ class ScheduleCreate(BaseModel):
     validation_enabled: bool = False  # Enable post-execution validation
     validation_prompt: Optional[str] = None  # Custom auditor instructions (None = default prompt)
     validation_timeout_seconds: int = 120  # Timeout for validation task (30-600 range)
+    # ent#498: deliver this schedule's output into ONE Workspace user's
+    # conversation with the agent. None = no delivery (today's behaviour). The
+    # router validates the address against the agent's Workspace roster and
+    # stores it lowercased; which THREAD it lands in is resolved at fire time.
+    deliver_to_workspace_email: Optional[str] = None
 
 
 class Schedule(BaseModel):
@@ -190,6 +195,8 @@ class Schedule(BaseModel):
     # exactly once, at mint time, and never persisted in the clear).
     webhook_auth_enabled: bool = False
     webhook_secret_encrypted: Optional[str] = None
+    # ent#498: Workspace delivery target (lowercased email; None = no delivery).
+    deliver_to_workspace_email: Optional[str] = None
 
 
 class ScheduleExecution(BaseModel):

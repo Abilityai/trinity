@@ -2897,6 +2897,12 @@ class InternalTaskExecutionRequest(BaseModel):
     schedule_cron: Optional[str] = None
     schedule_next_run: Optional[str] = None
     attempt: Optional[int] = None
+    # ent#498: the schedule's Workspace delivery target, carried verbatim from
+    # `agent_schedules.deliver_to_workspace_email`. `execute_task_internal`
+    # resolves it to a thread and stamps the portal channel context on the
+    # execution row BEFORE dispatch, so the existing ent#457 completion-report
+    # leg fires unmodified at the terminal. None = today's behaviour.
+    deliver_to_workspace_email: Optional[str] = None
 
 
 class ValidateExecutionRequest(BaseModel):
@@ -3356,6 +3362,10 @@ class ScheduleUpdateRequest(BaseModel):
     validation_enabled: Optional[bool] = None
     validation_prompt: Optional[str] = None
     validation_timeout_seconds: Optional[int] = None
+    # ent#498: Workspace delivery target. The route reads `exclude_unset`, so
+    # OMITTING the field leaves it unchanged while an explicit `null` (or "")
+    # clears it — the same distinction every other optional field here relies on.
+    deliver_to_workspace_email: Optional[str] = None
 
 
 class ScheduleResponse(BaseModel):
@@ -3380,6 +3390,8 @@ class ScheduleResponse(BaseModel):
     validation_enabled: bool = False
     validation_prompt: Optional[str] = None
     validation_timeout_seconds: int = 120
+    # ent#498: Workspace delivery target (None = no delivery).
+    deliver_to_workspace_email: Optional[str] = None
 
     class Config:
         from_attributes = True

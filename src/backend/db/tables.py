@@ -223,6 +223,9 @@ agent_schedules = Table(
     Column("webhook_enabled", Integer),
     Column("webhook_secret_encrypted", Text),  # ent#77: AES-256-GCM HMAC secret
     Column("webhook_auth_enabled", Integer),    # ent#77: gate signature verify
+    # ent#498: Workspace delivery target (one user's email, lowercased; NULL =
+    # no delivery, today's behaviour).
+    Column("deliver_to_workspace_email", Text),
     Column("deleted_at", Text),
 )
 

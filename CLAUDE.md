@@ -373,3 +373,12 @@ The **[abilities](https://github.com/abilityai/abilities)** repo is the canonica
 - **Agent Network Demo**: `docs/AGENT_NETWORK_DEMO.md`
 - **Agent Development Toolkit**: https://github.com/abilityai/abilities
 - **Docs Q&A Bot**: `./scripts/ask-trinity.sh "your question"` or [public endpoint](https://us-central1-mcp-server-project-455215.cloudfunctions.net/ask-trinity)
+
+## Platform Skills
+
+This agent has the following skills installed in `~/.claude/skills/`:
+
+- `/gemini-critic` - Use with /gemini-critic command — ⚠ missing: GEMINI_API_KEY
+- `/repo-velocity` - Use with /repo-velocity command
+
+Use these skills by invoking their slash commands (e.g., `/gemini-critic`).

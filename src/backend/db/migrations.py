@@ -3896,6 +3896,37 @@ def _migrate_shared_sessions_tables_to_oss(cursor, conn):
     conn.commit()
 
 
+def _migrate_schedule_workspace_delivery(cursor, conn):
+    """A schedule can name ONE Workspace user as its delivery target (ent#498).
+
+    When the schedule fires, the execution's terminal is filed as a new turn in
+    that person's conversation with the agent, through the ent#457 portal
+    completion-report leg. The column carries only the ADDRESS; which thread it
+    lands in is resolved live at dispatch (`services/workspace_delivery`), so a
+    thread deleted between config and fire re-resolves rather than dangling.
+
+    Nullable with no default: every pre-existing schedule reports NULL and
+    behaves exactly as it does today. Stored lowercased (normalized at the API
+    boundary) so it is comparable to `enterprise_portal_sessions.client_email`
+    and to the sharing roster — a schedule holding `Ada@Example.com` against a
+    share reading `ada@example.com` would validate at config time and then fail
+    closed at every delivery.
+
+    Mirrored by Alembic ``0050_schedule_workspace_delivery`` for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_schedules",
+        "deliver_to_workspace_email",
+        "ALTER TABLE agent_schedules ADD COLUMN deliver_to_workspace_email TEXT",
+        log_msg=(
+            "Adding deliver_to_workspace_email to agent_schedules for "
+            "Workspace brief delivery (ent#498)..."
+        ),
+    )
+    conn.commit()
+
+
 def _migrate_execution_turn_integrity(cursor, conn):
     """#2467: queryable turn-integrity flags on the execution row.
 
@@ -4106,4 +4137,5 @@ MIGRATIONS = [
     ("execution_turn_integrity", _migrate_execution_turn_integrity),
     ("agent_canvases_table", _migrate_agent_canvases_table),
     ("portal_session_title_source", _migrate_portal_session_title_source),
+    ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
 ]
