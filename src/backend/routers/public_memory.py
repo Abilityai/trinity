@@ -84,7 +84,9 @@ async def write_user_memory(
                 f"write_user_memory is only available during user-facing sessions "
                 f"(public, slack, telegram, whatsapp) or a scheduled run that names "
                 f"a person. This execution was triggered by '{triggered_by}'"
-                + (" and names no one." if triggered_by == schedule_seat_memory.SCHEDULE_TRIGGER else ".")
+                + (" and names no one." if triggered_by in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS
+                   and (getattr(execution, "schedule_id", None) or "") not in ("", schedule_seat_memory.NO_SCHEDULE_ID)
+                   else ".")
             ),
         )
 

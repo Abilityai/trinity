@@ -39,6 +39,13 @@ except Exception:  # pragma: no cover
     PORTAL_SOURCE_CHANNEL = "portal"
 
 SCHEDULE_TRIGGER = "schedule"
+#: The three ways a SCHEDULE fires (`src/scheduler/main.py::_trigger_handler`):
+#: cron, "Run now", and a webhook. All three address the same seat — the
+#: operator who presses Run now is not the addressee — so all three run as it.
+SCHEDULE_FIRE_TRIGGERS = frozenset({SCHEDULE_TRIGGER, "manual", "webhook"})
+#: `schedule_executions.schedule_id` for a run that came from no schedule
+#: (`/task`, chat) — mirrors `client_portal.agent_page.NO_SCHEDULE_ID`.
+NO_SCHEDULE_ID = "__manual__"
 
 SEAT_MEMORY_INSTRUCTION = """### This run serves one person
 
@@ -52,16 +59,23 @@ and undo it."""
 
 
 def seat_for_execution(execution: Any) -> Optional[str]:
-    """The seat email a `schedule`-triggered execution serves, or None.
+    """The seat email a schedule's run serves, or None.
 
-    Only a scheduled row that ent#498 stamped with a Workspace destination has a
-    seat. Every other trigger answers None here — the user-facing chat triggers
+    Three things must all hold: the row came from a schedule (a real
+    `schedule_id`, fired by cron / Run now / webhook), ent#498 stamped it with a
+    Workspace destination (`source_channel='portal'`), and that stamp names a
+    client. Every other row answers None — the user-facing chat triggers
     resolve their user through `source_user_email` as before, and nothing else
-    may write per-user memory.
+    may write per-user memory. A manual fire's `source_user_email` (the
+    operator who pressed Run now, #1970) is deliberately not consulted: the
+    brief is addressed to the seat, not to whoever fired it.
     """
     if execution is None:
         return None
-    if (getattr(execution, "triggered_by", "") or "").lower() != SCHEDULE_TRIGGER:
+    if (getattr(execution, "triggered_by", "") or "").lower() not in SCHEDULE_FIRE_TRIGGERS:
+        return None
+    schedule_id = (getattr(execution, "schedule_id", "") or "").strip()
+    if not schedule_id or schedule_id == NO_SCHEDULE_ID:
         return None
     if (getattr(execution, "source_channel", "") or "").lower() != PORTAL_SOURCE_CHANNEL:
         return None

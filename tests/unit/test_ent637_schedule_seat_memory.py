@@ -64,14 +64,27 @@ def test_the_seat_is_normalised_like_the_roster_stores_it():
 @pytest.mark.parametrize("over", [
     dict(source_channel=None, source_channel_client=None),          # AC 5: no address
     dict(source_channel="telegram"),                                 # a channel row, not a seat
-    dict(triggered_by="manual"),                                     # not a schedule
+    dict(triggered_by="manual", schedule_id="__manual__", source_channel=None,
+         source_channel_client=None),                                # a /task run, not a schedule
+    dict(triggered_by="manual", schedule_id=None),                   # no schedule behind it
     dict(triggered_by="agent"),
+    dict(triggered_by="mcp"),
     dict(triggered_by="public", source_channel="portal"),            # a chat turn resolves via source_user_email, not here
     dict(source_channel_client=""),
-], ids=["no-address", "channel-row", "manual", "agent", "portal-chat", "blank-client"])
+], ids=["no-address", "channel-row", "task-run", "manual-no-schedule", "agent", "mcp", "portal-chat", "blank-client"])
 def test_everything_that_is_not_an_addressed_schedule_has_no_seat(over):
     from services.schedule_seat_memory import seat_for_execution
     assert seat_for_execution(_execution(**over)) is None
+
+
+@pytest.mark.parametrize("trigger", ["schedule", "manual", "webhook"])
+def test_every_way_a_schedule_fires_serves_the_same_seat(trigger):
+    """Cron, Run now and a webhook all address the seat; the operator who
+    pressed Run now is not the addressee, so their `source_user_email` is not
+    consulted."""
+    from services.schedule_seat_memory import seat_for_execution
+    row = _execution(triggered_by=trigger, source_user_email="operator@example.com")
+    assert seat_for_execution(row) == "seat@example.com"
 
 
 def test_a_missing_execution_has_no_seat():
