@@ -174,7 +174,7 @@
                 </button>
               </span>
             </div>
-            <p v-else class="text-xs text-gray-400 dark:text-gray-500">
+            <p v-else class="text-xs text-gray-500 dark:text-gray-400">
               Add at least one tag to filter agents
             </p>
           </div>

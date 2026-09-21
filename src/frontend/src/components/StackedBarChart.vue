@@ -179,7 +179,7 @@ function showLabel(i) {
       <div
         v-for="(d, i) in data"
         :key="i"
-        class="flex-1 text-center text-[9px] text-gray-400 dark:text-gray-500 truncate"
+        class="flex-1 text-center text-[9px] text-gray-500 dark:text-gray-400 truncate"
       >
         {{ showLabel(i) ? fmtDayShort(d.date) : '' }}
       </div>
@@ -198,7 +198,7 @@ function showLabel(i) {
       >
         <span class="w-2.5 h-2.5 rounded-sm mr-1" :style="{ backgroundColor: colorFor(b) }"></span>
         {{ labelFor(b) }}
-        <span class="ml-1 font-mono text-gray-400 dark:text-gray-500">{{ bucketTotals[b] }}</span>
+        <span class="ml-1 font-mono text-gray-500 dark:text-gray-400">{{ bucketTotals[b] }}</span>
       </span>
     </div>
   </div>

@@ -127,7 +127,7 @@
         </ul>
       </div>
 
-      <p class="text-xs text-gray-400 dark:text-gray-500">
+      <p class="text-xs text-gray-500 dark:text-gray-400">
         Reversible: turn this off any time and egress stops immediately.
         <a href="https://github.com/abilityai/trinity/blob/main/docs/PRODUCT_EVENTS.md" target="_blank" rel="noopener" class="underline">Payload schema &amp; details</a>.
       </p>
