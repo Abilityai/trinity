@@ -33,7 +33,11 @@ from services.credential_charset import (
     CREDENTIAL_DETECTOR_NAME_RE,
     CREDENTIAL_DETECTOR_REF_RE,
 )
-from services.template_service import _is_platform_injected, declared_credential_names
+from services.template_service import (
+    PLATFORM_INJECTED_MCP_SERVERS,
+    _is_platform_injected,
+    declared_credential_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -455,24 +459,96 @@ def c_t003(snap):
                           else _fail("template.yaml 'description' is missing or empty"))
 
 
+def _resource_normalizers():
+    """The create path's own cpu/memory validators, imported lazily (#2899).
+
+    `services.agent_service.capabilities` is stdlib-only, but reaching it runs
+    the package `__init__`, which pulls the whole create stack (crud, lifecycle,
+    deploy, fastapi). This module is imported by the compatibility router at
+    startup and has no other agent_service edge, so the import stays inside the
+    two checks that need it rather than becoming a package-level one.
+    """
+    from services.agent_service.capabilities import (  # noqa: PLC0415 — see docstring
+        VALID_CPU,
+        VALID_MEMORY,
+        normalize_cpu,
+        normalize_memory,
+    )
+    return normalize_cpu, normalize_memory, VALID_CPU[0], VALID_MEMORY[0]
+
+
+def _resources_block(d) -> Tuple[Optional[dict], Optional[Result]]:
+    """(resources-mapping, shape-failure). `None`/absent means "not declared".
+
+    `null` and an absent key are the same thing to the create path
+    (`crud.py`: `config.resources` stays the caller's, then the admin default
+    fills it), so both are a legitimate declaration. Any OTHER non-mapping is
+    a real defect: `_resolve_local_template` assigns it unchanged and the
+    create path then raises `AttributeError` on `.get`.
+    """
+    r = d.get("resources")
+    if r is None:
+        return {}, None
+    if not isinstance(r, dict):
+        return None, _fail(
+            "template.yaml 'resources' must be a mapping of cpu/memory — "
+            f"got {type(r).__name__}",
+            {"type": type(r).__name__},
+        )
+    return r, None
+
+
 def c_t004(snap):
+    """HARD: `resources.cpu` is one the create path accepts, when declared.
+
+    An ABSENT block is not a finding (#2899): the agent then inherits the
+    admin's fleet-wide default (RES-001), which is what every bundled starter
+    and `local:default` rely on — declaring one here would silently override
+    both that default and the value a manifest or API caller asked for. Only a
+    value the create path would REJECT is a must-fix, and the verdict is the
+    create path's own `normalize_cpu`, never a second copy of the value set:
+    `"4G"`, `" 4g"` and `""` are all accepted there, and a membership test
+    against `VALID_CPU` would have called them must-fix.
+    """
     def f(d):
-        cpu = ((d.get("resources") or {}).get("cpu"))
-        if cpu is None:
-            return _fail("template.yaml resources.cpu is missing")
-        if str(cpu) not in {"1", "2", "4", "8", "16"}:
-            return _fail("resources.cpu must be one of 1/2/4/8/16", {"cpu": str(cpu)})
+        resources, shape_failure = _resources_block(d)
+        if shape_failure:
+            return shape_failure
+        cpu = resources.get("cpu")
+        if cpu is None or str(cpu).strip() == "":
+            return _ok("resources.cpu is not declared — the platform default applies")
+        normalize_cpu, _normalize_memory, cpu_default, _memory_default = _resource_normalizers()
+        # Clip BEFORE the normalizer: its ValueError quotes the value back, and
+        # `template.yaml` is agent-writable, so an unbounded (or escape-bearing)
+        # scalar would reach the UI row, the MCP payload and `checks_json`
+        # verbatim (the #950 L1 / `_clip` rule). No verdict can change — every
+        # accepted value is two or three printable characters.
+        try:
+            normalize_cpu(_clip(cpu), cpu_default)
+        except ValueError as e:
+            return _fail(str(e), {"cpu": _clip(cpu)})
         return _ok("resources.cpu is valid")
     return _with_template(snap, f)
 
 
 def c_t005(snap):
+    """HARD: `resources.memory` is one the create path accepts, when declared.
+
+    Same contract as T-004. Skips when the block itself is malformed so one
+    bad `resources:` is one finding, not two.
+    """
     def f(d):
-        mem = ((d.get("resources") or {}).get("memory"))
-        if mem is None:
-            return _fail("template.yaml resources.memory is missing")
-        if not re.match(r"^\d+[gm]$", str(mem)):
-            return _fail("resources.memory must match <number>g|m (e.g. 2g, 512m)", {"memory": str(mem)})
+        resources, shape_failure = _resources_block(d)
+        if shape_failure:
+            return _skip("resources is not a mapping (see T-004)", "invalid_resources")
+        mem = resources.get("memory")
+        if mem is None or str(mem).strip() == "":
+            return _ok("resources.memory is not declared — the platform default applies")
+        _normalize_cpu, normalize_memory, _cpu_default, memory_default = _resource_normalizers()
+        try:
+            normalize_memory(_clip(mem), memory_default)  # see T-004 on the clip
+        except ValueError as e:
+            return _fail(str(e), {"memory": _clip(mem)})
         return _ok("resources.memory is valid")
     return _with_template(snap, f)
 
@@ -1196,6 +1272,13 @@ def c_x004(snap):
         actual = set(_mcp_server_names(snap))
         if not declared_names and not actual:
             return _ok("no MCP servers declared")
+        # #2899: a platform-injected server (today: `trinity`) belongs in
+        # `template.yaml` and NOT in `.mcp.json.template` — the agent's own boot
+        # writes the entry into `.mcp.json`. Exempt that direction only: a
+        # template that ships its own `trinity` block in `.mcp.json.template` is
+        # still a mismatch worth reporting, because the injection overwrites it
+        # when Trinity MCP is configured and leaves it standing when it is not.
+        declared_names -= (PLATFORM_INJECTED_MCP_SERVERS - actual)
         only_template = sorted(declared_names - actual)
         only_mcp = sorted(actual - declared_names)
         if only_template or only_mcp:

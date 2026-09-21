@@ -57,10 +57,13 @@ name: my-agent                    # Unique identifier (lowercase, hyphens ok)
 display_name: "My Agent"          # Human-readable name for UI
 description: "What this agent does"
 
-# Resource limits (required)
+# Resource limits (optional — omit to inherit the platform default that the
+# instance admin sets under Settings; declare them only when this agent needs
+# something other than that default, since a value here OVERRIDES what a
+# manifest or API caller asks for)
 resources:
-  cpu: "2"                        # CPU cores (string)
-  memory: "4g"                    # Memory limit (e.g., "2g", "4g", "8g")
+  cpu: "2"                        # 1, 2, 4, 8 or 16 (string)
+  memory: "4g"                    # 1g, 2g, 4g, 8g, 16g or 32g
 ```
 
 See [template.yaml Schema](#templateyaml-schema) for complete field reference.
@@ -542,10 +545,13 @@ display_name: "My Agent"          # Human-readable name for UI
 description: |
   Multi-line description of what this agent does.
 
-# Resource limits (required)
+# Resource limits (optional — omit to inherit the platform default that the
+# instance admin sets under Settings; declare them only when this agent needs
+# something other than that default, since a value here OVERRIDES what a
+# manifest or API caller asks for)
 resources:
-  cpu: "2"                        # CPU cores (string)
-  memory: "4g"                    # Memory limit (e.g., "2g", "4g", "8g")
+  cpu: "2"                        # 1, 2, 4, 8 or 16 (string)
+  memory: "4g"                    # 1g, 2g, 4g, 8g, 16g or 32g
 
 # === RUNTIME CONFIGURATION (Optional) ===
 # Defaults to Claude Code if not specified
@@ -1972,7 +1978,7 @@ pip install --user opencv-python moviepy
 An agent is Trinity-compatible if:
 
 ### Required Files
-- [ ] Has `template.yaml` with required fields (name, display_name, description, version, resources)
+- [ ] Has `template.yaml` with required fields (name, display_name, description, version); `resources` is optional and inherits the instance default when omitted
 - [ ] Has `CLAUDE.md` with identity and domain-specific instructions
 - [ ] Has `.mcp.json.template` with `${VAR}` placeholders (if using MCP servers)
 - [ ] Has `.env.example` documenting required credentials
