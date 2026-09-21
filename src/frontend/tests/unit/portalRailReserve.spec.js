@@ -6,6 +6,13 @@ import { railColumnReservedFor, railVisibleFor } from '../../src/components/port
 /**
  * #2711 — the rail column is reserved while the stage loads.
  *
+ * @source-text-pin: the last describe is a spelling guard — `route.value`
+ *   must never appear in Portal.vue, because a `useRoute()` getter that reads
+ *   `.value` throws inside a watcher and Vue swallows it (the page renders,
+ *   the watcher is dead, every e2e passes). A mount proves the page renders;
+ *   only the text proves the spelling is absent. The reserve/visible rules
+ *   above are executed directly.
+ *
  * The contract's layout-stability rule: loading and loaded share one footprint,
  * nothing shifts on arrival. The rail's CONTENT needs the roster, but its WIDTH
  * does not — it comes from persisted state and is known at first paint — so the
