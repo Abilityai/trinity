@@ -73,6 +73,28 @@ def _in_session_cgroup(pid: int) -> bool:
     return cg == _session_cgroup or cg.startswith(_session_cgroup.rstrip("/") + "/")
 
 
+def _is_gone(pid: int) -> bool:
+    """The process no longer exists (or is a zombie the group kill cannot
+    reach anyway). Distinct from "cgroup unreadable": a LIVE pid whose cgroup
+    we cannot read is treated as foreign (fail closed); a pid that vanished
+    between the `/proc` walk and the membership read is simply not a member.
+
+    This is the flake behind `test_subprocess_pgroup` on CI: the harness's
+    parent exits (that is the scenario) while `guarded_killpg` is still
+    reading its cgroup, `_cgroup_of` answers None, and the group read as
+    "contains a process outside the session cgroup" — refusing a kill of a
+    group that was entirely ours a millisecond earlier."""
+    if not (_PROC / str(pid)).exists():
+        return True
+    try:
+        for line in (_PROC / str(pid) / "status").read_text().splitlines():
+            if line.startswith("State:"):
+                return line.split()[1] == "Z"
+    except (OSError, IndexError):
+        return True
+    return False
+
+
 def _ppid(pid: int) -> Optional[int]:
     try:
         for line in (_PROC / str(pid) / "status").read_text().splitlines():
@@ -150,7 +172,10 @@ def guarded_killpg(pgid: int, sig: int, /) -> None:
         return _real_killpg(pgid, sig)  # nothing there — real ESRCH surfaces
     if any(_is_self_or_ancestor(m) for m in members):
         _refuse("os.killpg", pgid, sig, "group contains this process or an ancestor")
-    if all(_in_session_cgroup(m) for m in members):
+    # Membership is decided per LIVE member. A member that exited after the
+    # walk (see `_is_gone`) is neither ours nor foreign — it is not there.
+    live = [m for m in members if not _is_gone(m)]
+    if not live or all(_in_session_cgroup(m) for m in live):
         return _real_killpg(pgid, sig)
     _refuse("os.killpg", pgid, sig, "group contains a process outside the session cgroup")
 
