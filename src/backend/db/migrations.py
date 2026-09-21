@@ -4351,6 +4351,27 @@ def _migrate_public_user_memory_writes_table(cursor, conn):
         "CREATE INDEX IF NOT EXISTS idx_public_user_memory_writes_lookup "
         "ON public_user_memory_writes(agent_name, user_email, written_at)"
     )
+def _migrate_agent_role_readiness_table(cursor, conn):
+    """The agent owner's readiness stamp for a role companion (ent#527 / #663).
+
+    `template.yaml`'s `x-role.status` is agent-writable, and the 2026-09-20
+    ruling is that only the agent OWNER flips a companion `calibrating → ready`
+    and the agent never can — so the stamp lives here, platform-side: one row
+    per agent with the state, when it changed and who flipped it. A template
+    that says `ready` with no row here is shown as calibrating.
+
+    Mirrored by the Alembic revision 0067_agent_role_readiness.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_role_readiness (
+            agent_name TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            changed_at TEXT NOT NULL,
+            changed_by TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 MIGRATIONS = [
@@ -4489,4 +4510,5 @@ MIGRATIONS = [
     ("executions_started_at_index", _migrate_executions_started_at_index),
     ("agent_skills_delivery_status", _migrate_agent_skills_delivery_status),
     ("public_user_memory_writes_table", _migrate_public_user_memory_writes_table),
+    ("agent_role_readiness_table", _migrate_agent_role_readiness_table),
 ]

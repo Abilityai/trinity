@@ -196,6 +196,7 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("agent_public_links",           "agent_name",        Policy.CASCADE),
     AgentRef("public_user_memory",           "agent_name",        Policy.CASCADE),
     AgentRef("public_user_memory_writes",    "agent_name",        Policy.CASCADE),  # ent#637
+    AgentRef("agent_role_readiness",         "agent_name",        Policy.CASCADE),  # ent#527
 
     # --- Per-agent config ---------------------------------------------------
     AgentRef("agent_git_config",             "agent_name",        Policy.CASCADE),

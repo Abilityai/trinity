@@ -377,6 +377,15 @@ export const useClientPortalStore = defineStore('clientPortal', {
     memoryError: null,
     memoryUndoError: null,   // the failed verb's home, next to the control (contract #18)
     memoryUndoing: null,     // write id in flight
+    // ent#527 — the role card: a projection of the agent's own files, plus the
+    // owner's readiness stamp. Same generation guard as reports.
+    roleAgent: null,
+    _roleGeneration: 0,
+    role: null,              // PortalRoleCard, or {role: null} for an agent with none
+    roleLoaded: false,
+    roleError: null,
+    roleFlipError: null,
+    roleFlipping: false,
     reportPayloads: {},
     // id -> {total, loaded}; present only for a payload the server actually
     // windowed, so a bounded document never renders a paging footer.
@@ -1009,6 +1018,61 @@ export const useClientPortalStore = defineStore('clientPortal', {
         return false
       } finally {
         if (gen === this._memoryGeneration) this.memoryUndoing = null
+      }
+    },
+
+    // ---- ent#527: the role card ------------------------------------------
+
+    resetAgentRole(agentName = null) {
+      this._roleGeneration += 1
+      this.roleAgent = agentName
+      this.role = null
+      this.roleLoaded = false
+      this.roleError = null
+      this.roleFlipError = null
+      this.roleFlipping = false
+    },
+
+    async loadAgentRole(agentName) {
+      if (this.roleAgent !== agentName) this.resetAgentRole(agentName)
+      const gen = this._roleGeneration
+      this.roleError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/role`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._roleGeneration) return
+        this.role = data
+        this.roleLoaded = true
+      } catch {
+        if (gen !== this._roleGeneration) return
+        this.roleError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    /** The owner's flip (#663). A named refusal lands next to the control. */
+    async flipAgentReadiness(agentName, status) {
+      const gen = this._roleGeneration
+      this.roleFlipError = null
+      this.roleFlipping = true
+      try {
+        await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/role/readiness`,
+          { status }, { headers: this.authHeader },
+        )
+        if (gen !== this._roleGeneration) return true
+        await this.loadAgentRole(agentName)
+        return true
+      } catch (e) {
+        if (gen !== this._roleGeneration) return false
+        const d = e?.response?.data?.detail
+        this.roleFlipError = (d && typeof d === 'object' && d.message)
+          || (typeof d === 'string' ? d : null)
+          || 'Could not change readiness. Try again.'
+        return false
+      } finally {
+        if (gen === this._roleGeneration) this.roleFlipping = false
       }
     },
 
