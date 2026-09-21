@@ -694,6 +694,17 @@ and `POST …/memory/writes/{id}/undo` (latest-first; `409 not_latest` / `alread
 named, unknown id the uniform 404). Requirement §10.19 of `scheduling.md`; flow in
 `schedule-workspace-delivery.md`.
 
+## The role card — a projection of the agent's files, and the owner's readiness stamp (ent#527, #663)
+
+`client_portal/role_card.py` builds the Info rail's Role card from the agent's own
+container on every read (template `x-role` + `x-canon.clone_path`, `<canon>/roles/<id>.yaml`,
+`<canon>/objectives/*.yaml`, `/api/metrics` for values + `last_updated`) — never cached,
+never a second store; author-controlled ids/paths are validated before any read and every
+failure is named. Readiness is the one platform fact: `agent_role_readiness` is the agent
+OWNER's stamp (`POST …/role/readiness`, owner check via `get_owned_roster`, agent never),
+and a template that claims `ready` without a stamp is shown as calibrating. Requirement
+§5.36 of `core-agent.md`; flow in `workspace-role-card.md`.
+
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 
 Clicking an agent opens the **conversation** you were last in. `/workspace/a/:agentName`

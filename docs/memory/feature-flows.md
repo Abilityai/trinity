@@ -89,6 +89,7 @@
 | Agent Plugin Manifest | [agent-plugin-manifest.md](feature-flows/agent-plugin-manifest.md) | Declared, committed, self-healing Claude Code marketplace plugin list (#1704) |
 | Gemini Runtime | [gemini-runtime.md](feature-flows/gemini-runtime.md) | Gemini CLI as an alternative agent runtime |
 | Schedule → Workspace Delivery | [schedule-workspace-delivery.md](feature-flows/schedule-workspace-delivery.md) | A schedule names one Workspace user; its output lands as a brief in their Main chat (ent#498) |
+| Workspace Role Card | [workspace-role-card.md](feature-flows/workspace-role-card.md) | The Info rail's role card — a projection of the agent's canon files, plus the owner's readiness stamp (ent#527, #663) |
 
 ### Dashboard & Monitoring
 

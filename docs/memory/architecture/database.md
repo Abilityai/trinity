@@ -550,6 +550,19 @@ replace, so `previous_notes` is what the row held at that instant. Not keyed to
 identity. Undo (`undo_user_memory_write`) is latest-first over the open (`undone_at IS NULL`)
 writes of one `(agent, email)`; a foreign write id is `not_found`, never a 403 (Invariant #8).
 
+**agent_role_readiness** (ent#527 / #663 — the agent owner's readiness stamp for a role companion):
+```sql
+CREATE TABLE agent_role_readiness (
+    agent_name TEXT PRIMARY KEY,
+    status TEXT NOT NULL,        -- calibrating | ready
+    changed_at TEXT NOT NULL,
+    changed_by TEXT NOT NULL     -- the owner's email
+);
+```
+Both tracks: SQLite `agent_role_readiness_table`, Alembic `0067_agent_role_readiness`;
+`AgentRef("agent_role_readiness", "agent_name", Policy.CASCADE)`. Platform-side because
+`template.yaml`'s `x-role.status` is agent-writable and only the owner may flip a companion.
+
 **agent_event_subscriptions / agent_events** (EVT-001 — agent event pub/sub):
 ```sql
 CREATE TABLE agent_event_subscriptions (
