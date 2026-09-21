@@ -17,11 +17,19 @@ const REASON_TEXT = Object.freeze({
   injection_error: 'the install failed',
 })
 
-/** #2914 — one sentence for a name conflict, shared by the partial and conflict arms. */
+/** #2914 — one sentence for a name conflict, shared by every arm that can carry one. */
 function conflictClause(names) {
   const list = names.length ? ` (${names.join(', ')})` : ''
-  const noun = names.length === 1 ? 'a skill' : 'skills'
-  return `the agent already has its own ${noun} with that name${list} — its copy is kept and runs. Unassign the library skill, or rename the agent's.`
+  if (names.length === 1) {
+    return `the agent already has its own skill with that name${list} — its copy is kept and runs. Unassign the library skill, or rename the agent's.`
+  }
+  return `the agent already has its own skills with those names${list} — its copies are kept and run. Unassign the library skills, or rename the agent's.`
+}
+
+function conflictNames(report) {
+  return Object.entries(report.skills || {})
+    .filter(([, v]) => v && v.status === 'conflict')
+    .map(([k]) => k)
 }
 
 /**
@@ -42,9 +50,7 @@ export function deliveryText(report, { saved = true } = {}) {
       const failed = Object.entries(report.skills || {})
         .filter(([, v]) => v && v.status === 'failed')
         .map(([k]) => k)
-      const conflicts = Object.entries(report.skills || {})
-        .filter(([, v]) => v && v.status === 'conflict')
-        .map(([k]) => k)
+      const conflicts = conflictNames(report)
       // #2914: a conflict is not a failed install — a retry via Sync would
       // refuse again by design. Name it apart, and only ask for a Sync when
       // something actually failed.
@@ -66,9 +72,7 @@ export function deliveryText(report, { saved = true } = {}) {
     case 'conflict': {
       // #2914: every requested name collides with a skill the agent wrote
       // itself. Nothing was written; the agent's own copy is what runs.
-      const conflicts = Object.entries(report.skills || {})
-        .filter(([, v]) => v && v.status === 'conflict')
-        .map(([k]) => k)
+      const conflicts = conflictNames(report)
       return {
         tone: DELIVERY_TONE.bad,
         text: `${lead} but not delivered: ${conflictClause(conflicts)}`,
@@ -89,9 +93,13 @@ export function deliveryText(report, { saved = true } = {}) {
       }
     case 'not_delivered': {
       const why = REASON_TEXT[report.reason] || 'it could not be delivered'
+      // #2914: a failure beside a conflict — Sync retries the failure, and
+      // the conflict is named so nobody expects the retry to clear it.
+      const conflicts = conflictNames(report)
+      const tail = conflicts.length ? ` Also, ${conflictClause(conflicts)}` : ''
       return {
         tone: DELIVERY_TONE.bad,
-        text: `${lead} but not delivered: ${why}. Sync now, or the agent picks it up on next start.`,
+        text: `${lead} but not delivered: ${why}. Sync now, or the agent picks it up on next start.${tail}`,
         needsSync: true,
       }
     }

@@ -218,6 +218,7 @@ agent /home/developer/.claude/skills/<name>/  (+ .trinity-skill.json provenance)
 | Idempotent start | agent meta `version` == library tree SHA → `unchanged`, no transfer (dep check still runs so CLAUDE.md annotations stay fresh) |
 | Deleted library files propagate | manifest diff prune on next inject |
 | Agent runtime files survive | prune only touches previous-manifest paths — `__pycache__`, downloaded models, agent notes untouched |
+| Platform writes always carry the marker (#2914) | the legacy fallback writes `.trinity-skill.json` beside `SKILL.md` (manifest = `[SKILL.md]`), and a restore whose `restored` list lacks the marker writes it back with one `write_file` (`marker_written_directly`); either failing → `failed` + `marker_not_written` (legacy write rolled back). Without this, the platform's own marker-less dir would read as agent-authored and conflict forever |
 | Same-named agent-authored dir | no meta → **refused** as `conflict` before any archive/restore/finalize (#2914): the agent's copy stays byte-for-byte and tracked; the row is stamped `agent_skills.delivery_status='conflict'` (cleared once the name lands, gone on unassign) so the Skills tab shows it on load with an inline Unassign; `force` does not override. Was overwrite + `unmanaged_dir_overwritten` before #2914 |
 | Repo bloat guard | injected names appended to agent's `.gitignore` + untracked, so the 15-min auto-sync (which deliberately commits `.claude/`) never commits platform packages (#1595/#1596 class); Playbooks keep committing |
 | Concurrency | Redis `skill_inject:{name}` SETNX+TTL fail-open lock via the shared `redis_breaker_util.SingleFlightLock` (#1920; injected `_redis_client`, `_acquire_inject_lock` still raises `SkillInjectionBusy` on contention) — outside `agent:*` (`compat_fix` precedent); manual inject → 409, start path → skip |
@@ -245,7 +246,7 @@ name-conflict refusal: `success: false`, `error: name_conflict: …`, not counte
 `missing_binary:*`, `missing_env:*`, `packages_not_checked`, `dep_check_skipped`,
 `skill_too_large` (error), `symlink_skipped:*`, `protected_name_skipped:*`,
 `restore_skipped:*`, `stale_delete_failed:*`, `prune_truncated`,
-`repair_reinjected`, `multi_file_dropped_old_image`,
+`repair_reinjected`, `marker_written_directly`, `multi_file_dropped_old_image`,
 `frontmatter_invalid`, `invalid_skill_name`, `gitignore_update_failed`,
 `finalize_partial:*`.
 

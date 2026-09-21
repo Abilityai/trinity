@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import tarfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -349,3 +350,110 @@ def test_bulk_replace_carries_the_verdict_for_retained_names(real_db):
     real_db.set_agent_skills(AGENT, ["backlog", "writing"], "alice")
     rows = {s.skill_name: s.delivery_status for s in real_db.get_agent_skills(AGENT)}
     assert rows == {"backlog": None, "writing": None}
+
+
+# ---- the platform never leaves a marker-less directory behind ----------------
+#
+# Merge-train finding on #2920: marker-absence is read as "the agent authored
+# this", but the platform itself wrote marker-less dirs on two live paths — the
+# pre-#384 legacy fallback (SKILL.md only) and a restore that dropped the meta
+# member — and each would have turned its own package into a permanent,
+# unrepairable conflict on the next sync (AC#6 violated). Both are closed.
+
+def _fallback_client(*, marker_ok=True):
+    """A pre-#384 agent: restore 404s, write_file records every path."""
+    client = SimpleNamespace()
+    client.written = []
+
+    async def write_file(path, content):
+        client.written.append((path, content))
+        if path.endswith("/.trinity-skill.json") and not marker_ok:
+            return {"success": False, "error": "disk full"}
+        return {"success": True}
+    client.write_file = write_file
+    client.read_file = AsyncMock(return_value={"success": True, "content": "# Agent\n"})
+    return client
+
+
+def test_the_legacy_fallback_writes_the_marker_beside_skill_md(service, monkeypatch):
+    _write_skill(service, "backlog")
+    client = _fallback_client()
+    monkeypatch.setattr(skill_service_module, "get_agent_client", lambda name: client)
+    r404 = MagicMock(); r404.status_code = 404
+    service._post_restore = AsyncMock(return_value=r404)
+    result = _inject(service, ["backlog"], metas={"backlog": ABSENT}, force=True)
+
+    assert result["results"]["backlog"]["status"] == "fallback"
+    paths = [p for p, _ in client.written]
+    assert ".claude/skills/backlog/SKILL.md" in paths
+    marker = next(c for p, c in client.written if p == ".claude/skills/backlog/.trinity-skill.json")
+    meta = json.loads(marker)
+    # The manifest is what was actually written, so a later prune on a newer
+    # image diffs against the truth.
+    assert meta["manifest"] == [".claude/skills/backlog/SKILL.md"]
+    assert meta["version"] == "tree-backlog"
+
+
+def test_a_legacy_fallback_that_cannot_write_the_marker_rolls_back_and_fails(service, monkeypatch):
+    """A SKILL.md with no marker would be refused as agent-authored forever;
+    a named failure the next sync can retry is strictly better."""
+    _write_skill(service, "backlog")
+    client = _fallback_client(marker_ok=False)
+    monkeypatch.setattr(skill_service_module, "get_agent_client", lambda name: client)
+    r404 = MagicMock(); r404.status_code = 404
+    service._post_restore = AsyncMock(return_value=r404)
+    result = _inject(service, ["backlog"], metas={"backlog": ABSENT}, force=True)
+
+    verdict = result["results"]["backlog"]
+    assert verdict["status"] == "failed"
+    assert "marker_not_written" in verdict["error"]
+    deleted = [c.args[1] for c in service._delete_agent_file.await_args_list]
+    assert ".claude/skills/backlog/SKILL.md" in deleted and ".claude/skills/backlog" in deleted
+    service._finalize_injected_dirs.assert_not_awaited()       # nothing to gitignore
+
+
+def test_a_restore_that_drops_the_marker_writes_it_back_directly(service, monkeypatch):
+    _write_skill(service, "backlog")
+    client = _fallback_client()
+    monkeypatch.setattr(skill_service_module, "get_agent_client", lambda name: client)
+
+    def _restore_without_meta(agent_name, skill_name, tar_bytes):
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tf:
+            names = [n for n in tf.getnames() if not n.endswith(".trinity-skill.json")]
+        resp = MagicMock(); resp.status_code = 200
+        resp.json.return_value = {"restored": names, "skipped_outside_allowlist": []}
+        return resp
+    service._post_restore = AsyncMock(side_effect=_restore_without_meta)
+    result = _inject(service, ["backlog"], metas={"backlog": ABSENT}, force=True)
+
+    verdict = result["results"]["backlog"]
+    assert verdict["status"] == "injected"
+    assert "marker_written_directly" in verdict["warnings"]
+    assert any(p == ".claude/skills/backlog/.trinity-skill.json" for p, _ in client.written)
+
+
+def test_a_restore_that_drops_the_marker_and_cannot_write_it_fails(service, monkeypatch):
+    _write_skill(service, "backlog")
+    client = _fallback_client(marker_ok=False)
+    monkeypatch.setattr(skill_service_module, "get_agent_client", lambda name: client)
+
+    def _restore_without_meta(agent_name, skill_name, tar_bytes):
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tf:
+            names = [n for n in tf.getnames() if not n.endswith(".trinity-skill.json")]
+        resp = MagicMock(); resp.status_code = 200
+        resp.json.return_value = {"restored": names, "skipped_outside_allowlist": []}
+        return resp
+    service._post_restore = AsyncMock(side_effect=_restore_without_meta)
+    result = _inject(service, ["backlog"], metas={"backlog": ABSENT}, force=True)
+    assert result["results"]["backlog"]["status"] == "failed"
+    assert "marker_not_written" in result["results"]["backlog"]["error"]
+    assert result["skills_failed"] == 1
+
+
+def test_a_marker_the_platform_wrote_is_upgraded_not_refused(service):
+    """The round trip that closes AC#6: a legacy-fallback marker is a real
+    marker, so the next sync — on any image — reads the dir as managed."""
+    _write_skill(service, "backlog")
+    legacy_marker = {"version": "old", "manifest": [".claude/skills/backlog/SKILL.md"]}
+    result = _inject(service, ["backlog"], metas={"backlog": {"exists": True, "meta": legacy_marker}}, force=True)
+    assert result["results"]["backlog"]["status"] == "injected"

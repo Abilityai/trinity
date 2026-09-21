@@ -1851,7 +1851,7 @@ print(json.dumps(out))
             )
 
             outcome = await self._restore_skill(
-                agent_name, client, skill_name, tar_bytes, members, warnings
+                agent_name, client, skill_name, tar_bytes, members, warnings, meta
             )
             if outcome["status"] in ("injected", "fallback"):
                 injected_names.append(skill_name)
@@ -2554,10 +2554,21 @@ print(json.dumps(out))
         tar_bytes: bytes,
         members: List[Tuple[str, bytes, int]],
         warnings: List[str],
+        meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """POST one skill package to the agent restore primitive.
 
         404 (pre-#384 image) → legacy single-file SKILL.md fallback.
+
+        #2914 invariant: **a directory the platform writes always carries the
+        marker.** Marker-absence is what the inject path reads as "the agent
+        authored this" and refuses to touch, so a platform write that leaves
+        the marker behind would turn its own package into a permanent,
+        unrepairable conflict on the next sync (the merge-train finding on
+        #2920). Both marker-less paths are closed here: the legacy fallback
+        writes the marker beside SKILL.md, and a restore that drops the marker
+        member writes it back directly — and if the marker cannot be written,
+        the write is reported `failed`, never a half-managed directory.
         Other failure → ONE repair retry as delete-dir + re-restore (a
         dir→file type transition wedges restore forever otherwise, because
         restore always fails before prune could remove the dir).
@@ -2565,7 +2576,7 @@ print(json.dumps(out))
         resp = await self._post_restore(agent_name, skill_name, tar_bytes)
 
         if resp is not None and resp.status_code == 404:
-            return await self._legacy_fallback(client, skill_name, members, warnings)
+            return await self._legacy_fallback(client, skill_name, members, warnings, meta)
 
         if resp is None:
             # Transport failure (timeout / connection drop) — the agent may be
@@ -2601,14 +2612,43 @@ print(json.dumps(out))
         restored = body.get("restored") or []
         # Honest write accounting: files_written = what the agent CONFIRMED
         # restoring; anything we sent that didn't land is a named warning.
+        meta_path = f".claude/skills/{skill_name}/{pkg.META_FILENAME}"
         sent = {arcname for arcname, _c, _m in members}
-        sent.add(f".claude/skills/{skill_name}/{pkg.META_FILENAME}")
+        sent.add(meta_path)
         for missing in sorted(sent - set(restored)):
             warnings.append(f"restore_skipped:{missing}")
+        if meta_path not in restored:
+            # #2914: the package landed but its marker did not. Left like this
+            # the directory reads as agent-authored forever; write the marker
+            # back directly, and if that cannot be done say the injection
+            # FAILED — a marker-less platform dir is worse than a retry.
+            if not await self._write_marker(client, skill_name, meta):
+                return {
+                    "success": False, "status": "failed",
+                    "files_written": len(restored),
+                    "error": "marker_not_written: the package landed but "
+                             f"{pkg.META_FILENAME} could not be written; the "
+                             "directory would read as agent-authored on the next sync",
+                    "warnings": warnings,
+                }
+            warnings.append("marker_written_directly")
         return {
             "success": True, "status": "injected",
             "files_written": len(restored), "warnings": warnings,
         }
+
+    @staticmethod
+    async def _write_marker(client, skill_name: str, meta: Optional[Dict[str, Any]]) -> bool:
+        """Write `.trinity-skill.json` with one `write_file` (#2914). False on any failure."""
+        try:
+            result = await client.write_file(
+                f".claude/skills/{skill_name}/{pkg.META_FILENAME}",
+                json.dumps(meta or {}, indent=2),
+            )
+        except Exception as e:  # noqa: BLE001 — reported by the caller as a failed write
+            logger.warning(f"skill marker write failed for {skill_name}: {e}")
+            return False
+        return bool(isinstance(result, dict) and result.get("success"))
 
     async def _post_restore(self, agent_name: str, skill_name: str, tar_bytes: bytes):
         """One multipart POST to /api/agent-server/restore (the #1169 shape)."""
@@ -2629,9 +2669,14 @@ print(json.dumps(out))
 
     async def _legacy_fallback(
         self, client, skill_name: str, members: List[Tuple[str, bytes, int]],
-        warnings: List[str],
+        warnings: List[str], meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Pre-#384 image: write SKILL.md only, exactly today's behavior."""
+        """Pre-#384 image: write SKILL.md, plus the marker (#2914).
+
+        The marker's manifest is what was actually written — SKILL.md alone —
+        so a later prune on a newer image diffs against the truth, not against
+        the package the old image could not take.
+        """
         skill_md = next(
             (
                 content for arcname, content, _m in members
@@ -2661,8 +2706,22 @@ print(json.dumps(out))
                 "success": False, "status": "failed", "files_written": 0,
                 "error": result.get("error", "Write failed"), "warnings": warnings,
             }
+        legacy_meta = dict(meta or {})
+        legacy_meta["manifest"] = [f".claude/skills/{skill_name}/SKILL.md"]
+        if not await self._write_marker(client, skill_name, legacy_meta):
+            # Undo the half-write rather than leave a marker-less platform dir
+            # that the next sync would refuse as agent-authored (best-effort:
+            # the retry path rewrites SKILL.md anyway).
+            await self._delete_agent_file(client, f".claude/skills/{skill_name}/SKILL.md")
+            await self._delete_agent_file(client, f".claude/skills/{skill_name}")
+            return {
+                "success": False, "status": "failed", "files_written": 0,
+                "error": f"marker_not_written: SKILL.md was written but {pkg.META_FILENAME} "
+                         "could not be; the write was rolled back",
+                "warnings": warnings,
+            }
         return {
-            "success": True, "status": "fallback", "files_written": 1,
+            "success": True, "status": "fallback", "files_written": 2,
             "warnings": warnings,
         }
 

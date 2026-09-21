@@ -123,6 +123,20 @@ describe('skills store — agent_skills_changed ticks', () => {
     expect([...store.conflictNames]).toEqual(['backlog'])
   })
 
+  // Merge-train finding on #2920: `inject()` re-reads the rows and the panel
+  // reset the draft on ANY row change, so ticking boxes and pressing Sync wiped
+  // the ticks. The store still re-reads; the panel keys its reset on the set.
+  it('the assignment rows may be re-read without the assigned SET changing', async () => {
+    const store = useSkillsStore()
+    store.setAgent('scout')
+    store.assigned = [{ skill_name: 'backlog', delivery_status: 'conflict' }]
+    const before = [...store.assignedNames].sort().join('|')
+    api.post.mockResolvedValueOnce({ data: { success: true, results: {} } })
+    api.get.mockResolvedValueOnce({ data: [{ skill_name: 'backlog', delivery_status: null }] })
+    await store.inject()
+    expect([...store.assignedNames].sort().join('|')).toBe(before)   // same set, new rows
+  })
+
   it('inject re-reads the rows so a resolved conflict clears without a reload', async () => {
     const store = useSkillsStore()
     store.setAgent('scout')
@@ -188,11 +202,24 @@ describe('deliveryText', () => {
     const v = deliveryText({ status: 'conflict', conflicts: ['backlog'],
                              skills: { backlog: { status: 'conflict', error: 'name_conflict: …' } } })
     expect(v.tone).toBe(DELIVERY_TONE.bad)
-    expect(v.text).toMatch(/^Saved but not delivered: the agent already has its own a skill with that name \(backlog\)/)
+    expect(v.text).toMatch(/^Saved but not delivered: the agent already has its own skill with that name \(backlog\)/)
     expect(v.text).toMatch(/its copy is kept and runs/)
     expect(v.text).toMatch(/Unassign the library skill, or rename the agent's/)
     expect(v.text).not.toMatch(/Sync/)
     expect(v.needsSync).toBe(false)
+  })
+
+  it('several conflicts read as a plural sentence', () => {
+    const v = deliveryText({ status: 'conflict', skills: { a: { status: 'conflict' }, b: { status: 'conflict' } } })
+    expect(v.text).toContain('its own skills with those names (a, b) — its copies are kept and run')
+  })
+
+  it('not_delivered beside a conflict asks for a Sync for the failure and still names the conflict', () => {
+    const v = deliveryText({ status: 'not_delivered', reason: 'injection_error', conflicts: ['c'],
+                             skills: { b: { status: 'failed', error: 'x' }, c: { status: 'conflict' } } })
+    expect(v.needsSync).toBe(true)
+    expect(v.text).toMatch(/Sync now/)
+    expect(v.text).toContain('Also, the agent already has its own skill with that name (c)')
   })
 
   it('partial with only conflicts beside the delivered names does not ask for a Sync', () => {

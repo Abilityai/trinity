@@ -106,8 +106,8 @@
                      class="mt-2 text-xs text-status-warning-700 dark:text-status-warning-300">
                   <p>
                     This agent already has its own <code class="font-mono">.claude/skills/{{ s.name }}/</code>
-                    — a skill it authored, not this library package. Its copy was left intact and is
-                    what runs; the library version was not installed.
+                    that the platform did not create — usually a skill it authored. It was left intact
+                    and is what runs; the library version was not installed.
                   </p>
                   <p class="mt-1">
                     Unassign the library skill to keep the agent's, or rename / remove the agent's
@@ -344,7 +344,10 @@ async function onSync() {
   if (result && !store.error) pendingSync.value = false
 }
 
-watch(() => store.assigned, resetDraft, { deep: true })
+// Reset the draft only when the assignment SET changes — not on every refetch
+// of the rows. `inject()` re-reads the rows (#2914: the conflict verdict rides
+// them), and a deep watch on the array would wipe unsaved ticks on every Sync.
+watch(() => [...store.assignedNames].sort().join('|'), resetDraft)
 
 onMounted(async () => {
   await store.load(props.agentName)
