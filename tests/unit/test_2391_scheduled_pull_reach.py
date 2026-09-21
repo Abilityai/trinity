@@ -318,8 +318,8 @@ class TestStrandedTriggersStayPushed:
 
     @pytest.mark.parametrize("trigger", ["manual", "mcp", "chat", "public", "voice"])
     def test_interactive_triggers_are_untouched(self, pilot, trigger):
-        """Open Question 7's scope cut: a human turn keeps the synchronous push
-        path and today's Redis session lock."""
+        """Until #2842/#2843 land (#1989), a human turn keeps the synchronous
+        push path and today's Redis session lock."""
         _, m = _run(triggered_by=trigger)
         assert _acquire_kwargs(m["capacity"])["overflow_policy"] == "reject"
 
