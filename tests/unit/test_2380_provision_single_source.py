@@ -114,7 +114,7 @@ def test_firewall_returns_established_before_it_drops() -> None:
 def test_containers_cannot_reach_the_cloud_metadata_service() -> None:
     """The droplet's user-data is served verbatim from link-local for the life of
     the machine, and on a script-installed instance it carries the Trinity admin
-    password and the operator's Claude subscription token. An agent container is
+    password. An agent container is
     exactly the untrusted-code case, so the range is blocked outbound.
 
     Two things are asserted, and the ordering one is the load-bearing half: the
