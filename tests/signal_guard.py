@@ -90,8 +90,13 @@ def _is_gone(pid: int) -> bool:
         for line in (_PROC / str(pid) / "status").read_text().splitlines():
             if line.startswith("State:"):
                 return line.split()[1] == "Z"
-    except (OSError, IndexError):
+    except FileNotFoundError:
         return True
+    except (OSError, IndexError):
+        # A LIVE pid whose status we cannot read (EACCES under `hidepid=`, a
+        # malformed line) is NOT "gone": say so, keep it in `live`, and let the
+        # cgroup check treat it as foreign. Fail closed, per the docstring above.
+        return False
     return False
 
 
