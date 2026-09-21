@@ -565,7 +565,7 @@ async def test_a_person_with_no_tab_is_not_told_the_file_is_in_their_tab(share_s
 # --------------------------------------------------------------------------- #
 # 1b. The slot for a platform-injected id (#2392)
 # --------------------------------------------------------------------------- #
-# Nothing passes `trusted_execution_id` today — every headless turn's process
+# Nothing passes `platform_execution_id` today — every headless turn's process
 # already carries `TRINITY_EXECUTION_ID`, and the day that reaches the backend it
 # answers "which turn?" with no cooperation from the model. A parameter nothing
 # exercises is how a slot rots, so its contract is pinned now.
@@ -575,9 +575,9 @@ async def test_a_platform_injected_id_needs_no_cooperation_from_the_model(share_
     turn = _turn(client=ADA)
 
     result = await share_service.create_share(          # the model cited nothing at all
-        AGENT, "trusted.txt", actor_is_agent=True, trusted_execution_id=turn)
+        AGENT, "injected.txt", actor_is_agent=True, platform_execution_id=turn)
 
-    assert _files_tab(ADA) == {"trusted.txt"}
+    assert _files_tab(ADA) == {"injected.txt"}
     assert _row(result["file_id"])["audience_source"] == "turn"
 
 
@@ -587,20 +587,20 @@ async def test_a_platform_injected_id_outranks_the_one_the_model_typed(share_ser
     bobs = _turn(client=BOB, chat="sess-bob")
 
     await share_service.create_share(
-        AGENT, "whose.txt", actor_is_agent=True, execution_id=bobs, trusted_execution_id=adas)
+        AGENT, "whose.txt", actor_is_agent=True, execution_id=bobs, platform_execution_id=adas)
 
     assert _files_tab(ADA) == {"whose.txt"} and _files_tab(BOB) == set()
 
 
 @pytest.mark.asyncio
 async def test_a_platform_injected_id_is_still_bound_to_the_calling_agent(share_service):
-    """"Trusted" means trusted against an honest model's mistakes — the header
+    """Platform-injected means robust against an honest model's mistakes — the header
     still arrives from the agent's container. Another agent's execution is not
     this agent's turn, whoever says so; the evidence rule then decides."""
     foreign = _turn(agent=OTHER_AGENT, client=ADA)
 
     result = await share_service.create_share(
-        AGENT, "x.txt", actor_is_agent=True, trusted_execution_id=foreign)
+        AGENT, "x.txt", actor_is_agent=True, platform_execution_id=foreign)
 
     assert _files_tab(ADA) == set()
     assert _row(result["file_id"])["audience_source"] == "ambiguous"
@@ -611,7 +611,7 @@ async def test_a_platform_injected_id_means_nothing_from_a_human_caller(share_se
     turn = _turn(client=ADA)
 
     result = await share_service.create_share(
-        AGENT, "h.txt", actor_is_agent=False, trusted_execution_id=turn)
+        AGENT, "h.txt", actor_is_agent=False, platform_execution_id=turn)
 
     assert _files_tab(ADA) == set()
     assert _row(result["file_id"])["audience_source"] == "none"

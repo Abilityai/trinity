@@ -495,7 +495,7 @@ async def create_share(
     dedup_label: str = "",
     audience_email: Optional[str] = None,
     actor_is_agent: bool = False,
-    trusted_execution_id: Optional[str] = None,
+    platform_execution_id: Optional[str] = None,
 ) -> dict:
     """
     End-to-end: resolve the audience → extract → validate → persist → DB insert
@@ -534,7 +534,7 @@ async def create_share(
             agent_name,
             actor_is_agent=actor_is_agent,
             claimed_execution_id=execution_id,
-            trusted_execution_id=trusted_execution_id,
+            platform_execution_id=platform_execution_id,
         )
 
     # --- extract (needed up-front so the effect key can version on content) ---

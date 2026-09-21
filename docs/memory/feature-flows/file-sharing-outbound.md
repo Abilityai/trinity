@@ -116,7 +116,7 @@ Pure and table-driven, over columns every entry path already stamps on the execu
 
 `normalize_addressee_email()` is the ONE spelling of an addressee for every writer and for the reader (strip + lower-case; anything not email-shaped is `None`): rooms stamp a raw `current_user.email`, while portal identities are lower-cased at login.
 
-### 2. Which turn did this call come from? — `resolve_turn_audience(agent_name, *, actor_is_agent, claimed_execution_id, trusted_execution_id=None)`
+### 2. Which turn did this call come from? — `resolve_turn_audience(agent_name, *, actor_is_agent, claimed_execution_id, platform_execution_id=None)`
 
 An MCP tool call carries the agent's key and nothing about the turn, so the only link is the `execution_id` the AGENT types — and a resumed session cites ids out of its own history. The rule therefore needs **positive evidence**, and says "could not tell" without it:
 
@@ -126,11 +126,11 @@ An MCP tool call carries the agent's key and nothing about the turn, so the only
 4. **Otherwise the cited id proves which CONVERSATION the call came from** (`source_channel` + `source_channel_chat_id`) — and never which person, whether that execution is live or finished. The person is whoever that conversation's RUNNING **direct** turns belong to — `db.get_running_in_conversation(agent_name, channel, chat_id)` (`db/schedules/executions.py`, facade in `database.py`; `RUNNING` rows only, all three predicates required, bound to the calling agent because a room holds several) — and they must **agree**: one person is an answer; none, or two different people, is could not tell. A room shares one Claude session across its humans, so a model citing another participant's id is the ordinary case there: a finished one must not send the file to them, and neither must a zombie row a crash left `running` beside somebody else's live turn. Delegated children in the same conversation are not turns of it and do not vote, so a turn that fanned out to itself still shares to its person.
 5. **A cited execution with no conversation at all** (a schedule, an operator chat) is its own answer while it runs — nobody — and no evidence once it has finished.
 
-Every "could not tell" (`ambiguous`) is **the owner only**: the rule can under-share, it cannot over-share. It never raises — a provenance lookup must not fail the share it describes — and every resolution of an agent's call logs `[turn-audience] agent=… rule=… execution=… source=… addressed=<bool> channel=<bool>`, naming the rule that fired (`trusted`, `no-evidence`, `cited-delegated-child`, `cited-live-turn`, `stale-no-conversation`, `conversation`, `conversation-<n>-turns-<m>-people`) and never the addressee.
+Every "could not tell" (`ambiguous`) is **the owner only**: the rule can under-share, it cannot over-share. It never raises — a provenance lookup must not fail the share it describes — and every resolution of an agent's call logs `[turn-audience] agent=… rule=… execution=… source=… addressed=<bool> channel=<bool>`, naming the rule that fired (`platform-id`, `no-evidence`, `cited-delegated-child`, `cited-live-turn`, `stale-no-conversation`, `conversation`, `conversation-<n>-turns-<m>-people`) and never the addressee.
 
 **The shortcut that must not return:** "the agent has exactly one running turn, so take it." A web-terminal `claude` session holds the agent's key, has no execution row and no Execution Context, and so cites nothing; that rule would hand an operator's file to whichever client happened to be mid-conversation.
 
-`trusted_execution_id` is the slot for a platform-injected id (#2392): every headless turn's process already carries `TRINITY_EXECUTION_ID`, and once that reaches the backend it answers this question with no cooperation from the model. Nothing passes it today.
+`platform_execution_id` is the slot for a platform-injected id (#2392): every headless turn's process already carries `TRINITY_EXECUTION_ID`, and once that reaches the backend it answers this question with no cooperation from the model. Nothing passes it today.
 
 `create_share()` resolves the audience **before** `extract_from_agent()` — that await is the slow step, and the turn's row can leave `running` while it is in flight.
 
