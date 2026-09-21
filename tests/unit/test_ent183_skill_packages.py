@@ -709,15 +709,20 @@ class TestInjectOrchestration:
         deleted = [c.args[1] for c in service._delete_agent_file.await_args_list]
         assert deleted == [".claude/skills/demo/scripts/removed.py"]
 
-    def test_unmanaged_dir_is_overwritten_but_never_pruned(self, service):
+    def test_unmanaged_dir_is_refused_as_a_conflict(self, service):
+        # #2914: this used to assert the overwrite (+ a post-hoc
+        # `unmanaged_dir_overwritten` warning). An agent-authored dir under
+        # the same name is now a named `conflict` — nothing written, nothing
+        # pruned. The full contract lives in test_2914_skill_name_conflict.py.
         _write_skill(service, "demo", {"SKILL.md": "# demo\n"})
         metas = {"demo": {"exists": True, "meta": None}}  # agent-authored dir
         client = _wire(service, metas=metas, restore=_restore_ok_for(None))
         with patch.object(skill_service_module, "get_agent_client", return_value=client):
             result = _run(service.inject_skills("agent-x", ["demo"], force=True))
         demo = result["results"]["demo"]
-        assert demo["status"] == "injected"
-        assert "unmanaged_dir_overwritten" in demo["warnings"]
+        assert demo["status"] == "conflict"
+        assert "unmanaged_dir_overwritten" not in demo["warnings"]
+        service._post_restore.assert_not_awaited()
         service._delete_agent_file.assert_not_awaited()
 
     def test_missing_skill_and_invalid_name(self, service):

@@ -723,6 +723,11 @@ class AgentSkill(BaseModel):
     # None = assigned before multi-source, or the source row is gone. Recorded
     # so a later cross-source swap under the same bare name is detectable.
     source_id: Optional[str] = None
+    # #2914: the durable verdict of the last injection that looked at this
+    # name. `conflict` = an agent-authored `.claude/skills/<name>/` blocks the
+    # library package (the agent's own copy is what runs); None = no standing
+    # conflict. Written and cleared by the inject path only.
+    delivery_status: Optional[str] = None
 
 
 class SkillSource(BaseModel):
