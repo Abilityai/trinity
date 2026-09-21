@@ -45,7 +45,7 @@
 - `agent_ssh.py` - SSH access endpoint
 - `credentials.py` - Credential injection/export/import (CRED-002)
 - `chat.py` / `chat/` - Agent chat/activity monitoring
-- `internal.py` - Internal endpoints for agent startup, scheduler task execution (no auth; see Container Security). Also hosts the **dark** pull/work-stealing seams `GET /api/internal/next-task` (atomic claim + lease) + `POST /api/internal/tasks/{id}/result` (CAS) on a separate `pull_router` with dual-auth (internal secret OR the calling agent's own scoped MCP key) — inert until `PULL_MODE_PILOT_AGENTS` is set (#1081 Phase 1)
+- `internal.py` - Internal endpoints for agent startup, scheduler task execution (no auth; see Container Security). Also hosts the **dark** pull/work-stealing seams `GET /api/internal/next-task` (atomic claim + lease; the turn limit is clamped to the agent timeout the lease is sized from, #2846) + `POST /api/internal/tasks/{id}/result` (CAS) on a separate `pull_router` with dual-auth (internal secret OR the calling agent's own scoped MCP key) — inert until `PULL_MODE_PILOT_AGENTS` is set (#1081 Phase 1)
 - `templates.py` - Template listing and GitHub repo fetching; `local:` ids resolve through `template_service.contained_template_dir` (name-allowlist + `resolve()`/`is_relative_to`), the same barrier shape the create path has used since #950 (#1900)
 - `sharing.py` - Agent sharing between users
 - `git.py` - Git sync endpoints (status, sync, log, pull)

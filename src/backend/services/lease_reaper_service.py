@@ -3,9 +3,17 @@
 Phase 3 of the pull/work-stealing migration. A pull worker that claims a task
 (``GET /api/internal/next-task``) stamps ``schedule_executions`` with a
 ``claim_token`` / ``lease_expires_at`` / ``claimed_by_worker``. If that worker
-dies or hangs, the row is left ``running`` with a lease in the past. This module
+dies, the row is left ``running`` with a lease in the past. This module
 is the recovery path — the "collapse the 9-path cleanup pyramid into a single
 lease-reaper" seam (#429), bounded by the DECIDED #1402 poison-task mechanism.
+
+An expired lease is taken to mean a dead worker; nothing checks liveness, and
+no heartbeat renews a lease (#2846). That holds because the claim clamps the
+turn limit to the agent timeout the lease is sized from, so a healthy turn
+always ends inside its lease. The remaining case is a turn whose own kill
+fails: only workers in the SAME agent container can re-claim it, so it can
+run twice at once only if that container stays responsive while the kill
+does not — a frozen agent-server claims nothing.
 
 Decision logic (do NOT re-litigate — implemented as decided in #1402):
 

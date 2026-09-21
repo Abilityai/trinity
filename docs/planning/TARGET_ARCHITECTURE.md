@@ -207,7 +207,7 @@ The envelope is the unit of enqueue, re-delivery, and deduplication.
 
 "Let it fail" is implemented as exactly one move, with no defensive partial-work rerun, no blind timeout-retry, no reconciliation repair:
 
-- Every claimed/running row carries `lease_expires_at` (= `execution_timeout_seconds` + a grace buffer). A heartbeat from the worker *renews* the lease, so a legitimately long turn is never reaped out from under itself.
+- Every claimed/running row carries `lease_expires_at` (= `execution_timeout_seconds` + a grace buffer). The claim clamps the turn limit to that same `execution_timeout_seconds`, so a legitimately long turn always ends inside its lease and is never reaped out from under itself — no renewal heartbeat (#2846).
 - A single **lease-reaper** sweep flips any expired claimed/running row back to `queued`. Any idle worker — the restarted agent, or a replica — re-pulls it. This one sweep replaces the ~5 reconciliation sweeps and the slot-ZSET watchdog that exist today.
 - Re-delivery reuses the **same `execution_id` and the same `idempotency_key`** (RELIABILITY-006 / #525), so a duplicate result POST is absorbed by the compare-and-set guard, and a re-pulled task is the same unit of work, never a half-finished turn resumed. **(v2)** A re-pulled task is not a *blind* re-run: the backend injects the prior failed attempt's **structured recovery trace** into it so the retried turn recovers from hindsight — see §"Re-Delivery and Side-Effect Recovery" (#1401).
 
