@@ -1,4 +1,9 @@
 <template>
+  <!-- #1925 triage — NOT a tab strip: a bounded wide table. Horizontal scroll
+       INSIDE the container is the correct treatment for unbounded column width
+       (design-system principle 7); collapsing columns into a "More" menu would
+       hide data, not navigation. Left as-is deliberately so a later audit does
+       not re-flag it. -->
   <div class="overflow-x-auto">
     <table class="min-w-full text-sm">
       <thead>
