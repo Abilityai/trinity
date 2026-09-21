@@ -1,4 +1,4 @@
-## Code Health Report — 2026-09-14 (3cb8ea6b)
+## Code Health Report — 2026-09-21 (3992665f)
 
 ### Executive Summary
 
@@ -10,8 +10,9 @@
 | High fan-out files (>20 imports) | 11 | → |
 | Circular imports | 0 | → |
 
-A quiet week — six days since the last run, no metric moved more than the ±10% trend
-threshold, and the smell/coupling/circular-import counts are all byte-identical to baseline.
+Another quiet week — seven days since the last run, no metric moved past the ±10% trend
+threshold, and the top-3 hotspot ranking, coupling ranking, and stale-marker set are all
+byte-identical to the 2026-09-14 baseline.
 
 ### Top 3 Hotspots (churn × complexity — highest refactoring ROI)
 
@@ -21,12 +22,12 @@ threshold, and the smell/coupling/circular-import counts are all byte-identical 
 | 2 | src/backend/client_portal/service.py | 37 | 139 | 5143 | 3916 |
 | 3 | src/backend/routers/settings.py | 30 | 155 | 4650 | 3597 |
 
-**Interpretation**: Same top 3, same order as the 2026-09-08 baseline. `agent_service/crud.py`
-holds #1 with complexity unchanged (153) and churn down slightly (36→35 — one fewer commit
-aged out of the 90-day window). `client_portal/service.py` (#2) and `routers/settings.py`
-(#3, churn 31→30) are similarly stable. No new entrant displaced the top 3 this run —
-`services/cleanup_service.py` (4575) and `services/task_execution_service.py` (4172) remain
-#4 and #5, the same as baseline.
+**Interpretation**: Same top 3, same order, same scores as the 2026-09-14 baseline —
+`agent_service/crud.py` (#1), `client_portal/service.py` (#2), and `routers/settings.py`
+(#3) each show identical churn and complexity to last run, meaning no commits touched these
+files in the trailing 90-day window's boundary shift and no new commits landed against them
+this week. `services/cleanup_service.py` (4575) and `services/task_execution_service.py`
+(4172) remain #4 and #5, unchanged.
 
 ### Top 3 Size Violations
 
@@ -77,5 +78,6 @@ aged out of the 90-day window). `client_portal/service.py` (#2) and `routers/set
 ---
 *Methodology: hotspot score = git churn (90d) × cyclomatic complexity, where complexity sums
 per-function scores from `radon cc -n C` (grade C/complexity≥6 and worse only), matching the
-2026-09-08 baseline. Size-violation and coupling counts are full `src/backend/` scans, not
-top-N windows.*
+2026-09-14 baseline. Size-violation and coupling counts are full `src/backend/` scans, not
+top-N windows. The baseline's `hotspot_scores` map is truncated to the top 30 files by score
+(not a full-repo dump) — treat entries outside that set as unranked, not zero.*
