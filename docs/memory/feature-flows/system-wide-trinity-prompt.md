@@ -189,7 +189,7 @@ Platform instructions are injected at runtime on every Claude Code invocation �
 1. **No startup coordination** — instructions are sent with every request, so fleet restart, container recreation, volume wipes all just work
 2. **Immediate effect** — changing `trinity_prompt` takes effect on the next message to any agent (no restart needed)
 3. **Immutable from agent** — platform instructions are CLI flags, not files the agent can modify
-4. **Per-invocation** — `--append-system-prompt` is per-invocation (not accumulated across `--continue` calls), safe on every call
+4. **Per-invocation** — `--append-system-prompt` is per-invocation (not accumulated across resumed chat turns — `--resume <own id>` since #2958), safe on every call
 
 ## Side Effects
 
