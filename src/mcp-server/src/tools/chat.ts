@@ -7,7 +7,7 @@
 
 import { z } from "zod";
 import { createHash } from "crypto";
-import { TrinityClient } from "../client.js";
+import { TrinityClient, isDepthRefusal, type DepthRefusal } from "../client.js";
 import type { McpAuthContext, AgentAccessCheckResult } from "../types.js";
 import { accessDenied, checkAgentEdge, resolveClient, uniformDenial } from "../access.js";
 
@@ -121,6 +121,18 @@ export interface RunAgentChatParams {
   /** ent#224: YOUR current execution_id, so the delegated task inherits the
    *  Slack channel/thread this work came from and can report back on finish. */
   execution_id?: string;
+}
+
+/**
+ * #2806: the tool result for a chain-depth refusal — the backend's refusal
+ * verbatim (`retryable: false` and its "do not retry" message), logged so the
+ * refusal is visible in the MCP server's own output.
+ */
+function depthRefusalResult(refusal: DepthRefusal): string {
+  console.log(
+    `[Chain Depth #2806] refused -> ${refusal.agent} (depth ${refusal.depth} > ${refusal.max_depth})`,
+  );
+  return JSON.stringify(refusal, null, 2);
 }
 
 /**
@@ -267,6 +279,7 @@ export async function runAgentChat(
     // as the sequential branch does below. Without the log line the two routes
     // are indistinguishable in the MCP server's own output, which is how the
     // 2026-09-08 cascade read as "chat_with_agent just fails sometimes".
+    if (isDepthRefusal(response)) return depthRefusalResult(response);
     if ('status' in response && response.status === 'queued_timeout') {
       console.log(`[Task Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#2661)`);
     }
@@ -292,11 +305,15 @@ export async function runAgentChat(
       mcpKeyInfo,
       idempotencyKey
     );
+    if (isDepthRefusal(receipt)) return depthRefusalResult(receipt);
     return JSON.stringify(receipt, null, 2);
   }
 
   // Sequential chat mode - uses queue, maintains context
   const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey);
+
+  // #2806: chain-depth refusal — a result the model must stop on, not an error.
+  if (isDepthRefusal(response)) return depthRefusalResult(response);
 
   // #914: MCP-server gateway timeout — task still running on agent.
   // Surface the structured receipt so the caller polls rather than retries.
@@ -707,6 +724,7 @@ export function createChatTools(
           idempotencyKey
         );
 
+        if (isDepthRefusal(response)) return depthRefusalResult(response);
         return JSON.stringify(response, null, 2);
       },
     },

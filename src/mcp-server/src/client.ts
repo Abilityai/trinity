@@ -264,6 +264,63 @@ export function extractIdempotencyExecutionId(body: string): string | undefined 
   }
 }
 
+/**
+ * #2806: the backend refused an agent-to-agent hop past the chain-depth limit
+ * (403, `detail.error === "inter_agent_depth_exceeded"`). Returned as a RESULT
+ * rather than thrown, so the calling model reads "stop, do not retry or
+ * re-route" instead of an opaque `API error (403)` it cannot tell apart from an
+ * access denial.
+ */
+export interface DepthRefusal {
+  status: "inter_agent_depth_exceeded";
+  agent: string;
+  depth?: number;
+  max_depth?: number;
+  retryable: false;
+  message: string;
+}
+
+export const INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded";
+
+/**
+ * #2806: a `DepthRefusal` from a non-2xx response, or undefined for anything
+ * else — including a 403 WITHOUT the code (access denial, SELF-EXEC-001), which
+ * must keep throwing. Read defensively, like `extractIdempotencyExecutionId`:
+ * this runs on an error path, and a parser that throws would replace a clean
+ * refusal with a crash.
+ */
+export function parseDepthRefusal(
+  status: number,
+  body: string,
+  agent: string,
+): DepthRefusal | undefined {
+  if (status !== 403) return undefined;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const d = ((parsed as { detail?: unknown })?.detail ?? parsed) as Record<string, unknown>;
+    if (d?.error !== INTER_AGENT_DEPTH_EXCEEDED) return undefined;
+    return {
+      status: INTER_AGENT_DEPTH_EXCEEDED,
+      agent,
+      depth: typeof d.depth === "number" ? d.depth : undefined,
+      max_depth: typeof d.max_depth === "number" ? d.max_depth : undefined,
+      retryable: false,
+      message:
+        typeof d.message === "string" && d.message
+          ? d.message
+          : "Inter-agent chain depth limit reached. Do not retry this call or route it " +
+            "through another agent; finish your turn and report back to your caller.",
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** #2806: type guard for the refusal, shared by every tool that dispatches. */
+export function isDepthRefusal(value: unknown): value is DepthRefusal {
+  return (value as { status?: unknown })?.status === INTER_AGENT_DEPTH_EXCEEDED;
+}
+
 /** Bound for #848 inline-auth control-plane calls (not chat). */
 const INLINE_AUTH_TIMEOUT_MS = Number(process.env.MCP_INLINE_AUTH_TIMEOUT_MS || 15000);
 
@@ -851,6 +908,7 @@ export class TrinityClient {
     | ChatResponse
     | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }
     | { status: "queued_timeout"; agent: string; execution_id: string; message: string }
+    | DepthRefusal
   > {
     // Prepare headers
     const headers: Record<string, string> = {
@@ -984,6 +1042,11 @@ export class TrinityClient {
           return this.inFlightReplayReceipt(name, executionId);
         }
       }
+      const refusal = parseDepthRefusal(response.status, error, name);
+      if (refusal) {
+        debugLog(`[chat] chain-depth refusal on '${name}' (depth ${refusal.depth} > ${refusal.max_depth}) (#2806)`);
+        return refusal;
+      }
       throw new Error(`API error (${response.status}): ${error}`);
     }
 
@@ -1113,6 +1176,7 @@ export class TrinityClient {
     // #2661: sync mode may answer with the gateway-timeout receipt (same shape
     // chat() returns for #914) instead of a completed ChatResponse.
     | { status: "queued_timeout"; agent: string; execution_id: string; message: string }
+    | DepthRefusal
   > {
     // Prepare headers
     const headers: Record<string, string> = {
@@ -1248,6 +1312,11 @@ export class TrinityClient {
           debugLog(`[task] 409 in-flight replay on '${name}' -> execution_id=${executionId} (#2661)`);
           return this.inFlightReplayReceipt(name, executionId);
         }
+      }
+      const refusal = parseDepthRefusal(response.status, error, name);
+      if (refusal) {
+        debugLog(`[task] chain-depth refusal on '${name}' (depth ${refusal.depth} > ${refusal.max_depth}) (#2806)`);
+        return refusal;
       }
       throw new Error(`API error (${response.status}): ${error}`);
     }
@@ -1393,7 +1462,7 @@ export class TrinityClient {
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
     idempotencyKey?: string
-  ): Promise<FanOutDispatchResult | FanOutTimeoutReceipt> {
+  ): Promise<FanOutDispatchResult | FanOutTimeoutReceipt | DepthRefusal> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
@@ -1520,6 +1589,11 @@ export class TrinityClient {
 
     if (!response.ok) {
       const error = await response.text();
+      const refusal = parseDepthRefusal(response.status, error, name);
+      if (refusal) {
+        debugLog(`[fanOut] chain-depth refusal on '${name}' (depth ${refusal.depth} > ${refusal.max_depth}) (#2806)`);
+        return refusal;
+      }
       throw new Error(`API error (${response.status}): ${error}`);
     }
 
