@@ -1475,6 +1475,41 @@ a declaration Trinity cannot read is **dropped** from the registry and reported
 as compatibility finding `D-009`, and a point recorded against a metric the
 registry does not hold is rejected.
 
+### Objectives name your metrics by name
+
+If your agent has a role and a canon (Tandem framework §3.4), its objective
+files set **targets** for these same metrics:
+
+```yaml
+# canon/objectives/q4-close-rate.yaml
+metrics:
+  - name: close_rate       # <- the SAME name as your template.yaml metrics: entry
+    direction: up          # up | down | hold
+    target: 35
+    by: 2026-12-31
+```
+
+`name` is the whole link: an objective does not carry its own copy of the
+number, it names a metric you declared and Trinity joins the two
+(trinity-enterprise#666). Two consequences worth knowing:
+
+- **A name an objective uses must be declared in your `metrics:` block.** If it
+  is not, the objective still shows — with a finding saying so and naming the
+  fix, never a blank cell. Add it to `template.yaml` and call
+  `refresh_metric_definitions`. (If the metric belongs to the role that *owns*
+  the objective and you merely appear in its `supporting_agents`, there is
+  nothing for you to fix — you get `metric_not_declared_here` instead.)
+- **Declare `direction:` somewhere.** Without it on either the template metric
+  or the objective's entry, nothing can say whether you are behind or ahead —
+  only what the number is.
+
+Read the join with the **`get_objectives`** MCP tool. It gives you target,
+actual, freshness and the gap in one call, so do not compute a gap yourself
+from `get_metrics` plus the file: `gap.status` is *position* relative to the
+target (`behind` / `on_target` / `ahead`, or `on_target` / `off_target` for
+`hold`), and `stale: true` means do not act on that number — record a fresh
+point first.
+
 ### File Locations
 
 - **Definitions**: `/home/developer/template.yaml` — read by the backend into

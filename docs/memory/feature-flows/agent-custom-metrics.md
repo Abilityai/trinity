@@ -306,6 +306,7 @@ Exactly `2 × cadence` is not stale (strict `>`), and a point in the future
 | `dashboard.yaml` widgets | A `metric`/`status`/`progress` widget carrying `metric: <name>` is filled from the registry — see [agent-dashboard.md](agent-dashboard.md) |
 | MCP `get_metrics` | Agent-scoped, never throws, maps `metric_undeclared` to a hint naming `refresh_metric_definitions` |
 | `get_agent_health` | An **informational** `metrics` block. It never touches `aggregate_status` or `issues`: a business metric going stale is a fact about the agent's work, not its health |
+| **The objective join (ent#666)** | `latest_by_metric` — the same folded tile value, with no series work — joined to the targets the agent's objective files set. See [the section below](#objectives-the-join-ent666) |
 
 ### Empty states name the next action
 
@@ -320,17 +321,94 @@ learn which playbooks a container holds (the catalog is a container probe, and
 carry `/update-dashboard` in `.claude/commands/`). The earlier conditional took
 a flag no caller could compute, which made half the sentence unreachable.
 
+## Objectives: the join (ent#666)
+
+A metric with no objective is fine — nobody set a target for it. A metric WITH
+one is the question this section answers: **target vs actual, with freshness,
+computed in exactly one place.**
+
+Full contract: [requirements §50](../requirements/lifecycle-observability.md#50-objective--metric-join--one-read-of-target-vs-actual-with-freshness-trinity-enterprise666).
+
+```
+objectives/<id>.yaml  ──┐                    (Tandem §3.4, in the agent's canon)
+  metrics: [{name,      │   agent door
+            direction,  │   (AgentClient, <=2 in flight, abort on transport death)
+            target, by}]│
+                        ▼
+      services/objective_join_service.py  ── the ONE join
+                        │
+        ┌───────────────┼────────────────────────────┐
+        ▼               ▼                            ▼
+  db.list_metric_   metric_read_service        metric_read_service
+  definitions       .latest_by_metric          .freshness   (§49.1)
+  (identity,        (actual — the SAME              (stale / fresh /
+   direction)        fold as the tile)               no_cadence / no_points)
+                        │
+        ┌───────────────┴───────────────────────────────────────┐
+        ▼                        ▼                              ▼
+ GET /api/agents/          MCP get_objectives          role card (ent#527) /
+   {name}/objectives         (agent-scoped)            hub (ent#661) /
+                                                       proactivity (ent#605)
+                                                       — in process, no second join
+```
+
+| Aspect | Contract |
+|---|---|
+| Gate | `AuthorizedAgentByName` (uniform 404) → agent self-gate (403) → limiter on the **validated** name — the `/metrics` order, verbatim |
+| Rate limit | `OBJECTIVES_READ_RATE_LIMIT`, default **60**/min per agent — its own knob, a quarter of `/metrics`, because this read touches the **container** |
+| Store-only? | **No.** Files are truth and they live in the container (E7/E13), so a stopped agent answers `unavailable: agent_stopped` with copy naming the fix — never a cached number |
+| `actual` | the tile's folded latest via `latest_by_metric` — one number on every surface, parity-tested on a dimensioned `sum` metric |
+| `gap.status` | `behind` · `on_target` · `ahead` · `off_target` (the `hold` arm) · `not_computable` — **position, never pace**. `by` and `horizon` ride the row so a consumer can judge pace itself |
+| Stale | orthogonal: a stale metric keeps its gap and carries `stale: true`. The join reports; the consumer decides |
+| Direction | registry first; `neutral` (the column default — no bundled template declares one) falls through to the objective's `up`/`down`/`hold` with `direction_source: objective`. Two *declared* directions that disagree are a `direction_mismatch` finding |
+| Never a blank | an undeclared metric is a `metric_undeclared` finding with the fix; a **supporting-only** agent gets `metric_not_declared_here` instead, because "declare it and refresh" is advice it cannot take |
+| Bounds | scan 100 files → filter → cap the **output** at 20; 12 metrics/objective; ≤ 2 reads in flight |
+| Errors | 503 `metric_store_unavailable` + `Retry-After: 30`. Everything below transport is a **named field on a 200** |
+
+### The rebase note for PR #2927 (role card, ent#527)
+
+The role card shipped the first version of this join — and a second staleness
+rule with it (a 30-day bound over `metrics.json`'s `last_updated`). ent#666
+retires that half. On rebase onto this branch, `client_portal/role_card.py`
+drops `_read_metrics`, `metric_row`, `objective_concerns`, `canon_root`, the
+objectives loop and `MAX_OBJECTIVES` / `MAX_METRICS_PER_OBJECTIVE`, and keeps
+`is_stale` / `STALE_AFTER_DAYS` **only** for the role file's `review_by`
+(framework §3.5 governs files, not metrics). After the role read it calls
+`objective_join_service.read_objective_join(agent_name, template=template,
+client=client)` — function-locally, so no portal suite drags the metrics stack
+in — and copies `objectives` / `findings` / `summary` onto the card.
+
+Two things ride that rebase rather than this branch:
+
+* **A slim portal projection** (TD-4). The card exposes
+  `name, target, actual, last_point_at, stale, freshness, gap.status,
+  finding.code` with client-safe copy per code — **not** `ObjectiveMetricRead`
+  whole. The findings here are operator-facing remediation ("call
+  `refresh_metric_definitions`") and `owner: role:<id>` names a canon an
+  external client does not own (#78 auth-path invariant).
+* **The portal route gains the limiter.** `GET …/client-portal/agents/{name}/role`
+  has none today and reaches the same container fan-out; it takes the same
+  `agent_objectives_read:{name}` key, so one key bounds both doors. The limiter
+  stays in the routers — it is transport (Invariant #1).
+
+Alembic: this branch adds **no** revision, so #2927's fork against
+`0067_metric_points` is resolved by whichever chain lands second re-chaining
+its `down_revision` (both orders are written out in the ent#666 plan §1.6);
+delete `src/backend/migrations/versions/__pycache__` afterwards and run
+`scripts/ci/check_alembic_heads.py` locally before pushing.
+
 ## Key Files
 
 | Component | File | Purpose |
 |-----------|------|---------|
 | Registry | `src/backend/services/metric_registry.py`, `db/metric_definitions.py` | Declarations (ent#477) |
 | Write | `src/backend/services/metric_points_service.py`, `db/metric_points.py` | `record_metrics` validation + store (ent#478) |
-| **Read** | `src/backend/services/metric_read_service.py` | `freshness`, `read_agent_metrics`, `freshness_summary`, `bind_dashboard_widgets` (ent#479) |
-| Route | `src/backend/routers/agent_files.py` | `GET/POST .../metrics*` |
+| **Read** | `src/backend/services/metric_read_service.py` | `freshness`, `read_agent_metrics`, `latest_by_metric`, `freshness_summary`, `bind_dashboard_widgets` (ent#479, ent#666) |
+| **Join** | `src/backend/services/objective_join_service.py` | `gap`, `join_objectives`, `read_objective_files`, `read_objective_join` (ent#666) — the one objective ↔ metric join |
+| Route | `src/backend/routers/agent_files.py` | `GET/POST .../metrics*`, `GET .../objectives` |
 | Health | `src/backend/routers/monitoring.py`, `db_models.AgentHealthDetail` | The informational block |
 | Compat | `src/backend/services/compatibility/static_checks.py` | D-009 (shape), D-010 (`metrics.json` superseded) |
-| MCP | `src/mcp-server/src/tools/metrics.ts` | `record_metrics`, `get_metrics` |
+| MCP | `src/mcp-server/src/tools/metrics.ts` | `record_metrics`, `get_metrics`, `get_objectives` |
 | Frontend | `src/frontend/src/components/DeclaredMetricsTiles.vue` | The tiles |
 | Frontend | `src/frontend/src/components/BoundMetricMark.vue` | A bound widget's point time / stale mark / binding error |
 | Frontend | `src/frontend/src/utils/metricFormat.js` | Type- and direction-aware formatting, shared by both surfaces |
@@ -477,10 +555,13 @@ All test agents have metrics defined:
 ## Future Enhancements
 
 Shipped since this list was written: time-series history (ent#478's
-`metric_points` + ent#479's bucketed series) and showing declared metrics as the
-default dashboard (ent#479). Still open:
+`metric_points` + ent#479's bucketed series), showing declared metrics as the
+default dashboard (ent#479), and the objective join (ent#666 — see above).
+Still open:
 
-1. **The objective join** — declared metrics against declared objectives (ent#666)
+1. **Pace, as opposed to position** — `gap.status` is where the number sits
+   relative to the target; judging whether the agent is *late* against `by` is
+   ent#605's ramp maths, on top of the `by` / `horizon` this read already carries
 2. **Cross-agent and fleet reads** — the read is self-scoped by design; lifting
    that is a deliberate grant (ent#80, ent#94)
 3. **A `metrics_updated` WebSocket trigger** — the refetch route now exists, so
@@ -504,4 +585,5 @@ default dashboard (ent#479). Still open:
 | 2025-12-30 | Verified file paths, service layer refactor |
 | 2026-01-23 | Updated line numbers (info.py:148-208, agents.py:688-695, agents.js:507-522), added Dashboard Widget system documentation (dashboard.yaml), added DashboardPanel.vue (510 lines), added revision history |
 | 2026-09-22 | Added the write path (ent#478): `record_metrics`, the `metric_points` store, the two Settings knobs and the retention sweep |
+| 2026-09-22 | Added the objective join (ent#666): `GET .../objectives`, MCP `get_objectives`, `latest_by_metric`, the gap semantics (position not pace, the `hold` arm) and the #2927 rebase note |
 | 2026-09-22 | Rewrote the READ half (ent#479): the re-backed route, the one `2 x cadence` staleness rule, the declared-metric tiles, MCP `get_metrics`, the health block — and retired `metrics.json` as a source, replacing it with the D-010 finding |

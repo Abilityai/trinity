@@ -307,6 +307,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   record_metrics: { kind: "none", why: "self-recorded; the backend self-gates the path agent (ent#478)" },
   refresh_metric_definitions: { kind: "none", why: "self-scoped; reconciles the calling agent's own template (ent#478)" },
   get_metrics: { kind: "none", why: "self-scoped read; the backend self-gates the path agent (ent#479)" },
+  get_objectives: { kind: "none", why: "self-scoped read; the backend self-gates the path agent (ent#666)" },
   list_reports: { kind: "in-tool", how: REPORTS_GATE },
   get_report: { kind: "in-tool", how: "reports.ts resolves the report's agent, then " + REPORTS_GATE },
   // --- canvas.ts ---

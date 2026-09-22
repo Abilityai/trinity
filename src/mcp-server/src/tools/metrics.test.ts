@@ -30,6 +30,7 @@ function fakeClient(behaviour: {
   record?: (agent: string, body: unknown) => Promise<unknown>;
   refresh?: (agent: string) => Promise<unknown>;
   read?: (agent: string, options: unknown) => Promise<unknown>;
+  objectives?: (agent: string) => Promise<unknown>;
 }): TrinityClient {
   const client = new TrinityClient("http://backend:8000");
   (client as unknown as Record<string, unknown>).recordMetrics =
@@ -62,6 +63,38 @@ function fakeClient(behaviour: {
       ],
       findings: [],
       findings_evaluated_at: null,
+    }));
+  (client as unknown as Record<string, unknown>).getAgentObjectives =
+    behaviour.objectives ??
+    (async (agent: string) => ({
+      agent_name: agent,
+      generated_at: "2026-09-22T12:00:00Z",
+      stale_rule: "2x cadence",
+      role: { id: "revenue-lead", path: "canon/roles/revenue-lead.yaml" },
+      canon_root: "canon",
+      unavailable: null,
+      source: { template: "read", objectives_dir: "read" },
+      objectives: [
+        {
+          id: "q4-close-rate",
+          owned: true,
+          supporting: false,
+          metrics: [
+            {
+              name: "close_rate",
+              target: 35,
+              actual: 30,
+              stale: false,
+              freshness: "fresh",
+              gap: { status: "behind", delta: -5, reason: null },
+              finding: null,
+            },
+          ],
+        },
+      ],
+      findings: [],
+      summary: { objectives: 1, metrics: 1, behind: 1 },
+      message: null,
     }));
   return client;
 }
@@ -442,4 +475,103 @@ test("the description teaches what stale means and that the series is bounded", 
   assert.match(description, /no_cadence/);
   assert.match(description, /no_points/);
   assert.match(description, /buckets/);
+});
+
+// ---------------------------------------------------------------------------
+// get_objectives (ent#666)
+// ---------------------------------------------------------------------------
+
+test("get_objectives refuses a non-agent key without calling the backend", async () => {
+  let called = false;
+  const t = tools({
+    objectives: async () => {
+      called = true;
+      return {};
+    },
+  });
+  const result = JSON.parse(
+    (await t.getObjectives.execute({}, { session: { scope: "user" } as McpAuthContext })) as string,
+  );
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /agent-scoped API key/);
+  assert.equal(called, false);
+});
+
+test("get_objectives takes no agent parameter — it reads the caller's own", async () => {
+  let asked: string | undefined;
+  const t = tools({
+    objectives: async (agent: string) => {
+      asked = agent;
+      return { agent_name: agent, objectives: [] };
+    },
+  });
+  await t.getObjectives.execute({}, { session: AGENT_AUTH });
+
+  assert.equal(asked, "metrics-agent");
+  assert.deepEqual(Object.keys(t.getObjectives.parameters.shape ?? {}), []);
+});
+
+test("get_objectives passes the backend body through verbatim — the shape IS the contract", async () => {
+  const result = JSON.parse(
+    (await tools().getObjectives.execute({}, { session: AGENT_AUTH })) as string,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(result.stale_rule, "2x cadence");
+  const row = result.objectives[0].metrics[0];
+  assert.deepEqual(row.gap, { status: "behind", delta: -5, reason: null });
+  assert.equal(row.target, 35);
+  assert.equal(row.actual, 30);
+  assert.equal(result.summary.behind, 1);
+});
+
+test("get_objectives never throws, whatever the backend does", async () => {
+  for (const message of ["503 store down", "500 boom", "403 nope", "429 slow down", "404"]) {
+    const t = tools({
+      objectives: async () => {
+        throw new Error(message);
+      },
+    });
+    const result = JSON.parse(
+      (await t.getObjectives.execute({}, { session: AGENT_AUTH })) as string,
+    );
+    assert.equal(result.success, false, message);
+  }
+});
+
+test("get_objectives maps a store outage as retryable and a 403/404 as not authorized", async () => {
+  const outage = tools({
+    objectives: async () => {
+      throw new Error("503 metric_store_unavailable");
+    },
+  });
+  const denied = tools({
+    objectives: async () => {
+      throw new Error("403 Agent-scoped key may only read its own objectives");
+    },
+  });
+
+  assert.equal(
+    JSON.parse((await outage.getObjectives.execute({}, { session: AGENT_AUTH })) as string)
+      .retryable,
+    true,
+  );
+  assert.equal(
+    JSON.parse((await denied.getObjectives.execute({}, { session: AGENT_AUTH })) as string)
+      .not_authorized,
+    true,
+  );
+});
+
+test("the description teaches position-not-pace, what stale means, and the undeclared fix", () => {
+  const description = tools().getObjectives.description;
+  assert.match(description, /NEVER pace/);
+  assert.match(description, /on_target/);
+  assert.match(description, /off_target/);
+  assert.match(description, /DO NOT ACT ON THIS NUMBER/);
+  assert.match(description, /refresh_metric_definitions/);
+  assert.match(description, /metric_not_declared_here/);
+  // The whole point of the issue: one join, not a second one derived here.
+  assert.match(description, /do not re-derive a gap/);
 });

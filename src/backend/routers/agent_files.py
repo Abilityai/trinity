@@ -1,4 +1,4 @@
-# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics, /metrics/definitions — ent#479 ships that tool; the definitions READ stays deliberately unexposed until then, not forgotten)
+# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics, /metrics/definitions — ent#479 ships that tool; get_objectives → /objectives, ent#666; the definitions READ stays deliberately unexposed until then, not forgotten)
 """Agent file management, info, and folder endpoints."""
 import logging
 import os
@@ -11,7 +11,7 @@ from models import User
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner
 from services.agent_auth import agent_httpx_client
-from services import metric_read_service, rate_limiter
+from services import metric_read_service, objective_join_service, rate_limiter
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 from services.agent_service import (
@@ -35,6 +35,7 @@ from services.agent_service import (
 from models import (
     CreateFolderRequest,
     FileUpdateRequest,
+    ObjectiveJoinRead,
     ShareFileMcpRequest,
     ShareFileResponse,
     SharedFileInfo,
@@ -58,6 +59,15 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 # `get_metrics` loop from pinning the store with 50-metric reads (TD-6).
 METRICS_READ_RATE_LIMIT = int(os.getenv("METRICS_READ_RATE_LIMIT", "240"))
 METRICS_READ_RATE_WINDOW = 60  # seconds
+
+# The objective join gets its OWN, much lower ceiling (ent#666). `/metrics` is
+# store-only; this read contacts the container — a directory listing plus up to
+# a hundred small file reads through the agent door — so the 240/min copied
+# from a store read would let ten open cards drive an agent-server the platform
+# also needs for chat. 60/min per agent clears ten cards polling at 30 s with
+# room to spare.
+OBJECTIVES_READ_RATE_LIMIT = int(os.getenv("OBJECTIVES_READ_RATE_LIMIT", "60"))
+OBJECTIVES_READ_RATE_WINDOW = 60  # seconds
 
 
 # ============================================================================
@@ -440,6 +450,62 @@ async def get_agent_metrics(
         )
     except (OperationalError, DBAPIError) as e:
         logger.error("[Metrics] Read failed for %s: %s", agent_name, e)
+        raise HTTPException(
+            status_code=503,
+            detail="metric_store_unavailable",
+            headers={"Retry-After": "30"},
+        )
+
+
+@router.get("/{agent_name}/objectives", response_model=ObjectiveJoinRead)
+async def get_agent_objectives(
+    agent_name: AuthorizedAgentByName,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """What this agent is supposed to move, and where it is (ent#666).
+
+    One read of target vs actual with freshness: the objective files in the
+    agent's own canon (framework §3.4) joined to the declared-metric registry
+    (ent#477) and the point store (ent#478), judged by the ONE stale rule
+    (ent#479). The role card, the project hub and proactivity all consume this
+    — a second join anywhere is the defect ent#476 exists to remove.
+
+    **Not store-only.** Unlike `/metrics`, this reads the objective FILES
+    through the agent door, because files are truth and they live in the
+    container (framework E7/E13). A stopped agent therefore answers
+    `unavailable: agent_stopped` with copy naming the fix, rather than a number
+    that was true once. That container cost is why this route has its own,
+    much lower rate limit.
+
+    Gate order (Invariant #8): the uniform-404 dependency decides access first,
+    then the agent self-gate — an agent-scoped key reads only its own
+    objectives — then the limiter, keyed on the name the gate has already
+    validated.
+
+    Every failure below transport is a NAMED field on a 200: `unavailable`,
+    `source.*`, and `findings[]` sentences an operator can act on. An objective
+    naming an undeclared metric comes back with that finding, never a blank.
+    """
+    # --- self-gate (after access, before any read: the `/metrics` spelling,
+    # so the two reads agree on who "itself" is) ----------------------------
+    if current_user.agent_name and current_user.agent_name != agent_name:
+        raise HTTPException(
+            status_code=403,
+            detail="Agent-scoped key may only read its own objectives",
+        )
+
+    rate_limiter.enforce(
+        f"agent_objectives_read:{agent_name}",
+        OBJECTIVES_READ_RATE_LIMIT,
+        OBJECTIVES_READ_RATE_WINDOW,
+        detail="Objective read rate limit exceeded for this agent.",
+    )
+
+    try:
+        return await objective_join_service.read_objective_join(agent_name)
+    except (OperationalError, DBAPIError) as e:
+        logger.error("[Objectives] Read failed for %s: %s", agent_name, e)
         raise HTTPException(
             status_code=503,
             detail="metric_store_unavailable",

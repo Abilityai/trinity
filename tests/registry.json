@@ -3268,6 +3268,37 @@
         "unit"
       ],
       "description": "`GET /api/agent-dashboard/{name}/exists` against the REAL `AuthorizedAgentByName` dependency — which the sibling route suites cannot do, because they override it away to reach their handlers' own gates. An absent and an inaccessible agent are byte-identical 404s (#186): before ent#479 a bare `get_current_user` made this a fleet-wide existence oracle for any logged-in principal. Also pins that the answer cannot vary with the inaccessible agent's registry contents, and that a registry failure degrades the tab gate rather than 500-ing. Written red: the route's path parameter was spelled `{name}` while the dependency binds `agent_name`, so the probe answered 422 to EVERY caller, owner included."
+    },
+    {
+      "file": "unit/test_ent666_objective_gap.py",
+      "feature": "abilityai/trinity-enterprise#666",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "`gap()` and the grammar leaves as a table, because this is the function every consumer's verdict word comes out of: nine positions (three directions x below/at/above), the `hold` arm in full (on_target within `tolerance`, off_target otherwise, and NEVER behind/ahead — a value that should be held has no good side to be on), every `not_computable` naming its reason, and the author-value refusals that keep a body strict JSON (`.nan` / `.inf` / lists / bools, where `isinstance(True, int)` is the trap). Also `resolve_direction`'s matrix (TD-2: the registry's `neutral` is the column DEFAULT and so reads as silence, falling through to the objective file's `up`/`down`/`hold`, with a declared `hold` told apart from silence only by `direction_source`), `canon_root`'s traversal refusals, and the `status: active` filter."
+    },
+    {
+      "file": "unit/test_ent666_objective_join.py",
+      "feature": "abilityai/trinity-enterprise#666",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "The join, in two halves. Pure: `parse_objective`'s bounds on author-controlled canon files (a non-mapping document is a NAMED finding with its path, never a silent `continue`), and `join_objectives`' AC surface — an undeclared metric as a finding carrying the fix and never a blank, a supporting-only agent getting `metric_not_declared_here` instead and NOT being counted as undeclared (the fix it would name is impossible on that agent), a retired metric withholding its last value, stale and gap staying orthogonal, and the summary adding up to the rows. Composition: the three `unavailable` states told apart, the zero-config path costing NO store query, a template handed in not being re-read, scan-100-filter-cap-20 (capping the listing first hides an agent's own objective behind twenty foreign ones), the concurrency bound, and a dead agent-server aborting the fan-out in under ten calls rather than driving open the circuit breaker chat rides on."
+    },
+    {
+      "file": "unit/test_ent666_objectives_route.py",
+      "feature": "abilityai/trinity-enterprise#666",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "api",
+        "unit"
+      ],
+      "description": "`GET /api/agents/{name}/objectives` through a real TestClient with the service's edges stubbed. Gate order copied from `/metrics` and proved in order (the self-gate fires BEFORE the service is called and before the limiter), the route's own 60/min knob rather than the store read's 240 because this one drives the container, a store outage as 503 + `Retry-After`, and an unreachable agent as a 200 that SAYS so — an agent being stopped is an answer, not an error. The model-is-the-contract half walks the service's own dict against every model's fields recursively, so an additive service key fails the build instead of being silently filtered out by `response_model`; author-shaped targets (`.nan`, `.inf`, lists, bools, 4 KB strings) are pushed through the real route and parsed with `parse_constant` armed, since a bare `NaN` on the wire is what blanks the card."
     }
   ]
 }
