@@ -244,6 +244,30 @@ def test_a_refused_type_change_is_never_counted_as_unchanged(db_backend):
     assert again.changed is True
 
 
+def test_a_refused_type_change_keeps_the_declared_status_values(db_backend):
+    """A refused type change must not strip the domain of the type it kept.
+
+    The stored `type` is frozen at `status`, but the re-declaration that was
+    refused is a `counter` — it carries no `values:`. Copying the whole
+    declaration payload over the row would null `status_values_json` and leave
+    a status metric with no declared domain, which is exactly the widening
+    ent#478's point validator must never have to absorb.
+    """
+    _reconcile([_entry(name="mood", type="status", values=[
+        {"value": "ok"}, {"value": "degraded"}])])
+    declared = _rows()["mood"]["values"]
+    assert [v["value"] for v in declared] == ["ok", "degraded"]
+
+    summary = _reconcile([_entry(name="mood", type="counter")], source="pull")
+
+    assert summary.type_change_refused == [
+        {"name": "mood", "from": "status", "to": "counter"}]
+    row = _rows()["mood"]
+    assert row["type"] == "status"
+    assert row["values"] == declared, \
+        "the refused declaration must not take the domain with it"
+
+
 def test_the_conflict_clears_when_the_template_agrees_again(db_backend):
     _reconcile([_entry(type="counter")])
     _reconcile([_entry(type="gauge")], source="pull")

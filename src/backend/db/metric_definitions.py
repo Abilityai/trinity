@@ -191,6 +191,13 @@ class MetricDefinitionOperations:
                 type_refused = entry["type"] != prior["type"]
                 if type_refused:
                     values["type_conflict"] = entry["type"]
+                    # The stored TYPE stands, so the column that only exists for
+                    # that type must stand with it: re-declaring a `status`
+                    # metric as `counter` carries no `values`, and letting the
+                    # payload overwrite them would leave a status row with no
+                    # declared domain at all (ent#478's point validator would
+                    # then have to widen to "any string").
+                    values["status_values_json"] = prior.get("status_values_json")
                     summary["type_change_refused"].append({
                         "name": name,
                         "from": prior["type"],
