@@ -4420,7 +4420,7 @@ def _migrate_metric_definitions_table(cursor, conn):
     and a CHECK would break that seed. The enums are enforced by the one
     reader (`services/template_metrics.py`).
 
-    Mirrored by the Alembic revision 0066_metric_definitions.
+    Mirrored by the Alembic revision 0069_metric_definitions.
     """
     cursor.execute("PRAGMA table_info(metric_definitions)")
     if cursor.fetchall():

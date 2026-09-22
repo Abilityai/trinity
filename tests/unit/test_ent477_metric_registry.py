@@ -439,23 +439,36 @@ def test_a_concurrent_insert_converges_instead_of_duplicating(db_backend):
 
 
 @pytest.mark.requires_postgres
-def test_the_alembic_revision_builds_the_table_on_postgres():
+def test_the_alembic_revision_builds_the_table_on_postgres(monkeypatch):
     """E1 — the SQLite track and `schema.py` agreeing proves nothing about the
     Alembic revision, which is the ONLY thing that runs on an existing
-    PostgreSQL install. Run the migrations and read the table back."""
+    PostgreSQL install. Run the migrations on real PostgreSQL, from an empty
+    schema, and read the table back.
+
+    `upgrade_to_head` resolves the engine from DATABASE_URL, so the test has
+    to point it at TEST_POSTGRES_URL itself — the marker alone still runs it
+    against the SQLite default, where the PG-only DDL in earlier revisions
+    cannot even parse."""
     import os
 
-    if not os.environ.get("TEST_POSTGRES_URL"):
+    pg_url = os.environ.get("TEST_POSTGRES_URL")
+    if not pg_url:
         pytest.skip("TEST_POSTGRES_URL not set")
 
     from sqlalchemy import select
-    from db.engine import get_engine
-
+    from db.engine import dispose_engines, get_engine
     from db.alembic_runner import upgrade_to_head
+    from db_harness import _reset_postgres
 
-    upgrade_to_head()
-    with get_engine().connect() as conn:
-        conn.execute(select(metric_definitions).limit(1)).all()
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    dispose_engines()
+    try:
+        _reset_postgres()
+        upgrade_to_head()
+        with get_engine().connect() as conn:
+            conn.execute(select(metric_definitions).limit(1)).all()
+    finally:
+        dispose_engines()
 
 
 # ---------------------------------------------------------------------------

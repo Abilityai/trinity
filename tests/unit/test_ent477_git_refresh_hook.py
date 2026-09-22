@@ -320,6 +320,10 @@ def test_the_start_hook_spawns_and_never_raises(db_backend, monkeypatch):
     """The ONE hook that covers the dominant staleness path: an agent edits its
     own `metrics:` in-container and the auto-sync heartbeat PUSHES it, so no
     backend pull ever fires."""
+    # A fresh set: the module-level one can hold a task another test spawned
+    # on a loop that has since closed (its done-callback never fired), and
+    # `gather` refuses a future from a different loop.
+    monkeypatch.setattr(metric_registry, "_inflight_refresh_tasks", set())
     monkeypatch.setattr(metric_registry, "_read_template_from_container",
                         _async_return(_TEMPLATE))
 
@@ -340,6 +344,7 @@ def test_the_start_hook_is_a_no_op_without_a_running_loop(db_backend):
 
 
 def test_the_start_hook_swallows_every_failure(db_backend, monkeypatch, caplog):
+    monkeypatch.setattr(metric_registry, "_inflight_refresh_tasks", set())
     monkeypatch.setattr(metric_registry, "refresh_from_running_agent",
                         _async_raise(RuntimeError("boom")))
 
