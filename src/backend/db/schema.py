@@ -1792,6 +1792,27 @@ TABLES = {
             UNIQUE(agent_name, name)
         )
     """,
+    # Recorded metric points (trinity-enterprise#478) — the append-only store
+    # `record_metrics` writes. No surrogate id: the PK IS the identity
+    # `(agent_name, ts, idempotency_key)`, which keeps the partition key inside
+    # the only unique constraint for the month-partitioning ent#80 wants later.
+    # `dims` carries the `/* pg:JSONB */` marker: SQLite reads it as a comment
+    # and reports TEXT, `to_postgres_table_ddl` rewrites the column to JSONB, so
+    # fresh PG, upgraded PG and SQLite all converge without an ALTER.
+    "metric_points": """
+        CREATE TABLE IF NOT EXISTS metric_points (
+            agent_name TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            value_numeric DOUBLE PRECISION,
+            value_text TEXT,
+            dims TEXT /* pg:JSONB */,
+            execution_id TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, ts, idempotency_key)
+        )
+    """,
 }
 
 # =============================================================================
@@ -2043,6 +2064,14 @@ INDEXES = [
     # the DDL and is the JOIN KEY ent#478 validates points against.
     "CREATE INDEX IF NOT EXISTS idx_metric_definitions_agent_status "
     "ON metric_definitions(agent_name, status)",
+    # Reads (ent#479): one agent's one series, newest first.
+    "CREATE INDEX IF NOT EXISTS idx_metric_points_agent_metric_ts "
+    "ON metric_points(agent_name, metric, ts DESC)",
+    # The retention sweep's count + ts-range prune.
+    "CREATE INDEX IF NOT EXISTS idx_metric_points_ts ON metric_points(ts)",
+    # The per-agent daily write cap counts on created_at, not ts.
+    "CREATE INDEX IF NOT EXISTS idx_metric_points_agent_created "
+    "ON metric_points(agent_name, created_at)",
 
     # Canary violations indexes (CANARY-001 / Issue #411 — Phase 1)
     "CREATE INDEX IF NOT EXISTS idx_canary_violations_invariant ON canary_violations(invariant_id, snapshot_time DESC)",
@@ -2284,6 +2313,14 @@ _PG_TABLE_SUBS = [
      "DEFAULT (to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS'))"),
     (_re.compile(r"DEFAULT\s+CURRENT_TIMESTAMP", _re.IGNORECASE),
      "DEFAULT (to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS'))"),
+    # Per-column dialect override (trinity-enterprise#478). `col TEXT /* pg:X */`
+    # is a plain TEXT column with a comment on SQLite and column type X on
+    # PostgreSQL. It exists so `metric_points.dims` can be the JSONB the frozen
+    # schema names without an `ALTER ... USING` that would have to be repeated
+    # on the fresh-PG path (`0001_baseline`) and the upgrade path separately.
+    # Declared LAST so it cannot eat a marker another rule needs to see.
+    (_re.compile(r"\bTEXT\s*/\*\s*pg:(\w+)\s*\*/", _re.IGNORECASE),
+     r"\1"),
 ]
 
 
