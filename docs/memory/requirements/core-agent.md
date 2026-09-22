@@ -3210,3 +3210,59 @@ to localStorage in the clear.
   (session-only — the chips carry upload state and inbox ids), server-side
   drafts synced across devices.
 - **Flow**: `docs/memory/feature-flows/workspace-drafts.md`
+
+### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
+- **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
+- **Requirement ID**: WORKSPACE_ROLE_CARD
+- **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness)
+- **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
+  Agent details show a **Role** card: the role it fills, the objectives it owns or
+  supports with each metric's latest value, target and freshness, the viewer's
+  relationship to it, and its **readiness** state. Framework §8's "organisation UI
+  over the canon" shrunk to one agent: **files are truth, this is a projection.**
+- **Files are truth, read through the platform, never a second store.** Everything the
+  card shows about the role comes from the agent's own container on each read
+  (`client_portal/role_card.py`, via the agent client — the same door the Files tab
+  uses): `template.yaml → x-role: {role, status, seat?}` (written by the
+  `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
+  `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
+  (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
+  agent); metric values from the agent's `metrics.json` through its own
+  `/api/metrics` (`last_updated` is the freshness stamp). Nothing is cached or
+  copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
+  card at all (the panel is unchanged, AC 5); a role file that cannot be read or
+  parsed → the card says so (`role.error`), never an empty role; a stopped agent
+  → "the agent is stopped; the card reads its files when it runs".
+- **Freshness is honest, never optimistic (quality bar #4).** A metric is `stale`
+  when its value is missing, when `metrics.json` carries no `last_updated`, or when
+  that stamp is older than the framework's 30-day staleness bound (§3.5); a stale
+  metric renders as stale beside its last value and age, never as current. A
+  per-metric cadence is the business-metrics workstream's to declare; until then
+  the bound is the one rule the framework already states.
+- **Readiness is a platform record, and only the agent owner writes it (#663,
+  ruled 2026-09-20).** `x-role.status` in `template.yaml` is agent-writable, so it
+  cannot be the thing that says a companion is `ready`. `agent_role_readiness`
+  (`agent_name` PK, `status`, `changed_at`, `changed_by`; dual-track — SQLite
+  `agent_role_readiness_table` + Alembic `0067_agent_role_readiness`; CASCADE in
+  `AGENT_REFS`) is the owner's stamp. The effective state is the platform record
+  when one exists, else the template's `calibrating`; a template that says `ready`
+  **without** an owner stamp is shown as `calibrating` with a note that no owner
+  has stamped it — `status: ready` is valid only with an owner stamp (#663 DoD 3).
+  `POST …/role/readiness {status}` is gated on the platform's **owner of the agent
+  record** (`db.get_owned_roster(email)` — creator/infra owner, not an assignment
+  kind, R8/R11): anyone else gets a named 403 (`readiness_owner_only`), the agent
+  never can (portal-token principals are not owners; the route is on the
+  platform-authenticated door). The card shows the state, the date it changed and
+  who flipped it. The flip **records**; it does not switch schedules on — turning
+  the brief schedule on at `ready` stays the operator's act until the wizard owns
+  it (#511).
+- **Walkthrough progress while calibrating** (§7.2 step 8–9): the card shows the
+  viewer's own asks with this agent — user turns in their Main chat, capped at the
+  ten the three-strikes test asks for — and how many of the agent's replies they
+  rated down (ent#366). A proxy for the ten-ask walkthrough, labelled as the
+  viewer's own count, never a fleet number.
+- **Your relationship**: rendered from ent#500's assignment when it lands; until
+  then the line states "no assignment recorded" rather than being blank (AC 3).
+- **Not this issue**: editing the canon from the card (files are truth — edit the
+  file), the organisation view (ent#502), enabling schedules on the flip.
+- **Flow**: `docs/memory/feature-flows/workspace-role-card.md`

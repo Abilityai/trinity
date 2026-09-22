@@ -131,6 +131,7 @@ from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
+from db.role_readiness import RoleReadinessOperations
 from db.skill_sources import SkillSourcesOperations
 from db.public_chat import PublicChatOperations
 from db.tags import TagOperations
@@ -995,6 +996,7 @@ class DatabaseManager:
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
+        self._role_readiness_ops = RoleReadinessOperations()
         self._skill_sources_ops = SkillSourcesOperations()
         self._public_chat_ops = PublicChatOperations()
         self._tag_ops = TagOperations()
@@ -2700,6 +2702,15 @@ class DatabaseManager:
     def set_skill_delivery_status(self, agent_name: str, conflicted: list, resolved: list):
         # #2914: the inject path's per-row verdict (`conflict` / cleared).
         return self._skills_ops.set_skill_delivery_status(agent_name, conflicted, resolved)
+    # =========================================================================
+    # Role readiness (delegated to db/role_readiness.py) — ent#527 / #663
+    # =========================================================================
+
+    def get_agent_role_readiness(self, agent_name: str):
+        return self._role_readiness_ops.get_role_readiness(agent_name)
+
+    def set_agent_role_readiness(self, agent_name: str, status: str, changed_by: str):
+        return self._role_readiness_ops.set_role_readiness(agent_name, status, changed_by)
 
     def is_skill_assigned(self, agent_name: str, skill_name: str):
         return self._skills_ops.is_skill_assigned(agent_name, skill_name)

@@ -902,6 +902,16 @@ public_user_memory_writes = Table(
     Column("undone_by", Text),
 )
 
+# ent#527 / #663: the agent owner's readiness stamp — see the note in db/schema.py.
+agent_role_readiness = Table(
+    "agent_role_readiness",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("status", Text),
+    Column("changed_at", Text),
+    Column("changed_by", Text),
+)
+
 agent_git_config = Table(
     "agent_git_config",
     metadata,

@@ -55,6 +55,9 @@
 
     <p v-if="header?.description" class="text-sm text-gray-600 dark:text-gray-300">{{ header.description }}</p>
 
+    <!-- ent#527: the role card — rendered only when the agent carries a role. -->
+    <PortalAgentRole :agent-name="agentName" />
+
     <!-- ---------------------------- CHATS ------------------------------ -->
     <!-- The FULL list, which is what this panel is for: the tab strip shows
          what fits and hides the rest, and the design pass puts the complete
@@ -197,6 +200,7 @@ import ReportRenderer from '@/components/reports/ReportRenderer.vue'
 import ReportSummary from '@/components/reports/ReportSummary.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalAgentMemory from './PortalAgentMemory.vue'
+import PortalAgentRole from './PortalAgentRole.vue'
 import { agentDisplayName } from '@/utils/agentName'
 import { availabilityChip, threadTitle, MAIN_TAB_LABEL } from './portalUtils'
 import { usePortalAgentPage } from '@/composables/usePortalAgentPage'

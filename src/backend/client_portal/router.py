@@ -46,7 +46,7 @@ from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
 from database import db
-from . import agent_page, service
+from . import agent_page, role_card, service
 from .models import (
     PortalSessionRename,
     PortalRatingRequest,
@@ -76,6 +76,9 @@ from .models import (
     PortalAgentPage,
     PortalAgentMemory,
     PortalMemoryUndo,
+    PortalRoleCard,
+    PortalRoleReadiness,
+    PortalRoleReadinessFlip,
     PortalAgentReports,
     PortalChatState,
     PortalSessionSummary,
@@ -792,6 +795,40 @@ def portal_agent_memory_undo(
     try:
         return agent_page.undo_memory_write(agent_name, email, write_id)
     except agent_page.MemoryUndoRefused as e:
+        raise HTTPException(status_code=e.status_code,
+                            detail={"code": e.code, "message": e.detail})
+
+
+@router.get("/agents/{agent_name}/role", response_model=PortalRoleCard)
+async def portal_agent_role(
+    agent_name: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """The role card (ent#527): a projection of the agent's own files — role,
+    objectives with metric freshness, readiness. `role: null` when the agent
+    carries no `x-role`. Roster-gated like every route here."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    return await role_card.build_role_card(agent_name, email, is_platform=principal.is_platform)
+
+
+@router.post("/agents/{agent_name}/role/readiness", response_model=PortalRoleReadiness)
+def portal_agent_role_readiness(
+    agent_name: str,
+    body: PortalRoleReadinessFlip,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """The owner flips a companion `calibrating` ⇄ `ready` (#663). Anyone
+    else — a shared user, an external client — gets a NAMED 403
+    (`readiness_owner_only`); the agent never reaches this door."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_role_readiness:{email}", 20, 60)
+    try:
+        return role_card.flip_readiness(agent_name, email, is_platform=principal.is_platform,
+                                        status=body.status)
+    except role_card.RoleCardRefused as e:
         raise HTTPException(status_code=e.status_code,
                             detail={"code": e.code, "message": e.detail})
 

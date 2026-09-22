@@ -16,6 +16,7 @@ Tables are organized by feature area:
 - Settings: system_settings
 - Public Links: agent_public_links, public_link_verifications, public_link_usage
 - Public Chat: public_chat_sessions, public_chat_messages, public_user_memory, public_user_memory_writes
+- Tandem: agent_role_readiness
 - Git: agent_git_config
 - Skills: agent_skills
 - Tags: agent_tags
@@ -1043,6 +1044,19 @@ TABLES = {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE(agent_name, user_email)
+        )
+    """,
+
+    # ent#527 / #663: a companion's readiness (`calibrating` | `ready`) is the
+    # AGENT OWNER's stamp, kept platform-side because `template.yaml`'s
+    # `x-role.status` is agent-writable and the rule is that the agent never
+    # flips itself. One row per agent: the current state, when, and who.
+    "agent_role_readiness": """
+        CREATE TABLE IF NOT EXISTS agent_role_readiness (
+            agent_name TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            changed_at TEXT NOT NULL,
+            changed_by TEXT NOT NULL
         )
     """,
 
