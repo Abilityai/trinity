@@ -56,6 +56,7 @@ function metric(overrides = {}) {
     stale_after: null,
     series_count: 1,
     series: [],
+    chart: null,
     stats: null,
     message: null,
     ...overrides,
@@ -151,31 +152,29 @@ describe('a stale metric is MARKED stale, never rendered as current', () => {
 })
 
 describe('the declared-but-empty state names the next action', () => {
-  it('shows the message the backend composed for a metric with no points', async () => {
-    // Which action depends on whether this agent HAS `/update-dashboard`; the
-    // route decides that and the tile renders what it decided, so the two
-    // cannot say different things.
+  it('renders the whole sentence the backend composed, both actions in it', async () => {
+    // The route decides the copy and the tile renders what it decided, so the
+    // two cannot say different things. It names BOTH actions because a
+    // store-only read cannot know which playbooks the agent holds — the
+    // earlier conditional was a branch no caller could take, which left the
+    // `/update-dashboard` half unreachable.
     const { wrapper } = await mountTiles(async () => payload([
       metric({
         latest: null, last_point_at: null, freshness: 'no_points', series_count: 0,
-        message: 'declared, no points yet — schedule `/update-dashboard`',
+        message: 'declared, no points yet — record points with `record_metrics` '
+          + '(or schedule `/update-dashboard` if the agent has that playbook)',
       }),
     ]))
     const copy = wrapper.find('[data-testid="metric-empty-message"]')
     expect(copy.text()).toContain('no points yet')
+    expect(copy.text()).toContain('record_metrics')
     expect(copy.text()).toContain('/update-dashboard')
     expect(wrapper.find('[data-testid="metric-value"]').text()).toContain('—')
   })
 
-  it('shows the record_metrics wording when that is what the backend sent', async () => {
-    const { wrapper } = await mountTiles(async () => payload([
-      metric({
-        latest: null, last_point_at: null, freshness: 'no_points',
-        message: 'declared, no points yet — record points with `record_metrics`',
-      }),
-    ]))
-    expect(wrapper.find('[data-testid="metric-empty-message"]').text())
-      .toContain('record_metrics')
+  it('carries no empty copy on a tile that HAS a number', async () => {
+    const { wrapper } = await mountTiles(async () => payload([metric()]))
+    expect(wrapper.find('[data-testid="metric-empty-message"]').exists()).toBe(false)
   })
 
   it('shows the zero-declaration copy, not a blank grid', async () => {
@@ -191,17 +190,89 @@ describe('the declared-but-empty state names the next action', () => {
 })
 
 describe('the superseded metrics.json finding is surfaced, not swallowed', () => {
+  // The fixture is the shape `static_checks.c_d010` actually emits — an
+  // OBJECT, `{keys, undeclared}`, persisted into `checks_json` and echoed
+  // verbatim by the route. The earlier fixture passed a pre-flattened string
+  // the backend never produces, so the spec was green while the operator got
+  // pretty-printed JSON braces on the dashboard.
+  const D010 = {
+    code: 'metrics_json_superseded',
+    message: 'metrics.json is superseded and no longer served — record these values with `record_metrics`',
+    detail: { keys: ['revenue', 'orphan'], undeclared: ['orphan'] },
+  }
+
   it('renders the D-010 echo above the tiles', async () => {
     const { wrapper } = await mountTiles(async () => payload([metric()], {
-      findings: [{
-        code: 'metrics_json_superseded',
-        message: 'metrics.json is superseded and no longer served',
-        detail: 'keys with no registry entry: orphan',
-      }],
+      findings: [D010],
     }))
     const finding = wrapper.find('[data-testid="declared-metrics-finding"]')
     expect(finding.text()).toContain('superseded')
     expect(finding.text()).toContain('orphan')
+  })
+
+  it('spells the detail object out as a sentence, not as JSON braces', async () => {
+    const { wrapper } = await mountTiles(async () => payload([metric()], {
+      findings: [D010],
+    }))
+    const detail = wrapper.find('[data-testid="declared-metrics-finding-detail"]')
+    expect(detail.text()).toContain('keys in the file: revenue, orphan')
+    expect(detail.text()).toContain('declared nowhere: orphan')
+    expect(detail.text()).not.toContain('{')
+    expect(detail.text()).not.toContain('"keys"')
+  })
+
+  it('still passes a plain-string detail straight through', async () => {
+    const { wrapper } = await mountTiles(async () => payload([metric()], {
+      findings: [{ ...D010, detail: 'an older finding that sent a sentence' }],
+    }))
+    expect(wrapper.find('[data-testid="declared-metrics-finding-detail"]').text())
+      .toContain('an older finding that sent a sentence')
+  })
+})
+
+describe('the chart and the number describe the same thing', () => {
+  it('captions a one-series chart under a multi-series metric', async () => {
+    // A `last` metric has no cross-series fold, so the chart is ONE series
+    // while the number names several. The caveat is the difference between a
+    // labelled chart and a misleading one.
+    const { wrapper } = await mountTiles(async () => payload([
+      metric({
+        aggregation: 'last',
+        series_count: 2,
+        latest_by_series: [
+          { dims: { region: 'eu' }, value: 4200, ts: '2026-09-22T09:00:00Z' },
+          { dims: { region: 'us' }, value: 100, ts: '2026-09-22T08:00:00Z' },
+        ],
+        chart: {
+          basis: 'series',
+          aggregation: 'last',
+          series_count: 2,
+          dims: { region: 'eu' },
+          buckets: [{ i: 1, ts: 't1', value: 10 }, { i: 2, ts: 't2', value: 20 }],
+        },
+      }),
+    ]))
+    const note = wrapper.find('[data-testid="metric-chart-basis"]')
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('region=eu')
+    expect(note.attributes('title')).toContain('2 dimension series')
+  })
+
+  it('adds no caveat when the chart IS the fold across every series', async () => {
+    const { wrapper } = await mountTiles(async () => payload([
+      metric({
+        aggregation: 'sum',
+        series_count: 2,
+        chart: {
+          basis: 'folded',
+          aggregation: 'sum',
+          series_count: 2,
+          dims: null,
+          buckets: [{ i: 1, ts: 't1', value: 15 }, { i: 2, ts: 't2', value: 20 }],
+        },
+      }),
+    ]))
+    expect(wrapper.find('[data-testid="metric-chart-basis"]').exists()).toBe(false)
   })
 })
 

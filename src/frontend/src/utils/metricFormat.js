@@ -189,15 +189,41 @@ function staleTitle(metric) {
 }
 
 /**
- * The folded sparkline series for a metric entry: the first dimension series'
- * buckets, numeric values only. `[]` when there is nothing chartable, so the
- * caller's `length > 1` gate is the only place that decides to render.
+ * The sparkline series for a metric entry: numeric values from `chart.buckets`.
+ * `[]` when there is nothing chartable, so the caller's `length > 1` gate is
+ * the only place that decides to render.
+ *
+ * `metric.chart` and NOT `metric.series[0]`: the backend composes one bucket
+ * list that describes the same thing as `latest.value` — the cross-series fold
+ * for `sum`/`avg`, the newest series for `last` — and `stats` (the trend
+ * arrow) is computed from that same list. Reading `series[0]` here drew one
+ * dimension's history under a total's number.
  */
 export function sparklinePoints(metric = {}) {
-  const series = Array.isArray(metric.series) ? metric.series : []
-  if (!series.length) return []
-  const buckets = Array.isArray(series[0].buckets) ? series[0].buckets : []
+  const buckets = Array.isArray(metric.chart?.buckets) ? metric.chart.buckets : []
   return buckets.map((b) => b.value).filter((v) => typeof v === 'number' && Number.isFinite(v))
+}
+
+/**
+ * What the sparkline is drawing, when that is not every series — `null` when
+ * the chart already describes the whole metric and needs no caveat.
+ *
+ * A cross-series fold is defined for `sum` and `avg` only; for `last` the
+ * chart is one series, and a chart that shows one region under a number that
+ * names several must SAY so rather than leave the operator to assume.
+ */
+export function chartBasisNote(metric = {}) {
+  const chart = metric.chart
+  if (!chart || chart.basis !== 'series' || !(chart.series_count > 1)) return null
+  const dims = Object.entries(chart.dims || {})
+    .map(([k, v]) => `${k}=${v}`)
+    .join(',')
+  return {
+    label: dims ? `chart: ${dims}` : 'chart: 1 series',
+    title: `A '${chart.aggregation || 'last'}' metric has no cross-series fold, so this `
+      + `chart and its trend show the most recently updated of `
+      + `${chart.series_count} dimension series, not all of them.`,
+  }
 }
 
 /** A sparkline's y-max: the series peak, never 0 (uPlot draws nothing at 0). */

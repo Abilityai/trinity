@@ -258,7 +258,10 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "buckets each); pass `metric` to get the raw points of ONE metric (newest first, " +
         "capped by series_limit, `truncated` says when older points were dropped). " +
         "Dimensioned metrics come back as one series per dimension tuple, with `latest` " +
-        "folded across them using the aggregation you declared. " +
+        "folded across them using the aggregation you declared. Chart `chart.buckets`, " +
+        "not `series[0]` — `chart` is the one series that matches `latest`: the fold " +
+        "across every dimension for sum/avg, and for `last` the single series named by " +
+        "`chart.dims` (basis: series), because a cross-series `last` is not one number. " +
         "This tool reads only your own metrics — there is no agent parameter; another " +
         "agent's numbers are not readable from here.",
       parameters: z.object({

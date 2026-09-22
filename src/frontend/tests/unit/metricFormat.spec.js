@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  chartBasisNote,
   formatBytes,
   formatDuration,
   formatMetricValue,
@@ -148,22 +149,66 @@ describe('freshnessChip reports the BACKEND verdict, it does not recompute it', 
 
 describe('sparkline inputs', () => {
   const metric = {
-    series: [{ dims: null, buckets: [{ ts: 't1', value: 1 }, { ts: 't2', value: null }, { ts: 't3', value: 4 }] }],
+    chart: {
+      basis: 'series',
+      aggregation: 'last',
+      series_count: 1,
+      dims: null,
+      buckets: [{ i: 0, ts: 't1', value: 1 }, { i: 1, ts: 't2', value: null }, { i: 2, ts: 't3', value: 4 }],
+    },
   }
 
-  it('takes the first series bucket values and drops the gaps', () => {
+  it('takes the chart bucket values and drops the gaps', () => {
     expect(sparklinePoints(metric)).toEqual([1, 4])
+  })
+
+  it('reads `chart`, NOT `series[0]` — the chart is what `stats` describes', () => {
+    // The backend composes one bucket list that matches `latest.value`: the
+    // cross-series fold for `sum`/`avg`. Reading `series[0]` here drew one
+    // dimension's history under a total, with the trend arrow — computed
+    // from the fold — pointing at something the chart did not show.
+    const folded = {
+      series: [
+        { dims: { region: 'eu' }, buckets: [{ i: 5, ts: 't', value: 10 }] },
+        { dims: { region: 'us' }, buckets: [{ i: 5, ts: 't', value: 5 }] },
+      ],
+      chart: { basis: 'folded', aggregation: 'sum', series_count: 2, dims: null, buckets: [{ i: 5, ts: 't', value: 15 }] },
+    }
+    expect(sparklinePoints(folded)).toEqual([15])
   })
 
   it('is empty — not undefined — when there is nothing chartable', () => {
     expect(sparklinePoints({})).toEqual([])
-    expect(sparklinePoints({ series: [] })).toEqual([])
+    expect(sparklinePoints({ chart: null })).toEqual([])
+    expect(sparklinePoints({ chart: { buckets: [] } })).toEqual([])
   })
 
   it('never hands uPlot a zero ceiling', () => {
     expect(sparklineMax([0, 0], null)).toBe(1)
     expect(sparklineMax([1, 4], null)).toBe(4)
     expect(sparklineMax([1, 4], { max: 9 })).toBe(9)
+  })
+})
+
+describe('the chart says when it is NOT showing the whole metric', () => {
+  it('captions a one-series chart under a multi-series metric', () => {
+    const note = chartBasisNote({
+      chart: { basis: 'series', aggregation: 'last', series_count: 3, dims: { region: 'eu' } },
+    })
+    expect(note.label).toContain('region=eu')
+    expect(note.title).toContain('3 dimension series')
+  })
+
+  it('says nothing when the chart IS the whole metric', () => {
+    // A cross-series fold describes every series, so a caveat would be noise…
+    expect(chartBasisNote({
+      chart: { basis: 'folded', aggregation: 'sum', series_count: 4, dims: null },
+    })).toBeNull()
+    // …and so does a metric with only one series to begin with.
+    expect(chartBasisNote({
+      chart: { basis: 'series', aggregation: 'last', series_count: 1, dims: null },
+    })).toBeNull()
+    expect(chartBasisNote({})).toBeNull()
   })
 })
 

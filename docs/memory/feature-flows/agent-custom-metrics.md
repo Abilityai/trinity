@@ -245,8 +245,10 @@ above.
 
 Writing `~/metrics.json` no longer does anything. The backend does not read it,
 the read route does not fall back to it when the store is empty, and the agent
-server's own `GET /api/metrics` (which still parses it) is not in any backend
-path. Two sources for one number is the condition this epic exists to remove,
+server's own `GET /api/metrics` no longer parses it either — that route is
+retired in place, answering `410` with
+`{has_metrics: false, superseded_by: "record_metrics / GET /api/agents/{name}/metrics", finding: "D-010"}`
+rather than being deleted (§49.7). Two sources for one number is the condition this epic exists to remove,
 and "serve the file when we have nothing better" is precisely how two sources
 drift apart unnoticed.
 
@@ -272,8 +274,9 @@ delete the file.
 | Window | `auto` (default) · `24h` · `7d` · `30d` · `90d`, or `since`/`until`. `auto` = `max(24h, 12 × cadence)` capped at 90 d, because a cadence ranges 60 s–1 y and a fixed 24 h shows a weekly metric four points |
 | Filters | `metric=<declared name>` · `include_retired` · `series_limit` (≤ 2000, single-metric path) |
 | Errors | 422 `window_invalid` · 422 `metric_undeclared` (retired names get "retired at T — pass `include_retired=true`") · 503 `metric_store_unavailable` + `Retry-After: 30` |
-| Series | Bucketed (≤ 120/series) by default; raw `points` only on the `metric=` path, truncation keeps the **newest** |
+| Series | Bucketed (≤ 120/series) by default; raw `points` only on the `metric=` path, truncation keeps the **newest**. A bucket covers the **window**: a point outside `[since, until]` is dropped before indexing, never clamped into bucket 0 |
 | Dimensions | Grouped by `canonical_dims`, folded by the declared `aggregation`, with `latest_by_series[]` carrying each series' own freshness |
+| Chart | `chart` is the one bucket list the sparkline, `stats` and a bound widget's `history` all read, so they describe the same thing as `latest.value`: `basis: "folded"` (the cross-series fold, for `sum`/`avg`) or `basis: "series"` + `dims` (for `last`, where a cross-series fold is undefined — the UI labels it) |
 
 ### The one staleness rule
 
@@ -308,10 +311,14 @@ Exactly `2 × cadence` is not stale (strict `>`), and a point in the future
 
 Zero declarations → "no metrics: block in template.yaml — declare one and pull,
 restart the agent, or POST .../metrics/definitions/refresh". A declared metric
-with no points → "declared, no points yet — schedule `/update-dashboard`" if the
-agent has that playbook, "…record points with `record_metrics`" if it does not.
-The **route** decides which, so no surface can offer an action the agent cannot
-take.
+with no points → "declared, no points yet — record points with `record_metrics`
+(or schedule `/update-dashboard` if the agent has that playbook)". The **route**
+composes the sentence, so no surface can offer an action the agent cannot take;
+it names both actions rather than branching, because a store-only read cannot
+learn which playbooks a container holds (the catalog is a container probe, and
+`agent_skills` knows only *library* assignments while the bundled templates
+carry `/update-dashboard` in `.claude/commands/`). The earlier conditional took
+a flag no caller could compute, which made half the sentence unreachable.
 
 ## Key Files
 

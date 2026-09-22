@@ -280,6 +280,99 @@ def test_a_bound_widget_history_matches_the_shape_the_panel_reads(store):
     assert all(set(v) == {"t", "v"} for v in history["values"])
 
 
+def test_a_retired_metric_is_REFUSED_not_rendered_as_current(store):
+    """I5 / TD-10 applied to the binding.
+
+    `bind_dashboard_widgets` reads with `include_retired=True` — it has to, or
+    a retired name would be indistinguishable from one that was never declared
+    — and the first version then copied the retired metric's last value onto
+    the widget like any other. TD-10 refuses exactly this on the route
+    (`metric=<retired>` is a 422, not a 200 carrying the stale number) *so
+    that a retired metric never silently reads as current*, and a widget is
+    that same read with nobody there to pass `include_retired`. Refusing is
+    the consistent answer; the widget says why rather than vanishing.
+    """
+    store.definitions = [_definition(status="retired",
+                                     retired_at="2026-09-01T00:00:00Z")]
+    config = _config({"type": "metric", "label": "Rev", "value": 7,
+                      "metric": "revenue"})
+    metric_read_service.bind_dashboard_widgets(config, AGENT)
+
+    widget = config["sections"][0]["widgets"][0]
+    assert widget["binding_error_code"] == "metric_retired"
+    assert "retired at 2026-09-01T00:00:00Z" in widget["binding_error"]
+    assert widget["retired_at"] == "2026-09-01T00:00:00Z"
+    assert widget["bound"] is False
+    # The placeholder goes too: a number the author wrote is not a substitute
+    # for the one the registry refuses to serve.
+    assert "value" not in widget
+    assert "history" not in widget
+
+
+def test_every_binding_refusal_carries_a_MACHINE_code(store):
+    """The route answers `{reason, message}`; a widget must not answer with a
+    sentence alone, or a consumer telling "store down" from "you named a
+    retired metric" has to substring-match English."""
+    store.raise_on_read = RuntimeError("store down")
+    config = _config({"type": "metric", "label": "Rev", "metric": "revenue"})
+    metric_read_service.bind_dashboard_widgets(config, AGENT)
+    assert (config["sections"][0]["widgets"][0]["binding_error_code"]
+            == "metric_store_unavailable")
+
+    store.raise_on_read = None
+    config = _config({"type": "metric", "label": "X", "metric": "nope"})
+    metric_read_service.bind_dashboard_widgets(config, AGENT)
+    assert (config["sections"][0]["widgets"][0]["binding_error_code"]
+            == "metric_undeclared")
+
+
+def test_a_resolved_binding_clears_a_PREVIOUS_refusal(store):
+    """The error keys are written onto the caller's dict, so a config that
+    carried a stale refusal (a retry after the store came back, the same dict
+    re-bound) must come out clean rather than bound-and-erroring at once."""
+    config = _config({"type": "metric", "label": "Rev", "metric": "revenue",
+                      "binding_error": "metric store unavailable",
+                      "binding_error_code": "metric_store_unavailable"})
+    metric_read_service.bind_dashboard_widgets(config, AGENT)
+
+    widget = config["sections"][0]["widgets"][0]
+    assert widget["bound"] is True
+    assert "binding_error" not in widget
+    assert "binding_error_code" not in widget
+
+
+def test_a_bound_widgets_history_is_the_FOLD_its_value_came_from(store):
+    """I6: the trend arrow must describe the number beside it.
+
+    A `sum` metric over two dimension series shows the TOTAL as its value, so
+    charting `series[0]` drew one region's history under a total — the arrow
+    and the number described different things. The history is built from
+    `chart`, which for a foldable aggregation is the cross-series fold.
+    """
+    store.definitions = [_definition(aggregation="sum",
+                                     dimensions=["region"])]
+    store.points = [
+        {"metric": "revenue", "ts": _ago(60), "value_numeric": 30.0,
+         "value_text": None, "dims": {"region": "eu"},
+         "idempotency_key": "eu-new"},
+        {"metric": "revenue", "ts": _ago(90), "value_numeric": 12.0,
+         "value_text": None, "dims": {"region": "us"},
+         "idempotency_key": "us-new"},
+    ]
+    store.calculate_widget_stats = lambda values: {
+        "min": min(v["v"] for v in values), "max": max(v["v"] for v in values),
+        "avg": 0, "trend": "stable"}
+
+    config = _config({"type": "metric", "label": "Rev", "metric": "revenue"})
+    metric_read_service.bind_dashboard_widgets(config, AGENT)
+
+    widget = config["sections"][0]["widgets"][0]
+    assert widget["value"] == 42.0  # 30 + 12, the cross-series fold
+    charted = [v["v"] for v in widget["history"]["values"]]
+    assert charted == [42.0], (
+        f"the chart shows {charted}, which is one region of a total of 42")
+
+
 def test_is_bound_is_the_one_spelling_the_skippers_share():
     assert metric_read_service.is_bound({"metric": "revenue"}) is True
     assert metric_read_service.is_bound({"value": 1}) is False

@@ -99,8 +99,12 @@
         <p class="text-sm font-medium text-state-autonomous-800 dark:text-state-autonomous-200">
           {{ finding.message }}
         </p>
-        <p v-if="finding.detail" class="mt-1 text-xs text-state-autonomous-700 dark:text-state-autonomous-300">
-          {{ finding.detail }}
+        <p
+          v-if="findingDetail(finding)"
+          class="mt-1 text-xs text-state-autonomous-700 dark:text-state-autonomous-300"
+          data-testid="declared-metrics-finding-detail"
+        >
+          {{ findingDetail(finding) }}
         </p>
       </div>
 
@@ -190,6 +194,16 @@
               :title="seriesTitle(metric)"
               data-testid="metric-series-chip"
             >{{ metric.series_count }} series · {{ metric.aggregation || 'last' }}</span>
+            <!-- The chart and the number must describe the same thing. When
+                 the aggregation has no cross-series fold the chart is ONE
+                 series, and this says which rather than letting the trend
+                 arrow be read as the whole metric's. -->
+            <span
+              v-if="chartNote(metric)"
+              class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
+              :title="chartNote(metric).title"
+              data-testid="metric-chart-basis"
+            >{{ chartNote(metric).label }}</span>
             <span
               v-if="metric.status === 'retired'"
               class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
@@ -238,6 +252,7 @@ import BaseSelect from './base/BaseSelect.vue'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '../utils/timestamps'
 import {
+  chartBasisNote,
   formatMetricValue,
   freshnessChip,
   metricUnitSuffix,
@@ -318,6 +333,7 @@ function detailOf(error) {
 const unitSuffix = (m) => metricUnitSuffix(m.latest?.value, m.type, m.unit)
 const chip = (m) => freshnessChip(m)
 const sparkline = (m) => sparklinePoints(m)
+const chartNote = (m) => chartBasisNote(m)
 const relativeTime = (ts) => formatRelativeTime(ts)
 const absoluteTime = (ts) => formatLocalDateTime(ts)
 
@@ -331,6 +347,39 @@ function statusColor(metric) {
   const value = metric.latest?.value
   const match = (metric.values || []).find((v) => v?.value === value)
   return match?.color || 'gray'
+}
+
+/**
+ * A finding's `detail` as a sentence.
+ *
+ * D-010 emits an OBJECT — `{keys, undeclared}` from
+ * `compatibility/static_checks.c_d010`, persisted into `checks_json` and
+ * echoed verbatim by the route. `{{ finding.detail }}` renders an object
+ * through Vue's `toDisplayString`, i.e. pretty-printed JSON braces in the
+ * middle of an operator's dashboard, so the two lists are spelled out here
+ * instead. A plain string (any other finding, and the shape a future check
+ * may use) passes straight through.
+ */
+function findingDetail(finding) {
+  const detail = finding?.detail
+  if (!detail) return ''
+  if (typeof detail === 'string') return detail
+  if (typeof detail !== 'object') return String(detail)
+
+  const parts = []
+  if (Array.isArray(detail.keys) && detail.keys.length) {
+    parts.push(`keys in the file: ${detail.keys.join(', ')}`)
+  }
+  if (Array.isArray(detail.undeclared) && detail.undeclared.length) {
+    parts.push(`declared nowhere: ${detail.undeclared.join(', ')}`)
+  }
+  if (parts.length) return parts.join(' · ')
+
+  // An unrecognised object still says something readable rather than nothing:
+  // a silent finding is the failure this banner exists to prevent.
+  return Object.entries(detail)
+    .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
+    .join(' · ')
 }
 
 function seriesTitle(metric) {

@@ -513,11 +513,19 @@ invisible to the metric tiles, the `dashboard.yaml` `metric:` binding, the MCP
 empty was rejected deliberately — two sources for one number is what ent#476
 exists to prevent — so the file becomes a finding instead.
 
-The detail lists the file's keys (charset-bounded, 25 max) and, separately,
-those with **no** `template.yaml metrics:` entry: "you still write this file"
-is advice, "these four numbers are declared nowhere" is a fix. Values are never
-persisted into `checks_json`. SOFT, like D-009: the agent runs fine, its
-numbers simply are not arriving.
+The detail is the object `{keys, undeclared}` — the file's keys
+(charset-bounded, 25 max) and, separately, those with **no** `template.yaml
+metrics:` entry: "you still write this file" is advice, "these four numbers are
+declared nowhere" is a fix. Values are never persisted into `checks_json`. The
+read echoes the object unchanged, so a UI must SPELL it out (the tiles render
+"keys in the file: … · declared nowhere: …") rather than interpolating it —
+`{{ detail }}` on an object is pretty-printed JSON braces. SOFT, like D-009:
+the agent runs fine, its numbers simply are not arriving.
+
+The container's own `GET /api/metrics` no longer reads the file either: it is
+retired in place and answers `410` with
+`{has_metrics: false, superseded_by, finding: "D-010"}`, so the finding is the
+only thing the file produces anywhere.
 
 Remedy: declare the metrics in `template.yaml metrics:`, call
 `refresh_metric_definitions`, and record points with `record_metrics` instead of

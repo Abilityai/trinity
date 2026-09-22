@@ -1283,14 +1283,23 @@ latest value, its freshness and its series:
              latest: {value, ts, dims} | null,
              latest_by_series: [{dims, value, ts, stale, freshness}],
              last_point_at, stale, freshness, stale_after, series_count,
-             series: [{dims, buckets: [{ts, value}], points?, truncated}],
+             series: [{dims, buckets: [{i, ts, value}], points?, truncated}],
+             chart: {basis, aggregation, series_count, dims, buckets} | null,
              stats, message }],
  findings: [{code, message, detail}], findings_evaluated_at, policy,
  stale_rule, message}
 ```
 
-Three shape decisions are load-bearing:
+Four shape decisions are load-bearing:
 
+- **A bucket is the WINDOW, not the newest N.** The store hands the composer
+  the newest 200 points per metric, which for any metric with history older
+  than the window is a superset of it. Points outside `[since, until]` are
+  **dropped** before bucket indexing — never clamped into bucket 0, which is
+  what fabricated an opening spike (the sum of points the window excludes,
+  stamped before `since`) and then computed `stats` from it. Each bucket
+  carries its index `i`, which is what makes "the same moment in two dimension
+  series" well defined.
 - **Bucketed by default, raw only on request.** 50 metrics × 2 000 raw points is
   a ten-megabyte "read". The all-metrics path ships ≤ 120 buckets per series;
   raw `points` appear only on the single-metric (`metric=`) path, capped at
@@ -1304,14 +1313,29 @@ Three shape decisions are load-bearing:
   visibly flagged, rather than silently dropping out of the total.
 - **`has_metrics` is gone.** One spelling of "this agent declares metrics", and
   it is `declared`.
+- **`chart` is the one bucket list the sparkline and the trend arrow share**,
+  so they cannot describe a different thing from the number above them.
+  `latest.value` is the fold across every dimension series, so for `sum` / `avg`
+  the chart is that same fold across series **by bucket index**
+  (`basis: "folded"`). A cross-series fold is undefined for `last` — the last
+  value of two regions is not one number — so there the chart is the most
+  recently updated series and says so (`basis: "series"` + its `dims`), which
+  the tile renders as a chip rather than leaving a total's trend arrow drawn
+  from one region's history.
 
 **Empty states name the next action** rather than returning a bare list. Zero
 declarations → "no metrics: block in template.yaml — declare one and pull,
 restart the agent, or POST .../metrics/definitions/refresh". A declared metric
-with no points → "declared, no points yet — schedule `/update-dashboard`" when
-the agent has that playbook, "…record points with `record_metrics`" when it does
-not. The *route* decides which, so no consumer can offer an action the agent
-cannot take.
+with no points → "declared, no points yet — record points with `record_metrics`
+(or schedule `/update-dashboard` if the agent has that playbook)". The copy
+names **both** actions rather than branching on whether the agent holds the
+playbook: this read is store-only, the playbook catalog is a container probe
+(`GET /api/agents/{name}/playbooks`, 503 on a stopped agent), and the persisted
+`agent_skills` rows know only *library* assignments while every bundled template
+carries `/update-dashboard` in `.claude/commands/` — a conditional built on that
+table would tell exactly those agents they lack the playbook they ship with. A
+branch no caller could compute left the `/update-dashboard` half unreachable
+dead copy, which is worse than naming one action too many.
 
 **`metric=` naming a retired definition is 422 `metric_undeclared` with "retired
 at T — pass `include_retired=true`"**, not a 200 with the retired row: a retired
@@ -1386,6 +1410,16 @@ from the registry on every read: `value`, `color` (from the declared status
   drift apart.
 - An undeclared name yields `binding_error` and **no value** — a wrong number is
   worse than no number — and the panel renders the reason, never a bare dash.
+  A **retired** metric is refused the same way (`binding_error_code:
+  metric_retired`, with `retired_at`): TD-10 refuses `metric=<retired>` on the
+  route so a retired metric never silently reads as current, and a widget is
+  that same read with nobody there to pass `include_retired`. Each refusal
+  carries a machine `binding_error_code` beside its sentence
+  (`metric_store_unavailable` / `metric_undeclared` / `metric_retired`), the
+  route's `{reason, message}` pair spelled for a widget.
+- A bound widget's `history` is built from `chart`, the same fold its `value`
+  comes from, so its sparkline and trend arrow describe the metric the number
+  names.
 - A store outage degrades **per widget**; a dashboard is never 5xx'd because one
   widget named a metric.
 - The agent-server `validate_widget` no longer requires `value` (or `color` on a
@@ -1403,10 +1437,15 @@ The objective ↔ metric join (ent#666). Cross-agent and fleet reads (ent#80,
 ent#94) — the self-gate above is the boundary they will lift, deliberately, with
 a grant. A WebSocket `metrics_updated` trigger: §48.8 deferred it for want of a
 refetch route, that route now exists, and it is ent#538's to add with
-coalescing, because a per-batch broadcast at the write cap is a storm. Removing
-the agent-server `/api/metrics` route or `metrics.json` support from the base
-image. `series_limit` and the bucket count as Settings rows — they are read
-bounds on one query, not operator policy.
+coalescing, because a per-batch broadcast at the write cap is a storm. Deleting
+the agent-server `/api/metrics` route from the base image — it is **retired in
+place** instead: the route still exists but reads neither `template.yaml` nor
+`metrics.json`, answering `410` with
+`{has_metrics: false, superseded_by, finding: "D-010", message}`. Keeping it
+serving the file would have left the agent half of a deleted backend read alive
+(Invariant #5) and made `metrics.json` a second source of truth for a number the
+registry owns. `series_limit` and the bucket count as Settings rows — they are
+read bounds on one query, not operator policy.
 
 ### Acceptance
 
@@ -1420,6 +1459,8 @@ bounds on one query, not operator policy.
 - [x] Dimensioned metrics fold by the declared `aggregation` and keep
       per-series freshness
 - [x] Every empty state names the next action the agent can actually take
+- [x] Buckets cover the window: an out-of-window point is dropped, not folded
+      into bucket 0, and `stats` is computed from the chart it labels
 - [x] `metrics.json` is retired as a source and named by D-010, echoed on the
       read with `findings_evaluated_at`
 - [x] MCP `get_metrics` is agent-scoped, never throws, and maps `undeclared`

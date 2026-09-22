@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
 from ..models import AgentInfo
 from ..safe_yaml import AliasPolicy, load_hardened_yaml
@@ -281,66 +282,38 @@ def get_template_path() -> Path:
 
 @router.get("/api/metrics")
 async def get_metrics():
+    """Superseded (trinity-enterprise#479, finding D-010).
+
+    This route used to read `/home/developer/metrics.json` and return its
+    contents as the agent's CURRENT values. The point store replaced it:
+    `record_metrics` writes points, `GET /api/agents/{name}/metrics` composes
+    them with the `template.yaml` declarations, and that read is store-only so
+    it answers for a stopped agent — which is precisely what this file-read
+    could never do.
+
+    The route stays (§49.7 keeps it rather than breaking any caller still
+    holding the URL) but it no longer READS the file. Serving those values
+    would make the file a second source of truth for a number the registry
+    owns, and "serve the file when the store looks empty" is exactly how two
+    sources drift apart unnoticed — the backend half of this read was deleted
+    for that reason, and Invariant #5 means the agent half cannot keep it.
+
+    It answers with the superseded payload and HTTP 410: gone, permanently,
+    with the replacement named. Declarations still come from
+    `GET /api/template-info`, and the file's presence is reported as D-010.
     """
-    Get agent custom metrics.
-
-    Returns metric definitions from template.yaml and current values from metrics.json.
-
-    Response:
-    - has_metrics: Whether agent has custom metrics defined
-    - definitions: List of metric definitions from template.yaml
-    - values: Current metric values from metrics.json
-    - last_updated: Timestamp from metrics.json (if available)
-    """
-    # 1. Read template.yaml for metric definitions
-    template_path = get_template_path()
-    if not template_path.exists():
-        return {
+    return JSONResponse(
+        status_code=410,
+        content={
             "has_metrics": False,
-            "message": "No template.yaml found"
-        }
-
-    try:
-        # #1965: same document, same REJECT policy as `/api/template-info`.
-        template_data = load_hardened_yaml(
-            template_path.read_text(),
-            kind="template",
-            alias_policy=AliasPolicy.REJECT,
-        )
-    except Exception as e:
-        logger.warning(f"Failed to read template.yaml: {e}")
-        return {
-            "has_metrics": False,
-            "message": f"Failed to read template.yaml: {str(e)}"
-        }
-
-    metric_definitions = template_data.get("metrics", [])
-
-    if not metric_definitions:
-        return {
-            "has_metrics": False,
-            "message": "No metrics defined in template.yaml"
-        }
-
-    # 2. Read current values from metrics.json
-    metrics_path = Path("/home/developer/metrics.json")
-
-    values: Dict[str, Any] = {}
-    last_updated: Optional[str] = None
-
-    if metrics_path.exists():
-        try:
-            data = json.loads(metrics_path.read_text())
-            last_updated = data.pop("last_updated", None)
-            values = data
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse metrics.json: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to read metrics.json: {e}")
-
-    return {
-        "has_metrics": True,
-        "definitions": metric_definitions,
-        "values": values,
-        "last_updated": last_updated
-    }
+            "superseded_by": (
+                "record_metrics / GET /api/agents/{name}/metrics"
+            ),
+            "finding": "D-010",
+            "message": (
+                "metrics.json is superseded and no longer served — record "
+                "these values with `record_metrics`; read them back from "
+                "GET /api/agents/{name}/metrics"
+            ),
+        },
+    )

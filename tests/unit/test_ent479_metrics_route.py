@@ -287,12 +287,46 @@ def test_a_metric_past_two_cadences_is_marked_stale(ctx):
 
 
 def test_a_declared_metric_with_no_points_teaches_the_next_action(ctx):
+    """Both halves of the ruled copy, on one sentence.
+
+    The first version branched on a `has_playbook` flag NO CALLER PASSED, so
+    the `/update-dashboard` half was dead copy — a route test that only read
+    the default branch could never have noticed. This read is store-only and
+    the playbook catalog is a container probe, so the copy names both actions
+    instead of branching on a fact it cannot learn. The two assertions are the
+    two branches that used to exist; a re-introduced branch that drops either
+    action from the default answer fails here.
+    """
     ctx.db.points = []
     metric = _get(ctx).json()["metrics"][0]
     assert metric["latest"] is None
     assert metric["freshness"] == "no_points"
     assert metric["stale"] is False
     assert "record_metrics" in metric["message"]
+    assert "/update-dashboard" in metric["message"]
+
+
+def test_a_metric_WITH_points_carries_no_empty_copy(ctx):
+    """The other arm of the same branch: the empty-state sentence must not
+    ride along under a number that exists."""
+    metric = _get(ctx).json()["metrics"][0]
+    assert metric["latest"] is not None
+    assert metric["message"] is None
+
+
+def test_the_empty_copy_takes_no_flag_the_route_cannot_compute(ctx):
+    """@signature-pin. `has_playbook` was reachable only by its default, which
+    is how half a documented sentence shipped unrenderable. If a future change
+    wants the branch back, it has to give `read_agent_metrics` a value the
+    ROUTE can produce store-only — and updating this pin is the moment to
+    prove it, rather than adding a parameter nobody passes again.
+    """
+    import inspect
+
+    from services import metric_read_service
+
+    params = inspect.signature(metric_read_service.read_agent_metrics).parameters
+    assert "has_playbook" not in params
 
 
 def test_an_agent_with_no_metrics_block_names_the_next_action(ctx):
@@ -333,6 +367,96 @@ def test_freshness_is_the_newest_point_across_every_dimension_series(ctx):
     assert metric["stale"] is False
     stale_series = [s for s in metric["latest_by_series"] if s["stale"]]
     assert [s["dims"]["region"] for s in stale_series] == ["us"]
+
+
+def test_a_point_OLDER_than_the_window_is_dropped_not_folded_into_bucket_0(ctx):
+    """I1 — the defect this whole assertion set exists for.
+
+    `latest_metric_points` returns the newest N points for the metric, which
+    is a "newest N" slice and NOT the window. The bucket index of a point
+    older than `since` is negative, and the first version clamped it with
+    `max(index, 0)` instead of dropping it: the read opened with a fabricated
+    spike — the fold of every excluded point — stamped BEFORE `since`, and
+    `stats` was computed from it.
+    """
+    ctx.db.definitions = [_definition(aggregation="sum")]
+    ctx.db.points = [
+        _point(ts=_ago(10 * 86400), value=500.0),   # ten days old
+        _point(ts=_ago(9 * 86400), value=500.0),
+        _point(ts=_ago(60), value=7.0),             # the only in-window point
+    ]
+    body = _get(ctx, window="24h").json()
+    metric = body["metrics"][0]
+    since = body["window"]["since"]
+
+    buckets = metric["series"][0]["buckets"]
+    assert buckets, "the in-window point should still be charted"
+    assert all(b["ts"] >= since for b in buckets), (
+        f"a bucket is stamped before the window opened: {buckets}")
+    assert [b["value"] for b in buckets] == [7.0], (
+        "an excluded point contributed to a fold")
+
+    # The same points must not reach `stats` by the back door — min/max/trend
+    # and the tile's trend arrow are computed from these buckets.
+    assert metric["stats"]["max"] == 7.0
+    assert metric["stats"]["min"] == 7.0
+    assert metric["chart"]["buckets"] == buckets
+
+
+def test_a_point_in_the_window_at_its_very_END_still_lands_in_a_bucket(ctx):
+    """The other side of the filter: the `SERIES_BUCKETS - 1` clamp survives
+    so `ts == until` is the last bucket rather than one past the end. A filter
+    written as `ts >= end: continue` would silently drop the newest point,
+    which is the one an operator is actually looking at."""
+    metric = _get(ctx, window="24h").json()["metrics"][0]
+    assert [b["value"] for b in metric["series"][0]["buckets"]] == [10.0]
+
+
+def test_the_chart_and_the_trend_describe_the_SAME_thing_as_the_value(ctx):
+    """I6: `latest.value` is the fold across every dimension series, so for a
+    foldable aggregation the chart must be that same fold. Charting
+    `series[0]` drew one region's history under a total."""
+    ctx.db.definitions = [_definition(aggregation="sum", dimensions=["region"])]
+    ctx.db.points = [
+        _point(ts=_ago(60), value=10.0, dims={"region": "eu"}),
+        _point(ts=_ago(90), value=5.0, dims={"region": "us"}),
+    ]
+    metric = _get(ctx, window="24h").json()["metrics"][0]
+
+    assert metric["latest"]["value"] == 15.0
+    assert metric["chart"]["basis"] == "folded"
+    assert [b["value"] for b in metric["chart"]["buckets"]] == [15.0]
+    assert metric["stats"]["max"] == 15.0
+    # Per-series buckets are still there for anyone who wants the breakdown.
+    assert sorted(s["buckets"][0]["value"] for s in metric["series"]) == [5.0, 10.0]
+
+
+def test_a_last_metric_over_several_series_SAYS_which_series_it_charts(ctx):
+    """A cross-series fold is undefined for `last` — the last value of two
+    regions is not one number. Rather than invent one, the payload names the
+    series it drew so the tile can label the chart; silently charting
+    `series[0]` under a multi-series metric was the ambiguity."""
+    ctx.db.definitions = [_definition(aggregation="last", dimensions=["region"])]
+    ctx.db.points = [
+        _point(ts=_ago(60), value=10.0, dims={"region": "eu"}),
+        _point(ts=_ago(90), value=5.0, dims={"region": "us"}),
+    ]
+    metric = _get(ctx, window="24h").json()["metrics"][0]
+
+    assert metric["chart"]["basis"] == "series"
+    assert metric["chart"]["series_count"] == 2
+    assert metric["chart"]["dims"] == {"region": "eu"}  # the newest series
+    # …and it is the same series the `last` fold took its value from.
+    assert metric["latest"]["value"] == 10.0
+    assert [b["value"] for b in metric["chart"]["buckets"]] == [10.0]
+
+
+def test_a_single_series_metric_needs_no_chart_caveat(ctx):
+    """`basis: "series"` with one series is the whole metric — the tile's
+    label is gated on `series_count > 1`, so this is what keeps the ordinary
+    tile free of a caveat that would mean nothing."""
+    metric = _get(ctx).json()["metrics"][0]
+    assert metric["chart"]["series_count"] == 1
 
 
 def test_the_default_read_ships_buckets_and_no_raw_points(ctx):

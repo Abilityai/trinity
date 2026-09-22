@@ -146,6 +146,24 @@ describe('a binding that failed shows the reason, never a number', () => {
     expect(wrapper.text()).toContain('7')
   })
 
+  it('renders the retired-metric refusal and no number', async () => {
+    // TD-10 refuses `metric=<retired>` on the route so a retired metric never
+    // silently reads as current; a widget is that same read with nobody there
+    // to pass `include_retired`, so the bind refuses too. The widget must say
+    // WHY rather than showing the last value it happened to have.
+    const wrapper = await mountPanel(dashboard([{
+      type: 'metric', label: 'Old KPI', metric: 'revenue', bound: false,
+      binding_error: "metric 'revenue' was retired at 2026-09-01T00:00:00Z — "
+        + 'bind a declared metric or re-declare this one in template.yaml',
+      binding_error_code: 'metric_retired',
+      retired_at: '2026-09-01T00:00:00Z',
+    }]))
+    const error = wrapper.find('[data-testid="bound-error"]')
+    expect(error.text()).toContain('was retired at 2026-09-01T00:00:00Z')
+    expect(wrapper.find('[data-testid="bound-freshness-chip"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="bound-point-time"]').exists()).toBe(false)
+  })
+
   it('says "no points yet" for a declared metric that has never recorded one', async () => {
     const wrapper = await mountPanel(dashboard([{
       type: 'metric', label: 'Revenue', metric: 'revenue', bound: true,

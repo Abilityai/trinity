@@ -318,7 +318,10 @@ widgets:
 
 Trinity fills it on every read from the metric registry: `value`, `color` (the
 declared status `values[].color`, or the thresholds for a numeric type),
-`history`, `last_point_at`, `stale`, `freshness`, `bound: true`. The panel
+`history`, `last_point_at`, `stale`, `freshness`, `bound: true`. `history` is
+built from the read's `chart` — the same fold `value` came from — so the
+widget's sparkline and trend arrow describe the number printed above them
+rather than one dimension of a total. The panel
 renders the metric name, the **point time** and a **stale** mark beneath the
 widget (`BoundMetricMark.vue`), because the panel's own header timestamp says
 when the *dashboard* was fetched, which for a bound number says nothing about
@@ -332,13 +335,20 @@ written into `agent_dashboard_values` would be a second source for a value the
 registry already owns, and the two would disagree the moment the dashboard poll
 and the recording cadence drift apart.
 
-**Failure modes, all per-widget:**
+**Failure modes, all per-widget.** Each carries a machine `binding_error_code`
+beside its sentence — the route's `{reason, message}` pair spelled for a widget,
+so a consumer telling one refusal from another never substring-matches English:
 
-| Situation | What the widget shows |
-|---|---|
-| The name is not declared | `binding_error: "metric 'x' is not declared in template.yaml"`, and **no value** — a wrong number is worse than no number |
-| The metric store is down | `binding_error: "metric store unavailable"`; unbound widgets render normally and the dashboard is never 5xx'd |
-| Declared, no points yet | "declared, no points yet" instead of a number |
+| Situation | `binding_error_code` | What the widget shows |
+|---|---|---|
+| The name is not declared | `metric_undeclared` | `binding_error: "metric 'x' is not declared in template.yaml"`, and **no value** — a wrong number is worse than no number |
+| The name is **retired** | `metric_retired` | `binding_error: "metric 'x' was retired at T — …"` plus `retired_at`, and no value. TD-10 refuses `metric=<retired>` on the route so a retired metric never silently reads as current; a widget is that same read with nobody there to pass `include_retired`, so it refuses too |
+| The metric store is down | `metric_store_unavailable` | `binding_error: "metric store unavailable"`; unbound widgets render normally and the dashboard is never 5xx'd |
+| Declared, no points yet | — | "declared, no points yet" instead of a number |
+
+A resolved binding **clears** a previous refusal (both keys are popped), so a
+retry after the store comes back cannot leave a widget bound and erroring at
+once.
 
 **Older base images.** The relaxed `validate_widget` ships in the agent image,
 so an author targeting an agent on an older image keeps a placeholder `value:`

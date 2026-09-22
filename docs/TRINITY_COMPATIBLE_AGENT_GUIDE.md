@@ -1482,7 +1482,10 @@ registry does not hold is rejected.
   `GET /api/agents/{name}/metrics/definitions`.
 - **Values**: the `metric_points` store, written only by `record_metrics`.
   `/home/developer/metrics.json` is **retired** — unread, never served, and
-  reported as D-010 if present.
+  reported as D-010 if present. The agent-server route that used to serve it,
+  `GET /api/metrics` on the container, is retired in place: it still exists but
+  reads no file and answers `410` with
+  `{has_metrics: false, superseded_by: "record_metrics / GET /api/agents/{name}/metrics", finding: "D-010"}`.
 
 ### Keeping the Registry in Sync
 
@@ -1667,6 +1670,12 @@ not used as a fallback, and its presence is reported as compatibility finding
 **D-010**: *"metrics.json is superseded and no longer served — record these
 values with `record_metrics`"*, with the detail naming its keys and which of
 them have no `template.yaml metrics:` entry.
+
+The container's own `GET /api/metrics` no longer reads it either. That route is
+kept so nothing 404s, but it parses nothing and answers `410` with
+`{has_metrics: false, superseded_by: "record_metrics / GET /api/agents/{name}/metrics", finding: "D-010"}`.
+Read your declarations from `GET /api/template-info` and your values from
+`GET /api/agents/{name}/metrics` (or the `get_metrics` MCP tool).
 
 Trinity refuses to serve it deliberately rather than as an oversight. Two
 sources for one number is the problem this whole area exists to remove, and
@@ -2383,7 +2392,7 @@ Closing stdout only (not stderr) preserves error messages from a failing
 
 | Date | Changes |
 |------|---------|
-| 2026-09-22 | **Reading metrics (ent#479)**: added `get_metrics` and the one `2 x cadence` staleness rule (declare a `cadence:` or your metric can never be called stale); declared metrics render as Dashboard tiles with no `dashboard.yaml`; `dashboard.yaml` widgets may bind `metric: <name>`, with the placeholder-`value:` rule for agents on a pre-#479 base image. **`metrics.json` is retired** — unread, never served, reported as D-010, with migration steps |
+| 2026-09-22 | **Reading metrics (ent#479)**: added `get_metrics` and the one `2 x cadence` staleness rule (declare a `cadence:` or your metric can never be called stale); declared metrics render as Dashboard tiles with no `dashboard.yaml`; `dashboard.yaml` widgets may bind `metric: <name>`, with the placeholder-`value:` rule for agents on a pre-#479 base image, and a binding to a **retired** metric is refused (`metric_retired`) rather than shown as current. **`metrics.json` is retired** — unread, never served, reported as D-010, with migration steps; the container's `GET /api/metrics` is retired in place and answers `410` with the superseded payload |
 | 2026-09-06 | **Widget Types**: stated as a closed set; no chart/badge/countdown widget exists (#2110) |
 | 2026-02-05 | **Credential System Refactor (CRED-002)**: Updated Credential Management section for new simplified system; Direct file injection replaces Redis-based assignments; Export/Import with encrypted `.credentials.enc` for git storage; Auto-import on agent startup |
 | 2026-01-27 | **Advanced Skills & CLAUDE.md**: Added 8 new skill frontmatter fields (`disable-model-invocation`, `user-invocable`, `argument-hint`, `model`, `context`, `agent`, `hooks`); Added invocation control table; Added string substitutions (`$ARGUMENTS`, `$N`, `${CLAUDE_SESSION_ID}`); Added dynamic context injection (`!`command``); Added skill size guidelines; Added CLAUDE.md imports (`@path` syntax) and best practices table |

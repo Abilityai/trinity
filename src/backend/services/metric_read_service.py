@@ -303,23 +303,39 @@ def _bucket(points: List[Dict[str, Any]], window: Dict[str, Any],
     folding a bucket with the declared aggregation keeps it. Buckets with no
     point are omitted (a gap is data — `SparklineChart` draws what it is
     given, and inventing a zero would draw a cliff that never happened).
+
+    **A point outside `[since, until]` is DROPPED, never clamped.** The default
+    path hands this function the newest `LATEST_POINTS_PER_METRIC` points for
+    the metric, which is a "newest N" slice and not a window: a clamp
+    (`max(index, 0)`) folded every pre-window point into bucket 0, so a metric
+    with ten days of history read over 24 h opened with a fabricated spike —
+    the sum of points the window excludes, stamped at a `ts` BEFORE `since` —
+    and `stats` (min/max/trend) was computed from it. Filtering is the window;
+    the `SERIES_BUCKETS - 1` clamp survives only to put `ts == until` in the
+    last bucket rather than one past the end.
+
+    Each bucket carries its index `i` as well as `{ts, value}`: the index is
+    what makes "the same moment in two dimension series" well defined, which
+    is what `_fold_across_series` folds by (a bucket with no point is omitted,
+    so position in the list is not the same thing).
     """
     if not points:
         return []
     start = _as_datetime(window["since"])
     end = _as_datetime(window["until"])
     if start is None or end is None or end <= start:
-        return [{"ts": p["ts"], "value": p["value"]} for p in points[-SERIES_BUCKETS:]]
+        return [{"i": i, "ts": p["ts"], "value": p["value"]}
+                for i, p in enumerate(points[-SERIES_BUCKETS:])]
     span = (end - start).total_seconds()
     width = max(span / SERIES_BUCKETS, 1e-6)
 
     grouped: Dict[int, List[Dict[str, Any]]] = {}
     for point in points:
         ts = _as_datetime(point["ts"])
-        if ts is None:
+        if ts is None or ts < start or ts > end:
             continue
         index = min(int((ts - start).total_seconds() / width), SERIES_BUCKETS - 1)
-        grouped.setdefault(max(index, 0), []).append(point)
+        grouped.setdefault(index, []).append(point)
 
     buckets = []
     for index in sorted(grouped):
@@ -327,8 +343,75 @@ def _bucket(points: List[Dict[str, Any]], window: Dict[str, Any],
         values = [m["value"] for m in members]
         # `members` is oldest-first, so `last` must read the END of the bucket.
         folded = fold(list(reversed(values)), aggregation)
-        buckets.append({"ts": members[-1]["ts"], "value": folded})
+        buckets.append({"i": index, "ts": members[-1]["ts"], "value": folded})
     return buckets
+
+
+#: Aggregations for which folding ACROSS dimension series is defined. `sum` and
+#: `avg` answer "what is the total / the mean at this moment" for any set of
+#: series; `last` does not — the last value of two regions is not one number,
+#: which is why `fold` resolves it to the newest series and why a `last` chart
+#: says which series it is drawing instead of inventing a fold.
+_FOLDABLE_ACROSS_SERIES = frozenset({"sum", "avg"})
+
+
+def _fold_across_series(
+    series: List[Dict[str, Any]], aggregation: Optional[str]
+) -> List[Dict[str, Any]]:
+    """One bucket list describing EVERY series, folded by bucket index.
+
+    A bucket holds only the series that reported in it — the same rule the
+    per-bucket fold already uses within one series, and the honest one: a
+    region with no observation in a five-minute bucket has no value to add.
+    """
+    by_index: Dict[int, List[Dict[str, Any]]] = {}
+    for entry in series:
+        for bucket in entry.get("buckets") or []:
+            by_index.setdefault(bucket.get("i", 0), []).append(bucket)
+
+    folded = []
+    for index in sorted(by_index):
+        members = by_index[index]
+        folded.append({
+            "i": index,
+            "ts": max(m["ts"] for m in members),
+            "value": fold([m["value"] for m in members], aggregation),
+        })
+    return folded
+
+
+def _chart(
+    series: List[Dict[str, Any]],
+    aggregation: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """The ONE bucket list the sparkline draws and `stats` is computed from.
+
+    The chart and the number above it must describe the same thing. `latest`
+    is the fold across every dimension series, so for a foldable aggregation
+    the chart is the fold too; for `last` a cross-series fold has no meaning,
+    so the chart is the newest series and `basis: "series"` + `dims` SAY so —
+    the tile labels it rather than letting a total's trend arrow be drawn from
+    one region's history.
+    """
+    if not series:
+        return None
+    mode = (aggregation or "last").lower()
+    if mode in _FOLDABLE_ACROSS_SERIES and len(series) > 1:
+        return {
+            "basis": "folded",
+            "aggregation": mode,
+            "series_count": len(series),
+            "dims": None,
+            "buckets": _fold_across_series(series, mode),
+        }
+    primary = series[0]
+    return {
+        "basis": "series",
+        "aggregation": mode,
+        "series_count": len(series),
+        "dims": primary.get("dims"),
+        "buckets": list(primary.get("buckets") or []),
+    }
 
 
 def _group_series(
@@ -374,10 +457,24 @@ def _numeric(definition: Dict[str, Any]) -> bool:
     return (definition.get("type") or "") in _NUMERIC_TYPES
 
 
-def _empty_message(definition: Dict[str, Any], has_playbook: bool) -> str:
-    if has_playbook:
-        return "declared, no points yet — schedule `/update-dashboard`"
-    return "declared, no points yet — record points with `record_metrics`"
+#: The copy a declared-but-never-recorded metric carries. It names BOTH
+#: actions because this read cannot tell which the agent has: the playbook
+#: catalog is a container probe (`GET /api/agents/{name}/playbooks`, 503 on a
+#: stopped agent) and this route is deliberately store-only, while the
+#: persisted `agent_skills` rows know only LIBRARY assignments — every bundled
+#: template carries `/update-dashboard` in `.claude/commands/` instead, so a
+#: conditional built on that table would tell exactly those agents they do not
+#: have the playbook they ship with. A `has_playbook` flag no caller could
+#: compute made the second half of this sentence unreachable dead copy, which
+#: is worse than naming one action too many.
+EMPTY_METRIC_MESSAGE = (
+    "declared, no points yet — record points with `record_metrics` "
+    "(or schedule `/update-dashboard` if the agent has that playbook)"
+)
+
+
+def _empty_message(definition: Dict[str, Any]) -> str:
+    return EMPTY_METRIC_MESSAGE
 
 
 def _definition_fields(definition: Dict[str, Any]) -> Dict[str, Any]:
@@ -412,7 +509,6 @@ def read_agent_metrics(
     include_retired: bool = False,
     series_limit: int = DEFAULT_SERIES_LIMIT,
     now: Optional[datetime] = None,
-    has_playbook: bool = False,
     findings: Optional[List[Dict[str, Any]]] = None,
     findings_evaluated_at: Optional[str] = None,
     policy: Optional[Dict[str, Any]] = None,
@@ -474,8 +570,7 @@ def read_agent_metrics(
         metrics.append(_compose_metric(
             agent_name, definition, rows_by_metric.get(definition["name"], []),
             resolved, now,
-            raw=bool(metric), series_limit=series_limit,
-            has_playbook=has_playbook, db=db,
+            raw=bool(metric), series_limit=series_limit, db=db,
         ))
 
     return {
@@ -505,7 +600,6 @@ def _compose_metric(
     *,
     raw: bool,
     series_limit: int,
-    has_playbook: bool,
     db: Any,
 ) -> Dict[str, Any]:
     """One metric's entry: definition + latest + freshness + series + stats."""
@@ -550,19 +644,24 @@ def _compose_metric(
     else:
         entry["latest"] = None
         entry["latest_by_series"] = []
-        entry["message"] = _empty_message(definition, has_playbook)
+        entry["message"] = _empty_message(definition)
 
     entry["series"] = _build_series(
         agent_name, definition, grouped, window,
         raw=raw, series_limit=series_limit, db=db,
     )
 
+    # `chart` is the ONE bucket list the sparkline and the trend arrow share,
+    # so they cannot describe a different thing from the number above them
+    # (`latest.value` is the cross-series fold; for `sum`/`avg` the chart is
+    # that same fold, and for `last` it names the series it is drawing).
+    entry["chart"] = _chart(entry["series"], aggregation)
+
     # Stats describe the folded sparkline of a NUMERIC metric only: a `status`
     # metric's min/max would be the alphabetical order of its labels.
-    if _numeric(definition) and entry["series"]:
-        primary = entry["series"][0]
+    if _numeric(definition) and entry["chart"]:
         history = [{"t": b["ts"], "v": b["value"]}
-                   for b in primary.get("buckets", [])
+                   for b in entry["chart"]["buckets"]
                    if isinstance(b.get("value"), (int, float))]
         entry["stats"] = db.calculate_widget_stats(history) if history else None
     else:
@@ -722,6 +821,12 @@ def bind_dashboard_widgets(
     Degrades per widget: a store outage sets `binding_error` on the bound
     widgets and leaves every unbound widget untouched. A dashboard is never
     5xx'd because one widget named a metric.
+
+    Three refusals, each with a machine `binding_error_code` beside the
+    sentence (the route's `{reason, message}` pair, spelled for a widget):
+    `metric_store_unavailable`, `metric_undeclared`, and `metric_retired` —
+    the last is TD-10's rule applied to a reader who cannot pass
+    `include_retired`, so a retired metric never reads as current here either.
     """
     if not isinstance(config, dict):
         return config
@@ -733,6 +838,8 @@ def bind_dashboard_widgets(
 
     now = now or datetime.now(timezone.utc)
     try:
+        # `include_retired=True` so a retired binding is DISTINGUISHABLE from a
+        # name that was never declared — the two get different refusals below.
         payload = read_agent_metrics(
             agent_name, window="auto", include_retired=True, now=now)
         by_name = {m["name"]: m for m in payload.get("metrics", [])}
@@ -740,6 +847,7 @@ def bind_dashboard_widgets(
         logger.warning("[Metrics] Bind failed for %s: %s", agent_name, exc)
         for widget in widgets:
             widget["binding_error"] = "metric store unavailable"
+            widget["binding_error_code"] = "metric_store_unavailable"
             widget["bound"] = False
         return config
 
@@ -749,12 +857,31 @@ def bind_dashboard_widgets(
         if entry is None:
             widget["binding_error"] = (
                 f"metric '{name}' is not declared in template.yaml")
+            widget["binding_error_code"] = "metric_undeclared"
             widget["bound"] = False
             widget.pop("value", None)
+            continue
+        if (entry.get("status") or "active") != "active":
+            # TD-10's rule, applied to the binding: `metric=<retired>` on the
+            # route is a 422 rather than a 200 carrying the last value, and a
+            # widget is the same read with no one there to pass
+            # `include_retired`. Rendering the last value of a metric the
+            # author retired is exactly the "silently reads as current" case
+            # that refusal exists to prevent, so the widget refuses too — and
+            # says why, rather than disappearing.
+            widget["binding_error"] = (
+                f"metric '{name}' was retired at {entry.get('retired_at')} — "
+                "bind a declared metric or re-declare this one in template.yaml")
+            widget["binding_error_code"] = "metric_retired"
+            widget["retired_at"] = entry.get("retired_at")
+            widget["bound"] = False
+            widget.pop("value", None)
+            widget.pop("history", None)
             continue
         latest = entry.get("latest")
         widget["bound"] = True
         widget.pop("binding_error", None)
+        widget.pop("binding_error_code", None)
         widget["last_point_at"] = entry.get("last_point_at")
         widget["stale"] = entry.get("stale")
         widget["freshness"] = entry.get("freshness")
@@ -771,17 +898,21 @@ def bind_dashboard_widgets(
                  else _threshold_color(entry, latest["value"]))
         if color:
             widget["color"] = color
-        series = entry.get("series") or []
-        if series:
+        chart = entry.get("chart")
+        if chart:
             # The SAME shape `_enrich_widgets_with_history` writes
             # (`{values, trend, trend_percent, min, max, avg}`), not a bare
             # list: `DashboardPanel.vue` reads `widget.history.values` and
             # `widget.history.trend`, so a bound widget handed a list would
             # silently lose its sparkline and its trend arrow while every
             # backend test still passed. One consumer, one shape.
+            #
+            # Drawn from `chart`, not `series[0]`: the widget's `value` above
+            # is the cross-series fold, so its history must be the same fold
+            # or the trend arrow would describe one region of a total.
             values = [
                 {"t": b["ts"], "v": b["value"]}
-                for b in series[0].get("buckets", [])
+                for b in chart["buckets"]
             ]
             stats = db.calculate_widget_stats(values) if values else None
             widget["history"] = {
