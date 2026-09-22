@@ -120,6 +120,14 @@ describe('#2964 — the chat card reserves its rows from first paint', () => {
     expect(w.emitted('stop')[0][0].id).toBe('e1')
   })
 
+  it('4b. the actions row is reserved with Stop, even without Open in Work', async () => {
+    const w = mountLive({ showOpenInWork: false })
+    const before = signature(w)
+    expect(w.find('[data-testid="portal-work-stop-reserved"]').exists()).toBe(true)
+    await w.setProps({ item: synthetic({ id: 'e1', steps: { state: 'none' } }), canStop: true })
+    expect(signature(w)).toEqual(before)
+  })
+
   it('5. pending → stages is the allowed growth: the list replaces the reserved row', async () => {
     const w = mountLive()
     await w.setProps({ item: synthetic({ id: 'e1', steps: { state: 'reported', stages: [{ id: 'a', name: 'Collect', state: 'current' }] } }) })

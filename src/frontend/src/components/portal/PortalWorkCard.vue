@@ -211,7 +211,7 @@ const clock = computed(() => (live.value ? formatElapsed(props.elapsedSeconds) :
 const steps = computed(() => stepsLine(props.item.steps, props.item.agent_name))
 const stages = computed(() => stageRows(props.item.steps))
 const askable = computed(() => !live.value && isHonestTerminal(props.item.outcome))
-const hasActions = computed(() => (live.value && props.canStop) || askable.value || props.showOpenInWork)
+const hasActions = computed(() => (live.value && (props.canStop || props.reserveLiveRows)) || askable.value || props.showOpenInWork)
 
 // A stage's holder is the executing agent unless the definition names one;
 // the server masks an off-roster name to null, so null here means "another
