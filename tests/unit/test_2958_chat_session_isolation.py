@@ -463,3 +463,30 @@ async def test_compaction_numbers_come_from_the_jsonl(shim):
         POST,
         DUR,
     )
+
+
+async def test_a_failed_marker_write_keeps_the_in_memory_id(shim, monkeypatch, tmp_path, caplog):
+    """T-C: a full disk must not disable continuity. The write fails loudly and
+    returns False; the chat still resumes its own id next turn."""
+    caplog.set_level(logging.WARNING)
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    monkeypatch.setenv("TRINITY_CHAT_SESSION_FILE", str(blocker / "chat-session.json"))
+
+    chat1 = await _chat("hello")
+    assert "event=chat_session_marker_write_failed" in caplog.text
+    assert agent_state.chat_session_id == chat1.session_id
+
+    chat2 = await _chat("again")
+    assert chat2.session_id == chat1.session_id
+
+
+def test_marker_write_rejects_a_non_uuid(tmp_path, monkeypatch):
+    from agent_server.services import chat_session_marker
+
+    target = tmp_path / "m.json"
+    monkeypatch.setenv("TRINITY_CHAT_SESSION_FILE", str(target))
+    assert chat_session_marker.write("../../etc/passwd", "m") is False
+    assert not target.exists()
+    assert chat_session_marker.write("c4a7c4a7-2958-4958-8958-295829582958", "m") is True
+    assert list(tmp_path.iterdir()) == [target], "no temp file left behind"
