@@ -55,6 +55,9 @@
 
     <p v-if="header?.description" class="text-sm text-gray-600 dark:text-gray-300">{{ header.description }}</p>
 
+    <!-- ent#527: the role card — rendered only when the agent carries a role. -->
+    <PortalAgentRole :agent-name="agentName" />
+
     <!-- ---------------------------- CHATS ------------------------------ -->
     <!-- The FULL list, which is what this panel is for: the tab strip shows
          what fits and hides the rest, and the design pass puts the complete
@@ -174,6 +177,10 @@
         </div>
       </div>
     </section>
+
+    <!-- ent#637: what this agent remembers about YOU, and which runs changed
+         it — its own component so the Undo verb is mount-testable on its own. -->
+    <PortalAgentMemory :agent-name="agentName" />
   </div>
 </template>
 
@@ -192,6 +199,8 @@ import LoadFailed from '@/components/LoadFailed.vue'
 import ReportRenderer from '@/components/reports/ReportRenderer.vue'
 import ReportSummary from '@/components/reports/ReportSummary.vue'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalAgentMemory from './PortalAgentMemory.vue'
+import PortalAgentRole from './PortalAgentRole.vue'
 import { agentDisplayName } from '@/utils/agentName'
 import { availabilityChip, threadTitle, MAIN_TAB_LABEL } from './portalUtils'
 import { usePortalAgentPage } from '@/composables/usePortalAgentPage'

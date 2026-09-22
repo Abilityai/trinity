@@ -12,25 +12,26 @@ Mirrors the SQLite ``metric_definitions_table`` migration.
 head at branch time (``0064_executions_search_indexes``); #2920 then landed
 ``0065_agent_skills_delivery_status`` on the same parent, making this revision a
 FORK — and a forked version-line applies **zero** revisions on PostgreSQL while
-git reports no conflict (#2068). The re-chain that docstring promised **is
-done**: by operator ruling this lands NOW, ahead of the still-open #2924 and
-#2927, so it is ``0066_metric_definitions`` on top of
-``0065_agent_skills_delivery_status``, and those two renumber behind it
-(``0067_public_user_memory_writes``, ``0068_agent_role_readiness``) before they
-merge — ``alembic-head-watch`` is advisory, so nothing in CI forces them to.
-``check_alembic_heads.py`` over a merge-tree against LIVE ``dev`` is the proof,
-and it must be re-run immediately before merge: the PR-event result goes stale
-the moment ``dev`` advances (#2533). ``migrations/versions/__pycache__`` was
-deleted with the rename (learning 2026-08-24).
+git reports no conflict (#2068). It was re-chained once to ``0066`` on top of
+``0065``, and then #2924, #2927 and #2936 landed ``0066_public_user_memory_writes``
+→ ``0067_agent_role_readiness`` → ``0068_agent_shared_files_audience`` ahead of
+it, forking it a second time. The merge train re-chained it again at landing
+time, so it is ``0069_metric_definitions`` on top of
+``0068_agent_shared_files_audience`` — ``alembic-head-watch`` is advisory, so
+nothing in CI forces a fork to be fixed before merge. ``check_alembic_heads.py``
+over a merge-tree against LIVE ``dev`` is the proof, and it must be re-run
+immediately before merge: the PR-event result goes stale the moment ``dev``
+advances (#2533). ``migrations/versions/__pycache__`` was deleted with the
+rename (learning 2026-08-24).
 
-Revision ID: 0066_metric_definitions
-Revises: 0065_agent_skills_delivery_status
+Revision ID: 0069_metric_definitions
+Revises: 0068_agent_shared_files_audience
 """
 from alembic import op
 
 
-revision = "0066_metric_definitions"
-down_revision = "0065_agent_skills_delivery_status"
+revision = "0069_metric_definitions"
+down_revision = "0068_agent_shared_files_audience"
 branch_labels = None
 depends_on = None
 

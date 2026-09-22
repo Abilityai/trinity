@@ -131,6 +131,7 @@ from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
+from db.role_readiness import RoleReadinessOperations
 from db.skill_sources import SkillSourcesOperations
 from db.public_chat import PublicChatOperations
 from db.tags import TagOperations
@@ -1007,6 +1008,7 @@ class DatabaseManager:
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
+        self._role_readiness_ops = RoleReadinessOperations()
         self._skill_sources_ops = SkillSourcesOperations()
         self._public_chat_ops = PublicChatOperations()
         self._tag_ops = TagOperations()
@@ -1317,6 +1319,10 @@ class DatabaseManager:
 
     def list_active_shared_files_for_agent(self, agent_name: str) -> list:
         return self._agent_shared_files_ops.list_active_for_agent(agent_name)
+
+    def list_active_shared_files_for_viewer(self, agent_name: str, viewer_email, *, include_owner_only: bool = False) -> list:
+        return self._agent_shared_files_ops.list_active_for_viewer(
+            agent_name, viewer_email, include_owner_only=include_owner_only)
 
     def mark_shared_file_downloaded(self, file_id: str) -> None:
         return self._agent_shared_files_ops.mark_downloaded(file_id)
@@ -1942,6 +1948,10 @@ class DatabaseManager:
         `__getattr__` — the ent#277 trap, guarded by
         `tests/unit/test_ent525_portal_work.py::test_the_facade_exposes_every_ledger_read_the_service_makes`."""
         return self._schedule_ops.get_running_for_chat(chat_id)
+
+    def get_running_in_conversation(self, agent_name: str, source_channel: str, chat_id: str):
+        """ent#549 — this agent's RUNNING turns in one conversation."""
+        return self._schedule_ops.get_running_in_conversation(agent_name, source_channel, chat_id)
 
     def get_fleet_execution_stats(self, agent_names, hours: int = 24):
         """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
@@ -2714,6 +2724,15 @@ class DatabaseManager:
     def set_skill_delivery_status(self, agent_name: str, conflicted: list, resolved: list):
         # #2914: the inject path's per-row verdict (`conflict` / cleared).
         return self._skills_ops.set_skill_delivery_status(agent_name, conflicted, resolved)
+    # =========================================================================
+    # Role readiness (delegated to db/role_readiness.py) — ent#527 / #663
+    # =========================================================================
+
+    def get_agent_role_readiness(self, agent_name: str):
+        return self._role_readiness_ops.get_role_readiness(agent_name)
+
+    def set_agent_role_readiness(self, agent_name: str, status: str, changed_by: str):
+        return self._role_readiness_ops.set_role_readiness(agent_name, status, changed_by)
 
     def is_skill_assigned(self, agent_name: str, skill_name: str):
         return self._skills_ops.is_skill_assigned(agent_name, skill_name)
@@ -2853,6 +2872,26 @@ class DatabaseManager:
     ) -> bool:
         return self._public_link_ops.update_user_memory_conversation_summary(
             agent_name, user_email, conversation_summary
+        )
+
+    # ent#637: the write boundary records history; the person reads + undoes it.
+    def write_public_user_memory_agent_notes(
+        self, agent_name: str, user_email: str, agent_notes: str, *,
+        execution_id: str = None, triggered_by: str = "", schedule_id: str = None,
+    ) -> dict:
+        return self._public_link_ops.write_user_memory_agent_notes(
+            agent_name, user_email, agent_notes,
+            execution_id=execution_id, triggered_by=triggered_by, schedule_id=schedule_id,
+        )
+
+    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
+        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
+
+    def undo_public_user_memory_write(
+        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str
+    ) -> str:
+        return self._public_link_ops.undo_user_memory_write(
+            agent_name, user_email, write_id, undone_by=undone_by
         )
 
     # =========================================================================

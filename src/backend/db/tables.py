@@ -777,12 +777,23 @@ agent_shared_files = Table(
     Column("consumed_at", Text),
     Column("download_count", Integer),
     Column("last_downloaded_at", Text),
+    # ent#549 — who the file is FOR. Decided by the platform from the turn the
+    # share came from (`services/turn_audience.py`), or named by the agent and
+    # checked against its roster. NULL email AND NULL channel = the owner only,
+    # which is also what every row from before these columns means.
+    Column("addressed_to_email", Text),
+    # The channel identity (`whatsapp:+…`, `telegram:<chat>`). DISPLAY ONLY — the
+    # owner's panel shows it; no reader ever filters on it.
+    Column("addressed_to_channel", Text),
+    # How the addressee was decided: turn | override | channel | none |
+    # ambiguous. NULL = a row that predates the column.
+    Column("audience_source", Text),
 )
 
 # #2582 / ent#548 — a Workspace viewer removes an agent-shared file from THEIR
-# list without revoking the share. `agent_shared_files` has no audience column,
-# so every rostered client already sees every active share of that agent; this
-# is the per-viewer preference layered over it.
+# list without revoking the share. Since ent#549 a file has an addressee, so
+# this is a preference over the viewer's OWN files; onward sharing (ent#633)
+# is what will make it a per-viewer layer over a shared row again.
 #
 # `agent_name` is load-bearing, not decoration: `agent_shared_files` is
 # registered CASCADE in `db/agent_cleanup.py`, so deleting an agent hard-deletes
@@ -884,6 +895,33 @@ public_user_memory = Table(
     Column("message_count", Integer),
     Column("created_at", Text),
     Column("updated_at", Text),
+)
+
+# ent#637: write history for the agent_notes section — see the note in db/schema.py.
+public_user_memory_writes = Table(
+    "public_user_memory_writes",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("user_email", Text),
+    Column("execution_id", Text),
+    Column("triggered_by", Text),
+    Column("schedule_id", Text),
+    Column("previous_notes", Text),
+    Column("new_notes", Text),
+    Column("written_at", Text),
+    Column("undone_at", Text),
+    Column("undone_by", Text),
+)
+
+# ent#527 / #663: the agent owner's readiness stamp — see the note in db/schema.py.
+agent_role_readiness = Table(
+    "agent_role_readiness",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("status", Text),
+    Column("changed_at", Text),
+    Column("changed_by", Text),
 )
 
 agent_git_config = Table(

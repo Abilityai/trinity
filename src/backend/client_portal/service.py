@@ -4292,8 +4292,9 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
 
 
 def portal_documents(agent_name: str, email: str, include_owned: bool = False) -> dict:
-    """List the files a rostered agent has shared (FILES-001), each with a
-    download URL. Scoped to the caller's roster (miss → 404). Download URLs are
+    """List the files a rostered agent has shared WITH THIS PERSON (FILES-001,
+    ent#549), each with a download URL. Scoped to the caller's roster (miss →
+    404), then to what is addressed to them. Download URLs are
     built from the PORTAL base URL (#79 resolver) so a private-deployment portal
     emits private links; when no base is configured they're relative (same-origin
     as the portal page). The `?sig=` token is the download credential — the OSS
@@ -4319,8 +4320,28 @@ def portal_documents(agent_name: str, email: str, include_owned: bool = False) -
     # `clientPortal.js::fetchDocuments`), so the filter cannot leak into the
     # turn manifest the agent is handed.
     dismissed = db.dismissed_file_ids(email)
+    # ent#549 — a shared file is for the person the turn was for. This used to
+    # read `list_active_shared_files_for_agent`, the OPERATOR question, so every
+    # rostered client saw every active share of the agent, download token
+    # included: a file made in one person's chat in another person's tab. The
+    # third time this exact shape shipped (asks ent#428, reports ent#365) — a
+    # table scoped by agent gains a per-person dimension, and a reader written
+    # before the column cannot be neutral about it.
+    #
+    # Narrowed IN THE QUERY. The agent's owner additionally reads the rows
+    # addressed to nobody (a schedule's, an operator chat's, a pre-column row's):
+    # "the owner only" has to be somewhere the owner actually works.
+    # `portal_owns_agent` is the membership the roster card renders, so a
+    # non-owner admin and an owner on a magic-link token are viewers here exactly
+    # as they are for the delete affordance (ent#358, #2582).
+    from services.turn_audience import normalize_addressee_email
+    shares = core_db.list_active_shared_files_for_viewer(
+        agent_name,
+        normalize_addressee_email(email),
+        include_owner_only=portal_owns_agent(email, agent_name, include_owned),
+    )
     docs = []
-    for row in core_db.list_active_shared_files_for_agent(agent_name):
+    for row in shares:
         fid, token = row["id"], row["download_token"]
         if fid in dismissed:
             continue

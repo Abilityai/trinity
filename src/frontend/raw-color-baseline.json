@@ -171,7 +171,7 @@
     },
     "src/frontend/src/components/FileSharingPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 49,
+      "raw_gray": 37,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/FileTreeNode.vue": {

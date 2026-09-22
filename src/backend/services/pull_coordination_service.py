@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from config import MAX_REDELIVERY
 from database import db
@@ -190,12 +190,65 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     The lease TTL reuses the slot-TTL convention: the agent's
     ``execution_timeout_seconds`` plus ``SLOT_TTL_BUFFER`` (so a legitimately
     long turn's lease outlives its deadline exactly as a slot would).
+
+    #2846: the turn limit is clamped to that same timeout, read once here, so
+    the turn always ends inside its lease. This is what keeps a healthy turn
+    from being re-delivered while it still runs — the job the (never built)
+    lease-renewal heartbeat was specified for.
     """
-    lease_seconds = int(db.get_execution_timeout(agent_name)) + SLOT_TTL_BUFFER
-    row = db.claim_next_queued(agent_name, worker_id=worker_id, lease_seconds=lease_seconds)
+    cap = int(db.get_execution_timeout(agent_name))
+    row = db.claim_next_queued(agent_name, worker_id=worker_id, lease_seconds=cap + SLOT_TTL_BUFFER)
     if not row:
         return None
-    return _build_claim_response(row)
+    claim = _build_claim_response(row)
+    overrides = claim["envelope"]["payload"]["task_overrides"]
+    limit, shortened_from = _turn_limit(overrides.get("timeout_seconds"), cap)
+    overrides["timeout_seconds"] = limit
+    if shortened_from is not None:
+        logger.warning(
+            "[#2846] %s: turn limit shortened from %ss to %ss (agent %s timeout)",
+            row["id"], shortened_from, limit, agent_name,
+        )
+    return claim
+
+
+def _turn_limit(requested: Any, cap: int) -> Tuple[int, Optional[int]]:
+    """``(limit, shortened_from)`` — ``requested`` capped at the agent timeout.
+
+    A row carries the timeout copied at enqueue; it exceeds ``cap`` when the
+    agent's timeout was lowered while the row waited. Absent/invalid → ``cap``.
+    """
+    try:
+        asked = int(requested)
+    except (TypeError, ValueError):
+        return cap, None
+    if asked <= 0:
+        return cap, None
+    return (cap, asked) if asked > cap else (asked, None)
+
+
+def _shortened_note(execution: Any) -> str:
+    """Suffix for a timeout error when the row asked for more than the agent allows.
+
+    Best-effort: runs before the terminal CAS write, so it must never raise.
+    """
+    try:
+        meta = json.loads(execution.backlog_metadata or "{}")
+        nested = meta.get("task_overrides") if isinstance(meta, dict) else None
+        requested = (nested or {}).get("timeout_seconds") or meta.get("timeout_seconds")
+        # Compares against the agent's CURRENT timeout, so the note states
+        # the two numbers rather than claiming the claim shortened this run
+        # (the timeout may have changed after the claim).
+        cap = int(db.get_execution_timeout(execution.agent_name))
+    except Exception:  # noqa: BLE001 — a missing note must not block the terminal
+        return ""
+    limit, shortened_from = _turn_limit(requested, cap)
+    if shortened_from is None:
+        return ""
+    return (
+        f" (this job asked for {shortened_from}s but the agent's timeout is "
+        f"{limit}s; raise the agent's timeout to give it longer)"
+    )
 
 
 def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -447,6 +500,9 @@ def apply_task_result(
         err_text = sanitized_content or ""
         if error_code:
             err_text = f"[{error_code}] {err_text}".strip()
+        if (error_code or "").strip().lower() == "timeout":
+            # #2846: name the setting to change when the claim clamped the limit.
+            err_text += _shortened_note(execution)
         won = db.update_execution_status(
             execution_id=execution_id,
             status=row_status,
