@@ -119,6 +119,93 @@ class MetricPointOperations:
                 conn.execute(select(func.count()).select_from(sub)).scalar_one()
             )
 
+    def latest_points_for(
+        self,
+        agent_name: str,
+        metric_names: List[str],
+        per_metric_limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """The newest `per_metric_limit` points of each named metric (ent#479).
+
+        One index seek per declared name (`ORDER BY ts DESC, idempotency_key
+        DESC LIMIT n`) on ONE connection, rather than a `row_number()`
+        partition over `agent_name` — the partition would number every row the
+        agent ever recorded before discarding all but the newest, while the
+        seek stops at the limit on `idx_metric_points_agent_metric_ts`. The
+        `idempotency_key` tiebreak is what makes "the latest point" the same
+        row on SQLite and PostgreSQL when two observations share a `ts`.
+
+        A metric's per-dimension series are folded in the service (dims are
+        stored in caller key order, so they cannot be partitioned in SQL);
+        this layer only guarantees the newest rows, newest first.
+        """
+        if not metric_names or per_metric_limit <= 0:
+            return []
+        t = metric_points
+        rows: List[Dict[str, Any]] = []
+        with get_engine().connect() as conn:
+            for metric in metric_names:
+                stmt = (
+                    select(
+                        t.c.metric,
+                        t.c.ts,
+                        t.c.value_numeric,
+                        t.c.value_text,
+                        t.c.dims,
+                        t.c.idempotency_key,
+                    )
+                    .where(t.c.agent_name == agent_name, t.c.metric == metric)
+                    .order_by(t.c.ts.desc(), t.c.idempotency_key.desc())
+                    .limit(per_metric_limit)
+                )
+                rows.extend(dict(r) for r in conn.execute(stmt).mappings())
+        return rows
+
+    def series_points(
+        self,
+        agent_name: str,
+        metric: str,
+        since_iso: str,
+        until_iso: Optional[str] = None,
+        limit: int = 2000,
+    ) -> List[Dict[str, Any]]:
+        """Points of one metric inside a window, NEWEST first, `limit + 1` deep.
+
+        Newest-first on purpose: `ASC + LIMIT` would keep the OLDEST points of
+        a busy window, which is the opposite of what a sparkline or a
+        freshness read needs. The caller reverses, and reads `len > limit` as
+        "truncated" — one extra row is cheaper than a second COUNT over a
+        table the sweep keeps at 36 M rows.
+
+        `since_iso`/`until_iso` are bound parameters compared against an
+        ISO-Z TEXT column the write path normalises (Invariant #16).
+        """
+        if limit <= 0:
+            return []
+        t = metric_points
+        conditions = [
+            t.c.agent_name == agent_name,
+            t.c.metric == metric,
+            t.c.ts >= since_iso,
+        ]
+        if until_iso:
+            conditions.append(t.c.ts <= until_iso)
+        stmt = (
+            select(
+                t.c.metric,
+                t.c.ts,
+                t.c.value_numeric,
+                t.c.value_text,
+                t.c.dims,
+                t.c.idempotency_key,
+            )
+            .where(*conditions)
+            .order_by(t.c.ts.desc(), t.c.idempotency_key.desc())
+            .limit(limit + 1)
+        )
+        with get_engine().connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings()]
+
     def count_metric_points_candidates(
         self, retention_days: int, limit: int
     ) -> int:

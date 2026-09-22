@@ -243,6 +243,114 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
     },
 
     // ========================================================================
+    // get_metrics — read your own recorded metrics, with freshness (ent#479)
+    // ========================================================================
+    getMetrics: {
+      name: "get_metrics",
+      description:
+        "Read YOUR recorded business metrics: what you declared, the latest value of each, " +
+        "how fresh it is, and a bounded series for charting. Answers from the point store, " +
+        "so it works whether or not you are mid-turn and whether or not you have a " +
+        "dashboard.yaml. A metric is STALE when no point has arrived within 2x its declared " +
+        "cadence — a metric with no declared cadence is never stale (freshness: no_cadence), " +
+        "and one that has never been recorded reads freshness: no_points, not stale. " +
+        "By default every declared metric comes back with a downsampled series (<=120 " +
+        "buckets each); pass `metric` to get the raw points of ONE metric (newest first, " +
+        "capped by series_limit, `truncated` says when older points were dropped). " +
+        "Dimensioned metrics come back as one series per dimension tuple, with `latest` " +
+        "folded across them using the aggregation you declared. " +
+        "This tool reads only your own metrics — there is no agent parameter; another " +
+        "agent's numbers are not readable from here.",
+      parameters: z.object({
+        metric: z
+          .string()
+          .optional()
+          .describe(
+            "Optional. One declared metric name. Narrows the read to it AND switches the " +
+              "series to raw points instead of buckets. An undeclared name comes back as " +
+              "undeclared: true, not as an error you should retry.",
+          ),
+        window: z
+          .enum(["auto", "24h", "7d", "30d", "90d"])
+          .optional()
+          .describe(
+            "How far back to read. Default `auto` sizes the window to your declared " +
+              "cadence (12 intervals, at least 24h, at most 90d), so a weekly metric still " +
+              "has points in it.",
+          ),
+        since: z
+          .string()
+          .optional()
+          .describe(
+            "Optional RFC 3339 start, overriding `window` (e.g. month-to-date). The span " +
+              "may not exceed the retention window.",
+          ),
+        until: z
+          .string()
+          .optional()
+          .describe("Optional RFC 3339 end; defaults to now. Only meaningful with `since`."),
+        include_retired: z
+          .boolean()
+          .optional()
+          .describe(
+            "Include metrics your template no longer declares but that still have points.",
+          ),
+      }),
+      execute: async (
+        params: {
+          metric?: string;
+          window?: string;
+          since?: string;
+          until?: string;
+          include_retired?: boolean;
+        },
+        context?: { session?: McpAuthContext },
+      ) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        let agentName: string;
+        try {
+          agentName = getAgentName(authContext, "get_metrics");
+        } catch (error) {
+          return JSON.stringify(
+            { success: false, error: error instanceof Error ? error.message : String(error) },
+            null,
+            2,
+          );
+        }
+
+        try {
+          const result = await apiClient.getAgentMetrics(agentName, params);
+          return JSON.stringify({ success: true, ...result }, null, 2);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`[get_metrics] Error: ${message}`);
+          const flags = classifyMetricError(message);
+          // `metric_undeclared` is a 422, which classifies as `invalid`. Name
+          // it separately with the fix attached: the remedy is a template edit
+          // plus a refresh, not a retry of this read.
+          if (/metric_undeclared/.test(message)) {
+            return JSON.stringify(
+              {
+                success: false,
+                undeclared: true,
+                error: message,
+                hint:
+                  "declare it in template.yaml `metrics:` and call " +
+                  "refresh_metric_definitions (or pass include_retired: true if it was retired)",
+                ...flags,
+              },
+              null,
+              2,
+            );
+          }
+          return JSON.stringify({ success: false, error: message, ...flags }, null, 2);
+        }
+      },
+    },
+
+    // ========================================================================
     // refresh_metric_definitions — make a template edit take effect
     // ========================================================================
     refreshMetricDefinitions: {
