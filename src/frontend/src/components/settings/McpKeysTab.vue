@@ -69,7 +69,6 @@
           <BaseInput
             v-model="keyQuery"
             type="search"
-            size="sm"
             placeholder="Search by name, prefix or agent"
             aria-label="Search API keys"
           />
