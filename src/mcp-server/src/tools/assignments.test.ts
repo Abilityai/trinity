@@ -139,6 +139,33 @@ describe("ent#500 assignments — degradation never throws", () => {
     );
     assert.equal(out.enabled, false);
     assert.match(out.message, /could not be reached/);
-    assert.match(out.detail, /socket hang up/);
   });
+});
+
+describe("ent#500 assignments — no raw error text reaches the agent ([I3])", () => {
+  // The reader is a model. `message` is a curated sentence per status; the raw
+  // error text is whatever the backend or the transport produced — a response
+  // body, an internal URL — and the fallback branch is exactly where the
+  // unexpected shape lands. None of it may be echoed.
+  const LEAK = "http://backend.internal:8000/api/enterprise/assignments trace=0xDEADBEEF";
+
+  for (const [label, err] of [
+    ["an unexpected status", apiError(502, LEAK)],
+    ["a 404", apiError(404, LEAK)],
+    ["a 403", apiError(403, LEAK)],
+    ["a transport error", new Error(LEAK)],
+  ] as const) {
+    it(`${label} degrades without echoing the raw error`, async () => {
+      const tools = makeTools([], {
+        getAgentAssignments: async () => {
+          throw err;
+        },
+      });
+      const raw = await tools.getAgentAssignments.execute({ agent_name: "ops" }, {});
+      const out = JSON.parse(raw);
+      assert.equal(out.enabled, false);
+      assert.equal("detail" in out, false, "no raw `detail` field");
+      assert.doesNotMatch(raw, /backend\.internal|DEADBEEF/);
+    });
+  }
 });
