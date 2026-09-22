@@ -79,7 +79,7 @@ dev-methodology plugin). Read it as a runbook, not as coverage: its
 | `journey-smoke.yml` | every PR to `dev` — deliberately no path filter, so a docs-only PR pays the boot too | boots the stack from the PR's own tree and runs the credential-free lifecycle journey; 30-minute budget, and a timeout is a failure, never a pass | `tests/journeys/` |
 | `journey-impact.yml` | every PR to `dev`/`main` (open, edit, sync, reopen) | validates the `Journey Impact:` line on the PR and on any epic it references; `new:` without a skeleton in the diff fails, and so does a bare `none` | PR and epic templates |
 | `integration-nightly.yml` | 06:30 UTC | a live-instance sweep, per open PR, of everything under `tests/` except `unit/` and `process_engine/` (`-m "not slow"`): the root-level API files and the `integration`, `git_sync`, `security`, `scheduler_tests`, `agent_server` and `journeys` directories | `tests/` root and its sibling directories |
-| `frontend-build.yml` | PRs and pushes touching `src/frontend/**` | `npm run check:tokens`, `npm run test:unit` (Vitest, including the raw-colour and loading-gate ratchets), `npm run build` | `src/frontend/tests/unit/` |
+| `frontend-build.yml` | PRs and pushes touching `src/frontend/**` | `npm run check:tokens`, `npm run test:unit` (Vitest, including the raw-colour, loading-gate and source-text ratchets), `npm run build` | `src/frontend/tests/unit/` |
 | `frontend-e2e.yml` | nightly 07:00 UTC; PRs touching `src/frontend/**`; the `ui` label; dispatch | Playwright `@smoke` specs against a booted stack; `@visual` and `@interactive` never run in CI | `src/frontend/e2e/` |
 | `schema-parity.yml` | every PR (self-skips when no schema file changed) | SQLite DDL ↔ migration parity, plus the cross-track Alembic and single-head guards | `tests/unit/test_schema_parity.py`, `scripts/ci/` |
 | `backend-image-smoke.yml` | pushes and PRs touching the backend image inputs | builds the production backend image and boots it | — |
@@ -202,6 +202,17 @@ The rule, and what enforces it:
   proved the workflow registered; #2811 was the same shape over a module nothing
   imports and was correctly ejected. The discriminator is the consumer, not the
   assertion style.
+- **A component is a live consumer that the harness CAN execute (#2918).** Two
+  PRs on the 2026-09-20 train and three on the one before put the pure layer
+  under executing tests and the wiring/gate layer — a fleet-delete
+  confirmation's `canRemove`, a modal's Esc/focus-trap — under source-text
+  regexes, each stating that this repo's vitest cannot mount. It can:
+  `vitest.config.js` carries `plugins: [vue()]`, `jsdom` and `@vue/test-utils`
+  for a per-file `// @vitest-environment jsdom` opt-in (precedent:
+  `portalThemeSwitch.spec.js`). For a predicate that gates a destructive verb,
+  a keyboard contract or a store write, source-text-only coverage is ❌, and
+  `tests/unit/sourceTextRatchet.spec.js` makes the direction mechanical: a new
+  spec reads no SFC source unless it says why with `@source-text-pin: <reason>`.
 - **A bug fix's evidence is a mutation.** Revert the fix from a scratch copy
   (never `git checkout --` over uncommitted work), run the new tests, show
   which go red, restore byte-identical, name the test in the PR's `Mutation:`

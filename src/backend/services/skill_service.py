@@ -1635,7 +1635,11 @@ print(json.dumps(out))
         Returns:
             Dict with per-skill results:
             {success, skills_injected, skills_unchanged, skills_failed,
+             skills_conflict, conflicts: [name],
              results: {name: {success, status, files_written, error?, warnings}}}
+            status ∈ injected | unchanged | fallback | failed | conflict —
+            `conflict` (#2914) is a same-named agent-authored directory the
+            platform refused to write into; it is neither injected nor failed.
 
         Raises:
             SkillInjectionBusy: another injection holds the per-agent lock.
@@ -1756,6 +1760,33 @@ print(json.dumps(out))
             agent_entry = agent_metas.get(skill_name) or {}
             agent_meta = agent_entry.get("meta") if isinstance(agent_entry, dict) else None
 
+            # #2914: a directory the platform did not write is the agent's own
+            # playbook under the same bare name, NOT an older copy of this
+            # skill — the library and the agent's repo share one flat namespace
+            # on the agent side, so a name match proves nothing. Refuse before
+            # a single byte is staged: no archive, no restore, no `.gitignore`
+            # line, no untracking, and the name is left out of the CLAUDE.md
+            # Platform Skills section because the agent's copy is what runs.
+            # `force` does not override this — a manual Sync is a repair of
+            # platform-written packages, never permission to replace agent
+            # work. The verdict is recorded on the assignment row below so the
+            # Skills tab shows it to an operator who never sees this response.
+            # A platform-managed directory (meta present) keeps upgrading in
+            # place, and an unreadable probe (`agent_metas == {}`) keeps the
+            # pre-existing fail-open direction rather than refusing the whole
+            # start path on a transient exec fault.
+            if agent_entry.get("exists") and not isinstance(agent_meta, dict):
+                results[skill_name] = {
+                    "success": False, "status": "conflict", "files_written": 0,
+                    "error": (
+                        "name_conflict: the agent already has its own "
+                        f".claude/skills/{skill_name}/ (not platform-managed); "
+                        "left untouched"
+                    ),
+                    "warnings": warnings,
+                }
+                continue
+
             if (
                 not force
                 and tree_sha
@@ -1820,7 +1851,7 @@ print(json.dumps(out))
             )
 
             outcome = await self._restore_skill(
-                agent_name, client, skill_name, tar_bytes, members, warnings
+                agent_name, client, skill_name, tar_bytes, members, warnings, meta
             )
             if outcome["status"] in ("injected", "fallback"):
                 injected_names.append(skill_name)
@@ -1830,20 +1861,18 @@ print(json.dumps(out))
                     # finalize_partial warnings on every old-image start.
                     exec_paths.extend(pkg.executable_paths(members))
                     # Prune only what a PREVIOUS injection wrote (manifest diff)
-                    # — never runtime artifacts or agent-authored files.
-                    if agent_entry.get("exists") and not isinstance(agent_meta, dict):
-                        warnings.append("unmanaged_dir_overwritten")
-                    else:
-                        prev = (agent_meta or {}).get("manifest")
-                        stale, truncated = pkg.compute_prune(prev, manifest, skill_name)
-                        if truncated:
-                            warnings.append("prune_truncated")
-                        for path in stale:
-                            deleted = await self._delete_agent_file(client, path)
-                            if deleted:
-                                pruned_paths.append(path)
-                            else:
-                                warnings.append(f"stale_delete_failed:{path}")
+                    # — never runtime artifacts or agent-authored files. An
+                    # unmanaged dir never reaches here (#2914 refusal above).
+                    prev = (agent_meta or {}).get("manifest")
+                    stale, truncated = pkg.compute_prune(prev, manifest, skill_name)
+                    if truncated:
+                        warnings.append("prune_truncated")
+                    for path in stale:
+                        deleted = await self._delete_agent_file(client, path)
+                        if deleted:
+                            pruned_paths.append(path)
+                        else:
+                            warnings.append(f"stale_delete_failed:{path}")
             results[skill_name] = outcome
 
         # Post-restore finalization: chmod + gitignore + untrack, one exec.
@@ -1870,6 +1899,7 @@ print(json.dumps(out))
         )
         unchanged_count = sum(1 for r in results.values() if r["status"] == "unchanged")
         error_count = sum(1 for r in results.values() if r["status"] == "failed")
+        conflict_names = sorted(n for n, r in results.items() if r["status"] == "conflict")
 
         # CLAUDE.md lists ALL assigned skills present on the agent — a
         # 1-of-19-changed start must not shrink the section to this pass's
@@ -1878,13 +1908,35 @@ print(json.dumps(out))
         if present:
             await self._update_claude_md_skills_section(client, present, results)
 
+        # #2914: the durable verdict. Stamp conflicts, clear the stamp on names
+        # that landed; a failed restore keeps whatever the row had (not a
+        # resolution). Best-effort — a row write must never fail an injection.
+        self._record_delivery_status(agent_name, conflict_names, present)
+
         return {
+            # A conflict is not an injection error: the platform did exactly
+            # what it should (nothing), and counting it as failure would raise
+            # a fleet-reinject alarm on every auto-sync for as long as the
+            # operator leaves the two same-named skills side by side.
             "success": error_count == 0,
             "skills_injected": success_count,
             "skills_unchanged": unchanged_count,
             "skills_failed": error_count,
+            "skills_conflict": len(conflict_names),
+            "conflicts": conflict_names,
             "results": results,
         }
+
+    @staticmethod
+    def _record_delivery_status(
+        agent_name: str, conflicted: List[str], resolved: List[str]
+    ) -> None:
+        if not conflicted and not resolved:
+            return
+        try:
+            db.set_skill_delivery_status(agent_name, conflicted, resolved)
+        except Exception as e:  # noqa: BLE001 — the row is a mirror, not the source
+            logger.warning(f"skill delivery_status write failed for {agent_name}: {e}")
 
     # =========================================================================
     # Delivery on assign (#2703)
@@ -1909,8 +1961,13 @@ print(json.dumps(out))
         has no agent-side meta and is injected; unchanged siblings cost one
         batched metas read. The report is projected onto `requested`.
 
-        Returns `{status, reason?, skills: {name: {status, error?}}}` where status is
-        `injected` | `partial` | `pending_start` | `in_progress` | `not_delivered`:
+        Returns `{status, reason?, conflicts?, skills: {name: {status, error?}}}`
+        where status is `injected` | `partial` | `conflict` | `pending_start` |
+        `in_progress` | `not_delivered`:
+          conflict        (#2914) every requested name collides with an
+                          agent-authored skill dir; nothing was written and the
+                          rows carry `delivery_status='conflict'`. A mixed
+                          outcome is `partial` with `conflicts` listing them
           pending_start   the container is stopped; the start path delivers
           in_progress     the injection outlived SKILL_DELIVERY_BUDGET_SECONDS and
                           continues in the background (WS trigger on completion)
@@ -1963,6 +2020,11 @@ print(json.dumps(out))
                 per[n] = {"status": "injected"}
             elif st == "unassigned_meanwhile":
                 per[n] = {"status": "unassigned_meanwhile"}
+            elif st == "conflict":
+                # #2914: named, not folded into `failed` — the next action is
+                # different (unassign, or rename the agent's own skill), and
+                # a retry via Sync would refuse again by design.
+                per[n] = {"status": "conflict", "error": str(r.get("error") or "name_conflict")}
             else:
                 err = str(r.get("error") or "injection_error")
                 per[n] = {
@@ -1970,13 +2032,19 @@ print(json.dumps(out))
                     "error": "agent_not_ready" if self._looks_unreachable(err) else err,
                 }
         delivered = sum(1 for v in per.values() if v["status"] == "injected")
+        conflicts = sorted(n for n, v in per.items() if v["status"] == "conflict")
+        failed = [n for n, v in per.items() if v["status"] == "failed"]
         if delivered == len(per):
             status = "injected"
         elif delivered:
             status = "partial"
+        elif conflicts and not failed:
+            status = "conflict"
         else:
             status = "not_delivered"
         report = {"status": status, "skills": per}
+        if conflicts:
+            report["conflicts"] = conflicts
         if status == "not_delivered":
             errs = {v.get("error") for v in per.values() if v["status"] == "failed"}
             report["reason"] = "agent_not_ready" if errs == {"agent_not_ready"} else "injection_error"
@@ -2154,8 +2222,8 @@ print(json.dumps(out))
             if not isinstance(meta, dict):
                 # No meta ⇒ the platform never wrote this directory (an
                 # agent-authored Playbook of the same name, or the pre-#183
-                # single-file era). `unmanaged_dir_overwritten` is injection's
-                # matching concession: overwrite is recoverable, deletion is not.
+                # single-file era). Injection refuses the same directory with
+                # a `conflict` verdict (#2914); neither side ever touches it.
                 results[name] = {
                     "success": True, "status": "not_managed",
                     "files_deleted": 0, "warnings": ["unmanaged_dir_kept"],
@@ -2486,10 +2554,21 @@ print(json.dumps(out))
         tar_bytes: bytes,
         members: List[Tuple[str, bytes, int]],
         warnings: List[str],
+        meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """POST one skill package to the agent restore primitive.
 
         404 (pre-#384 image) → legacy single-file SKILL.md fallback.
+
+        #2914 invariant: **a directory the platform writes always carries the
+        marker.** Marker-absence is what the inject path reads as "the agent
+        authored this" and refuses to touch, so a platform write that leaves
+        the marker behind would turn its own package into a permanent,
+        unrepairable conflict on the next sync (the merge-train finding on
+        #2920). Both marker-less paths are closed here: the legacy fallback
+        writes the marker beside SKILL.md, and a restore that drops the marker
+        member writes it back directly — and if the marker cannot be written,
+        the write is reported `failed`, never a half-managed directory.
         Other failure → ONE repair retry as delete-dir + re-restore (a
         dir→file type transition wedges restore forever otherwise, because
         restore always fails before prune could remove the dir).
@@ -2497,7 +2576,7 @@ print(json.dumps(out))
         resp = await self._post_restore(agent_name, skill_name, tar_bytes)
 
         if resp is not None and resp.status_code == 404:
-            return await self._legacy_fallback(client, skill_name, members, warnings)
+            return await self._legacy_fallback(client, skill_name, members, warnings, meta)
 
         if resp is None:
             # Transport failure (timeout / connection drop) — the agent may be
@@ -2533,14 +2612,43 @@ print(json.dumps(out))
         restored = body.get("restored") or []
         # Honest write accounting: files_written = what the agent CONFIRMED
         # restoring; anything we sent that didn't land is a named warning.
+        meta_path = f".claude/skills/{skill_name}/{pkg.META_FILENAME}"
         sent = {arcname for arcname, _c, _m in members}
-        sent.add(f".claude/skills/{skill_name}/{pkg.META_FILENAME}")
+        sent.add(meta_path)
         for missing in sorted(sent - set(restored)):
             warnings.append(f"restore_skipped:{missing}")
+        if meta_path not in restored:
+            # #2914: the package landed but its marker did not. Left like this
+            # the directory reads as agent-authored forever; write the marker
+            # back directly, and if that cannot be done say the injection
+            # FAILED — a marker-less platform dir is worse than a retry.
+            if not await self._write_marker(client, skill_name, meta):
+                return {
+                    "success": False, "status": "failed",
+                    "files_written": len(restored),
+                    "error": "marker_not_written: the package landed but "
+                             f"{pkg.META_FILENAME} could not be written; the "
+                             "directory would read as agent-authored on the next sync",
+                    "warnings": warnings,
+                }
+            warnings.append("marker_written_directly")
         return {
             "success": True, "status": "injected",
             "files_written": len(restored), "warnings": warnings,
         }
+
+    @staticmethod
+    async def _write_marker(client, skill_name: str, meta: Optional[Dict[str, Any]]) -> bool:
+        """Write `.trinity-skill.json` with one `write_file` (#2914). False on any failure."""
+        try:
+            result = await client.write_file(
+                f".claude/skills/{skill_name}/{pkg.META_FILENAME}",
+                json.dumps(meta or {}, indent=2),
+            )
+        except Exception as e:  # noqa: BLE001 — reported by the caller as a failed write
+            logger.warning(f"skill marker write failed for {skill_name}: {e}")
+            return False
+        return bool(isinstance(result, dict) and result.get("success"))
 
     async def _post_restore(self, agent_name: str, skill_name: str, tar_bytes: bytes):
         """One multipart POST to /api/agent-server/restore (the #1169 shape)."""
@@ -2561,9 +2669,14 @@ print(json.dumps(out))
 
     async def _legacy_fallback(
         self, client, skill_name: str, members: List[Tuple[str, bytes, int]],
-        warnings: List[str],
+        warnings: List[str], meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Pre-#384 image: write SKILL.md only, exactly today's behavior."""
+        """Pre-#384 image: write SKILL.md, plus the marker (#2914).
+
+        The marker's manifest is what was actually written — SKILL.md alone —
+        so a later prune on a newer image diffs against the truth, not against
+        the package the old image could not take.
+        """
         skill_md = next(
             (
                 content for arcname, content, _m in members
@@ -2593,8 +2706,22 @@ print(json.dumps(out))
                 "success": False, "status": "failed", "files_written": 0,
                 "error": result.get("error", "Write failed"), "warnings": warnings,
             }
+        legacy_meta = dict(meta or {})
+        legacy_meta["manifest"] = [f".claude/skills/{skill_name}/SKILL.md"]
+        if not await self._write_marker(client, skill_name, legacy_meta):
+            # Undo the half-write rather than leave a marker-less platform dir
+            # that the next sync would refuse as agent-authored (best-effort:
+            # the retry path rewrites SKILL.md anyway).
+            await self._delete_agent_file(client, f".claude/skills/{skill_name}/SKILL.md")
+            await self._delete_agent_file(client, f".claude/skills/{skill_name}")
+            return {
+                "success": False, "status": "failed", "files_written": 0,
+                "error": f"marker_not_written: SKILL.md was written but {pkg.META_FILENAME} "
+                         "could not be; the write was rolled back",
+                "warnings": warnings,
+            }
         return {
-            "success": True, "status": "fallback", "files_written": 1,
+            "success": True, "status": "fallback", "files_written": 2,
             "warnings": warnings,
         }
 

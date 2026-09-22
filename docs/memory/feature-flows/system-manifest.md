@@ -144,6 +144,11 @@ permissions:
   shipped in `config/manifests/`
 - **Bundled manifest** (ent#126): `GET /api/systems/manifests/{manifest_id}` - The same
   summary plus the raw YAML, for loading into the install editor
+- **Teardown** (ent#454, **entitlement-gated — not in this repo**):
+  `DELETE /api/enterprise/system-teardown/{name}?dry_run=<bool>` - preview or perform the
+  inverse of deploy. Absent (404) on an OSS build; 403 when unentitled. It mounts under
+  `/api/enterprise/*` like every other gated module, *not* under `/api/systems`, so the
+  OSS prefix stays entirely OSS and Invariant #4's route-order trap does not apply to it
 
 > **Naming adjacency**: `/api/systems/manifests` (the bundled *catalog*) and
 > `/api/systems/{name}/manifest` (export an *already-deployed* system) read alike and are
@@ -156,11 +161,20 @@ permissions:
 - `list_systems` - List deployed systems
 - `restart_system` - Restart all system agents
 - `get_system_manifest` - Export system configuration as YAML
+- `teardown_system` (ent#454) - Remove a deployed system. Ships in the OSS bundle and is
+  **license-blind**: it proxies the gated route and degrades honestly rather than throwing
+  — 404 (no such build), 403 (not licensed, or an agent key on a human-only verb) and 503
+  (membership unverified, retryable) stay three distinct messages. `dry_run` defaults to
+  **`true`**, the opposite of `deploy_system`, because an unwanted preview costs a round
+  trip and an unwanted execute costs a fleet
 
 ### UI
-- **Status**: ✅ Implemented (trinity-enterprise#126, 2026-07-30) — install surface only
+- **Status**: ✅ Install implemented (trinity-enterprise#126, 2026-07-30); **remove**
+  implemented behind the entitlement (ent#454, 2026-09-13)
 - **Where**: the `#systems` section of the Library page (`/library#systems`). `/templates` redirects, hash preserved.
-- **Not built**: a browser for *already-deployed* systems (see Frontend Layer below)
+- **Not built**: a browser for *already-deployed* systems (see Frontend Layer below) —
+  which is also why the teardown panel takes a **typed** system name or one handed over
+  from a deploy result, and never a name from `GET /api/systems`
 
 ## Frontend Layer
 
@@ -2258,6 +2272,162 @@ CLAUDE.md may name its collaborators literally (`acme-scout`,
 deployed names are `f"{manifest.name}-{short}"`, a renamed system or short name
 deploys a healthy fleet that cannot talk to itself.
 
+## Teardown — the public half (ent#454)
+
+Deploy's inverse. **The verb itself is an entitlement-gated module and its design
+lives in the private tree** (`trinity-enterprise/docs/memory/feature-flows/`, per the
+#151 doc-follows-the-code rule). What follows is what lives in *this* repo.
+
+### The membership primitive gained two facts, and did not fork (#2373 → ent#454)
+
+`system_member_names` keeps its signature and becomes a **thin wrapper**; the body
+moved verbatim into `system_membership`, which also returns:
+
+| Field | Why a DESTRUCTIVE consumer needs it |
+|---|---|
+| `tags_readable` | The body deliberately degrades to the **raw name prefix** when the tag read fails, and #2373 argues that ranking for `restart`: over-capture restarts one extra container and logs it, under-capture restarts a SUBSET and reports success. A verb that **deletes** inverts the cheap half — over-capture removes an innocent agent's container — so such a consumer can **refuse** instead of degrading, at its own call site, without a fourth membership rule. `get_system` / `restart_system` / `export_manifest` keep the degrade behaviour they were designed around. |
+| `evidence` (`tag` \| `prefix` \| `both`) | *Why* each name is a member. The prefix fallback's documented residual (`acme` may capture `acme-extra-worker`) is invisible in a flat name list; per-member evidence lets a caller show "matched by name only, not tagged by a deploy" and let the operator opt that member out. |
+
+`evidence` is derived from the same two sets that decided membership (`tagged`,
+`narrowed`), so it cannot disagree with them.
+
+Pinned as **properties**, not cases (`tests/unit/test_ent454_teardown_membership.py`),
+because #2373's fallback rule was wrong three times and each wrong rule passed the case
+test written for its predecessor: `members ⊇ raw prefix match` whenever the tags are
+unreadable, `tagged ⊆ members` whenever they are readable, wrapper equivalence over
+generated rosters, and evidence keyed by exactly the members. The named incidents (the
+eleven `vc-due-diligence-dd-*`, an agent named exactly `acme`, the sibling-prefixed
+`acme-api-worker`) stay as discrete cases — the fixture, not the ceiling.
+
+One honest asymmetry, found by Hypothesis and kept: an empty roster or empty system name
+is answered from the inputs and never reaches the tag read, so it reports
+`tags_readable: True`. A destructive caller refuses on `False`, and refusing a teardown
+of a system with no members would be a 503 where 404 is the truth.
+
+### The auto-view description is one constant
+
+Nothing persists a system↔view link: `create_system_view` marks the view it creates only
+by its description plus the system tag in `filter_tags`. That literal is now
+`system_service.SYSTEM_VIEW_AUTO_DESCRIPTION`, shared by the writer and by any reader
+that has to find the view again — one vocabulary for one fact.
+
+### MCP: a license-blind proxy (Invariant #13)
+
+`teardown_system` in `src/mcp-server/src/tools/systems.ts` knows nothing about
+entitlement. It proxies the gated route and reports what the route says, keeping three
+operator situations distinct — 404 (the module is absent on this build), 403 (not
+licensed, or an agent-scoped key on a human-only verb) and 503 (membership unverified,
+flagged retryable) — because flattening them is how a human on a user key gets told a
+licensed feature "doesn't exist". It never throws: a thrown error reaches an agent as an
+opaque transport failure it cannot reason about. A `failed` report arriving as HTTP 500 is
+returned as a **result**, since its per-member reasons are the only actionable output.
+
+It reads `ApiError.body` rather than regexing `ApiError.message` — the field is retained
+verbatim for exactly this purpose (ent#443), and its own docstring says the regex is what
+breaks when the message format changes.
+
+`dry_run` defaults to **`true`** here, the opposite of `deploy_system`: an unwanted
+preview costs a round trip, an unwanted execute costs a fleet.
+
+### UI: the gated half of the Systems section
+
+`components/systems/SystemTeardownPanel.vue` + `TeardownPreview.vue` +
+`TeardownResult.vue` over the teardown half of `stores/systems.js`, rendered only when
+`enterprise_features` carries `system_teardown` (so an OSS build's Systems section is
+unchanged), on top of the section's existing `creator` gate.
+
+The preview is a **checklist**, which is the design and not decoration: a member whose
+`evidence` is `prefix` may belong to a sibling system, the server cannot tell, and the
+badge plus the per-member box is the mechanism. The confirmed list is sent back on execute
+and intersected with freshly re-resolved membership.
+
+Which boxes arrive **ticked** is the load-bearing half, and it is decided in the store
+(`teardownDefaultSelection`) rather than the panel's watcher — `vitest.config.js` pins
+`environment: 'node'`, so a default written into a `.vue` watcher is a rule no runnable
+test can execute, and it shipped wrong for exactly that reason. A confirmed member
+(`tag`/`both`) is ticked and is an **opt-out**; a `prefix` member is **unticked** and is
+an **opt-in**, with the short selection explained above the list so it does not read as a
+miscount. The 503 refusal does not already cover this: a `prefix` member also appears in
+the **healthy** state — tags read fine, that one agent simply has no tag row — where
+`membership_verified` is true and Remove is ENABLED. #2373's ranking (under-capture is
+cheaper than over-capture) is right for `restart` and inverts for a verb that deletes,
+which is the same argument that makes teardown refuse rather than degrade.
+
+The refusal banner names **no** specific fault. `membership_verified` is one boolean over
+two independent faults (`tags_readable AND roster_complete`) and cannot say which fired,
+so the banner states the consequence — identical either way — and quotes the server's own
+warning for the cause. Naming the tag read there was a false statement on the roster arm,
+where the tags are perfectly readable and it is the agent LIST that is incomplete. Warning
+routing partitions: the banner claims the membership pair while it is rendering, the
+protected-agents and ephemeral lines are suppressed because they have dedicated blocks,
+and Notes takes the remainder by subtracting what the banner took — never by a second
+independent regex, which is two chances to drop a line silently.
+
+The "Also removed" tag line carries **no count**. `SystemTeardownTag.member_count` is
+`len(members)` — every candidate, tagged or matched by name — so rendering it as
+"(N tagged)" overstates the tag whenever any member is `prefix`, and in the refusal state
+it quoted a figure from the very read the banner above says failed. The total the operator
+needs is already stated on the list itself.
+
+Remove is gated on **four** conditions, each blocking something the others do not: the
+preview is current for the typed name, membership was verified, the consequence is
+acknowledged (ent#126's `:acknowledged` / `update:acknowledged` contract, reused
+rather than re-invented, under its own `data-testid="teardown-ack-checkbox"` —
+both panels render on one page, so sharing the ADDRESS would make every
+`getByTestId('ack-checkbox')` strict-mode ambiguous), and at least one agent is
+checked. A disabled button states which one is missing.
+
+Tone switches on `status`, never the HTTP code (the ent#126 rule: `partial` is 200,
+`failed` is 500 with the report as the body). `skipped` / `failed` / `aborted` render as
+three different things with per-reason operator copy — a refusal is not a breakage, and an
+un-attempted member is neither. A `discarded` ghost never claims recoverability. A timeout
+reports "outcome unknown" and offers **no** retry, because cancelling the request does not
+cancel the serial server-side removal.
+
+System names are **typed**, or handed over from a deploy result (`DeployResult.vue` gains a
+de-emphasised, entitlement-gated "Remove this system"). Never `GET /api/systems`, which
+groups by the last hyphen rather than by the predicate and so reports names that are not
+systems.
+
+`ManifestPreview.vue`'s *"There is no un-deploy"* warning now tracks the **capability**:
+still exactly true where the module is absent. Retiring it everywhere because one edition
+gained the verb would have been the dishonest fix.
+
+### What a REMOVAL needs from the roster that a read does not (review, 2026-09-13)
+
+Every OSS sibling on this surface resolves its roster with `get_accessible_agents`,
+which iterates `list_all_agents_fast()` — **containers**. An agent's identity, though,
+is its `agent_ownership` row (#1747), and the gap between the two is routine rather than
+exotic: the #834 Phase 1c recovery flow leaves a live row with no container *by design*,
+as does a `docker prune`, a daemon reset, or a crash between the row write and container
+creation. `DELETE /api/agents/{name}` was fixed to delete such an agent; a fleet verb
+reading the same roster could not even see it.
+
+For `get_system` / `restart_system` / `export_manifest` that is cosmetic. For a verb that
+reports **completion** it is the §3 under-capture failure one layer below where teardown
+already guards it: remove the ten members you can see, answer `torn_down`, and the
+eleventh keeps its live row and its reserved name — so the re-deploy produces exactly the
+`_N`-suffixed duplicate the feature exists to undo. So teardown supplements its roster
+from the ownership rows, filtered by the same access rule `get_accessible_agents` applies,
+and shows such a member as `status: "no container"`.
+
+That supplement is only safe because of the #2196 **tri-state** reader:
+`agent_container_states()` answers `None` for *Docker could not be asked* and `{}` for
+*asked, no containers*. Treating those alike would make a denied socket report the whole
+fleet as container-less and soft-delete every row while its container kept running — a
+worse bug than the one being fixed. An unreadable Docker therefore supplements nothing and
+**refuses on both paths** (503), rather than the 404 an empty roster used to produce:
+"System not found" is a false statement about a fleet nobody could ask.
+
+### Tests
+
+| File | Covers |
+|---|---|
+| `tests/unit/test_ent454_teardown_membership.py` | The membership properties + the named collision incidents + the one-constant auto-view description (asserted *through* `create_system_view`, never by restating the literal) |
+| `tests/unit/test_ent454_teardown_frontend.py` | Source-anchored template facts a node-environment vitest cannot see: the four Remove gates, the `prefix` badge, the entitlement gate wrapping the whole panel, one definition of the feature id, tone-on-`status`, the capability-aware install warning, and the four rendered-UI defects found by click-through (the panel defers to the store's default selection, the short selection is explained, the refusal names no fault the flag cannot identify, the tag line claims no count). Copy assertions go through `_prose`, which strips comments *and* collapses wrapping — one of them matched its own JSDoc line on the first run, and another broke on a re-wrap that changed no words |
+| `src/frontend/tests/unit/systemsTeardown.spec.js` | The store: the gated URL and verb, `agents` under axios's `data` (the only place axios reads a DELETE body — passing it positionally sends nothing and the server then removes *every* member), the preview↔name binding, the `failed`-at-500 result, timeout-as-unknown-outcome, and the arriving **default selection** — that `prefix` is excluded in the HEALTHY state too, that `tag`-only evidence still counts as confirmation, and that a wholly-untagged system selects nothing |
+| `src/mcp-server/src/tools/systems.teardown.test.ts` | The tool: preview-first default, verb/path/body, and the three distinct degradations |
+
 ## Post-deploy endpoints (#2373)
 
 The four post-deploy endpoints were essentially untouched since 2025 while every
@@ -2350,6 +2520,8 @@ the moment an admin moved the fleet default.
 
 | Date | Changes |
 |------|---------|
+| 2026-09-18 | **trinity-enterprise#454** (rendered-UI round): four defects that only a click-through could see, none of which any CI layer renders. The teardown preview **pre-ticked every member regardless of `evidence`** — an opt-OUT on a delete, in the healthy state the 503 refusal does not cover; the default moved to the store (`teardownDefaultSelection`, `prefix` excluded) where a node-environment vitest can execute it, and the per-member copy flipped to an opt-IN. The refusal banner named the **tag read** for a flag that covers two faults, false whenever the *ownership* read was the one that failed; it now states the shared consequence and quotes the server for the cause, with warning routing partitioned so no line is dropped or doubled. The "Also removed" tag line quoted **`(N tagged)`** from `member_count`, which is `len(members)` — wrong whenever any member is `prefix`, and quoted from the failed read itself in the refusal state; dropped. And the refusal advised *"try the preview again in a moment"* for a schema/permission fault that never clears. |
+| 2026-09-13 | **trinity-enterprise#454**: deploy gained its inverse. The verb is an entitlement-gated module (private tree); this repo gained the edition-agnostic half — `system_membership` / `SystemMembership` beside `system_member_names` (now a thin wrapper over the same body, so #2373's ONE predicate stays one and a destructive consumer can rank a tag-read failure as a *refusal* at its own call site instead of forking it), the `SYSTEM_VIEW_AUTO_DESCRIPTION` constant shared by the auto-view's writer and any reader that has to find it again, the license-blind `teardown_system` MCP tool, and the gated "Remove a deployed system" panel. `ManifestPreview`'s "there is no un-deploy" warning now tracks the capability rather than being retired on every edition. Membership is pinned as Hypothesis **properties** — #2373's fallback was wrong three times and each wrong rule passed the case test written for its predecessor. |
 | 2026-07-31 | **trinity-enterprise#126**: UI install surface (a stacked `#systems` section on the Library page — rebased onto ent#263, which renamed Templates -> Library and chose stacked sections over the `?tab=` strip this originally shipped; `components/systems/*` over the new `stores/systems.js`) + the read-only bundled-manifest catalog `GET /manifests` / `/manifests/{id}`. Dry-run gains `permission_edges` / `schedules_preview` / `system_view_requested` from **pure resolvers shared with the writers** (`configure_permissions` / `create_schedules` now loop over them), pinned by characterization tests captured green before the refactor. `_preflight_template` now validates **merged** resources through the create path's own `normalize_cpu` / `normalize_memory` — a shipped bundled manifest carried `cpu: 1.0`, previewed `valid`, and failed 100% of its agents (that manifest, a broken duplicate of the live seed, is deleted). `status` becomes five-valued (`invalid` added). `parse_manifest` warns on unrecognised top-level keys (coercing them with `str()` — YAML 1.1 renders bare `on`/`off`/`yes`/`no` as booleans, so a mixed-type key set made `sorted` raise and turned the hygiene check into the unnamed 500 it existed to prevent). Catalog `reason`s exit through `_failure_reason`; symlinked manifests are refused for catalog/read parity. Merged with trinity#1884 (landed on `dev` mid-review), which moves the manifest size cap into `parse_manifest` alongside its alias-budget and duplicate-key guards — so ent#126's request-model cap is dropped and `MANIFEST_MAX_BYTES` stays a single definition in `models.py` that both modules import. |
 | 2026-07-24 | **trinity-enterprise#124**: deploy orchestration extracted to `system_service.deploy_manifest` (router now a thin HTTP wrapper; `create_agent_fn` seam defaults to the ws-broadcasting `routers/agents` facade); first-run default seed added (`system_seed_service.py`, persisted `first_run_fresh` verdict shared with the Cornelius seeder, bundled `config/manifests/default-system.yaml`, `TRINITY_DEFAULT_SYSTEM_MANIFEST` override/disable). Partial-deploy warning no longer points at #124 for converge support. |
 | 2026-02-17 | **ORG-001 Phase 4**: Added tags and System View integration - `default_tags`, `system_view`, per-agent `tags` in manifest. Updated models.py (221-273), system_service.py (configure_tags, create_system_view), routers/systems.py (steps 10-11 in deploy flow). Added response fields `tags_configured`, `system_view_created`. |
@@ -2363,6 +2535,8 @@ the moment an admin moved the fleet default.
 
 ---
 
-**Last Updated**: 2026-02-17 (ORG-001 Phase 4 integration)
-**Status**: Complete (Phases 1, 2, 3, ORG-001 Phase 4 - API only, no frontend UI)
-**Feature Flag**: None (always enabled)
+**Last Updated**: 2026-09-18 (trinity-enterprise#454 — teardown's four rendered-UI defects)
+**Status**: Complete. Deploy + the post-deploy endpoints + the UI install surface are
+OSS; **teardown is entitlement-gated** and its design lives in the private tree.
+**Feature Flag**: none on the deploy half (always enabled); the teardown surface is gated
+on the `system_teardown` entitlement.

@@ -964,6 +964,11 @@ CREATE UNIQUE INDEX idx_skill_sources_url_ref ON skill_sources(url, ref);
 `agent_skills.source_id` records which source an assignment resolved from — recorded, not
 keyed (the UNIQUE stays `(agent_name, skill_name)`, since two sources' copies cannot
 coexist on disk). Deleting a source does **not** cascade to assignments.
+`agent_skills.delivery_status` (#2914; SQLite `agent_skills_delivery_status` + Alembic
+`0065`) is the inject path's durable per-row verdict: `conflict` while an agent-authored
+`.claude/skills/<name>/` blocks the library package, NULL otherwise — written and cleared
+only by `_inject_skills_locked`, carried across the bulk-replace PUT for retained names,
+read by the Skills tab and MCP `get_agent_skills`.
 
 **Tag pinning is the supply-chain control (AC#5).** Skills carry executable `scripts/`
 that the ent#139 runner executes and ent#236 re-injects fleet-wide unattended, so the

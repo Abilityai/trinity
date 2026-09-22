@@ -944,6 +944,9 @@ agent_skills = Table(
     # ent#237: which source this assignment resolved from. Recorded, not keyed
     # — see the agent_skills note in db/schema.py.
     Column("source_id", Text),
+    # #2914: `conflict` while an agent-authored dir of the same name blocks
+    # injection; NULL otherwise. See the agent_skills note in db/schema.py.
+    Column("delivery_status", Text),
 )
 
 # ent#237: one row per git repo the skills library syncs from.

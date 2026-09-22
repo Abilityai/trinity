@@ -1107,6 +1107,7 @@ TABLES = {
             assigned_by TEXT NOT NULL,
             assigned_at TEXT NOT NULL,
             source_id TEXT,
+            delivery_status TEXT,
             UNIQUE(agent_name, skill_name)
         )
     """,
@@ -1123,6 +1124,15 @@ TABLES = {
     # resolved from so a silent cross-source swap is detectable; it is
     # deliberately NOT part of the key, which would permit two rows that
     # cannot both exist on disk.
+    #
+    # #2914: `delivery_status` is the durable per-assignment verdict of the
+    # LAST injection that looked at this name — today only `conflict` (the
+    # agent's `.claude/skills/<name>/` is agent-authored, so the platform
+    # refused to write into it) or NULL (no standing conflict). Written by the
+    # inject path, cleared by the inject path once the name lands; the Skills
+    # tab reads it from the assignment row, because the per-injection result
+    # map is session-scoped and an operator who never sees it must still see
+    # the conflict.
     "skill_sources": """
         CREATE TABLE IF NOT EXISTS skill_sources (
             id TEXT PRIMARY KEY,

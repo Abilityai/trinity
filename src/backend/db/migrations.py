@@ -4292,6 +4292,31 @@ def _migrate_schedule_workspace_delivery(cursor, conn):
     )
     conn.commit()
 
+
+def _migrate_agent_skills_delivery_status(cursor, conn):
+    """#2914 — the durable per-assignment injection verdict.
+
+    Assigning a library skill whose name matched an agent-authored
+    `.claude/skills/<name>/` used to overwrite the agent's copy and bury an
+    `unmanaged_dir_overwritten` warning in the assignment response. The inject
+    path now refuses to write into a directory the platform did not create and
+    records `conflict` on the assignment row instead; NULL means no standing
+    conflict. Recorded on the row (not derived at read time) because the
+    Skills tab must show the conflict to an operator who never saw the
+    injection response, and clearing it is the inject path's job on the next
+    sync once the name lands.
+
+    Mirrored by the Alembic revision 0065_agent_skills_delivery_status.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_skills",
+        "delivery_status",
+        "ALTER TABLE agent_skills ADD COLUMN delivery_status TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_metric_definitions_table(cursor, conn):
     """trinity-enterprise#477 — the declared metric registry.
 
@@ -4482,5 +4507,6 @@ MIGRATIONS = [
     ("portal_messages_voice_source", _migrate_portal_messages_voice_source),
     ("portal_file_dismissals_table", _migrate_portal_file_dismissals_table),
     ("executions_started_at_index", _migrate_executions_started_at_index),
+    ("agent_skills_delivery_status", _migrate_agent_skills_delivery_status),
     ("metric_definitions_table", _migrate_metric_definitions_table),
 ]

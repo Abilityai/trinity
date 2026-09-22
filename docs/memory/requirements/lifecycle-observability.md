@@ -126,6 +126,13 @@
   mature install *will* trip the guard once, and that is intended — the
   guard cannot distinguish a large legitimate backlog from a mistyped
   window, so it asks once and the operator acknowledges once.
+- **Composed by system teardown** (roadmap §16.5.3, trinity-enterprise#454):
+  a system teardown is N of *these* soft-deletes, performed through this same
+  endpoint rather than a bespoke bulk path — so the window, the name
+  reservation, the schedule freeze and the per-agent `agent_lifecycle:delete`
+  audit row are all preserved by construction, and per-agent recovery (§33.3)
+  is unchanged. Nothing about this section is edition-specific; the teardown
+  verb that composes it is entitlement-gated.
 
 ### 33.2 Schedule Soft-Delete (#834 — Phase 1b)
 - **Implements**: Issue #834 Phase 1b (PR #839)
