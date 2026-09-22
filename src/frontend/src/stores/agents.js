@@ -766,13 +766,25 @@ export const useAgentsStore = defineStore('agents', {
       }
     },
 
-    // Custom Metrics Actions (Phase 9.9)
-    async getAgentMetrics(name) {
-      const authStore = useAuthStore()
-      const response = await axios.get(`/api/agents/${name}/metrics`, {
-        headers: authStore.authHeader
+    // Declared business metrics + freshness (ent#479).
+    //
+    // Same URL the `metrics.json` proxy used, re-backed by the ent#478 point
+    // store: declared definitions joined to their recorded points, with the
+    // platform's one stale rule applied server-side. Store-only on the
+    // backend, so this answers for a STOPPED agent — the caller must not gate
+    // it on status.
+    //
+    // Deduped on (name, window): the tiles poll on their own interval and a
+    // second mount of the same tab must not double the read.
+    async getAgentMetrics(name, { window = 'auto' } = {}) {
+      return dedupe(`agentMetrics:${name}:${window}`, async () => {
+        const authStore = useAuthStore()
+        const response = await axios.get(`/api/agents/${name}/metrics`, {
+          headers: authStore.authHeader,
+          params: { window }
+        })
+        return response.data
       })
-      return response.data
     },
 
     // Agent Dashboard Actions
@@ -789,13 +801,24 @@ export const useAgentsStore = defineStore('agents', {
     // NOTE: this is the STORE-level probe. `AgentDetail.vue` has a
     // same-named local function that wraps it with the boot retry ladder —
     // they are different functions (#2198 E13).
+    // ent#479: TWO flags, one request. The Dashboard tab appears for an agent
+    // with declared metrics and no `dashboard.yaml`, and both halves are
+    // DB-only, so asking twice would be two requests for one decision.
+    //
+    // The return shape changed from a bare boolean to an object — a caller
+    // that kept the old `if (exists)` test would read `{...}` as truthy and
+    // show the tab for every agent, so both call sites were updated with it
+    // (`AgentDetail.vue`'s probe is the only one).
     async checkDashboardExists(name) {
       return dedupe(`dashboardExists:${name}`, async () => {
         const authStore = useAuthStore()
         const response = await axios.get(`/api/agent-dashboard/${name}/exists`, {
           headers: authStore.authHeader
         })
-        return response.data?.has_dashboard === true
+        return {
+          hasDashboard: response.data?.has_dashboard === true,
+          hasDeclaredMetrics: response.data?.has_declared_metrics === true
+        }
       })
     },
 

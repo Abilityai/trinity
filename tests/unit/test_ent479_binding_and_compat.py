@@ -255,6 +255,31 @@ def test_a_bound_widget_carries_no_top_level_stale_flag(store):
     assert "stale" not in config
 
 
+def test_a_bound_widget_history_matches_the_shape_the_panel_reads(store):
+    """One `history` shape, not two.
+
+    `_enrich_widgets_with_history` writes `{values, trend, trend_percent, min,
+    max, avg}` and `DashboardPanel.vue` reads `widget.history.values` and
+    `widget.history.trend`. A bound widget handed a bare LIST would render no
+    sparkline and no trend arrow, silently, with every backend assertion still
+    green — the bind is the only writer the panel's contract is not spelled
+    next to.
+    """
+    store.points = [
+        {"metric": "revenue", "ts": _ago(7200), "value_numeric": 10.0,
+         "value_text": None, "dims": None, "idempotency_key": "a"},
+        {"metric": "revenue", "ts": _ago(60), "value_numeric": 42.0,
+         "value_text": None, "dims": None, "idempotency_key": "b"},
+    ]
+    config = _config({"type": "metric", "label": "Rev", "metric": "revenue"})
+    metric_read_service.bind_dashboard_widgets(config, AGENT)
+
+    history = config["sections"][0]["widgets"][0]["history"]
+    assert isinstance(history, dict), "the panel reads history.values, not history[i]"
+    assert set(history) == {"values", "trend", "trend_percent", "min", "max", "avg"}
+    assert all(set(v) == {"t", "v"} for v in history["values"])
+
+
 def test_is_bound_is_the_one_spelling_the_skippers_share():
     assert metric_read_service.is_bound({"metric": "revenue"}) is True
     assert metric_read_service.is_bound({"value": 1}) is False

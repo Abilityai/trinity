@@ -729,6 +729,8 @@ def bind_dashboard_widgets(
     if not widgets:
         return config
 
+    from database import db  # deferred, as in read_agent_metrics above
+
     now = now or datetime.now(timezone.utc)
     try:
         payload = read_agent_metrics(
@@ -771,10 +773,25 @@ def bind_dashboard_widgets(
             widget["color"] = color
         series = entry.get("series") or []
         if series:
-            widget["history"] = [
+            # The SAME shape `_enrich_widgets_with_history` writes
+            # (`{values, trend, trend_percent, min, max, avg}`), not a bare
+            # list: `DashboardPanel.vue` reads `widget.history.values` and
+            # `widget.history.trend`, so a bound widget handed a list would
+            # silently lose its sparkline and its trend arrow while every
+            # backend test still passed. One consumer, one shape.
+            values = [
                 {"t": b["ts"], "v": b["value"]}
                 for b in series[0].get("buckets", [])
             ]
+            stats = db.calculate_widget_stats(values) if values else None
+            widget["history"] = {
+                "values": values,
+                "trend": (stats or {}).get("trend", "stable"),
+                "trend_percent": (stats or {}).get("trend_percent", 0),
+                "min": (stats or {}).get("min"),
+                "max": (stats or {}).get("max"),
+                "avg": (stats or {}).get("avg"),
+            }
     return config
 
 

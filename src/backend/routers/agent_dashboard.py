@@ -86,8 +86,13 @@ async def get_agent_dashboard(
     )
 
 
-@router.get("/{name}/exists")
-async def check_dashboard_exists(name: AuthorizedAgentByName):
+# The path parameter is `agent_name`, not `name`, because that is the name
+# `get_authorized_agent_by_name` declares its `Path(...)` under — a route that
+# spells it `{name}` leaves the dependency with no path parameter to bind and
+# answers 422 to EVERY caller, including the owner. The URL is unchanged
+# (`/api/agent-dashboard/{agent}/exists`); only the binding name moved.
+@router.get("/{agent_name}/exists")
+async def check_dashboard_exists(agent_name: AuthorizedAgentByName):
     """
     Lightweight check for what the Dashboard tab would have to show.
 
@@ -106,12 +111,12 @@ async def check_dashboard_exists(name: AuthorizedAgentByName):
     dashboard", so closing it changes nothing a legitimate caller sees.
     """
     try:
-        has_declared_metrics = bool(db.list_metric_definitions(name))
+        has_declared_metrics = bool(db.list_metric_definitions(agent_name))
     except Exception as e:  # noqa: BLE001 — the tab gate is not worth a 500
         logger.warning("[Dashboard] Declared-metric probe failed for %s: %s",
-                       name, e)
+                       agent_name, e)
         has_declared_metrics = False
     return {
-        "has_dashboard": db.has_cached_dashboard(name),
+        "has_dashboard": db.has_cached_dashboard(agent_name),
         "has_declared_metrics": has_declared_metrics,
     }

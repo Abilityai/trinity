@@ -49,8 +49,10 @@
         </svg>
       </div>
       <h3 class="text-lg font-medium text-gray-900 dark:text-white">Agent Not Running</h3>
-      <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
-        Start the agent to view its dashboard.
+      <p class="mt-2 text-sm text-gray-500 dark:text-gray-400" data-testid="not-running-copy">
+        Start the agent to view its dashboard.<template v-if="hasDeclaredMetrics">
+          Its recorded metrics above are read from the platform store and do not
+          need the agent running.</template>
       </p>
     </div>
 
@@ -75,11 +77,17 @@
         </svg>
       </div>
       <h3 class="text-lg font-medium text-gray-900 dark:text-white">No Dashboard Defined</h3>
-      <p class="mt-2 text-sm text-gray-500 dark:text-gray-400 max-w-sm mx-auto">
-        This agent does not have a dashboard.yaml file.
+      <p class="mt-2 text-sm text-gray-500 dark:text-gray-400 max-w-sm mx-auto" data-testid="no-dashboard-copy">
+        <template v-if="hasDeclaredMetrics">
+          The declared metrics above are this agent's numbers. A dashboard.yaml
+          adds tables, lists and links around them.
+        </template>
+        <template v-else>
+          This agent does not have a dashboard.yaml file.
+        </template>
       </p>
       <div class="mt-4 text-xs text-gray-400 dark:text-gray-500">
-        Create <code class="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded">~/dashboard.yaml</code> to define a custom dashboard.
+        Create <code class="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded">~/dashboard.yaml</code> to define a custom dashboard<template v-if="hasDeclaredMetrics">, and bind a widget to a declared metric with a <span class="font-mono">metric:</span> key</template>.
       </div>
     </div>
 
@@ -226,6 +234,7 @@
                 :height="24"
                 class="mt-2"
               />
+              <BoundMetricMark :widget="widget" />
             </div>
 
             <!-- Status Widget -->
@@ -238,10 +247,11 @@
                 class="inline-flex items-center px-2.5 py-1 text-sm font-medium rounded-full"
                 :class="getStatusColors(widget.color)"
               >
-                {{ widget.value }}
+                {{ widget.value ?? '—' }}
               </span>
               <div class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ widget.label }}</div>
               <div v-if="widget.description" class="mt-1 text-xs text-gray-400 dark:text-gray-500">{{ widget.description }}</div>
+              <BoundMetricMark :widget="widget" />
             </div>
 
             <!-- Progress Widget -->
@@ -252,7 +262,8 @@
             >
               <div class="flex items-baseline justify-between">
                 <span class="text-2xl font-bold text-gray-900 dark:text-white">
-                  {{ widget.value }}%
+                  <template v-if="widget.value === null || widget.value === undefined">—</template>
+                  <template v-else>{{ widget.value }}%</template>
                 </span>
                 <div v-if="widget.history?.trend" class="flex items-center text-sm" :class="getTrendColor(widget.history.trend)">
                   <svg v-if="widget.history.trend === 'up'" class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
@@ -282,6 +293,7 @@
                 :height="24"
                 class="mt-2"
               />
+              <BoundMetricMark :widget="widget" />
             </div>
 
             <!-- Text Widget -->
@@ -429,6 +441,7 @@ import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
 import axios from 'axios'
 import SparklineChart from './SparklineChart.vue'
+import BoundMetricMark from './BoundMetricMark.vue'
 import ScanlineReveal from './ScanlineReveal.vue'
 import LoadFailed from './LoadFailed.vue'
 import InlineError from './InlineError.vue'
@@ -442,6 +455,14 @@ const props = defineProps({
   agentStatus: {
     type: String,
     default: 'stopped'
+  },
+  // ent#479: `DeclaredMetricsTiles` is mounted as this panel's SIBLING and is
+  // already showing the agent's numbers. When it is, "No Dashboard Defined"
+  // stops being the whole story — the copy below says what a `dashboard.yaml`
+  // would ADD rather than implying the agent has nothing to show.
+  hasDeclaredMetrics: {
+    type: Boolean,
+    default: false
   }
 })
 
