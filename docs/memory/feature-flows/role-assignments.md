@@ -108,8 +108,10 @@ Two lines join `## Execution Context` between `Execution ID` and
 - **Consent is stated, never implied.** An assignment records who fills a role;
   permission to message them lives on `agent_sharing.allow_proactive`, a
   different table with a different owner. A bare name would read as permission,
-  so the qualifier is rendered in both directions and omitted only when consent
-  is genuinely unresolved (`None`).
+  so the qualifier is ALWAYS rendered and **fails closed**: only an explicit
+  `True` reads as permitted; `False` and an unresolved `None` (a provider may
+  validly answer a name and a role and nothing else) both render the restrictive
+  clause. dolho's [I1] on #2596 — before this, `None` rendered a bare name.
 - Bounds are per field (120 / 64 / 140) rather than the generic 80, which
   truncates a real name mid-word; the stakeholder list is capped like
   collaborators (20, then `… (N more)`).
