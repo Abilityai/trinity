@@ -79,10 +79,67 @@ template.yaml `metrics:`
 | Compatibility | `services/compatibility/{spec,static_checks}.py` — `D-009` |
 
 **Known gap**: an agent that runs `git pull` itself without restarting is
-covered by no hook. The remedy is the refresh route (and, from ent#478, an
-undeclared-metric 422 carrying `hint: "refresh"`).
+covered by no hook. The remedy is the refresh route, reachable by the agent as
+the `refresh_metric_definitions` MCP tool (ent#478) — which is what the
+undeclared-metric 422's hint names.
 
 Requirement: `docs/memory/requirements/lifecycle-observability.md` §47.
+
+---
+
+## Recording points against those declarations (ent#478)
+
+The registry says which metrics exist; this is how their values get in. There
+is exactly one write path — the `record_metrics` MCP tool — and no second one.
+
+```
+agent turn (execution_id is in the Execution Context block)
+  │ record_metrics(points[], idempotency_key?, execution_id?)
+  ▼
+mcp-server/src/tools/metrics.ts      agent-scoped key only; never throws
+  │ client.recordMetrics(agent, body)
+  ▼
+POST /api/agents/{name}/metrics/points        routers/metric_points.py
+  ├─ AuthorizedAgent + self-gate       an agent key records only as itself
+  ├─ rate limit (agent_metrics:{name}) · size guard (2 MiB)
+  ├─ idempotency begin(scope, key)     header/body key, else execution-derived
+  ├─ db.list_metric_definitions(name, include_retired=True)     ← the registry
+  ├─ metric_points_service.validate_batch(defs, points, now)    ← pure leaf
+  │     → rows[] | errors[]   422 all-or-nothing, one reason code per point
+  ├─ daily write cap → 429 daily_point_cap_exceeded + Retry-After
+  ├─ db.insert_metric_points(name, rows)   ON CONFLICT DO NOTHING on identity
+  └─ 201 {recorded, deduplicated, replayed, points[{index, ts, key}]}
+
+cleanup cycle (300 s)  →  _sweep_metric_points  →  guarded ts-range prune
+```
+
+**What the agent has to understand, and where it learns it.** The tool
+description carries four rules, because each is one an author can get wrong in
+a way the platform cannot detect afterwards: declare the metric first (the
+`metric_undeclared` hint names `refresh_metric_definitions`, which ships in the
+same module so the remedy is reachable from where the error is read); values
+are not coerced; identity is `(metric, ts, dims)` and **excludes the value**, so
+a correction is a new `ts` rather than a new number at the same one; and
+passing `execution_id` is what makes a re-delivered turn replay instead of
+recording twice.
+
+**Two idempotency layers, for two different failures.** The row key
+(`sha256(metric \0 ts \0 canonical_dims)`, which is also the tail of the primary
+key) holds with no client key, no Redis and no execution id — it is the
+invariant. The batch key gives Invariant #18's "returns the first result" for a
+re-delivered turn; where no client key is supplied but `execution_id` resolves
+to the calling agent, it is derived from that execution, which is what dedups a
+batch of `ts`-less points whose timestamps would otherwise be freshly assigned
+on the retry. With neither, a retry is a new observation — stated in the tool
+description rather than papered over with a body hash, because the same numbers
+an hour later are usually a genuine new observation.
+
+**Failure is classified, not blanket.** A store outage is a 503 the tool
+reports as `retryable`; a batch the database rejects on its content is a 500
+the tool reports as explicitly not retryable, because an agent told to retry
+that would retry forever. A refusal never ends the turn.
+
+Requirement: `docs/memory/requirements/lifecycle-observability.md` §48.
 
 ---
 
@@ -397,3 +454,4 @@ All test agents have metrics defined:
 | 2025-12-10 | Initial documentation |
 | 2025-12-30 | Verified file paths, service layer refactor |
 | 2026-01-23 | Updated line numbers (info.py:148-208, agents.py:688-695, agents.js:507-522), added Dashboard Widget system documentation (dashboard.yaml), added DashboardPanel.vue (510 lines), added revision history |
+| 2026-09-22 | Added the write path (ent#478): `record_metrics`, the `metric_points` store, the two Settings knobs and the retention sweep |

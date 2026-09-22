@@ -199,7 +199,10 @@ journeys:
     invariants: [E-01, E-05, L-03]
 
   - id: J12
-    issue: 477
+    # ent#478 ships the WRITE half (record_metrics + the point store), so the
+    # promise is half-real; it stays `built: false` until ent#479's read makes
+    # "what Trinity actually knows" answerable end to end.
+    issue: [477, 478]
     promise: "My agent's own declaration of what it measures is what Trinity actually knows about it."
     actor: user
     lanes: [local]

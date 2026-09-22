@@ -3136,6 +3136,73 @@
         "unit"
       ],
       "description": "`search_executions` is a system-agent / human capability: the per-tool canAccess is an ALLOW-LIST of system/user scope (agent, connector, unknown, missing and null principals fail closed), an agent-scoped session is refused in-tool with the audited denial envelope and never reaches the client, permitted scopes are proxied with parameters intact, an absent (OSS 404) or unentitled (403) module answers available:false rather than no-results, and the real TrinityClient builds the enterprise route's query string (driven with `request` stubbed)."
+    },
+    {
+      "file": "unit/test_ent478_point_validation.py",
+      "feature": "abilityai/trinity-enterprise#478",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "validation",
+        "unit"
+      ],
+      "description": "The pure point validator plus the frozen `MetricPointIn` wire shape. Every reason code in the frozen contract against real definition rows; the identity hash (stable across dimension key order, excluding `value`, NUL-joined so no field spelling can spell another's key); the measured Pydantic coercions that must NOT happen (`Union[float, str]` turns `True` into 1.0 and accepts NaN, which SQLite stores as NULL and PostgreSQL as NaN); and the timestamp shapes `fromisoformat` swallows — week dates, bare dates, naive strings, and year 0999, which normalises to `999-01-01T...` and sorts ABOVE every real timestamp under the lexicographic ISO index this table is read by, so the range check compares datetimes rather than strings. Also proves the validator cannot reach the database by evicting and poisoning `database` in sys.modules and validating a full batch anyway."
+    },
+    {
+      "file": "unit/test_ent478_metric_points_store.py",
+      "feature": "abilityai/trinity-enterprise#478",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "database",
+        "unit"
+      ],
+      "description": "The `metric_points` store against real rows on SQLite (and PostgreSQL when TEST_POSTGRES_URL is set). Dedup by the identity primary key with `on_conflict_do_nothing`, `recorded` counted via `.returning` because rowcount is not a portable count across a multi-VALUES DO NOTHING, the write-time daily cap count, and the sweep primitives sharing one predicate. The ts-range chunked prune takes boundary TIES with it, so a timestamp shared by more rows than the chunk size cannot wedge the loop, and is bounded per call. Carries the negative control for what `test_schema_parity` structurally cannot see (a column in the DDL but not in `tables.py`), the JSONB marker-rule translation, a float8 precision check, and facade signature parity."
+    },
+    {
+      "file": "unit/test_ent478_record_route.py",
+      "feature": "abilityai/trinity-enterprise#478",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "api",
+        "auth",
+        "unit"
+      ],
+      "description": "`POST /api/agents/{name}/metrics/points` — gate ORDER and status meaning, with the store, limiter and idempotency service stubbed. The self-gate answers before any read (so the status cannot become an existence oracle); every post-claim refusal releases the batch claim, exercised across all four refusal kinds rather than asserted over the source, because a 422 that wedged the key would silently drop a day of corrected retries; DB failures are classified (connectivity 503 retryable, content 500 not, since an agent told to retry a permanently unstorable batch retries forever); the execution-derived batch key dedups a ts-less re-delivered turn; a human principal's batch does not replay an agent's (the scope folds the identity the key omits); and the cap refuses with 429 + Retry-After, with garbage coercing to the default rather than to 0 = unlimited."
+    },
+    {
+      "file": "unit/test_ent478_cleanup_sweep.py",
+      "feature": "abilityai/trinity-enterprise#478",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "retention",
+        "unit"
+      ],
+      "description": "The metric-point retention sweep's wiring: the literal setting key (which `test_1771a_retention_edges` pairs one-to-one with RETENTION_OPS_KEYS), the table-proportionate floor (100k rather than the row default of 1000, which at any real ingest rate would refuse every cycle and then sit blocked behind single-use acks), the disabled case, and the two rules that differ from the siblings — the per-call chunk bound and consuming the acknowledgement only once the REMAINING backlog is under the floor. The three CleanupReport sums are proven by RUNNING the WAL-checkpoint branch and the cleanup cycle, not by reading their source."
+    },
+    {
+      "file": "unit/test_ent478_settings_knobs.py",
+      "feature": "abilityai/trinity-enterprise#478",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "settings",
+        "unit"
+      ],
+      "description": "REPLACES test_ent477_settings_knobs.py, every assertion inverted by design: ent#477 ruled the two knobs must not exist until an enforcer shipped and recorded 'get_ops_setting has no env tier' as a tripwire precisely so this change could not happen silently. Covers the minted defaults/bounds/descriptions, the window being a retention key while the cap is not, and the new env tier — opt-in per key, a LIVE fallback rather than a one-time seed (the #2085 boot seeder skips an env-set key), invalid and out-of-range values ignored with the built-in default rather than the fail-open 0, a saved row still winning, and every surface naming which tier answered."
+    },
+    {
+      "file": "mcp-server/src/tools/metrics.test.ts",
+      "feature": "abilityai/trinity-enterprise#478",
+      "added": "2026-09-22",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit"
+      ],
+      "description": "`record_metrics` / `refresh_metric_definitions`: agent-scoped keys only, refused before any network call and with no agent target parameter to spoof; three separate outcome counts so a dedup cannot read as a write; and the failure classification, which is the load-bearing part — 503 retryable, 500 explicitly not (a tool that tells an agent to retry a permanently unstorable batch turns one bad point into an infinite loop), 409 in-flight, and the two 429s distinguished because 'wait a moment' and 'wait until tomorrow' are different remedies. Per-point reason codes are surfaced verbatim so the agent can self-correct, and an unparseable body degrades to no detail rather than throwing inside the error path."
     }
   ]
 }

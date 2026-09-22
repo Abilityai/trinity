@@ -1433,18 +1433,43 @@ Agents can define custom KPIs displayed in the Trinity UI Metrics tab. This enab
 3. Your agent records **values** against those declarations.
 4. Trinity renders them.
 
-Steps 3 and 4 are moving. Today the agent writes `metrics.json` into its
-workspace and `GET /api/agents/{name}/metrics` reads it back; that path is
-**superseded** by the `record_metrics` write API (trinity-enterprise#478),
-which validates every point against the registry your declaration built.
-`GET …/metrics` keeps its URL and is re-backed by the point store in
-trinity-enterprise#479. Keep writing `metrics.json` until then — there will not
-be a third path.
+Step 3 is the **`record_metrics` MCP tool** (trinity-enterprise#478), and it is
+the only write path — there is no second one and there will not be a third:
 
-Step 2 is live now, and it is why the fields below are validated rather than
-merely documented: a declaration Trinity cannot read is **dropped** from the
-registry and reported as compatibility finding `D-009`, and once #478 ships, a
-point recorded against a metric the registry does not hold is rejected.
+```
+record_metrics(points=[
+  {"metric": "cycles_completed", "value": 3},
+  {"metric": "revenue", "value": 1240.50, "dims": {"region": "eu"}},
+  {"metric": "pipeline_state", "value": "healthy",
+   "ts": "2026-09-22T08:00:00Z"},
+], execution_id="<from your Execution Context block>")
+```
+
+Each point is checked against the registry your declaration built. A batch is
+all-or-nothing: if one point is wrong the whole batch is refused and every bad
+point comes back with a reason code and a fix, so you can correct and re-send.
+Four rules are worth knowing before your first call:
+
+- **Declare first.** An undeclared name is refused with `metric_undeclared`.
+  Add it to `metrics:` in `template.yaml` and call
+  `refresh_metric_definitions` — the refusal's hint names that tool.
+- **Values are not coerced.** `"42"` is not `42`, `true` is not `1`, and a
+  `status` metric takes one of its declared labels, not a number.
+- **Identity is `(metric, ts, dims)` — the value is not part of it.** Sending
+  the same observation twice deduplicates instead of double-counting, and a
+  **correction is a new `ts`**, not a new value at the same one.
+- **Pass `execution_id`.** It links the batch to the turn and makes a
+  re-delivered turn replay instead of recording twice. Without it, and without
+  your own `ts`, a retry is treated as a new observation.
+
+The old path — writing `metrics.json` into the workspace and reading it back
+through `GET /api/agents/{name}/metrics` — is **superseded**. That URL keeps its
+shape and is re-backed by the point store in trinity-enterprise#479.
+
+Step 2 is what makes the fields below validated rather than merely documented:
+a declaration Trinity cannot read is **dropped** from the registry and reported
+as compatibility finding `D-009`, and a point recorded against a metric the
+registry does not hold is rejected.
 
 ### File Locations
 
@@ -1581,12 +1606,20 @@ name brings the original row back.
 
 #### How long values are kept
 
-The retention window and the per-day write cap are fixed at
-`metrics_retention_days = 365` and `metrics_daily_point_cap = 100,000`. Both
-become operator-adjustable settings when the write path and its sweep ship
-(trinity-enterprise#478); until then nothing prunes and nothing throttles, and
-the definitions API reports them with `enforced: false` rather than pretending
-otherwise.
+Points are kept for `metrics_retention_days` (default 365, `0` = forever) and
+an agent may record `metrics_daily_point_cap` of them per UTC day (default
+100,000, `0` = unlimited). Both are operator-adjustable — an operator sets them
+through Settings, or bootstraps them with `METRICS_RETENTION_DAYS` /
+`METRICS_DAILY_POINT_CAP` — and both are **enforced**: a sweep prunes past the
+window, and crossing the cap is a 429 telling you when to come back. Read the
+live numbers from `GET /api/agents/{name}/metrics/definitions` → `policy`
+rather than hard-coding them; they now carry `enforced: true` and say which
+tier supplied each value.
+
+Two consequences for an author. A backfill older than the window is refused
+(`ts_before_retention`) rather than accepted and pruned minutes later. And the
+cap counts WRITES, not observation times, so backfilling last year's points
+still spends today's budget.
 
 ### metrics.json Format
 
