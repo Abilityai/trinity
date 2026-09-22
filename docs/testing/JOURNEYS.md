@@ -22,7 +22,7 @@ coverage debt is queryable rather than rediscovered.
 | **J09** | I can point Trinity at my repo and get a working agent from it. | user | local | live-stack | **no** | — | RD-01, RD-02, RD-03 | #2348 |
 | **J10** | My agents can call each other, and I can see what they said. | user | local | journey-smoke | **no** | `tests/journeys/test_j10_agent_calls_agent_journey.py` | P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03 | #2349 |
 | **J11** | A companion's brief reaches me where I already work, without me asking. | user | local | live-stack | **no** | `tests/journeys/test_j11_brief_delivery_journey.py` | E-01, E-05, L-03 | #2565 |
-| **J12** | My agent's own declaration of what it measures is what Trinity actually knows about it. | user | local | live-stack | **no** | `tests/journeys/test_j12_declared_metrics_journey.py` | L-02, L-03 | #477, #478 |
+| **J12** | My agent's own declaration of what it measures is what Trinity actually knows about it. | user | local | live-stack | **no** | `tests/journeys/test_j12_declared_metrics_journey.py` | L-02, L-03 | #477, #478, #479 |
 
 **0 of 12 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
 

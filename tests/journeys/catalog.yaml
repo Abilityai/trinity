@@ -199,10 +199,12 @@ journeys:
     invariants: [E-01, E-05, L-03]
 
   - id: J12
-    # ent#478 ships the WRITE half (record_metrics + the point store), so the
-    # promise is half-real; it stays `built: false` until ent#479's read makes
-    # "what Trinity actually knows" answerable end to end.
-    issue: [477, 478]
+    # ent#477 declares, ent#478 records, ent#479 reads it back with freshness —
+    # the promise is whole now. It stays `built: false` because the harness
+    # needs a real container and docker; the unit island proves each leg
+    # (test_ent477_*, test_ent478_*, test_ent479_*), which is not the same as
+    # walking the loop once end to end.
+    issue: [477, 478, 479]
     promise: "My agent's own declaration of what it measures is what Trinity actually knows about it."
     actor: user
     lanes: [local]

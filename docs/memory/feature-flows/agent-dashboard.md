@@ -1,6 +1,6 @@
 # Feature: Agent Dashboard
 
-> **Last Updated**: 2026-03-15 - Added stale dashboard cache (shows last valid dashboard when YAML breaks) and Update Dashboard button.
+> **Last Updated**: 2026-09-22 (ent#479) — widgets may bind a declared metric with `metric: <name>`; declared metrics render as tiles with no `dashboard.yaml` at all; the `/exists` probe answers two flags and is gated. Snapshotting an author-written `value:` is now the **deprecated** way to publish a business number.
 
 ## Overview
 
@@ -52,6 +52,25 @@ When `dashboardData.stale` is true, a yellow warning banner is shown above the d
 ```javascript
 hasDashboard.value = response?.has_dashboard === true || response?.stale === true
 ```
+
+**ent#479 — two gates, one probe.** `GET /api/agent-dashboard/{name}/exists` now
+answers `{has_dashboard, has_declared_metrics}`, and `buildTabs`
+(`utils/agentTabs.js`) shows the tab for **either**: an agent that declares
+`metrics:` in `template.yaml` has numbers to show and may have no dashboard file
+to show them in. Both halves are DB-only, so the probe no longer waits for the
+agent to be running — a stopped agent's recorded numbers are exactly what an
+operator wants to see.
+
+The probe is also **gated** now, with `AuthorizedAgentByName`. On a bare
+`get_current_user` it was a fleet-wide existence oracle for any logged-in
+principal (Invariant #8 / #186). The frontend already treated a throw as "no
+dashboard", so closing it changes nothing a legitimate caller sees.
+
+> A path-parameter trap worth knowing: `get_authorized_agent_by_name` declares
+> its `Path(...)` under the name `agent_name`. A route spelling it `{name}`
+> leaves the dependency with nothing to bind and answers **422 to every
+> caller** — including the owner. The URL is what callers see; the binding name
+> has to match the dependency.
 
 ## Update Dashboard Button (2026-03-15)
 
@@ -275,15 +294,64 @@ def get_dashboard_path() -> Path:
 - Validates required `type` field
 - Validates type is one of 11 valid types
 - Type-specific required field validation:
-  - `metric`: label, value
-  - `status`: label, value, color
-  - `progress`: label, value
+  - `metric`: label, value — **`value` is optional when `metric:` is set** (ent#479)
+  - `status`: label, value, color — **`value` and `color` optional when `metric:` is set**
+  - `progress`: label, value — **`value` optional when `metric:` is set**
   - `text`: content
   - `markdown`: content
   - `table`: columns, rows
   - `list`: items
   - `link`: label, url
   - `image`: src, alt
+
+## Binding a widget to a declared metric (ent#479)
+
+A `metric`, `status` or `progress` widget may name a declared metric instead of
+carrying a number:
+
+```yaml
+widgets:
+  - type: metric
+    label: "Monthly Revenue"
+    metric: revenue          # ← the template.yaml metrics: name
+```
+
+Trinity fills it on every read from the metric registry: `value`, `color` (the
+declared status `values[].color`, or the thresholds for a numeric type),
+`history`, `last_point_at`, `stale`, `freshness`, `bound: true`. The panel
+renders the metric name, the **point time** and a **stale** mark beneath the
+widget (`BoundMetricMark.vue`), because the panel's own header timestamp says
+when the *dashboard* was fetched, which for a bound number says nothing about
+the number.
+
+**Order, and why it matters:** cache → snapshot → **bind** → history-enrich, on
+both the live and the cached path. The snapshot writer and the history
+enrichment both **skip** bound widgets, through one shared `is_bound` predicate
+so the skip cannot mean two different things in two files. A bound number
+written into `agent_dashboard_values` would be a second source for a value the
+registry already owns, and the two would disagree the moment the dashboard poll
+and the recording cadence drift apart.
+
+**Failure modes, all per-widget:**
+
+| Situation | What the widget shows |
+|---|---|
+| The name is not declared | `binding_error: "metric 'x' is not declared in template.yaml"`, and **no value** — a wrong number is worse than no number |
+| The metric store is down | `binding_error: "metric store unavailable"`; unbound widgets render normally and the dashboard is never 5xx'd |
+| Declared, no points yet | "declared, no points yet" instead of a number |
+
+**Older base images.** The relaxed `validate_widget` ships in the agent image,
+so an author targeting an agent on an older image keeps a placeholder `value:`
+in the file to satisfy the strict rule. The backend **overwrites** it when the
+binding resolves, so the placeholder is never what an operator sees.
+
+### Deprecated: snapshotting an author-written `value:`
+
+An unbound widget still works exactly as before — its `value:` is read from the
+file and snapshotted into `agent_dashboard_values` for history. That path is
+**deprecated for business numbers**: it has no declaration, no validation, no
+cadence and therefore no answer to "is this still current". Declare the metric,
+record it with `record_metrics`, and bind the widget.
 
 ## Dashboard YAML Schema
 
@@ -542,12 +610,13 @@ const startRefresh = () => {
 
 - **Upstream**: Agent Lifecycle (agent must be running)
 - **Downstream**: None
-- **Similar**: Agent Custom Metrics (replaced by this feature)
+- **Similar**: [Agent Custom Metrics](agent-custom-metrics.md) — the declaration/record/read loop this binds to (ent#476 epic)
 
 ## Revision History
 
 | Date | Change |
 |------|--------|
+| 2026-09-22 | **ent#479**: widgets may bind a declared metric (`metric: <name>`), filled from the registry and skipped by the snapshot writer; the agent-server validator no longer demands a `value`/`color` for a bound widget; declared metrics render as tiles with no `dashboard.yaml`; `/exists` answers two flags and is gated with the uniform-404 dependency (it had been an ungated existence oracle, and its path parameter was mis-named so it 422'd everyone). Author-written `value:` snapshotting marked deprecated for business numbers. |
 | 2026-09-06 | **Widget-type closed set** pinned by a parity test (backend ≡ agent server ≡ renderer ≡ docs); D-002 now names the offending type (#2110). Refreshed stale Widget Renderers line numbers. |
 | 2026-03-15 | **Dashboard Resilience**: Added stale cache fallback - when YAML breaks, last valid dashboard shown with warning banner. Added "Update Dashboard" button that triggers `/update-dashboard` playbook if available. Tab visibility now considers stale responses. |
 | 2026-02-12 | **Conditional Tab Visibility**: Dashboard tab now hidden when agent doesn't have `dashboard.yaml`. |

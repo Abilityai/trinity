@@ -856,6 +856,8 @@ Four column-level decisions are load-bearing, each against a plausible default.
 
 **No CHECK constraints**, for the `metric_definitions` reason above: `test_1819_rename_cascade_parity` seeds a placeholder row per AGENT_REFS table from NOT NULL introspection. The value rules belong to the one writer (`services/metric_points_service.py`).
 
+**The read (ent#479) adds no column and no index.** `idx_metric_points_agent_metric_ts` already prefixes every access `read_agent_metrics` needs: `latest_metric_points` is N per-metric `ORDER BY ts DESC, idempotency_key DESC` seeks unioned in one statement — not a `row_number()` partition over the agent's whole history, which scans rows the answer never uses — and the window cut is `ts >=` on the same index. The `idempotency_key` tiebreak is there because two points at the identical `ts` with different dims otherwise order by whatever the dialect feels like, and SQLite and PostgreSQL disagree. No Alembic revision ships with ent#479; `0067_metric_points` stays head.
+
 The retention sweep prunes by **`ts` range**, not an id list (there are none): each chunk reads the `ts` of the chunk-th oldest candidate and deletes everything at or below it that is still under the cutoff, **ties included**, so a timestamp shared by more rows than the chunk size cannot wedge the loop. Bounded to 20 chunks per call so a just-narrowed window drains over several cleanup cycles rather than monopolising one.
 
 **user_ui_preferences** (trinity-enterprise#413, OSS-core — see [Dashboard Grid View](../feature-flows/dashboard-grid-view.md#layout-model)).
