@@ -32,6 +32,7 @@ import { createVoipTools } from "./tools/voip.js";
 import { createFileTools } from "./tools/files.js";
 import { createPipelineTools } from "./tools/pipelines.js";
 import { createMemoryTools } from "./tools/memory.js";
+import { createDecisionTools } from "./tools/decisions.js";
 import { createLoopTools } from "./tools/loops.js";
 import { policyFor, resolveClient, withAgentAccess, type ToolAccessPolicy } from "./access.js";
 import { createReminderTools } from "./tools/reminders.js";
@@ -642,6 +643,7 @@ export async function createServer(config: ServerConfig = {}) {
     createMessageTools(client, requireApiKey),
     createVoiceReplyTools(client, requireApiKey), // send_voice_reply — per-message voice (ent#117)
     createMemoryTools(client, requireApiKey),     // MEM-001 write path (#888)
+    createDecisionTools(client, requireApiKey),   // Seat decision record (ent#638)
     createLoopTools(client, requireApiKey),       // Sequential agent loops (#740)
     createReminderTools(client, requireApiKey),   // Agent self-reminders (#1296)
     createVoipTools(client, requireApiKey),       // VoIP telephony — call_user (VOIP-001, #1056)

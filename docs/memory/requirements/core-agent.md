@@ -3270,3 +3270,59 @@ to localStorage in the clear.
 - **Not this issue**: editing the canon from the card (files are truth — edit the
   file), the organisation view (ent#502), enabling schedules on the flip.
 - **Flow**: `docs/memory/feature-flows/workspace-role-card.md`
+
+### 5.37 Workspace — the seat-level decision record: why a thing was approved, deferred or killed (trinity-enterprise#638)
+- **Status**: ✅ Implemented (2026-09-22). OSS-core (Workspace).
+- **Requirement ID**: WORKSPACE_SEAT_DECISIONS
+- **GitHub Issue**: abilityai/trinity-enterprise#638 (ruling R25; the evidence base for #641)
+- **Description**: The approve / defer / kill judgments a role companion and its
+  human make every week are recorded as a platform primitive owned by the **seat**
+  (agent × person — the ent#637 memory scope). A record is lintable, not prose:
+  `outcome` (approved | deferred | killed) · what was `decided` · the `alternatives`
+  that were live · the `criterion` that discriminated (the reusable part) · who
+  decided (role + person) · `decided_at` and `review_by` · what would `reverse` it ·
+  `notes` (the only free prose) · `ask_class` (slug) · `cites`.
+- **Refusals are receipts** (`services/seat_decision_service.validate_record`): prose
+  where a field belongs (over 280 chars, a second paragraph, a missing field) →
+  422 `decision_prose_only` naming every failing field and its rule; no alternatives
+  → 422 `decision_is_a_note` ("keep it in the seat's memory"); a citation outside the
+  seat's own records → 422 `unknown_citation`. Nothing is stored on refusal.
+- **Direction is not a seat decision (R C3)**: the caller declares `scope`; a
+  `direction` record (pricing, positioning, roadmap) is kept as `routed` — visible,
+  expiring, excluded from the evidence — and the answer carries the canon-proposal
+  hint, so it neither evaporates nor pollutes the seat's record.
+- **It expires, correction supersedes, history stays**: `expired` = `review_by` before
+  today (UTC; equal is not expired), computed on read, never written; `reconfirm`
+  moves `review_by`; `supersede` inserts a new row chained by `supersedes_id` and flips
+  the old one in one CAS transaction; `close` / `reverse` are status flips (`reverse`
+  requires a one-line reason — the evidence). Any action on a non-active row is a
+  named 409 `decision_not_active`. Nothing is deleted.
+- **Evidence (AC 5)**: `reused` = records cited by a LATER record of the seat (a
+  superseding record does not implicitly cite its predecessor) — conversion, not
+  volume; per `ask_class`: the distinct normalized criteria, the reversals, and
+  `stable` (≥3 non-expired records, one criterion, no reversal) — shipped as #641's
+  input, documented as such, not its verdict.
+- **Two surfaces, one seat rule**: the companion records over MCP (`record_decision` /
+  `list_seat_decisions` → `POST/GET /api/agents/{name}/decisions`; the seat is resolved
+  from `execution_id` exactly as `write_user_memory` does, never supplied;
+  `Idempotency-Key` honoured, the tool derives one over the arguments; `decided_by_role`
+  from `assignment_provider.resolve_assignment` or the caller, never a container read;
+  **no email in the answer** — the decider is `seat` / `owner`). The person records,
+  corrects, reconfirms, closes and reverses in Agent details
+  (`GET/POST /api/enterprise/client-portal/agents/{name}/decisions`,
+  `POST …/decisions/{id}/actions`, `PortalAgentDecisions.vue`).
+- **Readers**: own seat always; the agent OWNER (`role_card._is_owner`) every seat,
+  writable; a stakeholder the assignment provider recognises through the optional seam
+  method `kinds_for(agent_name, reader_email) -> {kind, role_id}` every seat read-only
+  (per-agent in v1 — DEBT_INBOX 2026-09-22); no provider → own seat only. Writes: own
+  seat, or the owner on a named seat; a foreign id is the uniform 404.
+- **Read into context**: the seat's active decisions (criterion first, bounded) ride the
+  shared memory block on every turn — public link, channels, seat runs, Workspace — so
+  a criterion is reusable and `cites` can be non-zero.
+- **Storage**: `seat_decisions` (both tracks; Alembic `0068` ← `0067`; cleanup CASCADE);
+  JSON lists in TEXT; stats in Python; reads bounded (500 rows / seat, 50 seats). Field
+  names match the role pack's YAML (`record-decision`, #510) so the canon-folder copy is
+  a move (export deferred — DEBT_INBOX 2026-09-22).
+- **Not in scope**: the autonomy dial itself (#641); auto-recording an answered decision
+  REQUEST (#611 — `request_id` is the link, DEBT_INBOX 2026-09-22).
+- **Flow**: `docs/memory/feature-flows/workspace-seat-decisions.md`

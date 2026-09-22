@@ -46,7 +46,7 @@ from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
 from database import db
-from . import agent_page, role_card, service
+from . import agent_page, role_card, seat_decisions, service
 from .models import (
     PortalSessionRename,
     PortalRatingRequest,
@@ -79,6 +79,10 @@ from .models import (
     PortalRoleCard,
     PortalRoleReadiness,
     PortalRoleReadinessFlip,
+    PortalSeatDecisions,
+    PortalSeatDecisionRecord,
+    PortalSeatDecisionAction,
+    PortalSeatDecisionResult,
     PortalAgentReports,
     PortalChatState,
     PortalSessionSummary,
@@ -810,6 +814,63 @@ async def portal_agent_role(
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     return await role_card.build_role_card(agent_name, email, is_platform=principal.is_platform)
+
+
+@router.get("/agents/{agent_name}/decisions", response_model=PortalSeatDecisions)
+def portal_seat_decisions(
+    agent_name: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """The seat decision record (ent#638, R25): why things were approved,
+    deferred or killed — own seat always, other seats per ownership or the
+    assignment provider's word. Roster-gated like every route here."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    return seat_decisions.page(agent_name, email, is_platform=principal.is_platform)
+
+
+@router.post("/agents/{agent_name}/decisions", response_model=PortalSeatDecisionResult)
+def portal_seat_decision_record(
+    agent_name: str,
+    body: PortalSeatDecisionRecord,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """The person records a decision for their seat (ent#638). Prose where a
+    field belongs is refused with a receipt naming each field (`decision_prose_only`);
+    no alternatives → `decision_is_a_note`; a direction decision is kept as `routed`
+    with the canon hint."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_seat_decision:{email}", 30, 60)
+    try:
+        return seat_decisions.record(agent_name, email, is_platform=principal.is_platform,
+                                     payload=body.model_dump())
+    except seat_decisions.svc.DecisionRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
+
+
+@router.post("/agents/{agent_name}/decisions/{decision_id}/actions",
+             response_model=PortalSeatDecisionResult)
+def portal_seat_decision_act(
+    agent_name: str,
+    decision_id: str,
+    body: PortalSeatDecisionAction,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """close / reverse / reconfirm / supersede (correct) an ACTIVE decision of
+    the caller's seat — or any seat, for the owner. A non-active target is a
+    NAMED 409 (`decision_not_active`); another seat's id is the uniform 404."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_seat_decision:{email}", 30, 60)
+    try:
+        return seat_decisions.act(agent_name, email, is_platform=principal.is_platform,
+                                  decision_id=decision_id, action=body.action, reason=body.reason,
+                                  review_by=body.review_by, fields=body.fields)
+    except seat_decisions.svc.DecisionRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
 
 
 @router.post("/agents/{agent_name}/role/readiness", response_model=PortalRoleReadiness)

@@ -3675,6 +3675,28 @@ class WriteUserMemoryRequest(BaseModel):
     memory_text: str = Field(..., max_length=8000)
 
 
+class RecordDecisionRequest(BaseModel):
+    """Body for POST /api/agents/{name}/decisions — a companion records a
+    decision for the seat it is serving (trinity-enterprise#638, R25). The
+    seat is resolved server-side from `execution_id`, never sent. The grammar
+    (one line per field, alternatives required, `review_by` a date) is checked
+    by `services/seat_decision_service.validate_record`, which answers with a
+    named receipt — these caps only bound the body."""
+    execution_id: str = Field(..., min_length=1, max_length=200)
+    outcome: str = Field(..., max_length=16)            # approved | deferred | killed
+    decided: str = Field(..., max_length=2000)
+    alternatives: List[str] = Field(default_factory=list, max_length=32)
+    criterion: str = Field(..., max_length=2000)
+    reversal: str = Field(..., max_length=2000)
+    review_by: str = Field(..., max_length=32)
+    scope: str = Field("seat", max_length=16)           # seat | direction
+    notes: Optional[str] = Field(None, max_length=4000)
+    ask_class: Optional[str] = Field(None, max_length=128)
+    decided_by_role: Optional[str] = Field(None, max_length=128)
+    cites: List[str] = Field(default_factory=list, max_length=32)
+    request_id: Optional[str] = Field(None, max_length=200)
+
+
 # =============================================================================
 # Schedules Models (routers/schedules.py)
 # =============================================================================

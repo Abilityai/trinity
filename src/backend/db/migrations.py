@@ -4515,6 +4515,53 @@ def _migrate_metric_points_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_seat_decisions_table(cursor, conn):
+    """The seat-level decision record (trinity-enterprise#638, ruling R25).
+
+    Why a thing was approved, deferred or killed — the alternatives that were
+    live, the criterion that discriminated, who decided (role and person),
+    `review_by`, and what would reverse it — owned by the seat
+    (`agent_name` × `seat_email`, the ent#637 memory scope). Correction
+    supersedes rather than edits; expiry is computed from `review_by` on read.
+
+    Mirrored by the Alembic revision 0068_seat_decisions.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS seat_decisions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            seat_email TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            decided TEXT NOT NULL,
+            alternatives TEXT NOT NULL,
+            criterion TEXT NOT NULL,
+            reversal TEXT NOT NULL,
+            decided_by_role TEXT,
+            decided_by_person TEXT NOT NULL,
+            decided_at TEXT NOT NULL,
+            review_by TEXT NOT NULL,
+            notes TEXT,
+            ask_class TEXT,
+            scope TEXT NOT NULL DEFAULT 'seat',
+            status TEXT NOT NULL DEFAULT 'active',
+            supersedes_id TEXT,
+            cites TEXT NOT NULL DEFAULT '[]',
+            request_id TEXT,
+            close_reason TEXT,
+            closed_at TEXT,
+            closed_by TEXT,
+            reconfirmed_at TEXT,
+            source_execution_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_seat_decisions_seat ON seat_decisions(agent_name, seat_email, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_seat_decisions_review ON seat_decisions(agent_name, review_by)")
+    conn.commit()
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4655,4 +4702,5 @@ MIGRATIONS = [
     ("agent_shared_files_audience", _migrate_agent_shared_files_audience),
     ("metric_definitions_table", _migrate_metric_definitions_table),
     ("metric_points_table", _migrate_metric_points_table),
+    ("seat_decisions_table", _migrate_seat_decisions_table),
 ]
