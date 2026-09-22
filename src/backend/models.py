@@ -4572,6 +4572,12 @@ METRIC_BATCH_MAX_POINTS = 1000
 METRIC_BATCH_MAX_BYTES = 2 * 1024 * 1024
 METRIC_DIM_VALUE_MAX_LEN = 128
 METRIC_TS_FUTURE_SKEW_SECONDS = 300
+# A `value` that is text is a LABEL, not a document. Unbounded, a single legal
+# point could carry the whole 2 MiB batch budget in one field, and a `status`
+# label has a 64-character domain anyway — 1024 is deliberately far above any
+# honest label so the refusal reads as "this is not a label" rather than as a
+# limit an author has to design around (ent#478 I1).
+METRIC_VALUE_TEXT_MAX_LEN = 1024
 
 
 class MetricPointIn(BaseModel):
@@ -4589,7 +4595,12 @@ class MetricPointIn(BaseModel):
         description="A metric name declared in the agent's template.yaml",
     )
     value: Union[float, str] = Field(
-        ..., description="A finite number, or a declared status label")
+        ...,
+        description=(
+            f"A finite number, or a declared status label "
+            f"(at most {METRIC_VALUE_TEXT_MAX_LEN} characters)"
+        ),
+    )
     ts: Optional[str] = Field(
         None, max_length=64,
         description="RFC 3339 with an explicit offset; defaults to server now",

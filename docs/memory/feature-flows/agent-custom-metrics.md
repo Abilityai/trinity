@@ -101,8 +101,9 @@ mcp-server/src/tools/metrics.ts      agent-scoped key only; never throws
   ▼
 POST /api/agents/{name}/metrics/points        routers/metric_points.py
   ├─ AuthorizedAgent + self-gate       an agent key records only as itself
-  ├─ rate limit (agent_metrics:{name}) · size guard (2 MiB)
-  ├─ idempotency begin(scope, key)     header/body key, else execution-derived
+  ├─ rate limit (agent_metrics:{name}) · size guard (2 MiB, post-parse)
+  ├─ execution provenance              backend-confirmed, else NULL
+  ├─ idempotency begin(scope, key)     key BOUND to sha256(canonical points)
   ├─ db.list_metric_definitions(name, include_retired=True)     ← the registry
   ├─ metric_points_service.validate_batch(defs, points, now)    ← pure leaf
   │     → rows[] | errors[]   422 all-or-nothing, one reason code per point
@@ -133,6 +134,20 @@ batch of `ts`-less points whose timestamps would otherwise be freshly assigned
 on the retry. With neither, a retry is a new observation — stated in the tool
 description rather than papered over with a body hash, because the same numbers
 an hour later are usually a genuine new observation.
+
+**The batch key is bound to the body.** `idempotency_keys` stores no request
+fingerprint, so a claim on the client key alone would make the key identify the
+*caller* rather than the batch: an agent stamping a constant `idempotency_key`
+on every turn gets the first batch's snapshot for 24 hours, with `replayed:
+true` and no 4xx — silent metric loss, where the equivalent on `/chat` is only
+a stale answer. Both branches therefore fold the canonical points payload into
+the claim, so the same batch replays and a different one is recorded.
+
+**The size guard bounds storage, not parse cost.** Starlette has buffered and
+Pydantic has validated the body before the handler runs; the 2 MiB cap is
+honest about being a storage bound, and the per-field
+`METRIC_VALUE_TEXT_MAX_LEN` (1024) is what stops one text `value` from being
+the whole batch.
 
 **Failure is classified, not blanket.** A store outage is a 503 the tool
 reports as `retryable`; a batch the database rejects on its content is a 500

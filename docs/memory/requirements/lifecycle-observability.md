@@ -1071,6 +1071,16 @@ Two idempotency layers, for two different failures:
   points on a re-delivered turn, since those take a fresh server-now timestamp
   and would otherwise hash to something new.
 
+**The batch key identifies a BATCH, not a caller.** Both branches bind the
+canonical points payload into the claim (`record_metrics:{client_key}:{
+sha256(points)}` for a client key; `derive_effect_key` for the execution-derived
+one), because `idempotency_keys` stores no request fingerprint. Without that
+binding an agent stamping a constant `idempotency_key` on every turn — the
+realistic LLM failure — would have every later batch answered with the first
+one's snapshot for 24 hours: `replayed: true`, no 4xx, nothing written. A retry
+of the *same* batch still replays; a *different* batch under a reused key is a
+fresh claim and is recorded.
+
 With **neither** a key nor an `execution_id`, a `ts`-less retry is a new
 observation. That is stated rather than papered over with a body hash: the same
 numbers an hour later are usually a genuine new observation, and treating them
@@ -1086,9 +1096,17 @@ Batch level: `batch_empty` · `batch_too_large` · `payload_too_large` (413) ·
 Per point (`errors[i].code`): `metric_name_invalid` · `metric_undeclared`
 (+ hint naming `refresh_metric_definitions`) · `metric_retired` ·
 `type_mismatch` (+ hint when a type change was refused) ·
-`status_value_undeclared` · `value_invalid` · `dimension_undeclared` ·
-`dimension_value_invalid` · `ts_invalid` · `ts_out_of_range` ·
-`ts_in_future` · `ts_before_retention` · `duplicate_in_batch`.
+`status_value_undeclared` · `value_invalid` · `value_too_long` ·
+`dimension_undeclared` · `dimensions_too_many` · `dimension_value_invalid` ·
+`ts_invalid` · `ts_out_of_range` · `ts_in_future` · `ts_before_retention` ·
+`duplicate_in_batch`.
+
+`value_too_long` and `dimensions_too_many` each exist because the nearest
+alternative sends the caller somewhere that cannot help: an over-long text
+value is not a type problem, and eleven *declared* dimensions is not an
+undeclared one. A text `value` is bounded at `METRIC_VALUE_TEXT_MAX_LEN`
+(1024) — the 2 MiB figure is a **batch** bound that a single field could
+otherwise spend on its own.
 
 Messages carry codes, indices, closed-enum names and dimension **keys** only —
 never a value and never a dimension value, which may be a customer name or an

@@ -151,12 +151,18 @@ def render(catalog: dict, junit_dir: str | None) -> str:
             elif j["built"]:
                 state = " · no evidence"
         inv = ", ".join(j["invariants"]) or "—"
+        # `issue` may be a scalar or a list: a journey can be promised by one
+        # ticket and delivered across several (J12 is ent#477's declaration plus
+        # ent#478's write). A scalar `f"#{...}"` renders the list literal
+        # `#[477, 478]` into a generated, committed file.
+        _issues = j["issue"] if isinstance(j["issue"], list) else [j["issue"]]
+        issue_cell = ", ".join(f"#{n}" for n in _issues)
         harness = f"`{j['harness']}`" if j["harness"] else "—"
         rows.append(
             f"| **{j['id']}** | {j['promise']} | {j['actor']} | "
             f"{', '.join(j['lanes'])} | {j['tier']} | "
             f"{'yes' if j['built'] else '**no**'}{state} | {harness} | {inv} | "
-            f"#{j['issue']} |"
+            f"{issue_cell} |"
         )
 
     out = [GENERATED_HEADER, "# Journeys\n",

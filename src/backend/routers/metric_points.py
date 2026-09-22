@@ -9,13 +9,19 @@ idempotency, status codes) and delegates every judgement about a point to
 
 ## Gate order, and why it is that order
 
-    self-gate → rate limit → size → batch idempotency → definitions →
-    validate → daily cap → execution provenance → insert → complete → audit
+    self-gate → rate limit → size → execution provenance → batch idempotency
+    → definitions → validate → daily cap → insert → complete → audit
 
 Auth first and access-first (Invariant #8): an agent-scoped key may only
 record as itself, decided before any lookup so the answer cannot vary by
 whether a metric exists. The two cheap floods (per-minute rate, body size) are
-refused before anything is parsed or read.
+refused before anything is READ — not before anything is parsed: FastAPI has
+already parsed and validated the body by the time this handler runs, so the
+byte cap bounds what gets STORED, not peak parse memory. `value` strings are
+bounded per point (`METRIC_VALUE_TEXT_MAX_LEN`) for the same reason.
+
+Execution provenance is resolved BEFORE the batch claim because the derived
+key needs it — that is the one step the gate order above may not reorder.
 
 The batch idempotency claim is taken AFTER the cheap refusals but BEFORE the
 work, and **every** non-2xx exit past that point goes through `_reject`, which
@@ -39,9 +45,13 @@ observation, and the tool description says so.
 
 Only CONNECTIVITY failures are retryable. A `DataError` / `IntegrityError` is
 about the content of this batch and will fail identically forever — telling an
-agent to retry it is how a permanent error becomes an infinite loop.
+agent to retry it is how a permanent error becomes an infinite loop. Both
+subclass `DBAPIError`, so ONE clause catches them and reads
+`connection_invalidated` to tell the two apart; a separate `except
+IntegrityError` after it would be dead code, never a second answer.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -49,7 +59,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from database import db
 from dependencies import AuthorizedAgent, get_current_user
@@ -91,6 +101,20 @@ def _reject(
     return HTTPException(status_code=status_code, detail=detail, headers=headers)
 
 
+def _canonical_points(data) -> str:
+    """The ONE serialisation both idempotency branches bind their key to."""
+    return json.dumps(
+        [p.model_dump(exclude_none=True) for p in data.points],
+        sort_keys=True, default=str,
+    )
+
+
+def _body_fingerprint(data) -> str:
+    """`sha256` of the canonical points payload — what makes a client key
+    identify a BATCH rather than a caller."""
+    return hashlib.sha256(_canonical_points(data).encode("utf-8")).hexdigest()
+
+
 def _next_utc_midnight_seconds(now: datetime) -> int:
     tomorrow = (now + timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0)
@@ -100,9 +124,18 @@ def _next_utc_midnight_seconds(now: datetime) -> int:
 def _ops_int(key: str, fallback: int) -> int:
     """An ops integer, coerced toward the SAFE direction on garbage.
 
-    For the cap that is the DEFAULT, never `0` — `0` means unlimited here, so
-    an unparseable row must not silently remove the cap. (`PUT /api/settings/
-    {key}` can no longer write one, but a hand-edited row still can.)
+    "Safe" is per key, and the caller names it by choosing `fallback`:
+
+    * the CAP falls back to the built-in default, never `0` — `0` means
+      unlimited here, so an unparseable row must not silently remove the cap;
+    * the RETENTION WINDOW falls back to `0`, which is what
+      `cleanup_service._read_retention_setting` does with the same garbage
+      (ent#478 I6). A route that refused `ts_before_retention` on a 365-day
+      basis while the sweep was disabled would enforce a window nothing is
+      actually pruning to.
+
+    (`PUT /api/settings/{key}` can no longer write garbage to either key, but a
+    hand-edited row still can.)
     """
     raw, _source = settings_service.resolve_ops_setting(key)
     try:
@@ -152,7 +185,10 @@ async def record_metric_points(
 
     # Two-stage size guard: the declared Content-Length is a cheap HINT, the
     # exact encoded size is the enforcement. Honest limit — Starlette has
-    # already buffered the body, so this bounds STORAGE, not peak memory.
+    # already buffered AND Pydantic has already validated the body by now, so
+    # this bounds STORAGE, not peak memory. The per-point `value` bound in
+    # `metric_points_service` is what keeps a single field from being the
+    # whole 2 MiB.
     declared = request.headers.get("content-length") if request else None
     if declared:
         try:
@@ -194,7 +230,16 @@ async def record_metric_points(
         scope = idempotency_service.make_agent_scope(name)
         if not current_user.agent_name:
             scope = f"{scope}:user:{current_user.username}"
-        key = f"record_metrics:{client_key}"
+        # The body is folded into the key, exactly as the execution-derived
+        # branch below already does and as the webhook boundary binds
+        # `(token, body_hash)`. `idempotency_keys` stores no request
+        # fingerprint, so a claim on the client key ALONE would answer every
+        # later batch with the first batch's snapshot for 24 hours — and an
+        # agent stamping a constant `idempotency_key: "metrics"` on every turn
+        # is the realistic case. That is silent metric loss: `replayed: true`,
+        # no 4xx, nothing written. Same batch → still a replay; different
+        # batch under a reused key → a fresh claim, recorded.
+        key = f"record_metrics:{client_key}:{_body_fingerprint(data)}"
     elif execution_id:
         # No client key, but a real turn: derive one, so a re-delivered turn
         # whose points carry no `ts` replays instead of writing a second set
@@ -203,8 +248,7 @@ async def record_metric_points(
         key = idempotency_service.derive_effect_key(
             execution_id,
             "record_metrics",
-            json.dumps([p.model_dump(exclude_none=True) for p in data.points],
-                       sort_keys=True, default=str),
+            _canonical_points(data),
         )
     else:
         scope, key = idempotency_service.make_agent_scope(name), None
@@ -220,7 +264,8 @@ async def record_metric_points(
         return MetricPointsResult(**{**idem.snapshot, "replayed": True})
 
     now = datetime.now(timezone.utc)
-    retention_days = _ops_int("metrics_retention_days", 365)
+    # 0 on garbage — the sweep's direction, see `_ops_int`.
+    retention_days = _ops_int("metrics_retention_days", 0)
 
     # --- validate ------------------------------------------------------------
     try:
@@ -293,13 +338,6 @@ async def record_metric_points(
             detail="metric_store_unavailable",
             headers={"Retry-After": str(STORE_RETRY_AFTER_SECONDS)},
         )
-    except IntegrityError as exc:
-        logger.error("[Metrics] Integrity error for %s: %s", name, exc)
-        raise _reject(
-            idem=idem,
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="metric_store_rejected_batch",
-        )
     except Exception as exc:  # noqa: BLE001
         logger.error("[Metrics] Unexpected store failure for %s: %s", name, exc)
         raise _reject(
@@ -333,6 +371,7 @@ async def _audit_cap_exceeded(name: str, current_user: User, cap: int,
     into a 500. Quota events only — a row per accepted batch would be up to
     86k permanent, undeletable rows per agent per day at the cap.
     """
+    claimed = None
     try:
         from services.platform_audit_service import (AuditEventType,
                                                      platform_audit_service)
@@ -340,6 +379,7 @@ async def _audit_cap_exceeded(name: str, current_user: User, cap: int,
         marker_scope = f"metrics-cap:{name}"
         marker_key = now.strftime("%Y-%m-%d")
         decision = idempotency_service.begin(marker_scope, marker_key)
+        claimed = decision
         if decision.replay:
             return  # already recorded for this agent today
         await platform_audit_service.log(
@@ -357,6 +397,13 @@ async def _audit_cap_exceeded(name: str, current_user: User, cap: int,
             details={"cap": cap, "day": marker_key},
         )
         idempotency_service.complete(decision, None, {"logged": True})
+        claimed = None  # completed: there is nothing left to release
     except Exception as exc:  # noqa: BLE001
+        # Release the marker, or a transient `log()` failure leaves it
+        # `in_flight` and every later refusal today reads `replay` and returns
+        # — no audit row for that agent-day, and no way to tell that from
+        # "already recorded". `_reject`'s rule, one layer down.
+        if claimed is not None:
+            idempotency_service.fail(claimed)
         logger.warning("[Metrics] Could not audit cap refusal for %s: %s",
                        name, exc)

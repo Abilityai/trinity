@@ -22,6 +22,9 @@ what makes every reason code testable without a DB and what keeps Invariant
 * **Identity excludes the value.** `idempotency_key = sha256(metric \0 ts \0
   canonical_dims)`: the same observation posted twice is one row, and a genuine
   correction is a new `ts`.
+* **A value is a label, not a document.** Text values are bounded at
+  `METRIC_VALUE_TEXT_MAX_LEN`; `status` labels are bounded far tighter by
+  their declared domain.
 * **Echo nothing.** Messages carry codes, indices, closed-enum names and
   dimension KEYS (charset-bounded, via `_safe_echo`) — never a value and never
   a dimension value. This output lands in MCP tool results, i.e. in an LLM's
@@ -37,6 +40,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from models import METRIC_VALUE_TEXT_MAX_LEN
 from services.template_metrics import (
     MAX_DIMENSIONS,
     MAX_STATUS_VALUE_LEN,
@@ -161,8 +165,14 @@ def _validate_dims(
     if not dims:
         return (None, None)
     if len(dims) > MAX_DIMENSIONS:
+        # Its OWN code: "you sent too many" and "you sent one nobody declared"
+        # are different remedies, and reusing `dimension_undeclared` tells an
+        # agent to go declare a dimension that would not help (ent#478 I8).
+        # Pydantic's `max_length=10` on `dims` refuses this first over HTTP, so
+        # this branch is defensive — it is the answer for any non-HTTP caller
+        # of the leaf, which is the whole point of the leaf being pure.
         return (None, (
-            "dimension_undeclared",
+            "dimensions_too_many",
             f"a point may carry at most {MAX_DIMENSIONS} dimensions",
         ))
     allowed = set(declared or [])
@@ -200,6 +210,19 @@ def _validate_value(
     value: Any, definition: Dict[str, Any]
 ) -> Tuple[Optional[float], Optional[str], Optional[Tuple[str, str, Optional[str]]]]:
     """`(value_numeric, value_text, (code, message, hint))`."""
+    # Length first, and before the type dispatch: a text value is a LABEL, and
+    # an unbounded one could spend the whole 2 MiB batch budget in a single
+    # field that then lands in a chart axis, a log line and an LLM's context.
+    # The byte cap is a batch-level bound that a single point can exhaust; this
+    # is the per-field one. Named, so the caller is told which rule it hit
+    # rather than reading it as a type problem (ent#478 I1).
+    if isinstance(value, str) and len(value) > METRIC_VALUE_TEXT_MAX_LEN:
+        return (None, None, (
+            "value_too_long",
+            f"a text value must be at most {METRIC_VALUE_TEXT_MAX_LEN} "
+            "characters — a value is a label, not a document",
+            None,
+        ))
     stored_type = definition.get("type")
     conflict = definition.get("type_conflict")
     hint = None

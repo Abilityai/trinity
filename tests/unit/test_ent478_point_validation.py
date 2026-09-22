@@ -333,11 +333,39 @@ def test_a_dimension_value_that_is_not_bounded_text_is_refused(value):
 
 
 def test_more_dimensions_than_the_declaration_reader_allows_is_refused():
+    """And under its OWN code (ent#478 I8): "too many" and "not declared" have
+    different remedies, so reusing `dimension_undeclared` here would send an
+    agent off to declare a dimension that cannot help — every key in this batch
+    IS declared."""
     dims = {f"d{i}": "x" for i in range(svc.MAX_DIMENSIONS + 1)}
     _, errors = _validate(
         [{"metric": "cycles", "value": 1, "dims": dims}],
         definitions=[_definition(dimensions=list(dims))])
-    assert errors
+    assert _codes(errors) == ["dimensions_too_many"]
+    assert str(svc.MAX_DIMENSIONS) in errors[0]["message"]
+
+
+def test_a_text_value_longer_than_the_bound_is_refused_by_name():
+    """ent#478 I1: the 2 MiB batch cap is a BATCH bound that one point can
+    exhaust. A `value` is a label, so it carries its own per-field bound, and
+    the refusal names that rule rather than reading as a type problem."""
+    from models import METRIC_VALUE_TEXT_MAX_LEN
+
+    _, errors = _validate(
+        [{"metric": "cycles", "value": "x" * (METRIC_VALUE_TEXT_MAX_LEN + 1)}])
+    assert _codes(errors) == ["value_too_long"]
+    # Never the value itself — this message lands in an LLM's context and logs.
+    assert "x" * 50 not in errors[0]["message"]
+
+
+def test_a_text_value_at_the_bound_is_judged_on_its_type_not_its_length():
+    """The boundary is inclusive, and the length check does not shadow the type
+    rules: a 1024-character string on a counter is still a `type_mismatch`."""
+    from models import METRIC_VALUE_TEXT_MAX_LEN
+
+    _, errors = _validate(
+        [{"metric": "cycles", "value": "x" * METRIC_VALUE_TEXT_MAX_LEN}])
+    assert _codes(errors) == ["type_mismatch"]
 
 
 # ---------------------------------------------------------------------------

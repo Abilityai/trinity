@@ -127,7 +127,8 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
                 .describe(
                   "A finite number for counter/gauge/percentage/duration/bytes metrics, " +
                     "or one of the declared status labels for a `status` metric. " +
-                    "Not coerced: \"42\" is not 42, and true is not 1.",
+                    "Not coerced: \"42\" is not 42, and true is not 1. " +
+                    "A text value is a label, not a document: at most 1024 characters.",
                 ),
               ts: z
                 .string()
@@ -154,7 +155,9 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
           .optional()
           .describe(
             "Optional. Re-sending the same batch under the same key returns the FIRST " +
-              "result instead of recording again.",
+              "result instead of recording again. The key is bound to the batch CONTENT, " +
+              "so a different set of points under a reused key is still recorded — you " +
+              "cannot lose data by reusing a key, only by re-sending identical points.",
           ),
         execution_id: z
           .string()

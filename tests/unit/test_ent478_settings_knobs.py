@@ -225,6 +225,45 @@ def test_the_generic_put_refuses_every_validated_ops_key():
     assert "if key in OPS_SETTINGS_VALIDATION:" in source
 
 
+@pytest.mark.parametrize("key", _KNOB_NAMES)
+def test_the_generic_put_actually_refuses_the_metric_knobs(key):
+    """I5: the guard above reads the source; this one CALLS the route. A
+    refusal that only exists as a matched string is a refusal nobody has seen
+    happen — and this branch is the whole reason the knobs have a validated
+    range at all."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from fastapi import HTTPException
+
+    from database import SystemSettingUpdate
+    from routers.settings import generic as mod
+
+    admin = MagicMock()
+    admin.role = "admin"
+    admin.connector_agent = None   # #1310: not a connector principal
+    admin.agent_name = None        # ent#293: not an agent-scoped key
+    admin.mcp_scope = None         # #2323: an interactive human
+
+    req = MagicMock()
+    req.client = None
+    req.url.path = f"/api/settings/{key}"
+    req.state.request_id = None
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(mod.update_setting(
+            key=key,
+            body=SystemSettingUpdate(value="not-a-number"),
+            request=req,
+            current_user=admin,
+        ))
+
+    assert exc.value.status_code == 422
+    # Named, and it points at the route that DOES validate — a bare refusal
+    # leaves the operator with a control they cannot reach.
+    assert "/api/settings/ops/config" in exc.value.detail
+
+
 def test_the_ack_gated_sweeps_include_the_metric_points_one():
     """TD-12: for this window a refusal is the EXPECTED path after a
     narrowing, and the guard's acknowledgements are single-use — without an
