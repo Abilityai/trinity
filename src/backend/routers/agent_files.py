@@ -1,4 +1,4 @@
-# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (get_metrics → /metrics, /metrics/definitions — ent#479 ships the tool; ent#477 leaves the two definition routes deliberately unexposed, not forgotten)
+# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics, /metrics/definitions — ent#479 ships that tool; the definitions READ stays deliberately unexposed until then, not forgotten)
 """Agent file management, info, and folder endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -394,16 +394,42 @@ async def get_agent_metric_definitions(
             else "no metrics: block in template.yaml — declare one and pull, "
                  "restart the agent, or POST .../metrics/definitions/refresh"
         ),
-        # The contract ent#478 implements, surfaced so a consumer reads the
-        # numbers from the platform rather than hard-coding them. Documented in
-        # requirements §47; no Settings knob is minted until the sweep that
-        # enforces it ships (T2 — a control with no enforcer is a lie).
-        "policy": {
-            "retention_days": 365,
-            "daily_point_cap": 100000,
-            "enforced": False,
-            "enforced_by": "abilityai/trinity-enterprise#478",
-        },
+        # The LIVE contract, read from settings rather than restated here:
+        # a consumer that hard-codes these numbers is wrong the first time an
+        # operator changes one. `enforced` is True as of ent#478 — the write
+        # path validates against these very values — and `source` says which
+        # tier supplied each, because "365 because nobody configured it" and
+        # "365 because someone chose it" are different promises.
+        "policy": _metric_policy(),
+    }
+
+
+def _metric_policy() -> dict:
+    """The live metric-point policy, resolved through the settings chain.
+
+    One reader for the two knobs ent#478 mints, so this block, the write path
+    and `GET /api/settings/retention` cannot disagree about what is in force.
+    """
+    from services.settings_service import settings_service
+
+    retention, retention_source = settings_service.resolve_ops_setting(
+        "metrics_retention_days")
+    cap, cap_source = settings_service.resolve_ops_setting(
+        "metrics_daily_point_cap")
+
+    def _int(raw, fallback):
+        try:
+            return max(int(raw), 0)
+        except (TypeError, ValueError):
+            return fallback
+
+    return {
+        "retention_days": _int(retention, 365),
+        "retention_days_source": retention_source,
+        "daily_point_cap": _int(cap, 100000),
+        "daily_point_cap_source": cap_source,
+        "enforced": True,
+        "enforced_by": "abilityai/trinity-enterprise#478",
     }
 
 

@@ -286,10 +286,13 @@ def _read_retention_setting(key: str) -> int:
     unreadable becomes `0`, which DISABLES the sweep. A malformed setting must
     never enable an unbounded prune.
     """
-    from services.settings_service import OPS_SETTINGS_DEFAULTS
+    from services.settings_service import settings_service
 
     try:
-        raw = db.get_setting_value(key, OPS_SETTINGS_DEFAULTS.get(key, "0"))
+        # Through the resolver, so the env tier minted for ent#478's window is
+        # honoured here too. A sweep that read the defaults dict directly would
+        # prune on a window the settings endpoint never reports.
+        raw, _source = settings_service.resolve_ops_setting(key)
         return max(int(raw), 0)
     except (TypeError, ValueError):
         return 0
@@ -385,12 +388,17 @@ def log_effective_retention_windows() -> None:
     Never raises: this is observability on the boot path.
     """
     try:
-        from services.settings_service import OPS_SETTINGS_DEFAULTS, RETENTION_OPS_KEYS
+        from services.settings_service import (RETENTION_OPS_KEYS,
+                                                settings_service)
 
         parts = []
         for key in RETENTION_OPS_KEYS:
-            row = db.get_setting_value(key, None)
-            source = "db-row" if row is not None else "code-default"
+            # The full chain, named honestly: an `env`-sourced window is one an
+            # operator set in the environment and can still change there, which
+            # is a different promise from both `db-row` and `code-default`.
+            resolved, source = settings_service.resolve_ops_setting(key)
+            if source == "default":
+                source = "code-default"
             if key == "backup_retention_days":
                 # #2216: rendered through the ONE shared reader — its coercion
                 # is inverted (garbage → 14, never → 0/keep-forever), so this
@@ -401,7 +409,7 @@ def log_effective_retention_windows() -> None:
                 )
                 value = effective_backup_retention_days()
             else:
-                value = row if row is not None else OPS_SETTINGS_DEFAULTS.get(key, "?")
+                value = resolved if resolved != "" else "?"
             parts.append(f"{key}={value}d ({source})")
         logger.info(f"[Cleanup] Effective retention windows: {'; '.join(parts)}")
     except Exception as e:
@@ -489,6 +497,8 @@ class CleanupReport:
     # replaces a hardcoded 24h sweep that had no window and no guard).
     headroom_history_pruned: int = 0
     rate_limit_events_pruned: int = 0
+    # trinity-enterprise#478: recorded metric points deleted past their window.
+    metric_points_pruned: int = 0
     # Issue #1804: dispatch activities closed by a recovery path that won the
     # terminal CAS (watchdog, startup recovery, the bulk sweeps). Post-merge
     # signal: `stale_activities` should trend to ~0 while this picks up the
@@ -516,7 +526,8 @@ class CleanupReport:
                 self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed +
                 self.operator_queue_pruned + self.ssh_credentials_expired +
                 self.agent_reminders_pruned +
-                self.headroom_history_pruned + self.rate_limit_events_pruned)
+                self.headroom_history_pruned + self.rate_limit_events_pruned +
+                self.metric_points_pruned)
     # NOTE (#1804): activities_closed_on_recovery is deliberately NOT summed
     # into `total` — it is an observability counter over work already counted
     # by the sweep that closed the execution, not additional cleanup work.
@@ -552,6 +563,7 @@ class CleanupReport:
             "agent_reminders_pruned": self.agent_reminders_pruned,
             "headroom_history_pruned": self.headroom_history_pruned,
             "rate_limit_events_pruned": self.rate_limit_events_pruned,
+            "metric_points_pruned": self.metric_points_pruned,
             "activities_closed_on_recovery": self.activities_closed_on_recovery,
             "total": self.total,
         }
@@ -652,6 +664,7 @@ class CleanupService:
         self._sweep_operator_queue_retention(report)
         self._sweep_agent_reminders_retention(report)
         self._sweep_headroom_history(report)
+        self._sweep_metric_points(report)
         await self._sweep_soft_deleted_agents(report)
         await self._sweep_orphan_agent_volumes(report)
         await self._sweep_ephemeral_agents(report)
@@ -1067,6 +1080,56 @@ class CleanupService:
                     )
         except Exception as e:
             logger.error(f"[Cleanup] Error pruning headroom history: {e}")
+
+    def _sweep_metric_points(self, report: CleanupReport) -> None:
+        """Prune recorded metric points past their window (ent#478).
+
+        Two things differ from the sibling row sweeps, both deliberate.
+
+        **The floor.** `FLOOR_METRIC_POINTS` (one agent-day at the default cap)
+        rather than the default `MAX_ROWS_PER_SWEEP = 1000`: at any real
+        ingest rate more than a thousand points fall out of a 365-day window
+        every five minutes, so the default floor would refuse EVERY cycle,
+        alarm once, and then leave the table growing behind single-use
+        acknowledgements. The guard still fires for what it is for — a window
+        an operator just narrowed.
+
+        **The ack.** The prune is bounded per call (TD-14), so the first cycle
+        after an approval does not necessarily finish the backlog. Consuming
+        the ack there would ask the operator to approve the same intent again
+        for the remainder, so it is consumed only once what is LEFT has fallen
+        under the floor.
+        """
+        from services.retention_guard import FLOOR_METRIC_POINTS
+
+        days = _read_retention_setting("metrics_retention_days")
+        if days <= 0:
+            return
+        try:
+            if _guard_allows(
+                "metrics_retention_days",
+                "metric_points", days,
+                lambda limit: db.count_metric_points_candidates(days, limit),
+                floor=FLOOR_METRIC_POINTS,
+            ):
+                pruned = db.prune_metric_points(
+                    retention_days=days,
+                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
+                )
+                report.metric_points_pruned = pruned
+                remaining = db.count_metric_points_candidates(
+                    days, FLOOR_METRIC_POINTS + 1)
+                if remaining <= FLOOR_METRIC_POINTS:
+                    _after_guarded_prune("metrics_retention_days")
+                if pruned > 0:
+                    _log_prune(
+                        pruned,
+                        f"[Cleanup] Deleted {pruned} metric_points rows older "
+                        f"than {days} days (ent#478); {remaining} still past "
+                        f"the window",
+                    )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error pruning metric points: {e}")
 
     def _sweep_shared_files(self, report: CleanupReport) -> None:
         """4b. Purge expired / old-revoked shared files (C4 / FILES-001).
@@ -1852,7 +1915,8 @@ class CleanupService:
                            + report.operator_queue_pruned  # #1142
                            + report.agent_reminders_pruned  # #1296 — was omitted
                            + report.headroom_history_pruned      # ent#433
-                           + report.rate_limit_events_pruned)    # ent#433
+                           + report.rate_limit_events_pruned    # ent#433
+                           + report.metric_points_pruned)       # ent#478
         if retention_total > 0:
             try:
                 _wal_checkpoint_truncate()

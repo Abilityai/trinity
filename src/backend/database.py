@@ -362,13 +362,23 @@ def _retention_window_seed_values():
     # — which this seed's fail-safe contract then SWALLOWS, leaving the feature
     # silently dead on every boot. Verified empirically before the move; the
     # same #1638 circular-import trap, one seed later.
-    from config import OPS_SETTINGS_DEFAULTS, RETENTION_OPS_KEYS
+    from config import (ENV_BACKED_OPS_KEYS, OPS_SETTINGS_DEFAULTS,
+                        RETENTION_OPS_KEYS, env_ops_value)
 
-    return [
-        (key, OPS_SETTINGS_DEFAULTS[key])
-        for key in RETENTION_OPS_KEYS
-        if key in OPS_SETTINGS_DEFAULTS
-    ]
+    pairs = []
+    for key in RETENTION_OPS_KEYS:
+        if key not in OPS_SETTINGS_DEFAULTS:
+            continue
+        # An env-backed window whose variable is SET is skipped on purpose
+        # (trinity-enterprise#478): seeding it would freeze the environment's
+        # value into a row and quietly end the environment's authority, so a
+        # later `METRICS_RETENTION_DAYS` change would be ignored with nothing
+        # to explain why. Env stays a live fallback; a `PUT /ops/config` row
+        # still wins over it, which is the only precedence anyone documented.
+        if key in ENV_BACKED_OPS_KEYS and env_ops_value(key) is not None:
+            continue
+        pairs.append((key, OPS_SETTINGS_DEFAULTS[key]))
+    return pairs
 
 
 def _seed_retention_windows(cursor, conn):
