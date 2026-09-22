@@ -110,7 +110,11 @@ unreadable file, or **two runs on one agent** (an agent-written, clock-skewed
 `updated_at` cannot say which run an instance belongs to) all read `unknown`,
 with their own sentence — "could not be read right now". Telling a user a
 stopped agent "doesn't report steps" would be the distrust-training misrender
-the ruling exists to prevent, in new clothes.
+the ruling exists to prevent, in new clothes. In the chat's live card,
+`pending` (the feed has not read the turn yet) holds the sentence's one-line
+footprint, blank and aria-hidden, and the sentence is held to one line there
+(only the agent's name truncates), so `none` / `unknown` swap in place. The
+Work tab and the room render as before (#2964).
 
 ### The #919 read is hardened like the MCP tool
 
@@ -206,7 +210,13 @@ live path at all. Now:
   live life; a keyed `<Transition name="portal-activity">` slides a new line up
   (a swap under reduced motion); `createActivityLineQueue` holds each line
   ≥700 ms, collapses a burst to its latest member, never re-keys an identical
-  line, keeps the last line on a quiet run, and is cleared at terminal.
+  line, keeps the last line on a quiet run, and is cleared at terminal. The
+  chat's card (`reserveLiveRows`) also reserves the steps-sentence row and
+  Stop's slot from first paint: Stop stays invisible, disabled, aria-hidden
+  and out of the tab order until the 202's execution id arrives (ent#155),
+  then the same button turns usable, so Open in Work never moves. In that card
+  only the agent's name truncates, never "doesn't report steps." Known and out
+  of scope: `stages ↔ unknown`, and a row going stale mid-turn (#2964).
 - **Scroll.** `submitUserText` already pins before `deliver`; the card mounts
   after, so a `watch(sending)` re-pins once, on `nextTick`, guarded by
   `following` — the person's own send only (#2624 holds for arrivals).
