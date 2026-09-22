@@ -209,6 +209,18 @@ class TestTierThreeNightly:
         cmd = _run(_step(job, "Run unit suite"))
         assert "--randomly-seed=" in cmd and "--timeout=" in cmd
 
+    def test_one_slack_message_per_scheduled_night(self, wf):
+        job = wf["jobs"]["notify-slack"]
+        for dep in ("unit", "integration"):
+            assert dep in job["needs"], "the message reports both tiers, so it waits for both"
+        assert "always()" in job["if"] and "github.event_name == 'schedule'" in job["if"], (
+            "green AND red nights post; a silent morning must never mean 'green'"
+        )
+        cmd = _run(_step(job, "Post the verdict"))
+        assert "SLACK_WEBHOOK_URL" in cmd and "exit 0" in cmd, "no secret → skip with a notice, never a red job"
+        assert "curl" in cmd and "jq -n" in cmd, "plain incoming webhook, JSON built by jq"
+        assert "dev-nightly green" in cmd and "dev-nightly red" in cmd
+
     def test_integration_runs_the_live_suite_on_dev(self, wf):
         job = wf["jobs"]["integration"]
         assert job["steps"][0]["with"]["ref"] == "dev"

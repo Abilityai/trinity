@@ -15,9 +15,11 @@ name: dev-nightly
 #                against a stack booted from `dev`, absolute failures reported.
 #
 # A red night opens or updates ONE tracking issue (the frontend-e2e nightly
-# precedent, #1526) so it has an owner by morning. Tier 3 findings that nobody
-# reads are the failure mode of moving tests off the PR — the issue is the
-# reader.
+# precedent, #1526) so it has an owner by morning, and every scheduled run —
+# green or red — posts ONE Slack message (`notify-slack`, incoming webhook in
+# the `SLACK_WEBHOOK_URL` secret; skipped with a notice when unset). Tier 3
+# findings that nobody reads are the failure mode of moving tests off the PR —
+# the morning message is the reader.
 #
 # `schedule` runs the workflow file from the DEFAULT branch, so every checkout
 # below names `ref: dev` explicitly (the P-20b trap).
@@ -26,6 +28,12 @@ on:
   schedule:
     - cron: '0 5 * * *'   # 05:00 UTC — before the PR sweeps (06:00 unit, 06:30 integration)
   workflow_dispatch:
+    inputs:
+      slack:
+        description: 'Also post the Slack message (scheduled runs always do)'
+        required: false
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -224,3 +232,43 @@ jobs:
             gh issue create --repo "$REPO" --title "$TITLE" --body "$body" \
               --label priority-p1 --label type-bug --label theme-reliability
           fi
+
+  notify-slack:
+    name: morning Slack message
+    needs: [unit, integration, report]
+    # One message per scheduled night, green or red — the team asked for exactly
+    # one alert to read in the morning, not a silence that could mean "green" or
+    # "never ran". Dispatch runs stay quiet unless asked (input below), so a
+    # test of this workflow does not page the channel.
+    if: always() && (github.event_name == 'schedule' || inputs.slack == true)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: read
+    steps:
+      - name: Post the verdict
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          UNIT: ${{ needs.unit.result }}
+          INTEGRATION: ${{ needs.integration.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "::notice::SLACK_WEBHOOK_URL is not set — no Slack message (add an Incoming Webhook secret to enable)"
+            exit 0
+          fi
+          tip=$(gh api "repos/$REPO/commits/dev" --jq '.sha[0:8]')
+          if [ "$UNIT" = "success" ] && [ "$INTEGRATION" = "success" ]; then
+            text=":white_check_mark: *dev-nightly green* — \`dev@${tip}\` · unit 3/3 seeds · live integration ok · <${RUN_URL}|run>"
+          else
+            issue=$(gh issue list --repo "$REPO" --state open --search '"dev-nightly red" in:title' --json number,url --jq '.[0] | "<\(.url)|#\(.number)>"' 2>/dev/null || true)
+            text=":red_circle: *dev-nightly red* — \`dev@${tip}\` · unit: \`${UNIT}\` · integration: \`${INTEGRATION}\` · <${RUN_URL}|run>${issue:+ · issue ${issue}}"
+          fi
+          # Plain incoming webhook, no third-party action to pin: jq builds the
+          # JSON so the text cannot break the payload.
+          jq -n --arg text "$text" '{text: $text}' \
+            | curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK_URL" >/dev/null
+          echo "posted: $text" >> "$GITHUB_STEP_SUMMARY"
