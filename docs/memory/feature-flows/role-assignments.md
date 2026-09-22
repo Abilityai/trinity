@@ -171,7 +171,12 @@ which is precisely why the backend self-scopes an agent principal to its own
 roster. Advertisement is not authorization, and an agent-scoped MCP key resolves
 to its *owner carrying the owner's role*; on a default admin-owned install, an
 un-self-scoped read would hand any agent the whole fleet's roster (the
-ent#293 / #1890 class, moved one layer onto a read).
+ent#293 / #1890 class, moved one layer onto a read). The tool enforces the
+same self-scope itself, deliberately redundant with the backend (dolho's [I2]
+on #2596; the `a2a_call.ts` `checkSelf` precedent): an agent key naming another
+agent — or carrying no agent name — is refused with `not_authorized` before
+any backend call, and audited as a denial. `access.ts` records the row as
+`in-tool`. `user` and `system` keys pass through to the backend.
 
 Degradation is deliberately **narrower** than `credential_vault.ts`. That module
 branches on the detail SHAPE (a `{code, message}` dict vs a plain string) because
@@ -179,7 +184,9 @@ its backend raises coded refusals. This route raises none: its failures are the
 entitlement 403 (plain-string detail) and a **uniform 404** covering both "route
 absent" and "no such agent / no access" (Invariant #8 enumeration safety). So the
 tool merges those in its message rather than claiming a distinction it does not
-have.
+have. The degraded answer is `{enabled: false, agent_name, message}` only — the
+raw error text is never returned ([I3]), because on the unexpected-status branch
+it is a backend body or an internal URL handed to a model.
 
 ## Reserved alert prefix
 

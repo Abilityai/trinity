@@ -169,3 +169,66 @@ describe("ent#500 assignments — no raw error text reaches the agent ([I3])", (
     });
   }
 });
+
+describe("ent#500 assignments — an agent key reads only its OWN roster ([I2])", () => {
+  // The description promises "an agent may only read its own roster". The
+  // backend enforces it; this layer enforces it too, deliberately redundant
+  // (the a2a_call.ts checkSelf precedent), so the promise does not depend on a
+  // private repo remembering it.
+  it("allows an agent key reading its own roster", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeTools(calls);
+    const out = JSON.parse(
+      await tools.getAgentAssignments.execute(
+        { agent_name: "ops-companion" },
+        { session: { scope: "agent", agentName: "ops-companion" } as any },
+      ),
+    );
+    assert.equal(out.agent_name, "ops-companion");
+    assert.equal(calls.length, 1);
+  });
+
+  it("denies an agent key reading ANOTHER agent's roster, without a backend call", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeTools(calls);
+    const out = JSON.parse(
+      await tools.getAgentAssignments.execute(
+        { agent_name: "ops-companion" },
+        { session: { scope: "agent", agentName: "sales-bot" } as any },
+      ),
+    );
+    assert.equal(out.not_authorized, true);
+    assert.equal(calls.length, 0, "a denied read must not reach the backend");
+    assert.doesNotMatch(JSON.stringify(out), /A\. Smith/);
+  });
+
+  it("denies an agent key that carries no agent name (fails closed)", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeTools(calls);
+    const out = JSON.parse(
+      await tools.getAgentAssignments.execute(
+        { agent_name: "ops-companion" },
+        { session: { scope: "agent" } as any },
+      ),
+    );
+    assert.equal(out.not_authorized, true);
+    assert.equal(calls.length, 0);
+  });
+
+  it("is declared an in-tool gate in the access policy, not a baseline", async () => {
+    const { TOOL_ACCESS_POLICY } = await import("../access.js");
+    assert.equal(TOOL_ACCESS_POLICY.get_agent_assignments.kind, "in-tool");
+  });
+
+  it("leaves user and system keys to the backend", async () => {
+    for (const scope of ["user", "system"]) {
+      const calls: Recorded[] = [];
+      const tools = makeTools(calls);
+      await tools.getAgentAssignments.execute(
+        { agent_name: "ops-companion" },
+        { session: { scope, agentName: scope === "system" ? "trinity-system" : undefined } as any },
+      );
+      assert.equal(calls.length, 1, `${scope} must reach the backend`);
+    }
+  });
+});

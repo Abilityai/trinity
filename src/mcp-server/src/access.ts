@@ -222,6 +222,8 @@ const REPORTS_GATE = "reports.ts checkAgentAccess ({self} ∪ permitted)";
 const OPERATOR_QUEUE_GATE = "operator_queue.ts checkAgentAccess ({self} ∪ permitted)";
 const GIT_GATE = "git.ts `run` wrapper → checkAgentAccess ({self} ∪ permitted)";
 const A2A_GATE = "a2a.ts checkAgentAccess ({self} ∪ permitted)";
+const ASSIGNMENTS_SELF =
+  "assignments.ts — an agent key reads only its own roster (fails closed without an agent name); user/system keys are scoped by the backend, whose 404 is uniform (ent#500)";
 const A2A_CALL_SELF = "a2a_call.ts checkSelf — self-only by design (an agent spends only its own endpoint credential)";
 const AGENTS_INLINE = "agents.ts inline getPermittedAgents filter ({self} ∪ permitted)";
 const LOOP_RESOLVE =
@@ -417,7 +419,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_available_credentials: { kind: "none", why: "the calling agent's own grants (ent#279)" },
   fetch_credential: { kind: "none", why: "`name` is a credential; the backend scopes it to the calling agent (ent#279)" },
   // --- assignments.ts ---
-  get_agent_assignments: { kind: "baselined", owner: ENT629 + "; the route's 404 is uniform (ent#500)" },
+  get_agent_assignments: { kind: "in-tool", how: ASSIGNMENTS_SELF },
   // --- connector.ts (connector / anonymous tiers) ---
   list_playbooks: { kind: "baselined", owner: CONNECTOR_SCOPE },
   run_playbook: { kind: "baselined", owner: CONNECTOR_SCOPE },
