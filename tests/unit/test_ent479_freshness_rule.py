@@ -116,13 +116,13 @@ def test_the_rule_is_named_once_for_every_consumer():
     assert STALE_RULE == "2x cadence"
 
 
-def test_freshness_does_not_need_the_database():
+def test_freshness_does_not_need_the_database(monkeypatch):
     """The property that keeps the rule importable by #2927's role card and
     ent#666 without dragging the store in. If this fails, the next consumer
     copies the threshold instead of importing it."""
     import services.metric_read_service as mod
 
-    sys.modules.pop("database", None)
+    monkeypatch.delitem(sys.modules, "database", raising=False)
     assert mod.freshness(HOUR, _ago(10), NOW)["stale"] is False
     assert "database" not in sys.modules
 

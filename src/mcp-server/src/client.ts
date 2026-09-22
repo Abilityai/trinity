@@ -2016,12 +2016,6 @@ export class TrinityClient {
   }
 
   /**
-   * Re-read the agent's template.yaml and reconcile its declared metrics.
-   *
-   * The remedy named by `record_metrics`'s `metric_undeclared` hint, so it has
-   * to be reachable from the same place the hint is read (ent#478, TD-4).
-   */
-  /**
    * Read the calling agent's recorded metrics with freshness (ent#479).
    *
    * Query knobs only — the agent is in the PATH and the backend self-gates it,
@@ -2052,6 +2046,12 @@ export class TrinityClient {
     );
   }
 
+  /**
+   * Re-read the agent's template.yaml and reconcile its declared metrics.
+   *
+   * The remedy named by `record_metrics`'s `metric_undeclared` hint, so it has
+   * to be reachable from the same place the hint is read (ent#478, TD-4).
+   */
   async refreshMetricDefinitions(
     agentName: string
   ): Promise<Record<string, unknown>> {

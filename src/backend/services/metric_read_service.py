@@ -794,13 +794,23 @@ def _status_color(definition: Dict[str, Any], value: Any) -> Optional[str]:
 def _threshold_color(definition: Dict[str, Any], value: Any) -> Optional[str]:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
+    # The registry's vocabulary is `up_good` / `down_good` / `neutral`
+    # (template_metrics.DIRECTIONS), and this is the same rule the tiles apply
+    # in `utils/metricFormat.js::thresholdClasses`: for `down_good` a value AT
+    # OR ABOVE the threshold is bad, for `up_good` a value AT OR BELOW it is,
+    # and `neutral` declines to judge — a colour would be an opinion the
+    # author did not express. One rule, spelled on both sides, so a bound
+    # widget and the tile for the same point never disagree.
+    direction = definition.get("direction")
+    if direction not in ("up_good", "down_good"):
+        return None
     critical = definition.get("critical_threshold")
     warning = definition.get("warning_threshold")
-    direction = (definition.get("direction") or "up").lower()
-    worse = (lambda v, t: v >= t) if direction != "down" else (lambda v, t: v <= t)
-    if critical is not None and worse(value, critical):
+    breached = ((lambda v, t: v >= t) if direction == "down_good"
+                else (lambda v, t: v <= t))
+    if critical is not None and breached(value, critical):
         return "red"
-    if warning is not None and worse(value, warning):
+    if warning is not None and breached(value, warning):
         return "yellow"
     return None
 

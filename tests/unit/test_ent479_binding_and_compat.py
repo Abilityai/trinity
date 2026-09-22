@@ -33,6 +33,8 @@ sys.path.insert(0, _BACKEND_STR)
 
 pytest.importorskip("sqlalchemy", reason="backend venv required")
 
+from db_harness import db_backend  # noqa: E402,F401
+
 import database as database_mod  # noqa: E402
 from services import metric_read_service  # noqa: E402
 from services.compatibility import spec, static_checks  # noqa: E402
@@ -130,7 +132,7 @@ def _definition(name="revenue", **overrides):
     d = {"name": name, "type": "gauge", "label": "Revenue", "unit": "USD",
          "status": "active", "cadence_seconds": HOUR, "aggregation": "last",
          "dimensions": [], "values": None, "retired_at": None,
-         "type_conflict": None, "direction": "up",
+         "type_conflict": None, "direction": "neutral",
          "warning_threshold": None, "critical_threshold": None,
          "description": None, "cadence": "1h"}
     d.update(overrides)
@@ -239,11 +241,37 @@ def test_a_bound_status_widget_takes_its_colour_from_the_declaration(store):
     assert widget["color"] == "green"
 
 
-def test_a_numeric_bound_widget_colours_from_its_thresholds(store):
-    store.definitions = [_definition(critical_threshold=40.0, direction="up")]
+def _bound_color(store, **definition):
+    store.definitions = [_definition(**definition)]
     config = _config({"type": "metric", "label": "Rev", "metric": "revenue"})
     metric_read_service.bind_dashboard_widgets(config, AGENT)
-    assert config["sections"][0]["widgets"][0]["color"] == "red"
+    return config["sections"][0]["widgets"][0].get("color")
+
+
+def test_a_down_good_bound_widget_is_red_at_or_above_its_critical_threshold(store):
+    """The store holds 42.0. The direction vocabulary is the REGISTRY's
+    (`up_good` / `down_good` / `neutral`), read the way the tiles read it in
+    `metricFormat.thresholdClasses` — the first cut used `up` / `down`, which
+    the registry never emits, so every declared metric was judged as
+    `down_good` and an `up_good` revenue widget turned red for EXCEEDING its
+    threshold."""
+    assert _bound_color(store, critical_threshold=40.0, direction="down_good") == "red"
+    assert _bound_color(store, warning_threshold=40.0, direction="down_good") == "yellow"
+    assert _bound_color(store, critical_threshold=50.0, direction="down_good") is None
+
+
+def test_an_up_good_bound_widget_is_red_at_or_below_its_critical_threshold(store):
+    assert _bound_color(store, critical_threshold=50.0, direction="up_good") == "red"
+    assert _bound_color(store, warning_threshold=50.0, direction="up_good") == "yellow"
+    assert _bound_color(store, critical_threshold=40.0, direction="up_good") is None
+
+
+def test_a_neutral_bound_widget_is_never_coloured_by_a_threshold(store):
+    """Same as the tile: `neutral` declines to judge, whichever side of the
+    threshold the value sits."""
+    assert _bound_color(store, critical_threshold=40.0, direction="neutral") is None
+    assert _bound_color(store, critical_threshold=50.0, direction="neutral") is None
+    assert _bound_color(store, critical_threshold=40.0, direction=None) is None
 
 
 def test_a_bound_widget_carries_no_top_level_stale_flag(store):
@@ -379,21 +407,22 @@ def test_is_bound_is_the_one_spelling_the_skippers_share():
     assert metric_read_service.is_bound(None) is False
 
 
-def test_the_snapshot_writer_skips_a_bound_widget(store, monkeypatch):
+def test_the_snapshot_writer_skips_a_bound_widget(db_backend):
     """The load-bearing one: a bound number in `agent_dashboard_values` would
     be a SECOND source for a value the registry already owns, and the two
     would disagree the moment the poll and the recording cadence drift."""
-    import db.dashboard_history as history_mod
-    import inspect
+    import database as live_db_mod
 
-    source = inspect.getsource(history_mod.DashboardHistoryOperations
-                               .capture_dashboard_snapshot)
-    # @source-text-pin: the skip is a `continue` inside a nested loop that
-    # writes through a live engine; a behavioural test would need a real DB
-    # fixture, which this file (a service/unit suite) deliberately does not
-    # carry. The store suite covers the write; this pins that the guard is
-    # present and reads the same key `is_bound` does.
-    assert 'widget.get("metric")' in source
+    config = _config(
+        {"type": "metric", "id": "bound", "label": "Rev", "metric": "revenue",
+         "value": 99},
+        {"type": "metric", "id": "plain", "label": "Plain", "value": 5},
+    )
+    captured = live_db_mod.db.capture_dashboard_snapshot(AGENT, config, "mtime-1")
+
+    assert captured == 1
+    assert live_db_mod.db.get_widget_history(AGENT, "plain") != []
+    assert live_db_mod.db.get_widget_history(AGENT, "bound") == []
 
 
 def test_history_enrichment_skips_a_bound_widget(store, monkeypatch):

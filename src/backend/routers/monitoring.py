@@ -1,3 +1,4 @@
+# mcp: monitoring.ts (get_fleet_health, get_agent_health, trigger_health_check)
 """
 Monitoring API Router (MON-001).
 
