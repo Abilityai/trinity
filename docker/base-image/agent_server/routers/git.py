@@ -1087,6 +1087,32 @@ _STATUS_LEADER_DEADLINE_SECONDS = 90
 _STATUS_INFLIGHT: Dict[str, "asyncio.Future"] = {}
 
 
+def _parse_porcelain_z(stdout: str) -> list[dict]:
+    """Parse `git status --porcelain -z` into `[{status, path[, orig_path]}]` (#2957).
+
+    Records are NUL-separated `XY PATH`, never quoted. A rename or copy (`R`/`C`
+    in either column) is followed by one extra record holding its origin, which
+    is surfaced as `orig_path`. Nothing is stripped before slicing: a leading
+    space IS the X column of an unstaged change.
+    """
+    records = [r for r in stdout.split("\0") if r]
+    changes = []
+    i = 0
+    while i < len(records):
+        rec = records[i]
+        i += 1
+        xy = rec[:2]
+        entry = {"status": xy.strip(), "path": rec[3:]}
+        if "R" in xy or "C" in xy:
+            if i < len(records):
+                entry["orig_path"] = records[i]
+                i += 1
+            else:
+                logger.warning(f"git status -z: rename/copy record without origin: {rec!r}")
+        changes.append(entry)
+    return changes
+
+
 def _compute_git_status(home_dir: Path) -> Dict:
     """The whole `/api/git/status` computation, as ONE blocking callable (#2742).
 
@@ -1135,21 +1161,14 @@ def _compute_git_status(home_dir: Path) -> Dict:
         # `GIT_OPTIONAL_LOCKS=0`: `run_registered` has no `env=` kwarg, the env
         # form would silently change the mutating sites too, and only the argv is
         # assertable in a test. Needs git >= 2.15; bookworm ships 2.39.
+        # #2957: `-z` — an outer strip ate the first line's X column, and plain
+        # porcelain quotes odd paths and prints renames as `old -> new`.
         status_result = run_registered(
-            ["git", "--no-optional-locks", "status", "--porcelain"],
+            ["git", "--no-optional-locks", "status", "--porcelain", "-z"],
             cwd=str(home_dir),
             timeout=10,
         )
-        changes = []
-        if status_result.returncode == 0 and status_result.stdout.strip():
-            for line in status_result.stdout.strip().split('\n'):
-                if line:
-                    status_code = line[:2]
-                    filepath = line[3:]
-                    changes.append({
-                        "status": status_code.strip(),
-                        "path": filepath
-                    })
+        changes = _parse_porcelain_z(status_result.stdout) if status_result.returncode == 0 else []
 
         # Get last commit
         log_result = run_registered(
