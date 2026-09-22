@@ -10,6 +10,10 @@
 
 ---
 
+### Watchdog: claim before you fail (#2944)
+
+`cleanup_service`'s orphan verdict (periodic sweep + boot recovery) asks the agent for a **retained terminal** (`GET /api/executions/{id}/result`) before it writes `failed` over a `running` row — a sync turn whose backend consumer died mid-run finishes and bills on the agent, and the #921 marker is only one cleanup interval wide. The claim goes through `apply_result` with the result-callback's exact inputs and is time-gated on the agent's `retained_at` (180 s), because a live dispatcher is not reliably `alive` between its POST returning and its CAS. One home for the design: [execution.md § Retained Terminals](execution.md#retained-terminals--a-sync-turn-survives-the-loss-of-its-consumer-2944); the decision matrix: [cleanup-service.md](../feature-flows/cleanup-service.md).
+
 ### Heartbeat Liveness (RELIABILITY-004, #307)
 
 Additive push-heartbeat layer; the 30s `monitoring_service` loop (lifespan-resumed, default-off, #1121) stays authoritative for aggregate status when enabled.

@@ -1612,6 +1612,26 @@ class ShareFileMcpRequest(BaseModel):
     # same file replays the original signed URL instead of minting a new token.
     execution_id: Optional[str] = Field(default=None, max_length=200)
     dedup_label: str = Field(default="", max_length=200)
+    # ent#549 — the ONE override. By default a shared file is for the person the
+    # turn was for, and the platform decides that; an agent may instead name a
+    # different person on its own roster. Validated against the roster in the
+    # service, exactly as `ReportCreate.audience_email` is — same name, same
+    # rule, one vocabulary.
+    audience_email: Optional[str] = Field(default=None, max_length=320)
+
+    @field_validator("audience_email")
+    @classmethod
+    def _normalize_audience(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip().lower()
+        # Shape only — reachability is the service's check. The empty string is
+        # "absent", so "unaddressed" has exactly one spelling.
+        if not v:
+            return None
+        if "@" not in v or " " in v:
+            raise ValueError("audience_email must be an email address")
+        return v
 
 
 class ShareFileResponse(BaseModel):
@@ -1621,6 +1641,16 @@ class ShareFileResponse(BaseModel):
     expires_at: str
     size_bytes: int
     mime_type: Optional[str] = None
+    # ent#549 — honest status, in the names `set_canvas` already uses (#2577).
+    # True: the person in this conversation finds the file in their Files tab.
+    # False: the platform could not tell which conversation the share came from,
+    # so the file is the owner's only — `visibility_note` says how to fix that.
+    # None: no claim (a turn with no person, or an address the agent chose).
+    visible_to_requester: Optional[bool] = None
+    visibility_note: Optional[str] = None
+    # Echoed only when the agent supplied `audience_email`. An address the
+    # platform resolved is never returned to the model.
+    addressed_to: Optional[str] = None
 
 
 class SharedFileInfo(BaseModel):
@@ -1634,6 +1664,11 @@ class SharedFileInfo(BaseModel):
     expires_at: str
     download_count: int
     last_downloaded_at: Optional[str] = None
+    # ent#549 — who the file is for. Declared here or `response_model` strips
+    # them. Withheld from every key-authenticated caller by the route.
+    addressed_to: Optional[str] = None
+    addressed_to_channel: Optional[str] = None
+    audience_source: Optional[str] = None
 
 
 class SharedFilesList(BaseModel):
