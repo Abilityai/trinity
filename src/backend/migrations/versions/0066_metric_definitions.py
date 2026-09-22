@@ -8,23 +8,29 @@ explicit refresh. ``UNIQUE(agent_name, name)`` is the conflict target
 
 Mirrors the SQLite ``metric_definitions_table`` migration.
 
-**Numbering (decision 15 / E1).** Numbered from the LIVE ``dev`` head at branch
-time, which is ``0064_executions_search_indexes``. Three migration PRs (#2920,
-#2924, #2927) are open against ``dev`` and each claims ``0065``; whichever lands
-first makes this revision a FORK, and a forked version-line applies **zero**
-revisions on PostgreSQL while git reports no conflict (#2068). So this file is
-re-chained onto the real head at PR time — ``check_alembic_heads.py`` and
-``alembic-head-watch`` are the gates that catch it if it is not. Delete
-``migrations/versions/__pycache__`` when renumbering (learning 2026-08-24).
+**Numbering (decision 15 / E1).** Originally numbered ``0065`` from the ``dev``
+head at branch time (``0064_executions_search_indexes``); #2920 then landed
+``0065_agent_skills_delivery_status`` on the same parent, making this revision a
+FORK — and a forked version-line applies **zero** revisions on PostgreSQL while
+git reports no conflict (#2068). The re-chain that docstring promised **is
+done**: by operator ruling this lands NOW, ahead of the still-open #2924 and
+#2927, so it is ``0066_metric_definitions`` on top of
+``0065_agent_skills_delivery_status``, and those two renumber behind it
+(``0067_public_user_memory_writes``, ``0068_agent_role_readiness``) before they
+merge — ``alembic-head-watch`` is advisory, so nothing in CI forces them to.
+``check_alembic_heads.py`` over a merge-tree against LIVE ``dev`` is the proof,
+and it must be re-run immediately before merge: the PR-event result goes stale
+the moment ``dev`` advances (#2533). ``migrations/versions/__pycache__`` was
+deleted with the rename (learning 2026-08-24).
 
-Revision ID: 0065_metric_definitions
-Revises: 0064_executions_search_indexes
+Revision ID: 0066_metric_definitions
+Revises: 0065_agent_skills_delivery_status
 """
 from alembic import op
 
 
-revision = "0065_metric_definitions"
-down_revision = "0064_executions_search_indexes"
+revision = "0066_metric_definitions"
+down_revision = "0065_agent_skills_delivery_status"
 branch_labels = None
 depends_on = None
 

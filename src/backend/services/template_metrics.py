@@ -340,7 +340,10 @@ def _status_values(
                 f"{_type_name(item)}"
             )
             return None, False
-        unknown = sorted(set(item) - _STATUS_VALUE_KEYS)
+        # `key=str`: a YAML mapping key need not be a string (`1: x`, `~: x`,
+        # `true: x` all parse), and a bare `sorted` over mixed types raises
+        # TypeError — which this module's contract forbids (C2).
+        unknown = sorted(set(item) - _STATUS_VALUE_KEYS, key=str)
         if unknown:
             errors.append(
                 f"{where}: unknown key '{_safe_echo(unknown[0], 40)}'"
@@ -504,9 +507,14 @@ def _parse(block: Any) -> Tuple[List[Dict[str, Any]], List[str]]:
             )
             continue
 
+        # `key=str` for the same reason as `_status_values` above: mixed-type
+        # keys are ordinary YAML and must produce a named error, never a raise.
         unknown = sorted(
-            k for k in entry
-            if not (isinstance(k, str) and (k in _KNOWN_KEYS or k.startswith("x-")))
+            (
+                k for k in entry
+                if not (isinstance(k, str) and (k in _KNOWN_KEYS or k.startswith("x-")))
+            ),
+            key=str,
         )
         if unknown:
             errors.append(

@@ -72,7 +72,7 @@ template.yaml `metrics:`
 | Layer | File |
 |---|---|
 | Reader (leaf) | `src/backend/services/template_metrics.py` |
-| Store | `src/backend/db/metric_definitions.py` (+ `schema.py`, `tables.py`, `migrations.py`, `migrations/versions/0065_metric_definitions.py`, `agent_cleanup.py`, `database.py` facade) |
+| Store | `src/backend/db/metric_definitions.py` (+ `schema.py`, `tables.py`, `migrations.py`, `migrations/versions/0066_metric_definitions.py`, `agent_cleanup.py`, `database.py` facade) |
 | Service | `src/backend/services/metric_registry.py` |
 | Hooks | `services/agent_service/crud.py`, `routers/git.py`, `services/agent_service/lifecycle.py` |
 | Routes | `src/backend/routers/agent_files.py` |

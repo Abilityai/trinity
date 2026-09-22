@@ -26,8 +26,6 @@ coverage debt is queryable rather than rediscovered.
 
 **0 of 12 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
 
-_Harnesses not present in `tests/registry.json`: J12._
-
 ## Variants
 
 A journey holds only if it holds on every shape listed for it.

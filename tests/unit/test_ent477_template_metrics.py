@@ -212,6 +212,53 @@ def test_x_prefixed_keys_are_preserved_not_reported():
     assert normalized[0]["extensions"] == {"x-owner": "team-a", "x-sla": 99}
 
 
+@pytest.mark.parametrize("bad_key,echoed", [
+    (1, "1"),
+    (None, "None"),
+    (True, "True"),
+])
+def test_a_non_string_key_beside_an_unknown_string_key_is_named_not_raised(
+        bad_key, echoed):
+    """C2 regression: a YAML mapping key need not be a string.
+
+    `1: x`, `~: x` and `true: x` are ordinary YAML and the hardened loader
+    passes them through (it rejects only duplicate and unhashable keys). The
+    unknown-key report sorts those keys, and a bare `sorted` over `{1, "zz"}`
+    raises `TypeError: '<' not supported between instances of 'str' and 'int'`
+    — breaking the totality contract on the ONE path that is unguarded, the
+    `_resolve_template` declaration resolver, where it becomes a traceback 500
+    on agent creation from an arbitrary `github:` template.
+    """
+    block = [_entry(**{"zz": "y"})]
+    block[0][bad_key] = "x"
+
+    normalized, errors = _one(block)          # must not raise
+
+    assert normalized == []
+    assert any("unknown key" in e for e in errors), errors
+    assert any(echoed in e or "zz" in e for e in errors), errors
+    assert all(isinstance(e, str) for e in errors)
+
+
+@pytest.mark.parametrize("bad_key,echoed", [
+    (1, "1"),
+    (None, "None"),
+    (True, "True"),
+])
+def test_a_non_string_key_in_a_status_value_is_named_not_raised(
+        bad_key, echoed):
+    """The `_status_values` twin of the sort above — same defect, same fix."""
+    value = {"value": "ok", "bogus": 1}
+    value[bad_key] = "x"
+
+    normalized, errors = _one([_entry(type="status", values=[value])])
+
+    assert normalized == []
+    assert any("unknown key" in e for e in errors), errors
+    assert any(echoed in e or "bogus" in e for e in errors), errors
+    assert all(isinstance(e, str) for e in errors)
+
+
 def test_too_many_x_keys_are_capped():
     entry = _entry(**{f"x-{i}": i for i in range(tm.MAX_EXTENSION_KEYS + 1)})
     normalized, errors = _one([entry])
@@ -515,11 +562,18 @@ if given is not None:
         st.none(), st.booleans(), st.integers(), st.floats(allow_nan=True),
         st.text(max_size=20), st.dates(),
     )
+    # A YAML mapping key is NOT necessarily a string (`1: x`, `~: x`,
+    # `true: x`), and the C2 TypeError lived in exactly that gap: while both
+    # strategies generated string keys only, the totality property could not
+    # reach the unknown-key sort that raised.
+    _yaml_keys = st.one_of(
+        st.text(max_size=8), st.integers(), st.none(), st.booleans(),
+    )
     _yaml_values = st.recursive(
         _yaml_scalars,
         lambda children: st.one_of(
             st.lists(children, max_size=4),
-            st.dictionaries(st.text(max_size=8), children, max_size=4),
+            st.dictionaries(_yaml_keys, children, max_size=4),
         ),
         max_leaves=8,
     )
@@ -539,8 +593,11 @@ if given is not None:
     @settings(max_examples=150, suppress_health_check=[HealthCheck.too_slow])
     @given(block=st.lists(
         st.dictionaries(
-            st.sampled_from(["name", "type", "label", "unit", "cadence",
-                             "dimensions", "values", "warning_threshold"]),
+            st.one_of(
+                st.sampled_from(["name", "type", "label", "unit", "cadence",
+                                 "dimensions", "values", "warning_threshold"]),
+                _yaml_keys,
+            ),
             _yaml_scalars, max_size=5),
         max_size=6))
     def test_every_entry_is_accounted_for(block):
