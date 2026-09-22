@@ -195,6 +195,7 @@ AGENT_REFS: List[AgentRef] = [
     # agent_public_links.id, not agent_name — we delete them via JOIN.
     AgentRef("agent_public_links",           "agent_name",        Policy.CASCADE),
     AgentRef("public_user_memory",           "agent_name",        Policy.CASCADE),
+    AgentRef("public_user_memory_writes",    "agent_name",        Policy.CASCADE),  # ent#637
 
     # --- Per-agent config ---------------------------------------------------
     AgentRef("agent_git_config",             "agent_name",        Policy.CASCADE),

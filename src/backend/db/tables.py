@@ -885,6 +885,23 @@ public_user_memory = Table(
     Column("updated_at", Text),
 )
 
+# ent#637: write history for the agent_notes section — see the note in db/schema.py.
+public_user_memory_writes = Table(
+    "public_user_memory_writes",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("user_email", Text),
+    Column("execution_id", Text),
+    Column("triggered_by", Text),
+    Column("schedule_id", Text),
+    Column("previous_notes", Text),
+    Column("new_notes", Text),
+    Column("written_at", Text),
+    Column("undone_at", Text),
+    Column("undone_by", Text),
+)
+
 agent_git_config = Table(
     "agent_git_config",
     metadata,

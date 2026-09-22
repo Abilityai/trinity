@@ -174,6 +174,10 @@
         </div>
       </div>
     </section>
+
+    <!-- ent#637: what this agent remembers about YOU, and which runs changed
+         it — its own component so the Undo verb is mount-testable on its own. -->
+    <PortalAgentMemory :agent-name="agentName" />
   </div>
 </template>
 
@@ -192,6 +196,7 @@ import LoadFailed from '@/components/LoadFailed.vue'
 import ReportRenderer from '@/components/reports/ReportRenderer.vue'
 import ReportSummary from '@/components/reports/ReportSummary.vue'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalAgentMemory from './PortalAgentMemory.vue'
 import { agentDisplayName } from '@/utils/agentName'
 import { availabilityChip, threadTitle, MAIN_TAB_LABEL } from './portalUtils'
 import { usePortalAgentPage } from '@/composables/usePortalAgentPage'

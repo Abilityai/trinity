@@ -57,7 +57,7 @@
 | POST | `/api/agents/{name}/shared-files` | Mint a download URL for a file in the publish dir (owner/admin or agent-scoped key) |
 | GET | `/api/agents/{name}/shared-files` | List active shared files with download counts |
 | DELETE | `/api/agents/{name}/shared-files/{file_id}` | Revoke a shared file (owner-only; idempotent) |
-| POST | `/api/agents/{name}/user-memory` | Write per-user memory blob; email resolved from execution_id server-side (MEM-001, #888) |
+| POST | `/api/agents/{name}/user-memory` | Write per-user memory blob; email resolved from execution_id server-side (MEM-001, #888) — user-facing triggers, or a `schedule` run addressed to a seat via ent#498's stamp (ent#637); every write records a `public_user_memory_writes` row |
 | POST | `/api/agents/{name}/data/export` | Export agent `data/` as a tar (owner/admin; `?format=stream`\|`base64`; 413 over cap; per-agent op lock). See [Agent Runtime Data](agent-lifecycle.md#agent-runtime-data--data_paths--snapshotexport-1169) (#1169) |
 | POST | `/api/agents/{name}/data/import` | Restore an uploaded tar into agent `data/` via the agent-server restore primitive (owner/admin; `data/**` allowlist + traversal guard; `Idempotency-Key`; op lock) (#1169) |
 | POST | `/api/agents/{name}/executions/{execution_id}/terminate` | Stop an in-flight turn (existing route; ent#155 makes it the operator arm of a three-surface cancel). Service is now principal-agnostic — `current_user` optional, `actor_kind` on the activity — so the public-link and Workspace arms delegate to it instead of re-implementing cancellation. See [chat-turn-cancellation.md](../feature-flows/chat-turn-cancellation.md) |

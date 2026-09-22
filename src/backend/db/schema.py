@@ -15,7 +15,7 @@ Tables are organized by feature area:
 - Shared Files (outbound): agent_shared_files
 - Settings: system_settings
 - Public Links: agent_public_links, public_link_verifications, public_link_usage
-- Public Chat: public_chat_sessions, public_chat_messages, public_user_memory
+- Public Chat: public_chat_sessions, public_chat_messages, public_user_memory, public_user_memory_writes
 - Git: agent_git_config
 - Skills: agent_skills
 - Tags: agent_tags
@@ -1046,6 +1046,29 @@ TABLES = {
         )
     """,
 
+    # ent#637: every agent-notes write through `POST /api/agents/{name}/user-memory`
+    # records the state before and after, who triggered it (the execution's
+    # `triggered_by`; `schedule` when a seat run wrote it) and the schedule, so
+    # the person can see that a scheduled run touched their memory and undo it.
+    # ent#419's "write history with rollback" layer, built here because that AC
+    # needed it. Not keyed to `public_user_memory.id`: the memory row is created
+    # on demand and may be re-created; `(agent_name, user_email)` is the identity.
+    "public_user_memory_writes": """
+        CREATE TABLE IF NOT EXISTS public_user_memory_writes (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_email TEXT NOT NULL,
+            execution_id TEXT,
+            triggered_by TEXT NOT NULL,
+            schedule_id TEXT,
+            previous_notes TEXT NOT NULL DEFAULT '',
+            new_notes TEXT NOT NULL DEFAULT '',
+            written_at TEXT NOT NULL,
+            undone_at TEXT,
+            undone_by TEXT
+        )
+    """,
+
     # -------------------------------------------------------------------------
     # Git Tables
     # -------------------------------------------------------------------------
@@ -1928,6 +1951,7 @@ INDEXES = [
 
     # Public user memory indexes (MEM-001)
     "CREATE INDEX IF NOT EXISTS idx_public_user_memory_lookup ON public_user_memory(agent_name, user_email)",
+    "CREATE INDEX IF NOT EXISTS idx_public_user_memory_writes_lookup ON public_user_memory_writes(agent_name, user_email, written_at)",
 
     # System views indexes
     "CREATE INDEX IF NOT EXISTS idx_system_views_owner ON system_views(owner_id)",
