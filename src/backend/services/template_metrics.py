@@ -655,8 +655,9 @@ def definition_hash(entry: Dict[str, Any]) -> str:
 
     Never raises: `default=str` covers the YAML natives an `x-` value may hold.
     """
+    content = {k: v for k, v in entry.items() if k != "definition_hash"}
     return hashlib.sha256(
-        json.dumps(entry, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(content, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
 
 
