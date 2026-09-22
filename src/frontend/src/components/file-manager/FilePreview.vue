@@ -121,7 +121,7 @@
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
             Preview not available for this file type
           </p>
-          <p class="mt-2 text-xs text-gray-400 dark:text-gray-500">
+          <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
             {{ previewData.type || 'Unknown type' }}
           </p>
         </div>

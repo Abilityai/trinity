@@ -22,7 +22,7 @@
         <div class="text-xs text-gray-500 dark:text-gray-400">
           Let this agent speak replies as a voice note (ElevenLabs). Replies are text by default —
           the agent chooses voice per message. Enable it per channel in each channel's settings.
-          <span v-if="!voice.available" class="block mt-1 text-status-warning-600 dark:text-status-warning-400">
+          <span v-if="!voice.available" class="block mt-1 text-status-warning-700 dark:text-status-warning-400">
             Voice is unavailable — the platform has no ElevenLabs API key configured.
           </span>
         </div>
@@ -46,7 +46,7 @@
           class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50"
         >Save</button>
       </div>
-      <p class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+      <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
         <template v-if="defaultVoiceId">Leave blank to use the platform default voice.</template>
         <template v-else>Paste a voice ID from your ElevenLabs account.</template>
       </p>

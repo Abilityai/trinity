@@ -44,7 +44,7 @@
     <!-- Agent Not Running State -->
     <div v-else-if="agentStatus !== 'running'" class="text-center py-8">
       <div class="mx-auto w-16 h-16 bg-gray-100 dark:bg-gray-700 rounded-full flex items-center justify-center mb-4">
-        <svg class="w-8 h-8 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg class="w-8 h-8 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
         </svg>
       </div>
@@ -72,7 +72,7 @@
     <!-- No Dashboard Defined State -->
     <div v-else-if="!dashboardData?.has_dashboard" class="text-center py-8">
       <div class="mx-auto w-16 h-16 bg-gray-100 dark:bg-gray-700 rounded-full flex items-center justify-center mb-4">
-        <svg class="w-8 h-8 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg class="w-8 h-8 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
         </svg>
       </div>
@@ -86,7 +86,7 @@
           This agent does not have a dashboard.yaml file.
         </template>
       </p>
-      <div class="mt-4 text-xs text-gray-400 dark:text-gray-500">
+      <div class="mt-4 text-xs text-gray-500 dark:text-gray-400">
         Create <code class="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded">~/dashboard.yaml</code> to define a custom dashboard<template v-if="hasDeclaredMetrics">, and bind a widget to a declared metric with a <span class="font-mono">metric:</span> key</template>.
       </div>
     </div>
@@ -208,7 +208,7 @@
               <div class="flex items-baseline justify-between">
                 <div class="text-3xl font-bold text-gray-900 dark:text-white">
                   {{ formatValue(widget.value) }}
-                  <span v-if="widget.unit" class="text-lg text-gray-400 dark:text-gray-500">{{ widget.unit }}</span>
+                  <span v-if="widget.unit" class="text-lg text-gray-500 dark:text-gray-400">{{ widget.unit }}</span>
                 </div>
                 <div v-if="widget.trend || widget.history?.trend" class="flex items-center text-sm" :class="getTrendColor(widget.trend || widget.history?.trend)">
                   <svg v-if="(widget.trend || widget.history?.trend) === 'up'" class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
@@ -223,7 +223,7 @@
                 </div>
               </div>
               <div class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ widget.label }}</div>
-              <div v-if="widget.description" class="mt-1 text-xs text-gray-400 dark:text-gray-500">{{ widget.description }}</div>
+              <div v-if="widget.description" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ widget.description }}</div>
               <!-- Sparkline -->
               <SparklineChart
                 v-if="widget.history?.values?.length > 1"
@@ -250,7 +250,7 @@
                 {{ widget.value ?? '—' }}
               </span>
               <div class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ widget.label }}</div>
-              <div v-if="widget.description" class="mt-1 text-xs text-gray-400 dark:text-gray-500">{{ widget.description }}</div>
+              <div v-if="widget.description" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ widget.description }}</div>
               <BoundMetricMark :widget="widget" />
             </div>
 
