@@ -411,7 +411,7 @@ def test_an_empty_batch_is_simply_empty_not_an_error():
     assert rows == [] and errors == []
 
 
-def test_validation_never_reaches_the_database_layer():
+def test_validation_never_reaches_the_database_layer(monkeypatch):
     """A leaf, proven by running it: with `database` evicted from
     `sys.modules` and poisoned so any import raises, a full batch still
     validates. A route that later hands in stale definitions is a route bug —
@@ -419,8 +419,7 @@ def test_validation_never_reaches_the_database_layer():
     """
     import importlib
 
-    saved = sys.modules.pop("database", None)
-    sys.modules["database"] = None  # any `import database` now raises
+    monkeypatch.setitem(sys.modules, "database", None)  # any `import database` now raises
     try:
         importlib.reload(svc)
         rows, errors = svc.validate_batch(
@@ -431,9 +430,7 @@ def test_validation_never_reaches_the_database_layer():
         )
         assert len(rows) == 1 and _codes(errors) == ["metric_undeclared"]
     finally:
-        del sys.modules["database"]
-        if saved is not None:
-            sys.modules["database"] = saved
+        monkeypatch.undo()          # restores (or removes) the real `database` entry
         importlib.reload(svc)
 
 
