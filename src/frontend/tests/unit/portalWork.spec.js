@@ -141,12 +141,12 @@ describe('ent#525 — three steps sentences (ruling 2, reviewed)', () => {
   it('reported → stages; none → "doesn\'t report steps"; unknown → "could not be read"; not-yet → nothing', () => {
     const reported = { state: 'reported', stages: [{ id: 'a', name: 'Collect', state: 'done', holder: 'scout' }] }
     expect(stepsLine(reported, 'scout').kind).toBe('stages')
-    expect(stepsLine({ state: 'none' }, 'scout')).toEqual({ kind: 'none', text: "scout doesn't report steps." })
+    expect(stepsLine({ state: 'none' }, 'scout')).toEqual({ kind: 'none', text: "scout doesn't report steps.", who: 'scout' })
     expect(stepsLine({ state: 'unknown' }, 'scout')).toEqual({ kind: 'unknown', text: 'Steps could not be read right now.' })
     expect(stepsLine(null, 'scout').kind).toBe('unknown')
     expect(stepsLine(undefined, 'scout')).toEqual({ kind: 'pending', text: '' })
     // A reported pipeline with no stages is still "doesn't report steps".
-    expect(stepsLine({ state: 'reported', stages: [] }, null).text).toBe("This agent doesn't report steps.")
+    expect(stepsLine({ state: 'reported', stages: [] }, null)).toEqual({ kind: 'none', text: "This agent doesn't report steps.", who: 'This agent' })
   })
 
   it('stage rows normalize state and holder; a masked holder reads "another agent"', () => {
@@ -430,6 +430,17 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
     // Matched by id, never "latest running".
     expect(conv).toContain('itemById(workStore.now, activeExecutionId.value)')
     expect(conv).toContain('childrenForChat(workStore.now, currentSessionId.value, activeExecutionId.value)')
+  })
+
+  it('#2964: only the chat\'s LIVE card reserves its rows — not the terminal card, the room or the tab', () => {
+    const liveAt = conv.indexOf('<div v-if="sending"')
+    const termAt = conv.indexOf('data-testid="portal-work-terminal"')
+    expect(liveAt).toBeGreaterThan(-1)
+    expect(termAt).toBeGreaterThan(liveAt)
+    expect(conv.slice(liveAt, termAt)).toContain('reserve-live-rows')
+    expect(conv.slice(termAt)).not.toContain('reserve-live-rows')
+    expect(room).not.toContain('reserve-live-rows')
+    expect(tab).not.toContain('reserve-live-rows')
   })
 
   it('a reattached turn can be stopped (review E3), and the id is cleared with the turn', () => {

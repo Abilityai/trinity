@@ -165,7 +165,9 @@ export function liveElapsedSeconds(item, { fetchedAtMs = null, nowMs = Date.now(
 /**
  * The steps sentence for a card — three states, three sentences (ruling 2,
  * reviewed). Returns `{ kind, text }`: `stages` renders the list, the other
- * two render the sentence in tertiary ink.
+ * two render the sentence in tertiary ink. `none` also carries `who`, the name
+ * `text` starts with, so the chat's one-line card can truncate the name and
+ * never the claim (#2964).
  */
 export function stepsLine(steps, agentName = null) {
   const who = agentName || 'This agent'
@@ -176,11 +178,11 @@ export function stepsLine(steps, agentName = null) {
     return { kind: 'unknown', text: 'Steps could not be read right now.' }
   }
   if (steps.state === 'none') {
-    return { kind: 'none', text: `${who} doesn't report steps.` }
+    return { kind: 'none', text: `${who} doesn't report steps.`, who }
   }
   if (steps.state === 'reported') {
     if (Array.isArray(steps.stages) && steps.stages.length) return { kind: 'stages', text: '' }
-    return { kind: 'none', text: `${who} doesn't report steps.` }
+    return { kind: 'none', text: `${who} doesn't report steps.`, who }
   }
   return { kind: 'unknown', text: 'Steps could not be read right now.' }
 }

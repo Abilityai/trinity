@@ -393,6 +393,7 @@
             :can-stop="canCancelTurn"
             :stopping="cancelling"
             show-open-in-work
+            reserve-live-rows
             @stop="cancelTurn"
             @open-work="emit('open-work')"
           />
