@@ -129,9 +129,67 @@ def _clean_session_state():
     R.reset_session_provider_failure()
 
 
-def test_non_503_is_a_no_op():
-    for status in (200, 202, 404, 429, 500, 502, 504):
+def test_non_turn_statuses_are_a_no_op():
+    """Only the statuses a model turn can launder (503 — #2889; 429 — #2919)
+    are classified; everything else is the caller's own assertion."""
+    for status in (200, 202, 404, 500, 502, 504):
         R.require_agent_answer(_resp(status=status, body="whatever"), what="POST /task")
+    assert R.session_provider_failure() is None
+
+
+# --------------------------------------------------------------------------- #
+# #2919 — the 429 twin: billing fails with attribution, capacity skips with
+# evidence, and an unattributed 429 is a FAILURE (the same doctrine one status
+# code over).
+# --------------------------------------------------------------------------- #
+
+USAGE_LIMIT_BODY = _detail(
+    "Subscription usage limit: You've hit your usage limit for this subscription; "
+    "resets at 2026-09-23T03:00:00Z"
+)
+
+# The three live header-less capacity shapes (dossier §4b), verbatim.
+CAPACITY_ADMISSION_DICT_BODY = (
+    '{"detail": {"error": "Agent queue is full", "agent": "a", "queue_length": 0, '
+    '"retry_after": 30, "message": "Agent \'a\' is busy. Please try again later."}}'
+)
+CAPACITY_BACKLOG_FULL_BODY = _detail(
+    "Agent 'a' is at capacity (2 parallel tasks) and its backlog is full. Try again later."
+)
+CAPACITY_MAP_TASK_BODY = _detail("Agent 'a' is at capacity. Try again later.")
+
+
+def test_billing_429_fails_with_attribution_and_is_remembered():
+    """The issue's case: an exhausted subscription surfaces as 429 (#2638) and
+    the backend labels it `billing`; the test must FAIL, not skip."""
+    with pytest.raises(pytest.fail.Exception) as exc:
+        R.require_agent_answer(
+            _resp(status=429, body=USAGE_LIMIT_BODY, headers={R.ERROR_CODE_HEADER: "billing"}),
+            what="POST /chat",
+        )
+    msg = str(exc.value)
+    assert "answered 429" in msg and "RAN and failed" in msg and "code=billing" in msg
+    assert "usage limit" in msg
+    seen = R.session_provider_failure()
+    assert seen and seen["what"] == "POST /chat" and seen["verdict"].code == "billing"
+
+
+@pytest.mark.parametrize(
+    "body,fragment",
+    [
+        (CAPACITY_ADMISSION_DICT_BODY, "Agent queue is full"),
+        (CAPACITY_BACKLOG_FULL_BODY, "backlog is full"),
+        (CAPACITY_MAP_TASK_BODY, "is at capacity"),
+    ],
+)
+def test_capacity_429_skips_with_evidence_and_is_not_remembered(body, fragment):
+    """A genuine admission refusal (the model never ran) still SKIPS — with the
+    backend's own wording as evidence — and is never a credential verdict."""
+    with pytest.raises(pytest.skip.Exception) as exc:
+        R.require_agent_answer(_resp(status=429, body=body), what="POST /task")
+    msg = str(exc.value)
+    assert "agent at capacity" in msg and "answered 429" in msg
+    assert "POST /task" in msg and "code=capacity" in msg and fragment in msg
     assert R.session_provider_failure() is None
 
 
