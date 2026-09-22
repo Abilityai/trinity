@@ -307,6 +307,8 @@ class ScheduleExecution(BaseModel):
     # ent#555 — the canvas the user had open for this turn. Context about what
     # is being discussed; never authority over what may be read or written.
     open_canvas_id: Optional[str] = None
+    # #2806 — agent-to-agent hops from a non-agent root (NULL/None = root).
+    chain_depth: Optional[int] = None
 
 
 # =========================================================================
