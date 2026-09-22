@@ -84,6 +84,7 @@
 | D-005 | SOFT | STATIC | Dashboard/Metrics | Status widget colors are from allowed palette (green/red/yellow/gray/blue/orange/purple) |
 | D-007 | SOFT | AI | Dashboard/Metrics | Metrics definitions reflect meaningful domain KPIs (not just generic "messages processed") |
 | D-008 | INFO | STATIC | Dashboard/Metrics | Dashboard `refresh_interval` is >= 5 seconds |
+| D-009 | SOFT | STATIC | Dashboard/Metrics | `template.yaml` `metrics:` entries are well-formed (name charset, known type, status `values`, cadence grammar, thresholds, dimensions, caps) |
 | X-001 | SOFT | AI | Consistency | Agent name, `display_name`, and `description` tell a coherent story about the same agent |
 | X-002 | SOFT | AI | Consistency | CLAUDE.md identity is consistent with `template.yaml` description and use cases |
 | X-003 | SOFT | AI | Consistency | Skills/playbooks described in `template.yaml` match skills that actually exist in `.claude/skills/` |
@@ -475,6 +476,27 @@ Prompt: "Are these metrics meaningful domain KPIs, or are they generic vanity me
 Severity: INFO | Type: STATIC  
 Faster refresh rates put unnecessary load on the agent container.
 
+**D-009** — `metrics:` entries are well-formed  
+Severity: SOFT | Type: STATIC  
+The declared-metric registry (trinity-enterprise#477) **drops** any entry it
+cannot read, so a malformed declaration is silently absent from the registry
+and ent#478 then rejects its points as undeclared. This check is where that
+becomes visible. It delegates to the one reader
+(`services/template_metrics.metric_shape_errors`), so a finding here is exactly
+an entry the registry refused to hold.
+
+Named per entry: unknown keys (with a did-you-mean), a `name` outside
+`^[a-z][a-z0-9_]{0,63}$`, a `type` outside counter/gauge/percentage/status/
+duration/bytes, a `status` metric with no `values` (or a non-status metric with
+them), a non-numeric threshold, a `cadence` that is not `<n>(s|m|h|d|w)` or an
+ISO 8601 fixed duration between 60s and 366d, duplicate names, and the caps
+(50 metrics, 50 status values, 10 dimensions, 20 `x-` keys / 1 KB). `x-`
+prefixed keys are preserved, never reported.
+
+SOFT, not HARD, on the T-018 precedent: the author is already told twice (here
+and by ent#478's 422), and HARD would flip a whole agent to incompatible over a
+mistyped label.
+
 ---
 
 ### Category: Cross-File Consistency
@@ -603,7 +625,7 @@ Removed from the catalog; their ids are permanently retired.
 | Retired | Reason | Successor |
 |---------|--------|-----------|
 | `T-017`, `G-003`, `G-004`, `G-005` | The `template.yaml git:` block has **no backend reader** anywhere in the platform, and no bundled template declares it. It is documented in `TRINITY_COMPATIBLE_AGENT_GUIDE.md` as legacy Working Branch Mode config. | — |
-| `D-006` | `template.yaml metrics:` has no backend reader — `dashboard.yaml` is the read surface. | D-001..D-005, D-008 |
+| `D-006` | `template.yaml metrics:` has no backend reader — `dashboard.yaml` is the read surface. **The premise expired with trinity-enterprise#477**, which gave the block a reader and a per-agent registry. A retired id is never reissued (persisted `checks_json` rows would be re-read as a verdict about a different check), so the successor is the new id `D-009` — a mapping, not a revival. | `D-009` (was D-001..D-005, D-008) |
 | `I-005` | `.trinity/post-check` has no executor. Its only other mention was a `git_service` comment pointing back at this check. | — |
 | `F-008` | Required `.claude/commands/`; the `create-agent` wizards emit `.claude/skills/<name>/SKILL.md` and never `.claude/commands/`, so this was a guaranteed INFO failure. | F-009 |
 | `F-012`, `F-013` | `docs/memory/requirements.md` / `CHANGELOG.md` are Trinity-repo conventions, not agent conventions. | — |

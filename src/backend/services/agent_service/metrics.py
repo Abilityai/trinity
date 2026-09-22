@@ -2,6 +2,22 @@
 Agent Service Metrics - Custom metrics operations.
 
 Handles fetching custom metrics from agents.
+
+**Superseded (ent#477 / ent#478 / ent#479).** The `metrics.json` WRITE path this
+proxy reads — the agent writing a JSON file into its workspace and the backend
+reading it back through the agent server — is superseded by `record_metrics`
+(ent#478), which validates each point against the declared registry ent#477
+builds from the SAME `template.yaml metrics:` block this reads ad hoc.
+
+Nothing here is removed or extended. `GET /api/agents/{name}/metrics` keeps its
+URL and ent#479 re-backs it with the point store (and replaces the 30-day
+staleness rule with the `2 x cadence` rule the registry's `cadence_seconds`
+makes possible). Until then this is the only place values come from, and it
+stays exactly as it is — a second write path is what ent#476 exists to avoid.
+
+New work reads definitions from `GET /api/agents/{name}/metrics/definitions`
+(`routers/agent_files.py`, backed by `db/metric_definitions.py`), which is
+validated, persisted, and answers on a stopped agent.
 """
 import logging
 

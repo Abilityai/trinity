@@ -1779,6 +1779,59 @@ TABLES = {
             updated_at TEXT NOT NULL
         )
     """,
+
+    # -------------------------------------------------------------------------
+    # Declared metric registry (trinity-enterprise#477)
+    # -------------------------------------------------------------------------
+    # One row per metric an agent's `template.yaml metrics:` block declares,
+    # reconciled on create / git pull / reset / sync-pull_first / container
+    # start / explicit refresh. The template is the ONLY writer — there is no
+    # operator edit surface — which is what makes an update-in-place reconcile
+    # safe here where the ent#89 schedules materializer had to be skip-by-name.
+    #
+    # Rows are never deleted by reconcile, only RETIRED (`status`), so ent#478's
+    # `metric_points` keep a definition to be interpreted against after the
+    # author removes a metric from the template.
+    #
+    # `type_conflict` is the honest-status column for a REFUSED type change: the
+    # stored `type` never changes shape under a by-name point store, so a
+    # re-declared type is recorded here and surfaced by the definitions read
+    # rather than silently applied or silently dropped.
+    #
+    # No CHECK constraints: `test_1819_rename_cascade_parity` seeds a
+    # placeholder row per AGENT_REFS table from NOT NULL introspection, and a
+    # `CHECK (type IN …)` would break that seed. The enums are enforced by
+    # `services/template_metrics.py`, the one writer's one parser.
+    "metric_definitions": """
+        CREATE TABLE IF NOT EXISTS metric_definitions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL,
+            label TEXT,
+            description TEXT,
+            unit TEXT,
+            warning_threshold REAL,
+            critical_threshold REAL,
+            status_values_json TEXT,
+            cadence TEXT,
+            cadence_seconds INTEGER,
+            direction TEXT NOT NULL DEFAULT 'neutral',
+            aggregation TEXT NOT NULL DEFAULT 'last',
+            dimensions_json TEXT,
+            extensions_json TEXT,
+            definition_hash TEXT,
+            type_conflict TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            source TEXT,
+            first_declared_at TEXT,
+            last_synced_at TEXT,
+            retired_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(agent_name, name)
+        )
+    """,
 }
 
 # =============================================================================
@@ -2025,6 +2078,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target_type, target_id, timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_mcp_key ON audit_log(mcp_key_id, timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_request ON audit_log(request_id)",
+
+    # Declared metric registry indexes (trinity-enterprise#477) — the one read
+    # the definitions API makes. UNIQUE(agent_name, name) is declared inline in
+    # the DDL and is the JOIN KEY ent#478 validates points against.
+    "CREATE INDEX IF NOT EXISTS idx_metric_definitions_agent_status "
+    "ON metric_definitions(agent_name, status)",
 
     # Canary violations indexes (CANARY-001 / Issue #411 — Phase 1)
     "CREATE INDEX IF NOT EXISTS idx_canary_violations_invariant ON canary_violations(invariant_id, snapshot_time DESC)",

@@ -3000,6 +3000,16 @@
       "description": "Journey J11 (brief delivery): a schedule that names one Workspace user lands its output as a turn in that person's Main chat without them asking. A deliberate strict=True xfail skeleton asserting the journey's invariants (E-01, E-05, L-03) until the delivery half ships; the shape #2350's Journey Impact gate accepts as a declared promise."
     },
     {
+      "file": "journeys/test_j12_declared_metrics_journey.py",
+      "feature": "abilityai/trinity-enterprise#477",
+      "added": "2026-09-21",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J12 (declared metrics): what my agent declares it measures is what Trinity knows — a `metrics:` block in `template.yaml` reaches the registry at creation, after a git pull, after a container restart and on an explicit refresh, and a malformed entry is named rather than silently dropped. A deliberate strict=True xfail skeleton standing in the tier until the values half ships (ent#478 points, ent#479 read surface); the shape #2350's Journey Impact gate accepts as a declared promise. Live-stack by necessity — every trigger except creation reads `template.yaml` out of a RUNNING container over the Docker socket, the leg the ent#477 unit suite declares as its own gap."
+    },
+    {
       "file": "journeys/test_j10_agent_calls_agent_journey.py",
       "feature": "#2349",
       "added": "2026-09-15",

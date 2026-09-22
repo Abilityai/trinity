@@ -1,4 +1,4 @@
-# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files)
+# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (get_metrics → /metrics, /metrics/definitions — ent#479 ships the tool; ent#477 leaves the two definition routes deliberately unexposed, not forgotten)
 """Agent file management, info, and folder endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -356,6 +356,96 @@ async def get_agent_metrics(
 ):
     """Get agent custom metrics."""
     return await get_agent_metrics_logic(agent_name, current_user)
+
+
+@router.get("/{agent_name}/metrics/definitions")
+async def get_agent_metric_definitions(
+    agent_name: AuthorizedAgentByName,
+    request: Request,
+    include_retired: bool = False,
+):
+    """The agent's DECLARED metric registry (ent#477).
+
+    What `template.yaml metrics:` declares, as the backend reconciled it — not
+    what the agent has measured (that is ent#478's `record_metrics` write path
+    and ent#479's read). Retired definitions are the ones the template no
+    longer declares; they are kept (points recorded under their name still need
+    something to interpret them) and served only on request.
+
+    Registered BEFORE nothing it could shadow: `/{agent_name}/metrics` is a
+    sibling literal, not a catch-all, so ordering is not load-bearing here
+    (Invariant #4 applies to `/{name}`-style parameterized prefixes).
+    """
+    from services import metric_registry
+
+    definitions = metric_registry.list_metric_definitions(
+        agent_name, include_retired=include_retired
+    )
+    active = [d for d in definitions if d.get("status") == "active"]
+    return {
+        "agent_name": agent_name,
+        # The empty state TEACHES the next action rather than returning a bare
+        # list (Product Quality Bar 3): "no rows" and "no block" are different
+        # situations and an operator cannot tell them apart from `[]`.
+        "declared": bool(active),
+        "definitions": definitions,
+        "message": (
+            None if active
+            else "no metrics: block in template.yaml — declare one and pull, "
+                 "restart the agent, or POST .../metrics/definitions/refresh"
+        ),
+        # The contract ent#478 implements, surfaced so a consumer reads the
+        # numbers from the platform rather than hard-coding them. Documented in
+        # requirements §47; no Settings knob is minted until the sweep that
+        # enforces it ships (T2 — a control with no enforcer is a lie).
+        "policy": {
+            "retention_days": 365,
+            "daily_point_cap": 100000,
+            "enforced": False,
+            "enforced_by": "abilityai/trinity-enterprise#478",
+        },
+    }
+
+
+@router.post("/{agent_name}/metrics/definitions/refresh")
+async def refresh_agent_metric_definitions(
+    agent_name: AuthorizedAgentByName,
+    request: Request,
+):
+    """Re-read the agent's `template.yaml` and reconcile its registry (ent#477).
+
+    The third trigger, beside creation and the git hooks: an agent that edits
+    its own `metrics:` block in-container and pushes is invisible to every
+    backend git path, so this is how an author (or the agent itself, with its
+    own scoped key) makes the registry agree with the file without a restart.
+
+    A **use**, not a grant (Invariant #8): it re-reads the caller's own
+    accessible agent's file and can reach no other agent, so `AuthorizedAgent
+    ByName` is the right gate — the same principal can already `pull`.
+
+    Running agents only (409). The stopped-agent read path spawns a throwaway
+    container, and no request-triggered route may create a container as a side
+    effect of a read.
+    """
+    from services import metric_registry
+
+    try:
+        summary = await metric_registry.refresh_from_running_agent(
+            agent_name, source="refresh"
+        )
+    except metric_registry.RefreshUnavailable as e:
+        # Named reasons, not a generic 500 (Bar 6). `agent_not_running` is a
+        # 409 — the same code `pull` uses for "the agent is not in a state to
+        # do this" — and an unreadable template is a 503: the registry is
+        # untouched and a retry after fixing the YAML is the remedy.
+        status_code = 409 if e.reason == "agent_not_running" else 503
+        raise HTTPException(
+            status_code=status_code,
+            detail=e.message,
+            headers={"X-Refresh-Unavailable": e.reason},
+        )
+
+    return {"success": True, **summary.to_dict()}
 
 
 # ============================================================================

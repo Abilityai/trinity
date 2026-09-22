@@ -17,7 +17,7 @@ performance index, and for `idx_agent_evaluations_rating_target` it would
 silently turn "one rating per person per thing" into "one row per click".
 """
 
-from sqlalchemy import BigInteger, Column, Float, ForeignKey, Index, MetaData, Table, Text, text
+from sqlalchemy import BigInteger, Column, Float, ForeignKey, Index, MetaData, Table, Text, UniqueConstraint, text
 from sqlalchemy import Integer as _Integer
 from sqlalchemy.types import TypeDecorator
 
@@ -1490,4 +1490,44 @@ agent_compatibility_results = Table(
     Column("ai_ran_at", Text),
     Column("static_ran_at", Text),
     Column("updated_at", Text),
+)
+
+# Declared metric registry (trinity-enterprise#477) — one row per metric an
+# agent's `template.yaml metrics:` block declares.
+metric_definitions = Table(
+    "metric_definitions",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text, nullable=False),
+    Column("name", Text, nullable=False),
+    Column("type", Text, nullable=False),
+    Column("label", Text),
+    Column("description", Text),
+    Column("unit", Text),
+    Column("warning_threshold", Float),
+    Column("critical_threshold", Float),
+    Column("status_values_json", Text),
+    Column("cadence", Text),
+    Column("cadence_seconds", Integer),
+    Column("direction", Text),
+    Column("aggregation", Text),
+    Column("dimensions_json", Text),
+    Column("extensions_json", Text),
+    Column("definition_hash", Text),
+    Column("type_conflict", Text),
+    Column("status", Text),
+    Column("source", Text),
+    Column("first_declared_at", Text),
+    Column("last_synced_at", Text),
+    Column("retired_at", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
+    # ent#366 lesson — declared HERE, not only in schema.py/Alembic, because
+    # this one is not a performance index: it IS the "one definition per metric
+    # name per agent" rule, and `reconcile`'s `on_conflict_do_update` names it
+    # as its conflict target. `migrations/env.py` autogenerates against this
+    # MetaData, so a rule it does not know about is proposed for DROP by the
+    # first `--autogenerate` anyone runs — and accepting that would turn one
+    # reconcile into a second row per metric on every pull.
+    UniqueConstraint("agent_name", "name"),
 )

@@ -1424,16 +1424,52 @@ Agents can define custom KPIs displayed in the Trinity UI Metrics tab. This enab
 
 ### How It Works
 
-1. Define metrics in `template.yaml` under `metrics:`
-2. Agent writes values to `metrics.json` in workspace
-3. Trinity UI displays metrics in the Metrics tab (auto-refresh every 30 seconds)
-4. **Agent must be running** for metrics to be visible
+1. You declare metrics in `template.yaml` under `metrics:`.
+2. Trinity reads that block and builds a per-agent **metric registry** — a
+   validated, persisted record of what this agent claims to measure
+   (trinity-enterprise#477). It is reconciled when the agent is created, when a
+   `git pull` / reset / `pull_first` sync brings a new `template.yaml` in, when
+   the container starts, and whenever you ask it to.
+3. Your agent records **values** against those declarations.
+4. Trinity renders them.
+
+Steps 3 and 4 are moving. Today the agent writes `metrics.json` into its
+workspace and `GET /api/agents/{name}/metrics` reads it back; that path is
+**superseded** by the `record_metrics` write API (trinity-enterprise#478),
+which validates every point against the registry your declaration built.
+`GET …/metrics` keeps its URL and is re-backed by the point store in
+trinity-enterprise#479. Keep writing `metrics.json` until then — there will not
+be a third path.
+
+Step 2 is live now, and it is why the fields below are validated rather than
+merely documented: a declaration Trinity cannot read is **dropped** from the
+registry and reported as compatibility finding `D-009`, and once #478 ships, a
+point recorded against a metric the registry does not hold is rejected.
 
 ### File Locations
 
-The agent server reads from the agent's working directory (`/home/developer/`):
-- **Definitions**: `/home/developer/template.yaml`
-- **Values**: `/home/developer/metrics.json`
+- **Definitions**: `/home/developer/template.yaml` — read by the backend into
+  the registry; also readable through
+  `GET /api/agents/{name}/metrics/definitions`.
+- **Values**: `/home/developer/metrics.json` (superseded, see above).
+
+### Keeping the Registry in Sync
+
+The registry is rebuilt from `template.yaml` at creation, on `git pull` /
+`reset-to-main-preserve-state` / `git sync --pull_first`, and on container
+start. **If your agent edits its own `metrics:` block and pushes** — the common
+case, since the in-container auto-sync pushes rather than pulls — nothing on
+the backend has seen the change until the agent restarts. Either restart it or
+call:
+
+```bash
+POST /api/agents/{name}/metrics/definitions/refresh
+```
+
+The agent can call this itself with its own Trinity key. It is idempotent, and
+it needs the agent to be **running** (409 otherwise). If the template cannot be
+read or parsed, the registry is left exactly as it is (503) — Trinity never
+retires a definition because it failed to read the file.
 
 ### template.yaml Metric Definitions
 
@@ -1484,6 +1520,73 @@ metrics:
     type: bytes
     label: "Cache Size"
 ```
+
+#### Additional fields
+
+Four optional fields make a declaration useful to the platform rather than only
+to a human reading it:
+
+```yaml
+metrics:
+  - name: research_cycles
+    type: counter
+    label: "Research Cycles"
+    cadence: 1h                     # how often you expect to record a point
+    direction: up_good              # up_good | down_good | neutral (default)
+    aggregation: sum                # last (default) | sum | avg
+    dimensions: [region, source]    # the dimension keys a point may carry
+    x-owner: research-team          # `x-` keys pass through untouched
+```
+
+| Field | What it is for |
+|-------|----------------|
+| `cadence` | The expected interval between points. Freshness is judged against it ("no point within 2× cadence"), so `1h` means a gap over two hours is worth surfacing. Written as `<n>s`/`m`/`h`/`d`/`w` or an ISO 8601 duration (`PT15M`, `P1D`, `P1DT12H`, `P1W`). Must be between 60 seconds and 366 days. **Years and months are rejected** — `1y` and `P1M` are not fixed durations, so they cannot be compared against a timestamp. |
+| `direction` | Which way is good, so a rise can be rendered as an improvement rather than just a change. |
+| `aggregation` | How a window of points collapses into one number. |
+| `dimensions` | The dimension keys a recorded point is allowed to carry. Each follows the `name` charset; at most 10. |
+| `x-…` | Your own annotations. Preserved verbatim (up to 20 keys / 1 KB per metric) and never interpreted. |
+
+#### Rules Trinity enforces
+
+- `name` must match `^[a-z][a-z0-9_]{0,63}$`. It is the key your points are
+  stored under, so `Cycles` and `cycles` are not two metrics — the first is
+  simply invalid.
+- `type` must be one of the six above. `values:` is required for `status` and
+  refused for everything else.
+- Thresholds must be numbers (`true` is not a number).
+- Status colors come from `green`, `red`, `yellow`, `gray`, `blue`, `orange`,
+  `purple`.
+- Limits: 50 metrics per agent, 50 status values, 10 dimensions; `label` ≤ 200
+  characters, `description` ≤ 1000, `unit` ≤ 32.
+- **A malformed entry is dropped, not repaired.** The rest of your block still
+  works, and the compatibility report (`D-009`) names exactly what was dropped
+  and why.
+
+#### Changing a metric later
+
+Everything except `type` updates in place on the next sync — rename a label,
+add a threshold, tighten a cadence.
+
+**Changing a metric's `type` is a new metric name; the old one retires.**
+Trinity refuses an in-place type change: points are stored by name, so turning
+a `status` into a `gauge` would leave every value already recorded
+uninterpretable. The refusal is not silent — the definitions response shows
+`type_conflict` with the type you declared, and the refresh summary names it.
+Pick a new name and let the old metric retire; that keeps the break visible
+instead of corrupting the history.
+
+A metric you delete from `template.yaml` is **retired**, not erased — its
+definition is kept so past values can still be read, and re-declaring the same
+name brings the original row back.
+
+#### How long values are kept
+
+The retention window and the per-day write cap are fixed at
+`metrics_retention_days = 365` and `metrics_daily_point_cap = 100,000`. Both
+become operator-adjustable settings when the write path and its sweep ship
+(trinity-enterprise#478); until then nothing prunes and nothing throttles, and
+the definitions API reports them with `enforced: false` rather than pretending
+otherwise.
 
 ### metrics.json Format
 
