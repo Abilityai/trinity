@@ -104,7 +104,7 @@ every turn ──► platform_prompt_service.format_user_memory_block(record)
 
 | Layer | File | Role |
 |---|---|---|
-| DB | `db/seat_decisions.py` · `db/schema.py` · `db/tables.py` · `db/migrations.py` (`seat_decisions_table`) · `migrations/versions/0068_seat_decisions.py` · `db/agent_cleanup.py` (`AgentRef`, CASCADE) · `database.py` facade | rows, both tracks |
+| DB | `db/seat_decisions.py` · `db/schema.py` · `db/tables.py` · `db/migrations.py` (`seat_decisions_table`) · `migrations/versions/0071_seat_decisions.py` · `db/agent_cleanup.py` (`AgentRef`, CASCADE) · `database.py` facade | rows, both tracks |
 | Service | `services/seat_decision_service.py` | grammar + receipts, lifecycle, evidence, readers, the two shapes, the prompt block |
 | Seam | `services/assignment_provider.py` (`kinds_for`, optional) | reader kinds from the private record |
 | Agent-facing | `routers/seat_decisions.py` · `models.RecordDecisionRequest` · `src/mcp-server/src/tools/decisions.ts` · `access.ts` rows · `client.ts` | record / list over MCP |

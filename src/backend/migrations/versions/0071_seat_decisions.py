@@ -12,14 +12,14 @@ documents in TEXT (no JSON type on either engine — the tables.py convention).
 
 ``agent_name`` is a CASCADE entry in ``db/agent_cleanup.py``.
 
-Revision ID: 0068_seat_decisions
-Revises: 0067_agent_role_readiness
+Revision ID: 0071_seat_decisions
+Revises: 0070_metric_points
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0068_seat_decisions"
-down_revision = "0067_agent_role_readiness"
+revision = "0071_seat_decisions"
+down_revision = "0070_metric_points"
 branch_labels = None
 depends_on = None
 

@@ -3319,7 +3319,7 @@ to localStorage in the clear.
 - **Read into context**: the seat's active decisions (criterion first, bounded) ride the
   shared memory block on every turn — public link, channels, seat runs, Workspace — so
   a criterion is reusable and `cites` can be non-zero.
-- **Storage**: `seat_decisions` (both tracks; Alembic `0068` ← `0067`; cleanup CASCADE);
+- **Storage**: `seat_decisions` (both tracks; Alembic `0071` ← `0070`; cleanup CASCADE);
   JSON lists in TEXT; stats in Python; reads bounded (500 rows / seat, 50 seats). Field
   names match the role pack's YAML (`record-decision`, #510) so the canon-folder copy is
   a move (export deferred — DEBT_INBOX 2026-09-22).

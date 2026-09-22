@@ -4524,7 +4524,7 @@ def _migrate_seat_decisions_table(cursor, conn):
     (`agent_name` × `seat_email`, the ent#637 memory scope). Correction
     supersedes rather than edits; expiry is computed from `review_by` on read.
 
-    Mirrored by the Alembic revision 0068_seat_decisions.
+    Mirrored by the Alembic revision 0071_seat_decisions.
     """
     cursor.execute(
         """

@@ -590,7 +590,7 @@ CREATE TABLE seat_decisions (
 CREATE INDEX idx_seat_decisions_seat ON seat_decisions(agent_name, seat_email, status);
 CREATE INDEX idx_seat_decisions_review ON seat_decisions(agent_name, review_by);
 ```
-Both tracks: SQLite `seat_decisions_table`, Alembic `0068_seat_decisions` (← `0067`);
+Both tracks: SQLite `seat_decisions_table`, Alembic `0071_seat_decisions` (← `0070`);
 `AgentRef("seat_decisions", "agent_name", Policy.CASCADE)`. Rows are the history: a
 correction inserts a new row with `supersedes_id` and flips the old one to `superseded`
 in one CAS transaction (`db/seat_decisions.py::supersede_seat_decision`); nothing is
