@@ -887,16 +887,27 @@ async def test_the_owner_sees_who_each_file_is_for(share_service, monkeypatch):
 async def test_a_key_authenticated_caller_is_told_nobodys_address(share_service, monkeypatch, scope):
     """An agent-scoped key resolves to its OWNER and passes the owner gate on
     this route, so without the strip any agent could read who every file was for
-    — an email AND a phone number. Allow-list, as `is_interactive_principal` is."""
+    — an email AND a phone number — nor whether it was addressed at all (#2955).
+    Allow-list, as `is_interactive_principal` is.
+
+    The WHOLE row is compared against what the JWT sees, with the three
+    audience fields nulled: a fourth audience field added to `SharedFileInfo`
+    tomorrow shows up in this diff and has to be classified, instead of
+    leaking to every key while a hand-written list of `is None`s stays green."""
     share_service.create_share_from_bytes(
         AGENT, b"x", display_name="v.ogg",
         addressed_to_email=BOB, addressed_to_channel=WA_NUMBER)
 
-    [row] = await _owner_list(_Principal(mcp_scope=scope, agent_name=AGENT), monkeypatch)
+    [jwt_row] = await _owner_list(_Principal(mcp_scope=None), monkeypatch)
+    [key_row] = await _owner_list(_Principal(mcp_scope=scope, agent_name=AGENT), monkeypatch)
 
-    assert row["addressed_to"] is None
-    assert row["addressed_to_channel"] is None
-    assert row["filename"] == "v.ogg"                  # the row itself is still theirs to see
+    assert key_row == {
+        **jwt_row,
+        "addressed_to": None,
+        "addressed_to_channel": None,
+        "audience_source": None,
+    }
+    assert key_row["filename"] == "v.ogg"              # the row itself is still theirs to see
 
 
 @pytest.mark.asyncio
@@ -904,9 +915,15 @@ async def test_a_principal_with_no_scope_attribute_fails_closed(share_service, m
     share_service.create_share_from_bytes(
         AGENT, b"x", display_name="v.ogg", addressed_to_email=BOB)
 
+    [jwt_row] = await _owner_list(_Principal(mcp_scope=None), monkeypatch)
     [row] = await _owner_list(_Principal(), monkeypatch)       # no `mcp_scope` at all
 
-    assert row["addressed_to"] is None
+    assert row == {
+        **jwt_row,
+        "addressed_to": None,
+        "addressed_to_channel": None,
+        "audience_source": None,
+    }
 
 
 # --------------------------------------------------------------------------- #
