@@ -116,3 +116,64 @@ class TerminalEnvelope:
     previous_attempt_cost: float = 0.0
     execution_time_ms: Optional[int] = None
     raw_response: dict = field(default_factory=dict)
+
+
+def terminal_from_callback_payload(payload: Any, execution_id: str) -> TerminalEnvelope:
+    """Normalize an agent-reported terminal (the #1083 ``ExecutionResultEnvelope``
+    shape) into the ``TerminalEnvelope`` ``apply_result`` consumes.
+
+    ONE classification for both readers of that shape: the result-callback
+    endpoint (``routers/agents.py``) and, since #2944, the cleanup watchdog
+    claiming a terminal the agent retained after the backend lost the held-open
+    connection. Two copies of this mapping would be two places for the
+    auth-is-never-cancellation rule below to drift.
+
+    #679: 3-way map — ``success``→SUCCESS, ``cancelled``→CANCELLED, everything
+    else (incl. unknown forward-compat values) →FAILED.
+
+    Finding 2 (CSO 2026-06-22): an auth/rate terminal must NOT be reclassified
+    as a clean cancellation even when the agent labels it "cancelled". The agent
+    side already guards this (``result_callback._is_auth_or_rate``), but the
+    backend is the trust boundary — a buggy or mixed-version agent that reports
+    ``status:"cancelled"`` carrying ``error_code:"auth"`` (or an auth/rate
+    ``terminal_reason``) would otherwise silently dodge the AUTH dispatch
+    breaker / SUB-003 auto-switch.
+
+    ``payload`` is duck-typed (the Pydantic model or any object with the same
+    attributes) so this leaf keeps importing nothing at module level; the
+    status enum is resolved lazily for the same reason.
+    """
+    from models import TaskExecutionStatus  # noqa: WPS433 — leaf stays import-free at module level
+
+    is_auth_or_rate = (
+        getattr(payload, "error_code", None) == TaskExecutionErrorCode.AUTH.value
+        or getattr(payload, "terminal_reason", None) in ("auth", "rate_limit")
+    )
+    raw_status = getattr(payload, "status", None)
+    if raw_status == "success":
+        status = TaskExecutionStatus.SUCCESS
+    elif raw_status == "cancelled" and not is_auth_or_rate:
+        status = TaskExecutionStatus.CANCELLED
+    else:
+        status = TaskExecutionStatus.FAILED
+
+    error_code: Optional[TaskExecutionErrorCode] = None
+    raw_code = getattr(payload, "error_code", None)
+    if raw_code:
+        try:
+            error_code = TaskExecutionErrorCode(raw_code)
+        except ValueError:
+            # Unknown codes are non-fatal — apply_result only special-cases AUTH.
+            error_code = None
+
+    return TerminalEnvelope(
+        execution_id=execution_id,
+        status=status,
+        response=getattr(payload, "response", None),
+        error=getattr(payload, "error", None),
+        error_code=error_code,
+        metadata=getattr(payload, "metadata", None) or {},
+        execution_log=getattr(payload, "execution_log", None),
+        session_id=getattr(payload, "session_id", None),
+        execution_time_ms=getattr(payload, "execution_time_ms", None),
+    )

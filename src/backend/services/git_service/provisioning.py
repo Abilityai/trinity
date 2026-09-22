@@ -378,12 +378,14 @@ async def initialize_git_in_container(
     """
     container_name = f"agent-{agent_name}"
 
-    # Step 1: Determine git directory (workspace for legacy agents, else home).
-    # Detection logic is shared with `_migrate_workspace_gitignore` so the
-    # post-init Push migration targets the same path.
+    # Step 1: Determine git directory. An EXISTING repo is wherever git says
+    # it is (a legacy workspace-rooted one included); a NEW repo is always
+    # created at the home directory — the only root the agent server reads
+    # (#2938). Detection logic is shared with `_migrate_workspace_gitignore`
+    # so the post-init Push migration targets the same path.
     git_dir = await gitignore._detect_git_dir(container_name)
     if git_dir == "/home/developer/workspace":
-        logger.info(f"[LEGACY] Using workspace directory with existing content: {git_dir}")
+        logger.info(f"[LEGACY] Re-initializing an existing workspace-rooted repository: {git_dir}")
     else:
         logger.info(f"Using home directory: {git_dir}")
 
@@ -570,6 +572,30 @@ async def initialize_git_in_container(
             error="Git initialization verification failed"
         )
 
+    # Step 6 (#2938): verify through the AGENT SERVER, not only through our own
+    # exec. The backend's `git rev-parse` above runs in the directory the
+    # backend chose, so it passes by construction — a 200 that the very next
+    # status poll contradicts was the actual defect. The agent server is the
+    # side that answers Push/Sync/Log/the UI panel, so it is the side whose
+    # verdict counts.
+    seen_by_agent = await _agent_server_sees_repo(agent_name)
+    if seen_by_agent is False:
+        return GitInitResult(
+            success=False,
+            git_dir=git_dir,
+            error=(
+                f"the agent server cannot see the repository at {git_dir}: it "
+                "reads /home/developer, so sync, log and the git panel would all "
+                "report 'not enabled' (#2938)"
+            ),
+        )
+    if seen_by_agent is None:
+        logger.warning(
+            "Git initialization for %s could not be confirmed through the agent "
+            "server (unreachable); the backend-side check passed in %s",
+            agent_name, git_dir,
+        )
+
     logger.info(f"Git initialization verified successfully in {git_dir}")
 
     return GitInitResult(
@@ -577,6 +603,31 @@ async def initialize_git_in_container(
         git_dir=git_dir,
         working_branch=working_branch
     )
+
+
+async def _agent_server_sees_repo(agent_name: str) -> Optional[bool]:
+    """Does the agent server's own `/api/git/status` report the repo enabled?
+
+    True / False from a readable answer; None when the agent server could not
+    be asked (unreachable, non-200) — the caller warns and proceeds rather than
+    failing an init over a transport blip, because the backend-side verify
+    already passed and the disagreement this guards against is deterministic.
+    """
+    try:
+        async with agent_httpx_client(agent_name, timeout=30.0) as client:
+            response = await client.get(f"http://agent-{agent_name}:8000/api/git/status")
+    except Exception as e:  # noqa: BLE001 — transport: unknown, not "no"
+        logger.warning("agent git status probe failed for %s: %s", agent_name, e)
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or "git_enabled" not in body:
+        return None
+    return bool(body.get("git_enabled"))
 
 
 async def check_git_initialized(agent_name: str) -> Optional[str]:
