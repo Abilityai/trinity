@@ -358,7 +358,11 @@ export function createChatTools(
         "Responses may take some time depending on the complexity of the task. " +
         "\n\n**Execution Modes:**\n" +
         "- `parallel=false` (default): Sequential chat mode. Uses execution queue, maintains conversation history. " +
-        "Best for multi-turn conversations requiring context.\n" +
+        "Best for multi-turn conversations requiring context. It continues this agent's own chat session " +
+        "(shared by every caller of this agent, never a scheduled or other headless run's). A turn that " +
+        "crosses the context limit can pay a one-off auto-compaction: it is recorded as `compact_metadata`, " +
+        "readable via `get_execution_result`, and is not a sign the agent is degraded. The session restarts " +
+        "after a model change or a `/api/chat/history` reset.\n" +
         "- `parallel=true`: Parallel task mode. Stateless, no queue, can run N tasks concurrently. " +
         "Best for independent tasks, batch processing, orchestrator delegation.\n" +
         "- `async=true` (with parallel=true): Fire-and-forget mode. Returns immediately with execution_id. " +
