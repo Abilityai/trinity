@@ -15,7 +15,9 @@
  * correctable mistake — and the 422 body carries a reason code per point
  * precisely so the agent can fix it and re-send.
  *
- * ent#479 adds `get_metrics` to this module (the read half).
+ * ent#479 adds `get_metrics` to this module (the read half), and ent#666
+ * adds `get_objectives` — the same numbers against the targets an objective
+ * file sets for them, which is the ONE place a gap is computed.
  */
 
 import { z } from "zod";
@@ -349,6 +351,79 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
             );
           }
           return JSON.stringify({ success: false, error: message, ...flags }, null, 2);
+        }
+      },
+    },
+
+    // ========================================================================
+    // get_objectives — what you are supposed to move, and where you are
+    // ========================================================================
+    getObjectives: {
+      name: "get_objectives",
+      description:
+        "Read YOUR objectives joined to your metrics: for each objective you own or " +
+        "support, every metric it names with its target, your current actual, how fresh " +
+        "that number is, and the gap between them. This is the one place target and actual " +
+        "are put side by side — do not re-derive a gap from get_metrics and an objective " +
+        "file, because two answers to one question is the problem this read exists to " +
+        "remove. " +
+        "`gap.status` is POSITION relative to the target given direction, NEVER pace: " +
+        "`behind` means the number is on the wrong side of the target right now, not that " +
+        "you are late — `by` and `horizon` are on every row if you want to judge pace " +
+        "yourself. A metric the objective wants HELD at a value reads `on_target` (within " +
+        "`tolerance`) or `off_target`, never behind/ahead. `not_computable` always says why " +
+        "in `gap.reason`. " +
+        "`direction` is the declared-metric vocabulary and nothing else — `up_good`, " +
+        "`down_good`, `neutral`, or null when nobody declared one. An objective that asks " +
+        "for a value to be HELD arrives as `neutral` with `direction_source: \"objective\"` " +
+        "(the word you wrote is kept beside it as `objective_direction`), so a `neutral` " +
+        "with `direction_source: \"none\"` means nobody said and nothing can be behind or " +
+        "ahead. " +
+        "`stale: true` means DO NOT ACT ON THIS NUMBER — the gap is still computed beside " +
+        "it so you can see what it was, but no point has arrived within 2x the declared " +
+        "cadence, so recording a fresh one is the next action, not reporting the gap. " +
+        "An objective that names a metric you do not declare comes back as a row with " +
+        "`declared: false` and a `finding` naming the fix (add it to template.yaml " +
+        "`metrics:` and call refresh_metric_definitions) — never as a blank. If the metric " +
+        "belongs to the role that OWNS the objective and you merely support it, the finding " +
+        "is `metric_not_declared_here` and there is nothing for you to fix. " +
+        "Objectives are read from your own canon files on every call, so a `status:` that " +
+        "is not `active` is not returned, and `unavailable` says when the files could not " +
+        "be reached — as does `source`, which counts the files listed, read, skipped by " +
+        "name and left unscanned, so an empty answer is never ambiguous. `findings` covers " +
+        "only the objectives you are returned: another role's YAML mistake is not yours to " +
+        "fix and is not reported to you. This tool reads only your own objectives — there " +
+        "is no agent parameter.",
+      parameters: z.object({}),
+      execute: async (
+        _params: Record<string, never>,
+        context?: { session?: McpAuthContext },
+      ) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        let agentName: string;
+        try {
+          agentName = getAgentName(authContext, "get_objectives");
+        } catch (error) {
+          return JSON.stringify(
+            { success: false, error: error instanceof Error ? error.message : String(error) },
+            null,
+            2,
+          );
+        }
+
+        try {
+          const result = await apiClient.getAgentObjectives(agentName);
+          return JSON.stringify({ success: true, ...result }, null, 2);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`[get_objectives] Error: ${message}`);
+          return JSON.stringify(
+            { success: false, error: message, ...classifyMetricError(message) },
+            null,
+            2,
+          );
         }
       },
     },

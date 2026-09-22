@@ -4699,3 +4699,169 @@ class MetricPointsResult(BaseModel):
     deduplicated: int
     replayed: bool = False
     points: List[MetricPointAccepted] = []
+
+
+# ============================================================================
+# Objective ↔ metric join (trinity-enterprise#666)
+# ============================================================================
+# The model IS the contract. `read_objective_join` returns a dict and the route
+# returns it unchanged; a key-parity test asserts these models carry exactly
+# the keys the service produces, so an additive service field fails the build
+# here instead of being silently filtered out of the response (2026-07-27).
+
+
+class ObjectiveMetricGap(BaseModel):
+    """Position of `actual` relative to `target`, given direction — NEVER pace.
+
+    `behind` means the number is on the wrong side of the target right now; it
+    says nothing about whether the agent is late against `by`. `off_target` is
+    the `hold` arm's only failure word, because a value that should be held has
+    no good side to be on.
+    """
+
+    status: str  # behind | on_target | ahead | off_target | not_computable
+    delta: Optional[float] = None
+    reason: Optional[str] = None
+
+
+class ObjectiveFindingRef(BaseModel):
+    """The finding attached to one metric row, so a card never renders a blank
+    where a number was expected."""
+
+    code: str
+    message: str
+
+
+class ObjectiveFinding(BaseModel):
+    """A finding in the flat list — the same sentence, plus where it came from."""
+
+    code: str
+    objective_id: Optional[str] = None
+    metric: Optional[str] = None
+    path: Optional[str] = None
+    message: str
+
+
+class ObjectiveMetricRead(BaseModel):
+    """One metric of one objective: target from the file, everything else from
+    the registry and the point store."""
+
+    name: str
+    target: Optional[float] = None
+    #: A non-numeric target (a status label, a phrase) kept verbatim and
+    #: bounded, so the card can show what the author wrote even though no gap
+    #: can be computed from it.
+    target_text: Optional[str] = None
+    tolerance: Optional[float] = None
+    by: Optional[str] = None
+    horizon: Optional[str] = None
+    #: What the objective file itself wrote (`up` / `down` / `hold`), kept
+    #: verbatim so an author can see the word they typed beside the resolved
+    #: one.
+    objective_direction: Optional[str] = None
+    declared: bool
+    #: Declared by the OWNING role's agent, not by this one — a supporting
+    #: agent cannot fix that and must not be told to.
+    declared_elsewhere: bool
+    #: The REGISTRY's vocabulary and nothing else — `up_good` | `down_good` |
+    #: `neutral` | `null` — so a direction-aware formatter needs no fourth
+    #: case. An objective's declared `hold` resolves to `neutral`; what tells
+    #: it apart from a registry that never said is `direction_source`, not a
+    #: fourth value.
+    direction: Optional[str] = None
+    direction_source: str = "none"  # registry | objective | none
+    unit: Optional[str] = None
+    type: Optional[str] = None
+    label: Optional[str] = None
+    actual: Optional[Union[float, str]] = None
+    last_point_at: Optional[str] = None
+    stale: bool = False
+    freshness: Optional[str] = None
+    stale_after: Optional[str] = None
+    gap: ObjectiveMetricGap
+    finding: Optional[ObjectiveFindingRef] = None
+
+
+class ObjectiveRead(BaseModel):
+    """One objective this agent owns or supports (framework §3.4)."""
+
+    id: str
+    path: str
+    schema_version: Optional[str] = None
+    statement: Optional[str] = None
+    horizon: Optional[str] = None
+    status: str = "active"
+    owner: Optional[str] = None
+    review_by: Optional[str] = None
+    owned: bool
+    supporting: bool
+    metrics: List[ObjectiveMetricRead] = []
+    metrics_truncated: bool = False
+
+
+class ObjectiveRoleRead(BaseModel):
+    """The role from `x-role`. `null` when the agent has none — it can still
+    support an objective by name."""
+
+    id: Optional[str] = None
+    path: Optional[str] = None
+
+
+class ObjectiveJoinSource(BaseModel):
+    """What was actually read, so "no objectives" can be told from "not read".
+
+    `objectives_listed` / `objectives_scanned` / `objectives_unscanned` are
+    separate because the filter runs AFTER the read: a shared fleet canon can
+    hold more files than the scan bound, and silently keeping the first N is
+    how an agent's own objective disappears. `objectives_skipped` counts the
+    `*.yaml` whose NAME this read refuses (a space, a non-ASCII character), so
+    a file that is there but unfetchable cannot look like a file that is not
+    there; it carries an `objective_file_skipped` finding naming one.
+    """
+
+    template: str = "skipped"  # read | not_found | unreadable | invalid | skipped
+    #: read | absent | unreadable | timeout | skipped — `timeout` is the
+    #: fan-out's wall-clock budget, an agent answering too slowly to join.
+    objectives_dir: str = "skipped"
+    objectives_listed: int = 0
+    objectives_scanned: int = 0
+    objectives_unscanned: int = 0
+    objectives_skipped: int = 0
+    objectives_truncated: bool = False
+
+
+class ObjectiveJoinSummary(BaseModel):
+    """Counts a consumer can act on without walking the rows."""
+
+    objectives: int = 0
+    metrics: int = 0
+    behind: int = 0
+    ahead: int = 0
+    on_target: int = 0
+    off_target: int = 0
+    not_computable: int = 0
+    stale: int = 0
+    undeclared: int = 0
+    declared_elsewhere: int = 0
+
+
+class ObjectiveJoinRead(BaseModel):
+    """`GET /api/agents/{name}/objectives` — target vs actual with freshness.
+
+    Files are truth and they live in the agent's container, so `unavailable`
+    is an honest answer rather than a cached number: `agent_stopped`,
+    `agent_missing` or `agent_unreachable`, each with `message` naming what to
+    do about it.
+    """
+
+    agent_name: str
+    generated_at: str
+    stale_rule: str
+    role: Optional[ObjectiveRoleRead] = None
+    canon_root: Optional[str] = None
+    unavailable: Optional[str] = None
+    source: ObjectiveJoinSource
+    objectives: List[ObjectiveRead] = []
+    findings: List[ObjectiveFinding] = []
+    summary: ObjectiveJoinSummary
+    message: Optional[str] = None

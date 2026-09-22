@@ -1471,3 +1471,378 @@ read bounds on one query, not operator policy.
 - [x] `/exists` answers both flags and is gated with the uniform-404 dependency
 - [x] A bound widget is filled from the registry and skipped by the snapshot
       writer; an undeclared binding shows the reason and no number
+
+---
+
+## 50. Objective ↔ Metric Join — one read of target vs actual with freshness (trinity-enterprise#666)
+
+§47 says which numbers an agent may have, §48 records them and §49 reads them
+back. This section is how the platform answers the question those three leave
+open: **what is this agent supposed to move, where is it now, and is that
+number still true?**
+
+The binding constraint is the same singularity that drives the whole epic. An
+objective's target and a metric's actual were reachable through paths that
+could disagree — the role card (ent#527) computed its own gap from
+`metrics.json` with its own 30-day staleness rule while the tiles read the
+point store with the §49.1 rule. So there is **one join**, in
+`services/objective_join_service.py`, and every consumer — the role card, the
+project hub (ent#661), proactivity (ent#605) — calls it rather than growing
+its own. A second join anywhere is a defect regardless of whether it currently
+agrees.
+
+### 50.1 The grammar it reads (Tandem framework §3.4)
+
+```yaml
+# <x-canon.clone_path>/objectives/<id>.yaml
+schema_version: 1
+id: q4-close-rate
+statement: Lift close rate to 35% by the end of Q4.
+horizon: day | week | month | quarter | year
+owner: role:revenue-lead
+supporting_agents: [sales-companion]
+metrics:
+  - name: close_rate          # the §47 registry's metrics[].name — by NAME
+    direction: up | down | hold
+    target: 35
+    by: 2026-12-31
+    tolerance: 1              # optional; `hold` only
+status: active | achieved | dropped
+review_by: 2026-10-15
+```
+
+**Reader tolerance** (the §47 rule): unknown keys are accepted and never fatal,
+so a field a later `schema_version` adds does not take the objective down with
+it. `schema_version` itself is read but not enforced.
+
+**Only `status: active` objectives are joined.** A file with no `status` reads
+as active (the oldest canon files predate the field); a value outside the enum
+reads as *not* active and is excluded — an unrecognised state is not a licence
+to keep nagging. A non-active objective produces no findings: it is not a
+defect, it is finished.
+
+**Findings belong to the objectives the read RETURNS.** The same suppression
+covers another role's objectives: in a shared fleet canon every agent reads
+every role's files, so publishing their parse defects would put every other
+role's YAML mistakes on this agent's card (and #2927 copies `findings` onto the
+card verbatim). Each objective's findings are held beside it while it is
+parsed and published only if the concern filter keeps it — the truncated tail
+beyond `MAX_OBJECTIVES` included, since those are not shown either. **The two
+file-level codes are the deliberate exception**: `objective_invalid` and
+`objective_unreadable` are always published, because a file that did not parse
+carries nothing that says whose concern it is, and silence there is how a file
+disappears from a read that claims to show them all.
+
+An objective reaches an agent two ways: `owner: role:<id>` matching the
+template's `x-role.role` (**owned**), or the agent's own name in
+`supporting_agents` (**supporting**). An agent with no `x-role` can still
+support.
+
+### 50.2 The four sources, and which one owns what
+
+| Fact | Source | Why that one |
+|---|---|---|
+| metric name, `target`, `by`, `tolerance`, `direction` (fallback) | the objective file | files are truth (framework E7/E13); the platform keeps no copy |
+| `direction` (first), `unit`, `type`, `label`, `status`/`retired_at` | the §47 registry | the platform's own declaration of what the name means |
+| `actual`, `last_point_at` | the §48 point store, via `metric_read_service.latest_by_metric` | the same folded value the tile shows, by construction |
+| `stale`, `freshness`, `stale_after` | `metric_read_service.freshness` (§49.1) | the ONE stale rule; a second one is a defect |
+
+`actual` is the **tile's folded latest**, not a window aggregate. Both the read
+route and the join go through `_latest_entry`, so "the objective's actual" and
+"the number on the tile" are one computation rather than two that happen to
+agree — pinned by a parity test including a dimensioned `sum` metric, where a
+re-implemented fold would plausibly diverge. A `counter` is monotonic by the
+guide's own definition, so "quarter-to-date" is the author's push contract, not
+something this read invents.
+
+**Two doors to one file, deliberately.** The registry reads `template.yaml` via
+`docker exec cat` at its six triggers; the join reads it through the agent door
+(`AgentClient`). Both use the same hardened loader (`utils/safe_yaml`), and the
+join accepts a pre-parsed `template` so the role card does not read it twice.
+
+### 50.3 `gap` — position, never pace
+
+```
+up_good    → behind when actual < target, ahead when actual > target
+down_good  → the mirror
+neutral    → the HOLD arm (a declared `hold`, see 50.4):
+             on_target when |actual − target| <= tolerance (default: exact),
+             off_target otherwise — NEVER behind/ahead
+```
+
+`gap.status ∈ {behind, on_target, ahead, off_target, not_computable}` and
+`delta = actual − target`, signed, numeric only.
+
+**`behind` is a position word here, not a pace word.** It says the number is on
+the wrong side of the target right now; it says nothing about whether the agent
+is late against `by`. `by` and `horizon` ride every metric row precisely so a
+consumer that wants a pace judgment can compute one — ent#605 owns the ramp
+maths and will add its own field. Nothing in this read computes pace.
+
+`hold` is its own arm because a value that should be held has **no good side to
+be on**: drifting up is as wrong as drifting down, so `off_target` with the
+signed delta is the honest answer and `ahead` would be a lie.
+
+`not_computable` always names its reason: `no_target`, `non_numeric`,
+`no_points`, `no_direction`, `undeclared`, `retired`, `declared_elsewhere`.
+
+**Stale is orthogonal to gap.** A stale metric still has its gap computed, with
+`stale: true` beside it — the card renders "30 / 35 · stale" and ent#605
+refuses to act on it. Collapsing a stale metric to `not_computable` would hide
+the number the card exists to show. The join reports; the consumer decides.
+
+### 50.4 Direction: the registry first, the objective as the fallback
+
+`resolve_direction(registry_direction, objective_direction)` returns
+`(direction, direction_source, mismatch)`:
+
+| registry | objective | direction | `direction_source` |
+|---|---|---|---|
+| `up_good` / `down_good` | anything | the registry's | `registry` |
+| `neutral` / absent | `up` | `up_good` | `objective` |
+| `neutral` / absent | `down` | `down_good` | `objective` |
+| `neutral` / absent | `hold` | `neutral` | `objective` |
+| `neutral` / absent | absent | `null` | `none` |
+
+**`direction` ranges over the REGISTRY's three values and nothing else** —
+`up_good`, `down_good`, `neutral`, or `null` when nobody said. A declared
+`hold` resolves to `neutral` rather than to a self-describing fourth token, so
+a consumer that reuses the registry-direction formatter (`utils/metricFormat.js`
+is direction-aware) cannot meet a value it has never heard of. The author's own
+word is kept verbatim beside it as `objective_direction`, and the *comparison* a
+declared hold selects lives in `gap` (50.3), not in a fourth direction.
+
+`neutral` is the registry column's **default**, indistinguishable from a
+template that never said — and no bundled template declares `direction:` — so
+a registry-only rule would have shipped a feature where every gap is
+`not_computable` on day one. Hence the fallback.
+
+The objective file's `hold` is the registry's `neutral` **declared on purpose**;
+`direction_source` is what tells a declared `hold` apart from silence, which is
+why that field exists — and why the wire needs no fourth direction value to
+carry the distinction. Two *declared* directions that disagree (registry
+`up_good` vs objective `down`, or vs `hold`) resolve to the registry's and
+raise a `direction_mismatch` finding — one of the two files is wrong and the
+read says so rather than silently picking. Neither declaring one leaves
+`direction: null`, `gap.reason: no_direction` and a `direction_undeclared`
+finding naming the one-line fix.
+
+### 50.5 Findings — never a blank
+
+Every failure is a named finding carrying a sentence a person can act on. The
+one thing this read will not do is render an empty cell where a number was
+expected: that is how "we are measuring it" survives having stopped measuring
+it. Findings appear twice — flat in `findings[]` with `objective_id` / `metric`
+/ `path`, and as `finding: {code, message}` on the metric row a card renders.
+
+| Code | When | The fix it names |
+|---|---|---|
+| `metric_undeclared` | an **owned** objective names a metric this agent does not declare | declare it in `template.yaml metrics:`, call `refresh_metric_definitions` |
+| `metric_not_declared_here` | a **supporting-only** objective names a metric this agent does not declare | *nothing* — the owning role's agent declares it; cross-agent metric reads are ent#80. Counted under `summary.declared_elsewhere`, **not** `undeclared` |
+| `metric_retired` | the name is declared but retired | re-declare and refresh; the last value is **withheld**, because a retired number rendering as current is the §49.2 failure |
+| `metric_name_invalid` | a `metrics:` entry is not a mapping, or its name is not a valid id | fix the objective file |
+| `metric_duplicate` | one objective lists a name twice | first entry wins; drop the rest |
+| `direction_mismatch` | registry and objective both declare a direction and disagree | registry wins; fix whichever file is wrong |
+| `direction_undeclared` | neither declares one | add `direction:` to the template metric or the objective entry |
+| `objective_invalid` | the file is not a YAML mapping | fix the YAML; §3.4 names the fields |
+| `objective_unreadable` | the agent answered, but not with that file (retryable — a transport fault is not an author error) | retry |
+| `objective_id_duplicate` | two files declare one id | both are shown; give one its own id |
+| `objective_id_invalid` | a file's `id:` is not a valid id | the **file name** is used instead and the finding says so — a *missing* `id` falls back silently, an id the author wrote and this read refused does not, because ent#661 keys objectives by id across agents |
+| `objective_file_skipped` | a `*.yaml` in `objectives/` whose NAME is not a plain path segment (a space, a non-ASCII character) | rename it; the file is never fetched, and `source.objectives_skipped` counts them so "not there" can be told from "there under a name this read will not open" |
+| `objectives_read_timeout` | the fan-out exceeded `OBJECTIVES_READ_BUDGET_SEC` | retry; the agent is answering, just too slowly — `source.objectives_dir: "timeout"`, no objective joined |
+| `role_id_invalid` | `x-role.role` is not a valid id | fix `template.yaml`; no owned objective can match until then |
+| `canon_path_invalid` | `x-canon.clone_path` is not a plain path | fix it; **no file is read with that path** |
+
+Every code in this table above the file-level pair is published **only for the
+objectives the read returns** (50.1): another role's parse defect, and a
+finished objective's, are not this agent's to fix. `objective_invalid`,
+`objective_unreadable`, `objective_file_skipped`, `objectives_read_timeout`,
+`role_id_invalid` and `canon_path_invalid` are file- or read-level and are
+always published — there is no objective there to decide whose they are.
+
+### 50.6 The read: `GET /api/agents/{name}/objectives`
+
+**Not store-only**, unlike §49's read. Objectives live in the agent's own
+container and nothing is copied platform-side (E7/E13), so this route contacts
+the agent door: one container-state read, one `template.yaml` read, one
+directory listing, and up to 100 small file reads.
+
+Gate order (Invariant #8), copied verbatim from `/metrics`:
+
+1. `AuthorizedAgentByName` — the uniform 404 for an absent **or** inaccessible
+   agent (owner / shared / admin).
+2. The agent self-gate: `current_user.agent_name and != name → 403`. An
+   agent-scoped key reads only its own objectives; cross-agent reads are
+   ent#80's grant, not an oversight here. **403, not 404** — the caller already
+   knows the agent exists, because the dependency let it through.
+3. `rate_limiter.enforce("agent_objectives_read:{name}", …)` on the name the
+   gate has already **validated** — no limiter-key amplification from an
+   unvalidated path param.
+
+`OBJECTIVES_READ_RATE_LIMIT` (env, default **60**/min per agent, window 60 s)
+is its **own** knob, not `/metrics`'s 240. That route is store-only; this one
+drives a container. Ten open role cards polling at 30 s is 20/min, so 60 clears
+normal traffic with room and still stops a loop from pinning an agent-server the
+platform also needs for chat.
+
+A store outage is `503 metric_store_unavailable` + `Retry-After: 30`.
+**Everything below transport is a named field on a 200** — an agent that is
+stopped is an *answer*, not an error.
+
+### 50.7 The response
+
+```
+{agent_name, generated_at, stale_rule: "2x cadence",
+ role: {id, path} | null,          # from x-role; null → objectives can only be supporting
+ canon_root: "canon" | null,
+ unavailable: null | agent_stopped | agent_missing | agent_unreachable,
+ source: {template, objectives_dir, objectives_listed, objectives_scanned,
+          objectives_unscanned, objectives_skipped, objectives_truncated},
+ objectives: [{id, path, schema_version, statement, horizon, status, owner,
+               review_by, owned, supporting, metrics_truncated,
+               metrics: [{name, target, target_text, tolerance, by, horizon,
+                          objective_direction, declared, declared_elsewhere,
+                          direction, direction_source, unit, type, label,
+                          actual, last_point_at, stale, freshness, stale_after,
+                          gap: {status, delta, reason},
+                          finding: {code, message} | null}]}],
+ findings: [{code, objective_id, metric, path, message}],
+ summary: {objectives, metrics, behind, ahead, on_target, off_target,
+           not_computable, stale, undeclared, declared_elsewhere},
+ message: str | null}
+```
+
+**The model is the contract.** `models.ObjectiveJoinRead` is the route's
+`response_model` and the service returns its dict unchanged; a key-parity test
+walks the service's output against the model's fields recursively, so an
+additive service key fails the build rather than being silently filtered out of
+every response.
+
+`unavailable` distinguishes `agent_stopped` (start it), `agent_missing` (no
+container — recreate it) and `agent_unreachable` (the door did not answer),
+because those are three different actions.
+
+`source.*` exists so "no objectives" can be told from "not read":
+`objectives_listed` / `objectives_scanned` / `objectives_unscanned` are
+separate counts because the **filter runs after the read** (see 50.8), and
+`objectives_skipped` counts the `*.yaml` refused by NAME before any fetch.
+`objectives_dir: "timeout"` is the fan-out's budget having run out — an
+answer, like `absent` and `unreadable`, never an error.
+
+### 50.8 Bounds, and why they are where they are
+
+| Bound | Value | Why |
+|---|---|---|
+| `MAX_OBJECTIVE_FILES_SCANNED` | 100 | files read before filtering |
+| `MAX_OBJECTIVES` | 20 | objectives **returned** — the cap is on the OUTPUT |
+| `MAX_METRICS_PER_OBJECTIVE` | 12 | per objective; `metrics_truncated` states it |
+| `MAX_TEXT` | 400 | statements; ids 64, owner 128, `by`/`review_by` 32, `horizon`/`direction` 16, `target_text` 64 |
+| `READ_CONCURRENCY` | 2 | objective reads in flight |
+| `OBJECTIVE_READ_TIMEOUT_SEC` | 5 s | one objective file — a few hundred bytes |
+| `OBJECTIVES_READ_BUDGET_SEC` | 30 s | the whole fan-out |
+
+**Scan, then filter, then cap.** Capping the *listing* first (the shape #2927
+shipped) hides an agent's own objective behind twenty foreign ones in a shared
+fleet canon — the files sort by name and nothing makes an agent's own sort
+early. The cap therefore applies to what survives the concern filter.
+
+**The fan-out is deliberately narrow.** `AgentClient`'s circuit breaker trips
+at three failures and it is the same breaker chat rides on, so objective reads
+run ≤ 2 in flight and **abort to `unavailable: agent_unreachable`** on the
+first typed transport failure (`AgentNotReachableError`,
+`AgentCircuitOpenError`) rather than spending nineteen more reads driving it
+open. The join does its own transport rather than `AgentClient.read_file`,
+which flattens every `AgentClientError` into `{"success": False}` — and the
+difference between "this file is unreadable" and "this agent is gone" is
+exactly whether the remaining reads are worth attempting.
+
+**A slow agent is bounded by the clock, not by the abort.** The unreachable
+abort only fires on *typed transport death*; an agent-server that answers
+slowly raises nothing, so the fan-out carries a wall-clock budget
+(`OBJECTIVES_READ_BUDGET_SEC`, 30 s) and each read a 5 s timeout of its own.
+Past the budget the read returns `objectives_dir: "timeout"` with the
+`objectives_read_timeout` finding and no objectives — a part answer that says
+what happened, rather than a backend task held for `100 / 2` slow reads while
+the 60/min limiter admits the next fan-out behind it.
+
+**The known cost**: a fleet canon with 60 objective files and ten polling role
+cards is 60 file reads per request against a single-process agent-server. The
+60/min knob, the ≤ 2 concurrency, the budget and the unreachable-abort are what
+bound it;
+the long-run relief is a consumer composing `read_objective_files` once with
+`join_objectives` per agent (50.10), not a cache.
+
+**Author values are normalised at parse.** `target` becomes a **finite**
+`int|float` or `null`, with anything else kept as bounded `target_text`:
+`.nan` / `.inf` are legal YAML that the hardened loader passes through and
+`json.dumps` emits as bare `NaN` / `Infinity` — which is not JSON, so
+`JSON.parse` throws and the consumer renders a blank card. `bool` is excluded
+too (`isinstance(True, int)` is `True`, and `true` is not `1`).
+
+`x-canon.clone_path` is validated segment by segment with `..` refused
+**before** any file is read with it.
+
+### 50.9 Zero config
+
+An agent with no `x-role` and no `x-canon` costs one container-state read and
+one `template.yaml` read — **no store query at all** — and answers
+`{objectives: [], message: "no x-role or x-canon in template.yaml — nothing to
+join…"}`. Every empty state carries `message` naming the next action: the
+`objectives/` directory that was not found, the agent that is stopped, the fact
+that no active objective names this agent.
+
+An agent with objectives but no `metrics:` block gets a row per referenced
+metric, every one `declared: false` with its `metric_undeclared` finding and
+`summary.undeclared: n` — loud, not blank.
+
+### 50.10 Consumers — and the no-second-join rule
+
+| Consumer | How |
+|---|---|
+| `GET /api/agents/{name}/objectives` | the operator/agent door |
+| MCP `get_objectives` | agent-scoped (no agent parameter), returns the route body verbatim, never throws |
+| Role card (ent#527, PR #2927) | calls `read_objective_join(agent, template=…, client=…)` **in process** behind its own roster gate — one implementation, two doors |
+| Project hub (ent#661) | composes `read_objective_files` (one file read) with `join_objectives` per participating agent over store-only reads — the agent door stays out of its loop |
+| Proactivity (ent#605) | consumes `summary.behind` and per-row `gap.status == "behind" and not stale`; it owns the "never act on a stale number" rule and the pace maths |
+
+Deliberately **not** here: a platform-side copy of objective files; an
+objective-centric cross-agent read (ent#661's design pass, with cross-agent
+metric access owned by ent#80); a proactivity evaluator; a `metrics.json`
+fallback for `actual` (retired by §49's D-010); a projection cache.
+
+### Acceptance
+
+- [x] One join, in one module, imported by every consumer — no second gap
+      computation anywhere
+- [x] `actual` is the tile's folded latest via the extracted
+      `latest_by_metric`, parity-tested including a dimensioned `sum` metric
+- [x] `freshness()` is imported, never re-derived — the §49.1 rule is the only
+      stale rule in the join
+- [x] An objective naming an undeclared metric is a named finding with the fix,
+      never a blank; a supporting-only agent gets the informational code instead
+- [x] A retired metric withholds its value and says why
+- [x] `hold` is `on_target` within `tolerance` and `off_target` otherwise —
+      never behind/ahead; only `active` objectives are joined, and neither a
+      non-active nor another role's objective puts a finding on this read
+- [x] `direction` never leaves the registry's three values: a declared `hold`
+      is `neutral` with `direction_source: objective`
+- [x] Direction falls through to the objective file when the registry is
+      `neutral`, with `direction_source`; two declared directions that disagree
+      are a finding
+- [x] `gap` is position, never pace; `by` and `horizon` ride the row
+- [x] `stale` and `gap` are orthogonal — a stale metric keeps its gap
+- [x] Uniform 404 → agent self-gate → its own 60/min limiter on the validated
+      name; 503 + `Retry-After` on a store outage; every other failure is a
+      named field on a 200
+- [x] Scan 100, filter, cap 20; ≤ 2 reads in flight; abort to
+      `agent_unreachable` on the first transport death; a 30 s fan-out budget
+      and a 5 s per-read timeout for an agent that is merely slow
+- [x] A file name this read refuses is counted and named, and an `id` the
+      author wrote and this read refused is a finding, not a silent rename
+- [x] Author-shaped targets (`.nan`, `.inf`, lists, bools, long strings) cannot
+      reach the wire as non-JSON
+- [x] Zero config: no role and no canon costs no store query and names the next
+      action
+- [x] The model is the contract, pinned by key parity
+- [x] MCP `get_objectives` is agent-scoped, takes no agent parameter, and never
+      throws

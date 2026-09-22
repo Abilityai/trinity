@@ -536,3 +536,96 @@ def test_a_passing_d010_is_not_echoed_as_a_finding(ctx):
 
 def test_the_live_policy_travels_with_the_read(ctx):
     assert _get(ctx).json()["policy"]["retention_days"] == 365
+
+
+# ---------------------------------------------------------------------------
+# `latest_by_metric` parity (ent#666 C1)
+# ---------------------------------------------------------------------------
+# The objective join reads `actual` through `latest_by_metric` rather than
+# through this route, so the two must be the SAME computation and not two that
+# happen to agree. Both go through `_latest_entry`; these cases are what says
+# so out loud, including the case the extraction could plausibly break — a
+# dimensioned metric, where the tile value is a cross-series fold.
+
+
+def _latest_map(ctx, **kwargs):
+    from services import metric_read_service
+    return metric_read_service.latest_by_metric(AGENT, **kwargs)
+
+
+def test_the_tile_and_the_join_read_the_same_number(ctx):
+    body = _get(ctx).json()
+    folded = _latest_map(ctx)
+
+    for entry in body["metrics"]:
+        mirror = folded[entry["name"]]
+        assert mirror["latest"] == entry["latest"]
+        assert mirror["last_point_at"] == entry["last_point_at"]
+        assert mirror["stale"] == entry["stale"]
+        assert mirror["freshness"] == entry["freshness"]
+        assert mirror["stale_after"] == entry["stale_after"]
+        assert mirror["series_count"] == entry["series_count"]
+
+
+def test_parity_holds_for_a_dimensioned_sum_metric(ctx):
+    """Sum of per-region latest IS the total — the number on the tile. A join
+    that re-implemented the fold would be a second answer to one question."""
+    ctx.db.definitions = [_definition(name="signups", type="counter",
+                                      aggregation="sum",
+                                      dimensions=["region"])]
+    ctx.db.points = [
+        _point("signups", _ago(30), 7.0, {"region": "emea"}),
+        _point("signups", _ago(90), 3.0, {"region": "emea"}),
+        _point("signups", _ago(45), 5.0, {"region": "us"}),
+    ]
+    entry = _get(ctx).json()["metrics"][0]
+    mirror = _latest_map(ctx)["signups"]
+
+    assert entry["latest"]["value"] == 12.0        # 7 + 5, not 7 and not 15
+    assert mirror["latest"] == entry["latest"]
+    assert mirror["series_count"] == entry["series_count"] == 2
+
+
+def test_parity_holds_when_a_metric_has_no_points(ctx):
+    ctx.db.points = []
+    entry = _get(ctx).json()["metrics"][0]
+    mirror = _latest_map(ctx)["revenue"]
+
+    assert entry["latest"] is None and mirror["latest"] is None
+    assert mirror["freshness"] == entry["freshness"] == "no_points"
+
+
+def test_the_join_can_narrow_to_the_names_it_needs(ctx):
+    ctx.db.definitions = [_definition(), _definition(name="unrelated")]
+    asked = []
+    original = ctx.db.latest_metric_points
+
+    def _spy(name, metric_names, per_metric_limit=200):
+        asked.append(tuple(metric_names))
+        return original(name, metric_names, per_metric_limit)
+
+    ctx.db.latest_metric_points = _spy
+    folded = _latest_map(ctx, names=["revenue"])
+
+    assert set(folded) == {"revenue"}
+    assert asked == [("revenue",)]
+
+
+def test_an_empty_name_list_performs_no_store_read_at_all(ctx):
+    """The zero-config path: an agent with nothing to join costs no query."""
+    def _boom(*a, **k):
+        raise AssertionError("the store must not be touched")
+
+    ctx.db.list_metric_definitions = _boom
+    ctx.db.latest_metric_points = _boom
+    assert _latest_map(ctx, names=[]) == {}
+
+
+def test_the_join_may_hand_in_registry_rows_it_already_holds(ctx):
+    """One registry read per join, not one per consumer of it."""
+    def _boom(*a, **k):
+        raise AssertionError("definitions were handed in")
+
+    ctx.db.list_metric_definitions = _boom
+    folded = _latest_map(ctx, definitions=[_definition()])
+    assert folded["revenue"]["latest"]["value"] == 10.0

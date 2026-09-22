@@ -35,6 +35,15 @@ moment an agent was stopped. The `metrics.json` that proxy used to read is now
 a compatibility finding (D-010), echoed from the persisted compat row — never
 a container probe on a polled read path.
 
+## Two entry points, one fold
+
+`read_agent_metrics` is the route's full composition (latest + series + chart +
+stats). `latest_by_metric` is the cheap half — `{name: tile}` with no series
+work — for a consumer that needs the current number and its freshness and
+nothing else (the ent#666 objective join). Both go through `_latest_entry`, so
+"the objective's actual" and "the number on the tile" are the same computation,
+not two that happen to agree.
+
 ## Series identity is `canonical_dims`, computed here
 
 `dims` is stored in caller key order (the engine serialiser sorts nothing), so
@@ -591,18 +600,23 @@ def read_agent_metrics(
     }
 
 
-def _compose_metric(
-    agent_name: str,
+def _latest_entry(
     definition: Dict[str, Any],
     latest_rows: List[Dict[str, Any]],
-    window: Dict[str, Any],
     now: datetime,
-    *,
-    raw: bool,
-    series_limit: int,
-    db: Any,
-) -> Dict[str, Any]:
-    """One metric's entry: definition + latest + freshness + series + stats."""
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Definition fields + the folded latest + freshness. Spelled ONCE.
+
+    This is the tile: the newest point of every dimension series, folded by the
+    declared `aggregation` into one number, stamped with the freshest `ts`
+    across those series and judged by the one stale rule.
+
+    `_compose_metric` (the route) and `latest_by_metric` (the ent#666 objective
+    join) both call it, which is what makes "the objective's actual" and "the
+    number on the tile" the same fact rather than two computations that happen
+    to agree today. The grouped series are returned alongside because the route
+    goes on to bucket them; the join never looks at them.
+    """
     aggregation = definition.get("aggregation")
     grouped = _group_series(latest_rows, aggregation)
     entry = _definition_fields(definition)
@@ -610,7 +624,7 @@ def _compose_metric(
     last_point_at = grouped[0]["latest"]["ts"] if grouped else None
     # The freshest point across EVERY dimension series, not the first group's:
     # one region reporting keeps the metric fresh, and the per-series `stale`
-    # flags below say which stopped.
+    # flags say which stopped.
     for series in grouped:
         if series["latest"]["ts"] > last_point_at:
             last_point_at = series["latest"]["ts"]
@@ -632,6 +646,83 @@ def _compose_metric(
             "ts": last_point_at,
             "dims": newest["dims"] if len(grouped) == 1 else None,
         }
+    else:
+        entry["latest"] = None
+    return entry, grouped
+
+
+def latest_by_metric(
+    agent_name: str,
+    *,
+    definitions: Optional[List[Dict[str, Any]]] = None,
+    names: Optional[List[str]] = None,
+    now: Optional[datetime] = None,
+    include_retired: bool = True,
+) -> Dict[str, Dict[str, Any]]:
+    """`{metric_name: <the tile>}` — no series, no buckets, no stats.
+
+    The cheap half of `read_agent_metrics` for a consumer that needs the
+    current number and its freshness and nothing else: the ent#666 objective
+    join asks "what is the actual against this target", not "draw me a chart".
+    Running the full read and discarding the series would cost a per-metric
+    window query and a 120-bucket fold per metric on every role-card poll.
+
+    `definitions` lets a caller that already holds the registry rows pass them
+    in rather than paying a second `list_metric_definitions`. `names` narrows
+    both the registry and the point read; passing `[]` performs NO store read
+    at all, which is the zero-config path.
+    """
+    from database import db  # deferred: `freshness` must import without it
+
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    if names is not None and not names:
+        return {}
+
+    if definitions is None:
+        definitions = db.list_metric_definitions(
+            agent_name, include_retired=include_retired)
+    if not include_retired:
+        definitions = [d for d in definitions if d.get("status") == "active"]
+    if names is not None:
+        wanted = set(names)
+        definitions = [d for d in definitions if d.get("name") in wanted]
+    if not definitions:
+        return {}
+
+    metric_names = [d["name"] for d in definitions if d.get("name")]
+    rows_by_metric: Dict[str, List[Dict[str, Any]]] = {
+        n: [] for n in metric_names}
+    for row in db.latest_metric_points(
+            agent_name, metric_names, LATEST_POINTS_PER_METRIC):
+        rows_by_metric.setdefault(row["metric"], []).append(row)
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for definition in definitions:
+        entry, _grouped = _latest_entry(
+            definition, rows_by_metric.get(definition["name"], []), now)
+        out[definition["name"]] = entry
+    return out
+
+
+def _compose_metric(
+    agent_name: str,
+    definition: Dict[str, Any],
+    latest_rows: List[Dict[str, Any]],
+    window: Dict[str, Any],
+    now: datetime,
+    *,
+    raw: bool,
+    series_limit: int,
+    db: Any,
+) -> Dict[str, Any]:
+    """One metric's entry: definition + latest + freshness + series + stats."""
+    aggregation = definition.get("aggregation")
+    entry, grouped = _latest_entry(definition, latest_rows, now)
+
+    if grouped:
         entry["latest_by_series"] = [
             {"dims": s["dims"], "value": s["latest"]["value"],
              "ts": s["latest"]["ts"],
@@ -642,7 +733,6 @@ def _compose_metric(
         ]
         entry["message"] = None
     else:
-        entry["latest"] = None
         entry["latest_by_series"] = []
         entry["message"] = _empty_message(definition)
 

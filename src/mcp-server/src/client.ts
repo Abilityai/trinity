@@ -2046,6 +2046,13 @@ export class TrinityClient {
     );
   }
 
+  async getAgentObjectives(agentName: string): Promise<Record<string, unknown>> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/objectives`
+    );
+  }
+
   /**
    * Re-read the agent's template.yaml and reconcile its declared metrics.
    *
