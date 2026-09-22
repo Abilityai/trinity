@@ -162,6 +162,7 @@ services:
       - METRICS_RATE_LIMIT=${METRICS_RATE_LIMIT:-60}             # record_metrics calls per agent per 60s
       - METRICS_RETENTION_DAYS=${METRICS_RETENTION_DAYS:-365}    # recorded point retention (0 = forever)
       - METRICS_DAILY_POINT_CAP=${METRICS_DAILY_POINT_CAP:-100000}  # points per agent per UTC day (0 = unlimited)
+      - METRICS_READ_RATE_LIMIT=${METRICS_READ_RATE_LIMIT:-240}   # GET /metrics reads per agent per 60s (tiles, dashboard binds, get_metrics)
       # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.
       # This compose launches standalone (no base merge / env_file), so wire it here too.
       - CANVAS_MAX_PER_AGENT=${CANVAS_MAX_PER_AGENT:-100}        # canvases per agent
