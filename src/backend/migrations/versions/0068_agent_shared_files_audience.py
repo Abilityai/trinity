@@ -14,13 +14,13 @@ unknowable, and every share expires within seven days.
 Mirrors the SQLite ``agent_shared_files_audience`` migration.
 
 Revision ID: 0068_agent_shared_files_audience
-Revises: 0064_executions_search_indexes
+Revises: 0067_agent_role_readiness
 """
 from alembic import op
 
 
 revision = "0068_agent_shared_files_audience"
-down_revision = "0064_executions_search_indexes"
+down_revision = "0067_agent_role_readiness"
 branch_labels = None
 depends_on = None
 
