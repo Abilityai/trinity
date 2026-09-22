@@ -43,9 +43,15 @@ owner ──► Mark ready (ConfirmDialog) ──► POST …/role/readiness {st
 - **Author-controlled input is bounded.** `x-role.role` and `x-canon.clone_path` reach
   a file read, so both are validated (`_ID_RE`, one plain segment chain, no `..`) before
   any path is built; text fields are capped; objectives ≤ 20, metrics ≤ 12 each.
-- **Freshness is the framework's own bound.** A metric is stale when its value is
+- **Freshness is the framework's own bound — interim.** A metric is stale when its value is
   missing, when `metrics.json` has no `last_updated`, or when that stamp is older than
   30 days (§3.5). Stale renders beside the last value and its age, never as current.
+  *Interim rule (operator ruling 2026-09-21, recorded on ent#476):* the platform's one
+  read path and stale rule for business metrics is `GET /api/agents/{name}/metrics`
+  re-backed by `metric_points` (ent#479, stale = no point within 2× the declared
+  cadence). When that lands, this card's `last_updated` + 30-day check and the
+  objective ↔ metric join in `role_card.py` move to that shared read; the swap is
+  named in ent#479's acceptance.
 - **Readiness is the owner's stamp (#663).** `x-role.status` is agent-writable, so a
   file that says `ready` proves nothing. The effective state is the platform record if
   present, else `calibrating`; a template-claimed `ready` with no stamp is shown as
