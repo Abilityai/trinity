@@ -13,6 +13,7 @@ by path, so nothing here needs Docker, a backend or a DB file.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sys
@@ -96,7 +97,7 @@ def _objective(**overrides):
 
 def _join(objectives, definitions, latest, *, role_id=ROLE, agent=AGENT):
     return svc.join_objectives(objectives, definitions, latest,
-                               agent_name=agent, role_id=role_id, now=NOW)
+                               agent_name=agent, role_id=role_id)
 
 
 # ===========================================================================
@@ -136,9 +137,25 @@ def test_a_document_that_is_not_a_mapping_is_a_named_finding():
 
 
 def test_a_missing_id_falls_back_to_the_filename():
-    obj, _ = svc.parse_objective({"metrics": []},
-                                 path="canon/objectives/q4-close-rate.yaml")
+    obj, findings = svc.parse_objective(
+        {"metrics": []}, path="canon/objectives/q4-close-rate.yaml")
     assert obj["id"] == "q4-close-rate"
+    assert findings == []       # a MISSING id is the documented fallback
+
+
+def test_an_id_the_author_wrote_and_this_read_refused_is_a_finding():
+    """The filename fallback is silent for a missing id and LOUD for an invalid
+    one: ent#661 keys objectives by id across agents, so an author whose id was
+    quietly replaced would never learn the canonical one is not theirs."""
+    obj, findings = svc.parse_objective(
+        {"id": "Q4 close rate", "metrics": []},
+        path="canon/objectives/q4-close-rate.yaml")
+
+    assert obj["id"] == "q4-close-rate"
+    assert [f["code"] for f in findings] == ["objective_id_invalid"]
+    assert "Q4 close rate" in findings[0]["message"]
+    assert "q4-close-rate" in findings[0]["message"]
+    assert findings[0]["path"] == "canon/objectives/q4-close-rate.yaml"
 
 
 @pytest.mark.parametrize("target,number,text", [
@@ -395,6 +412,12 @@ def test_a_hold_objective_is_on_target_at_the_value_and_off_target_away():
     on = _join([held], [_definition()], _latest(value=35.5))
     off = _join([held], [_definition()], _latest(value=40.0))
 
+    on_row = on["objectives"][0]["metrics"][0]
+    # The wire value is the registry's `neutral` (ent#666 ruling), with the
+    # author's own word kept beside it and `direction_source` saying who spoke.
+    assert on_row["direction"] == "neutral"
+    assert on_row["direction_source"] == "objective"
+    assert on_row["objective_direction"] == "hold"
     assert on["objectives"][0]["metrics"][0]["gap"]["status"] == "on_target"
     assert on["summary"]["on_target"] == 1
     off_row = off["objectives"][0]["metrics"][0]
@@ -461,6 +484,7 @@ class _FakeClient:
         self.listing = listing
         self.list_status = list_status
         self.calls = []
+        self.timeouts = []
         self.fail_after = fail_after
         self.max_in_flight = 0
         self._in_flight = 0
@@ -471,6 +495,7 @@ class _FakeClient:
         self.max_in_flight = max(self.max_in_flight, self._in_flight)
         try:
             self.calls.append(path)
+            self.timeouts.append(timeout)
             if (self.fail_after is not None
                     and len(self.calls) > self.fail_after):
                 raise AgentNotReachableError("agent-server is gone")
@@ -805,6 +830,139 @@ async def test_no_objective_names_this_agent_is_an_empty_state_with_copy(
 
     assert result["objectives"] == []
     assert "supporting_agents" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_another_roles_mistakes_do_not_land_on_this_agents_read(
+        store, running):
+    """§50: a non-active objective produces no findings, and neither does
+    another role's. In a shared fleet canon the alternative is every agent's
+    card carrying every other role's YAML mistakes — and #2927 copies
+    `findings` onto the card verbatim.
+
+    The two FILE-level codes are the documented exception: a file that did not
+    parse has no objective to say whose it is, so it is always published."""
+    mine = """
+id: mine
+owner: role:revenue-lead
+status: active
+metrics:
+  - name: close_rate
+    direction: up
+    target: 35
+  - name: close_rate
+    target: 99
+"""
+    finished = """
+id: done
+owner: role:revenue-lead
+status: dropped
+metrics:
+  - name: close_rate
+    target: 1
+  - name: close_rate
+    target: 2
+"""
+    theirs = """
+id: theirs
+owner: role:someone-else
+status: active
+metrics:
+  - name: ../../etc/passwd
+"""
+    client = _FakeClient(
+        files={"template.yaml": TEMPLATE,
+               "canon/objectives/mine.yaml": mine,
+               "canon/objectives/done.yaml": finished,
+               "canon/objectives/theirs.yaml": theirs,
+               "canon/objectives/broken.yaml": "- just\n- a\n- list\n"},
+        listing=["mine.yaml", "done.yaml", "theirs.yaml", "broken.yaml",
+                 "gone.yaml"])
+
+    result = await svc.read_objective_join(AGENT, now=NOW, client=client)
+    codes = [f["code"] for f in result["findings"]]
+
+    assert [o["id"] for o in result["objectives"]] == ["mine"]
+    # The foreign objective's bad metric name is not this agent's to fix.
+    assert "metric_name_invalid" not in codes
+    # Nor is the finished one's duplicate — but the LIVE one's still is.
+    assert codes.count("metric_duplicate") == 1
+    duplicate = next(f for f in result["findings"]
+                     if f["code"] == "metric_duplicate")
+    assert duplicate["objective_id"] == "mine"
+    # File-level: unconditional, because concern is unknowable here.
+    assert "objective_invalid" in codes          # broken.yaml
+    assert "objective_unreadable" in codes       # gone.yaml
+
+
+@pytest.mark.asyncio
+async def test_a_file_name_this_read_refuses_is_counted_and_named(
+        store, running):
+    """A `*.yaml` whose name is not a plain segment is never fetched. Dropping
+    it silently would leave `source` unable to tell "no such objective" from
+    "an objective this read will not open"."""
+    client = _FakeClient(
+        files={"template.yaml": TEMPLATE,
+               "canon/objectives/q4-close-rate.yaml": OBJECTIVE_YAML},
+        listing=["q4-close-rate.yaml", "q4 close rate.yaml", "rate\u00e9.yaml",
+                 "notes.txt"])
+
+    result = await svc.read_objective_join(AGENT, now=NOW, client=client)
+    source = result["source"]
+
+    assert source["objectives_skipped"] == 2     # the space and the non-ASCII
+    assert source["objectives_listed"] == 1      # `notes.txt` is not an objective
+    skipped = next(f for f in result["findings"]
+                   if f["code"] == "objective_file_skipped")
+    assert "q4 close rate.yaml" in skipped["message"]
+    assert len(skipped["message"]) < 600
+    # The readable one still joined.
+    assert [o["id"] for o in result["objectives"]] == ["q4-close-rate"]
+    assert not any("q4 close rate" in c for c in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_the_fan_out_has_a_wall_clock_budget(monkeypatch, store, running):
+    """An agent-server that answers SLOWLY never raises the typed error the
+    abort watches for, so without a budget one request holds a backend task
+    while the limiter admits the next one behind it."""
+    monkeypatch.setattr(svc, "OBJECTIVES_READ_BUDGET_SEC", 0.05)
+
+    class _SlowClient(_FakeClient):
+        async def get(self, path, timeout=None, **kwargs):
+            if path.startswith("/api/files/download?path=canon"):
+                await asyncio.sleep(5)
+            return await super().get(path, timeout=timeout, **kwargs)
+
+    names = [f"obj-{i:03d}.yaml" for i in range(20)]
+    files = {"template.yaml": TEMPLATE}
+    files.update({f"canon/objectives/{n}": OBJECTIVE_YAML for n in names})
+    client = _SlowClient(files=files, listing=names)
+
+    result = await svc.read_objective_join(AGENT, now=NOW, client=client)
+
+    assert result["source"]["objectives_dir"] == "timeout"
+    assert [f["code"] for f in result["findings"]] == ["objectives_read_timeout"]
+    assert result["objectives"] == []
+    assert result["unavailable"] is None          # the agent answered, slowly
+    assert "too slowly" in result["message"]
+    assert store.calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_objective_read_carries_its_own_short_timeout(store, running):
+    """An objective file is a few hundred bytes; the template read keeps the
+    longer default."""
+    client = _FakeClient(files={
+        "template.yaml": TEMPLATE,
+        "canon/objectives/q4-close-rate.yaml": OBJECTIVE_YAML,
+    })
+    await svc.read_objective_join(AGENT, now=NOW, client=client)
+
+    by_path = dict(zip(client.calls, client.timeouts))
+    assert by_path["/api/files/download?path=canon%2Fobjectives%2F"
+                   "q4-close-rate.yaml"] == svc.OBJECTIVE_READ_TIMEOUT_SEC
+    assert by_path["/api/files/download?path=template.yaml"] == 20.0
 
 
 # ===========================================================================

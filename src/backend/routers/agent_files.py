@@ -460,7 +460,6 @@ async def get_agent_metrics(
 @router.get("/{agent_name}/objectives", response_model=ObjectiveJoinRead)
 async def get_agent_objectives(
     agent_name: AuthorizedAgentByName,
-    request: Request,
     current_user: User = Depends(get_current_user),
 ):
     """What this agent is supposed to move, and where it is (ent#666).

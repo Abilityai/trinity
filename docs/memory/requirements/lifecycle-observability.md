@@ -1521,6 +1521,18 @@ reads as *not* active and is excluded — an unrecognised state is not a licence
 to keep nagging. A non-active objective produces no findings: it is not a
 defect, it is finished.
 
+**Findings belong to the objectives the read RETURNS.** The same suppression
+covers another role's objectives: in a shared fleet canon every agent reads
+every role's files, so publishing their parse defects would put every other
+role's YAML mistakes on this agent's card (and #2927 copies `findings` onto the
+card verbatim). Each objective's findings are held beside it while it is
+parsed and published only if the concern filter keeps it — the truncated tail
+beyond `MAX_OBJECTIVES` included, since those are not shown either. **The two
+file-level codes are the deliberate exception**: `objective_invalid` and
+`objective_unreadable` are always published, because a file that did not parse
+carries nothing that says whose concern it is, and silence there is how a file
+disappears from a read that claims to show them all.
+
 An objective reaches an agent two ways: `owner: role:<id>` matching the
 template's `x-role.role` (**owned**), or the agent's own name in
 `supporting_agents` (**supporting**). An agent with no `x-role` can still
@@ -1553,7 +1565,8 @@ join accepts a pre-parsed `template` so the role card does not read it twice.
 ```
 up_good    → behind when actual < target, ahead when actual > target
 down_good  → the mirror
-hold       → on_target when |actual − target| <= tolerance (default: exact),
+neutral    → the HOLD arm (a declared `hold`, see 50.4):
+             on_target when |actual − target| <= tolerance (default: exact),
              off_target otherwise — NEVER behind/ahead
 ```
 
@@ -1588,8 +1601,16 @@ the number the card exists to show. The join reports; the consumer decides.
 | `up_good` / `down_good` | anything | the registry's | `registry` |
 | `neutral` / absent | `up` | `up_good` | `objective` |
 | `neutral` / absent | `down` | `down_good` | `objective` |
-| `neutral` / absent | `hold` | `hold` | `objective` |
+| `neutral` / absent | `hold` | `neutral` | `objective` |
 | `neutral` / absent | absent | `null` | `none` |
+
+**`direction` ranges over the REGISTRY's three values and nothing else** —
+`up_good`, `down_good`, `neutral`, or `null` when nobody said. A declared
+`hold` resolves to `neutral` rather than to a self-describing fourth token, so
+a consumer that reuses the registry-direction formatter (`utils/metricFormat.js`
+is direction-aware) cannot meet a value it has never heard of. The author's own
+word is kept verbatim beside it as `objective_direction`, and the *comparison* a
+declared hold selects lives in `gap` (50.3), not in a fourth direction.
 
 `neutral` is the registry column's **default**, indistinguishable from a
 template that never said — and no bundled template declares `direction:` — so
@@ -1598,7 +1619,8 @@ a registry-only rule would have shipped a feature where every gap is
 
 The objective file's `hold` is the registry's `neutral` **declared on purpose**;
 `direction_source` is what tells a declared `hold` apart from silence, which is
-why that field exists. Two *declared* directions that disagree (registry
+why that field exists — and why the wire needs no fourth direction value to
+carry the distinction. Two *declared* directions that disagree (registry
 `up_good` vs objective `down`, or vs `hold`) resolve to the registry's and
 raise a `direction_mismatch` finding — one of the two files is wrong and the
 read says so rather than silently picking. Neither declaring one leaves
@@ -1625,8 +1647,18 @@ it. Findings appear twice — flat in `findings[]` with `objective_id` / `metric
 | `objective_invalid` | the file is not a YAML mapping | fix the YAML; §3.4 names the fields |
 | `objective_unreadable` | the agent answered, but not with that file (retryable — a transport fault is not an author error) | retry |
 | `objective_id_duplicate` | two files declare one id | both are shown; give one its own id |
+| `objective_id_invalid` | a file's `id:` is not a valid id | the **file name** is used instead and the finding says so — a *missing* `id` falls back silently, an id the author wrote and this read refused does not, because ent#661 keys objectives by id across agents |
+| `objective_file_skipped` | a `*.yaml` in `objectives/` whose NAME is not a plain path segment (a space, a non-ASCII character) | rename it; the file is never fetched, and `source.objectives_skipped` counts them so "not there" can be told from "there under a name this read will not open" |
+| `objectives_read_timeout` | the fan-out exceeded `OBJECTIVES_READ_BUDGET_SEC` | retry; the agent is answering, just too slowly — `source.objectives_dir: "timeout"`, no objective joined |
 | `role_id_invalid` | `x-role.role` is not a valid id | fix `template.yaml`; no owned objective can match until then |
 | `canon_path_invalid` | `x-canon.clone_path` is not a plain path | fix it; **no file is read with that path** |
+
+Every code in this table above the file-level pair is published **only for the
+objectives the read returns** (50.1): another role's parse defect, and a
+finished objective's, are not this agent's to fix. `objective_invalid`,
+`objective_unreadable`, `objective_file_skipped`, `objectives_read_timeout`,
+`role_id_invalid` and `canon_path_invalid` are file- or read-level and are
+always published — there is no objective there to decide whose they are.
 
 ### 50.6 The read: `GET /api/agents/{name}/objectives`
 
@@ -1665,7 +1697,7 @@ stopped is an *answer*, not an error.
  canon_root: "canon" | null,
  unavailable: null | agent_stopped | agent_missing | agent_unreachable,
  source: {template, objectives_dir, objectives_listed, objectives_scanned,
-          objectives_unscanned, objectives_truncated},
+          objectives_unscanned, objectives_skipped, objectives_truncated},
  objectives: [{id, path, schema_version, statement, horizon, status, owner,
                review_by, owned, supporting, metrics_truncated,
                metrics: [{name, target, target_text, tolerance, by, horizon,
@@ -1692,7 +1724,10 @@ because those are three different actions.
 
 `source.*` exists so "no objectives" can be told from "not read":
 `objectives_listed` / `objectives_scanned` / `objectives_unscanned` are
-separate counts because the **filter runs after the read** (see 50.8).
+separate counts because the **filter runs after the read** (see 50.8), and
+`objectives_skipped` counts the `*.yaml` refused by NAME before any fetch.
+`objectives_dir: "timeout"` is the fan-out's budget having run out — an
+answer, like `absent` and `unreadable`, never an error.
 
 ### 50.8 Bounds, and why they are where they are
 
@@ -1703,6 +1738,8 @@ separate counts because the **filter runs after the read** (see 50.8).
 | `MAX_METRICS_PER_OBJECTIVE` | 12 | per objective; `metrics_truncated` states it |
 | `MAX_TEXT` | 400 | statements; ids 64, owner 128, `by`/`review_by` 32, `horizon`/`direction` 16, `target_text` 64 |
 | `READ_CONCURRENCY` | 2 | objective reads in flight |
+| `OBJECTIVE_READ_TIMEOUT_SEC` | 5 s | one objective file — a few hundred bytes |
+| `OBJECTIVES_READ_BUDGET_SEC` | 30 s | the whole fan-out |
 
 **Scan, then filter, then cap.** Capping the *listing* first (the shape #2927
 shipped) hides an agent's own objective behind twenty foreign ones in a shared
@@ -1719,9 +1756,19 @@ which flattens every `AgentClientError` into `{"success": False}` — and the
 difference between "this file is unreadable" and "this agent is gone" is
 exactly whether the remaining reads are worth attempting.
 
+**A slow agent is bounded by the clock, not by the abort.** The unreachable
+abort only fires on *typed transport death*; an agent-server that answers
+slowly raises nothing, so the fan-out carries a wall-clock budget
+(`OBJECTIVES_READ_BUDGET_SEC`, 30 s) and each read a 5 s timeout of its own.
+Past the budget the read returns `objectives_dir: "timeout"` with the
+`objectives_read_timeout` finding and no objectives — a part answer that says
+what happened, rather than a backend task held for `100 / 2` slow reads while
+the 60/min limiter admits the next fan-out behind it.
+
 **The known cost**: a fleet canon with 60 objective files and ten polling role
 cards is 60 file reads per request against a single-process agent-server. The
-60/min knob, the ≤ 2 concurrency and the unreachable-abort are what bound it;
+60/min knob, the ≤ 2 concurrency, the budget and the unreachable-abort are what
+bound it;
 the long-run relief is a consumer composing `read_objective_files` once with
 `join_objectives` per agent (50.10), not a cache.
 
@@ -1775,7 +1822,10 @@ fallback for `actual` (retired by §49's D-010); a projection cache.
       never a blank; a supporting-only agent gets the informational code instead
 - [x] A retired metric withholds its value and says why
 - [x] `hold` is `on_target` within `tolerance` and `off_target` otherwise —
-      never behind/ahead; only `active` objectives are joined
+      never behind/ahead; only `active` objectives are joined, and neither a
+      non-active nor another role's objective puts a finding on this read
+- [x] `direction` never leaves the registry's three values: a declared `hold`
+      is `neutral` with `direction_source: objective`
 - [x] Direction falls through to the objective file when the registry is
       `neutral`, with `direction_source`; two declared directions that disagree
       are a finding
@@ -1785,7 +1835,10 @@ fallback for `actual` (retired by §49's D-010); a projection cache.
       name; 503 + `Retry-After` on a store outage; every other failure is a
       named field on a 200
 - [x] Scan 100, filter, cap 20; ≤ 2 reads in flight; abort to
-      `agent_unreachable` on the first transport death
+      `agent_unreachable` on the first transport death; a 30 s fan-out budget
+      and a 5 s per-read timeout for an agent that is merely slow
+- [x] A file name this read refuses is counted and named, and an `id` the
+      author wrote and this read refused is a finding, not a silent rename
 - [x] Author-shaped targets (`.nan`, `.inf`, lists, bools, long strings) cannot
       reach the wire as non-JSON
 - [x] Zero config: no role and no canon costs no store query and names the next

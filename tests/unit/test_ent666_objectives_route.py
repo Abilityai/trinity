@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -42,7 +41,6 @@ from models import ObjectiveJoinRead, User  # noqa: E402
 from services import objective_join_service as svc  # noqa: E402
 
 AGENT = "sales-companion"
-NOW = datetime(2026, 9, 22, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _definition(**overrides):
@@ -85,7 +83,7 @@ def _body(**overrides):
             "last_point_at": "2026-09-22T11:59:00.000000Z",
             "stale": False, "freshness": "fresh", "stale_after": None,
             "series_count": 1}},
-        agent_name=AGENT, role_id="revenue-lead", now=NOW)
+        agent_name=AGENT, role_id="revenue-lead")
     result = {
         "agent_name": AGENT,
         "generated_at": "2026-09-22T12:00:00.000000Z",
@@ -96,7 +94,8 @@ def _body(**overrides):
         "unavailable": None,
         "source": {"template": "read", "objectives_dir": "read",
                    "objectives_listed": 1, "objectives_scanned": 1,
-                   "objectives_unscanned": 0, "objectives_truncated": False},
+                   "objectives_unscanned": 0, "objectives_skipped": 0,
+                   "objectives_truncated": False},
         "objectives": joined["objectives"],
         "findings": joined["findings"],
         "summary": joined["summary"],
@@ -274,8 +273,7 @@ def test_the_finding_models_match_both_finding_shapes():
     """The flat list and the per-row reference are deliberately different
     shapes — one carries where it came from, the other is what a card renders."""
     joined = svc.join_objectives(
-        [_objective()], [], {}, agent_name=AGENT, role_id="revenue-lead",
-        now=NOW)
+        [_objective()], [], {}, agent_name=AGENT, role_id="revenue-lead")
     assert _keys(models_mod.ObjectiveFinding) == set(joined["findings"][0])
     row_finding = joined["objectives"][0]["metrics"][0]["finding"]
     assert _keys(models_mod.ObjectiveFindingRef) == set(row_finding)
@@ -297,8 +295,7 @@ def test_the_response_round_trips_through_the_model_unchanged(ctx):
 def test_an_undeclared_metric_reaches_the_wire_as_a_finding_not_a_blank(ctx):
     """The AC, pinned at the boundary a consumer actually binds to."""
     joined = svc.join_objectives(
-        [_objective()], [], {}, agent_name=AGENT, role_id="revenue-lead",
-        now=NOW)
+        [_objective()], [], {}, agent_name=AGENT, role_id="revenue-lead")
     ctx.service["result"] = _body(objectives=joined["objectives"],
                                   findings=joined["findings"],
                                   summary=joined["summary"])
@@ -326,7 +323,7 @@ def test_author_shaped_targets_survive_the_real_route_as_strict_json(
                         "last_point_at": None, "stale": False,
                         "freshness": "no_points", "stale_after": None,
                         "series_count": 0}},
-        agent_name=AGENT, role_id="revenue-lead", now=NOW)
+        agent_name=AGENT, role_id="revenue-lead")
     ctx.service["result"] = _body(objectives=joined["objectives"],
                                   findings=joined["findings"],
                                   summary=joined["summary"])

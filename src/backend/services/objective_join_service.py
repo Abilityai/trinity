@@ -56,6 +56,12 @@ that wants a pace judgment can compute one; nothing here does.
 otherwise, with the signed delta. `behind` / `ahead` are never emitted for a
 `hold`, because there is no good side to be on.
 
+The objective file's `hold` reaches the wire as the registry's own
+`direction: "neutral"` — `direction` ranges over the registry's three values
+and nothing else, so a direction-aware formatter written against the registry
+keeps working — with `direction_source: "objective"` telling a declared hold
+apart from a registry that simply never said.
+
 ## Stale is orthogonal to gap
 
 A stale metric still gets its gap computed, with `stale: true` beside it. The
@@ -100,15 +106,30 @@ MAX_TEXT = 400
 #: is single-process and `AgentClient`'s circuit trips at three failures, so a
 #: wide fan-out against a sick agent would open the circuit that chat rides on.
 READ_CONCURRENCY = 2
+#: Wall clock for the whole objective fan-out. The abort only fires on typed
+#: transport death, so an agent-server that answers SLOWLY rather than not at
+#: all would otherwise hold a backend task for up to
+#: `MAX_OBJECTIVE_FILES_SCANNED / READ_CONCURRENCY` reads while the limiter
+#: keeps admitting new fan-outs behind it. A part answer with `objectives_dir:
+#: "timeout"` is the honest one.
+OBJECTIVES_READ_BUDGET_SEC = 30.0
+#: Per objective-file read. An objective file is a few hundred bytes, so a read
+#: that has not answered in five seconds is not going to.
+OBJECTIVE_READ_TIMEOUT_SEC = 5.0
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _PATH_SEG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
-#: The objective file's direction vocabulary, mapped onto the comparison this
-#: module performs. `hold` is the registry's `neutral` **declared on purpose**,
-#: which is exactly what an absent registry `direction` cannot be told apart
-#: from — hence `direction_source`.
-_OBJECTIVE_DIRECTIONS = {"up": "up_good", "down": "down_good", "hold": "hold"}
+#: The registry's "no opinion" value, and the wire value a declared `hold`
+#: resolves to. The comparison it selects is the hold arm of `gap()`.
+NEUTRAL_DIRECTION = "neutral"
+#: The objective file's direction vocabulary, mapped onto the REGISTRY's
+#: vocabulary — the only one that reaches the wire. `hold` is the registry's
+#: `neutral` **declared on purpose**, which is exactly what an absent registry
+#: `direction` cannot be told apart from — hence `direction_source`. Emitting a
+#: fourth value here would break every formatter written against the three.
+_OBJECTIVE_DIRECTIONS = {"up": "up_good", "down": "down_good",
+                         "hold": NEUTRAL_DIRECTION}
 #: Registry directions that carry an opinion. `neutral` is the column default,
 #: so it is read as "no opinion", never as "hold".
 _REGISTRY_DIRECTIONS = {"up_good", "down_good"}
@@ -146,11 +167,6 @@ def finite_number(value: Any) -> Optional[float]:
     if not math.isfinite(value):
         return None
     return value
-
-
-def _comparable(value: Any) -> Optional[float]:
-    """The actual/target as a number, or None when there is nothing to compare."""
-    return finite_number(value)
 
 
 def canon_root(template: Any) -> Optional[str]:
@@ -205,6 +221,12 @@ def resolve_direction(
     the objective file's `up` / `down` / `hold` rather than making every gap
     uncomputable on day one.
 
+    The value returned is always one the REGISTRY could have produced —
+    `up_good`, `down_good` or `neutral` — never the objective file's own word:
+    a declared `hold` resolves to `neutral` with `direction_source:
+    "objective"`, so a consumer formatting by registry direction needs no
+    fourth case and `direction_source` still tells the two neutrals apart.
+
     Two directions that both speak and disagree is a `direction_mismatch`
     finding; the registry still wins. Neither speaking leaves `None`, which the
     gap reports as `no_direction` with a finding naming the one-line fix.
@@ -237,19 +259,21 @@ def gap(
 
     * `up_good`   → `behind` when below the target, `ahead` when above
     * `down_good` → the mirror
-    * `hold`      → `on_target` within `tolerance` (default: exact), else
-      `off_target`. Never `behind` / `ahead`: there is no good side.
+    * `neutral`   → the **hold** arm: `on_target` within `tolerance` (default:
+      exact), else `off_target`. Never `behind` / `ahead`: there is no good
+      side. Only a declared `hold` reaches here — a registry `neutral` is read
+      as silence upstream (`resolve_direction`) and arrives as `None`.
     * no direction / no target / a non-numeric either side → `not_computable`
       with the reason named.
     """
-    target_n = _comparable(target)
+    target_n = finite_number(target)
     if target_n is None:
         return {"status": "not_computable", "delta": None,
                 "reason": "non_numeric" if target is not None else "no_target"}
     if actual is None:
         return {"status": "not_computable", "delta": None,
                 "reason": "no_points"}
-    actual_n = _comparable(actual)
+    actual_n = finite_number(actual)
     if actual_n is None:
         return {"status": "not_computable", "delta": None,
                 "reason": "non_numeric"}
@@ -259,7 +283,7 @@ def gap(
 
     delta = actual_n - target_n
 
-    if direction == "hold":
+    if direction == NEUTRAL_DIRECTION:
         band = finite_number(tolerance)
         band = abs(band) if band is not None else 0.0
         status = "on_target" if abs(delta) <= band else "off_target"
@@ -307,7 +331,21 @@ def parse_objective(
             objective_id=_safe_id(fallback_id), path=path)]
 
     findings: List[Dict[str, Any]] = []
-    obj_id = _safe_id(doc.get("id")) or _safe_id(fallback_id) or fallback_id[:64]
+    raw_id = doc.get("id")
+    declared_id = _safe_id(raw_id)
+    obj_id = declared_id or _safe_id(fallback_id) or fallback_id[:64]
+    if raw_id is not None and declared_id is None:
+        # A MISSING id falling back to the filename is the deliberate,
+        # documented behaviour. An id the author WROTE and that this read
+        # refused is different: ent#661 keys objectives by id across agents, so
+        # the author has to learn the canonical id is not the one they typed.
+        findings.append(_finding(
+            "objective_id_invalid",
+            f"objective file {path} declares id `{_text(raw_id, 64)}`, which "
+            f"is not a valid id — `{obj_id}` (from the file name) is used "
+            "instead. An id is letters, digits, dot, dash and underscore, up "
+            "to 64 characters.",
+            objective_id=obj_id, path=path))
 
     supporting = doc.get("supporting_agents")
     supporting_agents = (
@@ -384,8 +422,13 @@ def select_objectives(
 
     Scan-then-filter: the cap is applied to what SURVIVES the filter, so an
     agent whose objective sorts after twenty foreign ones in a shared fleet
-    canon still sees it. A non-active objective is dropped silently and
-    produces no findings — it is not a defect, it is finished.
+    canon still sees it.
+
+    A non-active objective is dropped silently and produces no findings — it is
+    not a defect, it is finished; the same is true of another role's. This
+    function drops them; `read_objective_files` is where that promise is KEPT,
+    by holding each objective's parse findings beside it and publishing only
+    the ones this call returns.
     """
     kept = [o for o in objectives
             if objective_is_active(o)
@@ -400,14 +443,15 @@ def join_objectives(
     *,
     agent_name: str,
     role_id: Optional[str],
-    now: datetime,
 ) -> Dict[str, Any]:
     """The pure join. Every unit test drives this; nothing here does I/O.
 
     `objectives` are already parsed and filtered (`select_objectives`);
     `definitions` are the registry rows INCLUDING retired ones, because a
     retired metric must be named as retired rather than silently read as
-    undeclared; `latest_by_name` is `metric_read_service.latest_by_metric`.
+    undeclared; `latest_by_name` is `metric_read_service.latest_by_metric` —
+    which has already folded freshness against `now`, so no clock is threaded
+    through here and there is no second one to disagree with it.
     """
     by_name = {d["name"]: d for d in definitions if d.get("name")}
     findings: List[Dict[str, Any]] = []
@@ -438,7 +482,7 @@ def join_objectives(
         for spec in obj["metrics"]:
             row, row_findings = _metric_row(
                 spec, obj, by_name, latest_by_name,
-                owned=owned, agent_name=agent_name, now=now,
+                owned=owned, agent_name=agent_name,
             )
             metrics_out.append(row)
             findings.extend(row_findings)
@@ -478,7 +522,6 @@ def _metric_row(
     *,
     owned: bool,
     agent_name: str,
-    now: datetime,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """One objective metric: target from the file, everything else from the join."""
     name = spec["name"]
@@ -646,14 +689,17 @@ async def _agent_get(client, path: str, *, timeout: float = 20.0):
         return None
 
 
-async def _read_yaml(client, path: str) -> Tuple[Optional[dict], Optional[str]]:
+async def _read_yaml(client, path: str, *,
+                     timeout: float = 20.0
+                     ) -> Tuple[Optional[dict], Optional[str]]:
     """(parsed, error_code) — `not_found` / `unreadable` / `invalid`, or None."""
     import urllib.parse
 
     from utils.safe_yaml import load_template_yaml
 
     encoded = urllib.parse.quote(path, safe="")
-    response = await _agent_get(client, f"/api/files/download?path={encoded}")
+    response = await _agent_get(
+        client, f"/api/files/download?path={encoded}", timeout=timeout)
     if response is None:
         return None, "unreadable"
     status = getattr(response, "status_code", 0)
@@ -669,40 +715,52 @@ async def _read_yaml(client, path: str) -> Tuple[Optional[dict], Optional[str]]:
     return (data, None) if isinstance(data, dict) else (None, "invalid")
 
 
-async def _list_objective_files(client, root: str) -> Tuple[List[str], str]:
-    """(file names, source code) for `<root>/objectives`.
+async def _list_objective_files(
+        client, root: str) -> Tuple[List[str], List[str], str]:
+    """(file names, refused names, source code) for `<root>/objectives`.
 
     The agent-server listing is RECURSIVE with no depth cap, so only top-level
     `type: file` entries are taken; nested folders are ignored. A 404 is
     `absent` (the directory is not there — a real answer with its own copy),
     anything else unhappy is `unreadable`.
+
+    A `*.yaml` whose NAME is not a plain path segment (`q4 close rate.yaml`, a
+    non-ASCII name) is refused before it can reach a file read — and returned
+    separately rather than dropped, because a silent drop leaves `source`
+    unable to tell "not there" from "there under a name this read will not
+    fetch".
     """
     response = await _agent_get(
         client, f"/api/files?path=/home/developer/{root}/objectives")
     if response is None:
-        return [], "unreadable"
+        return [], [], "unreadable"
     status = getattr(response, "status_code", 0)
     if status == 404:
-        return [], "absent"
+        return [], [], "absent"
     if status != 200:
-        return [], "unreadable"
+        return [], [], "unreadable"
     try:
         body = response.json()
     except Exception:  # noqa: BLE001
-        return [], "unreadable"
+        return [], [], "unreadable"
     if not isinstance(body, dict):
-        return [], "unreadable"
+        return [], [], "unreadable"
 
     names: List[str] = []
+    skipped: List[str] = []
     for item in (body.get("tree") or body.get("children") or []):
         if not isinstance(item, dict):
             continue
         if item.get("type") == "directory" or item.get("is_dir"):
             continue
         name = str(item.get("name") or "")
-        if name.endswith((".yaml", ".yml")) and _PATH_SEG_RE.match(name):
+        if not name.endswith((".yaml", ".yml")):
+            continue
+        if _PATH_SEG_RE.match(name):
             names.append(name)
-    return sorted(names), "read"
+        else:
+            skipped.append(name)
+    return sorted(names), sorted(skipped), "read"
 
 
 async def read_objective_files(
@@ -720,24 +778,43 @@ async def read_objective_files(
 
     Returns `{objectives, findings, source, unavailable}`; `unavailable` is set
     only when the door itself died mid-fan-out.
+
+    **Findings belong to the objectives this call RETURNS.** A parse defect in
+    another role's file, or in one this agent already finished, is not this
+    agent's to fix, so each objective's findings are held beside it and
+    published only if the concern filter keeps it. The file- and read-level
+    codes (`objective_invalid`, `objective_unreadable`,
+    `objective_file_skipped`, `objectives_read_timeout`) are published
+    unconditionally — whose concern a file is, is unknowable when it was never
+    parsed.
     """
     source = {
         "objectives_dir": "skipped",
         "objectives_listed": 0,
         "objectives_scanned": 0,
         "objectives_unscanned": 0,
+        "objectives_skipped": 0,
         "objectives_truncated": False,
     }
     findings: List[Dict[str, Any]] = []
 
     try:
-        names, dir_state = await _list_objective_files(client, root)
+        names, skipped, dir_state = await _list_objective_files(client, root)
     except _Unreachable:
         return {"objectives": [], "findings": findings, "source": source,
                 "unavailable": "agent_unreachable"}
 
     source["objectives_dir"] = dir_state
     source["objectives_listed"] = len(names)
+    source["objectives_skipped"] = len(skipped)
+    if skipped:
+        findings.append(_finding(
+            "objective_file_skipped",
+            f"{len(skipped)} file(s) in `{root}/objectives/` were not read "
+            f"because their names are not plain file names (for example "
+            f"`{_text(skipped[0], 64)}`) — rename them to letters, digits, "
+            "dot, dash and underscore.",
+            path=f"{root}/objectives"))
     scanned = names[:MAX_OBJECTIVE_FILES_SCANNED]
     source["objectives_scanned"] = len(scanned)
     source["objectives_unscanned"] = len(names) - len(scanned)
@@ -756,16 +833,35 @@ async def read_objective_files(
             if aborted["value"]:
                 return path, None, "aborted"
             try:
-                doc, err = await _read_yaml(client, path)
+                doc, err = await _read_yaml(
+                    client, path, timeout=OBJECTIVE_READ_TIMEOUT_SEC)
             except _Unreachable:
                 aborted["value"] = True
                 return path, None, "aborted"
         return path, doc, err
 
-    results = await asyncio.gather(
-        *[_one(n) for n in scanned], return_exceptions=True)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*[_one(n) for n in scanned],
+                           return_exceptions=True),
+            OBJECTIVES_READ_BUDGET_SEC)
+    except (asyncio.TimeoutError, TimeoutError):
+        # An agent-server that answers slowly rather than not at all never
+        # raises the typed error the abort watches for, so the budget is the
+        # only thing that ends this. Say so instead of returning "no
+        # objectives", which reads as "you have none".
+        source["objectives_dir"] = "timeout"
+        findings.append(_finding(
+            "objectives_read_timeout",
+            f"reading `{root}/objectives/` from the agent took longer than "
+            f"{OBJECTIVES_READ_BUDGET_SEC:g}s, so no objective was joined — "
+            "the agent is answering, but too slowly. Retry, and check what "
+            "else the agent is doing.",
+            path=f"{root}/objectives"))
+        return {"objectives": [], "findings": findings, "source": source,
+                "unavailable": None}
 
-    parsed: List[Dict[str, Any]] = []
+    parsed: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
     for result in results:
         if isinstance(result, BaseException):
             logger.warning("objective join: read task failed: %s", result)
@@ -786,16 +882,23 @@ async def read_objective_files(
                 path=path))
             continue
         objective, obj_findings = parse_objective(doc, path=path)
-        findings.extend(obj_findings)
-        if objective is not None:
-            parsed.append(objective)
+        if objective is None:
+            # `objective_invalid` is file-level: there is no objective to
+            # decide whose it is, so it is always published.
+            findings.extend(obj_findings)
+            continue
+        parsed.append((objective, obj_findings))
 
     if aborted["value"]:
         return {"objectives": [], "findings": findings, "source": source,
                 "unavailable": "agent_unreachable"}
 
     kept, truncated = select_objectives(
-        parsed, role_id=role_id, agent_name=agent_name)
+        [o for o, _ in parsed], role_id=role_id, agent_name=agent_name)
+    kept_ids = {id(o) for o in kept}
+    for objective, obj_findings in parsed:
+        if id(objective) in kept_ids:
+            findings.extend(obj_findings)
     source["objectives_truncated"] = truncated
     return {"objectives": kept, "findings": findings, "source": source,
             "unavailable": None}
@@ -815,7 +918,8 @@ def _empty(agent_name: str, now: datetime, *, unavailable=None, role=None,
         "source": source or {
             "template": "skipped", "objectives_dir": "skipped",
             "objectives_listed": 0, "objectives_scanned": 0,
-            "objectives_unscanned": 0, "objectives_truncated": False,
+            "objectives_unscanned": 0, "objectives_skipped": 0,
+            "objectives_truncated": False,
         },
         "objectives": [],
         "findings": findings or [],
@@ -879,7 +983,8 @@ async def read_objective_join(
     source = {
         "template": "skipped", "objectives_dir": "skipped",
         "objectives_listed": 0, "objectives_scanned": 0,
-        "objectives_unscanned": 0, "objectives_truncated": False,
+        "objectives_unscanned": 0, "objectives_skipped": 0,
+        "objectives_truncated": False,
     }
     if template is None:
         try:
@@ -955,6 +1060,10 @@ async def read_objective_join(
                        "there (framework §3.4)"),
             "unreadable": (f"`{root}/objectives/` could not be listed — the "
                            "agent answered, but not with a directory"),
+            "timeout": (f"`{root}/objectives/` took longer than "
+                        f"{OBJECTIVES_READ_BUDGET_SEC:g}s to read — the agent "
+                        "is answering too slowly to join its objectives; "
+                        "retry"),
         }.get(source["objectives_dir"])
         if message is None:
             message = ("no active objective in "
@@ -976,7 +1085,7 @@ async def read_objective_join(
 
     joined = join_objectives(
         objectives, definitions, latest,
-        agent_name=agent_name, role_id=role_id, now=now)
+        agent_name=agent_name, role_id=role_id)
 
     return {
         "agent_name": agent_name,

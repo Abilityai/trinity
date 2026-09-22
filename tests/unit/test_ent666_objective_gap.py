@@ -5,6 +5,10 @@ out of and the three directions × three positions is exactly nine facts. The
 `hold` arm is here in full: it is the one the framework grammar adds and the
 one a reader guesses wrong, because `hold` has no good side to be on and so
 never produces `behind` or `ahead`.
+
+The objective file's word is `hold`; the value that reaches the wire — and this
+function — is the registry's `neutral`, so `direction` never ranges outside the
+three values a registry-direction formatter already handles.
 """
 
 from __future__ import annotations
@@ -37,9 +41,9 @@ from services import objective_join_service as svc  # noqa: E402
     ("down_good", 35, 30, "ahead"),
     ("down_good", 35, 35, "on_target"),
     ("down_good", 35, 40, "behind"),
-    ("hold", 35, 30, "off_target"),
-    ("hold", 35, 35, "on_target"),
-    ("hold", 35, 40, "off_target"),
+    ("neutral", 35, 30, "off_target"),
+    ("neutral", 35, 35, "on_target"),
+    ("neutral", 35, 40, "off_target"),
 ])
 def test_position_for_every_direction(direction, target, actual, status):
     result = svc.gap(target, actual, direction)
@@ -51,23 +55,33 @@ def test_position_for_every_direction(direction, target, actual, status):
 def test_hold_never_says_behind_or_ahead():
     """`hold` wants a value held, so there is no good side to be on."""
     for actual in (0, 34.9, 35, 35.1, 1000):
-        assert svc.gap(35, actual, "hold")["status"] in ("on_target", "off_target")
+        assert svc.gap(35, actual, "neutral")["status"] in (
+            "on_target", "off_target")
+
+
+def test_the_hold_arm_is_keyed_on_the_registrys_own_neutral():
+    """The wire value for a declared `hold` is `neutral` (ent#666 ruling), so
+    `direction` stays inside the registry's three values and a direction-aware
+    formatter needs no fourth case. The file's own word never reaches here."""
+    assert svc.NEUTRAL_DIRECTION == "neutral"
+    assert svc.gap(35, 30, "hold")["reason"] == "no_direction"
 
 
 def test_hold_honours_a_tolerance_band():
     """The framework's metric entry may carry `tolerance`; inside it is on target."""
-    assert svc.gap(35, 36, "hold", tolerance=2)["status"] == "on_target"
-    assert svc.gap(35, 33, "hold", tolerance=2)["status"] == "on_target"
-    assert svc.gap(35, 38, "hold", tolerance=2)["status"] == "off_target"
+    assert svc.gap(35, 36, "neutral", tolerance=2)["status"] == "on_target"
+    assert svc.gap(35, 33, "neutral", tolerance=2)["status"] == "on_target"
+    assert svc.gap(35, 38, "neutral", tolerance=2)["status"] == "off_target"
     # Signed, even inside the band: the consumer may want the drift.
-    assert svc.gap(35, 33, "hold", tolerance=2)["delta"] == -2
+    assert svc.gap(35, 33, "neutral", tolerance=2)["delta"] == -2
 
 
 def test_a_negative_or_unusable_tolerance_is_read_as_exact():
     for tolerance in (None, "wide", float("nan"), True, [2]):
-        assert svc.gap(35, 36, "hold", tolerance=tolerance)["status"] == "off_target"
+        assert svc.gap(35, 36, "neutral",
+                       tolerance=tolerance)["status"] == "off_target"
     # A negative band is a typo, not a licence to widen.
-    assert svc.gap(35, 36, "hold", tolerance=-2)["status"] == "on_target"
+    assert svc.gap(35, 36, "neutral", tolerance=-2)["status"] == "on_target"
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +135,8 @@ def test_a_list_target_is_not_a_number():
     ("neutral", "up", "up_good", "objective", False),
     (None, "down", "down_good", "objective", False),
     # `hold` is a declared direction that maps to the registry's `neutral`.
-    ("neutral", "hold", "hold", "objective", False),
-    ("neutral", "HOLD", "hold", "objective", False),
+    ("neutral", "hold", "neutral", "objective", False),
+    ("neutral", "HOLD", "neutral", "objective", False),
     # Two declared directions that disagree: registry wins, finding raised.
     ("up_good", "down", "up_good", "registry", True),
     ("up_good", "hold", "up_good", "registry", True),
@@ -138,14 +152,25 @@ def test_direction_falls_through_to_the_objective(
 
 
 def test_a_declared_hold_is_not_the_same_as_silence():
-    """Both land on the registry's `neutral` semantics, and they are told apart
-    by `direction_source` — which is the whole reason that field exists."""
+    """Both land on the registry's `neutral`, and the two are told apart by
+    `direction_source` — which is the whole reason that field exists, and the
+    reason a declared hold does not need a wire value of its own."""
     held, held_source, _ = svc.resolve_direction("neutral", "hold")
     silent, silent_source, _ = svc.resolve_direction("neutral", None)
-    assert (held, held_source) == ("hold", "objective")
+    assert (held, held_source) == ("neutral", "objective")
     assert (silent, silent_source) == (None, "none")
     assert svc.gap(35, 35, held)["status"] == "on_target"
     assert svc.gap(35, 35, silent)["reason"] == "no_direction"
+
+
+def test_direction_never_leaves_the_registrys_vocabulary():
+    """Whatever an objective file writes, `direction` is `up_good`,
+    `down_good`, `neutral` or None — never a fourth token."""
+    allowed = {"up_good", "down_good", "neutral", None}
+    for registry in ("up_good", "down_good", "neutral", None, "sideways"):
+        for objective in ("up", "down", "hold", "HOLD", "sideways", None, 7):
+            direction, _, _ = svc.resolve_direction(registry, objective)
+            assert direction in allowed, (registry, objective, direction)
 
 
 # ---------------------------------------------------------------------------

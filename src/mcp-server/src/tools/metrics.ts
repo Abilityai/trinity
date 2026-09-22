@@ -373,6 +373,12 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "yourself. A metric the objective wants HELD at a value reads `on_target` (within " +
         "`tolerance`) or `off_target`, never behind/ahead. `not_computable` always says why " +
         "in `gap.reason`. " +
+        "`direction` is the declared-metric vocabulary and nothing else — `up_good`, " +
+        "`down_good`, `neutral`, or null when nobody declared one. An objective that asks " +
+        "for a value to be HELD arrives as `neutral` with `direction_source: \"objective\"` " +
+        "(the word you wrote is kept beside it as `objective_direction`), so a `neutral` " +
+        "with `direction_source: \"none\"` means nobody said and nothing can be behind or " +
+        "ahead. " +
         "`stale: true` means DO NOT ACT ON THIS NUMBER — the gap is still computed beside " +
         "it so you can see what it was, but no point has arrived within 2x the declared " +
         "cadence, so recording a fresh one is the next action, not reporting the gap. " +
@@ -383,7 +389,11 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "is `metric_not_declared_here` and there is nothing for you to fix. " +
         "Objectives are read from your own canon files on every call, so a `status:` that " +
         "is not `active` is not returned, and `unavailable` says when the files could not " +
-        "be reached. This tool reads only your own objectives — there is no agent parameter.",
+        "be reached — as does `source`, which counts the files listed, read, skipped by " +
+        "name and left unscanned, so an empty answer is never ambiguous. `findings` covers " +
+        "only the objectives you are returned: another role's YAML mistake is not yours to " +
+        "fix and is not reported to you. This tool reads only your own objectives — there " +
+        "is no agent parameter.",
       parameters: z.object({}),
       execute: async (
         _params: Record<string, never>,

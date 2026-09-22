@@ -4720,11 +4720,19 @@ class ObjectiveMetricRead(BaseModel):
     tolerance: Optional[float] = None
     by: Optional[str] = None
     horizon: Optional[str] = None
+    #: What the objective file itself wrote (`up` / `down` / `hold`), kept
+    #: verbatim so an author can see the word they typed beside the resolved
+    #: one.
     objective_direction: Optional[str] = None
     declared: bool
     #: Declared by the OWNING role's agent, not by this one — a supporting
     #: agent cannot fix that and must not be told to.
     declared_elsewhere: bool
+    #: The REGISTRY's vocabulary and nothing else — `up_good` | `down_good` |
+    #: `neutral` | `null` — so a direction-aware formatter needs no fourth
+    #: case. An objective's declared `hold` resolves to `neutral`; what tells
+    #: it apart from a registry that never said is `direction_source`, not a
+    #: fourth value.
     direction: Optional[str] = None
     direction_source: str = "none"  # registry | objective | none
     unit: Optional[str] = None
@@ -4770,14 +4778,20 @@ class ObjectiveJoinSource(BaseModel):
     `objectives_listed` / `objectives_scanned` / `objectives_unscanned` are
     separate because the filter runs AFTER the read: a shared fleet canon can
     hold more files than the scan bound, and silently keeping the first N is
-    how an agent's own objective disappears.
+    how an agent's own objective disappears. `objectives_skipped` counts the
+    `*.yaml` whose NAME this read refuses (a space, a non-ASCII character), so
+    a file that is there but unfetchable cannot look like a file that is not
+    there; it carries an `objective_file_skipped` finding naming one.
     """
 
     template: str = "skipped"  # read | not_found | unreadable | invalid | skipped
-    objectives_dir: str = "skipped"  # read | absent | unreadable | skipped
+    #: read | absent | unreadable | timeout | skipped — `timeout` is the
+    #: fan-out's wall-clock budget, an agent answering too slowly to join.
+    objectives_dir: str = "skipped"
     objectives_listed: int = 0
     objectives_scanned: int = 0
     objectives_unscanned: int = 0
+    objectives_skipped: int = 0
     objectives_truncated: bool = False
 
 
