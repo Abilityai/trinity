@@ -193,6 +193,118 @@ def test_capacity_429_skips_with_evidence_and_is_not_remembered(body, fragment):
     assert R.session_provider_failure() is None
 
 
+def test_capacity_header_is_authoritative_over_a_billing_looking_body():
+    """Header beats body in both directions: a producer that says `capacity`
+    is believed even when the prose mentions a limit — and nothing is
+    recorded against the credential."""
+    with pytest.raises(pytest.skip.Exception) as exc:
+        R.require_agent_answer(
+            _resp(status=429, body=_detail("usage limit"), headers={R.ERROR_CODE_HEADER: "capacity"}),
+            what="POST /chat",
+        )
+    assert "code=capacity" in str(exc.value)
+    assert R.session_provider_failure() is None
+
+
+def test_billing_header_is_authoritative_over_a_capacity_looking_body():
+    with pytest.raises(pytest.fail.Exception) as exc:
+        R.require_agent_answer(
+            _resp(status=429, body=_detail("Agent 'a' is at capacity"), headers={R.ERROR_CODE_HEADER: "billing"}),
+            what="POST /chat",
+        )
+    assert "code=billing" in str(exc.value)
+    seen = R.session_provider_failure()
+    assert seen and seen["verdict"].code == "billing"
+
+
+def test_unattributed_429_fails_rather_than_skips():
+    """A stack that predates the header answering the agent's usage-limit
+    prose: FAIL as `unknown` (not recorded — nothing attributed it to the
+    credential). The mirror of #2889's unknown-503 doctrine."""
+    with pytest.raises(pytest.fail.Exception) as exc:
+        R.require_agent_answer(
+            _resp(status=429, body=_detail("Claude Code execution failed: Subscription usage limit reached")),
+            what="POST /chat",
+        )
+    assert "code=unknown" in str(exc.value) and "usage limit" in str(exc.value)
+    assert R.session_provider_failure() is None
+
+
+def test_switched_billing_429_dict_body_fails_and_records():
+    """The SUB-003 auto-switched shape: the platform already moved the agent
+    to a working subscription, yet the response is still 429+`billing`.
+
+    Documented choice, not an accident: this mirrors #2894's treatment of the
+    503 auto-switched `auth` shape (which records too). Treating the
+    structural `auto_switch` key as "fail this test, do not arm the cascade"
+    is the Q5 follow-up named in the PR body, not this PR."""
+    body = (
+        '{"detail": {"error": "usage limit", "auto_switch": {"new_subscription": "sub-b"}, '
+        '"message": "Rate limit hit. Subscription auto-switched to \'sub-b\'. Please retry.", '
+        '"retry_after": 15}}'
+    )
+    with pytest.raises(pytest.fail.Exception) as exc:
+        R.require_agent_answer(
+            _resp(status=429, body=body, headers={R.ERROR_CODE_HEADER: "billing"}),
+            what="POST /chat",
+        )
+    assert "auto-switched" in str(exc.value)
+    seen = R.session_provider_failure()
+    assert seen and seen["verdict"].code == "billing"
+
+
+def test_capacity_never_indicts_the_credential():
+    assert R.CAPACITY_CODE not in R.CREDENTIAL_CODES
+    assert R.Verdict(False, "capacity", "x", 429).indicts_credential is False
+
+
+@pytest.mark.parametrize(
+    "body,headers,readiness,code",
+    [
+        # The three live header-less capacity shapes.
+        (CAPACITY_ADMISSION_DICT_BODY, {}, False, "capacity"),
+        (CAPACITY_BACKLOG_FULL_BODY, {}, False, "capacity"),
+        (CAPACITY_MAP_TASK_BODY, {}, False, "capacity"),
+        # Header-less, no capacity wording: unknown, never a skip.
+        (_detail("usage limit"), {}, False, "unknown"),
+        ("", {}, False, "unknown"),
+        # The transport vocabulary is NOT consulted on a 429 — a fall-through
+        # to the 503 arm would launder this as a readiness race.
+        (_detail("Failed to communicate with agent: HTTP error: ConnectError"), {}, False, "unknown"),
+        # The breaker header still wins on a 429.
+        (_detail("x"), {"X-Circuit-Open": "true"}, False, "circuit_open"),
+        # Header is authoritative, normalised.
+        (_detail("x"), {R.ERROR_CODE_HEADER: "network"}, True, "network"),
+        (_detail("x"), {R.ERROR_CODE_HEADER: " CAPACITY "}, False, "capacity"),
+        (_detail("Agent 'a' is at capacity"), {R.ERROR_CODE_HEADER: "billing"}, False, "billing"),
+    ],
+)
+def test_classify_429(body, headers, readiness, code):
+    v = R.classify_unavailable(_resp(status=429, body=body, headers=headers))
+    assert (v.readiness, v.code, v.status) == (readiness, code, 429), v
+
+
+def test_capacity_skip_reason_is_not_on_the_skip_audit_allowlist():
+    """The twin of the readiness case: an admission refusal is still a test
+    that did not run; `tests/run-full.sh`'s audit must keep flagging it."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("audit_skips", TESTS_DIR / "harness" / "audit_skips.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    reason = R.capacity_skip_reason("POST /task", R.Verdict(False, "capacity", "Agent 'a' is at capacity", 429))
+    assert not mod._allowed(reason)
+
+
+def test_reason_builders_name_the_status():
+    v429 = R.Verdict(False, "unknown", "x", 429)
+    v503 = R.Verdict(True, "transport", "x")
+    assert "429" in R.readiness_skip_reason("POST /task", v429)
+    assert "429" in R.execution_failure_reason("POST /task", v429)
+    assert "503" in R.readiness_skip_reason("POST /task", v503)
+    assert "503" in R.execution_failure_reason("POST /task", v503)
+
+
 def test_readiness_race_skips_and_names_the_evidence():
     with pytest.raises(pytest.skip.Exception) as exc:
         R.require_agent_answer(
@@ -243,13 +355,26 @@ def test_unknown_503_fails_rather_than_skips():
         R.require_agent_answer(_resp(body=_detail("Failed to execute task. The agent may be unavailable.")), what="POST /task")
 
 
-@pytest.mark.parametrize("code,cascades", [("auth", True), ("billing", True), ("circuit_open", True), ("unknown", False), ("agent_error", False), ("timeout", False)])
-def test_only_credential_codes_fail_the_rest_of_the_session_fast(code, cascades):
+@pytest.mark.parametrize(
+    "code,status,cascades",
+    [
+        ("auth", 503, True),
+        ("billing", 503, True),
+        ("circuit_open", 503, True),
+        ("unknown", 503, False),
+        ("agent_error", 503, False),
+        ("timeout", 503, False),
+        # #2919: the same rule one status over.
+        ("billing", 429, True),
+        ("unknown", 429, False),
+    ],
+)
+def test_only_credential_codes_fail_the_rest_of_the_session_fast(code, status, cascades):
     """A one-off OOM (`agent_error`/`unknown`) fails ITS test; it must not take
     every later model turn down with it unrun. A credential verdict does."""
     headers = {} if code == "unknown" else {R.ERROR_CODE_HEADER: code}
     with pytest.raises(pytest.fail.Exception):
-        R.require_agent_answer(_resp(body=_detail("boom"), headers=headers), what="POST /task")
+        R.require_agent_answer(_resp(status=status, body=_detail("boom"), headers=headers), what="POST /task")
     assert (R.session_provider_failure() is not None) is cascades
 
 
@@ -295,6 +420,31 @@ def test_transport_markers_carry_no_credential_vocabulary():
     back in as a skip."""
     for bad in ("credit", "billing", "auth", "token", "subscription", "unauthorized"):
         assert not any(bad in m for m in R.TRANSPORT_BODY_MARKERS), bad
+
+
+def test_capacity_markers_carry_no_credential_vocabulary():
+    """#2919: the same rule for the capacity tuple — a usage-limit word in it
+    would launder an exhausted subscription back into a queue-full skip."""
+    for bad in ("credit", "billing", "auth", "token", "subscription", "unauthorized", "limit", "rate"):
+        assert not any(bad in m for m in R.CAPACITY_BODY_MARKERS), bad
+
+
+def test_backend_capacity_wording_still_matches():
+    """The header-less fallback is pinned to the three producers' actual
+    wording (`routers/chat.py` admission dict; `_dispatch_async` and
+    `_map_task_failure` both say "is at capacity")."""
+    chat_router = _src("routers/chat.py")
+    assert '"error": "Agent queue is full"' in chat_router
+    ces = _src("services/chat_execution_service.py")
+    assert ces.count("is at capacity") == 2, ces.count("is at capacity")
+    source = (chat_router + ces).lower()
+    for marker in R.CAPACITY_BODY_MARKERS:
+        assert marker == marker.lower() and marker in source, marker
+
+
+def test_backend_capacity_code_name_matches():
+    env = _src("services/execution_envelope.py")
+    assert f'CAPACITY = "{R.CAPACITY_CODE}"' in env
 
 
 # --------------------------------------------------------------------------- #

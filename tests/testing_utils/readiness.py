@@ -1,4 +1,4 @@
-"""Classify a 503 from a model turn: readiness race, or a turn that ran and failed (#2889).
+"""Classify a 503 or 429 from a model turn: a race / admission refusal, or a turn that ran and failed (#2889, #2919).
 
 Roughly forty live-tier tests POST ``/api/agents/{name}/chat`` or ``/task`` and
 used to ``pytest.skip("Agent server not ready")`` on ANY 503. The backend
@@ -15,18 +15,33 @@ doctrine in ``docs/testing/STRATEGY.md`` (a skip is not a pass; an infra-caused
 skip is a finding). This module holds the ONE classification policy, so the two
 causes can never again share a reason string.
 
+The same gap exists one status code over (#2919): a 429 is either an admission
+refusal — the agent's slots and backlog are full, the model never ran, a
+genuine ``capacity`` skip — or an exhausted subscription that the agent
+surfaces as 429 (#2638) and the backend labels ``billing``. Eighteen sites
+used to ``pytest.skip("Agent queue full")`` on either.
+
 Signal precedence, strongest first:
 
 1. ``X-Trinity-Error-Code`` — the backend's own ``TaskExecutionErrorCode`` for
    the failure (#2889 emits it on every sync ``/chat``/``/task`` 4xx/5xx it
-   classifies). ``network`` is the only value that means "never reached".
+   classifies). ``network`` is the only value that means "never reached";
+   ``capacity`` (emitted by the three admission-refusal sites since #2919) is
+   the only value that means "refused before any model turn".
 2. ``X-Circuit-Open`` — the dispatch breaker (#526) fed by prior AUTH failures.
-3. A transport-shaped body, for a stack that predates the header: the httpx
-   exception class names ``_parse_agent_http_error`` embeds, the router's
+3. On a 429, a capacity-shaped body, for a stack that predates the header:
+   the router's "Agent queue is full", the service's "is at capacity". The
+   transport vocabulary is deliberately NOT consulted on a 429 — no producer
+   emits transport words on one, and a fall-through would be a laundering path.
+4. On a 503, a transport-shaped body, for a stack that predates the header: the
+   httpx exception class names ``_parse_agent_http_error`` embeds, the router's
    "Agent is not running", the transport breaker's own wording.
-4. Otherwise: the agent answered, the turn failed → the test fails and names
+5. Otherwise: the agent answered, the turn failed → the test fails and names
    the body. Unknown is deliberately NOT a skip — the whole defect was an
-   unattributed 503 hiding behind a readiness excuse.
+   unattributed status hiding behind a readiness (or queue-full) excuse. On a
+   stack that predates the ``billing`` header a usage-limit 429 therefore fails
+   each test individually instead of arming the session cascade — the correct
+   direction; do not "fix" it with a credential substring table.
 
 Only transport vocabulary is matched here. There is deliberately no
 "credit balance"/"authentication" substring table: the repo already carries two
@@ -53,6 +68,16 @@ CIRCUIT_OPEN_HEADER = "X-Circuit-Open"
 # The header value that means "the agent server was never reached".
 NETWORK_CODE = "network"
 
+# The header value that means "admission refused before any model turn"
+# (#2919 makes the three CapacityFull producers emit it; the body vocabulary
+# below is the fallback for a stack that predates that).
+CAPACITY_CODE = "capacity"
+
+# The statuses a model turn can answer with a cause the status alone cannot
+# name: 503 (#2889 — unreachable vs ran-and-failed) and 429 (#2919 —
+# admission refused vs an exhausted subscription, #2638).
+LAUNDERED_STATUSES: frozenset[int] = frozenset({503, 429})
+
 # Transport-shaped fragments, matched case-insensitively against the FULL body.
 # Each entry names the backend site that emits it; the unit test pins them.
 TRANSPORT_BODY_MARKERS: tuple[str, ...] = (
@@ -74,6 +99,17 @@ TRANSPORT_BODY_MARKERS: tuple[str, ...] = (
     "failed to connect to agent",
 )
 
+# Capacity-shaped fragments, matched case-insensitively against the FULL body
+# of a 429 that carries no header. Each names its backend site; the unit test
+# pins them to source.
+CAPACITY_BODY_MARKERS: tuple[str, ...] = (
+    # routers/chat.py — /chat admission CapacityFull (dict-shaped detail)
+    "agent queue is full",
+    # chat_execution_service._dispatch_async (CapacityFull, backlog full too)
+    # and _map_task_failure's 429 branch — both say "is at capacity"
+    "is at capacity",
+)
+
 # Evidence in a skip/fail reason is bounded; classification is NOT (it runs on
 # the full body — a marker past the cut must still count).
 EVIDENCE_CHARS = 300
@@ -86,17 +122,20 @@ CREDENTIAL_CODES: frozenset[str] = frozenset({"auth", "billing", "circuit_open"}
 
 @dataclass(frozen=True)
 class Verdict:
-    """One 503's classification.
+    """One 503's or 429's classification.
 
     ``readiness`` — the agent server was not reachable: a race, skip with evidence.
     ``code`` — the backend's error code when it sent one, else a derived label
-    (``circuit_open``, ``transport``, ``unknown``).
+    (``circuit_open``, ``transport``, ``capacity``, ``unknown``).
     ``evidence`` — the bounded, human-readable reason text.
+    ``status`` — the HTTP status that was classified (trailing default so the
+    positional ``Verdict(readiness, code, evidence)`` constructions still work).
     """
 
     readiness: bool
     code: str
     evidence: str
+    status: int = 503
 
     @property
     def indicts_credential(self) -> bool:
@@ -133,30 +172,41 @@ def _detail_text(body: str) -> str:
 
 
 def classify_unavailable(response: Any) -> Verdict:
-    """Classify a response the caller has already established is a 503.
+    """Classify a response the caller has already established is a 503 or 429.
 
     Never raises. Reads the header first, then the breaker header, then the
-    transport vocabulary on the full body; anything else is "the turn ran and
-    failed" with the body as evidence.
+    status-specific body vocabulary on the full body (capacity on a 429,
+    transport on a 503); anything else is "the turn ran and failed" with the
+    body as evidence. The status is read here (not passed) so the signature
+    stays the one its three callers, incl. ``tests/conftest.py``, use.
     """
     headers = _headers(response)
     body = _body_text(response)
+    status = getattr(response, "status_code", 503)
     evidence = " ".join(_detail_text(body).split())[:EVIDENCE_CHARS] or "<empty body>"
 
     code = headers.get(ERROR_CODE_HEADER) if hasattr(headers, "get") else None
     if isinstance(code, str) and code:
         code = code.strip().lower()
-        return Verdict(readiness=(code == NETWORK_CODE), code=code, evidence=evidence)
+        return Verdict(readiness=(code == NETWORK_CODE), code=code, evidence=evidence, status=status)
 
     circuit = headers.get(CIRCUIT_OPEN_HEADER) if hasattr(headers, "get") else None
     if isinstance(circuit, str) and circuit.lower() == "true":
-        return Verdict(readiness=False, code="circuit_open", evidence=evidence)
+        return Verdict(readiness=False, code="circuit_open", evidence=evidence, status=status)
 
     low = body.lower()
-    if any(marker in low for marker in TRANSPORT_BODY_MARKERS):
-        return Verdict(readiness=True, code="transport", evidence=evidence)
+    if status == 429:
+        # Capacity wording or nothing: the transport vocabulary is NOT
+        # consulted on a 429 (no producer emits it there; falling through
+        # would add a laundering path).
+        if any(marker in low for marker in CAPACITY_BODY_MARKERS):
+            return Verdict(readiness=False, code=CAPACITY_CODE, evidence=evidence, status=status)
+        return Verdict(readiness=False, code="unknown", evidence=evidence, status=status)
 
-    return Verdict(readiness=False, code="unknown", evidence=evidence)
+    if any(marker in low for marker in TRANSPORT_BODY_MARKERS):
+        return Verdict(readiness=True, code="transport", evidence=evidence, status=status)
+
+    return Verdict(readiness=False, code="unknown", evidence=evidence, status=status)
 
 
 # Session-level memory of the first "the credential cannot execute" verdict, so
@@ -180,30 +230,41 @@ def reset_session_provider_failure() -> None:
 
 def readiness_skip_reason(what: str, verdict: Verdict) -> str:
     return (
-        f"agent server still starting — {what} answered 503 with no agent response "
+        f"agent server still starting — {what} answered {verdict.status} with no agent response "
+        f"(code={verdict.code}); evidence: {verdict.evidence}"
+    )
+
+
+def capacity_skip_reason(what: str, verdict: Verdict) -> str:
+    return (
+        f"agent at capacity — {what} answered {verdict.status} before any model turn "
         f"(code={verdict.code}); evidence: {verdict.evidence}"
     )
 
 
 def execution_failure_reason(what: str, verdict: Verdict) -> str:
     return (
-        f"{what} answered 503 from a turn that RAN and failed — provider credential "
+        f"{what} answered {verdict.status} from a turn that RAN and failed — provider credential "
         f"unusable or execution error, not a readiness race (code={verdict.code}); "
         f"evidence: {verdict.evidence}"
     )
 
 
 def require_agent_answer(response: Any, *, what: str = "the model turn") -> None:
-    """No-op unless ``response`` is a 503. Then: a readiness race skips with the
-    evidence in the reason; anything the agent answered FAILS the test.
+    """No-op unless ``response`` is a 503 or 429. Then: a readiness race or an
+    admission refusal skips with the evidence in the reason; anything the agent
+    answered FAILS the test (a credential-class code also arms the session
+    cascade).
 
     ``what`` names the call for the reason text (``"POST /chat"``).
     """
-    if getattr(response, "status_code", None) != 503:
+    if getattr(response, "status_code", None) not in LAUNDERED_STATUSES:
         return
     verdict = classify_unavailable(response)
     if verdict.readiness:
         pytest.skip(readiness_skip_reason(what, verdict))
+    if verdict.code == CAPACITY_CODE:
+        pytest.skip(capacity_skip_reason(what, verdict))
     if verdict.indicts_credential:
         record_provider_failure(what, verdict)
     pytest.fail(execution_failure_reason(what, verdict), pytrace=False)
