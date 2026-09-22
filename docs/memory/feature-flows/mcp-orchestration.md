@@ -396,6 +396,7 @@ console.log(`Registered ${totalTools} tools`);
 | `list_systems` | 105-133 | `{}` | List deployed systems grouped by prefix |
 | `restart_system` | 138-167 | `{system_name}` | Restart all agents in system |
 | `get_system_manifest` | 172-202 | `{system_name}` | Export system as YAML manifest |
+| `teardown_system` | ent#454 | `{system_name, dry_run?, agents?, strict?}` | Remove a deployed system — deploy's inverse. A **license-blind proxy** over an entitlement-gated route: it degrades rather than throws, keeping 404 (module absent on this build) / 403 (unentitled, or an agent key on a human-only verb) / 503 (membership unverified, retryable) distinct, and returns a `failed` report that arrives as a 500 AS a result. `dry_run` defaults to **`true`** — the opposite of `deploy_system`, because an unwanted preview costs a round trip and an unwanted execute costs a fleet |
 
 ### Documentation Tools (`src/mcp-server/src/tools/docs.ts`)
 
@@ -1195,8 +1196,9 @@ npx @modelcontextprotocol/inspector http://localhost:8080/mcp
 # - get_agent_ssh_access, deploy_local_agent, initialize_github_sync
 # Chat tools (3):
 # - chat_with_agent, get_chat_history, get_agent_logs
-# System tools (4):
+# System tools (5):
 # - deploy_system, list_systems, restart_system, get_system_manifest
+# - teardown_system (ent#454 — proxies an entitlement-gated route, license-blind)
 # Docs tools (1):
 # - get_agent_requirements
 # Skills tools (7):

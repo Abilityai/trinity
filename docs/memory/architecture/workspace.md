@@ -680,6 +680,31 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   `test_ent443_rooms_oss_core.py`.
 
 
+## What it remembers about you — seat memory, visible and undoable (ent#637)
+
+A scheduled run addressed to a person (ent#498's `deliver_to_workspace_email`) now runs AS
+that seat: the internal dispatch composes the seat's MEM-001 memory block into
+`execute_task(system_prompt=…)`, and `write_user_memory` accepts the run because
+`services/schedule_seat_memory.seat_for_execution` reads the seat off the row's stamp
+(`triggered_by='schedule'` + `source_channel='portal'` → `source_channel_client`) — the
+agent never names the user. The details panel's `PortalAgentMemory.vue` reads
+`GET /agents/{name}/memory` (the viewer's own memory, keyed on the principal, plus the
+`public_user_memory_writes` history with schedule names through the page's bounded map)
+and `POST …/memory/writes/{id}/undo` (latest-first; `409 not_latest` / `already_undone`
+named, unknown id the uniform 404). Requirement §10.19 of `scheduling.md`; flow in
+`schedule-workspace-delivery.md`.
+
+## The role card — a projection of the agent's files, and the owner's readiness stamp (ent#527, #663)
+
+`client_portal/role_card.py` builds the Info rail's Role card from the agent's own
+container on every read (template `x-role` + `x-canon.clone_path`, `<canon>/roles/<id>.yaml`,
+`<canon>/objectives/*.yaml`, `/api/metrics` for values + `last_updated`) — never cached,
+never a second store; author-controlled ids/paths are validated before any read and every
+failure is named. Readiness is the one platform fact: `agent_role_readiness` is the agent
+OWNER's stamp (`POST …/role/readiness`, owner check via `get_owned_roster`, agent never),
+and a template that claims `ready` without a stamp is shown as calibrating. Requirement
+§5.36 of `core-agent.md`; flow in `workspace-role-card.md`.
+
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 
 Clicking an agent opens the **conversation** you were last in. `/workspace/a/:agentName`

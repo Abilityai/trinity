@@ -253,7 +253,7 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 
 - Write the complete updated memory blob each time (read → update → write).
 - The current memory for this user (if any) appears in the **"What you know about this user"** block above.
-- Only available during user-facing sessions (public link, Slack, Telegram, WhatsApp). The tool returns an error if called from a scheduled task or agent-to-agent call."""
+- Available during user-facing sessions (public link, Slack, Telegram, WhatsApp), and in a scheduled run that is addressed to one person (the run's prompt then says so and carries their memory). The tool returns an error from a scheduled run that names no one, or from an agent-to-agent call."""
 
 # The payload ceiling is INTERPOLATED, never typed twice (#1838 review). The
 # block shipped `256 KB` while `REPORT_PAYLOAD_MAX_BYTES` was already 5 MiB in

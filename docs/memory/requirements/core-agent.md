@@ -134,7 +134,7 @@
 - **Second-order effect on the Trinity repo itself**: a `.gitignore` inside `config/agent-templates/<name>/` also governs **this** repository's view of that directory. A future template author adding `<name>/content/sample.md`, `<name>/notes.log`, `<name>/data.db` or a `*.local.md` file will find `git add` silently skipping it. Use `git add -f`, or (better) don't ship files matching the canonical list from a template. Verified at introduction: no tracked or untracked file under `config/agent-templates/` became newly ignored.
 - **Shipping committed `.trinity/` hooks**: the canonical list excludes `.trinity/` wholesale. A template that ships a *committed* `.trinity/` hook (a `pre-check`, #454; Brain-Orb hooks, trinity-enterprise#76) must instead use the `.trinity/*` + `!.trinity/<dir>/` form — `S-005` accepts the star form for exactly this reason. No bundled template needs this today.
 - **Enforcement**: `tests/unit/test_1908_bundled_template_gitignore.py`, run in the `backend-unit-test` per-PR workflow. It is both the guard and the **regenerator** (`python tests/unit/test_1908_bundled_template_gitignore.py --regenerate`), so a new `_GITIGNORE_PATTERNS` entry is a one-command change however many templates are guarded. The guard evaluates the real `static_checks.run_static` (never a re-implementation of the rules), names its coverage in a `GUARDED_TEMPLATES` constant, fails if a **new visible** template is added outside that set, and applies one universal assertion (`G-001`) to **every** bundled directory, hidden included.
-- **Known gap**: `T-004`/`T-005` (`resources.cpu`/`resources.memory` in `template.yaml`) still fail for the three starters, so those report 2 HARD findings rather than 0 (the 11 `dd-*` reach 0 — they already pin `resources`). Pinning `resources` in a bundled template is an existing catalog convention, but it *overrides* the admin's fleet-wide default (RES-001, `PUT /api/settings/agent-defaults/resources`) — so whether the default starters should pin or inherit is a **product decision**, and arguably these two checks should `skip` rather than `fail` when a template deliberately inherits. Tracked as a follow-up; the guard waives exactly those two ids and fails if the waiver goes stale.
+- **Resource declaration is optional, and the checks say so (#2899)**: `T-004`/`T-005` PASS on an absent `resources` block — the agent inherits the admin's fleet-wide default (RES-001), which is what all three starters and `local:default` rely on, and a template-level block would override both that default and the values a manifest or API caller asked for. A DECLARED value is validated by the create path's own `normalize_cpu`/`normalize_memory`, so the check can never call a deployable template must-fix nor pass a value creation rejects (T-005's old regex accepted `512m`, which `normalize_memory` 400s). A non-mapping `resources:` fails T-004 and skips T-005 — one malformed block, one finding. The guard's `_KNOWN_FAILING_CHECKS` waiver is consequently EMPTY: every visible bundled template now passes every HARD static check, with nothing exempt. The same value sets are enforced on the admin default itself — the dedicated `PUT /api/settings/agent-defaults/resources` validates, and the generic `PUT /api/settings/{key}` catch-all now refuses `agent_default_cpu`/`agent_default_memory`, because an unvalidated default is read at create time and 400s every agent that relies on it (`tests/unit/test_2899_resource_defaults_blocklist.py`).
 - **Not retroactive**: `startup.sh` copies `/template` only when `/home/developer/.trinity-initialized` is absent, so agents already created keep their existing `.gitignore`. They are served by the per-agent auto-fix (`POST /api/agents/{name}/compatibility/fix`) and the sync-time merge.
 
 ### 4.1.2 Deploy-Local Integrity Contract (#2060)
@@ -3214,3 +3214,59 @@ to localStorage in the clear.
   (session-only — the chips carry upload state and inbox ids), server-side
   drafts synced across devices.
 - **Flow**: `docs/memory/feature-flows/workspace-drafts.md`
+
+### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
+- **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
+- **Requirement ID**: WORKSPACE_ROLE_CARD
+- **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness)
+- **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
+  Agent details show a **Role** card: the role it fills, the objectives it owns or
+  supports with each metric's latest value, target and freshness, the viewer's
+  relationship to it, and its **readiness** state. Framework §8's "organisation UI
+  over the canon" shrunk to one agent: **files are truth, this is a projection.**
+- **Files are truth, read through the platform, never a second store.** Everything the
+  card shows about the role comes from the agent's own container on each read
+  (`client_portal/role_card.py`, via the agent client — the same door the Files tab
+  uses): `template.yaml → x-role: {role, status, seat?}` (written by the
+  `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
+  `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
+  (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
+  agent); metric values from the agent's `metrics.json` through its own
+  `/api/metrics` (`last_updated` is the freshness stamp). Nothing is cached or
+  copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
+  card at all (the panel is unchanged, AC 5); a role file that cannot be read or
+  parsed → the card says so (`role.error`), never an empty role; a stopped agent
+  → "the agent is stopped; the card reads its files when it runs".
+- **Freshness is honest, never optimistic (quality bar #4).** A metric is `stale`
+  when its value is missing, when `metrics.json` carries no `last_updated`, or when
+  that stamp is older than the framework's 30-day staleness bound (§3.5); a stale
+  metric renders as stale beside its last value and age, never as current. A
+  per-metric cadence is the business-metrics workstream's to declare; until then
+  the bound is the one rule the framework already states.
+- **Readiness is a platform record, and only the agent owner writes it (#663,
+  ruled 2026-09-20).** `x-role.status` in `template.yaml` is agent-writable, so it
+  cannot be the thing that says a companion is `ready`. `agent_role_readiness`
+  (`agent_name` PK, `status`, `changed_at`, `changed_by`; dual-track — SQLite
+  `agent_role_readiness_table` + Alembic `0067_agent_role_readiness`; CASCADE in
+  `AGENT_REFS`) is the owner's stamp. The effective state is the platform record
+  when one exists, else the template's `calibrating`; a template that says `ready`
+  **without** an owner stamp is shown as `calibrating` with a note that no owner
+  has stamped it — `status: ready` is valid only with an owner stamp (#663 DoD 3).
+  `POST …/role/readiness {status}` is gated on the platform's **owner of the agent
+  record** (`db.get_owned_roster(email)` — creator/infra owner, not an assignment
+  kind, R8/R11): anyone else gets a named 403 (`readiness_owner_only`), the agent
+  never can (portal-token principals are not owners; the route is on the
+  platform-authenticated door). The card shows the state, the date it changed and
+  who flipped it. The flip **records**; it does not switch schedules on — turning
+  the brief schedule on at `ready` stays the operator's act until the wizard owns
+  it (#511).
+- **Walkthrough progress while calibrating** (§7.2 step 8–9): the card shows the
+  viewer's own asks with this agent — user turns in their Main chat, capped at the
+  ten the three-strikes test asks for — and how many of the agent's replies they
+  rated down (ent#366). A proxy for the ten-ask walkthrough, labelled as the
+  viewer's own count, never a fleet number.
+- **Your relationship**: rendered from ent#500's assignment when it lands; until
+  then the line states "no assignment recorded" rather than being blank (AC 3).
+- **Not this issue**: editing the canon from the card (files are truth — edit the
+  file), the organisation view (ent#502), enabling schedules on the flip.
+- **Flow**: `docs/memory/feature-flows/workspace-role-card.md`

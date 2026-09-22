@@ -15,7 +15,8 @@ Tables are organized by feature area:
 - Shared Files (outbound): agent_shared_files
 - Settings: system_settings
 - Public Links: agent_public_links, public_link_verifications, public_link_usage
-- Public Chat: public_chat_sessions, public_chat_messages, public_user_memory
+- Public Chat: public_chat_sessions, public_chat_messages, public_user_memory, public_user_memory_writes
+- Tandem: agent_role_readiness
 - Git: agent_git_config
 - Skills: agent_skills
 - Tags: agent_tags
@@ -1049,6 +1050,42 @@ TABLES = {
         )
     """,
 
+    # ent#527 / #663: a companion's readiness (`calibrating` | `ready`) is the
+    # AGENT OWNER's stamp, kept platform-side because `template.yaml`'s
+    # `x-role.status` is agent-writable and the rule is that the agent never
+    # flips itself. One row per agent: the current state, when, and who.
+    "agent_role_readiness": """
+        CREATE TABLE IF NOT EXISTS agent_role_readiness (
+            agent_name TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            changed_at TEXT NOT NULL,
+            changed_by TEXT NOT NULL
+        )
+    """,
+
+    # ent#637: every agent-notes write through `POST /api/agents/{name}/user-memory`
+    # records the state before and after, who triggered it (the execution's
+    # `triggered_by`; `schedule` when a seat run wrote it) and the schedule, so
+    # the person can see that a scheduled run touched their memory and undo it.
+    # ent#419's "write history with rollback" layer, built here because that AC
+    # needed it. Not keyed to `public_user_memory.id`: the memory row is created
+    # on demand and may be re-created; `(agent_name, user_email)` is the identity.
+    "public_user_memory_writes": """
+        CREATE TABLE IF NOT EXISTS public_user_memory_writes (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_email TEXT NOT NULL,
+            execution_id TEXT,
+            triggered_by TEXT NOT NULL,
+            schedule_id TEXT,
+            previous_notes TEXT NOT NULL DEFAULT '',
+            new_notes TEXT NOT NULL DEFAULT '',
+            written_at TEXT NOT NULL,
+            undone_at TEXT,
+            undone_by TEXT
+        )
+    """,
+
     # -------------------------------------------------------------------------
     # Git Tables
     # -------------------------------------------------------------------------
@@ -1110,6 +1147,7 @@ TABLES = {
             assigned_by TEXT NOT NULL,
             assigned_at TEXT NOT NULL,
             source_id TEXT,
+            delivery_status TEXT,
             UNIQUE(agent_name, skill_name)
         )
     """,
@@ -1126,6 +1164,15 @@ TABLES = {
     # resolved from so a silent cross-source swap is detectable; it is
     # deliberately NOT part of the key, which would permit two rows that
     # cannot both exist on disk.
+    #
+    # #2914: `delivery_status` is the durable per-assignment verdict of the
+    # LAST injection that looked at this name — today only `conflict` (the
+    # agent's `.claude/skills/<name>/` is agent-authored, so the platform
+    # refused to write into it) or NULL (no standing conflict). Written by the
+    # inject path, cleared by the inject path once the name lands; the Skills
+    # tab reads it from the assignment row, because the per-injection result
+    # map is session-scoped and an operator who never sees it must still see
+    # the conflict.
     "skill_sources": """
         CREATE TABLE IF NOT EXISTS skill_sources (
             id TEXT PRIMARY KEY,
@@ -1921,6 +1968,7 @@ INDEXES = [
 
     # Public user memory indexes (MEM-001)
     "CREATE INDEX IF NOT EXISTS idx_public_user_memory_lookup ON public_user_memory(agent_name, user_email)",
+    "CREATE INDEX IF NOT EXISTS idx_public_user_memory_writes_lookup ON public_user_memory_writes(agent_name, user_email, written_at)",
 
     # System views indexes
     "CREATE INDEX IF NOT EXISTS idx_system_views_owner ON system_views(owner_id)",

@@ -108,14 +108,16 @@ def pull_owns_dispatch(agent_name: str, triggered_by: Optional[str]) -> bool:
     S-02, which counts ``ZCARD`` only. Making the pilot flag a true either/or
     restores one capacity owner per agent.
 
-    **Interactive turns are deliberately excluded.** Only the autonomous trigger
-    set queues; a human chat / Session-tab turn keeps today's synchronous push
-    path and today's Redis session lock. That is the scope cut in
-    ``TARGET_ARCHITECTURE.md`` Open Question 7 ("Does human-interactive chat
-    belong in the queue at all?" — *under consideration, not decided*), and it is
-    load-bearing here: one FIFO ordered by ``queued_at`` would park a human turn
-    behind N batch tasks until the held connection timed out, and N competing
-    workers could claim two turns of the same session concurrently — the exact
+    **Interactive turns are excluded — temporarily.** Only the autonomous
+    trigger set queues; a human chat / Session-tab turn keeps today's synchronous
+    push path and today's Redis session lock. ``TARGET_ARCHITECTURE.md`` Open
+    Question 7 is decided the other way (#1989): the queue carries ALL traffic,
+    interactive included, and the push path is deleted afterwards. The exclusion
+    is a migration state, not a design boundary, and it stays load-bearing until
+    two pieces land: interactive turns claimed ahead of autonomous ones (#2842) —
+    otherwise one FIFO ordered by ``queued_at`` parks a human turn behind N batch
+    tasks — and one turn per conversation at a time (#2843) — otherwise N
+    competing workers can claim two turns of one session concurrently, the
     concurrent ``--resume`` on one JSONL the session lock exists to prevent.
 
     Fail-safe: any error resolving the trigger set returns ``False``, i.e. the

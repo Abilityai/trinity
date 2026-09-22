@@ -4292,6 +4292,89 @@ def _migrate_schedule_workspace_delivery(cursor, conn):
     )
     conn.commit()
 
+
+def _migrate_agent_skills_delivery_status(cursor, conn):
+    """#2914 — the durable per-assignment injection verdict.
+
+    Assigning a library skill whose name matched an agent-authored
+    `.claude/skills/<name>/` used to overwrite the agent's copy and bury an
+    `unmanaged_dir_overwritten` warning in the assignment response. The inject
+    path now refuses to write into a directory the platform did not create and
+    records `conflict` on the assignment row instead; NULL means no standing
+    conflict. Recorded on the row (not derived at read time) because the
+    Skills tab must show the conflict to an operator who never saw the
+    injection response, and clearing it is the inject path's job on the next
+    sync once the name lands.
+
+    Mirrored by the Alembic revision 0065_agent_skills_delivery_status.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_skills",
+        "delivery_status",
+        "ALTER TABLE agent_skills ADD COLUMN delivery_status TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_public_user_memory_writes_table(cursor, conn):
+    """Write history for the per-user memory's agent_notes section (ent#637).
+
+    A schedule that names a user (ent#498's address) may now write that user's
+    MEM-001 memory from the run it triggers. The person must be able to see that
+    a scheduled run touched their memory — what, when, which run — and undo it,
+    so every agent-notes write through the one boundary
+    (`POST /api/agents/{name}/user-memory`) records the notes before and after,
+    the execution, its trigger and the schedule. This is also ent#419's third
+    layer (write history with rollback), built here because this AC needed it.
+
+    Mirrored by the Alembic revision 0066_public_user_memory_writes.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS public_user_memory_writes (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_email TEXT NOT NULL,
+            execution_id TEXT,
+            triggered_by TEXT NOT NULL,
+            schedule_id TEXT,
+            previous_notes TEXT NOT NULL DEFAULT '',
+            new_notes TEXT NOT NULL DEFAULT '',
+            written_at TEXT NOT NULL,
+            undone_at TEXT,
+            undone_by TEXT
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_public_user_memory_writes_lookup "
+        "ON public_user_memory_writes(agent_name, user_email, written_at)"
+    )
+def _migrate_agent_role_readiness_table(cursor, conn):
+    """The agent owner's readiness stamp for a role companion (ent#527 / #663).
+
+    `template.yaml`'s `x-role.status` is agent-writable, and the 2026-09-20
+    ruling is that only the agent OWNER flips a companion `calibrating → ready`
+    and the agent never can — so the stamp lives here, platform-side: one row
+    per agent with the state, when it changed and who flipped it. A template
+    that says `ready` with no row here is shown as calibrating.
+
+    Mirrored by the Alembic revision 0067_agent_role_readiness.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_role_readiness (
+            agent_name TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            changed_at TEXT NOT NULL,
+            changed_by TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
 def _migrate_agent_shared_files_audience(cursor, conn):
     """A shared file is for the person the turn was for (trinity-enterprise#549).
 
@@ -4322,7 +4405,6 @@ def _migrate_agent_shared_files_audience(cursor, conn):
             log_msg=f"Adding {column} to agent_shared_files — a shared file has an addressee (ent#549)",
         )
     conn.commit()
-
 
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
@@ -4458,5 +4540,8 @@ MIGRATIONS = [
     ("portal_messages_voice_source", _migrate_portal_messages_voice_source),
     ("portal_file_dismissals_table", _migrate_portal_file_dismissals_table),
     ("executions_started_at_index", _migrate_executions_started_at_index),
+    ("agent_skills_delivery_status", _migrate_agent_skills_delivery_status),
+    ("public_user_memory_writes_table", _migrate_public_user_memory_writes_table),
+    ("agent_role_readiness_table", _migrate_agent_role_readiness_table),
     ("agent_shared_files_audience", _migrate_agent_shared_files_audience),
 ]

@@ -896,6 +896,33 @@ public_user_memory = Table(
     Column("updated_at", Text),
 )
 
+# ent#637: write history for the agent_notes section — see the note in db/schema.py.
+public_user_memory_writes = Table(
+    "public_user_memory_writes",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("user_email", Text),
+    Column("execution_id", Text),
+    Column("triggered_by", Text),
+    Column("schedule_id", Text),
+    Column("previous_notes", Text),
+    Column("new_notes", Text),
+    Column("written_at", Text),
+    Column("undone_at", Text),
+    Column("undone_by", Text),
+)
+
+# ent#527 / #663: the agent owner's readiness stamp — see the note in db/schema.py.
+agent_role_readiness = Table(
+    "agent_role_readiness",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("status", Text),
+    Column("changed_at", Text),
+    Column("changed_by", Text),
+)
+
 agent_git_config = Table(
     "agent_git_config",
     metadata,
@@ -955,6 +982,9 @@ agent_skills = Table(
     # ent#237: which source this assignment resolved from. Recorded, not keyed
     # — see the agent_skills note in db/schema.py.
     Column("source_id", Text),
+    # #2914: `conflict` while an agent-authored dir of the same name blocks
+    # injection; NULL otherwise. See the agent_skills note in db/schema.py.
+    Column("delivery_status", Text),
 )
 
 # ent#237: one row per git repo the skills library syncs from.
