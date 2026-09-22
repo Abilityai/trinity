@@ -110,9 +110,11 @@ def test_the_window_is_not_a_community_floor_key():
 # ---------------------------------------------------------------------------
 
 def test_both_knobs_are_env_backed():
+    # #2806 opted a third key in: the inter-agent chain-depth cap.
     assert config.ENV_BACKED_OPS_KEYS == {
         "metrics_retention_days": "METRICS_RETENTION_DAYS",
         "metrics_daily_point_cap": "METRICS_DAILY_POINT_CAP",
+        "inter_agent_max_chain_depth": "INTER_AGENT_MAX_CHAIN_DEPTH",
     }
 
 

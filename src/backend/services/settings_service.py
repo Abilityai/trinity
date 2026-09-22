@@ -87,6 +87,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "backup_retention_days": "Days to retain database-backup artifacts in /data/backups (default: 14, bounds 1-3650 — 0 is invalid; the newest 3 artifacts are always kept; disable backups via DB_BACKUP_ENABLED=false, #2216)",
     "metrics_retention_days": "Days to retain recorded metric points (default: 365, bounds 0-3650; 0 disables the sweep and keeps them forever). Bootstrap via METRICS_RETENTION_DAYS until a value is saved here (trinity-enterprise#478)",
     "metrics_daily_point_cap": "Maximum metric points one agent may record per UTC day (default: 100000, bounds 0-10000000; 0 is unlimited). Bootstrap via METRICS_DAILY_POINT_CAP until a value is saved here (trinity-enterprise#478)",
+    "inter_agent_max_chain_depth": "Maximum agent-to-agent hops in one call chain (default: 8, bounds 1-32). A hop past it is refused with 403 inter_agent_depth_exceeded before any model work. Bootstrap via INTER_AGENT_MAX_CHAIN_DEPTH until a value is saved here (#2806)",
 }
 
 
