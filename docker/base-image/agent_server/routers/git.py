@@ -1163,10 +1163,14 @@ def _compute_git_status(home_dir: Path) -> Dict:
         # assertable in a test. Needs git >= 2.15; bookworm ships 2.39.
         # #2957: `-z` — an outer strip ate the first line's X column, and plain
         # porcelain quotes odd paths and prints renames as `old -> new`.
+        # `-z` also stops quoting non-ASCII, so git now emits raw filename bytes:
+        # a strict decode of one non-UTF-8 name would 500 the whole status.
+        # `backslashreplace` keeps it visible (`caf\\xe9.txt`) and JSON-safe.
         status_result = run_registered(
             ["git", "--no-optional-locks", "status", "--porcelain", "-z"],
             cwd=str(home_dir),
             timeout=10,
+            errors="backslashreplace",
         )
         changes = _parse_porcelain_z(status_result.stdout) if status_result.returncode == 0 else []
 

@@ -80,6 +80,7 @@ def run_registered(
     timeout: float = 60,
     check: bool = False,
     ttl_headroom: float = 60,
+    errors: Optional[str] = None,
 ) -> subprocess.CompletedProcess:
     """Drop-in replacement for ``subprocess.run(capture_output=True, text=True)``
     that registers the child with the orphan-sweep allowlist for its lifetime.
@@ -91,6 +92,10 @@ def run_registered(
     Raises ``subprocess.TimeoutExpired`` after killing the process group, and
     ``subprocess.CalledProcessError`` when ``check=True`` and the child fails —
     the same contract callers already handle for ``subprocess.run``.
+
+    ``errors`` is forwarded to ``Popen`` (default ``None`` = strict decode, as
+    before). A caller reading raw paths (``git status -z``) passes a lenient
+    handler so one non-UTF-8 filename cannot raise ``UnicodeDecodeError`` (#2957).
     """
     window = float(timeout) + float(ttl_headroom)
     if window > _LONG_WINDOW_LOG_SECONDS:
@@ -105,6 +110,7 @@ def run_registered(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        errors=errors,
         start_new_session=True,
     )
     # NOTE: there is an inherent spawn→register race — a sweep that snapshots

@@ -242,3 +242,37 @@ def test_status_changes_are_real_paths(status_home):
     for c in changes:
         assert (r / c["path"]).exists(), c
     assert payload["changes_count"] == len(changes)
+
+
+# ---------------------------------------------------------------------------
+# -z emits RAW filename bytes (plain porcelain C-quoted them to ASCII), so a
+# strict UTF-8 decode of one non-UTF-8 name used to 500 the whole status.
+# ---------------------------------------------------------------------------
+
+
+def test_run_registered_forwards_errors_handler():
+    """Filesystem-independent: the child writes an invalid UTF-8 byte."""
+    from agent_server.utils import registered_run
+
+    argv = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'caf\\xe9')"]
+    with pytest.raises(UnicodeDecodeError):
+        registered_run.run_registered(argv, timeout=30)  # default stays strict
+    out = registered_run.run_registered(argv, timeout=30, errors="backslashreplace")
+    assert out.stdout == "caf\\xe9"
+
+
+def test_status_survives_a_non_utf8_filename(status_home):
+    r = status_home
+    try:
+        with open(bytes(r) + b"/caf\xe9.txt", "wb") as fh:
+            fh.write(b"x")
+    except OSError as exc:  # APFS rejects invalid UTF-8 names; Linux ext4 does not
+        pytest.skip(f"filesystem refuses non-UTF-8 names: {exc}")
+    (r / "README.md").write_text("edited")
+
+    payload = git_mod._compute_git_status(r)
+
+    assert payload["changes"] == [
+        {"status": "M", "path": "README.md"},
+        {"status": "??", "path": "caf\\xe9.txt"},
+    ]
