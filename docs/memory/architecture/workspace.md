@@ -705,6 +705,27 @@ OWNER's stamp (`POST …/role/readiness`, owner check via `get_owned_roster`, ag
 and a template that claims `ready` without a stamp is shown as calibrating. Requirement
 §5.36 of `core-agent.md`; flow in `workspace-role-card.md`.
 
+## The seat decision record — why things were approved, deferred or killed (ent#638, R25)
+
+`client_portal/seat_decisions.py` + `services/seat_decision_service.py` give a seat
+(agent × person, the ent#637 scope) a lintable record of its judgment: `outcome`,
+what was `decided`, the `alternatives` that were live (none = a note, refused), the
+`criterion` that discriminated, who decided (role + person), `review_by` (expiry is
+computed on read, never written), what would `reverse` it, prose only in `notes`.
+Correction supersedes (a new row; the old stays as history), close / reverse are
+status flips, reconfirm moves `review_by`. A `direction` decision (R C3) is kept as
+`routed` with the canon hint — never a seat decision, never dropped. **Readers:**
+own seat always; the agent OWNER (`role_card._is_owner`, never an assignment kind)
+every seat, writable; a stakeholder the assignment provider recognises through the
+optional `kinds_for` seam method every seat read-only (per-agent in v1); an external
+principal is never an owner. Writes: own seat, or the owner on a named seat. The
+companion's half (`routers/seat_decisions.py`, MCP `record_decision` /
+`list_seat_decisions`) resolves the seat from `execution_id` and returns no email.
+The seat's active decisions ride the shared memory block into every turn
+(`platform_prompt_service.format_user_memory_block`), which is what makes a criterion
+reusable and `cites` — the health metric — non-zero. `PortalAgentDecisions.vue` in
+Agent details. Requirement §5.37 of `core-agent.md`; flow in `workspace-seat-decisions.md`.
+
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 
 Clicking an agent opens the **conversation** you were last in. `/workspace/a/:agentName`

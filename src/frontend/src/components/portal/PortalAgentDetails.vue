@@ -181,6 +181,10 @@
     <!-- ent#637: what this agent remembers about YOU, and which runs changed
          it — its own component so the Undo verb is mount-testable on its own. -->
     <PortalAgentMemory :agent-name="agentName" />
+
+    <!-- ent#638: the seat decision record — why things were approved, deferred
+         or killed; own component so record / correct / close are mount-testable. -->
+    <PortalAgentDecisions :agent-name="agentName" />
   </div>
 </template>
 
@@ -201,6 +205,7 @@ import ReportSummary from '@/components/reports/ReportSummary.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalAgentMemory from './PortalAgentMemory.vue'
 import PortalAgentRole from './PortalAgentRole.vue'
+import PortalAgentDecisions from './PortalAgentDecisions.vue'
 import { agentDisplayName } from '@/utils/agentName'
 import { availabilityChip, threadTitle, MAIN_TAB_LABEL } from './portalUtils'
 import { usePortalAgentPage } from '@/composables/usePortalAgentPage'

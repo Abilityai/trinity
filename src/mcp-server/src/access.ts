@@ -364,6 +364,9 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   send_voice_reply: { kind: "baselined", owner: ENT629 + "; effect-guarded per execution (#1084)" },
   // --- memory.ts ---
   write_user_memory: { kind: "baselined", owner: ENT629 },
+  // --- decisions.ts (ent#638) --- the target is only ever the seat's own agent
+  record_decision: { kind: "enforce", param: "agent_name" },
+  list_seat_decisions: { kind: "enforce", param: "agent_name" },
   // --- loops.ts ---
   run_agent_loop: { kind: "enforce", param: "agent_name" },
   get_loop_status: { kind: "in-tool", how: LOOP_RESOLVE },
