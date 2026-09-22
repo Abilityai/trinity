@@ -368,7 +368,9 @@
   - The JSONL reaper keep-set is the **union** of `agent_sessions` and
     `enterprise_portal_sessions` cached UUIDs. Without the union the 6h sweep
     deletes live Workspace JSONLs one hour after they are written, and continuity
-    breaks with no error anywhere
+    breaks with no error anywhere. Open rooms (#2610) and the agent's own
+    `/api/chat` session, read from its marker file (#2958, §5.38), are the third
+    and fourth sources
   - `?tab=session` and legacy session deep links redirect to
     `/workspace?agent=<name>`, query-preserving, and deliberately **same-tab**
     (a URL rewrite of an in-flight navigation, not an entry point); the two
@@ -3326,3 +3328,64 @@ to localStorage in the clear.
 - **Not in scope**: the autonomy dial itself (#641); auto-recording an answered decision
   REQUEST (#611 — `request_id` is the link, DEBT_INBOX 2026-09-22).
 - **Flow**: `docs/memory/feature-flows/workspace-seat-decisions.md`
+
+### 5.38 Chat continuity is the chat's own session (#2958)
+- **Status**: ✅ Implemented (2026-09-22). Claude runtime.
+- **Requirement ID**: CHAT_OWN_SESSION
+- **GitHub Issue**: abilityai/trinity#2958
+- **Problem**: a sequential chat turn (`POST /api/agents/{name}/chat`, which MCP
+  `chat_with_agent(parallel=false)` and CLI `trinity chat` use) ran `claude --continue`,
+  which resumes the newest JSONL in the shared project dir whoever wrote it. Every
+  `/api/task` with an effective timeout above 600 s persists its JSONL there (#678), so
+  the next chat silently continued a scheduled run's near-full context, paid an
+  auto-compaction first (one field case: 162 s of a 173 s execution) and could switch
+  models mid-session. The row said `success` with a large `duration_ms`, which callers
+  read as a degraded agent.
+- **AC1 — own session**: the chat records its session id after a **successful** turn
+  (`agent_state.chat_session_id`, UUID-validated) and resumes it with `--resume <id>`.
+  A failed turn never moves the id. `--continue` is gone from the chat path.
+  **Scope**: the session is per **agent**, shared by every caller of `/chat` on that
+  agent — true before this fix and unchanged by it. It is a **known limitation, not
+  intended behaviour** (a cross-user exposure, tracked separately).
+- **AC2 — model rule**: a different *effective* model (request model, else the agent's
+  `current_model`) starts a fresh session (`event=chat_session_model_change`). Cost:
+  MCP sequential and CLI callers lose context after a `PUT /api/agents/{name}/model`
+  (including the Agent Detail model dropdown). Alias vs full id counts as a change. The
+  Chat tab and MobileAdmin post `/task`, not `/chat`, so they are unaffected.
+- **Dead handle — one cold retry**: a resume turn that fails (not 429/503/504) whose
+  JSONL is **absent after the failure**, that ran no tool and was not cancelled, is
+  retried once cold with the same `execution_id` (re-registered pending first, so a
+  cancel in the gap is honoured) and logs `event=chat_resume_fallback`. Decided by the
+  filesystem, never by the CLI's error text. A failed resume is now a 502
+  (`Execution error: …`), not "returned empty response". **Residual**: a file that
+  exists but still cannot be resumed raises that 502 each turn until
+  `DELETE /api/chat/history` or a model change.
+- **Reset**: `DELETE /api/chat/history` clears the id and marker and bumps a generation
+  counter; a turn in flight across it discards its capture
+  (`event=chat_session_capture_discarded`). No lock (a turn may hold it 30 min).
+- **Cold start counters**: a fresh session resets `session_context_tokens` / cost /
+  output tokens, so it never reports the old session's context as `context_used`.
+- **Keep set**: the agent writes `~/.trinity/chat-session.json` atomically (mkstemp,
+  0600) after each successful turn; cleared on reset and at agent-server startup. The
+  JSONL reaper reads it over docker exec as `developer` (`head -c 512`, in-container
+  `timeout 5`, `asyncio.wait_for`) and unions it in; any unclean read aborts that
+  agent's sweep, and the log names the failure kind only. A failed write keeps the
+  in-memory id (the cold retry absorbs a later reap). Writer and reader paths are pinned
+  by a parity test; `TRINITY_CHAT_SESSION_FILE` overrides it for tests only.
+- **AC3 — attribution**: the agent reads compact events from the JSONL (off the event
+  loop, before the error checks); the backend writes `compact_metadata` on the chat
+  SUCCESS row and on the FAILED row from the #678 structured body, and the `/chat`
+  response's `execution.compaction` is `{events, trigger, pre_tokens, post_tokens,
+  duration_ms}` or null. **Partial**: 504 / 429 / plain-500 bodies carry no metadata,
+  so those failures stay unattributed (follow-up).
+- **AC4 — guidance**: `chat_with_agent` and `get_execution_result` descriptions name
+  the one-off compaction delay; `get_execution_result` returns `compact_metadata`.
+- **Known, not fixed here**: an idle limit on the chat session (it now lives until a
+  restart, reset or model change, and compacts on its own — attributed); per-caller
+  scoping; Continue-as-Chat on a chat row can resume the chat's id (explicit user
+  action); Gemini's bare `--resume` (Claude-only fix).
+- **No schema change** (the column exists on both tracks). No new endpoint.
+- **Tests**: `tests/unit/test_2958_chat_session_isolation.py` (a fake `claude` driving
+  the real chat and headless paths), `test_2958_chat_compact_metadata.py`,
+  `test_2958_session_cleanup_chat_marker.py`, `test_2958_marker_path_parity.py`,
+  `test_2610_resume_surface_parity.py`, `src/mcp-server/src/tools/executions.compact.test.ts`.
