@@ -393,10 +393,13 @@ affordance too**. `portal_owns_agent` is the *same* membership the roster card
 renders, so the UI and the enforcement cannot disagree; the affordance is not
 offered rather than offered-and-refused.
 
-"Unshare" needed new storage: `agent_shared_files` has no audience column
-(`portal_documents` lists every active share of the agent, for every rostered
-client), and the one generic per-user preference store is FK'd to `users.id`,
-which a portal principal has no row in. `portal_file_dismissals` is that
+"Unshare" needed new storage: the one generic per-user preference store is
+FK'd to `users.id`, which a portal principal has no row in. (When this slice
+shipped `agent_shared_files` had no audience at all and `portal_documents`
+listed every active share of the agent to every rostered client;
+trinity-enterprise#549 gave a share ONE addressee — `file-sharing-outbound.md`
+→ *Who a file is for* — so the tab now lists the viewer's own files and a
+dismissal is a preference over those.) `portal_file_dismissals` is that
 storage — server-side, auditable, and it survives a device change, which a
 `localStorage` "hidden on this device" would not. It carries `agent_name` so it
 follows the agent's lifecycle (and so it does not sidestep the cleanup parity

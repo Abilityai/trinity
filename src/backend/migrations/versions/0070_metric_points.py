@@ -22,21 +22,21 @@ PostgreSQL and would silently round a revenue metric's cents.
 
 Mirrors the SQLite `metric_points_table` migration.
 
-**Numbering.** Chains after `0066_metric_definitions` (ent#477, the branch this
+**Numbering.** Chains after `0069_metric_definitions` (ent#477, the branch this
 one stacks on). Per the operator's train order this lands ahead of the open
 #2924 and #2927, which renumber behind it. `check_alembic_heads.py` over a
 `git merge-tree` against LIVE `dev` is the proof and must be re-run immediately
 before merge — the PR-event result goes stale the moment `dev` advances
 (#2533).
 
-Revision ID: 0067_metric_points
-Revises: 0066_metric_definitions
+Revision ID: 0070_metric_points
+Revises: 0069_metric_definitions
 """
 from alembic import op
 
 
-revision = "0067_metric_points"
-down_revision = "0066_metric_definitions"
+revision = "0070_metric_points"
+down_revision = "0069_metric_definitions"
 branch_labels = None
 depends_on = None
 

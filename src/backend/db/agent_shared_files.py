@@ -52,8 +52,15 @@ class AgentSharedFilesOperations:
         created_by: str,
         created_at: str,
         expires_at: str,
+        addressed_to_email: Optional[str] = None,
+        addressed_to_channel: Optional[str] = None,
+        audience_source: Optional[str] = None,
     ) -> str:
-        """Insert a new shared-file row. Returns the file_id."""
+        """Insert a new shared-file row. Returns the file_id.
+
+        The addressee columns (ent#549) default to NULL = the owner only, so a
+        caller that says nothing can never widen who sees a file.
+        """
         with get_engine().begin() as conn:
             conn.execute(
                 insert(agent_shared_files).values(
@@ -67,6 +74,9 @@ class AgentSharedFilesOperations:
                     created_by=created_by,
                     created_at=created_at,
                     expires_at=expires_at,
+                    addressed_to_email=addressed_to_email,
+                    addressed_to_channel=addressed_to_channel,
+                    audience_source=audience_source,
                 )
             )
             return file_id
@@ -201,33 +211,98 @@ class AgentSharedFilesOperations:
             )
             return stored
 
+    # One projection for both listings below, so the owner's panel and a
+    # viewer's tab cannot drift in what a row carries.
+    _LISTING_COLUMNS = (
+        agent_shared_files.c.id,
+        agent_shared_files.c.agent_name,
+        agent_shared_files.c.filename,
+        agent_shared_files.c.stored_filename,
+        agent_shared_files.c.size_bytes,
+        agent_shared_files.c.mime_type,
+        agent_shared_files.c.download_token,
+        agent_shared_files.c.created_by,
+        agent_shared_files.c.created_at,
+        agent_shared_files.c.expires_at,
+        agent_shared_files.c.revoked_at,
+        agent_shared_files.c.download_count,
+        agent_shared_files.c.last_downloaded_at,
+        agent_shared_files.c.addressed_to_email,
+        agent_shared_files.c.addressed_to_channel,
+        agent_shared_files.c.audience_source,
+    )
+
     def list_active_for_agent(self, agent_name: str) -> list:
         """
         Active (non-revoked, non-expired) shares for an agent,
         newest first. Used by the Sharing panel.
+
+        The OPERATOR question — everything this agent has out. Never the read
+        behind a client-facing surface: that is `list_active_for_viewer`.
         """
         now = utc_now_iso()
         stmt = (
-            select(
-                agent_shared_files.c.id,
-                agent_shared_files.c.agent_name,
-                agent_shared_files.c.filename,
-                agent_shared_files.c.stored_filename,
-                agent_shared_files.c.size_bytes,
-                agent_shared_files.c.mime_type,
-                agent_shared_files.c.download_token,
-                agent_shared_files.c.created_by,
-                agent_shared_files.c.created_at,
-                agent_shared_files.c.expires_at,
-                agent_shared_files.c.revoked_at,
-                agent_shared_files.c.download_count,
-                agent_shared_files.c.last_downloaded_at,
-            )
+            select(*self._LISTING_COLUMNS)
             .where(
                 and_(
                     agent_shared_files.c.agent_name == agent_name,
                     agent_shared_files.c.revoked_at.is_(None),
                     agent_shared_files.c.expires_at > now,
+                )
+            )
+            .order_by(agent_shared_files.c.created_at.desc())
+        )
+        with get_engine().connect() as conn:
+            return [dict(row) for row in conn.execute(stmt).mappings()]
+
+    def list_active_for_viewer(
+        self,
+        agent_name: str,
+        viewer_email: Optional[str],
+        *,
+        include_owner_only: bool = False,
+    ) -> list:
+        """Active shares of an agent that are FOR this person, newest first (ent#549).
+
+        The Workspace question, and deliberately not `list_active_for_agent`
+        with a filter bolted on afterwards: a read that loads every share and
+        drops some in Python has already put another person's download token in
+        this process one edit away from the response (the ent#365 FR-2 lesson).
+        Narrowed in the query.
+
+        ``include_owner_only`` adds the rows addressed to nobody at all — NULL
+        email AND NULL channel — which is what a schedule's, an operator chat's
+        or a pre-column row's file is. Only the agent's owner passes it. A row
+        addressed to a CHANNEL identity with no email is not owner-only: it is
+        somebody's, just nobody with a Files tab, and it stays on the owner's
+        panel.
+
+        An empty ``viewer_email`` matches nothing rather than everything — a
+        caller who cannot be identified must not inherit the unaddressed rows.
+        ``viewer_email`` is compared as given: the caller normalises, with the
+        same function the writers use (`turn_audience.normalize_addressee_email`).
+        """
+        audiences = []
+        if viewer_email:
+            audiences.append(agent_shared_files.c.addressed_to_email == viewer_email)
+        if include_owner_only:
+            audiences.append(
+                and_(
+                    agent_shared_files.c.addressed_to_email.is_(None),
+                    agent_shared_files.c.addressed_to_channel.is_(None),
+                )
+            )
+        if not audiences:
+            return []
+        now = utc_now_iso()
+        stmt = (
+            select(*self._LISTING_COLUMNS)
+            .where(
+                and_(
+                    agent_shared_files.c.agent_name == agent_name,
+                    agent_shared_files.c.revoked_at.is_(None),
+                    agent_shared_files.c.expires_at > now,
+                    or_(*audiences),
                 )
             )
             .order_by(agent_shared_files.c.created_at.desc())
