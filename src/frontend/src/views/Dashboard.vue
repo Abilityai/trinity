@@ -69,8 +69,9 @@
               <!-- Create Agent (trinity-enterprise#260) — chassis-level so agent
                    creation is reachable from every mode, not just the List tab.
                    The label degrades to icon-only below `md` (pre-decided in the
-                   plan): the controls cluster is flex-shrink-0, and at 640px in
-                   grid mode the full label pushes the stats cluster below the
+                   plan): the controls cluster wraps rather than shrinks (#2197 dropped
+                   its flex-shrink-0), and at 640px in grid mode the full label
+                   would push the stats cluster below the
                    71px `agents-only` floor of the #1830 degrade ladder — the
                    stats-overflow spec's clip assertion would fire. -->
               <button

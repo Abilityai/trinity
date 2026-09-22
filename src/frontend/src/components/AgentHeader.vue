@@ -55,8 +55,9 @@
            both rigid (a name, a Talk/Workspace pair, a Running toggle), so on a
            single non-wrapping row their combined min-content simply widened the
            PAGE at every width below ~1024px. Wrapping lets the actions drop to
-           their own line; `min-w-0` on the identity block lets a long name
-           truncate instead of pushing. -->
+           their own line; `min-w-0` on the identity block lets that flex item
+           shrink below its content width so the actions wrap instead of the
+           page widening (the name itself is not truncated). -->
       <div class="flex flex-wrap justify-between items-start gap-y-3">
         <!-- Left: Agent Identity -->
         <div class="min-w-0">
