@@ -56,7 +56,10 @@ class SeatDecisionOperations:
     services/seat_decision_service.py."""
 
     def insert_seat_decision(self, values: dict) -> dict:
-        """Insert one decision row. The caller has validated the grammar."""
+        """Insert one decision row. The caller has validated the grammar; the
+        status vocabulary is the one thing checked here, at the sink."""
+        if values.get("status", "active") not in DECISION_STATUSES:
+            raise ValueError(f"unknown decision status: {values.get('status')!r}")
         now = utc_now_iso()
         row = _encode({
             "id": values.get("id") or secrets.token_urlsafe(12),

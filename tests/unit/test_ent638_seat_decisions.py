@@ -122,6 +122,9 @@ class TestGrammar:
         assert svc.effective_status(row, today=TODAY) == "active"
         assert svc.effective_status({"status": "active", "review_by": "2026-09-21"}, today=TODAY) == "expired"
         assert svc.effective_status({"status": "closed", "review_by": "2020-01-01"}, today=TODAY) == "closed"
+        # a routed record is kept so it does not evaporate, not so it accretes
+        assert svc.effective_status({"status": "routed", "review_by": "2020-01-01"}, today=TODAY) == "expired"
+        assert svc.effective_status({"status": "routed", "review_by": FUTURE}, today=TODAY) == "routed"
 
 
 # ---------------------------------------------------------------------------
@@ -490,6 +493,51 @@ class TestPortalRouter:
         ps, _ = wired
         out = ps.record(AGENT, SEAT, is_platform=False, payload=_payload(scope="direction"))
         assert out["decision"]["status"] == "routed" and "canon" in out["hint"]
+
+
+class TestPortalRoutes:
+    """The route layer itself: roster gate first, receipts mapped to HTTP."""
+
+    @pytest.fixture
+    def wired(self, monkeypatch):
+        from client_portal import router as pr
+        calls = []
+        monkeypatch.setattr(pr, "_require_roster", lambda a, e, p=False: calls.append((a, e)))
+        from services import rate_limiter
+        monkeypatch.setattr(rate_limiter, "enforce", lambda *a, **k: None)
+        return pr, calls
+
+    def _principal(self):
+        return SimpleNamespace(email=SEAT, is_platform=False)
+
+    def test_record_is_roster_gated_and_a_refusal_is_the_receipt_as_http(self, wired, monkeypatch):
+        pr, calls = wired
+        from client_portal.models import PortalSeatDecisionRecord
+        monkeypatch.setattr(pr.seat_decisions, "record", lambda *a, **k: (_ for _ in ()).throw(
+            pr.seat_decisions.svc.DecisionRefused("decision_is_a_note", "a note", receipt={"fields": {"alternatives": "x"}})))
+        body = PortalSeatDecisionRecord(**_payload(alternatives=[]))
+        with pytest.raises(HTTPException) as e:
+            pr.portal_seat_decision_record(AGENT, body, principal=self._principal())
+        assert calls == [(AGENT, SEAT)]
+        assert e.value.status_code == 422 and e.value.detail["code"] == "decision_is_a_note"
+        assert e.value.detail["receipt"]["fields"] == {"alternatives": "x"}
+
+    def test_actions_are_roster_gated_and_forward_the_body(self, wired, monkeypatch):
+        pr, calls = wired
+        from client_portal.models import PortalSeatDecisionAction
+        seen = {}
+        monkeypatch.setattr(pr.seat_decisions, "act", lambda a, e, **kw: seen.update(kw) or {"decision": None, "hint": None})
+        pr.portal_seat_decision_act(AGENT, "d1", PortalSeatDecisionAction(action="reverse", reason="changed"),
+                                    principal=self._principal())
+        assert calls == [(AGENT, SEAT)]
+        assert seen["decision_id"] == "d1" and seen["action"] == "reverse" and seen["reason"] == "changed"
+
+    def test_the_page_is_roster_gated(self, wired, monkeypatch):
+        pr, calls = wired
+        monkeypatch.setattr(pr.seat_decisions, "page", lambda a, e, **kw: {"agent_name": a, "my_seat": e, "seats": [e],
+                                                                            "decisions": [], "stats": {}, "can_record": True})
+        out = pr.portal_seat_decisions(AGENT, principal=self._principal())
+        assert calls == [(AGENT, SEAT)] and out["my_seat"] == SEAT
 
 
 # ---------------------------------------------------------------------------

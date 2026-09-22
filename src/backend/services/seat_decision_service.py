@@ -222,16 +222,18 @@ def validate_record(payload: dict, *, today: Optional[date] = None) -> dict:
 
 def effective_status(row: dict, *, today: Optional[date] = None) -> str:
     """`expired` is a state computed from `review_by`, never stored (§7a: it
-    expires rather than accreting). `review_by == today` is NOT expired."""
+    expires rather than accreting). `review_by == today` is NOT expired. A
+    `routed` record expires the same way — it is kept so it does not
+    evaporate, not so it accretes."""
     status = row.get("status") or "active"
-    if status != "active":
+    if status not in ("active", "routed"):
         return status
     try:
         if date.fromisoformat(str(row.get("review_by"))) < (today or _today()):
             return "expired"
     except (TypeError, ValueError):
         pass
-    return "active"
+    return status
 
 
 def _validate_cites(db, agent_name: str, seat_email: str, cites: List[str]) -> None:
