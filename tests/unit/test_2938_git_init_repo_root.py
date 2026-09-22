@@ -167,15 +167,25 @@ class TestANewRepoIsRootedAtHome:
         assert probes == [], probes
         assert sum("rev-parse --show-toplevel" in c for c in recorder.calls) == 1
 
-    def test_an_existing_workspace_rooted_repo_is_still_reinitialised_in_place(self, run_init):
+    def test_an_existing_workspace_rooted_repo_is_reinitialised_in_place_then_refused(self, run_init):
         """A genuine legacy repo (git says `workspace/`) keeps its root — that
-        is a re-init of a real repository, not a placement decision."""
-        result, recorder, _ = run_init(toplevel="/home/developer/workspace")
+        is a re-init of a real repository, not a placement decision. But the
+        agent server reads exactly one root, `/home/developer`, so its status
+        route answers `git_enabled: false` for a workspace-rooted repo (it is
+        a bare `Path("/home/developer/.git").exists()` — no walk-up). The
+        stub here models that real answer, so the verify step refuses the
+        init with the #2938 reason instead of a 200 the panel contradicts.
+        (Before #2938 this case returned 200 and stayed 'not enabled' forever.)
+        """
+        stub = _agent_server(_FakeResponse(200, {"git_enabled": False, "git_dir": None}))
+        result, recorder, _ = run_init(toplevel="/home/developer/workspace", agent_server=stub)
 
-        assert result.success, result.error
         assert result.git_dir == "/home/developer/workspace"
         assert recorder.commands_in("/home/developer/workspace")
         assert not recorder.commands_in("/home/developer")
+        assert result.success is False
+        assert "cannot see the repository at /home/developer/workspace" in result.error
+        assert "#2938" in result.error
 
 
 # ---------------------------------------------------------------------------

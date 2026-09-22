@@ -1148,7 +1148,7 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_git_config WHERE agent_na
 
 **Verify Directory Detection**:
 - New agents (2026-02+): Check backend logs for `Using home directory: /home/developer`
-- LEGACY agents (pre-2026-02): May show `Using workspace directory: /home/developer/workspace` if workspace exists with content
+- LEGACY agents (pre-2026-02, repo genuinely rooted at `workspace/`): logs `[LEGACY] Re-initializing an existing workspace-rooted repository`, then the agent-server verify (#2938) fails the init with a **400** — the agent server reads only `/home/developer`, so that repo can never be seen by Sync / Log / the git panel
 - Check for: `Git initialization verified successfully in {directory}`
 
 #### 3. MCP Tool Usage
@@ -1227,8 +1227,16 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_git_config WHERE agent_na
 
 **LEGACY Case** (agents created before 2026-02):
 - If the agent's repository is genuinely rooted at `/home/developer/workspace/`
-  (git's own `rev-parse --show-toplevel` says so), that directory is used
-- Backend logs: `Using workspace directory: /home/developer/workspace`
+  (git's own `rev-parse --show-toplevel` says so), that directory is used for
+  the re-init — and the agent-server verify (#2938, below) then **refuses the
+  init with a 400** and rolls the `agent_git_config` row back: the agent
+  server's status route is a bare `Path("/home/developer/.git").exists()`, so
+  a workspace-rooted repo answers `git_enabled: false` deterministically.
+  Before #2938 this case returned 200 and every later git call reported "not
+  enabled"; now the operator gets the reason. Repairing such an agent (moving
+  the repo to `/home/developer`) is an operator decision, not something init
+  does silently.
+- Backend logs: `[LEGACY] Re-initializing an existing workspace-rooted repository: /home/developer/workspace`
 - `.gitignore` merge also runs here (#458 — previously skipped)
 - Detection logic shared with `_detect_git_dir`, used by both init and the post-init Push migration (#462)
 - A populated non-git `workspace/` **data** directory never forces this
@@ -1571,8 +1579,9 @@ The system uses smart detection to find the correct directory (in `git_service.i
 **Known limitation**: an agent that was already re-initialised *while
 misdetected* now has a real `workspace/.git` — a genuine nested repo,
 indistinguishable from a legitimate legacy agent by any probe. Git's answer for
-it is `workspace/`, and this logic keeps it there; repairing those takes an
-operator decision per agent.
+it is `workspace/`, and this logic keeps it there — so the agent-server verify
+in step 4 refuses the init with the #2938 reason (the agent server reads only
+`/home/developer`); repairing those takes an operator decision per agent.
 
 4. **Verify**: Run `git rev-parse --git-dir`, then ask the agent server's own
    `GET /api/git/status` (#2938) — `git_enabled: false` fails the init with a

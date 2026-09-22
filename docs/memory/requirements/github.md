@@ -16,7 +16,7 @@
 ### 11.2 GitHub Repository Initialization
 - **Status**: ✅ Implemented
 - **Description**: Initialize GitHub sync for existing agents
-- **Repo root (#2938)**: a repository that does not exist yet is always created at `/home/developer` — the one root the agent server's git router reads — whatever `workspace/` holds; an existing repo (a legacy workspace-rooted one included) stays where `git rev-parse --show-toplevel` finds it. The pre-#2075 "populated `workspace/` ⇒ legacy root" content heuristic is retired: it created a template's repo where Sync / Log / the git panel could never see it.
+- **Repo root (#2938)**: a repository that does not exist yet is always created at `/home/developer` — the one root the agent server's git router reads — whatever `workspace/` holds; an existing repo (a legacy workspace-rooted one included) stays where `git rev-parse --show-toplevel` finds it — and because the agent server reads only `/home/developer`, the post-init verify then refuses a workspace-rooted one with a 400 and rolls the config back (before #2938 that case returned 200 and reported "not enabled" forever). The pre-#2075 "populated `workspace/` ⇒ legacy root" content heuristic is retired: it created a template's repo where Sync / Log / the git panel could never see it.
 - **Verified where it is consumed (#2938)**: init is confirmed through the agent server's own `GET /api/git/status` after the backend's `git rev-parse --git-dir`; `git_enabled: false` there fails the init with a named reason (400, config row rolled back), an unanswerable probe warns and keeps the backend verdict. A backend-only check cannot catch a mis-rooted repo, since it runs in the directory the backend chose.
 - **Flow**: `docs/memory/feature-flows/github-repo-initialization.md`
 
