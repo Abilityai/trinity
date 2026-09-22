@@ -284,8 +284,8 @@ def test_a_reachable_trigger_is_not_reported(pilot, trigger):
 
 @pytest.mark.parametrize("trigger", ["manual", "mcp", "chat", "self_task", "voip"])
 def test_an_interactive_trigger_is_not_reported(pilot, trigger):
-    """Interactive turns are excluded from pull by design (Open Question 7's
-    scope cut), so they are not a gap and must not be logged as one."""
+    """Interactive turns are excluded from pull until #2842/#2843 land (#1989),
+    so they are a known migration state, not a gap, and must not be logged as one."""
     assert pilot.note_unreachable_pull_trigger("pilot-a", trigger) is False
 
 

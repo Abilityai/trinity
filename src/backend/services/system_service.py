@@ -15,6 +15,7 @@ from utils.safe_yaml import (
 )
 import re
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple, Optional
 
@@ -774,7 +775,47 @@ def _manifest_default_resources() -> dict:
             "memory": _get_default_resource("memory")}
 
 
+@dataclass(frozen=True)
+class SystemMembership:
+    """The membership answer, with the two facts a DESTRUCTIVE consumer needs.
+
+    `system_member_names` returns `List[str]`, which is everything `get_system`,
+    `restart_system` and `export_manifest` need and is kept unchanged for them.
+    It discards two things, and both matter only once the verb deletes:
+
+    * `tags_readable` — the body below deliberately DEGRADES to the raw prefix
+      when the tag read fails, and that ranking is argued at length there for
+      `restart`: over-capture restarts one extra container and logs it, while
+      under-capture restarts a subset and reports success. A verb that DELETES
+      inverts the cheap half — over-capture removes an innocent agent's
+      container, and recovery is an admin incident rather than a log line — so
+      such a consumer can REFUSE on unverified membership instead. Exposing the
+      flag is what lets it rank the two errors at its own call site rather than
+      forking this predicate into a fourth rule (ent#454).
+    * `evidence` — WHY each name is a member. The prefix fallback's documented
+      residual (`acme` may capture `acme-extra-worker`) is invisible in a flat
+      name list; with per-member evidence a caller can show "matched by name
+      only, not tagged by a deploy" and let the operator opt that member out.
+    """
+
+    members: List[str]
+    tags_readable: bool = True
+    # name -> "tag" | "prefix" | "both". Keyed only for actual members.
+    evidence: Dict[str, str] = field(default_factory=dict)
+
+
 def system_member_names(system_name: str, agent_names: List[str]) -> List[str]:
+    """Which agents belong to `system_name` (#2373) — names only.
+
+    A thin wrapper over `system_membership`, which owns the body. Deliberately
+    NOT a second implementation: three copies of a wrong rule is what made
+    #2373 a bug in three places, and the teardown verb (ent#454) reads the same
+    body through the structured entry point rather than adding a fourth.
+    """
+    return system_membership(system_name, agent_names).members
+
+
+def system_membership(system_name: str, agent_names: List[str]) -> SystemMembership:
     """Which agents belong to `system_name` (#2373).
 
     THE ONE membership predicate. `get_system`, `restart_system` and
@@ -805,7 +846,7 @@ def system_member_names(system_name: str, agent_names: List[str]) -> List[str]:
     ambiguity, and every system deployed since ent#124 has it.
     """
     if not system_name or not agent_names:
-        return []
+        return SystemMembership(members=[])
     tags_readable = True
     try:
         tags_by_agent = db.get_tags_for_agents(list(agent_names)) or {}
@@ -882,8 +923,22 @@ def system_member_names(system_name: str, agent_names: List[str]) -> List[str]:
 
     # Roster order, not tag-then-prefix: the caller renders and restarts in this
     # order, and a membership set that reshuffles on a tag edit is a surprise.
-    members = set(tagged) | set(narrowed)
-    return [n for n in agent_names if n in members]
+    tagged_set = set(tagged)
+    members = tagged_set | set(narrowed)
+    ordered = [n for n in agent_names if n in members]
+
+    # Evidence is derived from the two sets that already decided membership, so
+    # it cannot disagree with them: `both` is a tagged member the prefix would
+    # ALSO have claimed, and it is a distinct answer from `tag` because only the
+    # latter says "this member is invisible to a name-based rule". `prefix` is
+    # the one a destructive caller renders as "matched by name only".
+    evidence = {
+        n: ("both" if n.startswith(prefix) else "tag") if n in tagged_set else "prefix"
+        for n in ordered
+    }
+    return SystemMembership(
+        members=ordered, tags_readable=tags_readable, evidence=evidence
+    )
 
 
 def configure_tags(
@@ -940,6 +995,16 @@ def configure_tags(
     return tags_count
 
 
+# The description `create_system_view` stamps on the view it auto-creates for a
+# deploy. It is load-bearing as an IDENTIFIER, not just as prose: nothing
+# persists a system↔view link, so the only way to find that view again — to
+# remove it with the system (ent#454), or to tell it apart from a user-created
+# view that merely filters the same tag — is this string plus the system tag in
+# `filter_tags`. One constant, formatted by the writer and by every reader, so
+# the two cannot drift into two vocabularies for one fact.
+SYSTEM_VIEW_AUTO_DESCRIPTION = "Auto-created for {system_name} system deployment"
+
+
 def create_system_view(
     system_name: str,
     system_view: SystemViewConfig,
@@ -974,7 +1039,7 @@ def create_system_view(
         # Create the view
         view_data = SystemViewCreate(
             name=system_view.name,
-            description=f"Auto-created for {system_name} system deployment",
+            description=SYSTEM_VIEW_AUTO_DESCRIPTION.format(system_name=system_name),
             icon=system_view.icon,
             color=system_view.color,
             filter_tags=filter_tags,
