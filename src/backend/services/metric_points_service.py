@@ -40,7 +40,11 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from models import METRIC_VALUE_TEXT_MAX_LEN
+from models import (
+    METRIC_DIM_VALUE_MAX_LEN,
+    METRIC_TS_FUTURE_SKEW_SECONDS,
+    METRIC_VALUE_TEXT_MAX_LEN,
+)
 from services.template_metrics import (
     MAX_DIMENSIONS,
     MAX_STATUS_VALUE_LEN,
@@ -62,8 +66,9 @@ _RFC3339_RE = re.compile(
 # unstorable point forever is the failure this prevents at the cheap end.
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
-MAX_DIM_VALUE_LEN = 128
-TS_FUTURE_SKEW_SECONDS = 300
+# One source for the wire limits: models.py is where the contract is read.
+MAX_DIM_VALUE_LEN = METRIC_DIM_VALUE_MAX_LEN
+TS_FUTURE_SKEW_SECONDS = METRIC_TS_FUTURE_SKEW_SECONDS
 # Below this, a timestamp is far likelier to be a typo or a zero-year default
 # than a real observation — and one such point steers the retention sweep.
 TS_FLOOR = datetime(2000, 1, 1, tzinfo=timezone.utc)

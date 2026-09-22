@@ -538,6 +538,16 @@ def test_a_changed_field_changes_the_hash():
     assert tm.definition_hash(a) != tm.definition_hash(b)
 
 
+def test_the_hash_ignores_its_own_key():
+    """`_reconcile` writes `definition_hash` INTO the entry it just hashed, so
+    hashing the same object twice must not drift — a second pass over one
+    list would otherwise report every metric as `updated`."""
+    entry = tm.normalize_declared_metrics([_entry(label="A")])[0]
+    first = tm.definition_hash(entry)
+    entry["definition_hash"] = first
+    assert tm.definition_hash(entry) == first
+
+
 def test_the_hash_survives_a_yaml_native_in_an_extension():
     import datetime
 

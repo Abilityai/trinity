@@ -475,6 +475,15 @@ def test_the_alembic_revision_builds_the_table_on_postgres(monkeypatch):
 # The summary shape the hooks and the route both publish
 # ---------------------------------------------------------------------------
 
+def test_an_unknown_source_is_refused_before_it_reaches_the_store(db_backend):
+    """`source` is recorded on the row for an operator to read back; a trigger
+    name nobody declared in SOURCES would land there unchecked and mean
+    nothing to anyone."""
+    with pytest.raises(ValueError, match="bogus"):
+        _reconcile([_entry()], source="bogus")
+    assert _rows() == {}
+
+
 def test_the_summary_serializes_to_the_documented_keys(db_backend):
     summary = _reconcile([_entry()])
     payload = summary.to_dict()
