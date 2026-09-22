@@ -295,13 +295,25 @@
   - Back-compat: existing `/health` keys unchanged; new keys additive.
 
 ### 12.9 Cleanup Service for Stuck Resources
-- **Status**: ✅ Implemented (Updated 2026-08-28, Issue #2433)
+- **Status**: ✅ Implemented (Updated 2026-09-22, Issue #2944)
 - **Requirement ID**: CLEANUP-001
-- **GitHub Issue**: #94, #129, #2433
+- **GitHub Issue**: #94, #129, #2433, #2944
 - **Description**: Background service that automatically recovers stuck intermediate states via active watchdog reconciliation and passive stale detection
 - **Key Features**:
   - **Active watchdog** (Issue #129): Reconciles DB execution state against agent process registries every 5 minutes
   - Orphan recovery: Executions marked "running" in DB but not found on agent are marked failed with descriptive error
+  - **A finished turn's result is claimed, never failed over (#2944)**: the agent retains every
+    sync terminal (`/api/task`, `/api/chat`) as the #1083 envelope and serves it at
+    `GET /api/executions/{id}/result`; the watchdog (periodic + boot) asks for it before writing
+    `failed` — for a row the agent reports as recently completed with no live dispatcher, and for
+    a row absent everywhere — and applies it through `apply_result` with the result-callback's
+    exact inputs (activity, breaker, slot). Claim gated on the record being ≥180 s old (a live
+    dispatcher is not reliably `alive` between its POST returning and its CAS). A coded 404 lets
+    the orphan string say "no retained result"; an old image's bare 404 keeps the #2433 path
+    unchanged; a probe that could not be asked withholds the row for a cycle. Counted in
+    `CleanupReport.results_recovered` (a recovery) / `result_claims_deferred` /
+    `result_probe_deferred` (observability); WS event `result_recovered`. Not covered: the chat
+    transcript surface of a recovered `/api/chat` row, and timeout-side loss (registered debt)
   - **Proof-of-life is two-sided (#2433)**: an admitted execution (row `running`, slot held) is an
     orphan only when the agent does not know it **and** no live backend dispatcher owns it. The
     agent side reports `executions` ∪ `recently_completed_ids` ∪ `pending_ids` (accepted at
