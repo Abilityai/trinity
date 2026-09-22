@@ -51,9 +51,16 @@
 
     <!-- ROW 1: Identity + Primary Action -->
     <div class="p-4 pb-3 pl-16">
-      <div class="flex justify-between items-start">
+      <!-- #2197 — `flex-wrap` + `gap-y-3`. Identity and the action buttons are
+           both rigid (a name, a Talk/Workspace pair, a Running toggle), so on a
+           single non-wrapping row their combined min-content simply widened the
+           PAGE at every width below ~1024px. Wrapping lets the actions drop to
+           their own line; `min-w-0` on the identity block lets that flex item
+           shrink below its content width so the actions wrap instead of the
+           page widening (the name itself is not truncated). -->
+      <div class="flex flex-wrap justify-between items-start gap-y-3">
         <!-- Left: Agent Identity -->
-        <div>
+        <div class="min-w-0">
           <div class="flex items-center gap-2">
             <!-- Editable agent name -->
             <!-- ent#181: the demoted slug rename. Separate mode, explicit copy —
@@ -204,7 +211,9 @@
           </div>
         </div>
         <!-- Right: Primary Actions -->
-        <div class="flex items-center space-x-3">
+        <!-- `gap-3`, not `space-x-3`: once this can wrap, a `space-x` row
+             mis-indents every line after the first. -->
+        <div class="flex flex-wrap items-center gap-3">
           <!-- Brain Orb logo (#60) — opens the agent's self-rendering mind page -->
           <button
             v-if="brainAvailable"
@@ -295,9 +304,13 @@
     </div>
 
     <!-- ROW 2: Settings + Stats (combined) -->
-    <div class="pl-16 pr-4 py-2.5 border-t border-gray-100 dark:border-gray-700 flex items-center">
+    <!-- #2197 — same treatment as row 1, and this is the row that actually
+         dominated the measurement: toggles + Tags on the left and the live
+         CPU/MEM/uptime cluster on the right add up to ~790px of min-content,
+         so the page body scrolled horizontally from 1023px down. -->
+    <div class="pl-16 pr-4 py-2.5 border-t border-gray-100 dark:border-gray-700 flex flex-wrap items-center gap-y-2">
       <!-- Left side: Mode toggles + Tags -->
-      <div class="flex items-center">
+      <div class="flex flex-wrap items-center gap-y-2 min-w-0">
         <!-- Autonomy Toggle (not for system agents) -->
         <div v-if="!agent.is_system && agent.can_share" class="flex items-center">
           <AutonomyToggle
@@ -333,7 +346,11 @@
       </div>
 
       <!-- Right side: Stats (running) or Resource info (stopped) -->
-      <div class="flex items-center ml-auto space-x-4 text-xs">
+      <!-- `ml-auto` still right-aligns this while both clusters share a line;
+           once the row wraps it simply starts the second line. The inner
+           `flex-wrap` matters on its own: the running-stats set is ~374px, wider
+           than a 375px phone's content box all by itself. -->
+      <div class="flex flex-wrap items-center ml-auto gap-x-4 gap-y-1 text-xs">
         <!-- When running: Show live stats with sparklines -->
         <template v-if="agent.status === 'running' && agentStats">
           <!-- CPU -->
@@ -407,7 +424,7 @@
     <!-- TOKEN USAGE ROW: 7-day sparkline + today vs average trend -->
     <div
       v-if="tokenStats && (tokenStats.lifetime_executions > 0)"
-      class="px-4 py-2 border-t border-gray-100 dark:border-gray-700 flex items-center space-x-4 text-xs"
+      class="px-4 py-2 border-t border-gray-100 dark:border-gray-700 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs"
     >
       <!-- #471 Tier 0: billing-mode qualifier — subscription usage shown as
            API-price equivalents, never presented as a bill -->
@@ -455,7 +472,9 @@
         </span>
       </div>
       <!-- Lifetime cost -->
-      <div class="ml-auto flex items-center space-x-1 text-gray-400 dark:text-gray-500">
+      <!-- #2197 — the cost row is the third that had to wrap: at 375px the
+           lifetime-spend cluster is the last thing still pushing the page. -->
+      <div class="ml-auto flex flex-wrap items-center gap-1 text-gray-400 dark:text-gray-500">
         <span>Lifetime</span>
         <span class="font-mono text-gray-600 dark:text-gray-400" :title="costUnreported ? 'Cost is not reported under this auth — token-based tracking only' : null">{{ costUnreported ? '—' : costPrefix + formatCost(tokenStats.lifetime_cost) }}</span>
         <span class="text-gray-300 dark:text-gray-600">·</span>
