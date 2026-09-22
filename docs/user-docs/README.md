@@ -17,7 +17,7 @@
 ## Guides
 
 - [Deploying Trinity](guides/deploying-trinity.md) — Cloud vs self-hosted setup, step-by-step
-- [Deploy on DigitalOcean](guides/deploying/digitalocean.md) — One command from your terminal to an HTTPS Droplet: doctl, a Claude subscription token, an optional domain
+- [Deploy on DigitalOcean](guides/deploying/digitalocean.md) — One command from your terminal to an HTTPS Droplet: doctl and an optional domain; you connect Claude on first sign-in
 - [Using Trinity](guides/using-trinity.md) — UI tour: dashboard, agents, monitoring
 - [Building Agents](guides/building-agents.md) — Create, develop, deploy with Claude Code + abilities
 

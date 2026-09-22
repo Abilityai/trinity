@@ -33,8 +33,8 @@
 | T-001 | HARD | STATIC | template.yaml | Valid YAML syntax |
 | T-002 | HARD | STATIC | template.yaml | `name` field present and valid (lowercase alphanumeric + hyphens, ≤64 chars) |
 | T-003 | HARD | STATIC | template.yaml | `description` field present and non-empty |
-| T-004 | HARD | STATIC | template.yaml | `resources.cpu` present and valid Docker CPU string |
-| T-005 | HARD | STATIC | template.yaml | `resources.memory` present and valid Docker memory string |
+| T-004 | HARD | STATIC | template.yaml | `resources.cpu` is a value container creation accepts, when declared (absent = inherit the instance default) |
+| T-005 | HARD | STATIC | template.yaml | `resources.memory` is a value container creation accepts, when declared (absent = inherit the instance default) |
 | T-006 | SOFT | STATIC | template.yaml | `display_name` field present |
 | T-007 | INFO | STATIC | template.yaml | `version` field present (semantic version format) |
 | T-008 | INFO | STATIC | template.yaml | `author` field present |
@@ -87,7 +87,7 @@
 | X-001 | SOFT | AI | Consistency | Agent name, `display_name`, and `description` tell a coherent story about the same agent |
 | X-002 | SOFT | AI | Consistency | CLAUDE.md identity is consistent with `template.yaml` description and use cases |
 | X-003 | SOFT | AI | Consistency | Skills/playbooks described in `template.yaml` match skills that actually exist in `.claude/skills/` |
-| X-004 | SOFT | AI | Consistency | MCP servers listed in `template.yaml` match servers in `.mcp.json.template` |
+| X-004 | SOFT | STATIC | Consistency | MCP servers listed in `template.yaml` match servers in `.mcp.json.template`, apart from the platform-injected `trinity` |
 | X-005 | SOFT | AI | Consistency | Credentials in `.env.example` are consistent with those documented in CLAUDE.md |
 | X-006 | INFO | AI | Consistency | The agent's stated use cases are achievable given its declared tools and MCP servers |
 | X-007 | SOFT | STATIC | Consistency | Scheduled messages resolve to an existing `.claude/skills/<name>/SKILL.md` **or** `.claude/commands/<name>.md` |
@@ -206,9 +206,22 @@ Must match `/^[a-z0-9][a-z0-9\-]*$/`, max 64 chars. Used as Docker container nam
 Severity: HARD | Type: STATIC  
 Required for template gallery display.
 
-**T-004/T-005** — `resources.cpu` and `resources.memory` valid  
+**T-004/T-005** — `resources.cpu` and `resources.memory` valid when declared  
 Severity: HARD | Type: STATIC  
-CPU must be a numeric string ("1", "2", "4", "8", "16"). Memory must match `/^\d+[gm]$/` (e.g., "2g", "512m").
+An ABSENT `resources` block (or an absent/empty key inside one) PASSES: the agent
+then inherits the instance-wide default an admin sets under Settings, which is what
+the bundled starters and `local:default` rely on — and a block here overrides both
+that default and the values a manifest or API caller asked for.
+
+A declared value is validated by the same functions container creation uses
+(`normalize_cpu` / `normalize_memory`), so the check accepts exactly what creation
+accepts and never reports a must-fix for a template that would deploy: CPU is `1`,
+`2`, `4`, `8` or `16`; memory is `1g`, `2g`, `4g`, `8g`, `16g` or `32g`, case-folded
+(`4G` is fine). A Kubernetes-style value (`cpu: "0.5"`, `memory: "512Mi"`) or a size
+outside that set (`512m`) FAILS — creation rejects it with a 400.
+
+A `resources` block that is not a mapping (a list, a string, a number) FAILS on
+T-004 and skips T-005, so one malformed block is one finding.
 
 **T-006** — `display_name` present  
 Severity: SOFT | Type: STATIC  
@@ -481,6 +494,8 @@ If `template.yaml` lists `skills:`, verify each has a corresponding SKILL.md fil
 **X-004** — MCP servers consistent across files  
 Severity: SOFT | Type: STATIC  
 Server names in `template.yaml mcp_servers[]` must match keys in `.mcp.json.template mcpServers{}`. Mismatches mean the UI shows capabilities the agent can't actually use.
+
+One exemption: `trinity`. The agent's own boot writes that entry into `.mcp.json`, so a template that declares it in `template.yaml` and omits it from `.mcp.json.template` is correct. The other direction is still reported — a template shipping its own `trinity` block is overwritten when Trinity MCP is configured and left standing when it is not.
 
 **X-005** — `.env.example` and CLAUDE.md credential references consistent  
 Severity: SOFT | Type: AI  
