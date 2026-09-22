@@ -484,6 +484,9 @@ CREATE TABLE agent_shared_files (
     consumed_at TEXT,                     -- deferred
     download_count INTEGER DEFAULT 0,
     last_downloaded_at TEXT,
+    addressed_to_email TEXT,              -- ent#549: whose Files tab lists the row; NULL + NULL channel = the owner only
+    addressed_to_channel TEXT,            -- ent#549: `whatsapp:+…` / `telegram:<chat>` — DISPLAY ONLY, never filtered on
+    audience_source TEXT,                 -- ent#549: turn | override | channel | none | ambiguous; NULL = pre-column row
     FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
         ON DELETE CASCADE ON UPDATE CASCADE   -- aspirational; manual cascade per platform convention
 );

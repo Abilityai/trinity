@@ -776,12 +776,23 @@ agent_shared_files = Table(
     Column("consumed_at", Text),
     Column("download_count", Integer),
     Column("last_downloaded_at", Text),
+    # ent#549 — who the file is FOR. Decided by the platform from the turn the
+    # share came from (`services/turn_audience.py`), or named by the agent and
+    # checked against its roster. NULL email AND NULL channel = the owner only,
+    # which is also what every row from before these columns means.
+    Column("addressed_to_email", Text),
+    # The channel identity (`whatsapp:+…`, `telegram:<chat>`). DISPLAY ONLY — the
+    # owner's panel shows it; no reader ever filters on it.
+    Column("addressed_to_channel", Text),
+    # How the addressee was decided: turn | override | channel | none |
+    # ambiguous. NULL = a row that predates the column.
+    Column("audience_source", Text),
 )
 
 # #2582 / ent#548 — a Workspace viewer removes an agent-shared file from THEIR
-# list without revoking the share. `agent_shared_files` has no audience column,
-# so every rostered client already sees every active share of that agent; this
-# is the per-viewer preference layered over it.
+# list without revoking the share. Since ent#549 a file has an addressee, so
+# this is a preference over the viewer's OWN files; onward sharing (ent#633)
+# is what will make it a per-viewer layer over a shared row again.
 #
 # `agent_name` is load-bearing, not decoration: `agent_shared_files` is
 # registered CASCADE in `db/agent_cleanup.py`, so deleting an agent hard-deletes

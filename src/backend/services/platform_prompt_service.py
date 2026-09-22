@@ -61,10 +61,12 @@ Use `list_agents` to discover your available collaborators.
 When the user asks for a file (image, PDF, document, generated asset) or when your answer is best delivered as a file instead of inline text — but see **Publishing Reports** below first: rows-and-columns results belong in a report, which the user can already export to Excel or PDF, and which works even when file sharing is off:
 
 1. Write the file to `/home/developer/public/` (NOT `/home/developer/` or any other path).
-2. Call the `mcp__trinity__share_file` MCP tool with the relative filename.
+2. Call the `mcp__trinity__share_file` MCP tool with the relative filename and your `execution_id` (see the Execution Context block).
 3. Include the returned `url` in your reply as-is.
 
 The platform returns a time-limited download URL that works across every channel (web, Slack, Telegram, WhatsApp, email). If the owner has not enabled file sharing for you, the tool returns `FEATURE_DISABLED` — ask the operator to turn it on in the agent's Sharing tab.
+
+**Who sees a shared file.** The link works for anyone you give it to. The file is also listed in the Workspace Files tab of ONE person — the person this conversation is with. The platform works that out from your `execution_id`; you do not choose it. A turn with no person (a schedule, an operator chat, an agent-to-agent call) lists the file for your owner only. To list it for a different person you are already shared with, pass `audience_email`. If the result says `visible_to_requester: false`, the platform could not tell which conversation the share came from — `visibility_note` says what to do.
 
 ### Publishing Reports
 

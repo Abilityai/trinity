@@ -805,9 +805,19 @@ at every call site (ent#358). Therefore a **non-owner admin is a viewer here** �
 than the platform surface, and correct — and an **owner signed in with a magic-link portal
 token also gets the viewer affordance**. `portal_owns_agent` is the same membership the
 roster card renders, so the UI and the enforcement cannot disagree: the affordance is
-simply not offered rather than offered-and-refused. `portal_file_dismissals` is per-viewer
-storage because `agent_shared_files` has no audience column and `user_ui_preferences` is
-FK'd to `users.id`, which a portal principal has no row in.
+simply not offered rather than offered-and-refused. `portal_file_dismissals` is its own
+table because `user_ui_preferences` is FK'd to `users.id`, which a portal principal has no
+row in.
+
+**What the tab lists (trinity-enterprise#549).** A shared file has ONE addressee, decided by
+the platform from the turn it came from — see
+[Outbound File Sharing](integrations.md#outbound-file-sharing-files-001), the one home of
+that rule. The tab lists what is addressed to the viewer, and for the agent's owner (the
+same `portal_owns_agent`, so a non-owner admin and an owner on a magic-link token are
+viewers here too) also the files addressed to nobody: a schedule's, an operator chat's, a
+row from before the columns. "Nothing shared with you yet." used to sit above other
+people's files; it is now true. A dismissal is therefore a preference over the viewer's
+OWN files until onward sharing (ent#633) makes a row several people's again.
 
 **Every `/api/files/` share URL is previewed same-origin (#2733).**
 `portalFiles.js::sharePreviewPath` takes the path from that route onward and drops whatever

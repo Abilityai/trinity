@@ -34,6 +34,8 @@ from services import idempotency_service
 from services.docker_service import get_agent_container
 from services.docker_utils import container_get_archive
 from services.settings_service import get_public_chat_url
+from services import turn_audience
+from services.turn_audience import TurnAudience
 
 logger = logging.getLogger(__name__)
 
@@ -316,10 +318,14 @@ def _persist_and_register(
     display_name: Optional[str],
     expires_in: int,
     created_by: Optional[str],
+    audience: Optional[TurnAudience] = None,
 ) -> dict:
     """
     Shared tail of the share pipeline: MIME-detect → blocklist → quota →
     disk-check → persist to disk → DB insert → mint URL.
+
+    ``audience`` (ent#549) is who the file is for. Absent means the owner only —
+    a caller that says nothing can never widen who sees a file.
 
     Operates on in-memory bytes that have *already* been obtained. The two
     public entry points differ only in where ``data`` comes from:
@@ -365,6 +371,9 @@ def _persist_and_register(
             created_by=created_by or agent_name,
             created_at=now.isoformat(),
             expires_at=expires_at.isoformat(),
+            addressed_to_email=audience.email if audience else None,
+            addressed_to_channel=audience.channel if audience else None,
+            audience_source=audience.source if audience else turn_audience.SOURCE_NONE,
         )
     except Exception:
         # Don't leak half-written files on DB failure
@@ -375,9 +384,13 @@ def _persist_and_register(
         raise
 
     url = build_download_url(file_id, download_token)
+    # The addressee is never logged — `audience_source` and a boolean are enough
+    # to explain a row, and an email or a phone number in a log line is not.
     logger.info(
-        "[shared-files] agent=%s shared file_id=%s filename=%s size=%d mime=%s",
+        "[shared-files] agent=%s shared file_id=%s filename=%s size=%d mime=%s audience=%s addressed=%s",
         agent_name, file_id, display, size_bytes, mime_type,
+        audience.source if audience else turn_audience.SOURCE_NONE,
+        bool(audience and not audience.is_owner_only),
     )
 
     return {
@@ -389,6 +402,88 @@ def _persist_and_register(
     }
 
 
+_OWNER_ONLY_NOTE = (
+    "This file is listed for the agent's owner only: the platform could not tell "
+    "which conversation this share came from, so it did not guess. The link still "
+    "works for anyone you give it to. To put the file in the Files tab of the "
+    "person you are talking to, call share_file again with your current "
+    "execution_id (the Execution Context block of your system prompt), or with "
+    "audience_email set to their address."
+)
+
+
+def _audience_from_override(agent_name: str, audience_email: str) -> TurnAudience:
+    """The agent named a person. Checked against the agent's OWN roster, with the
+    predicate the READER uses, so a stored addressee is always someone who can
+    actually open the tab it decides (the ent#365 rule: a broader write gate
+    stores rows nobody can read, a narrower one refuses people who could).
+
+    ``include_owned=True``: the Files tab shows an owner the files addressed to
+    them, so refusing the owner's address would make the one person who can
+    always see the file the only one who cannot be named.
+    """
+    email = turn_audience.normalize_addressee_email(audience_email)
+    if email is None:
+        raise HTTPException(
+            status_code=400,
+            detail="INVALID_AUDIENCE: audience_email must be an email address",
+        )
+    # Function-local, and through the MODULE: `client_portal.service` imports
+    # this service back, and a from-import alias would detach a test's patch.
+    from client_portal import service as portal_service
+    try:
+        reachable = portal_service.agent_on_roster(agent_name, email, include_owned=True)
+    except Exception as e:  # noqa: BLE001 — an unreadable roster must not share
+        logger.warning("[shared-files] audience check failed for %s: %s", agent_name, type(e).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="AUDIENCE_UNVERIFIABLE: could not verify the file's audience — try again.",
+        )
+    if not reachable:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "AUDIENCE_NOT_ON_ROSTER: audience_email is not someone this agent is "
+                "shared with — share the agent with that address first, or omit "
+                "audience_email and the file goes to the person this turn is for."
+            ),
+        )
+    return TurnAudience(email, None, turn_audience.SOURCE_OVERRIDE)
+
+
+def _with_addressee(payload: dict, audience: TurnAudience) -> dict:
+    """The response. `addressed_to` is echoed ONLY when the AGENT chose it (as
+    `report` does); an address the platform resolved is never returned to the
+    model — a channel user's verified email may be something this agent was
+    never told. Returns a new dict so the stored snapshot stays address-free."""
+    chosen = audience.email if audience.source == turn_audience.SOURCE_OVERRIDE else None
+    return {**payload, "addressed_to": chosen}
+
+
+def _visibility(agent_name: str, audience: TurnAudience) -> tuple:
+    """``(visible_to_requester, visibility_note)`` — the names `set_canvas`
+    already uses (#2577), so an agent reads one vocabulary. True only when the
+    person in this conversation will find the file in their Files tab; False
+    only when the platform could not tell and is saying so; None is no claim
+    (a turn with no person, a person with no tab, an address the agent chose
+    itself).
+
+    "Will find" is checked, not assumed: a verified channel user, or a human in
+    a room, need not be someone this agent is shared with — the row is theirs
+    and the tab 404s for them. Saying True there would have the agent tell them
+    "it is in your Files tab"."""
+    if audience.source == turn_audience.SOURCE_TURN and audience.email:
+        from client_portal import service as portal_service
+        try:
+            has_tab = portal_service.agent_on_roster(agent_name, audience.email, include_owned=True)
+        except Exception:  # noqa: BLE001 — advisory; never fail a created share
+            has_tab = False
+        return (True, None) if has_tab else (None, None)
+    if audience.source == turn_audience.SOURCE_AMBIGUOUS:
+        return False, _OWNER_ONLY_NOTE
+    return None, None
+
+
 async def create_share(
     agent_name: str,
     filename: str,
@@ -398,12 +493,23 @@ async def create_share(
     created_by: Optional[str] = None,
     execution_id: Optional[str] = None,
     dedup_label: str = "",
+    audience_email: Optional[str] = None,
+    actor_is_agent: bool = False,
+    platform_execution_id: Optional[str] = None,
 ) -> dict:
     """
-    End-to-end: extract → validate → persist → DB insert → return URL payload.
+    End-to-end: resolve the audience → extract → validate → persist → DB insert
+    → return URL payload.
+
+    WHO THE FILE IS FOR (ent#549) is decided here, before anything slow: the
+    agent's ``audience_email`` if it named a rostered person, otherwise the
+    person the turn was for (`turn_audience.resolve_turn_audience`), otherwise
+    the owner only. ``actor_is_agent`` defaults to False so a caller that does
+    not say it is the agent's own key gets no turn resolution at all.
 
     Effect-scoped idempotency (#1084): the token-mint + persist is wrapped in
-    the effect guard keyed on the filename + a sha256 of the extracted CONTENT,
+    the effect guard keyed on the filename + a sha256 of the extracted CONTENT
+    + the addressee (ent#549 — re-addressing a file is a second share),
     scoped to ``execution_id``. A re-run of the same turn sharing the same file
     replays the original signed URL instead of minting a second token; a changed
     file (different content) under the same name produces a new share. Fail-open
@@ -419,13 +525,31 @@ async def create_share(
     # --- path ---
     container_path = validate_publish_path(filename)
 
+    # --- audience (ent#549) — BEFORE the container read. That await is the
+    # slow step, and the turn's row can leave `running` while it is in flight.
+    if audience_email:
+        audience = _audience_from_override(agent_name, audience_email)
+    else:
+        audience = turn_audience.resolve_turn_audience(
+            agent_name,
+            actor_is_agent=actor_is_agent,
+            claimed_execution_id=execution_id,
+            platform_execution_id=platform_execution_id,
+        )
+
     # --- extract (needed up-front so the effect key can version on content) ---
     data, basename = await extract_from_agent(agent_name, container_path)
     content_version = hashlib.sha256(data).hexdigest()
 
     async with idempotency_service.effect_guard(
         "share_file",
-        {"filename": filename, "content": content_version},
+        # The addressee is part of WHAT the effect is: re-addressing the same
+        # file to a second person in one turn is a second share, not a replay of
+        # the first (which reported success and left the second person with
+        # nothing). The args are HASHED into the key, and the replay snapshot
+        # below carries no address either — `idempotency_keys` never holds one.
+        {"filename": filename, "content": content_version,
+         "audience": audience.email or audience.channel or ""},
         execution_id=execution_id,
         agent_name=agent_name,
         dedup_label=dedup_label,
@@ -440,7 +564,7 @@ async def create_share(
                     status_code=409,
                     detail="Share already created for this execution but its URL is unavailable.",
                 )
-            return guard.snapshot
+            return _with_addressee(guard.snapshot, audience)
         result = _persist_and_register(
             agent_name,
             data,
@@ -448,9 +572,17 @@ async def create_share(
             display_name=display_name,
             expires_in=expires_in,
             created_by=created_by,
+            audience=audience,
         )
-        guard.snapshot = result
-        return result
+        visible, note = _visibility(agent_name, audience)
+        result["visible_to_requester"] = visible
+        result["visibility_note"] = note
+        # A COPY, taken before the address is added: the snapshot sits in
+        # `idempotency_keys` for 24 h, and a replay re-derives the echo from its
+        # own call — whose `audience_email` is part of the key, so it is the same
+        # address by construction.
+        guard.snapshot = dict(result)
+        return _with_addressee(result, audience)
 
 
 def create_share_from_bytes(
@@ -461,6 +593,8 @@ def create_share_from_bytes(
     expires_in: Optional[int] = None,
     created_by: Optional[str] = None,
     require_sharing_enabled: bool = True,
+    addressed_to_email: Optional[str] = None,
+    addressed_to_channel: Optional[str] = None,
 ) -> dict:
     """
     Persist already-in-memory bytes as a public share and mint a download URL —
@@ -478,6 +612,13 @@ def create_share_from_bytes(
     Twilio to fetch and are already gated by ``tts_voice_replies_enabled``. The
     MIME-blocklist / quota / disk protections still apply.
 
+    ``addressed_to_email`` / ``addressed_to_channel`` (ent#549): these callers are
+    platform code that already HOLDS the recipient — the number a WhatsApp reply
+    is going to — so there is no turn to resolve and no agent to ask. The email
+    is whatever the channel binding verified, or None; the file then lists in
+    that person's Files tab only, and the owner's panel shows the channel
+    address either way. Neither given = the owner only.
+
     Raises ``HTTPException`` (403 gate / 400 expiry / 413 quota / 507 disk /
     400 MIME-blocked) exactly like ``create_share`` — callers must isolate it so
     one rejected file never aborts a whole response.
@@ -494,4 +635,15 @@ def create_share_from_bytes(
         display_name=display_name,
         expires_in=expires_in,
         created_by=created_by,
+        audience=_channel_audience(addressed_to_email, addressed_to_channel),
     )
+
+
+def _channel_audience(email: Optional[str], channel: Optional[str]) -> TurnAudience:
+    """The addressee a platform-side channel caller hands over, normalised by
+    the one function every writer uses."""
+    email = turn_audience.normalize_addressee_email(email)
+    channel = (channel or "").strip() or None
+    if email is None and channel is None:
+        return turn_audience.NOBODY
+    return TurnAudience(email, channel, turn_audience.SOURCE_CHANNEL)

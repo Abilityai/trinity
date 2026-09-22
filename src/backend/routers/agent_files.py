@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import User
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner
+from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, is_interactive_principal
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
@@ -488,6 +488,11 @@ async def share_agent_file(
             created_by=actor_agent or current_user.username,
             execution_id=body.execution_id,
             dedup_label=body.dedup_label,
+            audience_email=body.audience_email,
+            # ent#549: only the agent's OWN key can be a call from inside a turn.
+            # An owner or a user-scoped key passes the gate above too, and
+            # whatever execution id they cite, they are not an agent in a turn.
+            actor_is_agent=bool(actor_agent),
         )
     except EffectInProgressError as e:
         # Concurrent duplicate share for the same (execution, file) is mid-flight
@@ -514,6 +519,12 @@ async def list_agent_shared_files(
     assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can view shared files")
 
     rows = db.list_active_shared_files_for_agent(agent_name)
+    # ent#549 — who each file is for is the owner's to read, in the UI. An
+    # agent-scoped key resolves to its OWNER and passes the gate above, so
+    # without this any agent could read who every file of every sibling was for
+    # — an email and, for a channel share, a phone number. Same predicate and
+    # same allow-list as `routers/reports.py::_hide_audience`.
+    show_audience = is_interactive_principal(current_user)
     files = [
         SharedFileInfo(
             file_id=row["id"],
@@ -525,6 +536,9 @@ async def list_agent_shared_files(
             expires_at=row["expires_at"],
             download_count=row["download_count"] or 0,
             last_downloaded_at=row["last_downloaded_at"],
+            addressed_to=row.get("addressed_to_email") if show_audience else None,
+            addressed_to_channel=row.get("addressed_to_channel") if show_audience else None,
+            audience_source=row.get("audience_source"),
         )
         for row in rows
     ]
