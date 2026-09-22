@@ -107,10 +107,10 @@ def _router(monkeypatch, execution, *, recorded):
     return pm
 
 
-def _call(pm, agent="analyst", execution_id="e1", text="Open loop: budget sign-off."):
+def _call(pm, agent="analyst", execution_id="e1", text="Open loop: budget sign-off.", agent_key_for="analyst"):
     from models import WriteUserMemoryRequest
     body = WriteUserMemoryRequest(execution_id=execution_id, memory_text=text)
-    return asyncio.run(pm.write_user_memory(agent, body, current_user=SimpleNamespace(username="analyst-key")))
+    return asyncio.run(pm.write_user_memory(agent, body, current_user=SimpleNamespace(username="analyst-key", agent_name=agent_key_for)))
 
 
 def test_an_addressed_scheduled_run_writes_the_seats_memory(monkeypatch):
@@ -173,6 +173,21 @@ def test_the_seat_wins_over_a_stray_source_user_email_on_a_scheduled_row(monkeyp
     pm = _router(monkeypatch, _execution(source_user_email="operator@example.com"), recorded=recorded)
     _call(pm)
     assert recorded[0]["email"] == "seat@example.com"
+
+
+def test_a_sibling_agents_key_cannot_write_this_agents_seat_memory(monkeypatch):
+    """An agent-scoped key resolves to its owner carrying the owner's role, so
+    `assert_agent_access` alone would let any sibling agent under the same
+    owner name this agent's finished seat run and replace that person's notes.
+    The route gates on the key's own agent, as reminders does."""
+    recorded = []
+    pm = _router(monkeypatch, _execution(), recorded=recorded)
+    with pytest.raises(HTTPException) as ei:
+        _call(pm, agent_key_for="other-agent")
+    assert ei.value.status_code == 403
+    assert recorded == []
+    # A human principal (no agent_name) is unaffected.
+    assert _call(pm, agent_key_for=None)["success"] is True
 
 
 def test_there_is_one_write_boundary_for_every_trigger():
@@ -325,7 +340,7 @@ def test_a_companion_serving_two_seats_keeps_them_apart(real_db, monkeypatch):
                         real_db.write_user_memory_agent_notes)
     for eid, text in (("e-alice", "Alice's loops"), ("e-bob", "Bob's loops")):
         asyncio.run(pm.write_user_memory("analyst", WriteUserMemoryRequest(execution_id=eid, memory_text=text),
-                                         current_user=SimpleNamespace(username="k")))
+                                         current_user=SimpleNamespace(username="k", agent_name="analyst")))
     assert seat_for_execution(runs["e-alice"]) != seat_for_execution(runs["e-bob"])
     assert real_db.get_or_create_user_memory("analyst", "alice@example.com")["agent_notes"] == "Alice's loops"
     assert real_db.get_or_create_user_memory("analyst", "bob@example.com")["agent_notes"] == "Bob's loops"
