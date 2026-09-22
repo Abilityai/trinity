@@ -121,6 +121,14 @@ if resume is not None:
     if not os.path.exists(path(resume)) or os.environ.get("SHIM_RESUME_FAIL_ALWAYS") == "1":
         resume_failure(resume)
     sid = resume
+    if os.environ.get("SHIM_ERROR_AFTER_TEXT") == "1":
+        emit({"type": "system", "subtype": "init", "session_id": sid})
+        emit({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "partial answer from " + sid}]}})
+        emit({"type": "result", "subtype": "error_during_execution", "is_error": True,
+              "num_turns": 1, "result": "", "session_id": sid, "total_cost_usd": 0,
+              "duration_ms": 1, "errors": ["mid-turn failure 2958"]})
+        sys.exit(0)
 elif "--continue" in args:
     files = [f for f in os.listdir(proj) if f.endswith(".jsonl")]
     if files:
@@ -205,6 +213,7 @@ def shim(tmp_path, monkeypatch):
         "SHIM_RESUME_FAIL_ALWAYS",
         "SHIM_TOOL_USE",
         "SHIM_GATE_FILE",
+        "SHIM_ERROR_AFTER_TEXT",
     ):
         execution_env.INITIAL_ENV.pop(key, None)
     monkeypatch.setenv("HOME", str(home))  # Path.home() -> no ~/.mcp.json in argv
@@ -233,6 +242,7 @@ def shim(tmp_path, monkeypatch):
         "SHIM_RESUME_FAIL_ALWAYS",
         "SHIM_TOOL_USE",
         "SHIM_GATE_FILE",
+        "SHIM_ERROR_AFTER_TEXT",
     ):
         execution_env.INITIAL_ENV.pop(key, None)
 
@@ -386,6 +396,22 @@ async def test_no_retry_when_cancelled(shim, monkeypatch):
 # --------------------------------------------------------------------------
 # T5 — the capture and the keep-set marker
 # --------------------------------------------------------------------------
+
+
+async def test_resume_error_after_text_still_returns_the_text(shim):
+    """The dead-session 502 is for an EMPTY resume turn. A resumed turn that
+    answered and then reported `is_error` returns its text, as under
+    `--continue` and as a cold turn still does — not a 502."""
+    chat1 = await _chat("hello")
+    _env("SHIM_ERROR_AFTER_TEXT", "1")
+    runs_before = len(shim.runs())
+
+    text, _log, _meta, _raw = await claude_code.execute_claude_code(
+        "go on", model=M1, execution_id=f"exec-{uuid.uuid4().hex[:12]}"
+    )
+
+    assert text == f"partial answer from {chat1.session_id}"
+    assert len(shim.runs()) - runs_before == 1, "no cold retry for a live session"
 
 
 async def test_marker_written_after_success_and_kept_on_failure(shim):

@@ -552,9 +552,16 @@ async def _execute_claude_code_once(
             # (#1673's shape), which the stream parser marks `execution_error`.
             # Without this the chat path reads it as "returned empty response"
             # and the caller cannot tell a dead session from a silent model.
-            # Resume turns only: the general chat `execution_error` handling
-            # also needs #1870's completed-turn recovery (a follow-up).
-            if resume_session_id and metadata.error_type == "execution_error":
+            # Resume turns only, and only when the turn produced no text: a
+            # turn that answered and then reported `is_error` still returns its
+            # text, as it did under `--continue` and still does on a cold turn.
+            # The general chat `execution_error` handling also needs #1870's
+            # completed-turn recovery (a follow-up).
+            if (
+                resume_session_id
+                and metadata.error_type == "execution_error"
+                and not response_parts
+            ):
                 err = sanitize_text(metadata.error_message or "Execution error")
                 logger.error(f"[Chat] Resume turn reported an execution error: {err[:300]}")
                 raise HTTPException(
