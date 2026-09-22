@@ -366,21 +366,24 @@ objectives/<id>.yaml  ──┐                    (Tandem §3.4, in the agent's
 | Findings | belong to the objectives returned — another role's or a finished objective's parse defect never lands on this agent's read, since a shared fleet canon would otherwise put every role's mistakes on every card. File-level (`objective_invalid`, `objective_unreadable`, `objective_file_skipped`, `objectives_read_timeout`) are unconditional: nothing there says whose they are |
 | Errors | 503 `metric_store_unavailable` + `Retry-After: 30`. Everything below transport is a **named field on a 200** |
 
-### The rebase note for PR #2927 (role card, ent#527)
+### The role-card follow-up (ent#676; was "the rebase note for PR #2927")
 
-The role card shipped the first version of this join — and a second staleness
-rule with it (a 30-day bound over `metrics.json`'s `last_updated`). ent#666
-retires that half. On rebase onto this branch, `client_portal/role_card.py`
-drops `_read_metrics`, `metric_row`, `objective_concerns`, `canon_root`, the
-objectives loop and `MAX_OBJECTIVES` / `MAX_METRICS_PER_OBJECTIVE`, and keeps
-`is_stale` / `STALE_AFTER_DAYS` **only** for the role file's `review_by`
-(framework §3.5 governs files, not metrics). After the role read it calls
-`objective_join_service.read_objective_join(agent_name, template=template,
-client=client)` — function-locally, so no portal suite drags the metrics stack
-in — and copies `objectives` / `findings` / `summary` onto the card.
+The role card (ent#527, #2927) shipped the first version of this join — and a
+second staleness rule with it (a 30-day bound over `metrics.json`'s
+`last_updated`). This section was written as a rebase note on the assumption
+that ent#666 would land first; it did not — #2927 merged on 2026-09-22 ahead
+of the metrics stack — so the cut-over is now a follow-up on `dev`, tracked as
+**trinity-enterprise#676**. Until it lands, the join is spelled twice and the
+two surfaces can disagree about staleness. What that follow-up does:
 
-Two things ride that rebase rather than this branch:
-
+* `client_portal/role_card.py` drops `_read_metrics`, `metric_row`,
+  `objective_concerns`, `canon_root`, the objectives loop and
+  `MAX_OBJECTIVES` / `MAX_METRICS_PER_OBJECTIVE`, and keeps `is_stale` /
+  `STALE_AFTER_DAYS` **only** for the role file's `review_by` (framework §3.5
+  governs files, not metrics). After the role read it calls
+  `objective_join_service.read_objective_join(agent_name, template=template,
+  client=client)` — function-locally, so no portal suite drags the metrics
+  stack in — and copies `objectives` / `findings` / `summary` onto the card.
 * **A slim portal projection** (TD-4). The card exposes
   `name, target, actual, last_point_at, stale, freshness, gap.status,
   finding.code` with client-safe copy per code — **not** `ObjectiveMetricRead`
@@ -392,37 +395,15 @@ Two things ride that rebase rather than this branch:
   `agent_objectives_read:{name}` key, so one key bounds both doors. The limiter
   stays in the routers — it is transport (Invariant #1).
 
-**Alembic: two chains fork at `0065`, and whichever lands second re-chains.**
-This branch adds no revision, but ent#527/#2927 carries
-`0066_public_user_memory_writes` + `0067_agent_role_readiness` (both currently
-`down_revision = "0065…"`), while the metrics epic carries
-`0066_metric_definitions` → `0067_metric_points`. Two revisions sharing a
-`down_revision` are **two heads**, and `alembic upgrade head` resolves its
-target before applying anything, so such a graph applies **zero** revisions
-while git reports no conflict (Invariant #3, #2068). Both orders are written
-out here so the rebaser needs nothing but this file:
-
-**Order A — the metrics chain is already on `dev`** (rename #2927's files and
-re-chain them onto `0067_metric_points`):
-
-| file | `revision` | `down_revision` |
-|---|---|---|
-| `0068_public_user_memory_writes.py` | `0068_public_user_memory_writes` | `0067_metric_points` |
-| `0069_agent_role_readiness.py` | `0069_agent_role_readiness` | `0068_public_user_memory_writes` |
-
-**Order B — #2924/#2927 lands first** (re-chain the metrics revisions onto
-`0066_public_user_memory_writes` / `0067_agent_role_readiness`):
-
-| file | `revision` | `down_revision` |
-|---|---|---|
-| `0067_metric_definitions.py` | `0067_metric_definitions` | `0066_public_user_memory_writes` |
-| `0068_metric_points.py` | `0068_metric_points` | `0067_metric_definitions` |
-| `0069_agent_role_readiness.py` | `0069_agent_role_readiness` | `0068_metric_points` |
-
-Either way: the SQLite entries in `db/migrations.py` are appended in **landing
-order** (that runner keys by name, not by number, so they do not have to agree
-with the Alembic numbering); `rm -rf src/backend/migrations/versions/__pycache__`
-afterwards, or a stale `.pyc` keeps serving the old `down_revision`; then run
+**Alembic.** The two Alembic orders the original note carried are obsolete:
+#2924 / #2927 / #2936 landed `0066_public_user_memory_writes` →
+`0067_agent_role_readiness` → `0068_agent_shared_files_audience` first, and the
+merge train re-chained the metrics revisions behind them as
+`0069_metric_definitions` → `0070_metric_points`. The procedure still holds for
+the next fork: SQLite entries in `db/migrations.py` are appended in **landing
+order** (that runner keys by name, not by number); `rm -rf
+src/backend/migrations/versions/__pycache__` after any rename, or a stale
+`.pyc` keeps serving the old `down_revision`; then
 `scripts/ci/check_alembic_heads.py` and `scripts/ci/check_alembic_parity.py`
 locally before pushing — the first must report exactly **one** head.
 
@@ -614,6 +595,6 @@ Still open:
 | 2025-12-30 | Verified file paths, service layer refactor |
 | 2026-01-23 | Updated line numbers (info.py:148-208, agents.py:688-695, agents.js:507-522), added Dashboard Widget system documentation (dashboard.yaml), added DashboardPanel.vue (510 lines), added revision history |
 | 2026-09-22 | Added the write path (ent#478): `record_metrics`, the `metric_points` store, the two Settings knobs and the retention sweep |
-| 2026-09-22 | Added the objective join (ent#666): `GET .../objectives`, MCP `get_objectives`, `latest_by_metric`, the gap semantics (position not pace, the `hold` arm) and the #2927 rebase note |
+| 2026-09-22 | Added the objective join (ent#666): `GET .../objectives`, MCP `get_objectives`, `latest_by_metric`, the gap semantics (position not pace, the `hold` arm) and the role-card follow-up note (ent#676) |
 | 2026-09-22 | ent#666 review fixes: findings scoped to the objectives returned, a declared `hold` on the wire as the registry's `neutral`, a 30 s fan-out budget + 5 s per-read timeout, `objectives_skipped` / `objective_id_invalid` findings, and both Alembic rebase orders written out above |
 | 2026-09-22 | Rewrote the READ half (ent#479): the re-backed route, the one `2 x cadence` staleness rule, the declared-metric tiles, MCP `get_metrics`, the health block — and retired `metrics.json` as a source, replacing it with the D-010 finding |

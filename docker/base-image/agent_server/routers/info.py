@@ -7,7 +7,7 @@ import asyncio
 import logging
 import threading
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
