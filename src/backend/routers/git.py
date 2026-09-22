@@ -1,3 +1,4 @@
+# mcp: git.ts (get_git_status, git_sync, get_git_log, git_pull, get_git_sync_state, reset_to_main_preserve_state)
 """
 Git synchronization routes for GitHub-native agents (Phase 7).
 

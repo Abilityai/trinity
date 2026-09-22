@@ -227,6 +227,9 @@ def _reconcile(
     source: str,
 ) -> ReconcileSummary:
     """Hash each normalized entry, hand the set to the store, shape the summary."""
+    if source not in SOURCES:
+        raise ValueError(
+            f"unknown metric registry source {source!r}; expected one of {SOURCES}")
     for entry in declared:
         entry["definition_hash"] = template_metrics.definition_hash(entry)
 
