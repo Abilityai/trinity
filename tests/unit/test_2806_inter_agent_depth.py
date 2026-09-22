@@ -672,3 +672,26 @@ def test_2806_the_depth_check_precedes_every_claim_acquire_and_insert(fn):
     gates = [i for i, n in enumerate(names) if any(n.endswith(g) for g in _GATES)]
     assert gates, f"{fn.__qualname__}: no gate found — the guard list is stale"
     assert guard[0] < min(gates), f"{fn.__qualname__}: {names}"
+
+
+def test_2806_self_task_is_a_hop_too(world):
+    """SELF-EXEC-001 sibling: an agent's `/task` to ITSELF (with its own
+    X-Source-Agent) is refused on the same rule — a self-task loop is a chain."""
+    _set_max("2")
+    _running_row(A, 2)
+    with pytest.raises(InterAgentDepthExceeded) as ei:
+        asyncio.run(
+            _CE.dispatch_parallel_task(
+                request=ParallelTaskRequest(message="again"),
+                name=A,
+                current_user=_agent_principal(world),
+                container=SimpleNamespace(status="running"),
+                x_source_agent=A,
+                x_via_mcp="true",
+                idempotency_key=None,
+                x_event_trigger=None,
+                x_internal_secret=None,
+            )
+        )
+    assert (ei.value.caller, ei.value.target) == (A, A)
+    world.sync_dispatch.assert_not_called()
