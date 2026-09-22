@@ -19,8 +19,21 @@ import { test, expect } from '@playwright/test'
  * depend on how many links the build renders:
  *   1. no link ever visually collides with a control,
  *   2. the controls stay fully on-screen and hit-testable,
- *   3. links that don't fit stay reachable via a scroll container rather than
- *      being clipped dead or overlapping.
+ *   3. links that don't fit stay reachable — see the amendment below for the
+ *      mechanism that delivers it.
+ *
+ * **Amendment (#1925).** Properties 1 and 2 are unchanged and still measured
+ * the same way. Property 3's MECHANISM was replaced: #1789's answer was a
+ * horizontal scroll row with its scrollbar suppressed, which kept every link
+ * reachable but gave no signal that any were hidden — an overflowed link was
+ * invisible and undiscoverable inside a 64px bar. #1925 replaced it with the
+ * priority+ pattern the design system already uses for tabs: the links that fit
+ * render inline, the rest collapse into a counted "N more" disclosure.
+ *
+ * So test 3 now pins the new mechanism AND the absence of the old one. That
+ * second half matters: a future refactor that reintroduces `overflow-x-auto`
+ * here would restore exactly the undiscoverable-link failure #1925 removed, and
+ * this is where that would be caught.
  *
  * Widths ≥1280 are the entitled-build regression (the container is capped at
  * `max-w-7xl`, so "just use a wider monitor" never fixed it); the narrow
@@ -70,12 +83,41 @@ async function navGeometry(page) {
       controlsLeftEdge: Math.min(...controls.map((c) => c.left)),
       userMenuHitTestable: !!(hit && menu.contains(hit)),
       navHeight: row.getBoundingClientRect().height,
+      // #1925: the row no longer scrolls — the inner nav clips and the
+      // remainder moves into the disclosure. Both are reported so test 3 can
+      // assert the new mechanism and the absence of the old one.
       linkRowOverflowX: getComputedStyle(linkRow).overflowX,
       linkRowScrollWidth: linkRow.scrollWidth,
       linkRowClientWidth: linkRow.clientWidth,
       linkCount: left.querySelectorAll('a').length,
+      overflowTrigger: (() => {
+        const t = document.querySelector('[data-nav-overflow-trigger]')
+        return t ? t.innerText.replace(/\s+/g, ' ').trim() : null
+      })(),
     }
   })
+}
+
+/**
+ * #1925: the strip re-measures on a rAF after a resize, so a snapshot taken in
+ * the same tick as `setViewportSize` reports the PREVIOUS split — which reads
+ * as "it fits" one frame before the links move into the menu. Sample until two
+ * consecutive reads agree before asserting anything about the split.
+ */
+async function settleNav(page) {
+  let last = null
+  for (let i = 0; i < 20; i++) {
+    const now = await page.evaluate(() => {
+      const t = document.querySelector('[data-nav-overflow-trigger]')
+      const links = document.querySelectorAll(
+        'nav .flex.justify-between > div:first-child > div:last-child a'
+      )
+      return `${links.length}|${t ? t.innerText.replace(/\s+/g, ' ').trim() : ''}`
+    })
+    if (now === last) return
+    last = now
+    await page.waitForTimeout(100)
+  }
 }
 
 test.describe('NavBar overflow (#1789)', () => {
@@ -87,6 +129,7 @@ test.describe('NavBar overflow (#1789)', () => {
 
     for (const width of WIDTHS) {
       await page.setViewportSize({ width, height: 900 })
+      await settleNav(page)
       const g = await navGeometry(page)
 
       // The regression itself: a visible link box overlapping a control box.
@@ -106,6 +149,7 @@ test.describe('NavBar overflow (#1789)', () => {
 
     for (const width of WIDTHS) {
       await page.setViewportSize({ width, height: 900 })
+      await settleNav(page)
       const g = await navGeometry(page)
 
       // Pre-fix the cluster ran to x≈1170 regardless of viewport, and
@@ -122,42 +166,72 @@ test.describe('NavBar overflow (#1789)', () => {
 
     // And it genuinely opens at the width where it used to be unreachable.
     await page.setViewportSize({ width: 900, height: 900 })
+    await settleNav(page)
     await page.locator('nav .flex.justify-between > div:last-child > div:last-child button').click()
     await expect(page.getByRole('button', { name: /sign out/i })).toBeVisible({ timeout: 5000 })
   })
 
-  test('@smoke overflowing links stay reachable via the scroll row', async ({ page }) => {
+  test('@smoke overflowing links collapse into a counted menu and stay reachable', async ({ page }) => {
     await page.goto('/')
     await expect(page.getByRole('link', { name: 'Dashboard', exact: true })).toBeVisible({
       timeout: 15000,
     })
 
-    // The mechanism that replaces overlap: the link row is a scroll container,
-    // so a link set too wide for the bar scrolls instead of spilling over the
-    // controls. Guards against a future refactor dropping `overflow-x-auto`.
+    // Wide: everything fits, so there is nothing to disclose. Asserted rather
+    // than assumed — a strip that collapses at 1440px would be over-eager, and
+    // that failure is invisible without measuring it.
     await page.setViewportSize({ width: 1440, height: 900 })
+    await settleNav(page)
     const wide = await navGeometry(page)
-    expect(wide.linkRowOverflowX).toBe('auto')
+    expect(wide.overflowTrigger, 'the bar collapsed at a width where it fits').toBeNull()
 
-    // Squeeze to the `sm` floor (below it the link row hides entirely) and
-    // check both regimes. ent#260 removed the Agents link, so the 4-link OSS
-    // bar may now FIT at 640px where the 5-link bar overflowed — a fitting row
-    // can't exhibit the clipped-dead failure mode, so the honest assertion is
-    // conditional on the measured geometry (an entitled 6-7-link build still
-    // exercises the overflow branch):
-    //   overflowing → the last link must be recoverable via scroll,
-    //   fitting     → every link must already be fully in view.
+    // Squeeze to the `sm` floor, below which the link row hides entirely. An
+    // OSS build (4 links) may still fit where an entitled one (6-7) does not,
+    // so the assertion forks on the measured state rather than assuming a
+    // fleet — the same reason #1789's version forked on scrollWidth.
     await page.setViewportSize({ width: 640, height: 900 })
+    await settleNav(page)
     const narrow = await navGeometry(page)
 
-    const lastLink = page.locator('nav .flex.justify-between > div:first-child > div:last-child a').last()
-    if (narrow.linkRowScrollWidth > narrow.linkRowClientWidth) {
-      // Overflow: clipped-but-scrollable, not clipped-dead.
-      await lastLink.scrollIntoViewIfNeeded()
-      await expect(lastLink).toBeInViewport()
+    // The old mechanism must NOT come back: reintroducing a scroll row here
+    // restores the undiscoverable-link failure #1925 removed.
+    expect(narrow.linkRowOverflowX, 'the link row is scrolling again (#1925)').not.toBe('auto')
+    expect(
+      narrow.linkRowScrollWidth,
+      'the link row overflows its box instead of collapsing (#1925)'
+    ).toBeLessThanOrEqual(narrow.linkRowClientWidth + 1)
+
+    if (narrow.overflowTrigger) {
+      // Collapsed: the trigger states HOW MANY links are hidden, and every one
+      // of them is reachable from the menu it opens.
+      expect(narrow.overflowTrigger, 'the trigger does not count what it hides')
+        .toMatch(/\d+ more/)
+
+      await page.locator('[data-nav-overflow-trigger]').click()
+      const menu = page.locator('[data-nav-overflow-menu]')
+      await expect(menu).toBeVisible()
+
+      const hidden = menu.locator('[data-nav-menu-item]')
+      const count = await hidden.count()
+      expect(count, 'the menu opened with nothing in it').toBeGreaterThan(0)
+      expect(String(count), 'the count in the trigger disagrees with the menu')
+        .toBe(narrow.overflowTrigger.match(/(\d+) more/)[1])
+
+      for (let i = 0; i < count; i++) {
+        await expect(hidden.nth(i)).toBeInViewport()
+        await expect(hidden.nth(i)).toHaveAttribute('href', /./)
+      }
+
+      // Escape closes it and returns focus to the trigger — the disclosure
+      // contract the strip shares with OverflowTabs.
+      await page.keyboard.press('Escape')
+      await expect(menu).toBeHidden()
     } else {
-      // No overflow: the whole link set is on-screen without scrolling.
-      await expect(lastLink).toBeInViewport()
+      // Fits even at 640: every link is on-screen without a disclosure.
+      const links = page.locator('nav .flex.justify-between > div:first-child > div:last-child a')
+      const n = await links.count()
+      expect(n, 'no links and no trigger — the row rendered nothing').toBeGreaterThan(0)
+      for (let i = 0; i < n; i++) await expect(links.nth(i)).toBeInViewport()
     }
   })
 })

@@ -328,6 +328,11 @@
               <div v-if="widget.title" class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
                 <h4 class="text-sm font-medium text-gray-900 dark:text-white">{{ widget.title }}</h4>
               </div>
+              <!-- #1925 triage — NOT a tab strip: a bounded wide table. Horizontal scroll
+                   INSIDE the container is the correct treatment for unbounded column width
+                   (design-system principle 7); collapsing columns into a "More" menu would
+                   hide data, not navigation. Left as-is deliberately so a later audit does
+                   not re-flag it. -->
               <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                   <thead class="bg-gray-50 dark:bg-gray-900">
