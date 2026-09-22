@@ -2016,6 +2016,37 @@ export class TrinityClient {
   }
 
   /**
+   * Read the calling agent's recorded metrics with freshness (ent#479).
+   *
+   * Query knobs only — the agent is in the PATH and the backend self-gates it,
+   * so there is nothing here that could point the read at another agent.
+   */
+  async getAgentMetrics(
+    agentName: string,
+    options: {
+      metric?: string;
+      window?: string;
+      since?: string;
+      until?: string;
+      include_retired?: boolean;
+      series_limit?: number;
+    } = {}
+  ): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams();
+    if (options.metric) params.set("metric", options.metric);
+    if (options.window) params.set("window", options.window);
+    if (options.since) params.set("since", options.since);
+    if (options.until) params.set("until", options.until);
+    if (options.include_retired) params.set("include_retired", "true");
+    if (options.series_limit) params.set("series_limit", String(options.series_limit));
+    const query = params.toString();
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/metrics${query ? `?${query}` : ""}`
+    );
+  }
+
+  /**
    * Re-read the agent's template.yaml and reconcile its declared metrics.
    *
    * The remedy named by `record_metrics`'s `metric_undeclared` hint, so it has
@@ -2704,6 +2735,18 @@ export class TrinityClient {
     recent_alerts: unknown[];
     uptime_percent_24h?: number;
     avg_latency_24h_ms?: number;
+    // ent#479: informational declared-metric freshness. `null` means the store
+    // could not be read, NOT that the agent declared nothing.
+    metrics?: {
+      declared: number;
+      with_points: number;
+      stale: string[];
+      no_cadence: string[];
+      no_points: string[];
+      retired_with_points: string[];
+      last_point_at: string | null;
+      rule: string;
+    } | null;
   }> {
     return this.request(
       "GET",

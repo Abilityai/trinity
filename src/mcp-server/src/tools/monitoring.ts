@@ -145,6 +145,10 @@ export function createMonitoringTools(
             issues: result.issues,
             uptime_percent_24h: result.uptime_percent_24h,
             avg_latency_24h_ms: result.avg_latency_24h_ms,
+            // ent#479: informational only — a stale business metric is never
+            // in `issues` and never moves `aggregate_status`. Read
+            // get_metrics for the values behind these names.
+            metrics: result.metrics ?? null,
           }, null, 2);
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);

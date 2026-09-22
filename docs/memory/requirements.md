@@ -30,7 +30,7 @@ list.
 | [public-access.md](requirements/public-access.md) | Public access, Nevermined payments, mobile admin PWA |
 | [security.md](requirements/security.md) | Security & compliance, operator queue / Operating Room, agent guardrails |
 | [skills.md](requirements/skills.md) | Skills management (GitHub-based), playbooks tab |
-| [lifecycle-observability.md](requirements/lifecycle-observability.md) | Agent soft-delete & retention, compatibility validation, first-run operator profile, agent-reported structured reports |
+| [lifecycle-observability.md](requirements/lifecycle-observability.md) | Agent soft-delete & retention, compatibility validation, first-run operator profile, agent-reported structured reports, the declared-metric registry / point store / read contract (§47–§49) |
 | [roadmap.md](requirements/roadmap.md) | Advanced features, planned features, process engine, future vision |
 
 ## How requirements are organized

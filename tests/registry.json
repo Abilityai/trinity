@@ -3238,14 +3238,79 @@
     },
     {
       "file": "mcp-server/src/tools/metrics.test.ts",
-      "feature": "abilityai/trinity-enterprise#478",
+      "feature": "abilityai/trinity-enterprise#478, #479",
       "added": "2026-09-22",
       "categories": [
         "mcp-server",
         "typescript",
         "unit"
       ],
-      "description": "`record_metrics` / `refresh_metric_definitions`: agent-scoped keys only, refused before any network call and with no agent target parameter to spoof; three separate outcome counts so a dedup cannot read as a write; and the failure classification, which is the load-bearing part — 503 retryable, 500 explicitly not (a tool that tells an agent to retry a permanently unstorable batch turns one bad point into an infinite loop), 409 in-flight, and the two 429s distinguished because 'wait a moment' and 'wait until tomorrow' are different remedies. Per-point reason codes are surfaced verbatim so the agent can self-correct, and an unparseable body degrades to no detail rather than throwing inside the error path."
+      "description": "`record_metrics` / `refresh_metric_definitions` / `get_metrics`: agent-scoped keys only, refused before any network call and with no agent target parameter to spoof; three separate outcome counts so a dedup cannot read as a write; and the failure classification, which is the load-bearing part — 503 retryable, 500 explicitly not (a tool that tells an agent to retry a permanently unstorable batch turns one bad point into an infinite loop), 409 in-flight, and the two 429s distinguished because 'wait a moment' and 'wait until tomorrow' are different remedies. Per-point reason codes are surfaced verbatim so the agent can self-correct, and an unparseable body degrades to no detail rather than throwing inside the error path. ent#479 adds the READ tool on the same contract: agent-scoped, never throws, forwards `metric`/`window`/`since`/`until` verbatim, and maps a 422 `metric_undeclared` to `{undeclared: true}` with the hint naming `refresh_metric_definitions` rather than letting the #186 uniform-404 convention tell an agent it lacks access to itself."
+    },
+    {
+      "file": "unit/test_ent479_freshness_rule.py",
+      "feature": "abilityai/trinity-enterprise#479",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "The platform's ONE staleness rule as a table, against a frozen clock: fresh; stale at exactly 2x cadence + 1s and NOT stale at exactly 2x (the AC's strict `>`, and the boundary a reader guesses wrong); no cadence -> `stale: null` and `freshness: no_cadence`, never `false`, because \"not stale\" and \"unanswerable\" are different claims; no points -> not late, not started; a retired definition with points; and a point in the FUTURE (the write path tolerates <=300s of skew) clamping its age to zero rather than going negative. `freshness` is pure and takes its `now`, so every case here is deterministic and none of them needs a store."
+    },
+    {
+      "file": "unit/test_ent479_metric_points_read_store.py",
+      "feature": "abilityai/trinity-enterprise#479",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "database",
+        "unit"
+      ],
+      "description": "The two read primitives over `metric_points`, against a real in-memory DB: newest-N per metric via per-metric seeks (not a partition over the agent's whole history), the `(ts DESC, idempotency_key DESC)` tiebreak that keeps two points at an identical `ts` in one order on both SQLite and PostgreSQL, the window cut, `limit+1` truncation keeping the NEWEST rows, dimension ties, ordering and the empty case."
+    },
+    {
+      "file": "unit/test_ent479_metrics_route.py",
+      "feature": "abilityai/trinity-enterprise#479",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "api",
+        "unit"
+      ],
+      "description": "`GET /api/agents/{name}/metrics` through a real TestClient with only the store stubbed, because what is worth proving is that the route and `metric_read_service` agree on the shape a consumer binds to. Gate order (uniform-404 dependency, then the agent self-gate: an agent key reads its own numbers and gets 403 for another's), the enforced per-agent rate limit, `window_invalid`, `metric_undeclared` as a 422 and deliberately NOT a 404 (the MCP classifier reads 404 as `not_authorized` per the #186 convention, which would tell an agent it lacks access to itself), the retired-name hint, the empty-state message, the D-010 echo with `findings_evaluated_at`, and a store outage as 503 + `Retry-After` rather than a 500."
+    },
+    {
+      "file": "unit/test_ent479_health_informational.py",
+      "feature": "abilityai/trinity-enterprise#479",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "monitoring",
+        "unit"
+      ],
+      "description": "The `metrics` block on `get_agent_health` is INFORMATIONAL and nothing else: the block is present and correctly bucketed, and `aggregate_status` + `issues` are byte-identical with and without stale metrics. A business metric going quiet is a fact about the agent's work, not its health, and folding the two would make \"unhealthy\" mean two unrelated things. A store read failure yields `metrics: null` — the health check never fails because the metric store did."
+    },
+    {
+      "file": "unit/test_ent479_binding_and_compat.py",
+      "feature": "abilityai/trinity-enterprise#479",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "compatibility",
+        "unit"
+      ],
+      "description": "D-010 (the superseded `metrics.json` named as a finding, both legacy file spellings, the undeclared-key split that makes it actionable, and the charset bound on keys that are author-controlled text landing in persisted `checks_json`), the `metric:` widget binding (value from the registry, a placeholder `value:` OVERWRITTEN rather than preferred, an undeclared name showing the reason and NO number, a store outage degrading per widget, status colour from the declaration, threshold colour, the `history` shape the panel actually reads), the two skips that stop `agent_dashboard_values` becoming a second source, and the relaxed validator exercised against the REAL agent-image module (Invariant #5)."
+    },
+    {
+      "file": "unit/test_ent479_exists_gate.py",
+      "feature": "abilityai/trinity-enterprise#479",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "`GET /api/agent-dashboard/{name}/exists` against the REAL `AuthorizedAgentByName` dependency — which the sibling route suites cannot do, because they override it away to reach their handlers' own gates. An absent and an inaccessible agent are byte-identical 404s (#186): before ent#479 a bare `get_current_user` made this a fleet-wide existence oracle for any logged-in principal. Also pins that the answer cannot vary with the inaccessible agent's registry contents, and that a registry failure degrades the tab gate rather than 500-ing. Written red: the route's path parameter was spelled `{name}` while the dependency binds `agent_name`, so the probe answered 422 to EVERY caller, owner included."
     }
   ]
 }

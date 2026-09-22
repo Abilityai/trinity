@@ -975,9 +975,31 @@ operator can lift the cap without typing a huge number.
 module — `metrics_retention_days` is registered together with its sweeper. The
 cap is deliberately NOT a retention key: it is a write budget, not a window.
 
-### 47.9 Legacy `metrics.json` — superseded, not removed
+### 47.9 Legacy `metrics.json` — retired as a source, named as a finding (ent#479)
 
-`GET /api/agents/{name}/metrics` is **unchanged in code**. The `metrics.json` write path it reads is *superseded* by `record_metrics` (ent#478), which validates each point against this registry. The URL keeps its shape and ent#479 re-backs it with the point store — also replacing the 30-day staleness rule with the `2 × cadence` rule `cadence_seconds` makes possible. There is no third write path.
+`GET /api/agents/{name}/metrics` keeps its URL and is **re-backed by the point
+store** (§49). The agent-server `metrics.json` read behind it is gone from the
+backend: the route no longer contacts a container at all, which is also why it
+now answers for a *stopped* agent — the legacy proxy returned "Agent must be
+running to read metrics", making every number disappear at the moment an
+operator most wanted to know what it had been.
+
+`metrics.json` is not served as a fallback when the store is empty, and that is
+deliberate rather than an omission. Two sources for one number is the condition
+ent#476 exists to remove, and "serve the file when we have nothing better" is
+exactly how the two drift apart unnoticed. The file becomes a **compatibility
+finding** instead: **D-010** (SOFT, static) reports `metrics.json is superseded
+and no longer served — record these values with `record_metrics``, and its
+detail names the file's keys *and separately* the keys with no `template.yaml
+metrics:` entry, because "you still write this file" is advice while "these
+numbers are declared nowhere" is a fix. The read route echoes the persisted
+finding into `findings[]` with `findings_evaluated_at`, so an empty list before
+the first compat run reads as *not evaluated* rather than *clean*.
+
+The agent-server `GET /api/metrics` route stays in place with a superseded note
+in its docstring — removing it is a base-image change nothing here needs, and
+an agent still writing the file is told through D-010 rather than through a
+broken endpoint. There is no third write path.
 
 ### 47.10 Lifecycle
 
@@ -1184,3 +1206,268 @@ remedy is the `refresh_metric_definitions` tool the 422's hint names.
 - [x] Both knobs are Settings-surfaced with an env bootstrap, and the sweep
       enforces the window
 - [x] Purge and rename cascade
+
+---
+
+## 49. Reading Declared Metrics — the one read, and one staleness rule (trinity-enterprise#479)
+
+§47 says which numbers an agent may have and §48 records them. This section is
+how anybody — an operator, the agent itself, a dashboard widget, a future
+objective join — **reads** one back, and how the platform decides whether what
+it is showing is still current.
+
+The binding constraint is singularity. ent#476 exists because the same business
+number was reachable through several paths that could disagree; adding a second
+read, or a second staleness rule, reintroduces the defect this epic removes. So:
+**one route**, **one stale rule**, and every consumer imports the same
+function.
+
+### 49.1 The one stale rule
+
+```
+stale  ⟺  cadence_seconds is declared  AND  now − last_point_at > 2 × cadence_seconds
+```
+
+`services/metric_read_service.freshness(cadence_seconds, last_point_at, now)` is
+the platform's single definition. It is **pure** (no DB, no clock of its own —
+`now` is injected), exported, and imported by the read route, the health block,
+the dashboard binding and the role card. A second implementation anywhere is a
+defect regardless of whether it currently agrees.
+
+It returns `{stale, freshness, stale_after}` over exactly four outcomes:
+
+| `freshness` | `stale` | When |
+|---|---|---|
+| `fresh` | `false` | a point arrived within 2× cadence |
+| `stale` | `true` | no point within 2× cadence; `stale_after` = `last_point_at + 2 × cadence` |
+| `no_cadence` | `null` | the declaration carries no `cadence:` — **never stale**, because there is nothing to be late against. `null`, not `false`: "not stale" and "unanswerable" are different claims |
+| `no_points` | `false` | declared, nothing recorded yet — an agent that has never reported is not *late*, it has not started |
+
+Two boundaries are pinned by test because they are the ones a reader guesses
+wrong: exactly `2 × cadence` is **not** stale (strict `>`, per the issue's AC),
+and a point in the **future** (the write path tolerates ≤ 300 s of clock skew)
+clamps its age to zero and reads fresh rather than going negative.
+
+`cadence_seconds` on the definition row is the only cadence this rule reads.
+`cadence` (the author's string) is never re-parsed at read time — two parsers is
+two rules.
+
+### 49.2 The read: `GET /api/agents/{name}/metrics`
+
+Same URL as the `metrics.json` proxy it replaces (§47.9), re-backed by the point
+store. **Store-only: no container is contacted**, so a stopped agent answers
+exactly like a running one.
+
+**Gate order** (Invariant #8): `AuthorizedAgentByName` decides access first —
+uniform 404 for both an absent and an inaccessible agent — then the agent
+self-gate, `current_user.agent_name and != name → 403`, the same spelling the
+write path uses so read and write agree on who "itself" is. Cross-agent reads
+are ent#80's grant, not an oversight here. Rate-limited at 240/min per agent
+(`rate_limiter.enforce`, the write path's spelling): enough for N open tabs at a
+30 s poll, not enough for a runaway loop.
+
+**Query**: `window ∈ {auto, 24h, 7d, 30d, 90d}` plus optional `since`/`until`
+ISO bounds; `metric=` (one declared name); `include_retired`; `series_limit`
+(≤ 2000, single-metric path only). `auto` is `max(24h, 12 × cadence)` capped at
+90 d, because a cadence can be anything from 60 s to a year and a fixed 24-hour
+window shows a weekly metric at most four points. Named 422s, never a generic
+500: `window_invalid`, `metric_undeclared`. A store outage is **503
+`metric_store_unavailable` + `Retry-After: 30`**.
+
+**Response**, one object per declared metric, carrying its definition, its
+latest value, its freshness and its series:
+
+```
+{agent_name, declared, window: {kind, since, until}, generated_at,
+ metrics: [{ …definition fields…,
+             latest: {value, ts, dims} | null,
+             latest_by_series: [{dims, value, ts, stale, freshness}],
+             last_point_at, stale, freshness, stale_after, series_count,
+             series: [{dims, buckets: [{i, ts, value}], points?, truncated}],
+             chart: {basis, aggregation, series_count, dims, buckets} | null,
+             stats, message }],
+ findings: [{code, message, detail}], findings_evaluated_at, policy,
+ stale_rule, message}
+```
+
+Four shape decisions are load-bearing:
+
+- **A bucket is the WINDOW, not the newest N.** The store hands the composer
+  the newest 200 points per metric, which for any metric with history older
+  than the window is a superset of it. Points outside `[since, until]` are
+  **dropped** before bucket indexing — never clamped into bucket 0, which is
+  what fabricated an opening spike (the sum of points the window excludes,
+  stamped before `since`) and then computed `stats` from it. Each bucket
+  carries its index `i`, which is what makes "the same moment in two dimension
+  series" well defined.
+- **Bucketed by default, raw only on request.** 50 metrics × 2 000 raw points is
+  a ten-megabyte "read". The all-metrics path ships ≤ 120 buckets per series;
+  raw `points` appear only on the single-metric (`metric=`) path, capped at
+  `series_limit`, and truncation keeps the **newest** — a series that dropped
+  today's points would be worse than no series.
+- **Dimensioned metrics keep their identity.** Points are grouped by
+  `canonical_dims` (the write path's own spelling), the tile value is the folded
+  aggregate per the declared `aggregation` (`last`/`sum`/`avg`), and
+  `latest_by_series[]` (≤ 50) carries each series with its own freshness. A
+  region that stopped reporting keeps contributing to a `sum` **and** is
+  visibly flagged, rather than silently dropping out of the total.
+- **`has_metrics` is gone.** One spelling of "this agent declares metrics", and
+  it is `declared`.
+- **`chart` is the one bucket list the sparkline and the trend arrow share**,
+  so they cannot describe a different thing from the number above them.
+  `latest.value` is the fold across every dimension series, so for `sum` / `avg`
+  the chart is that same fold across series **by bucket index**
+  (`basis: "folded"`). A cross-series fold is undefined for `last` — the last
+  value of two regions is not one number — so there the chart is the most
+  recently updated series and says so (`basis: "series"` + its `dims`), which
+  the tile renders as a chip rather than leaving a total's trend arrow drawn
+  from one region's history.
+
+**Empty states name the next action** rather than returning a bare list. Zero
+declarations → "no metrics: block in template.yaml — declare one and pull,
+restart the agent, or POST .../metrics/definitions/refresh". A declared metric
+with no points → "declared, no points yet — record points with `record_metrics`
+(or schedule `/update-dashboard` if the agent has that playbook)". The copy
+names **both** actions rather than branching on whether the agent holds the
+playbook: this read is store-only, the playbook catalog is a container probe
+(`GET /api/agents/{name}/playbooks`, 503 on a stopped agent), and the persisted
+`agent_skills` rows know only *library* assignments while every bundled template
+carries `/update-dashboard` in `.claude/commands/` — a conditional built on that
+table would tell exactly those agents they lack the playbook they ship with. A
+branch no caller could compute left the `/update-dashboard` half unreachable
+dead copy, which is worse than naming one action too many.
+
+**`metric=` naming a retired definition is 422 `metric_undeclared` with "retired
+at T — pass `include_retired=true`"**, not a 200 with the retired row: a retired
+metric silently reading as current for a consumer that never asked is the
+failure worth preventing.
+
+### 49.3 MCP `get_metrics(metric?, window?, since?, until?)`
+
+Agent-scoped, resolved through the existing `getAgentName`, self-gated by the
+backend. Returns the route body verbatim — the shape IS the contract — and
+never throws: a 422 `metric_undeclared` maps to
+`{success: false, undeclared: true, hint: "declare it in template.yaml metrics:
+and call refresh_metric_definitions"}`. The tool description states the stale
+rule, that the default read is bucketed, and how to get raw points, because an
+agent that has to guess will guess a second rule. A user-scoped key reads
+metrics through the REST route or the health block, not this tool
+(`access.ts` records that as `kind: "none"` with the reason).
+
+### 49.4 Freshness in `get_agent_health` — informational, never a verdict
+
+`AgentHealthDetail.metrics` carries
+`{declared, with_points, stale: [], no_cadence: [], no_points: [],
+retired_with_points: [], last_point_at, rule: "2x cadence"} | null`.
+
+It **never** touches `aggregate_status` or `issues`. A business metric going
+stale is a fact about the agent's *work*, not about the agent's *health*, and
+folding it into the health verdict would make "agent unhealthy" mean two
+unrelated things. A store read failure yields `metrics: null` — the health check
+never fails because the metric store did. Attached at request time in the
+router, not inside `perform_health_check`, so the scheduled fleet loop does not
+grow a per-agent store read per cycle.
+
+### 49.5 Declared metrics are the default agent dashboard
+
+An agent that declares metrics gets tiles with **no `dashboard.yaml` at all**
+(ent#439's sensible default).
+
+- `GET /api/agent-dashboard/{name}/exists` answers **two** flags —
+  `{has_dashboard, has_declared_metrics}` — in one DB-only request, and the
+  Dashboard tab appears for **either**. It is gated with the uniform-404
+  dependency, which it was not before: a bare `get_current_user` made it a
+  fleet-wide existence oracle for any logged-in principal.
+- `DeclaredMetricsTiles.vue` mounts as a **sibling** of `DashboardPanel`, not an
+  arm inside it. The panel's state machine terminates in "Agent Not Running" and
+  "No Dashboard Defined"; the tiles are store-backed and must render in exactly
+  those states.
+- Every tile states **when** its point was recorded (relative on the face,
+  absolute on hover). A stale tile keeps its last known value with a warning
+  chip naming the cadence it was late against — **marked stale, never rendered
+  as current**. A metric with no declared cadence gets a neutral "No cadence
+  declared" chip.
+- The tiles never recompute staleness. They render `stale` / `freshness` as the
+  route decided them (§49.1).
+- Refresh is ent#253: loading means "no data yet", a background poll swaps values
+  in place with no scroll, selection or DOM reset, and a **failed** refresh keeps
+  the numbers on screen under a stale banner rather than replacing them with
+  "no points yet" — which would be a claim about the agent produced by a failed
+  request.
+
+### 49.6 `dashboard.yaml` widgets may bind a declared metric
+
+A `metric` / `status` / `progress` widget carrying `metric: <name>` is filled
+from the registry on every read: `value`, `color` (from the declared status
+`values[].color`, or from thresholds for a numeric type), `history`,
+`last_point_at`, `stale`, `freshness`, `bound: true`.
+
+- Order is **cache → snapshot → bind → history-enrich**, on both the live and
+  the cached path, and the snapshot writer and the history enrichment both
+  **skip** bound widgets through one shared `is_bound` predicate. A bound number
+  in `agent_dashboard_values` would be a second source for a value the registry
+  owns, and the two would disagree the moment the poll and the recording cadence
+  drift apart.
+- An undeclared name yields `binding_error` and **no value** — a wrong number is
+  worse than no number — and the panel renders the reason, never a bare dash.
+  A **retired** metric is refused the same way (`binding_error_code:
+  metric_retired`, with `retired_at`): TD-10 refuses `metric=<retired>` on the
+  route so a retired metric never silently reads as current, and a widget is
+  that same read with nobody there to pass `include_retired`. Each refusal
+  carries a machine `binding_error_code` beside its sentence
+  (`metric_store_unavailable` / `metric_undeclared` / `metric_retired`), the
+  route's `{reason, message}` pair spelled for a widget.
+- A bound widget's `history` is built from `chart`, the same fold its `value`
+  comes from, so its sparkline and trend arrow describe the metric the number
+  names.
+- A store outage degrades **per widget**; a dashboard is never 5xx'd because one
+  widget named a metric.
+- The agent-server `validate_widget` no longer requires `value` (or `color` on a
+  status widget) when `metric:` is set, so an author stops having to invent a
+  number. **Older base images keep the strict rule**, so an author targeting one
+  keeps a placeholder `value:` in the file; the backend **overwrites** it when
+  the binding resolves, so the placeholder is never what an operator sees.
+- **Unbound widgets are untouched.** Snapshotting an author-written `value:` is
+  the deprecated path, documented as such: it remains supported and is not the
+  way to publish a business number.
+
+### 49.7 What is deliberately absent
+
+The objective ↔ metric join (ent#666). Cross-agent and fleet reads (ent#80,
+ent#94) — the self-gate above is the boundary they will lift, deliberately, with
+a grant. A WebSocket `metrics_updated` trigger: §48.8 deferred it for want of a
+refetch route, that route now exists, and it is ent#538's to add with
+coalescing, because a per-batch broadcast at the write cap is a storm. Deleting
+the agent-server `/api/metrics` route from the base image — it is **retired in
+place** instead: the route still exists but reads neither `template.yaml` nor
+`metrics.json`, answering `410` with
+`{has_metrics: false, superseded_by, finding: "D-010", message}`. Keeping it
+serving the file would have left the agent half of a deleted backend read alive
+(Invariant #5) and made `metrics.json` a second source of truth for a number the
+registry owns. `series_limit` and the bucket count as Settings rows — they are
+read bounds on one query, not operator policy.
+
+### Acceptance
+
+- [x] One stale rule, pure and exported, imported by every consumer; `2 ×
+      cadence` strict, no cadence → never stale, future point clamps to fresh
+- [x] `GET /api/agents/{name}/metrics` keeps its URL, is backed by the point
+      store, and answers for a **stopped** agent
+- [x] Uniform 404 then the agent self-gate; named 422s; 503 + `Retry-After` on a
+      store outage; 240/min per agent
+- [x] Bucketed by default, raw only with `metric=`, truncation keeps the newest
+- [x] Dimensioned metrics fold by the declared `aggregation` and keep
+      per-series freshness
+- [x] Every empty state names the next action the agent can actually take
+- [x] Buckets cover the window: an out-of-window point is dropped, not folded
+      into bucket 0, and `stats` is computed from the chart it labels
+- [x] `metrics.json` is retired as a source and named by D-010, echoed on the
+      read with `findings_evaluated_at`
+- [x] MCP `get_metrics` is agent-scoped, never throws, and maps `undeclared`
+- [x] `get_agent_health` carries the freshness block and never changes
+      `aggregate_status` or `issues`
+- [x] Declared metrics render as tiles with no `dashboard.yaml`, for a stopped
+      agent, with the point time and stale mark on every tile
+- [x] `/exists` answers both flags and is gated with the uniform-404 dependency
+- [x] A bound widget is filled from the registry and skipped by the snapshot
+      writer; an undeclared binding shows the reason and no number

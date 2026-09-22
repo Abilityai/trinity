@@ -29,6 +29,7 @@ const AGENT_AUTH: McpAuthContext = {
 function fakeClient(behaviour: {
   record?: (agent: string, body: unknown) => Promise<unknown>;
   refresh?: (agent: string) => Promise<unknown>;
+  read?: (agent: string, options: unknown) => Promise<unknown>;
 }): TrinityClient {
   const client = new TrinityClient("http://backend:8000");
   (client as unknown as Record<string, unknown>).recordMetrics =
@@ -43,6 +44,25 @@ function fakeClient(behaviour: {
     }));
   (client as unknown as Record<string, unknown>).refreshMetricDefinitions =
     behaviour.refresh ?? (async () => ({ created: ["cycles"], unchanged: 0 }));
+  (client as unknown as Record<string, unknown>).getAgentMetrics =
+    behaviour.read ??
+    (async (agent: string) => ({
+      agent_name: agent,
+      declared: true,
+      stale_rule: "2x cadence",
+      window: { kind: "auto", since: "2026-09-21T12:00:00Z", until: "2026-09-22T12:00:00Z" },
+      metrics: [
+        {
+          name: "revenue",
+          latest: { value: 10, ts: "2026-09-22T11:59:00Z", dims: null },
+          stale: false,
+          freshness: "fresh",
+          series: [{ dims: null, buckets: [{ ts: "2026-09-22T11:59:00Z", value: 10 }] }],
+        },
+      ],
+      findings: [],
+      findings_evaluated_at: null,
+    }));
   return client;
 }
 
@@ -278,4 +298,148 @@ test("dimension values are strings, so one label cannot fork into four series", 
     schema.safeParse({ points: [{ metric: "c", value: 1, dims: { region: 3 } }] }).success,
     false,
   );
+});
+
+
+// ---------------------------------------------------------------------------
+// get_metrics (ent#479) — the read half
+// ---------------------------------------------------------------------------
+
+test("get_metrics refuses a non-agent key without calling the backend", async () => {
+  let called = false;
+  const t = tools({
+    read: async () => {
+      called = true;
+      return {};
+    },
+  });
+  const result = JSON.parse(
+    (await t.getMetrics.execute({}, { session: { scope: "user" } as McpAuthContext })) as string,
+  );
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /agent-scoped API key/);
+  assert.equal(called, false);
+});
+
+test("get_metrics reads the CALLING agent — there is no target to spoof", async () => {
+  let seen = "";
+  const t = tools({
+    read: async (agent) => {
+      seen = agent;
+      return { agent_name: agent, metrics: [] };
+    },
+  });
+  await t.getMetrics.execute({}, { session: AGENT_AUTH });
+
+  assert.equal(seen, "metrics-agent");
+  // ent#80 is the grant that would add one; until then the schema has no
+  // agent parameter at all, so a prompt-injected "read the other agent's
+  // revenue" has nothing to bind to.
+  assert.equal(t.getMetrics.parameters.safeParse({ agent_name: "victim" }).success, true);
+  assert.equal(
+    Object.keys(t.getMetrics.parameters.shape).includes("agent_name"),
+    false,
+  );
+});
+
+test("get_metrics returns the route body verbatim — the shape IS the contract", async () => {
+  const result = JSON.parse(
+    (await tools().getMetrics.execute({}, { session: AGENT_AUTH })) as string,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(result.stale_rule, "2x cadence");
+  assert.equal(result.metrics[0].freshness, "fresh");
+  assert.equal(result.metrics[0].latest.value, 10);
+  assert.equal(result.findings_evaluated_at, null);
+});
+
+test("get_metrics forwards every query knob", async () => {
+  let seen: Record<string, unknown> = {};
+  const t = tools({
+    read: async (_agent, options) => {
+      seen = options as Record<string, unknown>;
+      return {};
+    },
+  });
+  await t.getMetrics.execute(
+    { metric: "revenue", window: "7d", since: "2026-09-01T00:00:00Z", include_retired: true },
+    { session: AGENT_AUTH },
+  );
+
+  assert.equal(seen.metric, "revenue");
+  assert.equal(seen.window, "7d");
+  assert.equal(seen.since, "2026-09-01T00:00:00Z");
+  assert.equal(seen.include_retired, true);
+});
+
+test("an undeclared metric comes back named, with the remedy, not as a retry", async () => {
+  const t = tools({
+    read: async () => {
+      throw new Error('422 {"reason":"metric_undeclared","message":"not declared"}');
+    },
+  });
+  const result = JSON.parse(
+    (await t.getMetrics.execute({ metric: "nope" }, { session: AGENT_AUTH })) as string,
+  );
+
+  assert.equal(result.success, false);
+  assert.equal(result.undeclared, true);
+  assert.match(result.hint, /refresh_metric_definitions/);
+  assert.notEqual(result.retryable, true);
+});
+
+test("get_metrics never throws, whatever the backend does", async () => {
+  for (const message of ["503 store down", "500 boom", "403 nope", "429 slow down"]) {
+    const t = tools({
+      read: async () => {
+        throw new Error(message);
+      },
+    });
+    const result = JSON.parse(
+      (await t.getMetrics.execute({}, { session: AGENT_AUTH })) as string,
+    );
+    assert.equal(result.success, false, message);
+  }
+});
+
+test("a store outage is retryable and a permanent failure is not", async () => {
+  const outage = tools({
+    read: async () => {
+      throw new Error("503 metric_store_unavailable");
+    },
+  });
+  const permanent = tools({
+    read: async () => {
+      throw new Error("500 internal error");
+    },
+  });
+
+  assert.equal(
+    JSON.parse((await outage.getMetrics.execute({}, { session: AGENT_AUTH })) as string)
+      .retryable,
+    true,
+  );
+  assert.equal(
+    JSON.parse((await permanent.getMetrics.execute({}, { session: AGENT_AUTH })) as string)
+      .retryable,
+    false,
+  );
+});
+
+test("the window enum the schema accepts is the one the backend accepts", () => {
+  const schema = tools().getMetrics.parameters;
+  for (const window of ["auto", "24h", "7d", "30d", "90d"]) {
+    assert.equal(schema.safeParse({ window }).success, true, window);
+  }
+  assert.equal(schema.safeParse({ window: "last-tuesday" }).success, false);
+});
+
+test("the description teaches what stale means and that the series is bounded", () => {
+  const description = tools().getMetrics.description;
+  assert.match(description, /2x its declared cadence/);
+  assert.match(description, /no_cadence/);
+  assert.match(description, /no_points/);
+  assert.match(description, /buckets/);
 });

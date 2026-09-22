@@ -224,6 +224,10 @@ CHECKS: List[CheckDef] = [
     # rejects its points with a named 422, so the author is already told twice.
     # HARD would flip a whole agent to incompatible over a mistyped label.
     _c("D-009", "soft", "static", "D", "template.yaml `metrics:` entries are well-formed"),
+    # ent#479. SOFT for the same reason as D-009: the agent runs fine, its
+    # numbers simply are not arriving anywhere a human or a chart can read
+    # them. HARD would flip a whole agent to incompatible over a legacy file.
+    _c("D-010", "soft", "static", "D", "metrics.json is not used (superseded by record_metrics)"),
     # --- X: Cross-File Consistency -----------------------------------------
     _c("X-001", "soft", "ai", "X", "name, display_name, description tell a coherent story",
        prompt="Do the agent's name, display_name, and description clearly refer to the same agent and purpose, with no signs of a partially-updated clone? FAIL on contradictions."),

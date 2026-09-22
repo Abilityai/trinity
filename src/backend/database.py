@@ -3905,6 +3905,27 @@ class DatabaseManager:
             agent_name, day_start_iso, limit
         )
 
+    def latest_metric_points(
+        self, agent_name: str, metric_names, per_metric_limit: int = 200
+    ):
+        """Newest-N points per named metric (ent#479 read). See MetricPointOperations."""
+        return self._metric_point_ops.latest_points_for(
+            agent_name, list(metric_names), per_metric_limit
+        )
+
+    def metric_series_points(
+        self,
+        agent_name: str,
+        metric: str,
+        since_iso: str,
+        until_iso=None,
+        limit: int = 2000,
+    ):
+        """One metric's points inside a window, newest first, `limit + 1` deep."""
+        return self._metric_point_ops.series_points(
+            agent_name, metric, since_iso, until_iso, limit
+        )
+
     def count_metric_points_candidates(self, retention_days: int, limit: int) -> int:
         """Bounded count of points older than the window (#1644 guard)."""
         return self._metric_point_ops.count_metric_points_candidates(

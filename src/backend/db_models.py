@@ -1112,6 +1112,11 @@ class AgentHealthDetail(BaseModel):
     # #526: unified breaker block — {dispatch:{...}, transport:{...}, open: bool,
     # config:{enabled}}. Same shape as GET /api/agents/{name}/circuit-breaker.
     circuit_breaker: Optional[dict] = None
+    # ent#479: INFORMATIONAL declared-metric freshness — counts and names, no
+    # values. It never feeds `aggregate_status` or `issues`: a business metric
+    # going stale is the operator's news, not a platform health failure, and a
+    # store read failure leaves this `None` rather than failing the check.
+    metrics: Optional[dict] = None
 
 
 class AgentHealthSummary(BaseModel):

@@ -1,21 +1,22 @@
 # Agent Custom Metrics - Feature Flow
 
-> **Status (ent#477)**: `template.yaml metrics:` now has a **backend reader and
-> a per-agent registry**. The declaration half of this flow is no longer
-> "parsed in the container on every read, validated nowhere" — see
-> [The declared metric registry](#the-declared-metric-registry-ent477) below,
-> which is the current shape. The `metrics.json` VALUE path documented further
-> down is **superseded** by `record_metrics` (ent#478) and re-backed by ent#479;
-> it is unchanged in code and still the only source of values today.
-
-> **Status (#2492)**: the frontend half is GONE — `MetricsPanel.vue` was deleted as unreferenced (it had zero importers; the metrics API below remains live and MCP/agent-side declarations still work). Re-adding a renderer is a feature decision, not a revert. ent#479 owns the definitions/values renderer.
+> **Status (ent#476 epic, complete as of ent#479)**: a declared metric now has
+> exactly one declaration path, one write path and one read path.
+> `template.yaml metrics:` is parsed into a **per-agent registry** (ent#477),
+> points are recorded through **`record_metrics`** (ent#478), and
+> `GET /api/agents/{name}/metrics` **reads them back from the point store** with
+> one staleness rule (ent#479). The `metrics.json` file is **retired as a
+> source**: it is no longer read by anything, is never served as a current
+> number, and an agent still writing one gets the **D-010** compatibility
+> finding. `MetricsPanel.vue` was deleted as unreferenced in #2492; the renderer
+> is now `DeclaredMetricsTiles.vue` (ent#479).
 
 > **Updated**: 2026-01-23 - Verified line numbers and added Dashboard Widget system documentation (dashboard.yaml).
 
 **Feature ID**: 9.9
 **Status**: Implemented
 **Date**: 2025-12-10
-**Last Updated**: 2026-09-21 (ent#477 — declared metric registry)
+**Last Updated**: 2026-09-22 (ent#479 — the read contract and freshness)
 
 ## The declared metric registry (ent#477)
 
@@ -160,52 +161,36 @@ Requirement: `docs/memory/requirements/lifecycle-observability.md` §48.
 
 ## Overview
 
-Agent Custom Metrics allows agents to define domain-specific KPIs in their `template.yaml` that Trinity displays in the UI. This enables per-agent observability beyond generic tool call counts.
-
-Additionally, agents can create a `dashboard.yaml` file for richer widget-based dashboards with tables, lists, markdown, and more.
+An agent declares its domain KPIs in `template.yaml`, records observations
+against those declarations with `record_metrics`, and Trinity reads them back
+through one route. That is the whole loop, and each arrow has exactly one
+implementation — the point of the ent#476 epic.
 
 ## Flow Diagram
 
 ```
-┌─────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
-│   template.yaml     │     │   Agent writes      │     │   User opens        │
-│   defines metrics:  │     │   metrics.json      │     │   Metrics tab       │
-│   - name            │     │   with values       │     │                     │
-│   - type            │     │                     │     │                     │
-│   - label           │     │                     │     │                     │
-└─────────────────────┘     └─────────────────────┘     └─────────────────────┘
-          │                           │                           │
-          ▼                           ▼                           ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Agent Server (/api/metrics)                          │
-│   1. Read template.yaml → get metric definitions                             │
-│   2. Read metrics.json → get current values                                  │
-│   3. Return { has_metrics, definitions, values, last_updated }               │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    Backend (/api/agents/{name}/metrics)                      │
-│   1. Access control check (owner/shared/admin)                               │
-│   2. Check agent is running                                                  │
-│   3. Proxy to agent server                                                   │
-│   4. Add agent_name and status to response                                   │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Frontend (MetricsPanel.vue)                          │
-│   1. Load metrics when tab activated                                         │
-│   2. Render type-specific components:                                        │
-│      - counter: Large number with label                                      │
-│      - gauge: Number with optional unit                                      │
-│      - percentage: Progress bar with thresholds                              │
-│      - status: Colored badge                                                 │
-│      - duration: Formatted time (e.g., "2h 15m")                             │
-│      - bytes: Formatted size (e.g., "1.2 MB")                                │
-│   3. Auto-refresh every 30 seconds                                           │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
+│  template.yaml       │   │  the agent calls     │   │  an operator opens   │
+│  metrics:            │   │  record_metrics(...) │   │  the Dashboard tab   │
+│  name/type/label/    │   │  one or many points  │   │                      │
+│  cadence/direction   │   │                      │   │                      │
+└──────────┬───────────┘   └──────────┬───────────┘   └──────────┬───────────┘
+           │ reconcile (ent#477)      │ validate (ent#478)       │
+           ▼                          ▼                          ▼
+   metric_definitions  ◀── join ──▶  metric_points     GET /api/agents/{n}/metrics
+   (the declaration)                 (the values)      services/metric_read_service
+                                                                 │
+                                       ┌─────────────────────────┼───────────────┐
+                                       ▼                         ▼               ▼
+                              DeclaredMetricsTiles      MCP get_metrics    get_agent_health
+                              (+ bound dashboard.yaml   (agent-scoped)     .metrics block
+                                 widgets)                                  (informational)
 ```
+
+**No container is contacted on the read.** The store answers, so a *stopped*
+agent returns exactly what a running one would — the legacy proxy replied
+"Agent must be running to read metrics", which made every number vanish at the
+moment an operator most wanted to know what it had been.
 
 ## Metric Types
 
@@ -223,22 +208,26 @@ Additionally, agents can create a `dashboard.yaml` file for richer widget-based 
 ```yaml
 # template.yaml
 metrics:
-  - name: messages_processed     # Internal identifier (snake_case)
+  - name: messages_processed     # Internal identifier (snake_case, the join key)
     type: counter                # counter|gauge|percentage|status|duration|bytes
     label: "Messages"            # Display label
     description: "Total messages"  # Tooltip text
+    cadence: 1h                  # How often you intend to record it — this is
+                                 # what makes staleness answerable (ent#479)
+    direction: up_good           # up_good|down_good|neutral — whose trend is good
+    aggregation: last            # last|sum|avg — how dimension series fold
 
   - name: success_rate
     type: percentage
     label: "Success Rate"
-    warning_threshold: 80        # Yellow if below
+    warning_threshold: 80        # Yellow if below (read in the declared direction)
     critical_threshold: 50       # Red if below
 
   - name: current_state
     type: status
     label: "State"
-    values:                      # Required for status type
-      - value: "active"
+    values:                      # Required for status type; `color` is reused
+      - value: "active"          # by a bound dashboard widget
         color: "green"
         label: "Active"
       - value: "error"
@@ -246,68 +235,107 @@ metrics:
         label: "Error"
 ```
 
-## Metrics Data File
+## Recording values
 
-Agents write `metrics.json` in workspace:
+There is **one** write path, `record_metrics` (ent#478) — see
+[Recording points against those declarations](#recording-points-against-those-declarations-ent478)
+above.
 
-```json
-{
-  "messages_processed": 42,
-  "success_rate": 87.5,
-  "current_state": "active",
-  "last_updated": "2025-12-10T10:30:00Z"
-}
+### `metrics.json` is retired (ent#479)
+
+Writing `~/metrics.json` no longer does anything. The backend does not read it,
+the read route does not fall back to it when the store is empty, and the agent
+server's own `GET /api/metrics` no longer parses it either — that route is
+retired in place, answering `410` with
+`{has_metrics: false, superseded_by: "record_metrics / GET /api/agents/{name}/metrics", finding: "D-010"}`
+rather than being deleted (§49.7). Two sources for one number is the condition this epic exists to remove,
+and "serve the file when we have nothing better" is precisely how two sources
+drift apart unnoticed.
+
+Instead, the file is a **named finding**. Compatibility check **D-010** (SOFT,
+static) reports it, lists its keys, and separately lists the keys that have no
+`template.yaml metrics:` entry — "you still write this file" is advice, "these
+numbers are declared nowhere" is a fix. The read route echoes the persisted
+finding into `findings[]`, with `findings_evaluated_at` so an empty list before
+the first compatibility run reads as *not evaluated* rather than *clean*.
+
+To migrate: declare each key in `template.yaml metrics:`, call
+`refresh_metric_definitions`, replace the file write with `record_metrics`, and
+delete the file.
+
+## Reading them back (ent#479)
+
+### `GET /api/agents/{name}/metrics`
+
+| Aspect | Contract |
+|---|---|
+| Gate | `AuthorizedAgentByName` (uniform 404 — Invariant #8/#186), **then** the agent self-gate: an agent-scoped key reads only its own numbers (403). Cross-agent reads are ent#80's grant. |
+| Rate limit | 240/min per agent — clears N tabs at a 30 s poll, stops a loop |
+| Window | `auto` (default) · `24h` · `7d` · `30d` · `90d`, or `since`/`until`. `auto` = `max(24h, 12 × cadence)` capped at 90 d, because a cadence ranges 60 s–1 y and a fixed 24 h shows a weekly metric four points |
+| Filters | `metric=<declared name>` · `include_retired` · `series_limit` (≤ 2000, single-metric path) |
+| Errors | 422 `window_invalid` · 422 `metric_undeclared` (retired names get "retired at T — pass `include_retired=true`") · 503 `metric_store_unavailable` + `Retry-After: 30` |
+| Series | Bucketed (≤ 120/series) by default; raw `points` only on the `metric=` path, truncation keeps the **newest**. A bucket covers the **window**: a point outside `[since, until]` is dropped before indexing, never clamped into bucket 0 |
+| Dimensions | Grouped by `canonical_dims`, folded by the declared `aggregation`, with `latest_by_series[]` carrying each series' own freshness |
+| Chart | `chart` is the one bucket list the sparkline, `stats` and a bound widget's `history` all read, so they describe the same thing as `latest.value`: `basis: "folded"` (the cross-series fold, for `sum`/`avg`) or `basis: "series"` + `dims` (for `last`, where a cross-series fold is undefined — the UI labels it) |
+
+### The one staleness rule
+
+```
+stale  ⟺  cadence declared  AND  now − last_point_at > 2 × cadence
 ```
 
-## API Endpoints
+`metric_read_service.freshness()` is pure, exported and the ONLY implementation.
+The tiles, the bound widgets, the health block and the role card all import it;
+a second copy is a defect whether or not it currently agrees.
 
-### Agent Server: GET /api/metrics
+| `freshness` | `stale` | Meaning |
+|---|---|---|
+| `fresh` | `false` | a point arrived within 2× cadence |
+| `stale` | `true` | it did not; `stale_after` says when it tipped |
+| `no_cadence` | `null` | no `cadence:` declared — **never stale**; `null`, not `false`, because "not stale" and "unanswerable" are different claims |
+| `no_points` | `false` | declared, never recorded — not *late*, not started |
 
-```json
-{
-  "has_metrics": true,
-  "definitions": [...],
-  "values": {...},
-  "last_updated": "2025-12-10T10:30:00Z"
-}
-```
+Exactly `2 × cadence` is not stale (strict `>`), and a point in the future
+(≤ 300 s of tolerated clock skew) clamps to fresh rather than going negative.
 
-### Backend: GET /api/agents/{name}/metrics
+### Consumers
 
-Same as above, plus:
-- `agent_name`: Agent identifier
-- `status`: "running" or "stopped"
-- Access control enforced
+| Consumer | What it gets |
+|---|---|
+| `DeclaredMetricsTiles.vue` | The default agent dashboard — tiles with **no `dashboard.yaml` needed**, rendering for a **stopped** agent. Every tile shows its point time; a stale tile keeps its value under a warning chip and is never rendered as current |
+| `dashboard.yaml` widgets | A `metric`/`status`/`progress` widget carrying `metric: <name>` is filled from the registry — see [agent-dashboard.md](agent-dashboard.md) |
+| MCP `get_metrics` | Agent-scoped, never throws, maps `metric_undeclared` to a hint naming `refresh_metric_definitions` |
+| `get_agent_health` | An **informational** `metrics` block. It never touches `aggregate_status` or `issues`: a business metric going stale is a fact about the agent's work, not its health |
+
+### Empty states name the next action
+
+Zero declarations → "no metrics: block in template.yaml — declare one and pull,
+restart the agent, or POST .../metrics/definitions/refresh". A declared metric
+with no points → "declared, no points yet — record points with `record_metrics`
+(or schedule `/update-dashboard` if the agent has that playbook)". The **route**
+composes the sentence, so no surface can offer an action the agent cannot take;
+it names both actions rather than branching, because a store-only read cannot
+learn which playbooks a container holds (the catalog is a container probe, and
+`agent_skills` knows only *library* assignments while the bundled templates
+carry `/update-dashboard` in `.claude/commands/`). The earlier conditional took
+a flag no caller could compute, which made half the sentence unreachable.
 
 ## Key Files
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| Agent Server | `docker/base-image/agent_server/routers/info.py:148-208` | GET /api/metrics endpoint |
-| Router | `src/backend/routers/agent_files.py` | GET /api/agents/{name}/metrics endpoint |
-| Service | `src/backend/services/agent_service/metrics.py` (93 lines) | Metrics proxy logic |
-| Frontend | `src/frontend/src/components/MetricsPanel.vue` (365 lines) | Metrics display component |
-| Frontend | `src/frontend/src/views/AgentDetail.vue:88-91` | Dashboard tab content integration |
-| Store | `src/frontend/src/stores/agents.js:507-513` | getAgentMetrics action |
-
-### Backend Architecture
-
-```python
-# Router (agents.py:688-695)
-@router.get("/{agent_name}/metrics")
-async def get_agent_metrics(agent_name: str, request: Request, current_user: User = Depends(get_current_user)):
-    """Get agent custom metrics."""
-    return await get_agent_metrics_logic(agent_name, current_user)
-```
-
-```python
-# Service (metrics.py:18-93)
-async def get_agent_metrics_logic(agent_name: str, current_user: User) -> dict:
-    """Get agent custom metrics from agent's internal API."""
-    if not db.can_user_access_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, ...)
-    # ... proxy to agent-server
-```
+| Registry | `src/backend/services/metric_registry.py`, `db/metric_definitions.py` | Declarations (ent#477) |
+| Write | `src/backend/services/metric_points_service.py`, `db/metric_points.py` | `record_metrics` validation + store (ent#478) |
+| **Read** | `src/backend/services/metric_read_service.py` | `freshness`, `read_agent_metrics`, `freshness_summary`, `bind_dashboard_widgets` (ent#479) |
+| Route | `src/backend/routers/agent_files.py` | `GET/POST .../metrics*` |
+| Health | `src/backend/routers/monitoring.py`, `db_models.AgentHealthDetail` | The informational block |
+| Compat | `src/backend/services/compatibility/static_checks.py` | D-009 (shape), D-010 (`metrics.json` superseded) |
+| MCP | `src/mcp-server/src/tools/metrics.ts` | `record_metrics`, `get_metrics` |
+| Frontend | `src/frontend/src/components/DeclaredMetricsTiles.vue` | The tiles |
+| Frontend | `src/frontend/src/components/BoundMetricMark.vue` | A bound widget's point time / stale mark / binding error |
+| Frontend | `src/frontend/src/utils/metricFormat.js` | Type- and direction-aware formatting, shared by both surfaces |
+| Frontend | `src/frontend/src/utils/agentTabs.js` | `buildTabs({hasDashboardFlag, hasDeclaredMetrics})` |
+| Store | `src/frontend/src/stores/agents.js` | `getAgentMetrics`, the two-flag `checkDashboardExists` |
 
 ---
 
@@ -448,11 +476,17 @@ All test agents have metrics defined:
 
 ## Future Enhancements
 
-1. **Metrics History**: Store time-series data for graphs
-2. **Alerting**: Trigger alerts when thresholds breached
-3. **Aggregation**: Platform-wide metrics dashboard
-4. **Export**: Prometheus/OpenTelemetry export
-5. **Dashboard Display**: Show key metrics on agent cards
+Shipped since this list was written: time-series history (ent#478's
+`metric_points` + ent#479's bucketed series) and showing declared metrics as the
+default dashboard (ent#479). Still open:
+
+1. **The objective join** — declared metrics against declared objectives (ent#666)
+2. **Cross-agent and fleet reads** — the read is self-scoped by design; lifting
+   that is a deliberate grant (ent#80, ent#94)
+3. **A `metrics_updated` WebSocket trigger** — the refetch route now exists, so
+   a thin coalesced trigger is possible (ent#538)
+4. **Alerting** on a breached threshold or a stale metric
+5. **Export**: Prometheus/OpenTelemetry
 
 ## Related Documents
 
@@ -470,3 +504,4 @@ All test agents have metrics defined:
 | 2025-12-30 | Verified file paths, service layer refactor |
 | 2026-01-23 | Updated line numbers (info.py:148-208, agents.py:688-695, agents.js:507-522), added Dashboard Widget system documentation (dashboard.yaml), added DashboardPanel.vue (510 lines), added revision history |
 | 2026-09-22 | Added the write path (ent#478): `record_metrics`, the `metric_points` store, the two Settings knobs and the retention sweep |
+| 2026-09-22 | Rewrote the READ half (ent#479): the re-backed route, the one `2 x cadence` staleness rule, the declared-metric tiles, MCP `get_metrics`, the health block — and retired `metrics.json` as a source, replacing it with the D-010 finding |

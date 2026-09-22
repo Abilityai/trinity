@@ -55,9 +55,6 @@ from .queue import (
     clear_agent_queue_logic,
     force_release_agent_logic,
 )
-from .metrics import (
-    get_agent_metrics_logic,
-)
 from .dashboard import (
     get_agent_dashboard_logic,
 )
@@ -132,7 +129,6 @@ __all__ = [
     "clear_agent_queue_logic",
     "force_release_agent_logic",
     # Metrics
-    "get_agent_metrics_logic",
     # Dashboard
     "get_agent_dashboard_logic",
     # Stats

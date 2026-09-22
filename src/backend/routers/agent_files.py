@@ -1,11 +1,17 @@
 # mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics, /metrics/definitions — ent#479 ships that tool; the definitions READ stays deliberately unexposed until then, not forgotten)
 """Agent file management, info, and folder endpoints."""
-from fastapi import APIRouter, Depends, HTTPException, Request
+import logging
+import os
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from models import User
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, is_interactive_principal
 from services.agent_auth import agent_httpx_client
+from services import metric_read_service, rate_limiter
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 from services.agent_service import (
@@ -23,7 +29,6 @@ from services.agent_service import (
     preview_agent_file_logic,
     update_agent_file_logic,
     create_agent_folder_logic,
-    get_agent_metrics_logic,
     get_file_sharing_status_logic,
     set_file_sharing_status_logic,
 )
@@ -43,7 +48,16 @@ from services.agent_shared_files_service import (
 from services.idempotency_service import EffectInProgressError
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/agents", tags=["agents"])
+
+# Per-agent READ rate. Four times the write limit: every consumer polls (the
+# tiles, the dashboard bind, N open tabs at a 30 s cadence), so the ceiling has
+# to clear normal traffic by a wide margin and still stop a runaway
+# `get_metrics` loop from pinning the store with 50-metric reads (TD-6).
+METRICS_READ_RATE_LIMIT = int(os.getenv("METRICS_READ_RATE_LIMIT", "240"))
+METRICS_READ_RATE_WINDOW = 60  # seconds
 
 
 # ============================================================================
@@ -350,12 +364,116 @@ async def remove_agent_permission(
 
 @router.get("/{agent_name}/metrics")
 async def get_agent_metrics(
-    agent_name: str,
+    agent_name: AuthorizedAgentByName,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    window: str = "auto",
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    metric: Optional[str] = None,
+    include_retired: bool = False,
+    series_limit: int = Query(
+        metric_read_service.DEFAULT_SERIES_LIMIT,
+        ge=1,
+        le=metric_read_service.MAX_SERIES_LIMIT,
+    ),
+    current_user: User = Depends(get_current_user),
 ):
-    """Get agent custom metrics."""
-    return await get_agent_metrics_logic(agent_name, current_user)
+    """The agent's recorded business metrics, with freshness (ent#479).
+
+    Same URL as the `metrics.json` proxy it replaces, re-backed by the ent#478
+    point store: declared definitions (ent#477) joined to the points recorded
+    under their names, with ONE stale rule —
+    `now - last_point_at > 2 x cadence`, and never stale without a declared
+    cadence. `metrics.json` is superseded; an agent still writing one gets the
+    D-010 compatibility finding echoed in `findings[]` rather than having that
+    file served as a current number.
+
+    **Store-only.** No container is contacted, so a STOPPED agent answers
+    exactly like a running one — the legacy proxy returned "Agent must be
+    running to read metrics", which made every number disappear at the moment
+    an operator most wanted to know what it had been.
+
+    Gate order (Invariant #8): the uniform-404 dependency decides access
+    first, then the agent self-gate — an agent-scoped key reads only its own
+    numbers (cross-agent reads are ent#80's grant, not an oversight here).
+    """
+    # --- self-gate (after access, before any read: the `metric_points.py`
+    # spelling, so the write and the read agree on who "itself" is) ----------
+    if current_user.agent_name and current_user.agent_name != agent_name:
+        raise HTTPException(
+            status_code=403,
+            detail="Agent-scoped key may only read its own metrics",
+        )
+
+    rate_limiter.enforce(
+        f"agent_metrics_read:{agent_name}",
+        METRICS_READ_RATE_LIMIT,
+        METRICS_READ_RATE_WINDOW,
+        detail="Metric read rate limit exceeded for this agent.",
+    )
+
+    policy = _metric_policy()
+    findings, evaluated_at = _metric_findings(agent_name)
+
+    try:
+        return metric_read_service.read_agent_metrics(
+            agent_name,
+            window=window,
+            since=since,
+            until=until,
+            metric=metric,
+            include_retired=include_retired,
+            series_limit=series_limit,
+            findings=findings,
+            findings_evaluated_at=evaluated_at,
+            policy=policy,
+            retention_days=policy.get("retention_days"),
+        )
+    except metric_read_service.MetricReadError as e:
+        # Named 422s, never a generic 500 (Bar 6). Deliberately NOT a 404:
+        # the MCP error classifier reads 404 as "not authorized" (the #186
+        # uniform-404 convention), so an undeclared metric would tell the
+        # agent it lacks access to its own agent.
+        raise HTTPException(
+            status_code=422,
+            detail={"reason": e.reason, "message": e.message, **e.extra},
+        )
+    except (OperationalError, DBAPIError) as e:
+        logger.error("[Metrics] Read failed for %s: %s", agent_name, e)
+        raise HTTPException(
+            status_code=503,
+            detail="metric_store_unavailable",
+            headers={"Retry-After": "30"},
+        )
+
+
+def _metric_findings(agent_name: str):
+    """The persisted D-010 finding, echoed onto the read (TD-1).
+
+    Read from the compatibility row rather than probed per request: a polled
+    route may not `docker exec`, and a stopped agent has nothing to exec into.
+    `findings_evaluated_at` is returned alongside so that "no finding" can be
+    told from "not evaluated yet" — an empty list with no timestamp means the
+    compat collector has not run since the upgrade, not that the agent is
+    clean.
+    """
+    try:
+        result = db.get_compatibility_result(agent_name)
+    except Exception as e:  # noqa: BLE001 — a missing report is not a failure
+        logger.debug("[Metrics] No compatibility result for %s: %s",
+                     agent_name, e)
+        return [], None
+    if not result:
+        return [], None
+    findings = []
+    for check in result.get("checks") or []:
+        if check.get("id") == "D-010" and check.get("status") == "fail":
+            findings.append({
+                "code": "metrics_json_superseded",
+                "message": check.get("message"),
+                "detail": check.get("detail"),
+            })
+    return findings, result.get("checked_at")
 
 
 @router.get("/{agent_name}/metrics/definitions")

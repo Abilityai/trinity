@@ -85,6 +85,7 @@
 | D-007 | SOFT | AI | Dashboard/Metrics | Metrics definitions reflect meaningful domain KPIs (not just generic "messages processed") |
 | D-008 | INFO | STATIC | Dashboard/Metrics | Dashboard `refresh_interval` is >= 5 seconds |
 | D-009 | SOFT | STATIC | Dashboard/Metrics | `template.yaml` `metrics:` entries are well-formed (name charset, known type, status `values`, cadence grammar, thresholds, dimensions, caps) |
+| D-010 | SOFT | STATIC | Dashboard/Metrics | `metrics.json` is not used — the file is superseded by `record_metrics`, and any keys in it with no `template.yaml metrics:` entry are named |
 | X-001 | SOFT | AI | Consistency | Agent name, `display_name`, and `description` tell a coherent story about the same agent |
 | X-002 | SOFT | AI | Consistency | CLAUDE.md identity is consistent with `template.yaml` description and use cases |
 | X-003 | SOFT | AI | Consistency | Skills/playbooks described in `template.yaml` match skills that actually exist in `.claude/skills/` |
@@ -501,6 +502,34 @@ mistyped label.
 
 ### Category: Cross-File Consistency
 
+
+**D-010** — `metrics.json` is not used  
+Severity: SOFT | Type: STATIC  
+`metrics.json` was the agent-written file the old `GET /api/agents/{name}/metrics`
+proxy read. Since trinity-enterprise#479 that route is backed by the
+`metric_points` store, so nothing reads the file: a number written there is
+invisible to the metric tiles, the `dashboard.yaml` `metric:` binding, the MCP
+`get_metrics` tool and every consumer downstream. Serving it when the store is
+empty was rejected deliberately — two sources for one number is what ent#476
+exists to prevent — so the file becomes a finding instead.
+
+The detail is the object `{keys, undeclared}` — the file's keys
+(charset-bounded, 25 max) and, separately, those with **no** `template.yaml
+metrics:` entry: "you still write this file" is advice, "these four numbers are
+declared nowhere" is a fix. Values are never persisted into `checks_json`. The
+read echoes the object unchanged, so a UI must SPELL it out (the tiles render
+"keys in the file: … · declared nowhere: …") rather than interpolating it —
+`{{ detail }}` on an object is pretty-printed JSON braces. SOFT, like D-009:
+the agent runs fine, its numbers simply are not arriving.
+
+The container's own `GET /api/metrics` no longer reads the file either: it is
+retired in place and answers `410` with
+`{has_metrics: false, superseded_by, finding: "D-010"}`, so the finding is the
+only thing the file produces anywhere.
+
+Remedy: declare the metrics in `template.yaml metrics:`, call
+`refresh_metric_definitions`, and record points with `record_metrics` instead of
+writing the file.
 **X-001** — Name, display_name, description tell a coherent story  
 Severity: SOFT | Type: AI  
 All three should clearly refer to the same agent and the same purpose. Discrepancies suggest the agent was cloned and partially updated.
