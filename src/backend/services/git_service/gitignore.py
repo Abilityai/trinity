@@ -592,41 +592,32 @@ async def _git_toplevel(container_name: str) -> Optional[str]:
     return None
 
 
-async def _detect_git_dir_fallback(container_name: str) -> str:
-    """Where to *create* a repo when the container has none yet.
-
-    Verbatim the pre-#2075 content heuristic: any non-empty ``workspace/``
-    means the repo goes there. ``initialize_git_in_container`` uses this to
-    place a brand-new repo, so fresh-agent placement stays byte-compatible.
-    """
-    check_workspace = await execute_command_in_container(
-        container_name=container_name,
-        command=(
-            'bash -c "[ -d /home/developer/workspace ] && '
-            'find /home/developer/workspace -mindepth 1 -maxdepth 1 | '
-            'head -1 | wc -l"'
-        ),
-        timeout=5,
-    )
-    workspace_has_content = (
-        check_workspace.get("exit_code") == 0
-        and "1" in check_workspace.get("output", "")
-    )
-    return "/home/developer/workspace" if workspace_has_content else "/home/developer"
+#: Where a NEW repository is created, and the only root the agent server ever
+#: reads (`agent_server/routers/git.py::_STATUS_HOME_DIR`, `auto_sync._HOME_DIR`).
+#: #2938: the pre-#2075 content heuristic used to root a fresh repo at
+#: `workspace/` whenever that directory held anything — and every git route in
+#: the agent server, plus in-container auto-sync, hardcodes the home
+#: directory, so such an init returned 200 and the very next status poll said
+#: "not enabled" forever. A populated `workspace/` is not a reason to root the
+#: repo there; it is content under home that the initial commit should include.
+NEW_REPO_ROOT = "/home/developer"
 
 
 async def _detect_git_dir(container_name: str) -> str:
     """Pick the directory git operations should run in for an agent container.
 
-    Git's own answer wins (``_git_toplevel``). Only when the container has no
-    repository at all does the legacy content heuristic decide — that path is
-    reached by ``initialize_git_in_container``, which needs a placement for a
-    repo that does not exist yet.
+    Git's own answer wins (``_git_toplevel``): a genuinely workspace-rooted
+    legacy repo still answers ``/home/developer/workspace`` so Push, the
+    gitignore migration and the token scrub keep working on it. A container
+    with no repository at all answers ``NEW_REPO_ROOT`` — the one root the
+    agent server reads — which is the placement ``initialize_git_in_container``
+    needs for a repo that does not exist yet (#2938; the content heuristic that
+    used to decide this is gone, see ``NEW_REPO_ROOT``).
     """
     top = await _git_toplevel(container_name)
     if top:
         return top
-    return await _detect_git_dir_fallback(container_name)
+    return NEW_REPO_ROOT
 
 
 async def _migrate_workspace_gitignore(agent_name: str) -> gitignore_sweep.GitignoreSweep:

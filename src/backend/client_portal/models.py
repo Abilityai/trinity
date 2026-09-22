@@ -510,6 +510,111 @@ class PortalAgentHeader(BaseModel):
     last_active: Optional[str] = None
 
 
+class PortalMemoryWrite(BaseModel):
+    """ent#637 — one change to the notes an agent keeps about the viewer.
+
+    `schedule_name` is the bounded label the agent page already uses; `kind`
+    says who wrote it in the viewer's vocabulary — `scheduled_run` for a seat
+    run, `conversation` for anything the viewer was present for. `notes` is the
+    text the write left; `previous_notes` is what undo restores. `undoable` is
+    computed server-side (latest, not already undone), so the client never
+    guesses which button to show."""
+    id: str
+    kind: Literal["scheduled_run", "conversation"]
+    execution_id: Optional[str] = None
+    schedule_name: Optional[str] = None
+    written_at: str
+    undone_at: Optional[str] = None
+    undoable: bool = False
+    notes: str = ""
+    previous_notes: str = ""
+
+
+class PortalAgentMemory(BaseModel):
+    """ent#637 — what this agent remembers about the viewer, and what changed it.
+
+    Only the viewer's own memory ever leaves through here (keyed on the
+    principal's email inside the accessor); `writes` is newest-first and bounded."""
+    agent_name: str
+    notes: str = ""
+    updated_at: Optional[str] = None
+    writes: list[PortalMemoryWrite] = Field(default_factory=list)
+
+
+class PortalMemoryUndo(BaseModel):
+    """ent#637 — what Undo did: the notes as they now stand."""
+    write_id: str
+    notes: str = ""
+class PortalRoleReadiness(BaseModel):
+    """ent#527 / #663 — the effective readiness state. `source` says whether an
+    owner's stamp or the template's word produced it; `unstamped_ready` flags a
+    template that claims `ready` with no owner stamp."""
+    status: Literal["calibrating", "ready"]
+    changed_at: Optional[str] = None
+    changed_by: Optional[str] = None
+    source: Literal["owner", "template"]
+    unstamped_ready: bool = False
+
+
+class PortalRoleMetric(BaseModel):
+    name: str
+    direction: Optional[str] = None
+    target: Optional[float | int | str] = None
+    by: Optional[str] = None
+    value: Optional[float | int | str] = None
+    as_of: Optional[str] = None
+    stale: bool = True
+
+
+class PortalRoleObjective(BaseModel):
+    id: str
+    statement: Optional[str] = None
+    horizon: Optional[str] = None
+    status: Optional[str] = None
+    owned: bool = False
+    metrics: list[PortalRoleMetric] = Field(default_factory=list)
+
+
+class PortalRoleInfo(BaseModel):
+    id: Optional[str] = None
+    title: Optional[str] = None
+    mission: Optional[str] = None
+    status: Optional[str] = None
+    review_by: Optional[str] = None
+    stale: bool = False
+    path: Optional[str] = None
+    # role_file_not_found | role_file_unreadable | role_file_invalid |
+    # role_id_invalid | canon_path_invalid — the card SAYS the file failed.
+    error: Optional[str] = None
+
+
+class PortalRoleWalkthrough(BaseModel):
+    asks: int = 0
+    target: int = 10
+    rated_down: int = 0
+    unavailable: bool = False
+
+
+class PortalRoleCard(BaseModel):
+    """ent#527 — the role card, a projection of the agent's own files.
+    `role` is None when the agent carries no `x-role` (no card is rendered)."""
+    agent_name: str
+    role: Optional[PortalRoleInfo] = None
+    seat: Optional[str] = None
+    objectives: list[PortalRoleObjective] = Field(default_factory=list)
+    readiness: Optional[PortalRoleReadiness] = None
+    walkthrough: Optional[PortalRoleWalkthrough] = None
+    # ent#500's assignment kind, when it lands; None renders as "no assignment recorded".
+    relationship: Optional[str] = None
+    can_flip_readiness: bool = False
+    # agent_stopped | agent_unreachable — the files live in the container.
+    unavailable: Optional[str] = None
+
+
+class PortalRoleReadinessFlip(BaseModel):
+    status: Literal["calibrating", "ready"]
+
+
 class PortalAgentPage(BaseModel):
     """The Workspace agent page (ent#360) — one call, because the page is one
     screen and five round trips would render it in pieces."""

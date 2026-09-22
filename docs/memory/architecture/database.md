@@ -484,6 +484,9 @@ CREATE TABLE agent_shared_files (
     consumed_at TEXT,                     -- deferred
     download_count INTEGER DEFAULT 0,
     last_downloaded_at TEXT,
+    addressed_to_email TEXT,              -- ent#549: whose Files tab lists the row; NULL + NULL channel = the owner only
+    addressed_to_channel TEXT,            -- ent#549: `whatsapp:+…` / `telegram:<chat>` — DISPLAY ONLY, never filtered on
+    audience_source TEXT,                 -- ent#549: turn | override | channel | none | ambiguous; NULL = pre-column row
     FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
         ON DELETE CASCADE ON UPDATE CASCADE   -- aspirational; manual cascade per platform convention
 );
@@ -522,6 +525,46 @@ existence oracle over every share in the install (Invariant #8), the same fork
 `set_chat_star` already resolved the same way; a row cap bounds the write instead. Both
 purge paths in `db/agent_shared_files.py` (`delete_expired_and_revoked` and
 `delete_for_agent`) delete the matching dismissals in the same transaction.
+
+**public_user_memory_writes** (ent#637 — every write to the MEM-001 `agent_notes` section,
+so a person can see that a scheduled run touched their memory and undo it; also ent#419's
+"write history with rollback" layer):
+```sql
+CREATE TABLE public_user_memory_writes (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    user_email TEXT NOT NULL,
+    execution_id TEXT,
+    triggered_by TEXT NOT NULL,           -- the execution's trigger; 'schedule' for a seat run
+    schedule_id TEXT,
+    previous_notes TEXT NOT NULL DEFAULT '',   -- what undo restores
+    new_notes TEXT NOT NULL DEFAULT '',
+    written_at TEXT NOT NULL,
+    undone_at TEXT,
+    undone_by TEXT
+);
+CREATE INDEX idx_public_user_memory_writes_lookup ON public_user_memory_writes(agent_name, user_email, written_at);
+```
+Both tracks: SQLite `public_user_memory_writes_table`, Alembic `0066_public_user_memory_writes`;
+`AgentRef("public_user_memory_writes", "agent_name", Policy.CASCADE)`. Written only by
+`db/public_links.py::write_user_memory_agent_notes`, in the same transaction as the notes
+replace, so `previous_notes` is what the row held at that instant. Not keyed to
+`public_user_memory.id` — that row is created on demand; `(agent_name, user_email)` is the
+identity. Undo (`undo_user_memory_write`) is latest-first over the open (`undone_at IS NULL`)
+writes of one `(agent, email)`; a foreign write id is `not_found`, never a 403 (Invariant #8).
+
+**agent_role_readiness** (ent#527 / #663 — the agent owner's readiness stamp for a role companion):
+```sql
+CREATE TABLE agent_role_readiness (
+    agent_name TEXT PRIMARY KEY,
+    status TEXT NOT NULL,        -- calibrating | ready
+    changed_at TEXT NOT NULL,
+    changed_by TEXT NOT NULL     -- the owner's email
+);
+```
+Both tracks: SQLite `agent_role_readiness_table`, Alembic `0067_agent_role_readiness`;
+`AgentRef("agent_role_readiness", "agent_name", Policy.CASCADE)`. Platform-side because
+`template.yaml`'s `x-role.status` is agent-writable and only the owner may flip a companion.
 
 **agent_event_subscriptions / agent_events** (EVT-001 — agent event pub/sub):
 ```sql
