@@ -168,14 +168,19 @@ def test_a_refused_type_change_is_visible_on_the_read(db_backend):
 
 
 def test_the_response_carries_the_retention_contract(db_backend):
-    """T2 — the names and defaults ent#478 implements are published so a
-    consumer reads them from the platform, and `enforced: False` says plainly
-    that nothing sweeps yet. No Settings knob is minted here: a control with no
-    enforcer is a dishonest affordance."""
+    """T2 — the names and defaults are published so a consumer reads them from
+    the platform rather than hard-coding them.
+
+    `enforced` FLIPPED to True with ent#478 (a deliberate red, named in that
+    commit): the sweep, the cap and the two Settings knobs now exist, so the
+    honest answer changed. The numbers are read live from the settings chain,
+    which is why they are asserted against the resolver's own values rather
+    than restated literals — see `test_ent478_settings_knobs.py` for the
+    source-per-knob and the live-follow assertions."""
     policy = _get()["policy"]
     assert policy["retention_days"] == 365
     assert policy["daily_point_cap"] == 100000
-    assert policy["enforced"] is False
+    assert policy["enforced"] is True
     assert "478" in policy["enforced_by"]
 
 

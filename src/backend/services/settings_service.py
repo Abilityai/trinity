@@ -55,6 +55,7 @@ def is_valid_public_channel_model(model: str) -> bool:
 # ImportError was swallowed by that seed's fail-safe contract — so the feature
 # no-opped on every boot with a fully green unit suite. Anything
 # `init_database()` reads belongs in config.py and is re-exported below.
+import config  # noqa: E402
 from config import (  # noqa: E402
     COMMUNITY_FRESH_INSTALL_SEED,  # noqa: F401  (re-export)
     COMMUNITY_RETENTION_FLOOR_DAYS,  # noqa: F401  (re-export)
@@ -84,6 +85,8 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "subscription_headroom_retention_days": "Days to retain subscription headroom probe history used for utilization trends (default: 30, 0 = disabled, ent#433)",
     "subscription_failure_event_retention_days": "Days to retain subscription rate-limit/auth failure events (default: 30, 0 = disabled; was a hardcoded 24h sweep before ent#433)",
     "backup_retention_days": "Days to retain database-backup artifacts in /data/backups (default: 14, bounds 1-3650 — 0 is invalid; the newest 3 artifacts are always kept; disable backups via DB_BACKUP_ENABLED=false, #2216)",
+    "metrics_retention_days": "Days to retain recorded metric points (default: 365, bounds 0-3650; 0 disables the sweep and keeps them forever). Bootstrap via METRICS_RETENTION_DAYS until a value is saved here (trinity-enterprise#478)",
+    "metrics_daily_point_cap": "Maximum metric points one agent may record per UTC day (default: 100000, bounds 0-10000000; 0 is unlimited). Bootstrap via METRICS_DAILY_POINT_CAP until a value is saved here (trinity-enterprise#478)",
 }
 
 
@@ -917,14 +920,38 @@ class SettingsService:
         _platform_model_cache_ts = now
         return _platform_model_cache
 
+    def resolve_ops_setting(self, key: str):
+        """`(value, source)` for one ops setting — the whole chain, once.
+
+        `system_settings` row -> environment variable (for the keys listed in
+        `config.ENV_BACKED_OPS_KEYS` only) -> code default. Every surface that
+        reports WHERE a value came from (`GET /api/settings/retention`, the
+        boot log, the definitions `policy` block) resolves through this rather
+        than re-deriving the chain, because a reader that skips a tier reports
+        a precedence the platform does not actually have (trinity-enterprise#478).
+
+        `source` is one of `db-row`, `env`, `default`.
+        """
+        row = self.get_setting(key, None)
+        if row is not None and row != "":
+            return (row, "db-row")
+        env_value = config.env_ops_value(key)
+        if env_value is not None:
+            return (env_value, "env")
+        return (OPS_SETTINGS_DEFAULTS.get(key, ""), "default")
+
     def get_ops_setting(self, key: str, as_type: type = str):
         """
         Get an ops setting with type conversion.
 
-        Uses defaults from OPS_SETTINGS_DEFAULTS if not set.
+        Resolves row -> env (env-backed keys only) -> OPS_SETTINGS_DEFAULTS
+        through `resolve_ops_setting`, so the env tier minted for ent#478's
+        knobs is honoured by every existing caller without each one growing its
+        own chain.
         """
-        default = OPS_SETTINGS_DEFAULTS.get(key, "")
-        value = self.get_setting(key, default)
+        value, _source = self.resolve_ops_setting(key)
+        if value == "":
+            value = OPS_SETTINGS_DEFAULTS.get(key, "")
 
         if as_type == int:
             return int(value)

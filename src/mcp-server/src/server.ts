@@ -17,6 +17,7 @@ import { createRoomTools } from "./tools/rooms.js";  // ent#169 shared sessions
 import { createScheduleTools } from "./tools/schedules.js";
 import { createTagTools } from "./tools/tags.js";
 import { createNotificationTools } from "./tools/notifications.js";
+import { createMetricsTools } from "./tools/metrics.js";
 import { createReportTools } from "./tools/reports.js";
 import { createCanvasTools } from "./tools/canvas.js";
 import { createSubscriptionTools } from "./tools/subscriptions.js";
@@ -628,6 +629,7 @@ export async function createServer(config: ServerConfig = {}) {
     createTagTools(client, requireApiKey),
     createNotificationTools(client, requireApiKey),
     createReportTools(client, requireApiKey),     // Agent Reports (#918)
+    createMetricsTools(client, requireApiKey),    // Declared metrics (ent#478)
     createCanvasTools(client, requireApiKey),     // Agent canvas (ent#438)
     createFileTools(client, requireApiKey),       // FILES-001 — outbound file sharing
     createPipelineTools(client, requireApiKey),   // #919 — agent-defined pipeline introspection

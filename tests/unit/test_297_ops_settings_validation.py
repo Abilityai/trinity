@@ -221,7 +221,16 @@ def test_generic_put_routes_retention_windows_to_the_validated_endpoint():
     # ent#433 added two: subscription_headroom_retention_days (new probe-history
     # table) and subscription_failure_event_retention_days (which converted a
     # hardcoded 24h sweep into a real window).
-    assert len(RETENTION_OPS_KEYS) == 11
+    # trinity-enterprise#478 added metrics_retention_days (recorded points).
+    assert len(RETENTION_OPS_KEYS) == 12
+
+    # And the redirect is no longer a hand-maintained subset: EVERY validated
+    # ops key has exactly one write path, so a key minted tomorrow inherits the
+    # refusal instead of waiting for someone to remember this list (E4).
+    from config import OPS_SETTINGS_VALIDATION
+
+    assert "if key in OPS_SETTINGS_VALIDATION:" in src
+    assert "metrics_daily_point_cap" in OPS_SETTINGS_VALIDATION
 
 
 def test_the_validated_endpoint_checks_before_it_writes():

@@ -224,6 +224,13 @@ AGENT_REFS: List[AgentRef] = [
     # agent's next reconcile mints a second full set under the new name while
     # the old set stays visible to the definitions read.
     AgentRef("metric_definitions",           "agent_name",        Policy.CASCADE),
+    # ent#478 — the recorded points those definitions interpret. CASCADE for
+    # the same two reasons, plus one this table makes sharper: the point
+    # identity hash is `sha256(metric \0 ts \0 dims)` and deliberately
+    # EXCLUDES `agent_name`, so re-keying a rename is lossless — the same
+    # observation keeps the same key under the new name and cannot collide
+    # with itself.
+    AgentRef("metric_points",                "agent_name",        Policy.CASCADE),
     # ent#438 — the agent canvas is agent-authored output on the same footing
     # as a report: CASCADE so a purge wipes it and a rename re-keys it. The
     # rename half is load-bearing rather than tidy — `agent_name` is half the

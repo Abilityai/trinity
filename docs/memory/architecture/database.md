@@ -867,6 +867,40 @@ CREATE TABLE metric_definitions (
 -- idx_metric_definitions_agent_status (agent_name, status)
 ```
 
+**metric_points** (trinity-enterprise#478 — see [requirements §48](../requirements/lifecycle-observability.md) and [agent-custom-metrics.md](../feature-flows/agent-custom-metrics.md)). The **append-only observation store** `record_metrics` writes: one row per observation of a metric the registry above declares for that agent. Dual-track migration (SQLite `metric_points_table` + Alembic `0070_metric_points`); cascade/rename via `AGENT_REFS` (CASCADE).
+
+```sql
+CREATE TABLE metric_points (
+    agent_name TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    ts TEXT NOT NULL,                        -- ISO-Z, Invariant #16
+    idempotency_key TEXT NOT NULL,           -- sha256(metric \0 ts \0 canonical_dims)
+    value_numeric DOUBLE PRECISION,
+    value_text TEXT,
+    dims TEXT /* pg:JSONB */,
+    execution_id TEXT,                       -- provenance only; NO foreign key
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (agent_name, ts, idempotency_key)
+)
+-- idx_metric_points_agent_metric_ts (agent_name, metric, ts DESC)   -- the read (ent#479)
+-- idx_metric_points_ts (ts)                                         -- the sweep
+-- idx_metric_points_agent_created (agent_name, created_at)          -- the daily write cap
+```
+
+Four column-level decisions are load-bearing, each against a plausible default.
+
+**No surrogate `id`.** The PRIMARY KEY *is* the point identity, so a re-posted observation conflicts with itself and `on_conflict_do_nothing` drops it — no second unique index to keep in order, and the partition key (`agent_name`) sits inside the only unique constraint, which PostgreSQL requires before ent#80 can partition by month. A UUID id plus `UNIQUE(agent_name, idempotency_key)` — the sibling shape — would mean a table rebuild at that point.
+
+**`value` is NOT in the hash.** One observation of one metric at one instant with one set of dimensions is one fact; a corrected re-post therefore deduplicates rather than double-counting, and a genuine correction is a new `ts`. Hashing the value would make the same instant hold two contradictory rows.
+
+**`dims` is JSONB on PostgreSQL and TEXT on SQLite**, through a per-column marker in the shared DDL (`col TEXT /* pg:JSONB */`, rewritten by a `_PG_TABLE_SUBS` rule declared last so it cannot eat another rule's marker). Fresh PostgreSQL is built by replaying this DDL through `to_postgres_table_ddl` (`0001_baseline`), upgrades run `0067` — one rule converges both with **no** `ALTER … USING` to keep in step in two places. `db/tables.py` declares `JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")`; `none_as_null` is not decoration — without it `None` binds as the four-character JSON text `null`.
+
+**`value_numeric` is `DOUBLE PRECISION`, not `REAL`.** `to_postgres_table_ddl` does not translate `REAL`, and `REAL` is float4 on PostgreSQL: 1234567.89 would store as 1234567.875. The column that exists to observe a value is the one that must not lose it.
+
+**No CHECK constraints**, for the `metric_definitions` reason above: `test_1819_rename_cascade_parity` seeds a placeholder row per AGENT_REFS table from NOT NULL introspection. The value rules belong to the one writer (`services/metric_points_service.py`).
+
+The retention sweep prunes by **`ts` range**, not an id list (there are none): each chunk reads the `ts` of the chunk-th oldest candidate and deletes everything at or below it that is still under the cutoff, **ties included**, so a timestamp shared by more rows than the chunk size cannot wedge the loop. Bounded to 20 chunks per call so a just-narrowed window drains over several cleanup cycles rather than monopolising one.
+
 **user_ui_preferences** (trinity-enterprise#413, OSS-core — see [Dashboard Grid View](../feature-flows/dashboard-grid-view.md#layout-model)).
 Dual-track migration (SQLite `user_ui_preferences_table` + Alembic `0053_user_ui_preferences`).
 A GENERIC per-user UI-preference record: `(user_id, key)` → an opaque JSON object, size-capped

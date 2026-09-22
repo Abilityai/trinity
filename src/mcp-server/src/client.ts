@@ -1979,6 +1979,59 @@ export class TrinityClient {
   }
 
   // =========================================================================
+  // Declared business metrics (trinity-enterprise#478)
+  // =========================================================================
+
+  /**
+   * Record a batch of metric points as `agentName`.
+   *
+   * The agent name comes from the MCP auth context, never from tool input; the
+   * backend self-gates it again on its own side.
+   */
+  async recordMetrics(
+    agentName: string,
+    data: {
+      points: Array<{
+        metric: string;
+        value: number | string;
+        ts?: string;
+        dims?: Record<string, string>;
+      }>;
+      idempotency_key?: string;
+      execution_id?: string;
+    }
+  ): Promise<{
+    success: boolean;
+    agent_name: string;
+    recorded: number;
+    deduplicated: number;
+    replayed: boolean;
+    points: Array<{ index: number; ts: string; idempotency_key: string }>;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/metrics/points`,
+      data
+    );
+  }
+
+  /**
+   * Re-read the agent's template.yaml and reconcile its declared metrics.
+   *
+   * The remedy named by `record_metrics`'s `metric_undeclared` hint, so it has
+   * to be reachable from the same place the hint is read (ent#478, TD-4).
+   */
+  async refreshMetricDefinitions(
+    agentName: string
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/metrics/definitions/refresh`,
+      {}
+    );
+  }
+
+  // =========================================================================
   // Agent canvas (ent#438)
   // =========================================================================
 

@@ -944,21 +944,36 @@ SOFT on the T-018 precedent: a malformed entry is dropped and ent#478 then rejec
 
 **D-006 is not revived.** Its premise ("`metrics:` has no backend reader") expired with this issue, but a retired id is never reissued — persisted `checks_json` rows would be re-read as a verdict about a different check. D-006 → D-009 is recorded as a mapping in `spec.py` and the spec doc's retired table.
 
-### 47.8 Retention / cap contract — names now, enforcement in ent#478
+### 47.8 Retention / cap contract — enforced as of ent#478
 
-The frozen schema calls for Settings-surfaced retention and a daily point cap. **Neither knob is minted in this issue** (ruling T2): a window with no sweeper and a cap with no write boundary are controls that change a number nothing reads — a dishonest affordance (Product Quality Bar 4). What ships is the **contract**, published in the definitions response flagged `enforced: false`:
+Both knobs are minted and **enforced** (this section originally recorded the
+deliberate absence under ruling T2 — a window with no sweeper and a cap with no
+write boundary are controls that change a number nothing reads). The
+definitions response publishes the live values with `enforced: true` and a
+`source` per knob.
 
 | Name | Default | Bounds | Enforced by |
 |---|---|---|---|
-| `metrics_retention_days` | `365` | `0-3650`, where `0` = disabled | ent#478, together with its `_guard_allows` sweep site |
-| `metrics_daily_point_cap` | `100000` | per agent per day | ent#478, at the `record_metrics` write boundary |
+| `metrics_retention_days` | `365` | `0-3650`, where `0` = disabled | `cleanup_service._sweep_metric_points`, guarded with `floor=FLOOR_METRIC_POINTS` |
+| `metrics_daily_point_cap` | `100000` | `0-10000000`, where `0` = unlimited | the `record_metrics` write boundary (429 `daily_point_cap_exceeded`) |
 
-Two facts ent#478 inherits, verified against the code rather than assumed:
+Both resolve `system_settings` row → environment (`METRICS_RETENTION_DAYS`,
+`METRICS_DAILY_POINT_CAP`) → code default. The env tier is **new in ent#478**
+and opt-in per key (`config.ENV_BACKED_OPS_KEYS`): making every ops key
+env-backed would silently change precedence for ~20 keys that
+`GET /api/settings/retention` documents as env-less. Env is a **live**
+fallback, not a one-time seed — the #2085 boot seeder skips a key whose
+variable is set, so a later change to the variable is still honoured, and a
+`PUT /api/settings/ops/config` row still wins over both.
 
-1. **There is no env tier.** `SettingsService.get_ops_setting` resolves a `system_settings` row, else the `OPS_SETTINGS_DEFAULTS` entry — the frozen schema's "`system_settings` → env → default" ladder **does not exist today** and has to be built alongside the sweep.
-2. **`0` means "disabled"** on every sibling retention window, which is why the bounds are `0-3650` and not `1-3650`.
+`0` keeps its sibling meaning on the window (disable the sweep, keep forever)
+and takes the `ops_cost_limit_daily_usd` meaning on the cap (unlimited), so an
+operator can lift the cap without typing a huge number.
 
-`RETENTION_OPS_KEYS` membership requires a `_guard_allows` sweep site (`test_1771a_retention_edges`) and is mirrored by the private retention module, so registering `metrics_retention_days` ahead of its sweeper turns two unrelated suites red.
+`RETENTION_OPS_KEYS` membership requires a `_guard_allows` sweep site
+(`test_1771a_retention_edges`) and is mirrored by the private retention
+module — `metrics_retention_days` is registered together with its sweeper. The
+cap is deliberately NOT a retention key: it is a write budget, not a window.
 
 ### 47.9 Legacy `metrics.json` — superseded, not removed
 
@@ -970,7 +985,7 @@ Two facts ent#478 inherits, verified against the code rather than assumed:
 
 ### 47.11 Known gap
 
-No backend hook covers an agent that runs `git pull` **itself** without restarting. The remedy is the explicit refresh route (and, from ent#478, an undeclared-metric 422 carrying `hint: "refresh"`).
+No backend hook covers an agent that runs `git pull` **itself** without restarting. The remedy is the explicit refresh route, reachable by the agent as the `refresh_metric_definitions` MCP tool (ent#478) — which is what the undeclared-metric 422's hint names, so the hint points at something the reader can actually call.
 
 ### Acceptance
 
@@ -981,4 +996,191 @@ No backend hook covers an agent that runs `git pull` **itself** without restarti
 - [x] A `type` change is refused, recorded in `type_conflict`, and surfaced
 - [x] `GET`/`POST` definitions routes gate on `AuthorizedAgentByName` with named 409/503 reasons
 - [x] `D-009` reports what the registry refused; `D-006` stays retired
-- [x] The retention/cap contract is written down with its owner; no knob is minted
+- [x] The retention/cap contract is written down with its owner (both knobs minted and enforced in ent#478)
+
+---
+
+## 48. Recorded Metric Points (trinity-enterprise#478)
+
+The push half of declared business metrics: the store, the write path, and the
+wire shape everything downstream binds to. The registry (§47) says which
+metrics exist; this says what their values are.
+
+**`record_metrics` is the only write path.** Not a second `report` type, not a
+file the agent edits, not a `dashboard.yaml` field. A metric value that did not
+come through here is not in the series, and nothing downstream has to ask which
+of several sources to believe.
+
+### 48.1 The frozen wire shape
+
+One `MetricPoint` shape is used identically on write (this issue) and read
+(ent#479), and is what #536's canvas `chart`/`kpi` payloads bind to:
+
+```
+{ "metric": "<declared name>",
+  "value":  <finite number> | "<declared status label>",
+  "ts":     "2026-09-22T08:00:00Z",        // RFC 3339, explicit offset
+  "dims":   { "<declared key>": "<label>" } }
+```
+
+The series envelope ent#479 returns is `{metric, type, label, unit, points[],
+last_point_at}` with `stale` reserved for that issue. It is documented here so
+the consumers deferring to "the shape #478 defines" have one to build against;
+only the point shape is coded here.
+
+`value` is `number | string` because a `status` metric observes a label. It is
+**not coerced**: `true` is not `1` (Pydantic's union was measured to make it
+one), `"42"` is not `42`, and `NaN`/`inf` are refused before the dialects can
+disagree about them (SQLite stores NaN as NULL, PostgreSQL as NaN).
+
+`dims` values are **strings only**. Allowing `3` and `"3"` and `3.0` would fork
+one label into several series that render identically.
+
+### 48.2 Identity, and what a correction is
+
+`idempotency_key = sha256(metric \0 ts \0 canonical_dims)` is the point's
+identity and the tail of its primary key `(agent_name, ts, idempotency_key)`.
+The same observation posted twice is therefore **one row** with no client key,
+no Redis and no execution id.
+
+`value` is deliberately **outside** the identity: one observation of one metric
+at one instant with one set of dimensions is one fact, so a re-post with a
+different number deduplicates rather than double-counting. **A correction is a
+new `ts`** — this is stated in the tool description because it is the one rule
+an author can get wrong in a way the platform cannot detect.
+
+The on-disk `dims` need not be byte-identical to the canonical form the hash
+was taken over; the canonical form exists so the identity is stable across
+clients, and the column's serialisation belongs to the driver.
+
+### 48.3 Batches, idempotency and honesty
+
+A batch is 1..1000 points and ≤ 2 MiB encoded, **all-or-nothing**: a caller
+never has to reconcile a partial write against what it meant to send. The 201
+returns `recorded`, `deduplicated` and `replayed` as **separate** counts, plus
+each accepted point's assigned `{index, ts, idempotency_key}` — an "we already
+had this" must not read as a write that happened.
+
+Two idempotency layers, for two different failures:
+
+* the **row** key above, which needs nothing and holds always;
+* a **batch** key (`Idempotency-Key` header or body field) via
+  `idempotency_service`, which replays the first result. Where no client key is
+  given but `execution_id` resolves to the calling agent, the batch key is
+  derived from that execution — which is what dedups a batch of `ts`-less
+  points on a re-delivered turn, since those take a fresh server-now timestamp
+  and would otherwise hash to something new.
+
+**The batch key identifies a BATCH, not a caller.** Both branches bind the
+canonical points payload into the claim (`record_metrics:{client_key}:{
+sha256(points)}` for a client key; `derive_effect_key` for the execution-derived
+one), because `idempotency_keys` stores no request fingerprint. Without that
+binding an agent stamping a constant `idempotency_key` on every turn — the
+realistic LLM failure — would have every later batch answered with the first
+one's snapshot for 24 hours: `replayed: true`, no 4xx, nothing written. A retry
+of the *same* batch still replays; a *different* batch under a reused key is a
+fresh claim and is recorded.
+
+With **neither** a key nor an `execution_id`, a `ts`-less retry is a new
+observation. That is stated rather than papered over with a body hash: the same
+numbers an hour later are usually a genuine new observation, and treating them
+as a duplicate would silently drop real data.
+
+### 48.4 Reason codes (frozen; ent#483 validates parity against this list)
+
+Batch level: `batch_empty` · `batch_too_large` · `payload_too_large` (413) ·
+`rate_limited` (429) · `daily_point_cap_exceeded` (429) ·
+`idempotency_in_flight` (409) · `metric_store_unavailable` (503) ·
+`metric_store_rejected_batch` (500, non-retryable).
+
+Per point (`errors[i].code`): `metric_name_invalid` · `metric_undeclared`
+(+ hint naming `refresh_metric_definitions`) · `metric_retired` ·
+`type_mismatch` (+ hint when a type change was refused) ·
+`status_value_undeclared` · `value_invalid` · `value_too_long` ·
+`dimension_undeclared` · `dimensions_too_many` · `dimension_value_invalid` ·
+`ts_invalid` · `ts_out_of_range` · `ts_in_future` · `ts_before_retention` ·
+`duplicate_in_batch`.
+
+`value_too_long` and `dimensions_too_many` each exist because the nearest
+alternative sends the caller somewhere that cannot help: an over-long text
+value is not a type problem, and eleven *declared* dimensions is not an
+undeclared one. A text `value` is bounded at `METRIC_VALUE_TEXT_MAX_LEN`
+(1024) — the 2 MiB figure is a **batch** bound that a single field could
+otherwise spend on its own.
+
+Messages carry codes, indices, closed-enum names and dimension **keys** only —
+never a value and never a dimension value, which may be a customer name or an
+email. This output lands in an LLM's context and in logs.
+
+### 48.5 Timestamps
+
+`ts` must match the RFC 3339 shape with an explicit offset. `fromisoformat` is
+not the gate: it accepts week dates, bare dates, and year `0999` — which
+normalises to `999-01-01T…` and then sorts as the newest row **forever** under
+the lexicographic ISO index this table is read by. Bounds are
+`[2000-01-01T00:00:00Z, now + 300 s]`, compared as datetimes rather than
+strings for the same three-digit-year reason.
+
+When the retention window is non-zero, a point older than it is refused
+(`ts_before_retention`) rather than accepted and deleted minutes later — and,
+more importantly, so agent input cannot steer the retention guard into
+permanent refusal by dropping a year of expired points into the table.
+
+### 48.6 The daily write cap
+
+`metrics_daily_point_cap` counts `created_at`, not `ts`: it is a **write**
+budget, so backfilling last year's points still spends today's. Crossing it is
+a 429 with `Retry-After` to the next UTC midnight — the input is not wrong, so
+it is not a 422. The count is `LIMIT`-bounded (the question is "does this batch
+cross", not "how many did today hold"), which means two concurrent batches can
+each pass and overshoot by at most one batch. That is accepted and documented
+rather than serialised.
+
+One audit row per (agent, UTC day) on the **first** refusal — a quota event is
+the security-relevant signal. No row per accepted batch: `audit_log` is
+append-only and undeletable for a year, so that would be up to 86 000
+permanent rows per agent per day at the cap.
+
+### 48.7 Storage, retention and lifecycle
+
+`metric_points` has no surrogate id — the identity IS the primary key, which
+keeps the partition key inside the only unique constraint so ent#80 can
+partition by month without a table rebuild. `dims` is JSONB on PostgreSQL and
+TEXT on SQLite through a `/* pg:JSONB */` marker in the shared DDL, so the
+fresh-PG, upgraded-PG and SQLite paths converge with no `ALTER … USING`.
+`value_numeric` is `DOUBLE PRECISION`, because `REAL` is float4 on PostgreSQL
+and would round a revenue metric's cents.
+
+The retention sweep uses `floor=FLOOR_METRIC_POINTS` (100 000, one agent-day at
+the default cap) rather than the sibling default of 1000: at any real ingest
+rate more than a thousand rows fall out of a 365-day window every five-minute
+cycle, so the default floor would refuse every cycle and then sit blocked
+behind single-use acknowledgements. The prune is bounded per call, and the
+acknowledgement is consumed only once the remaining backlog is under the floor.
+
+`execution_id` is **provenance only** — no foreign key, and
+`execution_row_retention_days` (90) is shorter than the point window (365), so
+ent#479 must never join on it.
+
+`AGENT_REFS` carries `metric_points` as CASCADE. The identity hash excludes
+`agent_name`, so a rename re-keys losslessly.
+
+### 48.8 What is deliberately absent
+
+No WebSocket broadcast on write (Invariant #10 wants a thin trigger plus a
+refetch route, and that route is ent#479's); no partial-accept mode; no
+per-point caller-supplied key; no refresh-on-miss inside the write path — the
+remedy is the `refresh_metric_definitions` tool the 422's hint names.
+
+### Acceptance
+
+- [x] `record_metrics` records validated points and is the only write path
+- [x] A batch is all-or-nothing with a named reason code per rejected point
+- [x] The same observation posted twice is one row, with or without a key
+- [x] A re-delivered turn replays rather than recording twice
+- [x] The daily cap refuses with 429 + `Retry-After` and audits once a day
+- [x] A store outage is retryable and never fails the agent's turn; a rejected
+      batch is explicitly not retryable
+- [x] Both knobs are Settings-surfaced with an env bootstrap, and the sweep
+      enforces the window
+- [x] Purge and rename cascade

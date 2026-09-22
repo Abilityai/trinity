@@ -1,6 +1,7 @@
 """
 Pydantic models for the Trinity backend API.
 """
+import math
 import os
 import re
 import unicodedata
@@ -4592,3 +4593,109 @@ class FirstRunState(BaseModel):
     seeded_agents: List[str] = []
     own_agent_count: int = 0
     demo_agent: Optional[str] = None
+
+
+# =============================================================================
+# Recorded metric points (trinity-enterprise#478)
+# =============================================================================
+
+# The batch caps. Both are checked at two levels — Pydantic bounds the point
+# COUNT, the route bounds the encoded BYTES — because 1000 points × 10
+# dimensions × 128 characters is ~1.4 MB of legal input, so a point cap alone
+# is not a size cap.
+METRIC_BATCH_MAX_POINTS = 1000
+METRIC_BATCH_MAX_BYTES = 2 * 1024 * 1024
+METRIC_DIM_VALUE_MAX_LEN = 128
+METRIC_TS_FUTURE_SKEW_SECONDS = 300
+# A `value` that is text is a LABEL, not a document. Unbounded, a single legal
+# point could carry the whole 2 MiB batch budget in one field, and a `status`
+# label has a 64-character domain anyway — 1024 is deliberately far above any
+# honest label so the refusal reads as "this is not a label" rather than as a
+# limit an author has to design around (ent#478 I1).
+METRIC_VALUE_TEXT_MAX_LEN = 1024
+
+
+class MetricPointIn(BaseModel):
+    """One observation on the wire — the frozen shape for ent#478/#479/#536.
+
+    Read and write use the SAME shape: what an agent records here is what
+    ent#479's history returns and what a canvas `chart`/`kpi` payload binds to.
+    `value` is `float | str` because `status` metrics observe a label, not a
+    number; the validator below is what stops Pydantic's union coercion from
+    turning `True` into `1.0` or accepting `NaN` (both measured).
+    """
+
+    metric: str = Field(
+        ..., pattern=r"^[a-z][a-z0-9_]{0,63}$",
+        description="A metric name declared in the agent's template.yaml",
+    )
+    value: Union[float, str] = Field(
+        ...,
+        description=(
+            f"A finite number, or a declared status label "
+            f"(at most {METRIC_VALUE_TEXT_MAX_LEN} characters)"
+        ),
+    )
+    ts: Optional[str] = Field(
+        None, max_length=64,
+        description="RFC 3339 with an explicit offset; defaults to server now",
+    )
+    dims: Optional[Dict[str, str]] = Field(
+        None, max_length=10,
+        description="Declared dimension keys → string labels",
+    )
+
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _reject_coercions(cls, v):
+        # `bool` is an `int` subclass, so it must be rejected BEFORE the union
+        # ever sees it — otherwise `True` records as the number 1.0 and nothing
+        # downstream can tell it from a real observation. Non-finite floats are
+        # rejected here too: SQLite stores NaN as NULL and PostgreSQL stores it
+        # as NaN, so the same batch means two different things per dialect.
+        if isinstance(v, bool):
+            raise ValueError("value must be a number or a string, not a boolean")
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError("value must be a finite number")
+        return v
+
+
+class MetricPointsBatch(BaseModel):
+    """A `record_metrics` batch — all-or-nothing, idempotent."""
+
+    points: List[MetricPointIn] = Field(
+        ..., min_length=1, max_length=METRIC_BATCH_MAX_POINTS)
+    idempotency_key: Optional[str] = Field(
+        None, max_length=128,
+        description="Batch key; the `Idempotency-Key` header wins over it",
+    )
+    execution_id: Optional[str] = Field(
+        None, max_length=128,
+        description=(
+            "The turn this batch belongs to. Provenance only — the backend "
+            "confirms it belongs to this agent and stores NULL if it does not"
+        ),
+    )
+
+
+class MetricPointAccepted(BaseModel):
+    """What the store made of one accepted point."""
+
+    index: int
+    ts: str
+    idempotency_key: str
+
+
+class MetricPointsResult(BaseModel):
+    """The 201 body. `recorded` and `deduplicated` are separate counts on
+    purpose: an honest "we already had this" is not a failure and must not read
+    as a success that wrote something."""
+
+    success: bool = True
+    agent_name: str
+    recorded: int
+    deduplicated: int
+    replayed: bool = False
+    points: List[MetricPointAccepted] = []

@@ -17,7 +17,8 @@ performance index, and for `idx_agent_evaluations_rating_target` it would
 silently turn "one rating per person per thing" into "one row per click".
 """
 
-from sqlalchemy import BigInteger, Column, Float, ForeignKey, Index, MetaData, Table, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Column, Float, ForeignKey, Index, JSON, MetaData, PrimaryKeyConstraint, Table, Text, UniqueConstraint, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import Integer as _Integer
 from sqlalchemy.types import TypeDecorator
 
@@ -1530,4 +1531,36 @@ metric_definitions = Table(
     # first `--autogenerate` anyone runs — and accepting that would turn one
     # reconcile into a second row per metric on every pull.
     UniqueConstraint("agent_name", "name"),
+)
+
+# Recorded metric points (trinity-enterprise#478) — the append-only store the
+# `record_metrics` write path fills and ent#479 reads.
+metric_points = Table(
+    "metric_points",
+    metadata,
+    Column("agent_name", Text, nullable=False),
+    Column("metric", Text, nullable=False),
+    Column("ts", Text, nullable=False),
+    Column("idempotency_key", Text, nullable=False),
+    # Float renders FLOAT = float8 on PostgreSQL and REAL-affinity on SQLite,
+    # matching the DDL's DOUBLE PRECISION. `REAL` would be float4 on PG and
+    # would round 1234567.89 — the column that exists to observe a value is the
+    # one that must not lose it.
+    Column("value_numeric", Float),
+    Column("value_text", Text),
+    # `none_as_null=True` is load-bearing: without it a `None` binds as the
+    # four-character JSON text `null`, which is not the same as "no dims" on
+    # either dialect.
+    Column(
+        "dims",
+        JSON(none_as_null=True).with_variant(
+            JSONB(none_as_null=True), "postgresql"),
+    ),
+    Column("execution_id", Text),
+    Column("created_at", Text, nullable=False),
+    # The identity IS the primary key (no surrogate id): the insert's
+    # `on_conflict_do_nothing` names these columns, and keeping the eventual
+    # partition key (`agent_name`) inside the only unique constraint is what
+    # lets ent#80 partition by month without a table rebuild.
+    PrimaryKeyConstraint("agent_name", "ts", "idempotency_key"),
 )

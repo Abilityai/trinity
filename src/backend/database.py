@@ -153,6 +153,7 @@ from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
 from db.compatibility import CompatibilityOperations
 from db.metric_definitions import MetricDefinitionOperations
+from db.metric_points import MetricPointOperations
 from db.sync_state import SyncStateOperations
 from db.idempotency import IdempotencyOperations
 from db.loops import LoopOperations
@@ -362,13 +363,23 @@ def _retention_window_seed_values():
     # — which this seed's fail-safe contract then SWALLOWS, leaving the feature
     # silently dead on every boot. Verified empirically before the move; the
     # same #1638 circular-import trap, one seed later.
-    from config import OPS_SETTINGS_DEFAULTS, RETENTION_OPS_KEYS
+    from config import (ENV_BACKED_OPS_KEYS, OPS_SETTINGS_DEFAULTS,
+                        RETENTION_OPS_KEYS, env_ops_value)
 
-    return [
-        (key, OPS_SETTINGS_DEFAULTS[key])
-        for key in RETENTION_OPS_KEYS
-        if key in OPS_SETTINGS_DEFAULTS
-    ]
+    pairs = []
+    for key in RETENTION_OPS_KEYS:
+        if key not in OPS_SETTINGS_DEFAULTS:
+            continue
+        # An env-backed window whose variable is SET is skipped on purpose
+        # (trinity-enterprise#478): seeding it would freeze the environment's
+        # value into a row and quietly end the environment's authority, so a
+        # later `METRICS_RETENTION_DAYS` change would be ignored with nothing
+        # to explain why. Env stays a live fallback; a `PUT /ops/config` row
+        # still wins over it, which is the only precedence anyone documented.
+        if key in ENV_BACKED_OPS_KEYS and env_ops_value(key) is not None:
+            continue
+        pairs.append((key, OPS_SETTINGS_DEFAULTS[key]))
+    return pairs
 
 
 def _seed_retention_windows(cursor, conn):
@@ -1019,6 +1030,7 @@ class DatabaseManager:
         self._canary_ops = CanaryOperations()
         self._compatibility_ops = CompatibilityOperations()  # #668 agent compatibility
         self._metric_definition_ops = MetricDefinitionOperations()  # ent#477 metric registry
+        self._metric_point_ops = MetricPointOperations()  # ent#478 recorded points
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
@@ -3876,6 +3888,36 @@ class DatabaseManager:
     def reconcile_metric_definitions(self, agent_name: str, declared, source: str):
         """Set-diff the declared metrics into the registry; returns a summary dict."""
         return self._metric_definition_ops.reconcile(agent_name, declared, source)
+
+    # -------------------------------------------------------------------------
+    # Recorded metric points (trinity-enterprise#478 — db/metric_points.py)
+    # -------------------------------------------------------------------------
+
+    def insert_metric_points(self, agent_name: str, rows):
+        """Insert validated points; returns `(recorded, deduplicated)`."""
+        return self._metric_point_ops.insert_points(agent_name, rows)
+
+    def count_metric_points_today(
+        self, agent_name: str, day_start_iso: str, limit: int
+    ) -> int:
+        """Points this agent wrote since `day_start_iso`, counted to `limit`."""
+        return self._metric_point_ops.count_points_today(
+            agent_name, day_start_iso, limit
+        )
+
+    def count_metric_points_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of points older than the window (#1644 guard)."""
+        return self._metric_point_ops.count_metric_points_candidates(
+            retention_days, limit
+        )
+
+    def prune_metric_points(
+        self, retention_days: int = 365, chunk_size: int = 5000
+    ) -> int:
+        """Delete points older than the window, bounded per call."""
+        return self._metric_point_ops.prune_metric_points(
+            retention_days, chunk_size
+        )
 
     # =========================================================================
     # Idempotency keys (RELIABILITY-006, #525 — delegated to db/idempotency.py)

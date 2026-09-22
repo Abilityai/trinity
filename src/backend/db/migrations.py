@@ -4462,6 +4462,59 @@ def _migrate_metric_definitions_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_metric_points_table(cursor, conn):
+    """trinity-enterprise#478 — the recorded metric point store.
+
+    Append-only: `record_metrics` INSERTs, the retention sweep DELETEs by ts
+    range, nothing UPDATEs. The primary key IS the point identity
+    `(agent_name, ts, idempotency_key)` where `idempotency_key` is
+    `sha256(metric \0 ts \0 canonical_dims)` — so a re-POSTed observation
+    conflicts with itself and `on_conflict_do_nothing` drops it, with no
+    surrogate id and no second unique index to keep in order.
+
+    `dims` is TEXT here and JSONB on PostgreSQL: the shared DDL in
+    `db/schema.py` carries the `/* pg:JSONB */` marker that
+    `to_postgres_table_ddl` rewrites, and the Alembic twin writes JSONB
+    directly.
+
+    No CHECK constraints — `test_1819_rename_cascade_parity` seeds a
+    placeholder row per AGENT_REFS table from NOT NULL introspection and a
+    CHECK would break that seed. The value/type rules belong to the one writer
+    (`services/metric_points_service.py`).
+
+    Mirrored by the Alembic revision 0070_metric_points.
+    """
+    cursor.execute("PRAGMA table_info(metric_points)")
+    if cursor.fetchall():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS metric_points (
+            agent_name TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            value_numeric DOUBLE PRECISION,
+            value_text TEXT,
+            dims TEXT,
+            execution_id TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, ts, idempotency_key)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_metric_points_agent_metric_ts "
+        "ON metric_points(agent_name, metric, ts DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_metric_points_ts ON metric_points(ts)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_metric_points_agent_created "
+        "ON metric_points(agent_name, created_at)"
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4601,4 +4654,5 @@ MIGRATIONS = [
     ("agent_role_readiness_table", _migrate_agent_role_readiness_table),
     ("agent_shared_files_audience", _migrate_agent_shared_files_audience),
     ("metric_definitions_table", _migrate_metric_definitions_table),
+    ("metric_points_table", _migrate_metric_points_table),
 ]
