@@ -2195,6 +2195,7 @@ export class TrinityClient {
       expires_in?: number;
       execution_id?: string;
       dedup_label?: string;
+      audience_email?: string;
     }
   ): Promise<{
     file_id: string;
@@ -2202,6 +2203,9 @@ export class TrinityClient {
     expires_at: string;
     size_bytes: number;
     mime_type?: string;
+    visible_to_requester?: boolean | null;
+    visibility_note?: string | null;
+    addressed_to?: string | null;
   }> {
     return this.request(
       "POST",

@@ -181,6 +181,11 @@ async def _deliver_whatsapp(agent_name, to_number, text, voice_id, tts_service):
         return VoiceReplyResult(False, "whatsapp", "synthesis_failed")
     # Host the transient voice note for Twilio to fetch (voice-out has its own gate,
     # so this bypasses the file-sharing toggle; MIME/quota/disk checks still apply).
+    # ent#549: the note is hosted in the store the Workspace Files tab lists, so it
+    # is addressed to the number it is going to — a `voice.ogg` for one person
+    # used to appear in every rostered client's tab.
+    from services.turn_audience import whatsapp_recipient
+    addressed_email, addressed_channel = whatsapp_recipient(binding.get("id"), to_number)
     try:
         share = create_share_from_bytes(
             agent_name,
@@ -189,6 +194,8 @@ async def _deliver_whatsapp(agent_name, to_number, text, voice_id, tts_service):
             expires_in=_OUTBOUND_MEDIA_EXPIRES_IN,
             created_by=agent_name,
             require_sharing_enabled=False,
+            addressed_to_email=addressed_email,
+            addressed_to_channel=addressed_channel,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("[voice_reply] whatsapp hosting failed for %s: %s", agent_name, e)

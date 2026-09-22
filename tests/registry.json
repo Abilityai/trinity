@@ -3128,6 +3128,29 @@
       "description": "`search_executions` is a system-agent / human capability: the per-tool canAccess is an ALLOW-LIST of system/user scope (agent, connector, unknown, missing and null principals fail closed), an agent-scoped session is refused in-tool with the audited denial envelope and never reaches the client, permitted scopes are proxied with parameters intact, an absent (OSS 404) or unentitled (403) module answers available:false rather than no-results, and the real TrinityClient builds the enterprise route's query string (driven with `request` stubbed)."
     },
     {
+      "file": "unit/test_ent549_file_audience.py",
+      "feature": "trinity-enterprise#549",
+      "added": "2026-09-21",
+      "categories": [
+        "backend",
+        "unit",
+        "access-control",
+        "workspace"
+      ],
+      "description": "A shared file is for the person the turn was for. Real-SQLite ROUND TRIPS — the real create_share / create_share_from_bytes into a real database, read back through the real portal_documents (only the container read and the disk write are stubbed) — because every earlier share test mocked _persist_and_register and every listing test seeded by INSERT, so nothing crossed write → read. Covers: the two-account repro; a terminal share never landing in whichever client is mid-conversation (no evidence ⇒ owner-only); a stale execution id proving the conversation and never the person (rooms); inherited agent-to-agent context; unverified channel ids never stored as emails; the audience_email override against the reader's own roster predicate; the addressee in the effect key; the owner list stripped for every key-authenticated scope, driven through the route; both migration tracks executed; the WhatsApp adapter, voice-note and share-route CALL SITES. 22 call-site mutations, all red."
+    },
+    {
+      "file": "mcp-server/src/files.test.ts",
+      "feature": "trinity-enterprise#549",
+      "added": "2026-09-21",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit"
+      ],
+      "description": "share_file forwards audience_email into the request body and returns the honest-status fields (visible_to_requester / visibility_note / addressed_to) to the agent; the tool DESCRIPTION carries the guidance, since the prompt section is dropped at the minimal tier."
+    },
+    {
       "file": "unit/test_2944_retained_results.py",
       "feature": "#2944",
       "added": "2026-09-22",

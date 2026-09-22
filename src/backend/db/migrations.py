@@ -4374,6 +4374,38 @@ def _migrate_agent_role_readiness_table(cursor, conn):
     )
     conn.commit()
 
+
+def _migrate_agent_shared_files_audience(cursor, conn):
+    """A shared file is for the person the turn was for (trinity-enterprise#549).
+
+    `agent_shared_files` was scoped by agent alone, so the Workspace Files tab
+    listed every active share of an agent to everyone on its roster — a file
+    made in one person's chat appeared, download link included, in another
+    person's tab. Third occurrence of one class (asks ent#428, reports ent#365):
+    a table scoped by an owning entity gains a per-person dimension.
+
+    `addressed_to_email` decides whose Files tab lists the row.
+    `addressed_to_channel` is the channel identity (`whatsapp:+…`) and is DISPLAY
+    ONLY — the owner's panel shows it and no reader filters on it.
+    `audience_source` records how the addressee was decided (turn | override |
+    channel | none | ambiguous), so "nobody" and "could not tell" stay
+    distinguishable for the person reading the owner's panel.
+
+    All three are nullable with NO default and there is no backfill, on purpose:
+    NULL email + NULL channel means "the owner only", which is exactly what an
+    existing row has to become — its recipient is unknowable, and every share
+    expires within seven days. The same call ent#365 made for reports.
+    """
+    for column in ("addressed_to_email", "addressed_to_channel", "audience_source"):
+        _safe_add_column(
+            cursor,
+            "agent_shared_files",
+            column,
+            f"ALTER TABLE agent_shared_files ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to agent_shared_files — a shared file has an addressee (ent#549)",
+        )
+    conn.commit()
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4511,4 +4543,5 @@ MIGRATIONS = [
     ("agent_skills_delivery_status", _migrate_agent_skills_delivery_status),
     ("public_user_memory_writes_table", _migrate_public_user_memory_writes_table),
     ("agent_role_readiness_table", _migrate_agent_role_readiness_table),
+    ("agent_shared_files_audience", _migrate_agent_shared_files_audience),
 ]

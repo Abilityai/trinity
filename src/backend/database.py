@@ -1306,6 +1306,10 @@ class DatabaseManager:
     def list_active_shared_files_for_agent(self, agent_name: str) -> list:
         return self._agent_shared_files_ops.list_active_for_agent(agent_name)
 
+    def list_active_shared_files_for_viewer(self, agent_name: str, viewer_email, *, include_owner_only: bool = False) -> list:
+        return self._agent_shared_files_ops.list_active_for_viewer(
+            agent_name, viewer_email, include_owner_only=include_owner_only)
+
     def mark_shared_file_downloaded(self, file_id: str) -> None:
         return self._agent_shared_files_ops.mark_downloaded(file_id)
 
@@ -1930,6 +1934,10 @@ class DatabaseManager:
         `__getattr__` — the ent#277 trap, guarded by
         `tests/unit/test_ent525_portal_work.py::test_the_facade_exposes_every_ledger_read_the_service_makes`."""
         return self._schedule_ops.get_running_for_chat(chat_id)
+
+    def get_running_in_conversation(self, agent_name: str, source_channel: str, chat_id: str):
+        """ent#549 — this agent's RUNNING turns in one conversation."""
+        return self._schedule_ops.get_running_in_conversation(agent_name, source_channel, chat_id)
 
     def get_fleet_execution_stats(self, agent_names, hours: int = 24):
         """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
