@@ -90,7 +90,11 @@ arm_subscription_auth_guard()
 
 # #2958: the chat's own session id lives in memory and is gone after a restart,
 # so a leftover keep-set marker would only pin a JSONL nothing will resume.
-app.add_event_handler("startup", chat_session_marker.clear)
+# `on_event`, like every sibling startup hook here: the image's FastAPI has no
+# `add_event_handler` (a module-import AttributeError, caught by the in-image smoke).
+@app.on_event("startup")
+def _clear_chat_session_marker() -> None:
+    chat_session_marker.clear()
 
 # #389 S1a: auto-sync heartbeat loop (gated by GIT_SYNC_AUTO env var).
 schedule_auto_sync_if_enabled(app)
