@@ -556,3 +556,35 @@ def test_the_agent_read_declares_its_mcp_surface_and_resolves_the_seat_from_the_
     body = src[src.index("async def get_seat_autonomy"):src.index("@router.get(\"/{agent_name}/decisions\")")]
     assert "_seat_for(agent_name, execution_id)" in body      # never a parameter
     assert "assert_agent_access" in body
+
+
+def test_the_seat_read_is_not_shadowed_by_the_agent_level_autonomy_toggle():
+    """`/api/agents/{name}/autonomy` was already taken.
+
+    `agent_config` owns it (the agent-level `autonomy_enabled` toggle) and is
+    included FIRST in `main.py`, so declaring the same path again raises
+    nothing, warns nothing and logs nothing — FastAPI matches the first route
+    and the second is simply never reached. The seat read shipped that way and
+    returned the TOGGLE's payload; only calling it live found it.
+
+    Assert the property, not the spelling: among the agent routes, no two
+    declarations may share a (path, method), and the seat read must resolve to
+    its own endpoint.
+    """
+    from routers import agent_config, seat_decisions
+
+    seen: dict[tuple[str, str], str] = {}
+    collisions: list[str] = []
+    for mod in (agent_config, seat_decisions):
+        for route in mod.router.routes:
+            for method in getattr(route, "methods", ()) or ():
+                key = (route.path, method)
+                name = getattr(route.endpoint, "__name__", "?")
+                if key in seen:
+                    collisions.append(f"{method} {route.path}: {seen[key]} vs {name}")
+                else:
+                    seen[key] = name
+    assert collisions == [], f"two endpoints share a path — the later one is dead: {collisions}"
+    assert seen[("/api/agents/{agent_name}/seat-autonomy", "GET")] == "get_seat_autonomy"
+    # and the toggle is still where every existing caller expects it
+    assert seen[("/api/agents/{agent_name}/autonomy", "GET")] != "get_seat_autonomy"

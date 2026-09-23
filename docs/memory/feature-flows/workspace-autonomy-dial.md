@@ -57,7 +57,7 @@ autonomy_dial_service.live_verdict(stored, level=…, autonomy_enabled=…, toda
   │  → unprompted: bool  ·  blocked_by: [named …]        READS PERSIST NOTHING
   ▼
 companion ──► get_autonomy {execution_id}          src/mcp-server/src/tools/decisions.ts
-                 → GET /api/agents/{name}/autonomy  routers/seat_decisions.py
+                 → GET /api/agents/{name}/seat-autonomy   routers/seat_decisions.py
                     seat from execution (_seat_for, the MEM-001 rule) · no email out
 person    ──► PortalAgentAutonomy.vue → GET /api/enterprise/client-portal/agents/{n}/autonomy
                  own seat, or every seat for the agent owner (_require_roster → 404)
@@ -106,6 +106,11 @@ every turn ──► platform_prompt_service memory block → autonomy_dial_serv
   `negative_rating_in_window`, `guard_metric_capped`, `held_by_operator` — each with a sentence. A bare
   "not autonomous yet" teaches nobody what to do next, and the companion needs the
   reason to say why it is asking rather than inventing one.
+- **The seat read needs its own noun.** `/api/agents/{name}/autonomy` is the
+  agent-level `autonomy_enabled` toggle (`agent_config`), registered first in
+  `main.py`; a second declaration on that path is matched by neither error nor
+  warning — FastAPI simply serves the first one and the new route is dead. Caught
+  by calling it live, not by a test or a diff read.
 - **The companion reads the same verdict as the person.** `prompt_lines` rides the seat's
   existing memory block (the #638 composer), so no caller can forget it, and the model
   cannot believe it is more autonomous than the panel says.
@@ -124,7 +129,7 @@ every turn ──► platform_prompt_service memory block → autonomy_dial_serv
 | Service | `services/autonomy_dial_service.py` | the rule leaf: levels, evidence, the named blocks, `live_verdict`, `evaluate_seat`, `prompt_lines` |
 | Hooks | `services/seat_decision_service.py` (`_reevaluate_autonomy` on `record` + the three terminal `act` branches) · `client_portal/service.py` (`submit_rating`) | re-evaluate on a real event |
 | Level | `routers/settings/autonomy_dial.py` · `routers/settings/__init__.py` (before `generic.router`) · `routers/settings/generic.py` (blocklist) | the instance ceiling |
-| Agent-facing | `routers/seat_decisions.py` (`GET /{agent_name}/autonomy`) · `src/mcp-server/src/tools/decisions.ts` (`get_autonomy`) · `access.ts` · `client.ts` | the companion's read |
+| Agent-facing | `routers/seat_decisions.py` (`GET /{agent_name}/seat-autonomy`) · `src/mcp-server/src/tools/decisions.ts` (`get_autonomy`) · `access.ts` · `client.ts` | the companion's read |
 | Workspace | `client_portal/autonomy.py` · `client_portal/router.py` · `client_portal/models.py` · `PortalAgentAutonomy.vue` · `PortalAgentDetails.vue` · `stores/clientPortal.js` | read / hold / release / guard |
 | Prompt | `services/platform_prompt_service.py` (via `seat_decision_service.prompt_block`) | read-into-context |
 | Tests | `tests/unit/test_ent641_autonomy_dial.py` (44) · `src/frontend/tests/unit/portalAgentAutonomy.spec.js` (10, mounted) · `src/mcp-server/src/tools/decisions.test.ts` (7) | |

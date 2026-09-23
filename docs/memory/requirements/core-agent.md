@@ -3382,7 +3382,9 @@ to localStorage in the clear.
   rides the seat's shared memory block, so the model reads which classes it may act on
   unprompted and, for every other class, the named reason it must ask first.
 - **Three surfaces, one seat rule**: MCP `get_autonomy` (seat from `execution_id`,
-  never a parameter; no email in the answer) → `GET /api/agents/{name}/autonomy`;
+  never a parameter; no email in the answer) → `GET /api/agents/{name}/seat-autonomy`
+  (`/autonomy` is the agent-level toggle, registered first — a second route on it
+  is silently never reached);
   the person reads and holds/releases in Agent details (`PortalAgentAutonomy.vue`,
   `GET /api/enterprise/client-portal/agents/{name}/autonomy`, `…/autonomy/actions`,
   `…/autonomy/guard`); admins set the level in Settings.

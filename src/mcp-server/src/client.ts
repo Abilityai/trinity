@@ -2453,7 +2453,7 @@ export class TrinityClient {
     const q = new URLSearchParams({ execution_id: executionId });
     return this.request(
       "GET",
-      `/api/agents/${encodeURIComponent(agentName)}/autonomy?${q.toString()}`
+      `/api/agents/${encodeURIComponent(agentName)}/seat-autonomy?${q.toString()}`
     );
   }
 

@@ -113,7 +113,12 @@ async def record_seat_decision(
     return result
 
 
-@router.get("/{agent_name}/autonomy")
+# `/{agent_name}/autonomy` is TAKEN — `agent_config` owns it (the agent-level
+# autonomy_enabled toggle) and is registered first in `main.py`, so a second
+# declaration here is simply never reached: FastAPI matches the first, returns
+# the toggle's payload, and nothing anywhere errors. This is a SEAT-scoped read
+# of a different thing, so it gets its own noun (#641, caught live).
+@router.get("/{agent_name}/seat-autonomy")
 async def get_seat_autonomy(
     agent_name: str,
     execution_id: str = Query(..., min_length=1, max_length=200),
