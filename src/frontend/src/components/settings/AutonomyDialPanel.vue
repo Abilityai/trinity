@@ -35,9 +35,9 @@
       <!-- A failure to LOAD is not a failure to SAVE and not "you may not set
            this". Collapsing them tells an admin the wrong thing to do next. -->
       <div v-else-if="view.state === 'failed'"
-           class="mt-4 rounded-md border border-status-error-200 dark:border-status-error-500/30 bg-status-error-50 dark:bg-status-error-500/10 p-4">
-        <p class="text-sm text-status-error-700 dark:text-status-error-300">{{ loadError }}</p>
-        <button type="button" class="mt-2 text-sm font-medium underline text-status-error-700 dark:text-status-error-300"
+           class="mt-4 rounded-md border border-status-danger-200 dark:border-status-danger-500/30 bg-status-danger-50 dark:bg-status-danger-500/10 p-4">
+        <p class="text-sm text-status-danger-700 dark:text-status-danger-300">{{ loadError }}</p>
+        <button type="button" class="mt-2 text-sm font-medium underline text-status-danger-700 dark:text-status-danger-300"
                 @click="load">Retry</button>
       </div>
 
@@ -67,8 +67,8 @@
         </label>
 
         <div v-if="saveError"
-             class="rounded-md border border-status-error-200 dark:border-status-error-500/30 bg-status-error-50 dark:bg-status-error-500/10 p-3">
-          <p class="text-sm text-status-error-700 dark:text-status-error-300">{{ saveError }}</p>
+             class="rounded-md border border-status-danger-200 dark:border-status-danger-500/30 bg-status-danger-50 dark:bg-status-danger-500/10 p-3">
+          <p class="text-sm text-status-danger-700 dark:text-status-danger-300">{{ saveError }}</p>
         </div>
 
         <div class="flex items-center gap-3 pt-1">
