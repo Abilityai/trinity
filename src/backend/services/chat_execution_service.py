@@ -1630,6 +1630,7 @@ async def _acquire_task_capacity(
                 f"Agent '{name}' is at capacity ({max_parallel_tasks} parallel tasks) "
                 f"and its backlog is full. Try again later."
             ),
+            headers=_error_code_headers(TaskExecutionErrorCode.CAPACITY),  # #2919
         )
     except CircuitOpen as e:
         # #526: dispatch breaker open — raised before the queue_persistent enqueue.
@@ -1678,12 +1679,17 @@ def _map_task_failure(name, result, *, idem):
         idempotency_service.fail(idem)
         # #2889: the immediate path's result carries the producer-side code;
         # the backlog-reconstruct path builds its result from the row and has
-        # none — the header is simply absent there.
+        # none — the header is absent there, except on the at-capacity branch
+        # below, where `capacity` (#2919) fills the absent code.
         code_headers = _error_code_headers(getattr(result, "error_code", None))
         if "at capacity" in (result.error or ""):
+            # #2919: the capacity rejection carries no code, so `capacity`
+            # fills the ABSENT one. A code the result already carries is the
+            # producer's structured verdict on a turn that ran (e.g. #2638
+            # `billing`) and wins over this substring match on its prose.
             raise ChatDispatchError(
                 429, f"Agent '{name}' is at capacity. Try again later.",
-                headers=code_headers,
+                headers=code_headers or _error_code_headers(TaskExecutionErrorCode.CAPACITY),
             )
         elif "timed out" in (result.error or ""):
             raise ChatDispatchError(504, result.error, headers=code_headers)

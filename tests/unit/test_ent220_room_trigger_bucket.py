@@ -89,7 +89,7 @@ def test_the_alerting_set_still_holds_the_unwatched_triggers():
     from services.task_execution_service import _AUTONOMOUS_TRIGGERS
 
     for unwatched in ("schedule", "webhook", "loop", "event", "fan_out",
-                      "agent", "reminder", "a2a"):
+                      "agent", "reminder", "a2a", "retry"):
         assert unwatched in _AUTONOMOUS_TRIGGERS
 
 

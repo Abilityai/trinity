@@ -38,6 +38,8 @@ class SkillsOperations:
             source_id=row["source_id"],
             # #2914: None unless the last injection recorded a name conflict.
             delivery_status=row["delivery_status"],
+            # ent#596: the agent that made the assignment; None for a human.
+            assigned_by_agent=row["assigned_by_agent"],
         )
 
     # =========================================================================
@@ -63,6 +65,7 @@ class SkillsOperations:
                 agent_skills.c.assigned_at,
                 agent_skills.c.source_id,
                 agent_skills.c.delivery_status,
+                agent_skills.c.assigned_by_agent,
             )
             .where(agent_skills.c.agent_name == agent_name)
             .order_by(agent_skills.c.skill_name)
@@ -132,6 +135,7 @@ class SkillsOperations:
         skill_name: str,
         assigned_by: str,
         source_id: Optional[str] = None,
+        assigned_by_agent: Optional[str] = None,
     ) -> Optional[AgentSkill]:
         """
         Assign a skill to an agent.
@@ -157,6 +161,7 @@ class SkillsOperations:
             assigned_by=assigned_by,
             assigned_at=now,
             source_id=source_id,
+            assigned_by_agent=assigned_by_agent,
         )
         try:
             with get_engine().begin() as conn:
@@ -170,6 +175,7 @@ class SkillsOperations:
                 assigned_by=assigned_by,
                 assigned_at=datetime.fromisoformat(now),
                 source_id=source_id,
+                assigned_by_agent=assigned_by_agent,
             )
         except IntegrityError:
             # Skill already assigned
@@ -200,6 +206,7 @@ class SkillsOperations:
         skill_names: List[str],
         assigned_by: str,
         source_ids: Optional[Dict[str, str]] = None,
+        assigned_by_agent: Optional[str] = None,
     ) -> int:
         """
         Set skills for an agent (full replacement).
@@ -236,6 +243,22 @@ class SkillsOperations:
                     )
                 )
             }
+            # ent#596: the same delete-all + reinsert would re-stamp every KEPT
+            # name with THIS caller — so an orchestrator's next replace would
+            # make a skill a human assigned last month read as "assigned by
+            # trinity-pm, today". Attribution belongs to the act that created
+            # the assignment; a replace that keeps a name did not create it.
+            kept_by = {
+                row.skill_name: (row.assigned_by, row.assigned_at, row.assigned_by_agent)
+                for row in conn.execute(
+                    select(
+                        agent_skills.c.skill_name,
+                        agent_skills.c.assigned_by,
+                        agent_skills.c.assigned_at,
+                        agent_skills.c.assigned_by_agent,
+                    ).where(agent_skills.c.agent_name == agent_name)
+                )
+            }
 
             # Remove all existing skills for this agent
             conn.execute(
@@ -246,14 +269,18 @@ class SkillsOperations:
             for skill_name in skill_names:
                 try:
                     with conn.begin_nested():
+                        by, at, by_agent = kept_by.get(
+                            skill_name, (assigned_by, now, assigned_by_agent)
+                        )
                         conn.execute(
                             insert(agent_skills).values(
                                 agent_name=agent_name,
                                 skill_name=skill_name,
-                                assigned_by=assigned_by,
-                                assigned_at=now,
+                                assigned_by=by,
+                                assigned_at=at,
                                 source_id=source_ids.get(skill_name),
                                 delivery_status=kept_status.get(skill_name),
+                                assigned_by_agent=by_agent,
                             )
                         )
                 except IntegrityError:

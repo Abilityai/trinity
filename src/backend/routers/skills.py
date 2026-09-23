@@ -1,3 +1,4 @@
+# mcp: skills.ts (list_skills, get_skill, get_skills_library_status, assign_skill_to_agent, set_agent_skills, sync_agent_skills, get_agent_skills); skill-manager grant routes: none — admin grant, human-only (grant-vs-use, ent#596)
 """
 Skills Router - API endpoints for skills management.
 
@@ -22,14 +23,19 @@ from dependencies import (
     get_current_user,
     require_admin,
     reject_agent_principal,
+    reject_non_interactive_principal,
     get_authorized_agent_by_name,
-    get_owned_agent_by_name,
+    get_skill_managed_agent_by_name,
+    acting_agent_name,
 )
 from database import db
 from db_models import AgentSkill, SkillInfo, AgentSkillsUpdate
 from models import (
     SkillAssignmentAgent,
     SkillAssignmentsResponse,
+    SkillManagerGrantRequest,
+    SkillManagerGrantResult,
+    SkillManagersResponse,
     SkillsLibraryStatus,
     SkillSourceCreate,
     SkillSourceUpdate,
@@ -45,6 +51,9 @@ from services.skill_service import (
     skill_service, SkillInjectionBusy, broadcast_skills_changed,
 )
 from services.skill_packaging import validate_skill_name
+from services import capability_grant_service
+from services.capability_grant_service import CapabilityGrantRefused
+from db.capability_grants import CAPABILITY_SKILLS_MANAGE
 
 logger = logging.getLogger(__name__)
 
@@ -406,7 +415,7 @@ async def get_agent_skills(
 async def update_agent_skills(
     update: AgentSkillsUpdate,
     request: Request,
-    agent_name: str = Depends(get_owned_agent_by_name),
+    agent_name: str = Depends(get_skill_managed_agent_by_name),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -438,7 +447,8 @@ async def update_agent_skills(
     count = db.set_agent_skills(
         agent_name=agent_name,
         skill_names=update.skills,
-        assigned_by=current_user.username
+        assigned_by=current_user.username,
+        assigned_by_agent=acting_agent_name(current_user),  # ent#596, R29
     )
 
     # #2703: symmetric — added names are delivered, dropped names removed. Both
@@ -469,7 +479,7 @@ async def update_agent_skills(
 # to prevent FastAPI from matching "inject" as a skill_name parameter
 @router.post("/agents/{agent_name}/skills/inject")
 async def inject_skills(
-    agent_name: str = Depends(get_owned_agent_by_name),
+    agent_name: str = Depends(get_skill_managed_agent_by_name),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -491,7 +501,7 @@ async def inject_skills(
 @router.post("/agents/{agent_name}/skills/{skill_name}")
 async def assign_skill(
     skill_name: str,
-    agent_name: str = Depends(get_owned_agent_by_name),
+    agent_name: str = Depends(get_skill_managed_agent_by_name),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -505,7 +515,10 @@ async def assign_skill(
             detail=f"Skill '{skill_name}' not found in library"
         )
 
-    result = db.assign_skill(agent_name, skill_name, current_user.username)
+    result = db.assign_skill(
+        agent_name, skill_name, current_user.username,
+        assigned_by_agent=acting_agent_name(current_user),  # ent#596, R29
+    )
     # #2703: deliver on BOTH branches. "Already assigned" used to return early,
     # which made a re-click after a `not_delivered` a no-op — and the Library
     # page's assign control has no Sync button beside it, so that re-click is
@@ -533,7 +546,7 @@ async def assign_skill(
 async def unassign_skill(
     skill_name: str,
     request: Request,
-    agent_name: str = Depends(get_owned_agent_by_name),
+    agent_name: str = Depends(get_skill_managed_agent_by_name),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -562,6 +575,80 @@ async def unassign_skill(
         "skill_name": skill_name,
         "removal": removal,
     }
+
+
+# ============================================================================
+# Skill managers — who may change an agent's skills (trinity-enterprise#596)
+# ============================================================================
+#
+# The ruling: changing an agent's skills — another agent's OR ITS OWN — is its
+# own permission. An instance admin grants it to named agents (the fleet
+# orchestrators); every other agent key is refused on both, and neither this
+# permission nor permission to call an agent implies the other. Humans and the
+# system agent are unchanged. The USE side is the fence on the four routes above
+# (`get_skill_managed_agent_by_name`); these two routes are the GRANT side.
+#
+# Granting is the grant half of grant-vs-use, so it is admin AND interactive:
+# `require_admin` refuses every agent principal (#1890) and the scope allowlist
+# (#2323); `reject_non_interactive_principal` then refuses a user-scoped MCP key
+# too — a capability that lets an agent write executable skills into its
+# siblings is granted by a person at a screen, never by a key. The READ is
+# admin-only but not interactive-only, so an ops dashboard driven by a user key
+# can still see who holds it.
+#
+# The path is `/skill-manager`, its own noun, and deliberately NOT
+# `/skills/manager`: `POST /agents/{agent_name}/skills/{skill_name}` above is a
+# catch-all, so `/skills/manager` would read as assigning a skill named
+# "manager" (#2984: a second declaration on a taken path is silently dead).
+
+
+@router.get("/skills/managers", response_model=SkillManagersResponse)
+async def list_skill_managers(admin_user: User = Depends(require_admin)):
+    """Every live agent that may change agents' skills — the whole list."""
+    try:
+        holders = capability_grant_service.list_holders(CAPABILITY_SKILLS_MANAGE)
+    except CapabilityGrantRefused as e:  # pragma: no cover - constant capability
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
+    return SkillManagersResponse(capability=CAPABILITY_SKILLS_MANAGE, holders=holders)
+
+
+@router.put("/agents/{agent_name}/skill-manager", response_model=SkillManagerGrantResult)
+async def set_skill_manager(
+    agent_name: str,
+    body: SkillManagerGrantRequest,
+    request: Request,
+    admin_user: User = Depends(require_admin),
+):
+    """Grant (`granted: true`) or revoke (`false`) the skill-management capability.
+
+    Idempotent both ways; `changed` says whether anything moved. Every change is
+    audited — who gave which agent the power to write skills into its siblings,
+    and when, is exactly the record a later incident review reaches for.
+    """
+    reject_non_interactive_principal(admin_user)
+    try:
+        result = capability_grant_service.set_grant(
+            agent_name, CAPABILITY_SKILLS_MANAGE, body.granted, admin_user.username
+        )
+    except CapabilityGrantRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
+    if result["changed"]:
+        try:  # best-effort: the grant has already committed
+            await platform_audit_service.log(
+                event_type=AuditEventType.AUTHORIZATION,
+                event_action="skill_manager_grant" if body.granted else "skill_manager_revoke",
+                source="api",
+                actor_user=admin_user,
+                actor_ip=request.client.host if request.client else None,
+                endpoint=str(request.url.path),
+                request_id=getattr(request.state, "request_id", None),
+                target_type="agent",
+                target_id=agent_name,
+                details={"capability": CAPABILITY_SKILLS_MANAGE, "granted": body.granted},
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("skill-manager audit failed for %s", agent_name)
+    return SkillManagerGrantResult(**result)
 
 
 # ============================================================================

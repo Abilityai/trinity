@@ -70,7 +70,7 @@
           </tr>
         </thead>
         <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-800">
-          <tr v-for="file in files" :key="file.file_id">
+          <tr v-for="{ file, audience } in rows" :key="file.file_id">
             <td class="px-4 py-2 text-sm text-gray-900 dark:text-gray-100 truncate max-w-[20ch]" :title="file.filename">
               {{ file.filename }}
             </td>
@@ -78,12 +78,12 @@
                  no person and "Owner only" because the platform could not tell
                  are different claims — the second line says which. -->
             <td :class="MUTED_CELL" class="max-w-[30ch]">
-              <div class="truncate" :title="audienceOf(file).label">{{ audienceOf(file).label }}</div>
+              <div class="truncate" :title="audience.label">{{ audience.label }}</div>
               <div
-                v-if="audienceOf(file).detail"
+                v-if="audience.detail"
                 class="truncate text-xs"
-                :title="audienceOf(file).detail"
-              >{{ audienceOf(file).detail }}</div>
+                :title="audience.detail"
+              >{{ audience.detail }}</div>
             </td>
             <td :class="MUTED_CELL">{{ formatBytes(file.size_bytes) }}</td>
             <td :class="MUTED_CELL" :title="file.expires_at">
@@ -123,7 +123,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import { useNotification } from '../composables'
 import { describeSharedFileAudience } from '../utils/sharedFileAudience'
@@ -149,10 +149,11 @@ const COLUMNS = [
   { label: 'Actions', right: true },
 ]
 
-const audienceOf = describeSharedFileAudience
-
 const status = ref({ enabled: false, restart_required: false, volume_attached: false })
 const files = ref([])
+// One derivation per row (#2955): the five "For" bindings read a precomputed
+// `{ label, detail }`. `utils/sharedFileAudience.js` stays the single rule.
+const rows = computed(() => files.value.map((file) => ({ file, audience: describeSharedFileAudience(file) })))
 const totalBytes = ref(0)
 const quotaBytes = ref(500 * 1024 * 1024)
 

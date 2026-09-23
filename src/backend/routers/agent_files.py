@@ -822,7 +822,10 @@ async def list_agent_shared_files(
     # agent-scoped key resolves to its OWNER and passes the gate above, so
     # without this any agent could read who every file of every sibling was for
     # — an email and, for a channel share, a phone number. Same predicate and
-    # same allow-list as `routers/reports.py::_hide_audience`.
+    # same allow-list as `routers/reports.py::_hide_audience`. `audience_source`
+    # goes with them (#2955): it carries no identity, but it is a property of
+    # the addressing — whether the share was for someone at all — and only the
+    # UI renders it.
     show_audience = is_interactive_principal(current_user)
     files = [
         SharedFileInfo(
@@ -837,7 +840,7 @@ async def list_agent_shared_files(
             last_downloaded_at=row["last_downloaded_at"],
             addressed_to=row.get("addressed_to_email") if show_audience else None,
             addressed_to_channel=row.get("addressed_to_channel") if show_audience else None,
-            audience_source=row.get("audience_source"),
+            audience_source=row.get("audience_source") if show_audience else None,
         )
         for row in rows
     ]

@@ -12,6 +12,7 @@ from datetime import datetime
 from enum import Enum
 
 from utils.helpers import parse_iso_timestamp, to_utc_iso
+from utils.addressee import normalize_addressee_email
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
 from db_models import SubscriptionCredential
 
@@ -913,6 +914,27 @@ class CanvasBulkDeleteResult(BaseModel):
     deleted: List[str]
 
 
+_AUDIENCE_EMAIL_ERROR = "audience_email must be an email address"
+
+
+def _validate_audience_email(v: Optional[str]) -> Optional[str]:
+    """The boundary form of the one addressee rule (#2955).
+
+    The validator raises exactly where the resolver answers `None` for a
+    non-blank input — one shape rule (`utils/addressee.py`), two callers
+    (`ReportCreate`, `ShareFileMcpRequest`). Blank is "absent", never an
+    error: "unaddressed" has exactly one spelling, so the audience column
+    never holds ''. The message names the field, which is why this wrapper
+    lives in the contract module and not in the leaf.
+    """
+    if v is None or not str(v).strip():
+        return None
+    email = normalize_addressee_email(v)
+    if email is None:
+        raise ValueError(_AUDIENCE_EMAIL_ERROR)
+    return email
+
+
 class ReportCreate(BaseModel):
     """Request body for an agent publishing a structured report (#918).
 
@@ -940,17 +962,11 @@ class ReportCreate(BaseModel):
     @field_validator("audience_email")
     @classmethod
     def _normalize_audience(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return None
-        v = v.strip().lower()
         # Shape only — reachability is the router's check, and it is the one
-        # that matters. Rejecting the empty string here means "unaddressed" has
-        # exactly one spelling (absent), so the audience column never holds ''.
-        if not v:
-            return None
-        if "@" not in v or " " in v:
-            raise ValueError("audience_email must be an email address")
-        return v
+        # that matters. One rule, `utils/addressee.py` (#2955): blank is
+        # "absent" (so the audience column never holds ''), anything else
+        # that is not email-shaped is refused by name.
+        return _validate_audience_email(v)
 
     @field_validator("report_type")
     @classmethod
@@ -1622,16 +1638,11 @@ class ShareFileMcpRequest(BaseModel):
     @field_validator("audience_email")
     @classmethod
     def _normalize_audience(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return None
-        v = v.strip().lower()
-        # Shape only — reachability is the service's check. The empty string is
-        # "absent", so "unaddressed" has exactly one spelling.
-        if not v:
-            return None
-        if "@" not in v or " " in v:
-            raise ValueError("audience_email must be an email address")
-        return v
+        # Shape only — reachability is the service's check. One rule,
+        # `utils/addressee.py` (#2955): the empty string is "absent", so
+        # "unaddressed" has exactly one spelling; anything else that is not
+        # email-shaped is refused by name.
+        return _validate_audience_email(v)
 
 
 class ShareFileResponse(BaseModel):
@@ -4530,6 +4541,37 @@ class A2ACallRequest(BaseModel):
     context_id: Optional[str] = Field(default=None, max_length=200)
     task_id: Optional[str] = Field(default=None, max_length=200)
     execution_id: Optional[str] = Field(default=None, max_length=200)
+
+
+class SkillManagerHolder(BaseModel):
+    """One agent holding the skill-management capability (trinity-enterprise#596)."""
+    agent_name: str
+    granted_by: str
+    granted_at: str
+
+
+class SkillManagersResponse(BaseModel):
+    """`GET /api/skills/managers` — the agents an admin has let change skills.
+
+    The ruling makes this the whole list: every agent NOT here is refused when it
+    tries to change any agent's skills, its own included. Humans and the system
+    agent are not listed because they never needed a grant.
+    """
+    capability: str
+    holders: List[SkillManagerHolder] = Field(default_factory=list)
+
+
+class SkillManagerGrantRequest(BaseModel):
+    """`PUT /api/agents/{agent_name}/skill-manager` — grant (true) or revoke (false)."""
+    granted: bool
+
+
+class SkillManagerGrantResult(BaseModel):
+    """What the grant route did. `changed` is False on an idempotent repeat."""
+    agent_name: str
+    capability: str
+    granted: bool
+    changed: bool
 
 
 class A2ATaskRequest(BaseModel):

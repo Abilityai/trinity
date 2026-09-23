@@ -71,8 +71,26 @@
 - **Description**: Assign specific skills to individual agents
 - **Key Features**:
   - Database stores assignments only (`agent_skills` table)
-  - Bulk save via PUT `/api/agents/{name}/skills`; single assign/unassign via POST/DELETE `/api/agents/{name}/skills/{skill}` (owner-only)
+  - Bulk save via PUT `/api/agents/{name}/skills`; single assign/unassign via POST/DELETE `/api/agents/{name}/skills/{skill}` (owner-only; an agent key additionally needs the §21.3.1 grant)
 - **Note**: assignment surfaces — the Agent Detail **Skills tab** (visible since trinity-enterprise#235 / PR #1877, 2026-07-29; §22.2) plus REST/MCP. The Library page's skills section is browse-only, never a second assignment path (§22.3)
+
+### 21.3.1 Skill managers — only designated agents may change an agent's skills (trinity-enterprise#596)
+- **Status**: ✅ Implemented (2026-09-23). OSS-core (operator ruling 2026-09-23 — the deny gate is a security fence, and the grant surface ships with it or OSS orchestrators could never be granted).
+- **Requirement ID**: SKILL_MANAGER_PERMISSION
+- **Ruling** (operator 2026-09-17, addendum the same day, restated 2026-09-18): changing an agent's skills — **another agent's or its own** — is its own permission. An instance admin grants it to named agents (the fleet orchestrators). A holder changes its own skills the same way it changes a sibling's; **every other agent key is refused, on a sibling and on itself**. It is not implied by permission to call or message an agent, and does not imply it. People (UI or their own key) and the system agent are unchanged.
+- **Why it was needed**: an agent-scoped key resolves to its owner carrying the owner's role (Invariant #8), so the owner fence on the §21.3 routes let any agent rewrite the skills of every sibling its owner holds — and since #2703 an assignment also writes the skill's executable files into the target in the same call.
+- **The fence** (`dependencies.get_skill_managed_agent_by_name`, a composed dependency on all four §21.3 write routes — bulk PUT, sync, assign, unassign):
+  - an **allowlist** (#2323): humans (JWT / user key) and `trinity-system` pass unchanged; an `agent` key passes only while its agent holds the grant; every other scope — `connector`, `ops`, `portal_delegate`, one invented tomorrow — is refused; a principal with no scope at all fails closed;
+  - the capability check runs **before** the owner fence, so a non-holder gets one uniform named 403 (`skill_management_not_permitted`, naming where the grant lives) whether or not the target exists — never an existence signal (#186) — and a holder gains no reach beyond its owner's agents;
+  - a refusal changes nothing (no row, no delivery) and is written to the audit log with the agent and key.
+- **The file-route bypass is closed too**: `PUT`/`DELETE /api/agents/{name}/files` and `POST …/files/mkdir` under `~/.claude/skills/` take the same capability (a `DELETE` of an ancestor — `.claude`, the home dir — counts, since it removes every skill). Without this the fence above was decorative: the same `SKILL.md` + `scripts/` landed through a route that checks only access. Humans are unaffected.
+- **Grant surface**: Settings → Agents → **Skill managers** (`SkillManagersPanel.vue`) — list holders with who granted and when, grant, revoke. `GET /api/skills/managers` (admin), `PUT /api/agents/{name}/skill-manager` `{granted}` (admin **and** interactive — granting is the grant half of grant-vs-use; a user-scoped MCP key is refused). Refuses a nonexistent or soft-deleted agent (uniform 404), the system agent and ephemeral agents (named 422). Every change audited.
+- **Attribution (Tandem R29)**: `agent_skills.assigned_by_agent` records the agent that made an assignment (the system agent's writes are attributed to it), NULL for a person; returned on `GET /api/agents/{name}/skills` and MCP `get_agent_skills`. A bulk replace keeps the original who/when on the names it keeps — only the names it adds belong to it.
+- **Storage**: `agent_capability_grants(agent_name, capability, granted_by, granted_at)`, capability `skills.manage` — a row, not a column, so who/when is answerable and later capabilities (ent#590, ent#341) share the seam. Both tracks (SQLite `agent_capability_grants` + Alembic `0072_agent_capability_grants`); `AgentRef` CASCADE (rename re-keys, delete removes). A soft-deleted agent holds nothing; recovery restores the grant with the rest of its configuration.
+- **Default on upgrade: nobody holds it** (the ruling). Orchestrators that apply a skill map (`/reconcile-skill-map`) are refused with the named error until an admin grants them — grant `trinity-pm` / `corbin` at or before deploy.
+- **Known limits, stated**: an agent editing its **own** `~/.claude/skills` from inside its container (no platform gate reaches there); a git pull into a sibling; chat-driven self-modification; the other owner-equivalent routes of ent#629.
+- **Related**: ent#493 (MCP unassign / list-assignments tools — will inherit this fence), ent#530 (skill sets), ent#646 (the orchestrator's intended mapping), ent#589 (its installer must assign through the orchestrator, not self-assign).
+- **Flow**: `docs/memory/feature-flows/skill-manager-permission.md`
 
 ### 21.4 Skill Injection (Full Directory Packages)
 - **Status**: ✅ Implemented (trinity-enterprise#183, 2026-07-19; OSS-core by decision)
