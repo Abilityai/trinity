@@ -16,6 +16,13 @@
         <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
           {{ subtitle }}
         </p>
+        <!-- #2915: the visible escalation — counts from the list response, never
+             a queue item about queue items. -->
+        <p
+          v-if="honestyCounts"
+          class="mt-1 text-xs text-status-urgent-700 dark:text-status-urgent-300"
+          data-testid="ops-honesty-counts"
+        >{{ honestyCounts }}</p>
       </div>
 
       <!-- Tabs: Needs Response / Notifications / Health (admin) / Executions / Resolved + Refresh -->
@@ -100,10 +107,21 @@
         <!-- Spacer + Clear All / Refresh buttons (operator tabs only —
              Health/Executions panels carry their own refresh controls) -->
         <div class="ml-auto flex items-center gap-1 pb-1">
+          <!-- #2915: one-click cancel of items the agent closed on its side. Goes
+               through the same ConfirmDialog as Clear All (#1924, p19). -->
+          <button
+            v-if="activeTab === 'needs-response' && closedByFilerIds.length > 0"
+            @click="askCancelClosed"
+            :disabled="clearing"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-status-urgent-700 dark:text-status-urgent-300 hover:text-status-urgent-800 dark:hover:text-status-urgent-200 rounded-md hover:bg-status-urgent-50 dark:hover:bg-status-urgent-900/20 transition-colors disabled:opacity-50 whitespace-nowrap"
+            data-testid="ops-cancel-closed"
+          >
+            Cancel {{ closedByFilerIds.length }} closed by {{ closedByFilerIds.length === 1 ? 'the agent' : 'agents' }}
+          </button>
           <!-- Clear All (#1017) — hidden when the active tab has nothing to clear -->
           <button
             v-if="isOperatorTab && clearableCount > 0"
-            @click="showClearConfirm = true"
+            @click="clearMode = 'all'; showClearConfirm = true"
             :disabled="clearing"
             class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-status-danger-600 dark:text-status-danger-400 hover:text-status-danger-700 dark:hover:text-status-danger-300 rounded-md hover:bg-status-danger-50 dark:hover:bg-status-danger-900/20 transition-colors disabled:opacity-50 whitespace-nowrap"
             data-testid="ops-clear-all"
@@ -358,6 +376,25 @@ function refresh() {
 // --- Clear All (#1017) ---
 const showClearConfirm = ref(false)
 const clearing = ref(false)
+// #2915: 'all' = the tab's Clear All; 'closed' = only the pending rows whose
+// agent closed them on its side (sync_state closed_by_filer).
+const clearMode = ref('all')
+const closedByFilerIds = computed(() =>
+  operatorQueueStore.openItems.filter(i => i.sync_state === 'closed_by_filer').map(i => i.id)
+)
+const honestyCounts = computed(() => {
+  if (activeTab.value !== 'needs-response' && activeTab.value !== 'resolved') return ''
+  const u = operatorQueueStore.undeliveredCount
+  const c = operatorQueueStore.closedByFilerCount
+  const parts = []
+  if (u > 0) parts.push(`${u} ${u === 1 ? 'item' : 'items'} whose answer or cancellation did not reach the agent`)
+  if (c > 0) parts.push(`${c} ${c === 1 ? 'item' : 'items'} closed by the agent, still shown here`)
+  return parts.join(' · ')
+})
+function askCancelClosed() {
+  clearMode.value = 'closed'
+  showClearConfirm.value = true
+}
 
 // What the active tab can clear. For notifications this is only a visibility
 // heuristic (pendingCount from the badge poll is effectively 0/1 — #1143 —
@@ -375,12 +412,17 @@ const clearableCount = computed(() => {
 })
 
 const clearConfirmTitle = computed(() => {
+  if (clearMode.value === 'closed') return 'Cancel the items the agents closed?'
   if (activeTab.value === 'needs-response') return 'Cancel all pending items?'
   if (activeTab.value === 'notifications') return 'Dismiss all notifications?'
   return 'Clear resolved items?'
 })
 
 const clearConfirmMessage = computed(() => {
+  if (clearMode.value === 'closed') {
+    const k = closedByFilerIds.value.length
+    return `This cancels ${k} pending ${k === 1 ? 'item' : 'items'} whose agent already closed ${k === 1 ? 'it' : 'them'} on its side. Nothing is sent to the agents; the items move to Resolved as cancelled. This affects all operators of these agents.`
+  }
   const n = clearableCount.value
   if (activeTab.value === 'needs-response') {
     return `This cancels ${n} pending ${n === 1 ? 'item' : 'items'} shown here. The agents waiting on them will be told their requests were cancelled and will not receive an answer. This affects all operators of these agents.`
@@ -395,7 +437,9 @@ async function confirmClearAll() {
   showClearConfirm.value = false
   clearing.value = true
   try {
-    if (activeTab.value === 'needs-response') {
+    if (clearMode.value === 'closed') {
+      await operatorQueueStore.bulkCancel(closedByFilerIds.value)
+    } else if (activeTab.value === 'needs-response') {
       const ids = operatorQueueStore.openItems.map(i => i.id)
       await operatorQueueStore.bulkCancel(ids)
     } else if (activeTab.value === 'notifications') {
@@ -408,6 +452,7 @@ async function confirmClearAll() {
     console.error('Clear All failed:', err)
   } finally {
     clearing.value = false
+    clearMode.value = 'all'
   }
 }
 

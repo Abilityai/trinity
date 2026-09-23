@@ -250,12 +250,12 @@ Generalises #868 to agent scope (`db/schedules.py:get_agent_analytics`); read-on
 ### Operator Queue (OPS-001)
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/operator-queue` | List queue items (filters: status, type, priority, agent_name, since) |
+| GET | `/api/operator-queue` | List queue items (filters: status, type, priority, agent_name, since). #2915: each item carries `sync_state`/`sync_detail`/`sync_updated_at`/`last_confirmed_at`, `delivery_state`/`delivery_detail`/`delivery_updated_at`, server-computed `aging`/`aged_since`; the response carries `undelivered_count` + `closed_by_filer_count` (access-scoped) |
 | GET | `/api/operator-queue/stats` | Counts by status/type/priority/agent |
 | POST | `/api/operator-queue/bulk-cancel` | Cancel listed pending items (`{ids: [...]}`, 1–500, ids-scoped so a sync race can't cancel unseen items); returns `{cancelled, skipped}`; audit-logged (#1017) |
 | POST | `/api/operator-queue/clear-resolved` | Hide terminal rows (acknowledged/cancelled/expired) by setting `cleared_at` — NOT a DELETE (the 5s sync loop would resurrect items whose agent-file entry still says `pending`); `responded` kept visible until delivered; actual row deletion is the automatic retention sweep's job (`operator_queue_retention_days`, #1142); returns `{cleared}`; audit-logged (#1017) |
 | GET | `/api/operator-queue/{id}` | Single item |
-| POST | `/api/operator-queue/{id}/respond` / `/cancel` | Submit operator response / cancel pending item. Respond returns **409** if the item left `pending` under the caller (race vs bulk-cancel, #1017) |
+| POST | `/api/operator-queue/{id}/respond` / `/cancel` | Submit operator response / cancel pending item. Respond returns **409** if the item left `pending` under the caller (race vs bulk-cancel, #1017); **409 `item_diverged`** (#2915) while `sync_state ∈ {changed, closed_by_filer}` unless the body carries `acknowledge_divergence: true` |
 | GET | `/api/operator-queue/agents/{name}` | Items for one agent |
 
 Bulk ops scope writes to the caller's accessible agents (tri-state: admin = no filter, empty set = no-op). The sync service write-back also propagates `cancelled`/`expired` status into agent queue files (in-place flips of still-`pending` entries only) so agents stop waiting on cleared items and stale file entries can't resurrect purged rows (#1017). The Operations UI exposes these as a per-tab **Clear All** button (`notifications` tab uses `POST /api/notifications/dismiss-all` — bulk pending+acknowledged → dismissed, same accessible-set scoping).

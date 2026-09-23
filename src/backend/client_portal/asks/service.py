@@ -85,6 +85,7 @@ def _project(item: dict, *, resume_requested: Optional[bool] = None) -> Workspac
     """
     context = item.get("context") if isinstance(item.get("context"), dict) else {}
     chat_id = context.get("workspace_session_id")
+    from services.operator_queue_service import is_aged
     return WorkspaceAsk(
         id=item["id"],
         agent_name=item["agent_name"],
@@ -98,7 +99,24 @@ def _project(item: dict, *, resume_requested: Optional[bool] = None) -> Workspac
         status=_status_of(item),
         chat_id=chat_id if isinstance(chat_id, str) else None,
         resume_requested=resume_requested,
+        sync=_coarse_sync(item),
+        aging=bool(is_aged(item)),
     )
+
+
+def _coarse_sync(item: dict) -> str:
+    """The client-facing sync state (#2915): `confirmed | changed | closed |
+    unconfirmed`. `missing` and `stale_id` collapse to `unconfirmed` and the
+    reason never crosses — `agent_not_running` / `file_missing` describe the
+    operator's infrastructure, not the ask."""
+    state = item.get("sync_state")
+    if state == "confirmed":
+        return "confirmed"
+    if state == "changed":
+        return "changed"
+    if state == "closed_by_filer":
+        return "closed"
+    return "unconfirmed"
 
 
 def _on_roster(agent_name: str, email: str, is_platform: bool) -> bool:
@@ -167,7 +185,8 @@ def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None) -
 
 
 def answer_ask(item_id: str, email: str, is_platform: bool,
-               response: Optional[str], response_text: Optional[str]) -> WorkspaceAsk:
+               response: Optional[str], response_text: Optional[str],
+               acknowledge_divergence: bool = False) -> WorkspaceAsk:
     """Answer one ask as the addressee. Raises `AskError` with a named code."""
     # #2375: the decision is REQUIRED. `response` is the field the agent reads
     # (the write-back copies it to the queue file verbatim; the ent#329 resume
@@ -204,6 +223,15 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     if _is_expired(item):
         raise AskError(409, "expired",
                        "This ask expired before it was answered.")
+    # #2915: the agent rewrote or closed its own copy of this ask after the
+    # platform ingested it. Answering the version the person read would hand the
+    # agent a decision about a different question, so it is refused until the
+    # person has seen that and answers anyway (the operator route mirrors this).
+    if (item.get("sync_state") in ("changed", "closed_by_filer")
+            and not acknowledge_divergence):
+        raise AskError(409, "item_diverged",
+                       "The agent changed this ask after you opened it. Review it and answer again.",
+                       {"sync": _coarse_sync(item)})
 
     # The OSS respond path, unchanged: it writes the answer back to the agent's
     # queue file (the 5s sync loop), stamps the audit fields and broadcasts. A

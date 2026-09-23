@@ -705,6 +705,13 @@ CREATE TABLE operator_queue (
     responded_at TEXT,
     acknowledged_at TEXT,
     cleared_at TEXT,                    -- #1017: NULL = visible; set = hidden by Clear All (rows deleted by the #1142 retention sweep past operator_queue_retention_days)
+    sync_state TEXT,                    -- #2915: confirmed|changed|closed_by_filer|missing|stale_id|unconfirmed (leader-locked poller, edge-triggered)
+    sync_detail TEXT,                   -- #2915: closed vocabulary (field names / folded status / failure kind), never agent text
+    sync_updated_at TEXT,               -- #2915: transition time
+    last_confirmed_at TEXT,             -- #2915: refreshed ≤ once/min per agent, batched
+    delivery_state TEXT,                -- #2915: delivered|undelivered|not_applicable
+    delivery_detail TEXT,               -- #2915: conflict|http_<code>|unreachable|timeout|entry_missing|entry_changed|closed_by_filer|platform_minted
+    delivery_updated_at TEXT,           -- #2915
     addressed_to_email TEXT,            -- ent#364: the human this ask is for; NULL = operator ask. Validated at ingestion against the agent's roster, never trusted from the payload
     FOREIGN KEY (responded_by_id) REFERENCES users(id)
 );

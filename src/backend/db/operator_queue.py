@@ -95,6 +95,14 @@ class OperatorQueueOperations:
             "acknowledged_at": row["acknowledged_at"],
             "cleared_at": row["cleared_at"],  # #1017
             "addressed_to_email": row["addressed_to_email"],  # ent#364
+            # #2915 — what the poller last established, and whether the answer landed
+            "sync_state": row["sync_state"],
+            "sync_detail": row["sync_detail"],
+            "sync_updated_at": row["sync_updated_at"],
+            "last_confirmed_at": row["last_confirmed_at"],
+            "delivery_state": row["delivery_state"],
+            "delivery_detail": row["delivery_detail"],
+            "delivery_updated_at": row["delivery_updated_at"],
         }
 
     # Columns selected for a full queue-item record, in the canonical order.
@@ -120,6 +128,13 @@ class OperatorQueueOperations:
         operator_queue.c.acknowledged_at,
         operator_queue.c.cleared_at,  # #1017 — Clear All hide flag
         operator_queue.c.addressed_to_email,  # ent#364 — the human it is for
+        operator_queue.c.sync_state,  # #2915
+        operator_queue.c.sync_detail,
+        operator_queue.c.sync_updated_at,
+        operator_queue.c.last_confirmed_at,
+        operator_queue.c.delivery_state,
+        operator_queue.c.delivery_detail,
+        operator_queue.c.delivery_updated_at,
     )
 
     def create_item(self, agent_name: str, item: Dict) -> str:
@@ -747,28 +762,211 @@ class OperatorQueueOperations:
             rows = conn.execute(stmt).mappings().all()
         return [self._row_to_item(row) for row in rows]
 
-    def get_terminal_items_for_agent(self, agent_name: str, since_hours: int = 168) -> List[Dict]:
-        """Get recently cancelled/expired items for a specific agent (#1017).
+    def get_terminal_items_for_agent(self, agent_name: str, limit: int = 200) -> List[Dict]:
+        """Cancelled/expired items whose terminal flip has not been delivered (#1017, #2915).
 
-        Used by the sync service to flip still-'pending' entries in the
-        agent's queue file to their terminal status so the agent stops
-        waiting (and so a stale 'pending' file entry can't resurrect the
-        item if its row is ever purged). Deliberately NOT filtered on
-        cleared_at — hidden items still need their flip delivered. Bounded
-        by created_at (there is no per-status timestamp) so the per-agent
-        5s sync query stays cheap.
+        Used by the sync service to flip still-'pending' entries in the agent's
+        queue file to their terminal status so the agent stops waiting. Bounded by
+        DELIVERY STATE, not by a `created_at` window: before #2915 a row that went
+        terminal more than 168 h after it was created was never fetched, so it
+        was neither flipped nor recorded as undeliverable — the card said
+        "cancelled", the agent's file said "pending", and nothing said so. A row
+        leaves this set when the flip lands (`delivered`) or is platform-minted
+        (`not_applicable`); `undelivered` rows are retried each cycle (the read is
+        already paid for) and bounded by the retention sweep. Deliberately NOT
+        filtered on cleared_at — hidden items still need their flip delivered.
         """
-        cutoff = iso_cutoff(since_hours)
-        stmt = select(*self._SELECT_COLS).where(
-            and_(
-                operator_queue.c.agent_name == agent_name,
-                operator_queue.c.status.in_(("cancelled", "expired")),
-                operator_queue.c.created_at >= cutoff,
+        stmt = (
+            select(*self._SELECT_COLS)
+            .where(
+                and_(
+                    operator_queue.c.agent_name == agent_name,
+                    operator_queue.c.status.in_(("cancelled", "expired")),
+                    or_(
+                        operator_queue.c.delivery_state.is_(None),
+                        operator_queue.c.delivery_state == "undelivered",
+                    ),
+                )
             )
+            .order_by(operator_queue.c.created_at.desc())
+            .limit(limit)
         )
         with get_engine().connect() as conn:
             rows = conn.execute(stmt).mappings().all()
         return [self._row_to_item(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # #2915 — sync honesty accessors. Written ONLY by the leader-locked poller.
+    # Every writer is edge-triggered: the WHERE excludes rows already carrying
+    # the value, and the returned rowcount IS the transition — never read-then-
+    # write, so two overlapping leaders cannot double-record one change.
+    # ------------------------------------------------------------------
+
+    def get_sync_index_for_agent(self, agent_name: str) -> Dict:
+        """Everything the poller needs to reconcile one agent's file in two reads.
+
+        `open` — full rows for pending + responded items (the ones the file is
+        expected to carry); `terminal` — `{request_id: {"id", "status",
+        "sync_state"}}` for every other status, so a pending file entry whose id
+        matches a row that already went terminal is recognised as `stale_id`
+        instead of being re-admitted (the on-conflict create returns the
+        surviving uuid silently, so without this index it would count against the
+        depth cap and broadcast "new" every cycle).
+        """
+        open_stmt = select(*self._SELECT_COLS).where(
+            and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.status.in_(("pending", "responded")),
+            )
+        )
+        term_stmt = select(
+            operator_queue.c.request_id,
+            operator_queue.c.id,
+            operator_queue.c.status,
+            operator_queue.c.sync_state,
+        ).where(
+            and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.status.notin_(("pending", "responded")),
+            )
+        )
+        with get_engine().connect() as conn:
+            open_rows = conn.execute(open_stmt).mappings().all()
+            term_rows = conn.execute(term_stmt).mappings().all()
+        return {
+            "open": [self._row_to_item(r) for r in open_rows],
+            "terminal": {
+                r["request_id"]: {"id": r["id"], "status": r["status"], "sync_state": r["sync_state"]}
+                for r in term_rows
+            },
+        }
+
+    def set_sync_state(
+        self, item_id: str, state: str, detail: Optional[str], now: str,
+    ) -> bool:
+        """Record what the poller established; True iff the row CHANGED.
+
+        `confirmed` also stamps `last_confirmed_at`. The predicate is spelled
+        `IS NULL OR !=` because `IS DISTINCT FROM` is PostgreSQL-only.
+        """
+        detail_v = detail or ""
+        values = {"sync_state": state, "sync_detail": detail, "sync_updated_at": now}
+        if state == "confirmed":
+            values["last_confirmed_at"] = now
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(
+                    and_(
+                        operator_queue.c.id == item_id,
+                        or_(
+                            operator_queue.c.sync_state.is_(None),
+                            operator_queue.c.sync_state != state,
+                            func.coalesce(operator_queue.c.sync_detail, "") != detail_v,
+                        ),
+                    )
+                )
+                .values(**values)
+            )
+            return result.rowcount > 0
+
+    def refresh_last_confirmed(self, agent_name: str, now: str, older_than: str) -> int:
+        """One batched UPDATE per agent per cycle: `last_confirmed_at = now` for
+        confirmed open rows whose stamp is older than `older_than` (a minute
+        cadence — the card can say "last confirmed at HH:MM" without a write per
+        row per 5 s cycle)."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(
+                    and_(
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.status.in_(("pending", "responded")),
+                        operator_queue.c.sync_state == "confirmed",
+                        or_(
+                            operator_queue.c.last_confirmed_at.is_(None),
+                            operator_queue.c.last_confirmed_at < older_than,
+                        ),
+                    )
+                )
+                .values(last_confirmed_at=now)
+            )
+            return result.rowcount
+
+    def set_delivery_state(
+        self, item_id: str, state: str, detail: Optional[str], now: str,
+    ) -> bool:
+        """Record whether the answer (or terminal flip) reached the agent's file;
+        True iff the row CHANGED (same edge rule as `set_sync_state`)."""
+        detail_v = detail or ""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(
+                    and_(
+                        operator_queue.c.id == item_id,
+                        or_(
+                            operator_queue.c.delivery_state.is_(None),
+                            operator_queue.c.delivery_state != state,
+                            func.coalesce(operator_queue.c.delivery_detail, "") != detail_v,
+                        ),
+                    )
+                )
+                .values(delivery_state=state, delivery_detail=detail, delivery_updated_at=now)
+            )
+            return result.rowcount > 0
+
+    def mark_unconfirmed(
+        self, detail: str, now: str, *,
+        agent_name: Optional[str] = None,
+        exclude_agents: Optional[List[str]] = None,
+    ) -> int:
+        """Flip open rows to `unconfirmed:<detail>` — for ONE agent (`agent_name`,
+        the read-failure path) or for every agent NOT in `exclude_agents` (the
+        per-cycle not-running sweep). An EMPTY exclude list means every open row,
+        spelled as an explicit branch because SQLAlchemy's `notin_([])` warns and
+        matches every row by accident. Edge-triggered: rows already carrying the
+        value are excluded, so the steady state writes nothing."""
+        conds = [
+            operator_queue.c.status.in_(("pending", "responded")),
+            or_(
+                operator_queue.c.sync_state.is_(None),
+                operator_queue.c.sync_state != "unconfirmed",
+                func.coalesce(operator_queue.c.sync_detail, "") != detail,
+            ),
+        ]
+        if agent_name is not None:
+            conds.append(operator_queue.c.agent_name == agent_name)
+        elif exclude_agents:
+            conds.append(operator_queue.c.agent_name.notin_(list(exclude_agents)))
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(and_(*conds))
+                .values(sync_state="unconfirmed", sync_detail=detail, sync_updated_at=now)
+            )
+            return result.rowcount
+
+    def count_flags(self, accessible_agent_names: Optional[Set[str]] = None) -> Dict[str, int]:
+        """`{"undelivered": n, "closed_by_filer": n}` over the rows the caller may
+        see — the visible escalation the Operations header renders (#2915)."""
+        base = []
+        if accessible_agent_names is not None:
+            if not accessible_agent_names:
+                return {"undelivered": 0, "closed_by_filer": 0}
+            base.append(operator_queue.c.agent_name.in_(list(accessible_agent_names)))
+        undelivered = select(func.count()).select_from(operator_queue).where(
+            and_(*base, operator_queue.c.delivery_state == "undelivered",
+                 operator_queue.c.cleared_at.is_(None))
+        )
+        closed = select(func.count()).select_from(operator_queue).where(
+            and_(*base, operator_queue.c.status == "pending",
+                 operator_queue.c.sync_state == "closed_by_filer")
+        )
+        with get_engine().connect() as conn:
+            u = conn.execute(undelivered).scalar() or 0
+            c = conn.execute(closed).scalar() or 0
+        return {"undelivered": int(u), "closed_by_filer": int(c)}
 
     def item_exists(self, agent_name: str, item_id: str) -> bool:
         """Check whether this agent already created an item for a request id.

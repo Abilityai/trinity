@@ -3342,6 +3342,26 @@
         "unit"
       ],
       "description": "`GET /api/agents/{name}/objectives` through a real TestClient with the service's edges stubbed. Gate order copied from `/metrics` and proved in order (the self-gate fires BEFORE the service is called and before the limiter), the route's own 60/min knob rather than the store read's 240 because this one drives the container, a store outage as 503 + `Retry-After`, and an unreachable agent as a 200 that SAYS so — an agent being stopped is an answer, not an error. The model-is-the-contract half walks the service's own dict against every model's fields recursively, so an additive service key fails the build instead of being silently filtered out by `response_model`; author-shaped targets (`.nan`, `.inf`, lists, bools, 4 KB strings) are pushed through the real route and parsed with `parse_constant` armed, since a bare `NaN` on the wire is what blanks the card."
+    },
+    {
+      "file": "unit/test_2915_operator_queue_sync_honesty.py",
+      "feature": "abilityai/trinity#2915",
+      "added": "2026-09-23",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "The operator-queue file sync tells the truth (Trinity 1.0 gate). The seven divergence fixtures from the field trace (rewritten entry → `changed` with the field names and the row untouched; agent-side `acknowledged` on a never-responded row → `closed_by_filer`; folded free-text status; pruned entry / missing file → `missing`; a reused id on a terminal row → `stale_id`, never a phantom admit), read-failure hysteresis (3 cycles; token never `str(e)`), no write-back over invalid JSON, the tri-state poll cycle (Docker unreadable sweeps nothing; expiry before the no-agents return; one thin broadcast per cycle), the write-back gate (deliver only into a matching pending entry; `entry_changed` / `conflict` / `http_<code>` recorded; pre-write re-read is what gets written with its sha as `if_match`; the aging receipt once at the crossing, never at ingest; platform alarms `not_applicable` and never flip-flopping), fingerprint stability, and the accessors on a real migrated SQLite (edge UPDATEs, sync index, delivery-bound terminal query, scoped sweep, header counts)."
+    },
+    {
+      "file": "unit/test_2915_agent_server_files_if_match.py",
+      "feature": "abilityai/trinity#2915",
+      "added": "2026-09-23",
+      "categories": [
+        "agent",
+        "unit"
+      ],
+      "description": "The agent server's `PUT /api/files` is atomic (tmp + os.replace, no temp file left) and a compare-and-swap: `if_match` holds for the content that was read and refuses (412) after a concurrent change; absent `if_match` or a missing file always holds; a non-UTF-8 file never matches (fail closed). Loaded by path like test_1795; the handler is asserted to call the helpers it documents."
     }
   ]
 }

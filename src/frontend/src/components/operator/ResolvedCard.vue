@@ -13,6 +13,14 @@
           >{{ item.agent_name }}</span>
           <span class="text-xs text-gray-400 dark:text-gray-500">&middot;</span>
           <span class="text-xs text-gray-400 dark:text-gray-500">{{ timeAgo(item.created_at) }}</span>
+          <!-- #2915: an answer that never reached the agent says so here. -->
+          <BaseBadge
+            v-if="syncBadge"
+            :variant="syncBadge.variant"
+            dot
+            :title="syncBadge.title"
+            data-testid="queue-sync-badge"
+          >{{ syncBadge.label }}</BaseBadge>
         </div>
 
         <p class="text-sm text-gray-600 dark:text-gray-400">{{ item.title }}</p>
@@ -51,7 +59,9 @@ import { computed } from 'vue'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
+import { queueSyncBadge } from '../../utils/operatorQueue'
 import AgentAvatar from '../AgentAvatar.vue'
+import BaseBadge from '../base/BaseBadge.vue'
 
 const props = defineProps({
   item: { type: Object, required: true }
@@ -60,6 +70,7 @@ const props = defineProps({
 const store = useOperatorQueueStore()
 const agentsStore = useAgentsStore()
 
+const syncBadge = computed(() => queueSyncBadge(props.item))   // #2915
 const isTerminalWithoutResponse = computed(() =>
   props.item.status === 'cancelled' || props.item.status === 'expired'
 )

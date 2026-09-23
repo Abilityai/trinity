@@ -84,7 +84,19 @@ async def list_queue_items(
         offset=offset,
         accessible_agent_names=accessible,
     )
-    return {"items": items, "count": len(items)}
+    # #2915: aging is computed once, here, from the operator's bound — the
+    # frontend renders `aging`/`aged_since`, it never recomputes them. The two
+    # counts are the visible escalation (undelivered answers, items the agent
+    # closed on its side) the Operations header shows instead of minting queue
+    # items about queue items.
+    items = operator_queue_service.annotate_aging(items)
+    flags = db.count_operator_queue_flags(accessible_agent_names=accessible)
+    return {
+        "items": items,
+        "count": len(items),
+        "undelivered_count": flags["undelivered"],
+        "closed_by_filer_count": flags["closed_by_filer"],
+    }
 
 
 @router.get("/stats")
@@ -196,7 +208,7 @@ async def get_queue_item(
         raise HTTPException(status_code=404, detail="Queue item not found")
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(item["agent_name"], accessible)
-    return item
+    return operator_queue_service.annotate_aging([item])[0]
 
 
 @router.post("/{item_id}/respond")
@@ -217,6 +229,26 @@ async def respond_to_queue_item(
         raise HTTPException(
             status_code=400,
             detail=f"Cannot respond to item with status '{existing['status']}'"
+        )
+
+    # #2915: the agent rewrote or closed its own copy of this item after the
+    # platform ingested it. The card the human read is the platform's frozen
+    # snapshot; delivering an answer to it would hand the agent a decision
+    # about a different question. Refused, named, until the human has SEEN the
+    # divergence and answers anyway (`acknowledge_divergence`, set by the UI on
+    # the second click). The portal answer path carries the same rule.
+    if (
+        existing.get("sync_state") in operator_queue_service.REFUSE_RESPONSE_STATES
+        and not body.acknowledge_divergence
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "item_diverged",
+                "message": "The agent changed this item after you opened it. Review it and send again.",
+                "sync_state": existing.get("sync_state"),
+                "sync_detail": existing.get("sync_detail"),
+            },
         )
 
     # #2376: the decision has to be one the AGENT offered. Nothing checked this
@@ -324,4 +356,5 @@ async def get_agent_queue_items(
         status=status,
         limit=limit,
     )
+    items = operator_queue_service.annotate_aging(items)
     return {"agent_name": agent_name, "items": items, "count": len(items)}

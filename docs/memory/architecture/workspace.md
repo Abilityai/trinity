@@ -500,7 +500,7 @@ feed's live rows plus the conversation's in-flight emit joined **by execution id
 (under the message; the stream's last line is the current step while live; the terminal card
 renders FROM the durable #2320 verdict, so it survives a reload; **Ask about it** is a prefill,
 never a send — the ruled lesser control) and for `PortalWork`, the tab body (Waiting on you =
-`PortalAsks` over `store.asks` filtered to participants, the fourth rendering of the ask row;
+`PortalAsks` over `store.asks` filtered to participants, the fourth rendering of the ask row — since #2915 the projection (`WorkspaceAsk`) carries a coarse `sync ∈ {confirmed, changed, closed, unconfirmed}` + `aging` (never the reason or a poller timestamp), rendered by the shared `queueSyncBadge` rule, and an answer to a changed/closed ask is refused with `AskError(409, "item_diverged")` until `acknowledge_divergence` rides the resend;
 rooms grouped by participant, absence visible). **OSS-core by decision (ent#525): deliberately
 ungated.** See [workspace-work.md](../feature-flows/workspace-work.md).
 

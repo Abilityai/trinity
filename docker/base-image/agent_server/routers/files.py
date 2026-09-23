@@ -1,11 +1,14 @@
 """
 File browser endpoints.
 """
+import hashlib
 import logging
 import mimetypes
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse, FileResponse
@@ -413,18 +416,64 @@ async def preview_file(path: str):
         raise HTTPException(status_code=500, detail=f"Failed to preview file: {str(e)}")
 
 
+def content_sha256(text: str) -> str:
+    """The hash both sides of the compare-and-swap agree on (#2915): sha256 of
+    the UTF-8 text — what the download endpoint hands out as `response.text`."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def if_match_holds(path: Path, if_match: Optional[str]) -> bool:
+    """True when the caller's `if_match` still describes the file on disk.
+
+    No `if_match` → always holds (a plain write). A file that does not exist
+    holds too (there is nothing to clobber). A file that cannot be read as
+    UTF-8 never matches — fail closed, not open.
+    """
+    if if_match is None or not path.exists():
+        return True
+    try:
+        return content_sha256(path.read_text(encoding="utf-8")) == if_match
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def write_text_atomic(path: Path, content: str) -> None:
+    """tmp + os.replace in the same directory: a reader never sees a torn file,
+    and a concurrent writer's own read is of a whole file (#2915)."""
+    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
 @router.put("/api/files")
-async def update_file(path: str, request: FileUpdateRequest, platform: bool = False):
+async def update_file(
+    path: str,
+    request: FileUpdateRequest,
+    platform: bool = False,
+    if_match: Optional[str] = None,
+):
     """
     Update or create a file's content in the workspace.
     Only allows access to /home/developer for security.
     Cannot modify protected paths (.trinity, .git, etc.) unless platform=true.
     Creates parent directories if they don't exist.
 
+    #2915 — the write is ATOMIC (tmp + os.replace) and optionally a
+    compare-and-swap: `if_match` is the sha256 hex of the UTF-8 text the caller
+    last read; when the file exists and no longer matches, the write is refused
+    with 412 and nothing is touched. The platform's operator-queue write-back
+    uses this so it can never clobber an entry the agent appended between the
+    platform's read and its write — both writers used to be plain overwrites.
+
     Args:
         path: File path to update/create (query parameter)
         request: Request body with content
         platform: If true, allows writes to .trinity directory (platform-initiated)
+        if_match: sha256 hex of the content the caller last read (see above)
 
     Returns:
         Success status and file info
@@ -457,12 +506,24 @@ async def update_file(path: str, request: FileUpdateRequest, platform: bool = Fa
     if requested_path.exists() and not requested_path.is_file():
         raise HTTPException(status_code=400, detail=f"Not a file: {path}")
 
+    # #2915: compare-and-swap. Hash the same bytes the download endpoint hands
+    # out (the UTF-8 text), so the platform's sha over `response.text` and this
+    # one agree; a file that cannot be read as UTF-8 never matches, which fails
+    # closed (412) rather than open.
+    if not if_match_holds(requested_path, if_match):
+        raise HTTPException(
+            status_code=412,
+            detail="if_match mismatch: the file changed since it was read",
+        )
+
     try:
         # Create parent directories if they don't exist
         requested_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Write the new content
-        requested_path.write_text(request.content, encoding='utf-8')
+        # Write the new content ATOMICALLY: a reader (or a concurrent writer's
+        # own read) never sees a half-written file. Same directory so the
+        # rename cannot cross a filesystem boundary.
+        write_text_atomic(requested_path, request.content)
         stat = requested_path.stat()
 
         logger.info(f"Updated file: {requested_path}")

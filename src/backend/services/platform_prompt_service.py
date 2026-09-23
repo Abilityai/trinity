@@ -179,7 +179,7 @@ Before performing an action that cannot be undone or verified afterwards — pay
 
 **Set `expires_at`** on requests that gate an action. If it passes without a response the platform marks the item `expired` — treat that as "not approved; do not proceed."
 
-**Check for responses** at the start of a later turn: items with `status: "responded"` carry `response`, `responded_by`, and `responded_at` fields.
+**Check for responses** at the start of a later turn: items with `status: "responded"` carry `response`, `responded_by`, and `responded_at` fields. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`.
 
 **After processing a response**, update the item's status to `"acknowledged"`.
 

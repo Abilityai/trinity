@@ -15,12 +15,14 @@ Polling cycle:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from database import db
@@ -28,7 +30,7 @@ from redis_breaker_util import get_breaker_redis
 from services import rate_limiter
 from services.operator_queue_choices import OPTIONS_DROPPED_MARKER
 from services.agent_client import AgentClient
-from utils.helpers import utc_now_iso
+from utils.helpers import iso_cutoff, parse_iso_timestamp, to_utc_iso, utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +470,196 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     return out
 
 
+# =========================================================================
+# #2915: sync honesty — the vocabulary the loop writes, the fingerprint it
+# compares, and the aging predicate every reader shares.
+#
+# The file contract is unchanged (ingestion is create-only; an agent's rewrite
+# is NEVER applied in place — an approval is frozen to the exact action the
+# human read). What this adds is that every way the two sides can disagree is
+# detected, recorded on the row, and audited, instead of presenting as fine.
+# =========================================================================
+
+SYNC_CONFIRMED = "confirmed"          # entry present, same content, same status
+SYNC_CHANGED = "changed"              # entry present, content rewritten (detail = fields)
+SYNC_CLOSED_BY_FILER = "closed_by_filer"  # entry carries a status the agent set
+SYNC_MISSING = "missing"              # entry gone (entry_missing / file_missing)
+SYNC_STALE_ID = "stale_id"            # a pending entry re-uses a terminal row's id
+SYNC_UNCONFIRMED = "unconfirmed"      # the poller could not reconcile (detail = why)
+SYNC_STATES = frozenset({
+    SYNC_CONFIRMED, SYNC_CHANGED, SYNC_CLOSED_BY_FILER, SYNC_MISSING,
+    SYNC_STALE_ID, SYNC_UNCONFIRMED,
+})
+# States that audit as `diverged` when entered, `reconciled` when left for confirmed.
+DIVERGED_STATES = frozenset({SYNC_CHANGED, SYNC_CLOSED_BY_FILER, SYNC_MISSING, SYNC_STALE_ID})
+# States on which a response is refused (409 item_diverged) without an explicit
+# acknowledgement: the card the human read is not what the agent now holds.
+REFUSE_RESPONSE_STATES = frozenset({SYNC_CHANGED, SYNC_CLOSED_BY_FILER})
+
+DELIVERY_DELIVERED = "delivered"
+DELIVERY_UNDELIVERED = "undelivered"
+DELIVERY_NOT_APPLICABLE = "not_applicable"
+DELIVERY_STATES = frozenset({DELIVERY_DELIVERED, DELIVERY_UNDELIVERED, DELIVERY_NOT_APPLICABLE})
+
+# `sync_detail` / `delivery_detail` are durable, operator-visible, audited
+# columns — a CLOSED vocabulary. Field names, folded status tokens and failure
+# kinds only; never `str(e)`, never `response.text` (agent-controlled), never
+# agent-authored text.
+_DETAIL_RE = re.compile(r"^[a-z0-9_,]{1,64}$")
+_AGENT_STATUS_RE = re.compile(r"^[a-z_]{1,32}$")
+READ_FAILURE_THRESHOLD = 3            # consecutive failed cycles before `unconfirmed` (sync_health precedent)
+LAST_CONFIRMED_REFRESH_SECONDS = 60   # `last_confirmed_at` cadence — one batched UPDATE per agent per minute
+OPERATOR_QUEUE_AGING_HOURS_KEY = "operator_queue_aging_hours"
+OPERATOR_QUEUE_AGING_HOURS_DEFAULT = 24
+_PLATFORM_BLOCK_KEY = "platform"      # the receipt lives under `platform` in the agent's entry
+_AGING_SINCE_KEY = "aging_since"
+_CONTENT_FIELDS = ("title", "question", "options", "expires_at")
+
+
+def _detail(token) -> str:
+    """Fold any candidate into the closed detail vocabulary; unknown ⇒ `other`."""
+    s = str(token or "").strip().lower()
+    return s if _DETAIL_RE.match(s) else "other"
+
+
+def _fold_agent_status(raw) -> str:
+    """An agent-written status becomes a short lowercase token or `other`."""
+    s = str(raw or "").strip().lower()
+    return s if _AGENT_STATUS_RE.match(s) else "other"
+
+
+def _read_failure_detail(result: dict) -> str:
+    """Why a read failed, as a token — a status code or a class, never text."""
+    code = result.get("status_code") if isinstance(result, dict) else None
+    if isinstance(code, int):
+        return f"http_{code}"
+    err = str(result.get("error") or "") if isinstance(result, dict) else ""
+    return "timeout" if "timeout" in err.lower() else "unreachable"
+
+
+def _normalise_expires(value) -> str:
+    if not value:
+        return ""
+    try:
+        return to_utc_iso(parse_iso_timestamp(str(value)))
+    except Exception:  # noqa: BLE001 — an unparseable deadline compares as its text
+        return str(value)
+
+
+def _canonical_options(options) -> str:
+    if options is None:
+        return ""
+    try:
+        return json.dumps(options, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError):
+        return json.dumps([_OPTIONS_DROPPED_MARKER])
+
+
+def _entry_content(req: dict) -> dict:
+    """The comparable content of an agent's file entry — the PURE half of
+    `_clamp_ingested_item` (caps, markers) plus `create_item`'s defaults, so it
+    matches what the row stored at ingest byte for byte. `_clamp_ingested_item`
+    itself is deliberately not called: it reads the roster and may create a
+    workspace thread, and must never run speculatively."""
+    title = req.get("title")
+    title = _truncate_with_marker(title, OPERATOR_QUEUE_TITLE_MAX) if isinstance(title, str) else None
+    question = req.get("question")
+    question = _truncate_with_marker(question, OPERATOR_QUEUE_QUESTION_MAX) if isinstance(question, str) else None
+    options = req.get("options")
+    if options is not None:
+        try:
+            if len(json.dumps(options).encode("utf-8")) > OPERATOR_QUEUE_OPTIONS_MAX_BYTES:
+                options = [_OPTIONS_DROPPED_MARKER]
+        except (TypeError, ValueError):
+            options = [_OPTIONS_DROPPED_MARKER]
+    return {
+        "title": title or "Agent request",
+        "question": question or title or "(no details provided)",
+        "options": _canonical_options(options),
+        "expires_at": _normalise_expires(req.get("expires_at")),
+    }
+
+
+def _row_content(row: dict) -> dict:
+    return {
+        "title": row.get("title") or "Agent request",
+        "question": row.get("question") or row.get("title") or "(no details provided)",
+        "options": _canonical_options(row.get("options")),
+        "expires_at": _normalise_expires(row.get("expires_at")),
+    }
+
+
+def changed_fields(row: dict, req: dict) -> list:
+    """Which of the four content fields the agent rewrote since ingest."""
+    a, b = _row_content(row), _entry_content(req)
+    return [f for f in _CONTENT_FIELDS if a[f] != b[f]]
+
+
+def aging_hours() -> int:
+    """The operator's bound, `0` = disabled; unreadable ⇒ the default + WARN."""
+    try:
+        raw = db.get_setting_value(
+            OPERATOR_QUEUE_AGING_HOURS_KEY, str(OPERATOR_QUEUE_AGING_HOURS_DEFAULT)
+        )
+        return max(0, int(str(raw).strip()))
+    except Exception as e:  # noqa: BLE001 — a bad setting must not break a list
+        logger.warning("[OperatorQueue] aging bound unreadable (%s); using %d h",
+                       e, OPERATOR_QUEUE_AGING_HOURS_DEFAULT)
+        return OPERATOR_QUEUE_AGING_HOURS_DEFAULT
+
+
+def _aged_at(item: dict, hours: int) -> Optional[datetime]:
+    if hours <= 0 or item.get("status") != "pending":
+        return None
+    created = item.get("created_at")
+    if not created:
+        return None
+    try:
+        return parse_iso_timestamp(str(created)) + timedelta(hours=hours)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def is_aged(item: dict, hours: Optional[int] = None, now: Optional[datetime] = None) -> bool:
+    """Has this pending item waited past the operator's bound? ONE predicate for
+    the list API, the portal projection and the receipt the poller writes."""
+    hours = aging_hours() if hours is None else hours
+    at = _aged_at(item, hours)
+    if at is None:
+        return False
+    return at <= (now or datetime.now(timezone.utc))
+
+
+def annotate_aging(items: list, hours: Optional[int] = None) -> list:
+    """Adds `aging` / `aged_since` to every item in place; the frontend renders,
+    it never recomputes."""
+    hours = aging_hours() if hours is None else hours
+    now = datetime.now(timezone.utc)
+    for item in items:
+        at = _aged_at(item, hours)
+        aged = at is not None and at <= now
+        item["aging"] = aged
+        item["aged_since"] = to_utc_iso(at) if aged else None
+    return items
+
+
+async def _audit_sync(action: str, agent_name: str, item_id: str, details: dict) -> None:
+    """Accountability transitions only (ingested · diverged · reconciled ·
+    written_back · undeliverable) — ids and enums, never agent text; best-effort."""
+    try:
+        from services.platform_audit_service import platform_audit_service, AuditEventType
+        await platform_audit_service.log(
+            event_type=AuditEventType.OPERATOR_QUEUE,
+            event_action=action,
+            source="system",
+            target_type="operator_queue",
+            target_id=str(item_id),
+            details={"agent_name": agent_name, **details},
+        )
+    except Exception as e:  # noqa: BLE001 — audit never breaks the sync
+        logger.debug("[OperatorQueue] audit %s for %s skipped: %s", action, item_id, e)
+
+
 def set_websocket_manager(manager):
     """Set the WebSocket manager for broadcasting events."""
     global _websocket_manager
@@ -712,6 +904,12 @@ class OperatorQueueSyncService:
         # #1632: agent_name → monotonic ts of the last flood alert, so a sustained
         # flood emits one alert per cooldown episode, not one per 5s cycle.
         self._flood_alert_cooldown: dict[str, float] = {}
+        # #2915: consecutive failed reads per agent — hysteresis before a row is
+        # called `unconfirmed` (a busy container times out intermittently).
+        self._read_failures: dict[str, int] = {}
+        # #2915: did any row's sync/delivery state change this cycle? ONE thin WS
+        # trigger per cycle, never per agent or per item.
+        self._changed_this_cycle = False
 
     def start(self):
         """Start the background polling loop."""
@@ -806,44 +1004,166 @@ class OperatorQueueSyncService:
         if not leader:
             return
 
-        from services.docker_service import list_all_agents_fast
+        from services.docker_service import agent_container_states
 
+        # Expire items past their deadline — BEFORE the running-agents gate
+        # (#2915): the early return below used to sit above this, so an
+        # all-stopped fleet never expired anything.
         try:
-            agents = list_all_agents_fast()
+            expired_count = db.mark_operator_queue_expired()
+            if expired_count > 0:
+                logger.info(f"Expired {expired_count} operator queue items")
         except Exception as e:
-            logger.debug(f"Could not list agents: {e}")
+            logger.error(f"Operator queue expiry failed: {e}")
+
+        # #2915: TRI-state, deliberately (#2196 class). `list_all_agents_fast`
+        # collapses "Docker unreadable" into "no agents"; keyed on that, one
+        # daemon blip would flip every open row fleet-wide to
+        # `unconfirmed:agent_not_running` and back. `None` here means "could
+        # not look" — nothing is swept and nothing is synced this cycle.
+        try:
+            states = agent_container_states()
+        except Exception as e:
+            logger.debug(f"Could not read agent container states: {e}")
+            states = None
+        if states is None:
             return
 
-        running_agents = [a.name for a in agents if a.status == "running"]
-        if not running_agents:
+        running_agents = sorted(name for name, state in states.items() if state == "running")
+        now = utc_now_iso()
+        self._changed_this_cycle = False
+
+        # Sweep: every open row of an agent that is NOT running is
+        # `unconfirmed:agent_not_running`. Edge-triggered — at steady state the
+        # WHERE matches nothing. An empty running list sweeps every open row
+        # (an explicit branch in the accessor; never `notin_([])`).
+        try:
+            swept = db.mark_operator_queue_unconfirmed(
+                "agent_not_running", now, exclude_agents=running_agents
+            )
+            if swept:
+                self._changed_this_cycle = True
+        except Exception as e:
+            logger.error(f"Operator queue not-running sweep failed: {e}")
+
+        if running_agents:
+            # Sync each agent concurrently (with a reasonable limit)
+            tasks = [self._sync_agent(name) for name in running_agents]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        if self._changed_this_cycle:
+            await self._broadcast_sync()
+
+    async def _broadcast_sync(self):
+        """ONE thin trigger per cycle (#918: identifiers only — here none; the
+        store refetches the access-controlled list). Never per agent or per
+        item: a fleet restart would otherwise fire hundreds of refetches."""
+        if not _websocket_manager:
             return
+        try:
+            await _websocket_manager.broadcast(json.dumps({
+                "type": "operator_queue_sync",
+                "data": {},
+            }))
+        except Exception as e:
+            logger.error(f"Failed to broadcast operator-queue sync: {e}")
 
-        # Expire items past their deadline
-        expired_count = db.mark_operator_queue_expired()
-        if expired_count > 0:
-            logger.info(f"Expired {expired_count} operator queue items")
+    async def _apply_sync_state(self, agent_name: str, row: dict, state: str,
+                                detail: Optional[str], now: str) -> bool:
+        """Record what the poller established about one row; True iff it changed.
 
-        # Sync each agent concurrently (with a reasonable limit)
-        tasks = [self._sync_agent(name) for name in running_agents]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        The row is the edge: `set_sync_state`'s WHERE excludes rows already
+        carrying the value and its rowcount is the transition, so two
+        overlapping leaders cannot double-record. Audit ONLY the accountability
+        transitions — entering a diverged state, or leaving one for confirmed.
+        The `confirmed ↔ unconfirmed` flap is never audited: a fleet restart
+        must write zero audit rows.
+        """
+        if state not in SYNC_STATES:
+            logger.error(f"Refusing unknown sync_state {state!r} for {row.get('id')} (programming error)")
+            return False
+        detail = _detail(detail) if detail else None
+        prior = row.get("sync_state")
+        if prior == state and (row.get("sync_detail") or "") == (detail or ""):
+            return False
+        try:
+            changed = db.set_operator_queue_sync_state(row["id"], state, detail, now)
+        except Exception as e:
+            logger.error(f"Failed to record sync state for {row.get('id')}: {e}")
+            return False
+        if not changed:
+            return False
+        row["sync_state"] = state
+        row["sync_detail"] = detail
+        self._changed_this_cycle = True
+        if state in DIVERGED_STATES:
+            await _audit_sync("diverged", agent_name, row["id"],
+                              {"from": prior, "to": state, "detail": detail})
+        elif state == SYNC_CONFIRMED and prior in DIVERGED_STATES:
+            await _audit_sync("reconciled", agent_name, row["id"], {"from": prior})
+        return True
+
+    async def _apply_delivery_state(self, agent_name: str, row: dict, state: str,
+                                    detail: Optional[str], now: str) -> bool:
+        """Record whether the answer / terminal flip reached the agent's file."""
+        if state not in DELIVERY_STATES:
+            logger.error(f"Refusing unknown delivery_state {state!r} for {row.get('id')} (programming error)")
+            return False
+        detail = _detail(detail) if detail else None
+        if row.get("delivery_state") == state and (row.get("delivery_detail") or "") == (detail or ""):
+            return False
+        try:
+            changed = db.set_operator_queue_delivery_state(row["id"], state, detail, now)
+        except Exception as e:
+            logger.error(f"Failed to record delivery state for {row.get('id')}: {e}")
+            return False
+        if not changed:
+            return False
+        row["delivery_state"] = state
+        row["delivery_detail"] = detail
+        self._changed_this_cycle = True
+        if state == DELIVERY_DELIVERED:
+            await _audit_sync("written_back", agent_name, row["id"], {"status": row.get("status")})
+        elif state == DELIVERY_UNDELIVERED:
+            await _audit_sync("undeliverable", agent_name, row["id"],
+                              {"status": row.get("status"), "detail": detail})
+        return True
 
     async def _sync_agent(self, agent_name: str):
         """Sync a single agent's operator queue file."""
         client = AgentClient(agent_name)
+        now = utc_now_iso()
 
         # 1. Read the queue file from the agent
         try:
             result = await client.read_file(QUEUE_FILE_PATH, timeout=5.0)
-        except Exception:
-            # Agent not reachable or file API not ready — skip silently
+        except Exception as e:
+            result = {"success": False, "error": type(e).__name__}
+
+        if not result.get("success"):
+            # #2915: "could not read" is a fact, not silence — but with
+            # hysteresis. The 5 s read times out intermittently on a busy
+            # container, so a row is called `unconfirmed` only after
+            # READ_FAILURE_THRESHOLD consecutive failed cycles, and returns to
+            # `confirmed` on the first good read. No ingest and no write-back
+            # this cycle either way.
+            failures = self._read_failures.get(agent_name, 0) + 1
+            self._read_failures[agent_name] = failures
+            if failures >= READ_FAILURE_THRESHOLD:
+                try:
+                    if db.mark_operator_queue_unconfirmed(
+                        _read_failure_detail(result), now, agent_name=agent_name
+                    ):
+                        self._changed_this_cycle = True
+                except Exception as e:
+                    logger.error(f"Failed to mark {agent_name} rows unconfirmed: {e}")
             return
+        self._read_failures.pop(agent_name, None)
 
         file_exists = result.get("success") and not result.get("not_found")
-
-        if file_exists:
-            content = result.get("content")
-            if not content:
-                file_exists = False
+        content = result.get("content") if file_exists else None
+        if file_exists and not content:
+            file_exists = False
 
         # #1632: skip a pathologically large queue file wholesale (C1 per-cycle
         # DoS guard) — don't even parse it. One flood alert, then skip this agent
@@ -854,20 +1174,56 @@ class OperatorQueueSyncService:
                 f"(> {OPERATOR_QUEUE_MAX_FILE_BYTES}); skipping ingestion this cycle"
             )
             await self._maybe_emit_flood_alert(agent_name, reason="oversize_file")
+            try:
+                if db.mark_operator_queue_unconfirmed("oversize_file", now, agent_name=agent_name):
+                    self._changed_this_cycle = True
+            except Exception as e:
+                logger.error(f"Failed to mark {agent_name} rows unconfirmed: {e}")
             return
 
         if file_exists:
             try:
                 queue_data = json.loads(content)
             except json.JSONDecodeError:
+                # #2915: an unparseable file is `unconfirmed`, never "empty", and
+                # NOTHING is written back this cycle — the previous path treated
+                # it as an empty request list and then overwrote the agent's
+                # file with the reconstructed responses alone.
                 logger.warning(f"Invalid JSON in operator-queue.json for {agent_name}")
-                queue_data = {"$schema": "operator-queue-v1", "requests": []}
+                try:
+                    if db.mark_operator_queue_unconfirmed("invalid_json", now, agent_name=agent_name):
+                        self._changed_this_cycle = True
+                except Exception as e:
+                    logger.error(f"Failed to mark {agent_name} rows unconfirmed: {e}")
+                return
         else:
             queue_data = {"$schema": "operator-queue-v1", "requests": []}
 
         requests = queue_data.get("requests", [])
         if not isinstance(requests, list):
             requests = []
+        content_sha = (
+            hashlib.sha256(content.encode("utf-8")).hexdigest() if file_exists else None
+        )
+
+        # #2915: everything the platform holds for this agent, in two reads —
+        # full rows for the open (pending/responded) items the file is expected
+        # to carry, and id/status for every terminal row, so a pending entry that
+        # re-uses a terminal row's id is recognised as `stale_id` instead of
+        # being re-admitted (the on-conflict create returns the surviving uuid
+        # silently: a phantom admit against the depth cap and a "new" broadcast
+        # every cycle). Replaces the per-entry `exists()` probe.
+        try:
+            index = db.get_operator_queue_sync_index_for_agent(agent_name)
+        except Exception as e:
+            logger.error(f"Failed to read the sync index for {agent_name}: {e}")
+            return
+        open_rows = list(index["open"] or [])
+        terminal_index = index["terminal"] or {}
+        open_by_rid = {r["request_id"]: r for r in open_rows if r.get("request_id")}
+        seen_rids: set = set()
+        hours = aging_hours()
+        receipt_rids: set = set()
 
         # 2. Process each request. Two independent bounds guard this agent-authored
         #    seam (#1632): a DB-measured pending-DEPTH cap (primary, Redis-independent)
@@ -913,6 +1269,8 @@ class OperatorQueueSyncService:
 
             fail_key = (agent_name, req_id)
             req_status = req.get("status", "pending")
+            if isinstance(req_id, str):
+                seen_rids.add(req_id)
 
             if req_status == "acknowledged":
                 # Agent acknowledged our response. #1631: broadcast the row's
@@ -922,12 +1280,55 @@ class OperatorQueueSyncService:
                 ack_uuid = db.mark_operator_queue_acknowledged(agent_name, req_id)
                 if ack_uuid:
                     acknowledged_items.append(ack_uuid)
+                    open_by_rid.pop(req_id, None)  # it just went terminal
+                elif req_id in open_by_rid:
+                    # #2915: acknowledged on a row that was never responded — the
+                    # agent closed its own ask. The platform used to drop this
+                    # (the UPDATE matches only `responded` rows) and keep showing
+                    # the human a pending card for an item the agent had closed.
+                    await self._apply_sync_state(
+                        agent_name, open_by_rid[req_id], SYNC_CLOSED_BY_FILER, "acknowledged", now
+                    )
                 continue
 
-            # #1631: exists() is scoped to (agent, req_id) — two agents may share a
-            # req_id, so an id-only check would treat B's distinct request as
-            # already-created.
-            if req_status != "pending" or db.operator_queue_item_exists(agent_name, req_id):
+            if req_id in open_by_rid:
+                # #2915: the platform already holds this item — reconcile the
+                # entry against the row instead of skipping it. The row is the
+                # frozen ingest snapshot; nothing here rewrites it.
+                row = open_by_rid[req_id]
+                if req_status == "pending":
+                    fields = changed_fields(row, req)
+                    if fields:
+                        await self._apply_sync_state(agent_name, row, SYNC_CHANGED, ",".join(fields), now)
+                    else:
+                        await self._apply_sync_state(agent_name, row, SYNC_CONFIRMED, None, now)
+                        if (
+                            row.get("status") == "pending"
+                            and is_aged(row, hours)
+                            and not (isinstance(req.get(_PLATFORM_BLOCK_KEY), dict)
+                                     and req[_PLATFORM_BLOCK_KEY].get(_AGING_SINCE_KEY))
+                        ):
+                            receipt_rids.add(req_id)
+                elif req_status == "responded":
+                    # Our own write-back landed; the agent has not acknowledged yet.
+                    await self._apply_sync_state(agent_name, row, SYNC_CONFIRMED, None, now)
+                else:
+                    await self._apply_sync_state(
+                        agent_name, row, SYNC_CLOSED_BY_FILER, _fold_agent_status(req_status), now
+                    )
+                continue
+
+            if isinstance(req_id, str) and req_id in terminal_index:
+                if req_status == "pending":
+                    term = terminal_index[req_id]
+                    await self._apply_sync_state(
+                        agent_name,
+                        {"id": term["id"], "sync_state": term.get("sync_state"), "sync_detail": None},
+                        SYNC_STALE_ID, _fold_agent_status(term.get("status")), now,
+                    )
+                continue
+
+            if req_status != "pending":
                 continue
 
             # #1525: quarantine a request whose create keeps failing so a single
@@ -983,7 +1384,7 @@ class OperatorQueueSyncService:
             # clamp/create failure is quarantined by #1525 rather than hot-looping.
             try:
                 clamped = _clamp_ingested_item(req, agent_name)
-                db.create_operator_queue_item(agent_name, clamped)
+                new_id = db.create_operator_queue_item(agent_name, clamped)
                 admitted += 1
                 new_items.append(clamped)
                 self._create_failures.pop(fail_key, None)  # recovered — clear count
@@ -1004,6 +1405,36 @@ class OperatorQueueSyncService:
                         f"Failed to create queue item {req_id} for '{agent_name}' "
                         f"(attempt {attempts}/{MAX_CREATE_ATTEMPTS}): {e}"
                     )
+                continue
+
+            # #2915: a freshly ingested row is confirmed by construction (the
+            # entry was just read) — and `ingested` is the first accountability
+            # row of its audit story.
+            await self._apply_sync_state(
+                agent_name, {"id": new_id, "sync_state": None, "sync_detail": None},
+                SYNC_CONFIRMED, None, now,
+            )
+            await _audit_sync("ingested", agent_name, new_id,
+                              {"request_id": req_id, "type": clamped.get("type")})
+
+        # #2915: open rows the file no longer carries. The entry was pruned or the
+        # file is gone — the platform used to keep showing a live card for it.
+        for rid, row in open_by_rid.items():
+            if rid in seen_rids:
+                continue
+            await self._apply_sync_state(
+                agent_name, row, SYNC_MISSING,
+                "entry_missing" if file_exists else "file_missing", now,
+            )
+
+        # #2915: "last confirmed at HH:MM" without a write per row per cycle —
+        # one batched UPDATE per agent, for confirmed rows older than a minute.
+        try:
+            db.refresh_operator_queue_last_confirmed(
+                agent_name, now, iso_cutoff(minutes=LAST_CONFIRMED_REFRESH_SECONDS // 60)
+            )
+        except Exception as e:
+            logger.error(f"Failed to refresh last_confirmed_at for {agent_name}: {e}")
 
         # #1632: one aggregated summary alert per episode when items were held
         # (depth cap, rate cap, or malformed ids) — never one per skipped item.
@@ -1043,17 +1474,16 @@ class OperatorQueueSyncService:
 
         # 4. Write responses back to the agent's file. Cancelled/expired
         # items are propagated too (#1017) so the agent stops waiting on
-        # them — but only as in-place status flips on entries still in the
-        # file.
+        # them — as in-place status flips on entries still in the file; an
+        # entry that is gone is recorded `undelivered:entry_missing` (#2915),
+        # never silently skipped. The aging receipt rides the same write.
         responded_items = db.get_operator_queue_responded_for_agent(agent_name)
-        terminal_items = (
-            db.get_operator_queue_terminal_for_agent(agent_name)
-            if file_exists else []
-        )
-        if responded_items or terminal_items:
+        terminal_items = db.get_operator_queue_terminal_for_agent(agent_name)
+        if responded_items or terminal_items or receipt_rids:
             await self._write_responses_to_agent(
                 agent_name, client, queue_data, responded_items,
-                terminal_items, file_exists
+                terminal_items, file_exists,
+                content_sha=content_sha, receipt_request_ids=receipt_rids,
             )
 
     async def _write_responses_to_agent(
@@ -1064,9 +1494,54 @@ class OperatorQueueSyncService:
         responded_items: list,
         terminal_items: Optional[list] = None,
         file_exists: bool = True,
+        *,
+        content_sha: Optional[str] = None,
+        receipt_request_ids=None,
     ):
-        """Write operator responses back to the agent's queue file."""
+        """Write operator responses back to the agent's queue file.
+
+        #2915 — the write is honest and narrow. Before writing, the file is
+        READ AGAIN and merged by id, and the write carries `if_match` (the sha of
+        what was read) so the agent server refuses (412) rather than clobbers an
+        entry the agent appended in between — the window is narrowed to one
+        round trip, and a refused write is recorded and retried, not lost. A
+        response is delivered ONLY into an entry that is still `pending` and
+        whose content still matches the row (an answer to a rewritten question
+        is `undelivered:entry_changed`). Every outcome lands on the row as a
+        delivery state; nothing is dropped silently.
+        """
+        now = utc_now_iso()
+        terminal_items = terminal_items or []
+        receipt_request_ids = set(receipt_request_ids or ())
+        if not responded_items and not terminal_items and not receipt_request_ids:
+            return
+
+        # Re-read immediately before writing (the cycle-start read may be a whole
+        # cycle old). A transient failure here means "try next cycle" — the
+        # agent WAS readable seconds ago, so nothing is recorded for it.
+        if file_exists:
+            try:
+                fresh = await client.read_file(QUEUE_FILE_PATH, timeout=5.0)
+            except Exception as e:
+                logger.warning(f"Re-read before write-back failed for {agent_name}: {type(e).__name__}")
+                return
+            if not fresh.get("success"):
+                return
+            if fresh.get("not_found") or not fresh.get("content"):
+                queue_data = {"$schema": "operator-queue-v1", "requests": []}
+                content_sha = None
+                file_exists = False
+            else:
+                try:
+                    queue_data = json.loads(fresh["content"])
+                except json.JSONDecodeError:
+                    logger.warning(f"Re-read of operator-queue.json for {agent_name} is not JSON; not writing")
+                    return
+                content_sha = hashlib.sha256(fresh["content"].encode("utf-8")).hexdigest()
+
         requests = queue_data.get("requests", [])
+        if not isinstance(requests, list):
+            requests = []
         updated = False
         terminal_flips = 0
 
@@ -1075,36 +1550,73 @@ class OperatorQueueSyncService:
         # `request_id`. So every match against a file entry (`req.get("id")`)
         # MUST key on `request_id`, not the DB `id` — otherwise write-back
         # silently stops matching and the agent never sees its answer.
-        response_map = {item["request_id"]: item for item in responded_items}
+        # #2915: a platform-minted row (ent#499) has no loop to close — it is
+        # `not_applicable` and takes NO part in delivery. Files written before
+        # ent#499 still carry those alarms as `responded` entries; matching them
+        # here flip-flopped the row between delivered and not_applicable every
+        # cycle, minting an audit row each time (seen live on the first run).
+        response_map = {
+            item["request_id"]: item for item in responded_items
+            if not is_platform_minted(item)
+        }
         # Cancelled/expired items (#1017): flip still-'pending' file entries
         # to their terminal status so the agent stops waiting (and so a
         # stale 'pending' file entry can't resurrect a purged row). Never
         # appended if missing from the file.
-        terminal_map = {item["request_id"]: item for item in (terminal_items or [])}
+        terminal_map = {
+            item["request_id"]: item for item in (terminal_items or [])
+            if not is_platform_minted(item)
+        }
+        delivered: dict = {}      # row id -> row, IN this write (or already there)
+        undelivered: dict = {}    # row id -> (row, detail), decided before the write
 
         # Update items already in the agent's requests array
         seen_ids = set()
         for req in requests:
+            if not isinstance(req, dict):
+                continue
             req_id = req.get("id")
-            if req_id in response_map and req.get("status") == "pending":
+            if req_id in response_map:
                 resp = response_map[req_id]
-                req["status"] = "responded"
-                req["response"] = resp["response"]
-                req["response_text"] = resp.get("response_text")
-                req["responded_by"] = resp.get("responded_by_email")
-                req["responded_at"] = resp.get("responded_at")
-                updated = True
-            elif req_id in terminal_map and req.get("status") == "pending":
-                req["status"] = terminal_map[req_id]["status"]
-                updated = True
-                terminal_flips += 1
+                if req.get("status") == "pending":
+                    if changed_fields(resp, req):
+                        # The agent rewrote the question after the human answered
+                        # it. Never hand an answer to a different question.
+                        undelivered[resp["id"]] = (resp, "entry_changed")
+                    else:
+                        req["status"] = "responded"
+                        req["response"] = resp["response"]
+                        req["response_text"] = resp.get("response_text")
+                        req["responded_by"] = resp.get("responded_by_email")
+                        req["responded_at"] = resp.get("responded_at")
+                        updated = True
+                        delivered[resp["id"]] = resp
+                elif req.get("status") in ("responded", "acknowledged"):
+                    delivered[resp["id"]] = resp  # a previous write landed
+                else:
+                    undelivered[resp["id"]] = (resp, "closed_by_filer")
+            elif req_id in terminal_map:
+                term = terminal_map[req_id]
+                if req.get("status") == "pending":
+                    req["status"] = term["status"]
+                    updated = True
+                    terminal_flips += 1
+                delivered[term["id"]] = term
+            if req_id in receipt_request_ids and req.get("status") == "pending":
+                block = req.get(_PLATFORM_BLOCK_KEY)
+                if not isinstance(block, dict):
+                    block = {}
+                    req[_PLATFORM_BLOCK_KEY] = block
+                if not block.get(_AGING_SINCE_KEY):
+                    block[_AGING_SINCE_KEY] = now
+                    updated = True
             if req_id:
                 seen_ids.add(req_id)
 
         # Reconstruct items missing from the file (e.g. after container restart).
         # #1631: write the agent's own `request_id` back as the file entry's
         # `id` (never the DB uuid) so the agent recognises the item and the next
-        # sync cycle's exists() check — keyed on request_id — matches instead of
+        # sync cycle's index — keyed on request_id — matches instead of
         # creating a duplicate.
         for resp in responded_items:
             # ent#499: a platform alarm was never in this agent's file and must
@@ -1128,8 +1640,25 @@ class OperatorQueueSyncService:
                     "responded_at": resp.get("responded_at"),
                 })
                 updated = True
+                delivered[resp["id"]] = resp
+
+        # #2915: a platform alarm has no loop to close — `not_applicable`, once,
+        # whether it is still `responded` or already terminal.
+        for row in list(responded_items) + list(terminal_items or []):
+            if is_platform_minted(row):
+                await self._apply_delivery_state(
+                    agent_name, row, DELIVERY_NOT_APPLICABLE, "platform_minted", now
+                )
+        # #2915: a terminal flip whose entry is gone is recorded, not dropped.
+        for term in terminal_map.values():
+            if term["request_id"] not in seen_ids:
+                undelivered[term["id"]] = (term, "entry_missing" if file_exists else "file_missing")
+        for row, detail in undelivered.values():
+            await self._apply_delivery_state(agent_name, row, DELIVERY_UNDELIVERED, detail, now)
 
         if not updated:
+            for row in delivered.values():
+                await self._apply_delivery_state(agent_name, row, DELIVERY_DELIVERED, None, now)
             return
 
         queue_data["requests"] = requests
@@ -1142,18 +1671,31 @@ class OperatorQueueSyncService:
                 new_content,
                 timeout=10.0,
                 platform=True,  # Allow writes to .trinity directory
+                if_match=content_sha,
             )
-            if result.get("success"):
-                logger.info(
-                    f"Wrote {len(response_map)} responses and {terminal_flips} "
-                    f"terminal-status flips back to {agent_name}"
-                )
-            else:
-                logger.warning(
-                    f"Failed to write responses to {agent_name}: {result.get('error')}"
-                )
         except Exception as e:
-            logger.error(f"Error writing responses to {agent_name}: {e}")
+            result = {"success": False, "error": type(e).__name__}
+
+        if result.get("success"):
+            logger.info(
+                f"Wrote {len(response_map)} responses and {terminal_flips} "
+                f"terminal-status flips back to {agent_name}"
+            )
+            for row in delivered.values():
+                await self._apply_delivery_state(agent_name, row, DELIVERY_DELIVERED, None, now)
+        else:
+            code = result.get("status_code")
+            if code == 412:
+                detail = "conflict"      # the agent wrote in between — retried next cycle
+            elif isinstance(code, int):
+                detail = f"http_{code}"
+            else:
+                detail = _read_failure_detail(result)
+            logger.warning(
+                f"Failed to write responses to {agent_name}: {detail}"
+            )
+            for row in delivered.values():
+                await self._apply_delivery_state(agent_name, row, DELIVERY_UNDELIVERED, detail, now)
 
     async def _maybe_emit_flood_alert(
         self, agent_name: str, held: int = 0, reason: str = "ingestion_cap"

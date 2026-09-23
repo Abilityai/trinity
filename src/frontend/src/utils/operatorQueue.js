@@ -164,3 +164,95 @@ export function respondRefusedAsNotPending(err) {
   const status = err?.response?.status
   return status === 409 || status === 400 || status === 404
 }
+
+/**
+ * #2915 — what the platform last established about the agent's own copy of an
+ * item, as ONE badge rule every surface calls (QueueCard, ResolvedCard, /m,
+ * PortalAsks). Returns `null` when nothing needs saying (confirmed, not aging,
+ * delivered) so a healthy card stays quiet; otherwise `{ label, variant, title }`
+ * for a `BaseBadge` (variant is a BaseBadge variant, never a raw colour).
+ *
+ * Inputs are the fields the API already carries: `sync_state`, `sync_detail`,
+ * `last_confirmed_at`, `delivery_state`, `delivery_detail`, `aging`,
+ * `aged_since`. The portal projection carries a coarse `sync` instead of
+ * `sync_state`; both spellings are read.
+ */
+export const SYNC_BADGE_COPY = Object.freeze({
+  changed: 'Changed by the agent',
+  closed_by_filer: 'Closed by the agent',
+  closed: 'Closed by the agent',
+  missing: 'Gone from the agent',
+  stale_id: 'Re-used id',
+  unconfirmed: 'Unconfirmed',
+  undelivered: 'Answer not delivered',
+  aging: 'Waiting',
+})
+
+export function queueSyncBadge(item) {
+  if (!item || typeof item !== 'object') return null
+  const state = item.sync_state || item.sync
+  // Delivery outranks sync on an answered item: "your answer never landed" is
+  // the fact the operator needs first.
+  if (item.delivery_state === 'undelivered') {
+    return { label: SYNC_BADGE_COPY.undelivered, variant: 'danger', title: deliveryTitle(item.delivery_detail) }
+  }
+  if (state === 'changed') {
+    return { label: SYNC_BADGE_COPY.changed, variant: 'warning', title: changedTitle(item.sync_detail) }
+  }
+  if (state === 'closed_by_filer' || state === 'closed') {
+    return { label: SYNC_BADGE_COPY.closed_by_filer, variant: 'warning', title: 'The agent closed this on its side; it is still waiting for you here.' }
+  }
+  if (state === 'missing') {
+    return { label: SYNC_BADGE_COPY.missing, variant: 'warning', title: 'The agent no longer carries this item in its queue file.' }
+  }
+  if (state === 'stale_id') {
+    return { label: SYNC_BADGE_COPY.stale_id, variant: 'neutral', title: 'The agent re-used this id after the item was closed; the re-ask was not admitted.' }
+  }
+  if (state === 'unconfirmed') {
+    return { label: SYNC_BADGE_COPY.unconfirmed, variant: 'neutral', title: unconfirmedTitle(item) }
+  }
+  if (item.aging) {
+    return { label: SYNC_BADGE_COPY.aging, variant: 'warning', title: item.aged_since ? `Past the aging bound since ${item.aged_since}` : 'Past the aging bound' }
+  }
+  return null
+}
+
+function changedTitle(detail) {
+  const fields = typeof detail === 'string' && detail ? detail.split(',').join(', ') : 'content'
+  return `The agent rewrote this item since it was ingested (${fields}). You are reading the original.`
+}
+
+function deliveryTitle(detail) {
+  switch (detail) {
+    case 'entry_changed': return 'The agent rewrote the item after you answered; the answer was not delivered.'
+    case 'closed_by_filer': return 'The agent closed the item on its side; the answer was not delivered.'
+    case 'entry_missing': return "The item is gone from the agent's queue file; retrying."
+    case 'file_missing': return 'The agent has no queue file; retrying.'
+    case 'conflict': return 'The agent was writing its file at the same moment; retrying.'
+    default: return 'The write to the agent failed; retrying.'
+  }
+}
+
+function unconfirmedTitle(item) {
+  const why = {
+    agent_not_running: 'the agent is not running',
+    timeout: 'the agent did not answer in time',
+    unreachable: 'the agent could not be reached',
+    invalid_json: "the agent's queue file is not valid JSON",
+    oversize_file: "the agent's queue file is too large to read",
+  }[item.sync_detail] || 'the platform could not reconcile it'
+  const when = item.last_confirmed_at ? ` Last confirmed ${item.last_confirmed_at}.` : ' Never confirmed.'
+  return `Not confirmed with the agent: ${why}.${when}`
+}
+
+/** True when a respond/answer was refused with 409 `item_diverged` (#2915). */
+export function respondRefusedAsDiverged(err) {
+  const status = err?.response?.status
+  if (status !== 409) return false
+  const detail = err?.response?.data?.detail
+  const code = detail && typeof detail === 'object' ? detail.code : null
+  return code === 'item_diverged'
+}
+
+export const QUEUE_RESPONSE_DIVERGED =
+  'The agent changed this item after you opened it. Review it and send again to answer anyway.'
