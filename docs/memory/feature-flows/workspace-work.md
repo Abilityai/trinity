@@ -114,7 +114,9 @@ the ruling exists to prevent, in new clothes. In the chat's live card,
 `pending` (the feed has not read the turn yet) holds the sentence's one-line
 footprint, blank and aria-hidden, and the sentence is held to one line there
 (only the agent's name truncates), so `none` / `unknown` swap in place. The
-Work tab and the room render as before (#2964).
+row takes the card's width and never sets it (`w-0 min-w-full`), so a long
+agent name cannot widen the card when the sentence lands. The Work tab and the
+room render as before (#2964).
 
 ### The #919 read is hardened like the MCP tool
 
@@ -215,7 +217,11 @@ live path at all. Now:
   Stop's slot from first paint: Stop stays invisible, disabled, aria-hidden
   and out of the tab order until the 202's execution id arrives (ent#155),
   then the same button turns usable, so Open in Work never moves. In that card
-  only the agent's name truncates, never "doesn't report steps." Known and out
+  only the agent's name truncates, never "doesn't report steps." Both of the
+  chat's synthetic cards (live and terminal) title themselves with
+  `previewTitle`, a mirror of `service.clean_title` pinned row-for-row by
+  `tests/fixtures/portal-work-titles.json`, so the feed's row lands without
+  re-wrapping the title; only secret masking is not mirrored. Known and out
   of scope: `stages ↔ unknown`, and a row going stale mid-turn (#2964).
 - **Scroll.** `submitUserText` already pins before `deliver`; the card mounts
   after, so a `watch(sending)` re-pins once, on `nextTick`, guarded by
@@ -243,6 +249,13 @@ while live and not for a stale row, push filtered and debounced, Stop through
 the terminate route), the owner feeding the Work store off the door gate and
 re-scoping on a thread switch, the merged signal, and source guards on the
 shell, both conversations, the tab body, the card and the WebSocket consumer.
+`src/frontend/tests/unit/portalWorkCardLiveShape.spec.js` — the chat card's
+reserved rows (#2964): the steps row and Stop's slot exist from first paint and
+are patched in place, and every other host keeps the default markup.
+`tests/fixtures/portal-work-titles.json`, asserted by
+`tests/unit/test_2964_portal_work_title_fixture.py` (against `clean_title`) and
+`src/frontend/tests/unit/portalWorkTitle.spec.js` (against `previewTitle`) —
+the pre-read title mirror, row for row.
 
 ## Residuals (stated)
 
