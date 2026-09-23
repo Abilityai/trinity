@@ -203,6 +203,12 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("agent_git_config",             "agent_name",        Policy.CASCADE),
     AgentRef("agent_sync_state",             "agent_name",        Policy.CASCADE),
     AgentRef("agent_skills",                 "agent_name",        Policy.CASCADE),
+    # ent#596: `agent_skills.assigned_by_agent` (the agent that MADE the
+    # assignment) is audit-only initiator provenance and intentionally NOT
+    # registered — the `source_agent_name` precedent above. A renamed actor
+    # keeps its historical name on the rows it wrote; the parity-test regex
+    # does not match the column, which is that same distinction.
+    AgentRef("agent_capability_grants",      "agent_name",        Policy.CASCADE),  # ent#596
     AgentRef("agent_tags",                   "agent_name",        Policy.CASCADE),
     # #668 — latest compatibility snapshot (transient/recomputable): wipe on
     # delete, re-key on rename via this registry.

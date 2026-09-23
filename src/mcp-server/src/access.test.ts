@@ -70,6 +70,19 @@ describe("ent#628 TOOL_ACCESS_POLICY is total over the registered tools", () => 
     assert.equal(TOOL_ACCESS_POLICY.stop_loop.kind, "in-tool");
   });
 
+  it("ent#596: the three skill-changing tools name the backend skill-manager fence, not ENT629", () => {
+    // They were `baselined: ENT629` — "ungated at MCP, backend owner-equivalent".
+    // The fence now exists (routers/skills.py get_skill_managed_agent_by_name),
+    // so a row pointing back at ENT629 would claim the gap is still open.
+    for (const tool of ["assign_skill_to_agent", "set_agent_skills", "sync_agent_skills"]) {
+      const policy = TOOL_ACCESS_POLICY[tool];
+      assert.equal(policy.kind, "baselined", tool);
+      assert.match((policy as { owner: string }).owner, /get_skill_managed_agent_by_name.*#596/, tool);
+    }
+    // The READ stays on ENT629: reading an agent's skills is not changing them.
+    assert.match((TOOL_ACCESS_POLICY.get_agent_skills as { owner: string }).owner, /#629/);
+  });
+
   it("every baselined row names an owner — an issue or a backend gate, never free text", () => {
     const OWNER =
       /#\d+|reject_agent_principal|require_admin|assert_admin|_self_gate|_enforce_connector_scope|agent_permissions|rooms service/;

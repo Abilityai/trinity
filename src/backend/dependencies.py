@@ -1543,6 +1543,142 @@ def get_owned_agent_by_name(
 
 
 # ============================================================================
+# Agent capability gate (trinity-enterprise#596)
+# ============================================================================
+# An agent-scoped key resolves to its OWNER carrying the owner's role (Invariant
+# #8), so an owner fence alone lets any agent act on every sibling the owner
+# holds. A capability is the thing an instance admin grants to a NAMED agent to
+# close that: without the grant, the agent key is refused — on a sibling AND on
+# itself. `skills.manage` is the first (only designated agents may change an
+# agent's skills; since #2703 an assignment also writes the skill's executable
+# files into the target in the same call).
+#
+# ALLOWLIST, not a denylist (#2323): `mcp_scope` is free text, so the shape is
+# "these scopes pass, this one passes with a grant, everything else is
+# refused" — a future scope is refused until someone decides otherwise.
+#   * ADMIN_GATE_SCOPES ({None, user, system}) — humans (JWT / user key) and
+#     `trinity-system`: unchanged by the ruling.
+#   * `agent` — passes only while its agent holds the capability (a LIVE row).
+#   * everything else — connector, ops, portal_delegate, a scope invented
+#     tomorrow — refused. Ephemeral ("ghost") agents are scope `agent` and are
+#     fenced earlier, at auth, by `_enforce_ephemeral_key_fence`; the grant
+#     route also refuses to grant one.
+# The gate never reads `agent_permissions` and granting never writes it:
+# permission to CALL an agent and permission to change its skills are
+# independent in both directions (ruling 2026-09-17).
+# ============================================================================
+
+# The named refusal per capability: the machine-readable code an agent can branch
+# on, and a sentence that says what is missing and where it is granted.
+_CAPABILITY_REFUSALS = {
+    "skills.manage": (
+        "skill_management_not_permitted",
+        "This agent does not hold the skill-management permission, which changing "
+        "any agent's skills requires \u2014 its own included. An instance admin can "
+        "grant it in Settings \u2192 Agents \u2192 Skill managers.",
+    ),
+}
+
+
+def acting_agent_name(current_user) -> Optional[str]:
+    """The AGENT behind a request, for attribution (ent#596, Tandem R29).
+
+    `current_user.agent_name` is populated only for `scope == "agent"`, so the
+    system agent's writes would otherwise be indistinguishable from a human's —
+    the one distinction the attribution exists to keep. None for a human.
+    """
+    scope = getattr(current_user, "mcp_scope", None)
+    if scope == "agent":
+        return getattr(current_user, "agent_name", None) or None
+    if scope == "system":
+        from db.agents import SYSTEM_AGENT_NAME
+        return SYSTEM_AGENT_NAME
+    return None
+
+
+def capability_refusal(current_user, capability: str) -> Optional[tuple]:
+    """`None` when this principal may use `capability`; else `(code, message)`.
+
+    Pure apart from one DB read, so the whole scope matrix is testable without
+    a request. A principal with no `mcp_scope` at all fails CLOSED — the
+    `_SCOPE_ABSENT` sentinel, never `getattr(..., None)`, which would make an
+    absent attribute the privileged JWT value (the #2323 trap).
+    """
+    code, message = _CAPABILITY_REFUSALS.get(
+        capability, ("capability_not_permitted", f"This key may not use '{capability}'.")
+    )
+    scope = getattr(current_user, "mcp_scope", _SCOPE_ABSENT)
+    if scope is _SCOPE_ABSENT:
+        return code, "Principal carries no mcp_scope; cannot satisfy a capability gate."
+    if scope in ADMIN_GATE_SCOPES:
+        return None
+    if scope == "agent":
+        agent = getattr(current_user, "agent_name", None)
+        if agent and db.agent_has_capability(agent, capability):
+            return None
+        return code, message
+    return code, f"A '{scope}' key cannot do this: {message}"
+
+
+async def enforce_agent_capability(
+    request: Request, current_user: User, capability: str, *, target: Optional[str] = None,
+) -> None:
+    """Refuse with a named 403 — and an audit row — unless the principal may use
+    `capability`. The refused attempt of a prompt-injected agent is exactly the
+    event worth keeping, so a refusal is recorded, not only returned."""
+    refusal = capability_refusal(current_user, capability)
+    if refusal is None:
+        return
+    code, message = refusal
+    try:  # best-effort: an audit failure must never turn a 403 into a 500
+        from services.platform_audit_service import platform_audit_service, AuditEventType
+        await platform_audit_service.log(
+            event_type=AuditEventType.AUTHORIZATION,
+            event_action="capability_refused",
+            source="api",
+            actor_user=current_user,
+            actor_agent_name=getattr(current_user, "agent_name", None),
+            actor_ip=request.client.host if request.client else None,
+            target_type="agent",
+            target_id=target,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={"capability": capability, "code": code, "method": request.method},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("capability refusal audit failed for %s", capability)
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": code, "capability": capability, "message": message},
+    )
+
+
+async def get_skill_managed_agent_by_name(
+    request: Request,
+    agent_name: str = Path(..., description="Agent name from path"),
+    current_user: User = Depends(get_current_user),
+) -> str:
+    """The fence for every route that changes an agent's skills (ent#596).
+
+    The capability check runs FIRST, then the owner fence. The order is the
+    point: a non-holder gets one uniform 403 whether or not the target exists,
+    so the refusal is never an existence oracle (#186), and it always names the
+    missing permission. A holder then meets the unchanged owner fence — the grant
+    never widens reach beyond the owner's own agents.
+
+    A composed dependency rather than a first-line call in each handler: a
+    convention has no guard, and the next route added to `routers/skills.py`
+    would forget it. `tests/unit/test_ent596_skill_manager.py` asserts every
+    skill-changing route there depends on this.
+    """
+    from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+    await enforce_agent_capability(
+        request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
+    )
+    return get_owned_agent_by_name(agent_name=agent_name, current_user=current_user)
+
+
+# ============================================================================
 # Imperative auth-guard family (INV-8, #1310)
 # ============================================================================
 # Callable from any router BODY (not a Depends), for the sites where the agent
@@ -1731,6 +1867,7 @@ OwnedAgent = Annotated[str, Depends(get_owned_agent)]
 # For routes using {agent_name} path parameter (agents, git, sharing, public_links)
 AuthorizedAgentByName = Annotated[str, Depends(get_authorized_agent_by_name)]
 OwnedAgentByName = Annotated[str, Depends(get_owned_agent_by_name)]
+SkillManagedAgentByName = Annotated[str, Depends(get_skill_managed_agent_by_name)]  # ent#596
 
 # Current user type alias
 CurrentUser = Annotated[User, Depends(get_current_user)]
