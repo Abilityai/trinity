@@ -3377,6 +3377,31 @@
         "transport"
       ],
       "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default)."
+    },
+    {
+      "file": "unit/test_2845_retry_trigger_sets.py",
+      "feature": "#2845",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "pull-migration",
+        "scheduler"
+      ],
+      "description": "RETRY-001's `retry` trigger is classified like the run it retries: it is in _AUTONOMOUS_TRIGGERS (an unresolved slash command in a retry raises the operator alert exactly as the scheduled attempt does; `manual` still does not), in PULL_REACHABLE_TRIGGERS (a pilot owns its retries as it owns its scheduled runs, a non-pilot does not), in the executions filter allow-list and in the analytics 'Scheduled' bucket. Class guard: every `triggered_by=` keyword literal the scheduler emits (read from the AST, so comments cannot satisfy it, and asserted non-empty) must appear in all four sets."
+    },
+    {
+      "file": "scheduler_tests/test_2845_retry_pull.py",
+      "feature": "#2845",
+      "added": "2026-09-22",
+      "categories": [
+        "scheduler",
+        "unit",
+        "reliability",
+        "pull-migration"
+      ],
+      "description": "RETRY-001 once retries are pullable: a row the lease reaper poison-parked (`error` starts with `poison_lease`) is not retried, while an ordinary failure still is; a retry whose dispatch times out after the backend already queued the row leaves it `queued` (CAS on `running`) instead of failing it; and a retry is a new row that starts at redelivery_count 0 while the original keeps its own count, so retry and re-delivery counting stay distinct."
     }
   ]
 }
