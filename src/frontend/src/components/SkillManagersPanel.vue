@@ -91,7 +91,7 @@
             type="submit"
             size="md"
             :disabled="!choice || !!store.busyAgent"
-            :loading="!!choice && store.busyAgent === choice"
+            :loading="!!granting"
             loading-label="Granting…"
             data-testid="skill-managers-grant"
           >Grant</BaseButton>
@@ -112,6 +112,9 @@ import { viewState } from '../utils/loadingState'
 const store = useSkillManagersStore()
 const agents = useAgentsStore()
 const choice = ref('')
+// The agent being granted right now. Held apart from `choice` because `choice`
+// is cleared BEFORE the request — see grant().
+const granting = ref('')
 
 const view = computed(() => viewState({
   hasLoaded: store.hasLoaded,
@@ -134,8 +137,17 @@ const candidates = computed(() => {
 
 async function grant () {
   if (!choice.value) return
-  const ok = await store.setGranted(choice.value, true)
-  if (ok) choice.value = ''
+  // Clear the choice BEFORE the refresh. A successful grant removes this agent
+  // from `candidates`; if its option is still SELECTED when that happens, the
+  // browser leaves the select at selectedIndex -1 with value '' — and a later
+  // reset to '' is a no-op for Vue, which compares against the DOM's '' and
+  // skips it. The picker then renders blank. Found by the live screenshot.
+  const name = choice.value
+  granting.value = name
+  choice.value = ''
+  const ok = await store.setGranted(name, true)
+  granting.value = ''
+  if (!ok) choice.value = name   // keep the person's pick next to the refusal
 }
 
 function formatDate (iso) {

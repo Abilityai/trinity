@@ -84,6 +84,24 @@ describe('Skill managers', () => {
     expect(api.get).toHaveBeenCalledTimes(2)
   })
 
+  it('after a grant the picker shows its placeholder again — not a blank select', async () => {
+    // Found by the live screenshot, not by a spec: the granted agent's option is
+    // removed while it is still SELECTED, the DOM reports value '' with
+    // selectedIndex -1, and resetting the model to '' is then a no-op for Vue
+    // (it compares against the DOM's '' and skips). The select renders blank.
+    const w = await mountPanel()
+    api.put.mockResolvedValue({ data: { changed: true } })
+    api.get.mockResolvedValue({ data: { capability: 'skills.manage', holders: [
+      ...HOLDERS, { agent_name: 'sales-companion', granted_by: 'admin', granted_at: '2026-09-23T11:00:00Z' },
+    ] } })
+    const select = w.find('select[data-testid="skill-managers-picker"]')
+    await select.setValue('sales-companion')
+    await w.find('form').trigger('submit')
+    await flushPromises()
+    expect(select.element.selectedIndex).toBe(0)
+    expect(select.element.options[select.element.selectedIndex].text).toMatch(/Choose an agent|Every agent/)
+  })
+
   it('revokes a holder', async () => {
     const w = await mountPanel()
     api.put.mockResolvedValue({ data: { changed: true } })
