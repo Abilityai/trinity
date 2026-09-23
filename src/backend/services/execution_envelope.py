@@ -39,6 +39,9 @@ class TaskExecutionErrorCode(str, Enum):
     LEASE_EXPIRED = "lease_expired" # Fire-and-forget lease expired — no callback before slot TTL (#1083)
     SKILL_NOT_FOUND = "skill_not_found"  # Slash-command message didn't resolve to an installed skill (#1410)
     EPHEMERAL_EXHAUSTED = "ephemeral_exhausted"  # Ghost agent budget spent — expired TTL or exec count (trinity-enterprise#69)
+    # Agent-to-agent hop past inter_agent_max_chain_depth (#2806). Refused before
+    # a row exists, so it only ever appears on the X-Trinity-Error-Code header.
+    INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded"
 
 
 @dataclass

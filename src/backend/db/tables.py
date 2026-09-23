@@ -293,6 +293,8 @@ schedule_executions = Table(
     Column("source_channel_client", Text),
     # ent#555 — the canvas the user had open for this turn (context, not authority).
     Column("open_canvas_id", Text),
+    # #2806 — agent-to-agent hops from a non-agent root; NULL = root (0).
+    Column("chain_depth", Integer),
 )
 
 agent_loops = Table(

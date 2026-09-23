@@ -213,6 +213,8 @@ CREATE TABLE schedule_executions (
     turn_integrity TEXT,                         -- #2467: JSON turn-integrity flags (background_tasks_killed records +
                                                  -- background_tasks_pending_at_exit), derived backend-side at terminal write;
                                                  -- NULL = no evidence, never "verified healthy"
+    chain_depth INTEGER,                         -- #2806: agent-to-agent hops from a non-agent root; NULL = root (0).
+                                                 -- Stamped 1 + MAX(caller's running depths) on agent-principal children
     FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
 );
 

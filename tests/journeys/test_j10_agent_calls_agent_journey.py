@@ -30,8 +30,11 @@ container. Only "what B actually said" needs a model, and skips with the
 allowlisted reason where no key exists — journey-smoke and the nightly are
 deliberately credential-free (`integration-nightly.yml` states why).
 
-**Finding carried as a `strict=True` xfail, with its own issue:**
-- #2806 — no chain-depth guard on agent-to-agent chat chains
+**Closed here:** #2806 — no chain-depth guard on agent-to-agent chat chains.
+A hop past `inter_agent_max_chain_depth` is now refused with the named
+`inter_agent_depth_exceeded` before any model work, and recorded (IA-04);
+`test_two_agents_cannot_bounce_a_call_between_each_other_forever` drives a real
+A→B→A chain past a limit of 1 on a keyed stack.
 
 **Closed here:** #2807 — a refused call was audited as a successful tool call.
 The deny sites now stamp the call context and the MCP audit wrapper records the
@@ -44,7 +47,7 @@ resolve the loop's agent before answering; both are asserted below. The gate is
 a tool-surface gate — the REST route behind it is still owner-equivalent, which is
 the ent#629 question above.
 
-Invariants cited, never restated: P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03.
+Invariants cited, never restated: P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03, IA-04.
 """
 import json
 import os
@@ -612,30 +615,131 @@ def test_deleting_an_agent_leaves_no_dangling_permission_edge(pair, journey_clie
 
 
 # ---------------------------------------------------------------------------
-# Runaway recursion — the promise the platform cannot keep yet (#2806)
+# Runaway recursion is refused at the chain-depth limit (#2806, IA-04)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#2806 — no chain-depth guard exists on agent-to-agent chat chains; "
-           "the bound today is capacity parks and per-hop timeouts",
-)
-def test_two_agents_cannot_bounce_a_call_between_each_other_forever():
-    """A and B may call each other. A call that A makes to B, that B passes
-    back to A, that A passes back to B, ... is stopped by the platform with a
-    named reason before it runs away — not by an execution timeout, a capacity
-    park, or an operator noticing the bill.
+DEPTH_KEY = "inter_agent_max_chain_depth"
+DEPTH_CODE = "inter_agent_depth_exceeded"
 
-    What this asserts when #2806 ships (the flip condition is written there):
 
-    1. with the depth limit set low on a keyed stack, a real A→B→A→B chain is
-       refused at the hop past the limit, with the named error, before any
-       model work for that hop starts;
-    2. the refusal is recorded on the platform, not only returned to the caller;
-    3. no execution beyond the limit exists on either agent afterwards.
+def _set_max_chain_depth(client, value):
+    """Set the limit through the one validated write path, and return a
+    function that puts back exactly what was there — a row's value, or no row
+    at all (so the env/default tier answers again)."""
+    before = client.get(f"/api/settings/{DEPTH_KEY}")
+    assert before.status_code in (200, 404), (
+        f"reading {DEPTH_KEY} answered {before.status_code}: {before.text[:300]}"
+    )
+    prior = before.json().get("value") if before.status_code == 200 else None
+    resp = client.put("/api/settings/ops/config", json={"settings": {DEPTH_KEY: str(value)}})
+    assert resp.status_code == 200, (
+        f"setting {DEPTH_KEY}={value} answered {resp.status_code}: {resp.text[:300]}"
+    )
 
-    It is a skeleton on purpose: the recursion needs B's model to decide to call
-    A, so a live body would fail for the wrong reason on the keyless PR gate and
-    the strict marker could never flip honestly. The issue carries the contract.
+    def restore():
+        if prior is None:
+            client.delete(f"/api/settings/{DEPTH_KEY}")
+        else:
+            client.put("/api/settings/ops/config", json={"settings": {DEPTH_KEY: prior}})
+
+    return restore
+
+
+def _depth_refusals_recorded(client, caller, target):
+    """The platform's own record of the refusal: the audit row, or the FAILED
+    collaboration activity on the caller. Either is the AC's 'recorded'."""
+    resp = client.get(
+        f"/api/audit-log?event_type=execution&actor_id={caller}&target_id={target}&limit=100"
+    )
+    assert resp.status_code == 200, (
+        f"reading the audit log answered {resp.status_code}: {resp.text[:300]}"
+    )
+    audits = [e for e in resp.json().get("entries", []) if e.get("event_action") == DEPTH_CODE]
+    activities = [
+        x for x in agent_activities(client, caller, "agent_collaboration")
+        if _details(x).get("error_code") == DEPTH_CODE and _details(x).get("target_agent") == target
+    ]
+    return audits, activities
+
+
+def test_two_agents_cannot_bounce_a_call_between_each_other_forever(
+    pair, mcp_as_caller, journey_client,
+):
+    """A and B may call each other. With the limit at 1, A's call to B runs
+    (B's execution is depth 1), and B's call back to A — depth 2 — is refused
+    with the named reason before any model work starts on A.
+
+    One model decision is needed, B choosing to call A, so this is keyed. The
+    deterministic teeth are `tests/unit/test_2806_inter_agent_depth.py`; this
+    proves the whole path: A's own key through the MCP server, B's own key back.
+
+    1. B's call back is refused with `inter_agent_depth_exceeded`;
+    2. the refusal is recorded on the platform, not only returned to B;
+    3. no execution beyond the limit exists — under a limit of 1 the only row
+       that could exceed it is an execution on A whose source is B.
     """
-    raise AssertionError("no inter-agent call-depth guard exists — see abilityai/trinity#2806")
+    a, b = pair
+    # B is the one whose model has to decide to call A.
+    skip_unless_agent_can_answer(journey_client, b)
+    add_edge(journey_client, a, b)
+    add_edge(journey_client, b, a)
+    restore = _set_max_chain_depth(journey_client, 1)
+    try:
+        rows_a_before = _ids(agent_executions(journey_client, a))
+        rows_b_before = _ids(agent_executions(journey_client, b))
+        seen_calls = {e.get("event_id") for e in _audit_rows_for_call(journey_client, b, a)}
+
+        res = mcp_as_caller.call(
+            "chat_with_agent", agent_name=b,
+            message=_unique(
+                f"This is a platform test. Use your chat_with_agent tool exactly once to send "
+                f"the message 'ping' to the agent named '{a}'. Do not use any other tool. "
+                f"Then reply with the exact JSON the tool returned."
+            ),
+        )
+        status, answer = _read_turn(mcp_as_caller, b, res)
+        assert status in ("success", "failed"), (
+            f"'{a}'s call to '{b}' (depth 1, inside the limit) ended {status!r}: "
+            f"{(answer or '')[:300]!r}"
+        )
+        assert _new_rows(journey_client, b, rows_b_before), (
+            f"'{a}' called '{b}' inside the limit and no execution appeared on '{b}'"
+        )
+
+        try:
+            poll_until(
+                lambda: [e for e in _audit_rows_for_call(journey_client, b, a)
+                         if e.get("event_id") not in seen_calls] or None,
+                deadline_s=AUDIT_DEADLINE_S,
+                describe=f"'{b}' never called '{a}'",
+            )
+        except AssertionError:
+            pytest.skip(
+                f"keyed journey: '{b}'s model did not attempt the call back to '{a}', so no "
+                f"hop past the limit was made (the deterministic check is the #2806 unit test)"
+            )
+
+        audits, activities = poll_until(
+            lambda: (lambda r: r if (r[0] or r[1]) else None)(
+                _depth_refusals_recorded(journey_client, b, a)
+            ),
+            deadline_s=AUDIT_DEADLINE_S,
+            describe=(f"'{b}' called '{a}' past the limit but the platform recorded no "
+                      f"{DEPTH_CODE} refusal — neither an audit row nor a FAILED "
+                      f"collaboration activity on '{b}'"),
+        )
+        assert audits or activities
+
+        assert DEPTH_CODE in (answer or "") or audits, (
+            f"'{b}'s call back to '{a}' was not refused with {DEPTH_CODE}: "
+            f"answer={(answer or '')[:300]!r}"
+        )
+
+        beyond = [r for r in _new_rows(journey_client, a, rows_a_before)
+                  if r.get("source_agent_name") == b]
+        assert not beyond, (
+            f"with the limit at 1, '{b}'s call back to '{a}' still created execution(s) on "
+            f"'{a}': {[r.get('id') for r in beyond]} — the hop past the limit ran"
+        )
+    finally:
+        restore()

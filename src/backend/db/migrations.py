@@ -4109,6 +4109,26 @@ def _migrate_execution_open_canvas(cursor, conn):
     conn.commit()
 
 
+def _migrate_execution_chain_depth(cursor, conn):
+    """#2806 — how many agent-to-agent hops deep this execution is.
+
+    Stamped at dispatch on the child row of an agent-principal call as
+    `1 + MAX(chain_depth)` over the calling agent's running rows; NULL (read
+    as 0) on every root. The chain-depth guard reads it to refuse a hop past
+    `inter_agent_max_chain_depth`. Nullable with no default, so existing rows
+    are roots and no backfill is needed.
+
+    Mirrored by the Alembic revision 0073_execution_chain_depth.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "chain_depth",
+        "ALTER TABLE schedule_executions ADD COLUMN chain_depth INTEGER",
+    )
+    conn.commit()
+
+
 def _migrate_agent_canvas_shares_table(cursor, conn):
     """ent#554 — share links for a canvas.
 
@@ -4750,4 +4770,5 @@ MIGRATIONS = [
     ("metric_points_table", _migrate_metric_points_table),
     ("seat_decisions_table", _migrate_seat_decisions_table),
     ("agent_capability_grants", _migrate_agent_capability_grants),
+    ("execution_chain_depth", _migrate_execution_chain_depth),
 ]

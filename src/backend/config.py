@@ -807,6 +807,12 @@ OPS_SETTINGS_DEFAULTS = {
     # without typing a huge number. At the ent#482 norm (tens of points a day)
     # this is a ceiling against a runaway writer, not a working limit.
     "metrics_daily_point_cap": "100000",
+    # #2806: how many agent-to-agent hops one chain may take. A non-agent
+    # principal's call is a root (depth 0); each agent-principal hop is
+    # `1 + max(depth of the caller's running rows)`, and a hop above this
+    # value is refused before any model work. 8 matches ROOM_MAX_CHAIN_DEPTH;
+    # the derivation errs toward over-refusal, so the default is generous.
+    "inter_agent_max_chain_depth": "8",
 }
 
 
@@ -849,6 +855,8 @@ OPS_SETTINGS_VALIDATION = {
     # disables). The cap's `0` means UNLIMITED, so its bounds are its own.
     "metrics_retention_days": ("int", 0, _DAYS_MAX),
     "metrics_daily_point_cap": ("int", 0, 10_000_000),
+    # #2806: the floor is 1, not 0 — no value may refuse every agent call.
+    "inter_agent_max_chain_depth": ("int", 1, 32),
 }
 
 
@@ -870,6 +878,7 @@ OPS_SETTINGS_VALIDATION = {
 ENV_BACKED_OPS_KEYS = {
     "metrics_retention_days": "METRICS_RETENTION_DAYS",
     "metrics_daily_point_cap": "METRICS_DAILY_POINT_CAP",
+    "inter_agent_max_chain_depth": "INTER_AGENT_MAX_CHAIN_DEPTH",
 }
 
 _env_ops_warned: set = set()

@@ -25,7 +25,7 @@
 | DELETE | `/api/agents/{name}` | Soft-delete agent (see [Soft Delete](reliability.md#soft-delete-retention--recovery-834-772)) |
 | POST | `/api/agents/{name}/start` | Start agent |
 | POST | `/api/agents/{name}/stop` | Stop agent |
-| POST | `/api/agents/{name}/chat` | Send chat message |
+| POST | `/api/agents/{name}/chat` | Send chat message. An agent-principal hop past `inter_agent_max_chain_depth` → 403 `inter_agent_depth_exceeded` + `X-Trinity-Error-Code` (after the uniform 404, before any claim or row; #2806 — also on `/task` and `/fan-out`) |
 | GET | `/api/agents/{name}/chat/history` | In-memory chat history (container) |
 | GET | `/api/agents/{name}/chat/history/persistent` | Persistent chat history (database) |
 | GET | `/api/agents/{name}/chat/sessions` | List chat sessions |
@@ -399,7 +399,7 @@ All four require `X-Internal-Secret` **AND** `MCP_INLINE_AUTH_ENABLED`; with the
 ### Fan-Out (FANOUT-001)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/api/agents/{name}/fan-out` | JWT/MCP | Dispatch 1–50 tasks in parallel (`max_concurrency` 1–10). Sync: waits for the batch and returns the aggregate (`timeout_seconds` bounds the wait, not the subtasks — open ones report `running`, batch `deadline_exceeded`; #2524). `async_mode: true` → `{fan_out_id, status: "accepted", total}` immediately (#2524). Accepts `Idempotency-Key`; in-flight duplicate → 409 `{error, message, execution_id: <fan_out_id>}` (#2670) |
+| POST | `/api/agents/{name}/fan-out` | JWT/MCP | Dispatch 1–50 tasks in parallel (`max_concurrency` 1–10). Sync: waits for the batch and returns the aggregate (`timeout_seconds` bounds the wait, not the subtasks — open ones report `running`, batch `deadline_exceeded`; #2524). `async_mode: true` → `{fan_out_id, status: "accepted", total}` immediately (#2524). Accepts `Idempotency-Key`; in-flight duplicate → 409 `{error, message, execution_id: <fan_out_id>}` (#2670). Chain-depth refusal → 403 `inter_agent_depth_exceeded` before the claim; subtasks carry the depth captured at request time (#2806) |
 | GET | `/api/agents/{name}/fan-out/{fan_out_id}` | JWT/MCP | Batch read back from its execution rows: `running` \| `completed` \| `partial` \| `failed`, per-task execution status verbatim + `task_id` (#2670, #2524). Malformed / unknown / other agent's id → uniform 404 |
 
 ### Sequential Agent Loops (#740)

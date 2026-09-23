@@ -142,6 +142,7 @@ async def prepare_chat_execution(
     chat_execution_id: str,
     capacity_result: object,
     queue_result: str,
+    chain_depth: Optional[int] = None,
 ) -> ChatExecutionContext:
     """Execution setup for chat_with_agent (#1026 slice 2).
 
@@ -189,6 +190,8 @@ async def prepare_chat_execution(
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
         source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
         subscription_id=_exec_subscription_id,
+        # #2806: from admission — None for a non-agent principal (a root).
+        chain_depth=chain_depth,
     )
     task_execution_id = task_execution.id if task_execution else None
     idempotency_service.attach_execution(idem, task_execution_id)
@@ -1372,6 +1375,7 @@ async def create_task_execution_and_activities(
     triggered_by,
     is_self_task,
     idem,
+    chain_depth=None,
 ):
     """Create the execution record (#95/#96), attach the idempotency claim, and
     track the collaboration / self-task activity (mirrors the /chat pattern).
@@ -1412,6 +1416,8 @@ async def create_task_execution_and_activities(
         source_channel_thread=src_thread,
         source_channel_agent=src_channel_agent,
         source_channel_client=src_channel_client,
+        # #2806: stamped once here; a backlog-queued row keeps it when drained.
+        chain_depth=chain_depth,
     )
     execution_id = execution.id if execution else None
     idempotency_service.attach_execution(idem, execution_id)
@@ -2011,6 +2017,16 @@ async def dispatch_parallel_task(
         current_user=current_user,
     )
 
+    # #2806: chain-depth guard — keyed on the principal, ahead of the claim,
+    # the uploads, the row and the capacity acquire, so a refused hop leaves
+    # nothing behind. Raises InterAgentDepthExceeded (the router maps it).
+    chain_depth = await dispatch_admission_service.enforce_inter_agent_depth(
+        current_user=current_user,
+        target=name,
+        endpoint=f"/api/agents/{name}/task",
+        x_via_mcp=x_via_mcp,
+    )
+
     # RELIABILITY-006 (#525): idempotency begin/replay (shared with /chat, RD2).
     idem, replay = dispatch_admission_service.begin_task_idempotency(
         name=name,
@@ -2048,6 +2064,7 @@ async def dispatch_parallel_task(
         triggered_by=derivation.triggered_by,
         is_self_task=derivation.is_self_task,
         idem=idem,
+        chain_depth=chain_depth,
     )
 
     if request.async_mode:

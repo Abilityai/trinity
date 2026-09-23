@@ -100,6 +100,8 @@ class ScheduleExecutionsMixin:
             source_channel_agent=row["source_channel_agent"] if "source_channel_agent" in row_keys else None,
             source_channel_client=row["source_channel_client"] if "source_channel_client" in row_keys else None,
             open_canvas_id=row["open_canvas_id"] if "open_canvas_id" in row_keys else None,
+            # Inter-agent chain depth (#2806); NULL = root.
+            chain_depth=row["chain_depth"] if "chain_depth" in row_keys else None,
         )
 
     # =========================================================================
@@ -127,6 +129,7 @@ class ScheduleExecutionsMixin:
         source_channel_agent: str = None,
         source_channel_client: str = None,
         open_canvas_id: str = None,
+        chain_depth: Optional[int] = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
 
@@ -153,6 +156,9 @@ class ScheduleExecutionsMixin:
                 Set ONLY when channel context is inherited from a parent
                 execution; None for direct rows (reporter falls back to the
                 executing agent).
+            chain_depth: Agent-to-agent hops from a non-agent root (#2806).
+                Set only on the child row of an agent-principal call; None
+                (read as 0) on every root.
         """
         execution_id = self._generate_id()
         now = utc_now_iso()
@@ -183,6 +189,7 @@ class ScheduleExecutionsMixin:
                     source_channel_agent=source_channel_agent,
                     source_channel_client=source_channel_client,
                     open_canvas_id=open_canvas_id,
+                    chain_depth=chain_depth,
                 )
             )
 
@@ -209,7 +216,29 @@ class ScheduleExecutionsMixin:
                 source_channel_agent=source_channel_agent,
                 source_channel_client=source_channel_client,
                 open_canvas_id=open_canvas_id,
+                chain_depth=chain_depth,
             )
+
+    def get_max_running_chain_depth(self, agent_name: str) -> int:
+        """Deepest `chain_depth` among `agent_name`'s RUNNING rows, 0 if none (#2806).
+
+        The chain-depth guard stamps a child `1 + this`. Only `running` rows
+        count: every row is inserted RUNNING, so a caller mid-turn is always
+        visible, while `queued` / `pending_retry` rows are not executing and so
+        cannot be the one making the call. NULL depths (roots) read as 0.
+        Taking the MAX means a caller cannot lower it while it has a running
+        execution — the guard fails toward over-refusal.
+        """
+        with get_engine().connect() as conn:
+            value = conn.execute(
+                select(func.max(schedule_executions.c.chain_depth)).where(
+                    and_(
+                        schedule_executions.c.agent_name == agent_name,
+                        schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                    )
+                )
+            ).scalar()
+        return int(value or 0)
 
     def create_schedule_execution(
         self,
