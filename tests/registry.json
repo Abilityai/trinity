@@ -3355,6 +3355,17 @@
       "description": "The seat-level decision record (ent#638, R25): the grammar and its receipts (prose-only per field, no-alternatives-is-a-note, decided-not-an-alternative, strict review_by with the equal-is-not-expired boundary), lifecycle over a real SQLite file (lower-cased seat, JSON lists, direction kept as routed, supersede chain + CAS refusal, close/reverse/reconfirm + their 409s, uniform 404 for another seat, cites within the seat, request_id must be the agent's queue item), the evidence (reused = later citations only, superseding does not cite, stable = 3 / one criterion / no reversal / expired excluded, the bounded email-free prompt block on the shared memory composer), readers (own seat, owner, provider kinds_for incl. absent/raise/bad-kind → None), the agent router (seat from a seat run or a verified channel email, refused triggers, foreign execution 403, receipt + idempotency release, replay snapshot, email-free list), the portal service (own seat vs owner vs shared platform user, named seat, direction hint), both migration tracks + registry + single head, facade signature parity, the mcp header + registration."
     },
     {
+      "file": "unit/test_ent641_autonomy_dial.py",
+      "feature": "trinity-enterprise#641",
+      "added": "2026-09-23",
+      "categories": [
+        "backend",
+        "workspace",
+        "mcp"
+      ],
+      "description": "The autonomy dial (ent#641, P12): the promotion rule as a table over #638's records (3 records / one normalized criterion / no reversal, each named block fired in isolation), the three read-time conjuncts proven to demote WITHOUT a write and restore on their own (level below L2, agent autonomy off, evidence expired at the earliest review_by with no event to hook), reversals counted over the window only (a lapsed reversal stops blocking — effective_status returns `reversed` unconditionally, so history-counting makes on_request the only reachable steady state), the rating window's three shapes (operator: as well as workspace:, COALESCE(updated_at, created_at) so an up→down flip counts, a fixed 30 days so expiry cannot promote), writes only on a real event with the evidence-hash CAS (unchanged verdict → no row, no event; a stale hash refused), the portal gates (seat isolation, hold by any reader of their own seat, release owner-only, no promote path at all), the instance level (admin AND interactive, validated, audited, refused by the generic /{key} catch-all), the companion's prompt lines, both migration tracks + cleanup CASCADE + single head, facade signature parity, and the MCP surface (get_autonomy registered with an access row, seat from execution_id, no email out)."
+    },
+    {
       "file": "../src/mcp-server/src/tools/self-acting-scope.test.ts",
       "feature": "#2975",
       "added": "2026-09-23",

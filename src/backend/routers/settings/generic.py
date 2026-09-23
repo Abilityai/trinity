@@ -310,6 +310,22 @@ async def update_setting(
     # route — without this block the whole SSRF gate is one generic PUT away
     # from being bypassed. `generation` and `lkg` are blocked for a different
     # reason: they ARE the cache, and a writable cache is a poisonable one.
+    # ent#641: the autonomy level has a closed vocabulary (L0-L3) and raising it
+    # is what lets anything on the instance run unprompted. An unvalidated write
+    # here would accept any string — and a value outside the vocabulary reads as
+    # the DEFAULT at every consumer, so the catch-all would be a silent way to
+    # disarm the dial rather than to set it. Same 422-with-a-pointer as the
+    # retention windows (ent#297) and the registry URL (ent#14).
+    from services import autonomy_dial_service
+
+    if key == autonomy_dial_service.LEVEL_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "the autonomy level must be set via PUT /api/settings/autonomy-dial "
+                "(admin + human-only, validated, audit-logged)"
+            ),
+        )
     # Validate at the boundary AND at the sink (#1525).
     from services.settings_service import TEMPLATE_REGISTRY_KEYS
 

@@ -2445,6 +2445,18 @@ export class TrinityClient {
     );
   }
 
+  /** The seat's autonomy dial: which ask classes are unprompted and why not (ent#641). */
+  async getSeatAutonomy(
+    agentName: string,
+    executionId: string
+  ): Promise<Record<string, unknown>> {
+    const q = new URLSearchParams({ execution_id: executionId });
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/autonomy?${q.toString()}`
+    );
+  }
+
   /** The seat's standing decisions + evidence stats (no person emails). */
   async listSeatDecisions(
     agentName: string,

@@ -3957,6 +3957,16 @@ class OpsSettingsUpdate(BaseModel):
     settings: Dict[str, str]
 
 
+class AutonomyDialUpdate(BaseModel):
+    """The instance autonomy level (trinity-enterprise#641, P12).
+
+    A closed vocabulary — L0/L1/L2/L3, canon `tandem-06-operations.md` §2.3 —
+    validated at the boundary AND at the sink (`autonomy_dial_service.set_level`),
+    because the generic `PUT /api/settings/{key}` would otherwise accept any
+    string for a value whose whole meaning is its range (#1525, #506)."""
+    level: str = Field(..., max_length=8)
+
+
 class RetentionAcknowledge(BaseModel):
     """Approve one over-threshold retention prune (#1644).
 

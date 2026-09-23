@@ -1,4 +1,4 @@
-# mcp: decisions.ts (record_decision, list_seat_decisions)
+# mcp: decisions.ts (record_decision, list_seat_decisions, get_autonomy)
 """
 Seat decision record — the companion's half (trinity-enterprise#638, R25).
 
@@ -111,6 +111,37 @@ async def record_seat_decision(
     logger.info("[ent#638] decision %s recorded on %s (%s, %s)", row["id"], agent_name,
                 row.get("outcome"), row.get("status"))
     return result
+
+
+@router.get("/{agent_name}/autonomy")
+async def get_seat_autonomy(
+    agent_name: str,
+    execution_id: str = Query(..., min_length=1, max_length=200),
+    current_user: User = Depends(get_current_user),
+):
+    """What this companion may do unprompted for the seat it is serving, and
+    why not where it may not (trinity-enterprise#641).
+
+    Same seat rule as the decision routes — the seat comes from the execution,
+    never from a parameter — and the same email-free contract: the answer names
+    ask classes and blockers, never a person. A companion that cannot read this
+    cannot tell someone why it is asking first."""
+    assert_agent_access(current_user, agent_name, detail="Not authorized")
+    seat_email, _ = _seat_for(agent_name, execution_id)
+    from services import autonomy_dial_service
+
+    summary = autonomy_dial_service.seat_summary(db, agent_name, seat_email, persist=False)
+    return {
+        "agent_name": agent_name,
+        **{k: summary[k] for k in ("level", "level_label", "ceiling_allows_unprompted",
+                                   "agent_autonomy_enabled", "rating_window_days", "rule_version")},
+        "classes": [
+            {k: c[k] for k in ("ask_class", "state", "unprompted", "blocked_by",
+                               "evidence_expires_at", "guard_metric", "held")}
+            for c in summary["classes"]
+        ],
+        "blocker_text": autonomy_dial_service.BLOCKER_TEXT,
+    }
 
 
 @router.get("/{agent_name}/decisions")

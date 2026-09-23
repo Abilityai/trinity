@@ -705,6 +705,61 @@ class PortalSeatDecisionAction(BaseModel):
     fields: Optional[dict] = None
 
 
+class PortalAskClassState(BaseModel):
+    """ent#641 — one ask class of one seat, as the panel sees it.
+
+    `state` is the LIVE verdict (the earned state ANDed with the instance
+    ceiling, the agent's autonomy switch and the clock); `earned_state` is what
+    the evidence bought, so a person can tell "not yet earned" from "earned but
+    the dial is down". `blocked_by` is every reason, never just the first."""
+    ask_class: str
+    seat: str
+    state: Literal["on_request", "graduated"]
+    earned_state: Literal["on_request", "graduated"]
+    unprompted: bool = False
+    blocked_by: list[str] = Field(default_factory=list)
+    evidence: dict = Field(default_factory=dict)
+    evidence_expires_at: Optional[str] = None
+    guard_metric: Literal["not_assessed", "capped", "clear"] = "not_assessed"
+    held: bool = False
+    writable: bool = False
+
+
+class PortalAutonomyDial(BaseModel):
+    """ent#641 — the seat's dial panel: the instance ceiling, the hard off, and
+    every readable seat's classes."""
+    agent_name: str
+    my_seat: str
+    level: str
+    level_label: str
+    ceiling_allows_unprompted: bool
+    agent_autonomy_enabled: bool
+    rating_window_days: int
+    rule_version: str
+    can_hold: bool = True
+    can_release: bool = False
+    classes: list[PortalAskClassState] = Field(default_factory=list)
+    other_seats: list[PortalAskClassState] = Field(default_factory=list)
+
+
+class PortalAutonomyAction(BaseModel):
+    """hold (refuse unprompted work) / release (owner only — a grant)."""
+    action: Literal["hold", "release"]
+    seat: Optional[str] = Field(None, max_length=254)
+
+
+class PortalAutonomyGuard(BaseModel):
+    """Canon's hard cap for a class, recorded by the owner."""
+    guard_metric: Literal["not_assessed", "capped", "clear"]
+    seat: Optional[str] = Field(None, max_length=254)
+
+
+class PortalAutonomyResult(BaseModel):
+    class_: PortalAskClassState = Field(alias="class")
+
+    model_config = {"populate_by_name": True}
+
+
 class PortalSeatDecisionResult(BaseModel):
     decision: PortalSeatDecision
     hint: Optional[str] = None

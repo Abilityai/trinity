@@ -5362,6 +5362,19 @@ def submit_rating(agent_name: str, email: str, *, target_kind: str, target_id: s
         logger.warning("portal: rating write failed for %s/%s: %s", agent_name, target_kind, e)
         raise ClientPortalError(503, "Could not record that rating — try again.")
 
+    # ent#641: a thumbs-down by the seat is one of the two events that can
+    # DEMOTE an ask class, and the only one that does not pass through the
+    # decision record. Re-evaluate here rather than on the panel read — a read
+    # that writes makes an owner opening the page a writer for every seat.
+    # Fail-open: the reader re-ANDs the live conjuncts anyway, so a missed
+    # re-evaluation can only leave a verdict stale, never wider than earned.
+    try:
+        from services import autonomy_dial_service
+
+        autonomy_dial_service.evaluate_seat(platform_db, agent_name, email, persist=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal: autonomy re-evaluation after a rating failed for %s: %s", agent_name, e)
+
     return {
         "target_kind": target_kind,
         "target_id": target_id,

@@ -273,6 +273,47 @@ class EvaluationOperations:
                     down += int(n)
         return {"up": up, "down": down, "total": up + down}
 
+    def latest_negative_seat_rating(self, agent_name: str, evaluators: list,
+                                    since: str) -> Optional[str]:
+        """The most recent thumbs-down by these evaluators on this agent since
+        ``since``, as its timestamp — or None (trinity-enterprise#641).
+
+        Two shapes are load-bearing, and each was a defect before it was one:
+
+        * ``evaluators`` is a LIST because the same person rates under two
+          prefixes — ``workspace:<email>`` from the client surface and
+          ``operator:<email>`` when they reach the Workspace as a platform
+          principal (``client_portal/service.py``). On a single-operator install
+          every rating is the second kind, so matching only ``workspace:`` means
+          a seat that can never demote its own agent.
+        * the window predicate is ``COALESCE(updated_at, created_at)`` because
+          ``upsert_workspace_rating`` updates ``quality`` and ``updated_at`` and
+          leaves ``created_at`` alone — an up rating from before the window that
+          FLIPPED to down inside it is exactly the demotion the caller is
+          asking about, and a ``created_at`` predicate discards it.
+
+        ``quality < 0.5`` is the down half of the one-click scale, the same
+        split ``workspace_rating_tally`` uses. NULL quality is not a rating.
+        """
+        if not agent_name or not evaluators:
+            return None
+        stamp = func.coalesce(agent_evaluations.c.updated_at, agent_evaluations.c.created_at)
+        stmt = (
+            select(stamp)
+            .where(and_(
+                agent_evaluations.c.agent_name == agent_name,
+                agent_evaluations.c.evaluator.in_(list(evaluators)),
+                agent_evaluations.c.quality.isnot(None),
+                agent_evaluations.c.quality < 0.5,
+                stamp >= since,
+            ))
+            .order_by(stamp.desc())
+            .limit(1)
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        return row[0] if row else None
+
     def get_evaluation(self, eval_id: str) -> Optional[dict]:
         stmt = select(agent_evaluations).where(agent_evaluations.c.id == eval_id)
         with get_engine().connect() as conn:
