@@ -60,7 +60,7 @@
 | GET/PUT | `/api/agents/{name}/guardrails` | Per-agent guardrails config / overrides (GUARD-001) |
 | GET/PUT | `/api/agents/{name}/file-sharing` | Outbound file-sharing status + quota / owner-only toggle (returns `restart_required`) (FILES-001) |
 | POST | `/api/agents/{name}/shared-files` | Mint a download URL for a file in the publish dir (owner/admin or agent-scoped key). The file is addressed to the person the turn was for; optional `audience_email` names a rostered person instead (ent#549) |
-| GET | `/api/agents/{name}/shared-files` | List active shared files with download counts and who each is for (addressee withheld from key-authenticated callers, ent#549) |
+| GET | `/api/agents/{name}/shared-files` | List active shared files with download counts and who each is for (addressee and `audience_source` withheld from key-authenticated callers, ent#549/#2955) |
 | DELETE | `/api/agents/{name}/shared-files/{file_id}` | Revoke a shared file (owner-only; idempotent) |
 | POST | `/api/agents/{name}/user-memory` | Write per-user memory blob; email resolved from execution_id server-side (MEM-001, #888) — user-facing triggers, or a `schedule` run addressed to a seat via ent#498's stamp (ent#637); every write records a `public_user_memory_writes` row |
 | POST | `/api/agents/{name}/decisions` | Record a seat decision — why a thing was approved/deferred/killed — for the seat the execution serves (seat from `execution_id`, never sent; `Idempotency-Key` honoured; grammar receipts `decision_prose_only` / `decision_is_a_note` / `unknown_citation`; `scope: direction` → kept as `routed` with the canon hint). No person email in the answer (trinity-enterprise#638) |
