@@ -105,7 +105,8 @@ TRANSPORT_BODY_MARKERS: tuple[str, ...] = (
 CAPACITY_BODY_MARKERS: tuple[str, ...] = (
     # routers/chat.py — /chat admission CapacityFull (dict-shaped detail)
     "agent queue is full",
-    # chat_execution_service._dispatch_async (CapacityFull, backlog full too)
+    # chat_execution_service._acquire_task_capacity (CapacityFull, backlog full
+    # too — shared by async and sync /task)
     # and _map_task_failure's 429 branch — both say "is at capacity"
     "is at capacity",
 )

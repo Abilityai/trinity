@@ -1647,7 +1647,8 @@ def _map_task_failure(name, result, *, idem):
         idempotency_service.fail(idem)
         # #2889: the immediate path's result carries the producer-side code;
         # the backlog-reconstruct path builds its result from the row and has
-        # none — the header is simply absent there.
+        # none — the header is absent there, except on the at-capacity branch
+        # below, where `capacity` (#2919) fills the absent code.
         code_headers = _error_code_headers(getattr(result, "error_code", None))
         if "at capacity" in (result.error or ""):
             # #2919: the capacity rejection carries no code, so `capacity`
