@@ -75,3 +75,20 @@ def test_the_handler_calls_the_helpers_it_documents():
     assert "status_code=412" in handler
     assert "write_text_atomic(requested_path, request.content)" in handler
     assert "requested_path.write_text(" not in handler
+
+
+def test_update_file_containment_is_resolved_path_not_string_prefix():
+    """The workspace guard is resolved-path containment (`is_relative_to`, the
+    barrier `create_folder` already uses), not a string prefix: a sibling name
+    that shares the prefix (`/home/developer2/…`) must be refused like an
+    absolute escape or a relative traversal — 403 before any filesystem touch."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    mod = _load()
+    app = FastAPI()
+    app.include_router(mod.router)
+    client = TestClient(app, raise_server_exceptions=True)
+    for candidate in ("/home/developer2/x.txt", "/home/developer-old/x.txt",
+                      "/etc/passwd", "../../etc/passwd"):
+        resp = client.put("/api/files", params={"path": candidate}, json={"content": "x"})
+        assert resp.status_code == 403, (candidate, resp.status_code, resp.text)

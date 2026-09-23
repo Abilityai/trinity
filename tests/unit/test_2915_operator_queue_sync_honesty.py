@@ -610,6 +610,37 @@ class TestAccessorsOnAMigratedDb:
 _OP_APP = None
 
 
+def _override_current_user(app, router, user):
+    """Key the auth override off the `get_current_user` callables the routes
+    ACTUALLY captured — found by walking each route's dependant tree — never off
+    a fresh `from dependencies import get_current_user`.
+
+    Under a seeded full-suite order the two are not always the same object: an
+    earlier module that stubs or re-imports `dependencies` (the `sys.modules`
+    class the pollution lint exists for) leaves the router holding one function
+    while the fresh import returns another, and an override keyed on the wrong
+    one is silently ignored — the real auth runs and answers 401 "Not
+    authenticated" to a request with no Authorization header (seed 12345 on
+    PR #2989). Returns the set it overrode; a route-shape change fails loudly.
+    """
+    found = set()
+
+    def walk(dependant):
+        for sub in dependant.dependencies:
+            if getattr(sub.call, "__name__", "") == "get_current_user":
+                found.add(sub.call)
+            walk(sub)
+
+    for route in router.routes:
+        dependant = getattr(route, "dependant", None)
+        if dependant is not None:
+            walk(dependant)
+    assert found, "no get_current_user dependency on the operator-queue routes"
+    for call in found:
+        app.dependency_overrides[call] = lambda: user
+    return found
+
+
 def _operator_queue_app():
     """One FastAPI app over the real operator-queue router, with `get_current_user`
     overridden by an admin stand-in (built once — see `op_client`)."""
@@ -618,11 +649,10 @@ def _operator_queue_app():
         from types import SimpleNamespace
         from fastapi import FastAPI
         from routers import operator_queue as r
-        from dependencies import get_current_user
         app = FastAPI()
         app.include_router(r.router)
         admin = SimpleNamespace(id="u-admin", username="admin", email="admin@example.com", role="admin", mcp_scope=None)
-        app.dependency_overrides[get_current_user] = lambda: admin
+        _override_current_user(app, r.router, admin)
         _OP_APP = app
     return _OP_APP
 

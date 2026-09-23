@@ -478,8 +478,11 @@ async def update_file(
     Returns:
         Success status and file info
     """
-    # Security: Only allow workspace access
-    allowed_base = Path("/home/developer")
+    # Security: Only allow workspace access. Resolved-path containment via
+    # is_relative_to() — the CWE-022 barrier create_folder already uses — rather
+    # than a string prefix, which a sibling name such as /home/developer2 would
+    # satisfy (#2915).
+    allowed_base = Path("/home/developer").resolve()
 
     # Handle both absolute and relative paths
     if path.startswith('/'):
@@ -488,7 +491,7 @@ async def update_file(
         requested_path = (allowed_base / path).resolve()
 
     # Ensure requested path is within workspace
-    if not str(requested_path).startswith(str(allowed_base)):
+    if not requested_path.is_relative_to(allowed_base):
         raise HTTPException(status_code=403, detail="Access denied: only /home/developer accessible")
 
     # Check if it's a protected path (for editing)
