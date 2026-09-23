@@ -228,3 +228,21 @@ def test_dispatch_async_capacity_full_carries_the_capacity_header():
     assert exc.value.headers == {ERROR_CODE_HEADER: "capacity"}
     assert isinstance(exc.value.detail, str) and "is at capacity" in exc.value.detail
     m["isvc"].fail.assert_called_once()
+
+
+def test_map_task_failure_at_capacity_text_never_overrides_a_result_code():
+    """The branch picks 429 by substring on the result TEXT; the result's code
+    is the producer's structured classification (a turn that RAN — e.g. the
+    #2638 `billing` whose `error` is the agent's own prose). Prose must not
+    beat the structured code: relabelling that result `capacity` would make
+    the #2919 arm SKIP an exhausted subscription. `capacity` only fills an
+    ABSENT code."""
+    with patch.object(_CE, "idempotency_service"):
+        with pytest.raises(ChatDispatchError) as exc:
+            _map_task_failure(
+                "agent1",
+                _result("failed", "upstream says the model is at capacity", TaskExecutionErrorCode.BILLING),
+                idem=MagicMock(),
+            )
+    assert exc.value.status_code == 429
+    assert exc.value.headers == {ERROR_CODE_HEADER: "billing"}

@@ -1650,12 +1650,13 @@ def _map_task_failure(name, result, *, idem):
         # none — the header is simply absent there.
         code_headers = _error_code_headers(getattr(result, "error_code", None))
         if "at capacity" in (result.error or ""):
-            # #2919: this branch decides the STATUS by the result text, so the
-            # code it sends must agree — `capacity` overrides whatever code the
-            # result carried (none today: the capacity rejection sets no code).
+            # #2919: the capacity rejection carries no code, so `capacity`
+            # fills the ABSENT one. A code the result already carries is the
+            # producer's structured verdict on a turn that ran (e.g. #2638
+            # `billing`) and wins over this substring match on its prose.
             raise ChatDispatchError(
                 429, f"Agent '{name}' is at capacity. Try again later.",
-                headers=_error_code_headers(TaskExecutionErrorCode.CAPACITY, code_headers),
+                headers=code_headers or _error_code_headers(TaskExecutionErrorCode.CAPACITY),
             )
         elif "timed out" in (result.error or ""):
             raise ChatDispatchError(504, result.error, headers=code_headers)
