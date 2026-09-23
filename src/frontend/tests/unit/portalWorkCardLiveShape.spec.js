@@ -18,7 +18,7 @@ import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import PortalWorkCard from '../../src/components/portal/PortalWorkCard.vue'
 
-const LAYOUT = /^(mt-|h-|min-h-|leading-|flex$|flex-wrap$|truncate$|whitespace-|min-w-|shrink-0$)/
+const LAYOUT = /^(mt-|h-|min-h-|leading-|flex$|flex-wrap$|truncate$|whitespace-|w-|min-w-|shrink-0$)/
 
 const synthetic = (over = {}) => ({
   id: 'pending', agent_name: 'cornelius', status: 'running', outcome: 'running',
@@ -52,7 +52,12 @@ describe('#2964 — the chat card reserves its rows from first paint', () => {
     expect(row.exists()).toBe(true)
     expect(row.attributes('aria-hidden')).toBe('true')
     expect(row.text()).toBe('')
-    for (const c of ['mt-1.5', 'h-4', 'leading-4', 'flex', 'min-w-0']) expect(row.classes()).toContain(c)
+    for (const c of ['mt-1.5', 'h-4', 'leading-4', 'flex']) expect(row.classes()).toContain(c)
+    // D1: the row takes the card's width and never sets it, so a long agent
+    // name cannot widen the card when the sentence lands. `min-w-0` would
+    // fight `min-w-full` on the same property, so it must not come back.
+    for (const c of ['w-0', 'min-w-full']) expect(row.classes()).toContain(c)
+    expect(row.classes()).not.toContain('min-w-0')
 
     const stop = w.find('[data-testid="portal-work-stop-reserved"]')
     expect(stop.exists()).toBe(true)

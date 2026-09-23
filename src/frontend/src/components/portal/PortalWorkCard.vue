@@ -79,11 +79,13 @@
            first paint — blank and aria-hidden while the feed has not read the
            turn — and holds ONE line, so `pending → none | unknown` swaps the
            text in place. Only the agent's name truncates; the claim
-           ("doesn't report steps.") is never cut (ent#525's "says so"). -->
+           ("doesn't report steps.") is never cut (ent#525's "says so").
+           `w-0 min-w-full`: the row takes the card's width and never sets it,
+           so a long name cannot widen the card when the sentence lands. -->
       <p
         v-else-if="steps.kind !== 'pending' || reserveLiveRows"
         class="mt-1.5 text-xs text-gray-500 dark:text-gray-400"
-        :class="reserveLiveRows ? 'h-4 leading-4 flex min-w-0 whitespace-nowrap' : ''"
+        :class="reserveLiveRows ? 'h-4 leading-4 flex w-0 min-w-full whitespace-nowrap' : ''"
         :aria-hidden="steps.kind === 'pending' ? 'true' : undefined"
         :title="reserveLiveRows && steps.text ? steps.text : undefined"
         :data-testid="steps.kind === 'pending' ? 'portal-work-reserved-steps' : `portal-work-steps-${steps.kind}`"
