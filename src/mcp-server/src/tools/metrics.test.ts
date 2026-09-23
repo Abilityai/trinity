@@ -124,7 +124,7 @@ test("record_metrics refuses a non-agent key without calling the backend", async
   const result = JSON.parse(raw as string);
 
   assert.equal(result.success, false);
-  assert.match(result.error, /agent-scoped API key/);
+  assert.match(result.error, /requires a key that carries an agent identity/);
   assert.equal(called, false, "a refusal must not reach the network");
 });
 
@@ -351,7 +351,7 @@ test("get_metrics refuses a non-agent key without calling the backend", async ()
   );
 
   assert.equal(result.success, false);
-  assert.match(result.error, /agent-scoped API key/);
+  assert.match(result.error, /requires a key that carries an agent identity/);
   assert.equal(called, false);
 });
 
@@ -494,7 +494,7 @@ test("get_objectives refuses a non-agent key without calling the backend", async
   );
 
   assert.equal(result.success, false);
-  assert.match(result.error, /agent-scoped API key/);
+  assert.match(result.error, /requires a key that carries an agent identity/);
   assert.equal(called, false);
 });
 
