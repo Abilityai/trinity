@@ -22,6 +22,7 @@ side effects).
 from __future__ import annotations
 
 import ast
+import contextlib
 import pathlib
 import re
 from types import SimpleNamespace
@@ -44,6 +45,23 @@ def _detail(text: str) -> str:
     import json
 
     return json.dumps({"detail": text})
+
+
+@contextlib.contextmanager
+def _must_fail():
+    """`pytest.raises(pytest.fail.Exception)` that also refuses a SKIP.
+
+    `Skipped` is not a subclass of `Failed`, so under plain `pytest.raises` a
+    helper that wrongly *skips* propagates the skip and the test that exists
+    to forbid laundering is itself reported as skipped — green. Mutating the
+    helper to "skip every 429" left this file at 0 failed / 6 skipped until
+    every fail-expecting case went through here (#2919 review).
+    """
+    try:
+        with pytest.raises(pytest.fail.Exception) as exc:
+            yield exc
+    except pytest.skip.Exception as e:
+        raise AssertionError(f"SKIPPED where it must FAIL (the laundering this file guards): {e}") from None
 
 
 # --------------------------------------------------------------------------- #
@@ -162,7 +180,7 @@ CAPACITY_MAP_TASK_BODY = _detail("Agent 'a' is at capacity. Try again later.")
 def test_billing_429_fails_with_attribution_and_is_remembered():
     """The issue's case: an exhausted subscription surfaces as 429 (#2638) and
     the backend labels it `billing`; the test must FAIL, not skip."""
-    with pytest.raises(pytest.fail.Exception) as exc:
+    with _must_fail() as exc:
         R.require_agent_answer(
             _resp(status=429, body=USAGE_LIMIT_BODY, headers={R.ERROR_CODE_HEADER: "billing"}),
             what="POST /chat",
@@ -207,7 +225,7 @@ def test_capacity_header_is_authoritative_over_a_billing_looking_body():
 
 
 def test_billing_header_is_authoritative_over_a_capacity_looking_body():
-    with pytest.raises(pytest.fail.Exception) as exc:
+    with _must_fail() as exc:
         R.require_agent_answer(
             _resp(status=429, body=_detail("Agent 'a' is at capacity"), headers={R.ERROR_CODE_HEADER: "billing"}),
             what="POST /chat",
@@ -221,7 +239,7 @@ def test_unattributed_429_fails_rather_than_skips():
     """A stack that predates the header answering the agent's usage-limit
     prose: FAIL as `unknown` (not recorded — nothing attributed it to the
     credential). The mirror of #2889's unknown-503 doctrine."""
-    with pytest.raises(pytest.fail.Exception) as exc:
+    with _must_fail() as exc:
         R.require_agent_answer(
             _resp(status=429, body=_detail("Claude Code execution failed: Subscription usage limit reached")),
             what="POST /chat",
@@ -243,7 +261,7 @@ def test_switched_billing_429_dict_body_fails_and_records():
         '"message": "Rate limit hit. Subscription auto-switched to \'sub-b\'. Please retry.", '
         '"retry_after": 15}}'
     )
-    with pytest.raises(pytest.fail.Exception) as exc:
+    with _must_fail() as exc:
         R.require_agent_answer(
             _resp(status=429, body=body, headers={R.ERROR_CODE_HEADER: "billing"}),
             what="POST /chat",
@@ -331,7 +349,7 @@ def test_readiness_skip_reason_is_not_on_the_skip_audit_allowlist():
 
 
 def test_credit_balance_503_fails_and_is_remembered_for_the_session():
-    with pytest.raises(pytest.fail.Exception) as exc:
+    with _must_fail() as exc:
         R.require_agent_answer(
             _resp(body=CREDIT_BALANCE_BODY, headers={R.ERROR_CODE_HEADER: "auth"}),
             what="POST /task",
@@ -351,7 +369,7 @@ def test_first_provider_failure_wins_the_session_slot():
 
 def test_unknown_503_fails_rather_than_skips():
     """The defect: an unattributed 503 hid behind a readiness excuse."""
-    with pytest.raises(pytest.fail.Exception):
+    with _must_fail():
         R.require_agent_answer(_resp(body=_detail("Failed to execute task. The agent may be unavailable.")), what="POST /task")
 
 
@@ -373,7 +391,7 @@ def test_only_credential_codes_fail_the_rest_of_the_session_fast(code, status, c
     """A one-off OOM (`agent_error`/`unknown`) fails ITS test; it must not take
     every later model turn down with it unrun. A credential verdict does."""
     headers = {} if code == "unknown" else {R.ERROR_CODE_HEADER: code}
-    with pytest.raises(pytest.fail.Exception):
+    with _must_fail():
         R.require_agent_answer(_resp(status=status, body=_detail("boom"), headers=headers), what="POST /task")
     assert (R.session_provider_failure() is not None) is cascades
 
