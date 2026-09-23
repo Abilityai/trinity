@@ -1598,6 +1598,7 @@ async def _acquire_task_capacity(
                 f"Agent '{name}' is at capacity ({max_parallel_tasks} parallel tasks) "
                 f"and its backlog is full. Try again later."
             ),
+            headers=_error_code_headers(TaskExecutionErrorCode.CAPACITY),  # #2919
         )
     except CircuitOpen as e:
         # #526: dispatch breaker open — raised before the queue_persistent enqueue.
@@ -1649,9 +1650,12 @@ def _map_task_failure(name, result, *, idem):
         # none — the header is simply absent there.
         code_headers = _error_code_headers(getattr(result, "error_code", None))
         if "at capacity" in (result.error or ""):
+            # #2919: this branch decides the STATUS by the result text, so the
+            # code it sends must agree — `capacity` overrides whatever code the
+            # result carried (none today: the capacity rejection sets no code).
             raise ChatDispatchError(
                 429, f"Agent '{name}' is at capacity. Try again later.",
-                headers=code_headers,
+                headers=_error_code_headers(TaskExecutionErrorCode.CAPACITY, code_headers),
             )
         elif "timed out" in (result.error or ""):
             raise ChatDispatchError(504, result.error, headers=code_headers)

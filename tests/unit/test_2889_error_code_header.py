@@ -168,3 +168,63 @@ async def test_chat_agent_429_is_billing_on_both_shapes():
     assert plain.status_code == 429 and plain.headers == {ERROR_CODE_HEADER: "billing"}
     switched = await _run_autoswitch("usage limit", 429, switch_result={"new_subscription": "sub-b"})
     assert switched.status_code == 429 and switched.headers == {ERROR_CODE_HEADER: "billing"}
+
+
+# --------------------------------------------------------------------------- #
+# #2919 — the three admission-refusal producers carry `capacity`
+# --------------------------------------------------------------------------- #
+#
+# `capacity` was in the enum and in two docs but had zero assignment sites, so
+# a queue-full 429 was recognisable only by the ABSENCE of a header plus its
+# prose. These pin each producer behaviourally (reusing the harnesses of
+# tests/unit/test_chat_admission.py and test_946_task_idempotency_on_deny.py)
+# so the header is the authority and the docs are true.
+
+
+def test_map_task_failure_at_capacity_carries_the_capacity_header_without_a_result_code():
+    """`_map_task_failure` decides "429" by the result TEXT and never receives
+    a code on that branch (task_execution_service's capacity rejection sets
+    none) — so the code it sends must agree with the status it sends."""
+    with patch.object(_CE, "idempotency_service"):
+        with pytest.raises(ChatDispatchError) as exc:
+            _map_task_failure(
+                "agent1",
+                _result("failed", "Agent at capacity (2/2 parallel tasks running)", None),
+                idem=MagicMock(),
+            )
+    assert exc.value.status_code == 429
+    assert exc.value.headers == {ERROR_CODE_HEADER: "capacity"}
+    assert isinstance(exc.value.detail, str)
+
+
+def test_chat_admission_capacity_full_carries_the_capacity_header():
+    from tests.unit.test_chat_admission import _call, _env, _idem
+    from fastapi import HTTPException
+    from services.capacity_manager import CapacityFull
+
+    full = CapacityFull(agent_name="agent1", max_concurrent=3, reason="in_memory_full", depth=3)
+    with _env(_idem(replay=False), acquire_exc=full) as m:
+        with pytest.raises(HTTPException) as exc:
+            _call()
+    assert exc.value.status_code == 429
+    assert exc.value.headers == {ERROR_CODE_HEADER: "capacity"}
+    # Body byte-identical in shape: the dict the router always sent.
+    assert isinstance(exc.value.detail, dict)
+    assert exc.value.detail["error"] == "Agent queue is full"
+    assert exc.value.detail["agent"] == "agent1" and exc.value.detail["retry_after"] == 30
+    m["isvc"].fail.assert_called_once()
+
+
+def test_dispatch_async_capacity_full_carries_the_capacity_header():
+    from tests.unit.test_946_task_idempotency_on_deny import _call, _env, _idem
+    from fastapi import HTTPException
+    from services.capacity_manager import CapacityFull
+
+    full = CapacityFull(agent_name="agent1", max_concurrent=3, reason="persistent_full", depth=50)
+    with _env(_idem(), full) as m:
+        with pytest.raises(HTTPException) as exc:
+            _call(async_mode=True)
+    assert exc.value.status_code == 429
+    assert exc.value.headers == {ERROR_CODE_HEADER: "capacity"}
+    assert isinstance(exc.value.detail, str) and "is at capacity" in exc.value.detail
+    m["isvc"].fail.assert_called_once()
