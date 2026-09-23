@@ -197,6 +197,63 @@ RUN npm install -g @google/gemini-cli@0.62.0
 # the linux-x64 build lands here. Bump deliberately after testing.
 RUN npm install -g @openai/codex@0.147.0
 
+# Install OpenCode CLI for multi-runtime support (Abilityai/lilu#257).
+#
+# `npm i -g opencode-ai@1.18.32` FAILS on this glibc image and installs NOTHING.
+# Measured, not inferred: npm's optional-dependency resolution selects
+# `opencode-linux-x64-musl`, whose postinstall aborts with
+#     notsup … Valid libc: musl / Actual libc: glibc
+# and the top-level install still exits 0 — the #2537 class (which arrived on
+# arm64) landing again on x64. So the platform package is named EXPLICITLY
+# alongside the wrapper rather than left to optional-dependency resolution.
+#
+# The `opencode --version` assertion is IN THE SAME RUN LAYER and compares
+# against the pin, which is the whole point: an install that silently lands no
+# binary, or lands a different version, must fail the BUILD rather than ship an
+# image whose agents 503 at their first turn (the Abilityai/lilu#19 symptom).
+#
+# Pinned (not @latest) so rebuilds are reproducible and a breaking OpenCode
+# release can't silently change the agent runtime. Bump deliberately, together
+# with the parser — the JSON event stream is this pin's real contract.
+ARG OPENCODE_VERSION=1.18.32
+RUN set -eu; \
+    npm install -g --no-ignore-scripts \
+        "opencode-ai@${OPENCODE_VERSION}" \
+        "opencode-linux-x64@${OPENCODE_VERSION}"; \
+    installed="$(opencode --version 2>&1 | tr -d '\r' | tail -n1)"; \
+    echo "[base-image] opencode --version: ${installed}"; \
+    case "$installed" in \
+        *"${OPENCODE_VERSION}"*) : ;; \
+        *) echo "[base-image] FATAL: opencode reports '${installed}', expected ${OPENCODE_VERSION}." >&2; \
+           echo "[base-image] The usual cause is npm resolving the musl platform package on glibc and installing no binary at all." >&2; \
+           exit 1 ;; \
+    esac
+
+# Pre-seed OpenCode's provider packages into the image (Abilityai/lilu#257).
+#
+# OpenCode installs provider npm packages at RUNTIME into
+# `$XDG_CONFIG_HOME/opencode/node_modules` — a cold start writes package.json,
+# package-lock.json and a full dependency tree. That is a live npm-registry
+# dependency on EVERY cold container: startup latency, an air-gap failure, and
+# a supply-chain fetch outside the image's control. Measured: the
+# custom-provider package the Ollama/Replicate path needs
+# (`@ai-sdk/openai-compatible`) was not fetched automatically at all and had to
+# be installed by hand.
+#
+# startup.sh symlinks this tree into the agent's XDG config dir, and each turn's
+# private config dir symlinks it again, so no turn ever resolves from the
+# network. Root-owned and read-only to the agent by construction.
+RUN set -eu; \
+    mkdir -p /opt/trinity/opencode; \
+    cd /opt/trinity/opencode; \
+    npm init -y >/dev/null; \
+    npm install --no-audit --no-fund \
+        @ai-sdk/openai-compatible \
+        @ai-sdk/anthropic \
+        @ai-sdk/openai; \
+    test -d node_modules/@ai-sdk/openai-compatible; \
+    chmod -R a+rX /opt/trinity/opencode
+
 RUN useradd -m -s /bin/bash -u 1000 developer && \
     echo "developer:developer" | chpasswd && \
     usermod -aG sudo developer && \

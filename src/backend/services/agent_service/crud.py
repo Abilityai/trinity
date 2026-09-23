@@ -62,7 +62,7 @@ from .fork_to_own import (
     saved_token_not_for_agents,
 )
 from . import snapshot_import
-from .helpers import validate_base_image, is_claude_runtime, validate_runtime
+from .helpers import validate_base_image, is_claude_runtime, validate_runtime, validate_runtime_model
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
 from .capabilities import (
     AGENT_TMPFS_MOUNT,
@@ -3690,6 +3690,13 @@ async def create_agent_internal(
     # startup setup (AGENTS.md mirror / CODEX_HOME) or Gemini's credential inject.
     if config.runtime:
         config.runtime = config.runtime.lower()
+
+    # The runtime is final, so the runtime/model PAIRING can be checked too
+    # (#2981). OpenCode's `-m` takes `provider/model`; a bare model id would
+    # otherwise surface as a failed turn inside the container, long after
+    # creation reported success. Runs AFTER the lowercase normalization above so
+    # a template `runtime: OpenCode` is checked, not skipped.
+    validate_runtime_model(config.runtime, config.runtime_model)
 
     # #2215: the SSH-port allocation moved INTO the docker try-block below (just
     # before the container run) — see the comment there. `config.port` is

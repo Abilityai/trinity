@@ -400,3 +400,268 @@ Composition paths and whether the model is known:
   #1521's context-window "safe floor").
 
 ---
+
+---
+
+## RT-OPENCODE — OpenCode as a fourth runtime (Abilityai/lilu#257, steps 0+1)
+
+**Status:** partial — steps 0 and 1 of 7 (harness core + registration). Trinity
+MCP (step 2), controls parity (3), playbook shims (4), UI (5), the
+custom-provider/Ollama block (6) and the Cornelius proof (7) are not built.
+
+Selected via `runtime: { type: opencode, model: "<provider>/<model>" }`. The
+container is created with `AGENT_RUNTIME=opencode` and
+`agent_server/services/opencode_runtime.py` implements `AgentRuntime` over
+`opencode run --format json --auto`. The CLI is pinned to **v1.18.32**.
+
+- **FR-1 — Execution.** `/api/chat` and `/api/task` run through
+  `opencode run --format json --auto [-m provider/model] [--session id]
+  [--dir path]`. Continuity is `--session <id>`; the id rides on every JSON
+  line, so capture does not depend on one event type arriving.
+- **FR-2 — Cost is native.** `step_finish` carries a real `cost`, so
+  `cost_reporting="native"` and there is deliberately **no pricing table**
+  (#2207: a hand-maintained rate card silently goes stale). Two subset traps
+  are handled explicitly — `tokens.reasoning` ⊂ `tokens.output` and
+  `tokens.cache.read` ⊂ `tokens.input` — and neither is added to any total.
+- **FR-3 — An empty final text is a FAILED turn (#520).** There is no separate
+  result line; the response is the LAST step's concatenated `text` parts. Empty
+  text with non-empty `reasoning` fails as `reasoning_only` (500); empty with
+  tool calls is `"(Task completed)"` (Codex parity); empty with nothing fails as
+  `empty_response` (500). The reasoning is **never** promoted into the response
+  — a scratchpad is not an answer, and promoting it would launder a failed turn
+  into a plausible success. It is surfaced, truncated, in the error detail.
+  This is live, not theoretical: `qwen3.6:27b` via Ollama returns prose in a
+  non-standard `reasoning` field with `content: ""` while reporting success.
+- **FR-4 — System prompt via `instructions:`.** `opencode run` has no
+  system-prompt flag (verified against the real `--help`). The composed platform
+  prompt is written to a per-turn file named by the `instructions:` config key.
+  Per-turn, not shared: a single config file would race across the parallel
+  `/api/task` path. Each turn gets a private `XDG_CONFIG_HOME` — the one
+  relocation mechanism measured to work — with the pre-seeded provider
+  `node_modules` symlinked in.
+- **FR-5 — Error→HTTP.** auth→503, rate→429, generic runtime failure→**500**
+  (not 503, which is the backend's AUTH signal and the only class the dispatch
+  breaker counts), pipe drop→**502** (SUB-003 guard), timeout→504.
+- **FR-6 — Model shape.** `-m` takes `provider/model`. Validated at both
+  boundaries with a named 400: `helpers.validate_runtime_model` at create time
+  and `opencode_runtime.validate_provider_model` in the container. The backend
+  cannot import the base image, so the two are a parity pair with a test.
+- **FR-7 — Capabilities.** `chat_continuity=True`, `session_tab_resume=False`
+  (added to `RUNTIMES_WITHOUT_SESSION_TAB_RESUME`), `mcp_support=True`
+  (declared; wiring is step 2 and `configure_mcp` returns **False** rather than
+  claiming a success it did not perform), `cost_reporting="native"`.
+
+**Build-time constraints, measured rather than assumed.**
+`npm i -g opencode-ai@1.18.32` FAILS on the glibc base image and installs
+*nothing*: npm selects `opencode-linux-x64-musl`, its postinstall aborts, and
+the top-level install still exits 0. The Dockerfile therefore names
+`opencode-linux-x64` explicitly and asserts `opencode --version` against the
+pin **in the same RUN layer**, so a silent no-binary install fails the build
+rather than shipping agents that 503 at their first turn. OpenCode also
+installs provider npm packages at *runtime* into
+`$XDG_CONFIG_HOME/opencode/node_modules` — a live npm-registry dependency on
+every cold container — so they are pre-seeded into `/opt/trinity/opencode` and
+symlinked in.
+
+**Privacy defaults** are baked into the generated `opencode.json`
+(`share: "disabled"`, `autoupdate: false`, no `plugin:` entries) and mirrored as
+env (`OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_DISABLE_LSP_DOWNLOAD`,
+`OPENCODE_DISABLE_DEFAULT_PLUGINS`). The file is written only when absent, so an
+operator's own additions survive a reboot.
+
+### RT-OPENCODE-PROVIDER — local / OpenAI-compatible models (step 6)
+
+**FR-7 — a non-models.dev provider is declarable without touching the
+container.** `runtime: { type: opencode, model: "ollama/gemma4:12b" }` plus
+`OPENCODE_OLLAMA_BASE_URL` in the agent's env is sufficient. OpenCode resolves
+models.dev providers itself; a local Ollama it does not know, so
+`agent_server/services/opencode_provider.py` merges a `provider.ollama` entry —
+`{"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "<root>/v1"},
+"models": {…}}` — into the **per-turn** `opencode.json`.
+
+Per turn, not at boot, because the agent's `.env` is re-read at every spawn
+(#1999): a block baked by `startup.sh` would be stale from the operator's first
+change onward. The model list is the union of the turn's own `-m`,
+`AGENT_RUNTIME_MODEL` and the optional comma-separated `OPENCODE_OLLAMA_MODELS`
+— the pinned model is **always** declared, so nobody maintains a parallel list
+to use the model they already pinned. `@ai-sdk/openai-compatible` is
+pre-seeded in the image (measured: OpenCode does **not** fetch it on demand).
+
+Boundaries: an unset base URL emits **no** `provider` key at all, so an
+Anthropic/OpenRouter agent is untouched (graceful degradation); a non-http(s)
+value fails with the **env var named** rather than degrading into OpenCode's own
+"unknown provider"; an operator-declared block wins on `npm`/`options` and has
+its model map **unioned**, so a customised config can never be missing the model
+the turn was launched with.
+
+**FR-8 — a silent turn is a failed turn (the F6 stall).** `step_start` is the
+first line `opencode run --format json` writes; everything before it — config
+load, session create, the cold ripgrep fetch, the git/project walk, the
+provider's prefill — is silent, so a wedged turn emits zero bytes and would
+otherwise burn the whole execution timeout holding the chat lock. No
+`step_start` within the watchdog window (`OPENCODE_STALL_TIMEOUT_SEC`, default
+**300 s**, clamped to never exceed the turn timeout; a bad override falls back
+rather than disabling) kills the process group and relaunches on a **fresh
+session** — resuming the wedged session reproduces the wedge. Zero bytes is
+**504**, never a success, however many attempts it took.
+
+300 s is deliberately generous. Measured against a real DGX Ollama
+(`gemma4:12b`, cold XDG root, 6/6 then 5/5 non-empty completions): the silent
+pre-`step_start` window ranged **7.2 s → 59.3 s for byte-identical configs**,
+the variance being Ollama's own model load, not OpenCode. A watchdog tighter
+than that would kill healthy turns, which is the worse failure.
+
+**FR-8c — free space on the XDG filesystem is a live suspect for F6 (lead, not
+a conclusion).** Measured on the `lilu-engineer` container, 2026-09-23, while
+building step 2: with the XDG root on a **512 MB tmpfs**, 5 consecutive runs
+produced **zero bytes** — 4 as `exit 124` wedged at `message=init`, and one
+that surfaced the cause outright, `SQLiteError: database or disk is full`,
+alongside `failed to add snapshot files … fatal: sha1 file …`. Moving the same
+XDG root to disk-backed scratch (`$AGENT_TMPDIR`, which is what `startup.sh`
+actually configures) gave **3/3 completions** with the same binary, flags,
+provider block, model and working directory. Pre-filling the filesystem to 95%
+reproduces zero-byte stdout on demand.
+
+The arithmetic makes this worth checking on any host running the cold-root
+protocol: a cold `$XDG_CONFIG_HOME` costs **~67 MB**, because OpenCode npm-
+installs the provider tree per root (finding 2 above) unless the pre-seeded
+`/opt/trinity/opencode` tree is symlinked in — which the runtime does and a
+hand-rolled probe harness does not. Fifteen cold runs is ~1 GB. So: `df` the
+filesystem behind `$XDG_DATA_HOME`/`$XDG_CONFIG_HOME` *during* the run, not
+before it. This is **not** a claim about the control plane's host — that was
+not inspected from here — and it is not on the falsified list (which covers a
+*stale* SQLite DB, not a filesystem with nowhere to write one). It is the
+cheapest remaining check before the DGX agent container settles it.
+
+**FR-8a — the stall is HOST-DEPENDENT, and the cause is unknown (open).** This
+is the honest state of F6 as of 2026-09-23, recorded because a reader who sees
+only one of the two measurements will draw the wrong conclusion:
+
+| Host | Result |
+|---|---|
+| `lilu-engineer` container | **16/16** completions — the stall does not reproduce at all |
+| Lilu control plane | **2 successes in 15 runs (~13 % per attempt)**; the other 13 are zero-byte `exit 124` hangs at `message=init` |
+
+Both were run with the same pinned binary (v1.18.32), the same flag set
+(`--format json --auto --print-logs --log-level DEBUG`), a cold XDG root per
+run, the same generated provider block and the same DGX Ollama. **Falsified by
+measurement — do not re-test:** stale lock files; a stale `opencode.db`; Ollama
+itself (the same endpoint answers a 30-tool-schema request in 5.2 s directly);
+models.dev egress; GitHub egress (github.com 200 in 0.25 s and the ripgrep
+tarball 200 in 0.33 s *from the stalling host*, which kills the ripgrep-fetch
+hypothesis there); `--auto` present vs absent; a tool-calling vs a plain prompt;
+a pre-existing `node_modules` under `$XDG_CONFIG_HOME/opencode`; a stray
+non-XDG `~/.config/opencode`; orphaned processes. The variable is the **host**;
+the **DGX agent container is the settling instrument** and neither party has it
+yet. Until it does, the mitigation below is what ships — it raises the odds a
+turn survives an affected host and makes such a host *countable*; it does not
+fix anything, and the air-gap/npm-registry exposure noted above remains its own
+issue.
+
+**FR-8b — bounded retries, and a retried turn says so.** The retry count is
+`OPENCODE_STALL_RETRIES`, **default 2** (3 attempts), clamped to 0–5; a junk
+value falls back to the default and a negative one means "stop retrying". One
+retry on a 13 % host yields ~24 %, i.e. three turns in four end as a 504, which
+is not shippable for unattended work; three attempts reach ~34 %, and an
+operator on a worse host raises the knob without a rebuild. **The ceiling is
+the turn's own timeout, never added to it:** each attempt is launched with the
+time actually remaining, and no retry starts once less than **90 s** is left —
+under the measured 59.3 s worst-case silent window an attempt cannot do
+anything but delay the 504 it is already heading for. Every relaunch and the
+give-up detail carry the greppable marker **`[OpenCode][STALL-RETRY]`**, and a
+turn that recovered reports **`metadata.stall_retries`** (0 on every healthy
+turn and every other runtime) — without that field an affected host is recorded
+as a plain success and looks merely slow-but-fine in the execution ledger. The
+empty-stdout-is-failure rule is deliberately **not** loosened to compensate.
+
+**Two follow-ups from step 1, closed here.**
+
+*The `--` separator is real and is now used.* `opencode run`'s `message` is a
+yargs positional **array**, so a prompt beginning with `-` would be parsed as a
+flag. Verified live against v1.18.32 rather than assumed — `opencode run --
+"Reply with exactly the word ZEBRA."` returned `ZEBRA`, proving the text after
+`--` reaches the message and is not diverted into yargs' `argv['--']` — and the
+runtime now emits `-- <prompt>`.
+
+*`--agent` vs `instructions:` as the platform-prompt carrier: `instructions:`
+stays.* Both can carry a system prompt — `--agent <name>` selects a named entry
+under the config's `agent:` key, which can hold its own `prompt`, `model` and
+tool set, so it is the richer carrier and is the natural home for per-runtime
+tool policy later. It is nevertheless the wrong carrier for the **platform
+prompt**, for three reasons. (1) It is not additive: an agent entry *replaces*
+the prompt, whereas `instructions:` is a list, and Trinity's prompt has to sit
+in front of whatever the template author declared, not instead of it. (2) It
+moves the prompt from a value into a **name**, adding a resolution step that
+can fail silently — a probe with `--agent nosuchagent` was accepted and the
+turn proceeded rather than failing with a named error, so a typo'd agent name
+would run the turn under the wrong identity with nothing in the log. (3) It buys
+nothing we need today: the per-turn `XDG_CONFIG_HOME` already isolates
+concurrent `/api/task` turns, which was the only reason `instructions:` needed
+care. Revisit when step 3 maps guardrails and the denied-tools list, where an
+`agent:` entry's `tools`/`permission` fields may genuinely be the right
+mechanism — the prompt would then ride along as a side effect rather than as
+the motive.
+
+### RT-OPENCODE-CONTEXT — Trinity MCP + the platform prompt (step 2)
+
+**FR-9 — the platform prompt travels through `instructions:`.** `opencode run`
+has no system-prompt flag (verified against the real `--help`). The prompt the
+backend already composes — platform instructions, the operator's custom
+prompt, the execution context block, and the MEM-001 per-user memory block,
+all folded into the single `system_prompt` the agent server receives — is
+written to a per-turn file and named **first** in that turn's `instructions:`
+array. First because OpenCode reads the list in order; **additive** because a
+template author's own entries must survive, and dropping an agent's declared
+reading list on a runtime switch would be a silent capability loss. A turn with
+no platform prompt writes no entry rather than an empty one. The carrier is the
+same per-turn `_prepare_turn_config` seam as the provider block, never
+`startup.sh` (#1999), and per-turn rather than shared so concurrent `/api/task`
+turns cannot overwrite each other's identity.
+
+**FR-10 — Trinity MCP is callable from inside a turn.** `.mcp.json` stays the
+**single** store — it is what Claude Code reads, what
+`trinity_mcp.inject_trinity_mcp_if_configured` writes the Trinity server into,
+and what credential injection re-writes. OpenCode cannot read it, so
+`agent_server/services/opencode_mcp.py` **translates** it into that turn's
+`mcp:` block against the published v1.18.32 schema: an entry with a `url`
+becomes `McpRemoteConfig` (`type: remote` + `headers`), an entry with a
+`command` becomes `McpLocalConfig` (Claude's `command` + `args` → OpenCode's
+single `command` **array**; `env` → `environment`). `url` is the
+discriminator, not `type`, because Claude makes `type` optional and Trinity's
+own `.mcp.json.template` omits it on stdio entries. A second persistent store
+was rejected deliberately: it would let a re-injected Trinity key reach one
+file and not the other. Boundaries: an unmappable entry is **skipped with a
+named warning** rather than emitted half-formed (OpenCode rejects a malformed
+`mcp` entry at config-parse time, taking down a turn that had nothing to do
+with MCP); a missing or corrupt `.mcp.json` degrades to "no MCP tools this
+turn", never a failed turn; an operator-declared server in the shared config
+wins, matching the provider block's precedence. The per-turn config now carries
+the Trinity bearer token, so it is written **0600**.
+
+**FR-11 — OpenCode is a THIRD MCP tool-naming scheme.** It namespaces tools as
+`<server-id>_<tool>`, so Trinity's are `trinity_report`,
+`trinity_chat_with_agent`, … — measured, not assumed: a real turn on
+`ollama/gemma4:12b` emitted
+`{"type":"tool_use","part":{"tool":"trinity_list_agents",…}}` and answered from
+the tool's output. Both the Claude spelling (`mcp__trinity__list_agents`) and
+the Codex bare spelling (`list_agents`) are unknown tools to it, so
+`platform_prompt_service._adapt_instructions_for_runtime` **rewrites** the
+prefix to `trinity_` for `opencode` — a strip would be as wrong as leaving it —
+and prepends an OpenCode-specific orientation note.
+
+### RT-SEAM — runtime seam hygiene (step 0)
+
+Two defects Codex already carried, fixed before adding a fourth runtime rather
+than duplicated into it:
+
+- `plugins_reinstall` ran on **every** runtime although every subprocess it
+  runs is `claude plugin ...`. Now gated on `is_claude_runtime()` with a named
+  `skipped_runtime` status.
+- The `CLAUDE.md -> AGENTS.md` mirror was a one-shot `cp`, so it froze at first
+  boot and every later CLAUDE.md edit was invisible. Now a relative symlink,
+  shared by Codex and OpenCode (both read AGENTS.md), with an explicit
+  three-case upgrade path off the copy-era image.
+- The runtime name sets and `is_claude_runtime`/`normalize_runtime` live in a
+  zero-dependency `agent_server/runtime_names.py` leaf, importable both as a
+  package member and standalone, because the boot hooks run as `python3 -m`.
+

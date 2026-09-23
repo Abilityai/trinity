@@ -593,13 +593,39 @@ _CODEX_MCP_ORIENTATION = (
     "\n\n---\n\n"
 )
 
+# OpenCode is a THIRD naming scheme, and it is neither of the other two
+# (Abilityai/lilu#257 step 2). It namespaces every MCP tool as
+# ``<server-id>_<tool>`` — MEASURED, not assumed: a real turn on
+# ``ollama/gemma4:12b`` against the pinned v1.18.32 emitted
+# ``{"type":"tool_use","part":{"tool":"trinity_list_agents",…}}``. So the
+# Claude prefix is rewritten to the server id rather than stripped: a Codex-
+# style bare ``list_agents`` is an unknown tool to OpenCode, and the
+# Claude-style ``mcp__trinity__list_agents`` is too. The server id is
+# ``trinity`` because that is the key ``trinity_mcp._inject_claude_mcp``
+# writes into ``.mcp.json``, which is what ``opencode_mcp`` translates from.
+_OPENCODE_RUNTIMES = frozenset({"opencode"})
+_OPENCODE_MCP_PREFIX = "trinity_"
+
+_OPENCODE_MCP_ORIENTATION = (
+    "## MCP Tools (OpenCode runtime)\n\n"
+    "A Trinity MCP server named `trinity` is configured for you. OpenCode "
+    "namespaces its tools by server id, so call them as `trinity_<tool>` — "
+    "`trinity_list_agents`, `trinity_chat_with_agent`, `trinity_share_file`, "
+    "`trinity_report`, `trinity_list_reports`, `trinity_get_report`, "
+    "`trinity_write_user_memory`, `trinity_set_reminder`, "
+    "`trinity_run_agent_loop` — exactly as they appear in your tool list. Do "
+    "not add any other vendor-specific prefix."
+    "\n\n---\n\n"
+)
+
 
 def _adapt_instructions_for_runtime(instructions: str, runtime: str) -> str:
     """Rewrite the MCP-tool references in ``instructions`` for ``runtime``.
 
     Codex → strip the Claude-only ``mcp__trinity__`` prefix and prepend a short
-    orientation note. Claude/Gemini/unknown keep the canonical naming (the
-    plan's ``default claude-code`` behavior). Any runtime without the file
+    orientation note. OpenCode → rewrite that prefix to its server-scoped
+    ``trinity_`` form and prepend its own note. Claude/Gemini/unknown keep the
+    canonical naming (the plan's ``default claude-code`` behavior). Any runtime without the file
     guardrail hook gets the honest protected-paths sentence (trinity-enterprise#945).
     Any runtime without the Claude Code subagent launcher is offered its own
     tools instead of `Agent`/`Task` (trinity-enterprise#643).
@@ -616,6 +642,10 @@ def _adapt_instructions_for_runtime(instructions: str, runtime: str) -> str:
         )
     if runtime_key in _CODEX_RUNTIMES:
         return _CODEX_MCP_ORIENTATION + instructions.replace("mcp__trinity__", "")
+    if runtime_key in _OPENCODE_RUNTIMES:
+        return _OPENCODE_MCP_ORIENTATION + instructions.replace(
+            "mcp__trinity__", _OPENCODE_MCP_PREFIX
+        )
     return instructions
 
 
