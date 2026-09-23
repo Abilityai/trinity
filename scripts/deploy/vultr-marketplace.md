@@ -3,8 +3,8 @@
 The listing is **imageless**: Vultr runs [`vultr-vendor-data.sh`](vultr-vendor-data.sh)
 once, as root, on a clean Ubuntu 24.04 at first boot. There is no snapshot to build,
 review or resubmit — which is why this lane costs one script instead of a Packer
-pipeline, and why first boot takes ~10 minutes (apt + a ~1.6 GB image pull) rather
-than the DigitalOcean image's ~2.
+pipeline, and why first boot takes about 4 minutes (apt + a ~1.6 GB image pull) rather
+than the DigitalOcean image's ~2 — measured end to end on a `vc2-4c-8gb` in Frankfurt.
 
 The script resolves the **latest stable release** at boot (`releases/latest`, which
 excludes release candidates). Nothing here carries a version, so no release requires
@@ -20,7 +20,7 @@ Ubuntu apt repository.
 > ## Trinity is starting
 >
 > Your server is running, but Trinity is **still installing** — it downloads and
-> starts about 1.6 GB of images on first boot. Give it **about 10 minutes**.
+> starts about 1.6 GB of images on first boot. Give it **about 5 minutes**.
 >
 > ## Open it
 >
@@ -87,6 +87,12 @@ cd /opt/trinity && sudo ./scripts/deploy/start.sh \
 
 The clone is guarded, so this resumes rather than starting over. Do **not** run
 `cloud-init clean` — it also re-runs Vultr's own instance configuration.
+
+`/var/log/trinity-install.log` is appended across attempts, so an earlier
+`FAILED` line sits above a later success. Read from the last
+`=== Trinity first boot: <timestamp> ===` header down, or just check the
+markers, which the script clears on every entry: `/etc/trinity/ready` versus
+`/etc/trinity/firstboot-failed`.
 
 ### Testing without a vendor account
 
