@@ -374,8 +374,8 @@ name for `'<agent>'`.
 
 **Every autonomous trigger reaches the durable queue as of #2524.** There is no
 longer a "can this agent be piloted at all?" question — `agent`, `event`,
-`schedule`, `webhook`, `reminder`, `loop`, `fan_out`, `a2a` and
-`operator_response` are all pullable. Pick a pilot on volume and traffic mix,
+`schedule`, `webhook`, `reminder`, `loop`, `fan_out`, `a2a`,
+`operator_response` and `retry` (#2845) are all pullable. Pick a pilot on volume and traffic mix,
 not on eligibility.
 
 > **Changed by #2391, widened again by #2523.** Before #2391,
@@ -486,14 +486,15 @@ passed `overflow_policy="queue_persistent"`. Two of the three producers can:
 
 | Producer | Carries | `overflow_policy` | Pullable? |
 |---|---|---|---|
-| `task_execution_service` | scheduler — **all cron** — webhooks, reminders, loops, fan-out, A2A, operator resumes | `queue_persistent` **when `pull_owns_dispatch` is true**, else `reject` | **Yes**, for every autonomous trigger it carries |
+| `task_execution_service` | scheduler — **all cron** and its RETRY-001 retries — webhooks, reminders, loops, fan-out, A2A, operator resumes | `queue_persistent` **when `pull_owns_dispatch` is true**, else `reject` | **Yes**, for every autonomous trigger it carries |
 | `dispatch_admission_service` | sequential `chat_with_agent`, human chat | `queue_in_memory` | **No** |
 | `chat_execution_service` (`POST /task`) | parallel `chat_with_agent`, MCP/manual task | `queue_persistent` | **Yes**, for `agent` / `event` |
 
 `POST /task` can only derive `triggered_by ∈ {self_task, agent, mcp, manual,
 event}`, contributing `agent` + `event`. `task_execution_service` contributes the
 autonomous triggers with **no synchronous result consumer**: `schedule`,
-`webhook` and `reminder`, all three of which reach it from the scheduler, which
+`webhook`, `reminder` and `retry` (#2845 — RETRY-001's next attempt at a failed
+run), all of which reach it from the scheduler, which
 dispatches `async_mode=True` and then polls the DB for the terminal, plus `loop`
 (#2523) and `fan_out` (#2524) since their orchestrators stopped holding the work
 in a coroutine, plus `a2a` and `operator_response` (#2524) through
@@ -538,7 +539,7 @@ SELECT agent_name,
        COUNT(*) FILTER (WHERE triggered_by = 'schedule') AS cron,
        COUNT(*) FILTER (WHERE triggered_by IN
          ('agent','event','schedule','webhook','reminder','loop','fan_out',
-          'a2a','operator_response'))                            AS pull_eligible,
+          'a2a','operator_response','retry'))                    AS pull_eligible,
        COUNT(*) FILTER (WHERE triggered_by IN
          ('manual','mcp','chat','public','session','voice','room'))
                                                                  AS interactive
@@ -740,6 +741,10 @@ load rather than in the 2026-07-08 synthetic pilot.
 > occurred" rather than "unknown". It also makes the T6.3 gate concrete: re-running
 > the same execution is now demonstrated behaviour, which is the condition
 > fail-closed `execution_id` injection was written for.
+
+A parked row stays parked: RETRY-001 skips any row whose `error` starts with
+`poison_lease` (#2845), so a schedule's `max_retries` cannot restart the
+re-delivery budget on a fresh row.
 
 ```sql
 SELECT redelivery_count, COUNT(*)

@@ -188,8 +188,15 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # ent#329: `operator_response` belongs here. The operator answered and moved
     # on; the resume turn runs with nobody reading its reply, so an unresolved
     # command in it is invisible without the alert.
+    #
+    # #2845: `retry` belongs here. RETRY-001 fires it from a timer
+    # `retry_delay_seconds` after the failure, so nobody is reading its reply —
+    # even when the run it retries was started by hand. Without it, a skill that
+    # was missing all along stays silent whenever the first attempt failed
+    # before reaching the agent (capacity, timeout) and only the retry got far
+    # enough to show it.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
-     "a2a", "operator_response"}
+     "a2a", "operator_response", "retry"}
 )
 
 
