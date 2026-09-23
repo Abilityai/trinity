@@ -589,7 +589,7 @@ class ActivityType(str, Enum):
 | Timeout | 504 | Task execution timed out |
 | Connection error | 503 | Failed to communicate with agent |
 
-Since #2889 every sync `/chat`/`/task` failure the backend classifies also carries `X-Trinity-Error-Code` (`auth` / `billing` / `network` / `agent_error` / `capacity` / `timeout`) — `network` is the only value that means the agent server was never reached; the body is unchanged.
+Since #2889 every sync `/chat`/`/task` failure the backend classifies also carries `X-Trinity-Error-Code` (`auth` / `billing` / `network` / `agent_error` / `capacity` / `timeout`) — `network` is the only value that means the agent server was never reached; the body is unchanged. A queue-full 429 (either admission refusal) carries `capacity` since #2919.
 
 *Note: MCP tools return errors in JSON response body, not HTTP status codes.
 
