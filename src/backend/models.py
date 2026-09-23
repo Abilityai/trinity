@@ -4543,6 +4543,37 @@ class A2ACallRequest(BaseModel):
     execution_id: Optional[str] = Field(default=None, max_length=200)
 
 
+class SkillManagerHolder(BaseModel):
+    """One agent holding the skill-management capability (trinity-enterprise#596)."""
+    agent_name: str
+    granted_by: str
+    granted_at: str
+
+
+class SkillManagersResponse(BaseModel):
+    """`GET /api/skills/managers` — the agents an admin has let change skills.
+
+    The ruling makes this the whole list: every agent NOT here is refused when it
+    tries to change any agent's skills, its own included. Humans and the system
+    agent are not listed because they never needed a grant.
+    """
+    capability: str
+    holders: List[SkillManagerHolder] = Field(default_factory=list)
+
+
+class SkillManagerGrantRequest(BaseModel):
+    """`PUT /api/agents/{agent_name}/skill-manager` — grant (true) or revoke (false)."""
+    granted: bool
+
+
+class SkillManagerGrantResult(BaseModel):
+    """What the grant route did. `changed` is False on an idempotent repeat."""
+    agent_name: str
+    capability: str
+    granted: bool
+    changed: bool
+
+
 class A2ATaskRequest(BaseModel):
     """Body for `POST /api/agents/{name}/a2a/task` — poll a remote task (#736)."""
     model_config = ConfigDict(extra="forbid")

@@ -210,6 +210,8 @@ const ADMIN_ONLY =
 const TEARDOWN_HUMAN_ONLY =
   "backend fence: the gated route requires role 'creator' AND a HUMAN caller — reject_agent_principal plus a credential-kind refusal, because one call removes N agents without delete_agent's per-agent spawn-scope check (abilityai/trinity-enterprise#454)";
 const REMINDER_SELF_GATE = "backend self-gate: reminders.py::_self_gate refuses an agent key naming another agent";
+const SKILL_MANAGER_FENCE =
+  "backend fence: routers/skills.py get_skill_managed_agent_by_name refuses an agent key whose agent does not hold the skills.manage capability — on a sibling AND on itself (abilityai/trinity-enterprise#596)";
 const CONNECTOR_SCOPE = "connector scope — the key is bound to one agent; backend _enforce_connector_scope (ent#46)";
 const ROOMS_SERVICE = "room membership is the rooms service's decision (ent#169, ent#443), not a per-agent permission edge";
 const EVENT_EDGE = "backend gates by agent_permissions edge itself (event_subscriptions.py, uniform 403)";
@@ -279,9 +281,9 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_skills: { kind: "none", why: "no agent target" },
   get_skill: { kind: "none", why: "a skill name, not an agent" },
   get_skills_library_status: { kind: "none", why: "no agent target" },
-  assign_skill_to_agent: { kind: "baselined", owner: ENT629 },
-  set_agent_skills: { kind: "baselined", owner: ENT629 },
-  sync_agent_skills: { kind: "baselined", owner: ENT629 },
+  assign_skill_to_agent: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
+  set_agent_skills: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
+  sync_agent_skills: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
   get_agent_skills: { kind: "baselined", owner: ENT629 },
   run_skill: { kind: "none", why: "runs on the calling agent; a skill name, not an agent" },
   list_runnable_skills: { kind: "none", why: "no agent target" },
