@@ -20,7 +20,14 @@
  * server fires, so the last two cases prove the composition end to end over the
  * wire: a refused call's row says `denied`, and the permitted call that follows
  * on the SAME session carries no stale marker. The audit POST is fire-and-forget
- * and may land after the client already holds its result, so the row is awaited.
+ * and may land after the client already holds its result — and a row awaited by
+ * `(tool, index-after-length)` is not an identity: the previous test's late row
+ * matched first (#2952). So every call made through `asAgent().call` drains ITS
+ * OWN row before returning, and the row is checked for position (the call
+ * counter) AND identity (the session's own bearer, which the stub echoes back as
+ * `key_name`). Subtests run one at a time (node:test default — do not add
+ * `concurrency`), and one call is one row: a change to `withAudit`'s row count
+ * breaks this file on purpose.
  *
  * Runner: node:test → `node --import tsx --test src/*.test.ts`.
  */
@@ -49,6 +56,8 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
   let permissionReads = 0;
   /** Every audit row the MCP server posted (#2807): the label the operator reads. */
   const auditRows: any[] = [];
+  /** Tool calls made through `asAgent().call` — the count the recorder must have caught up to before the next call. */
+  let calls = 0;
 
   before(async () => {
     backend = createHttpServer((req, res) => {
@@ -66,7 +75,8 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
             key_id: "key-agent-1",
             user_id: "owner",
             user_email: "owner@example.com",
-            key_name: "alpha-key",
+            // #2952: echo the session's bearer so every row carries who called.
+            key_name: String(req.headers.authorization ?? "").replace(/^Bearer /, ""),
             scope: "agent",
             agent_name: CALLER,
           });
@@ -129,40 +139,61 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
   /** A client holding agent A's own key — what a playbook call looks like on the wire. */
   const asAgent = async (name: string) => {
     const client = new Client({ name, version: "1.0.0" });
+    // #2952: a per-session bearer — the stub echoes it back as `key_name`, so a row
+    // carries which session made the call and the finder can check identity.
+    const key = `${AGENT_KEY}-${name}`;
     const transport = new StreamableHTTPClientTransport(mcpUrl, {
-      requestInit: { headers: { Authorization: `Bearer ${AGENT_KEY}` } },
+      requestInit: { headers: { Authorization: `Bearer ${key}` } },
     });
     await client.connect(transport);
     const call = async (tool: string, args: Record<string, unknown>) => {
+      assert.equal(
+        auditRows.length,
+        calls,
+        `${auditRows.length} audit rows after ${calls} calls — the row count per call changed (audit.ts) or a call bypassed this helper (#2952): ${JSON.stringify(auditRows)}`,
+      );
+      const at = calls++;
       const r: any = await client.callTool({ name: tool, arguments: args });
-      return JSON.parse(r.content.map((c: any) => c.text).join("\n"));
+      // Drain BEFORE parsing: an `isError` text would throw at the parse and skip the
+      // drain, leaving this call's row in flight for the next call to misread.
+      const row = await auditRowAt(at, tool, key);
+      const out = JSON.parse(r.content.map((c: any) => c.text).join("\n"));
+      return { out, row };
     };
     return { client, call };
   };
 
   const START = { message: "Reply with the single word: pong", max_runs: 1 };
 
-  /** Each case starts from a clean slate so one defect reads as one red, not three. */
+  /** A clean slate per case; a dropped audit row now reds every case that made a call — by design (#2952). */
   const reset = (edge: string[]) => {
     permitted = edge;
     loopPosts.length = 0;
   };
 
-  /** The first audit row for `tool` posted after index `after` — awaited, because the POST is fire-and-forget. */
-  const auditRowFor = async (tool: string, after: number, timeoutMs = 5000): Promise<any> => {
+  /**
+   * The audit row at index `at` — THIS call's row, awaited because the POST is
+   * fire-and-forget, and cross-checked for tool and session so a row from another
+   * call can never be returned in its place (#2952).
+   */
+  const auditRowAt = async (at: number, tool: string, key: string, timeoutMs = 5000): Promise<any> => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const row = auditRows.slice(after).find((r) => r?.details?.tool === tool);
-      if (row) return row;
+      if (auditRows.length > at) {
+        const row = auditRows[at];
+        assert.equal(row?.details?.tool, tool, `row ${at} is not this call's tool: ${JSON.stringify(row)}`);
+        assert.equal(row?.mcp_key_name, key, `row ${at} is not this session's: ${JSON.stringify(row)}`);
+        return row;
+      }
       await new Promise((r) => setTimeout(r, 25));
     }
-    throw new Error(`no audit row for ${tool} arrived within ${timeoutMs}ms; rows seen: ${JSON.stringify(auditRows.slice(after))}`);
+    throw new Error(`no audit row for call ${at} (${tool}) arrived within ${timeoutMs}ms; rows seen: ${JSON.stringify(auditRows)}`);
   };
 
   it("an agent key with no edge is refused at the REGISTERED tool, and no loop starts", async () => {
     reset([]);
     const { client, call } = await asAgent("628-no-edge");
-    const out = await call("run_agent_loop", { agent_name: SIBLING, ...START });
+    const { out } = await call("run_agent_loop", { agent_name: SIBLING, ...START });
     assert.equal(out.success, false, `expected a refusal, got: ${JSON.stringify(out)}`);
     assert.equal(out.error, "Access denied");
     assert.match(out.reason, new RegExp(`Agent '${CALLER}' is not permitted to communicate with '${SIBLING}'`));
@@ -174,7 +205,7 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
   it("the same key with an edge starts the loop on the sibling", async () => {
     reset([SIBLING]);
     const { client, call } = await asAgent("628-edge");
-    const out = await call("run_agent_loop", { agent_name: SIBLING, ...START });
+    const { out } = await call("run_agent_loop", { agent_name: SIBLING, ...START });
     assert.equal(out.success, true, `expected the loop to start, got: ${JSON.stringify(out)}`);
     assert.equal(out.loop_id, "loop_1");
     assert.deepEqual(loopPosts, [SIBLING]);
@@ -185,7 +216,7 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
     reset([]);
     const before = permissionReads;
     const { client, call } = await asAgent("628-self");
-    const out = await call("run_agent_loop", { ...START });
+    const { out } = await call("run_agent_loop", { ...START });
     assert.equal(out.success, true, `expected a self loop to start, got: ${JSON.stringify(out)}`);
     assert.deepEqual(loopPosts, [CALLER]);
     assert.equal(permissionReads, before, "a self loop paid a permission-edge read");
@@ -194,12 +225,10 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
 
   it("#2807: a refused loop start is audited as a refusal, not as a successful call", async () => {
     reset([]);
-    const seen = auditRows.length;
     const { client, call } = await asAgent("2807-refused");
-    const out = await call("run_agent_loop", { agent_name: SIBLING, ...START });
+    const { out, row } = await call("run_agent_loop", { agent_name: SIBLING, ...START });
     assert.equal(out.error, "Access denied");
 
-    const row = await auditRowFor("run_agent_loop", seen);
     assert.equal(row.details.success, false, `the refusal was audited as a success: ${JSON.stringify(row.details)}`);
     assert.equal(row.details.denied, true);
     assert.match(String(row.details.error), new RegExp(`Agent '${CALLER}' is not permitted to communicate with '${SIBLING}'`));
@@ -214,17 +243,13 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
     reset([]);
     const { client, call } = await asAgent("2807-same-session");
 
-    let seen = auditRows.length;
-    const refused = await call("run_agent_loop", { agent_name: SIBLING, ...START });
+    const { out: refused, row: first } = await call("run_agent_loop", { agent_name: SIBLING, ...START });
     assert.equal(refused.error, "Access denied");
-    const first = await auditRowFor("run_agent_loop", seen);
     assert.equal(first.details.denied, true);
 
     permitted = [SIBLING];
-    seen = auditRows.length;
-    const ok = await call("run_agent_loop", { agent_name: SIBLING, ...START });
+    const { out: ok, row: second } = await call("run_agent_loop", { agent_name: SIBLING, ...START });
     assert.equal(ok.success, true, `expected the loop to start, got: ${JSON.stringify(ok)}`);
-    const second = await auditRowFor("run_agent_loop", seen);
     assert.equal(second.details.success, true, `the permitted call inherited a stale refusal: ${JSON.stringify(second.details)}`);
     assert.equal(second.details.denied, undefined);
     assert.equal(second.details.error, undefined);

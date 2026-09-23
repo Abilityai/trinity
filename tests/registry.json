@@ -3147,7 +3147,7 @@
         "access-control",
         "workspace"
       ],
-      "description": "A shared file is for the person the turn was for. Real-SQLite ROUND TRIPS — the real create_share / create_share_from_bytes into a real database, read back through the real portal_documents (only the container read and the disk write are stubbed) — because every earlier share test mocked _persist_and_register and every listing test seeded by INSERT, so nothing crossed write → read. Covers: the two-account repro; a terminal share never landing in whichever client is mid-conversation (no evidence ⇒ owner-only); a stale execution id proving the conversation and never the person (rooms); inherited agent-to-agent context; unverified channel ids never stored as emails; the audience_email override against the reader's own roster predicate; the addressee in the effect key; the owner list stripped for every key-authenticated scope, driven through the route; both migration tracks executed; the WhatsApp adapter, voice-note and share-route CALL SITES. 22 call-site mutations, all red."
+      "description": "A shared file is for the person the turn was for. Real-SQLite ROUND TRIPS — the real create_share / create_share_from_bytes into a real database, read back through the real portal_documents (only the container read and the disk write are stubbed) — because every earlier share test mocked _persist_and_register and every listing test seeded by INSERT, so nothing crossed write → read. Covers: the two-account repro; a terminal share never landing in whichever client is mid-conversation (no evidence ⇒ owner-only); a stale execution id proving the conversation and never the person (rooms); inherited agent-to-agent context; unverified channel ids never stored as emails; the audience_email override against the reader's own roster predicate; the addressee in the effect key; the owner list stripped for every key-authenticated scope, driven through the route; both migration tracks executed; the WhatsApp adapter, voice-note and share-route CALL SITES. 22 call-site mutations, all red. #2955: the key-caller withholding tests compare the WHOLE row against the JWT row with addressed_to / addressed_to_channel / audience_source nulled and the row's key set pinned (a fourth audience field turns them red until classified); a validator-vs-resolver parity table over both audience_email models (agreement as the expectation, never a literal); a blank-is-absent regression pin; an AST one-home test (turn_audience re-export identity, utils/addressee.py imports only typing, models.py imports no services, both validators a single wrapper call with no inline Compare). The owner panel's once-per-row derivation is mounted in src/frontend/tests/unit/fileSharingPanelAudience.spec.js."
     },
     {
       "file": "mcp-server/src/files.test.ts",
@@ -3363,6 +3363,20 @@
         "security"
       ],
       "description": "A self-acting MCP tool takes its identity from the key (#2975): report / set_canvas / patch_canvas / record_metrics / refresh_metric_definitions all admit the orchestrator's system-scoped key and act as trinity-system, an agent-scoped key is unchanged, and seven other credential shapes (user, connector, portal_delegate, ops, anonymous, a system key naming no agent, an unknown future scope) are refused without reaching the network. Drives the real execute() with a recording fake client; also pins resolveActingAgent's allowlist and its two distinct refusal messages. node:test."
+    },
+    {
+      "file": "mcp-server/src/access-wiring.test.ts",
+      "feature": "trinity-enterprise#628 / #2807 / #2952",
+      "added": "2026-09-16",
+      "updated": "2026-09-22",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "audit",
+        "access-control",
+        "transport"
+      ],
+      "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default)."
     },
     {
       "file": "unit/test_2845_retry_trigger_sets.py",
