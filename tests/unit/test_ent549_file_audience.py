@@ -963,6 +963,18 @@ class _Principal:
             setattr(self, k, v)
 
 
+# Every field of an owner-list row, classified (#2955). The withholding tests
+# compare a key row to the JWT row with the audience fields nulled — which on
+# its own would let a FOURTH audience field leak (it is equal in both rows).
+# Pinning the key set turns a new `SharedFileInfo` field red here, so whoever
+# adds it has to say which side of the line it is on.
+_AUDIENCE_FIELDS = {"addressed_to", "addressed_to_channel", "audience_source"}
+_OWNER_ROW_FIELDS = {
+    "file_id", "filename", "size_bytes", "mime_type", "url", "created_at",
+    "expires_at", "download_count", "last_downloaded_at",
+} | _AUDIENCE_FIELDS
+
+
 async def _owner_list(principal, monkeypatch):
     from routers import agent_files
     monkeypatch.setattr(agent_files, "assert_agent_owner", lambda *a, **kw: None)
@@ -993,9 +1005,10 @@ async def test_a_key_authenticated_caller_is_told_nobodys_address(share_service,
     Allow-list, as `is_interactive_principal` is.
 
     The WHOLE row is compared against what the JWT sees, with the three
-    audience fields nulled: a fourth audience field added to `SharedFileInfo`
-    tomorrow shows up in this diff and has to be classified, instead of
-    leaking to every key while a hand-written list of `is None`s stays green."""
+    audience fields nulled, and the row's key set is pinned
+    (`_OWNER_ROW_FIELDS`): a fourth audience field added to `SharedFileInfo`
+    tomorrow turns this red and has to be classified, instead of leaking to
+    every key while a hand-written list of `is None`s stays green."""
     share_service.create_share_from_bytes(
         AGENT, b"x", display_name="v.ogg",
         addressed_to_email=BOB, addressed_to_channel=WA_NUMBER)
@@ -1003,6 +1016,8 @@ async def test_a_key_authenticated_caller_is_told_nobodys_address(share_service,
     [jwt_row] = await _owner_list(_Principal(mcp_scope=None), monkeypatch)
     [key_row] = await _owner_list(_Principal(mcp_scope=scope, agent_name=AGENT), monkeypatch)
 
+    assert set(jwt_row) == _OWNER_ROW_FIELDS, set(jwt_row) ^ _OWNER_ROW_FIELDS
+    assert all(jwt_row[f] is not None for f in _AUDIENCE_FIELDS)   # not vacuous
     assert key_row == {
         **jwt_row,
         "addressed_to": None,
@@ -1020,6 +1035,8 @@ async def test_a_principal_with_no_scope_attribute_fails_closed(share_service, m
     [jwt_row] = await _owner_list(_Principal(mcp_scope=None), monkeypatch)
     [row] = await _owner_list(_Principal(), monkeypatch)       # no `mcp_scope` at all
 
+    assert set(jwt_row) == _OWNER_ROW_FIELDS, set(jwt_row) ^ _OWNER_ROW_FIELDS
+    assert jwt_row["addressed_to"] == BOB and jwt_row["audience_source"] is not None
     assert row == {
         **jwt_row,
         "addressed_to": None,
