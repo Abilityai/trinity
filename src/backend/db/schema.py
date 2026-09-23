@@ -16,7 +16,7 @@ Tables are organized by feature area:
 - Settings: system_settings
 - Public Links: agent_public_links, public_link_verifications, public_link_usage
 - Public Chat: public_chat_sessions, public_chat_messages, public_user_memory, public_user_memory_writes
-- Tandem: agent_role_readiness
+- Tandem: agent_role_readiness, seat_decisions
 - Git: agent_git_config
 - Skills: agent_skills
 - Tags: agent_tags
@@ -1063,6 +1063,46 @@ TABLES = {
         )
     """,
 
+    # ent#638 (R25): the seat-level decision record — why a thing was approved,
+    # deferred or killed, by whom, on which criterion, and what would reverse
+    # it. Lintable fields only (`notes` is the one prose field); a decision
+    # with no alternatives is refused as a note. `expired` is never stored —
+    # it is computed on read from `review_by`; correction supersedes (a new
+    # row with `supersedes_id`), so history stays. `alternatives` / `cites` are
+    # JSON documents in TEXT (the tables.py convention — no JSON type on
+    # either engine). One home for the seat: `agent_name` × `seat_email`
+    # (lower-cased), the ent#637 memory scope.
+    "seat_decisions": """
+        CREATE TABLE IF NOT EXISTS seat_decisions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            seat_email TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            decided TEXT NOT NULL,
+            alternatives TEXT NOT NULL,
+            criterion TEXT NOT NULL,
+            reversal TEXT NOT NULL,
+            decided_by_role TEXT,
+            decided_by_person TEXT NOT NULL,
+            decided_at TEXT NOT NULL,
+            review_by TEXT NOT NULL,
+            notes TEXT,
+            ask_class TEXT,
+            scope TEXT NOT NULL DEFAULT 'seat',
+            status TEXT NOT NULL DEFAULT 'active',
+            supersedes_id TEXT,
+            cites TEXT NOT NULL DEFAULT '[]',
+            request_id TEXT,
+            close_reason TEXT,
+            closed_at TEXT,
+            closed_by TEXT,
+            reconfirmed_at TEXT,
+            source_execution_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """,
+
     # ent#637: every agent-notes write through `POST /api/agents/{name}/user-memory`
     # records the state before and after, who triggered it (the execution's
     # `triggered_by`; `schedule` when a seat run wrote it) and the schedule, so
@@ -2050,6 +2090,10 @@ INDEXES = [
     # Public user memory indexes (MEM-001)
     "CREATE INDEX IF NOT EXISTS idx_public_user_memory_lookup ON public_user_memory(agent_name, user_email)",
     "CREATE INDEX IF NOT EXISTS idx_public_user_memory_writes_lookup ON public_user_memory_writes(agent_name, user_email, written_at)",
+
+    # Seat decisions (ent#638)
+    "CREATE INDEX IF NOT EXISTS idx_seat_decisions_seat ON seat_decisions(agent_name, seat_email, status)",
+    "CREATE INDEX IF NOT EXISTS idx_seat_decisions_review ON seat_decisions(agent_name, review_by)",
 
     # System views indexes
     "CREATE INDEX IF NOT EXISTS idx_system_views_owner ON system_views(owner_id)",

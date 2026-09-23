@@ -83,6 +83,7 @@ from typing import Any, Optional
 
 from config import PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL
 from models import TaskExecutionStatus
+from utils.addressee import normalize_addressee_email  # noqa: F401 — re-exported: the resolver's public name for the one rule (#2955)
 
 logger = logging.getLogger(__name__)
 
@@ -116,27 +117,6 @@ class TurnAudience:
 
 NOBODY = TurnAudience(None, None, SOURCE_NONE)
 COULD_NOT_TELL = TurnAudience(None, None, SOURCE_AMBIGUOUS)
-
-
-def normalize_addressee_email(value: Any) -> Optional[str]:
-    """The ONE spelling of an addressee, for every writer and the reader.
-
-    The sources that feed this column do not agree: portal identities are
-    lower-cased at login, rooms stamp a raw ``current_user.email`` and
-    ``users.email`` is never normalised. Anything that is not email-shaped is
-    None — "unaddressed" has exactly one spelling, and a channel-native id
-    (``telegram:<bot>:<id>``) can never land in a column a Files tab is matched
-    against, whatever column it arrived in.
-    """
-    if not isinstance(value, str):
-        return None
-    v = value.strip().lower()
-    if not v or "@" not in v or any(c.isspace() for c in v):
-        return None
-    local, _, domain = v.rpartition("@")
-    if not local or not domain:
-        return None
-    return v
 
 
 def channel_address(channel: Optional[str], chat_id: Any) -> Optional[str]:

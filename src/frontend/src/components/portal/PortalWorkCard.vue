@@ -192,8 +192,8 @@ const TERMINAL_DOT = 'block w-2 h-2 rounded-full shrink-0'
 const toneText = computed(() => {
   switch (workTone(props.item)) {
     case 'active': return 'text-action-primary-600 dark:text-action-primary-400'
-    case 'ok': return 'text-status-success-600 dark:text-status-success-400'
-    case 'warn': return 'text-status-warning-600 dark:text-status-warning-400'
+    case 'ok': return 'text-status-success-700 dark:text-status-success-400'
+    case 'warn': return 'text-status-warning-700 dark:text-status-warning-400'
     case 'danger': return 'text-status-danger-600 dark:text-status-danger-400'
     default: return 'text-gray-600 dark:text-gray-300'
   }
@@ -207,7 +207,7 @@ const toneDot = computed(() => {
   }
 })
 function stageGlyph(state) {
-  if (state === 'done') return 'text-status-success-600 dark:text-status-success-400 shrink-0'
+  if (state === 'done') return 'text-status-success-700 dark:text-status-success-400 shrink-0'
   if (state === 'current') return 'text-action-primary-600 dark:text-action-primary-400 shrink-0'
   return 'text-gray-400 shrink-0'
 }

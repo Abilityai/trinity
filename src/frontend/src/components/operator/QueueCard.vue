@@ -22,7 +22,7 @@
               class="text-sm font-semibold text-gray-900 dark:text-white"
               :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))"
             >{{ item.agent_name }}</span>
-            <span class="text-xs text-gray-400 dark:text-gray-500">&middot;</span>
+            <span class="text-xs text-gray-500 dark:text-gray-400">&middot;</span>
             <span class="text-xs text-gray-400 dark:text-gray-400">{{ timeAgo(item.created_at) }}</span>
           </div>
 
@@ -60,7 +60,7 @@
         <button
           v-if="isExpanded"
           @click.stop="store.toggleExpand(item.id)"
-          class="flex-shrink-0 p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 rounded"
+          class="flex-shrink-0 p-1 text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded"
           aria-label="Collapse"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -144,7 +144,7 @@
               class="px-5 py-2 rounded-lg text-sm font-medium text-white transition-colors"
               :class="selectedOption
                 ? 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
-                : 'bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'"
+                : 'bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'"
             >
               Send
             </button>
@@ -167,7 +167,7 @@
               class="px-5 py-2 rounded-lg text-sm font-medium text-white transition-colors"
               :class="responseText.trim()
                 ? 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
-                : 'bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'"
+                : 'bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'"
             >
               Send Answer
             </button>

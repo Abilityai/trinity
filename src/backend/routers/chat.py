@@ -30,6 +30,7 @@ from services.capacity_manager import (
 from services import dispatch_admission_service
 from services import chat_execution_service
 from services.chat_signals import ChatAdmissionReplay, ChatDispatchError
+from services.execution_envelope import TaskExecutionErrorCode
 from database import db
 from utils.helpers import utc_now_iso
 
@@ -208,7 +209,12 @@ async def chat_with_agent(
                 "queue_length": e.depth or 0,
                 "retry_after": 30,
                 "message": f"Agent '{name}' is busy. Please try again later."
-            }
+            },
+            # #2919: an admission refusal is self-describing (the same 1:1
+            # header shape the ChatDispatchError branch below maps).
+            headers=chat_execution_service._error_code_headers(
+                TaskExecutionErrorCode.CAPACITY
+            ),
         )
     if isinstance(admission, ChatAdmissionReplay):
         if admission.in_flight:

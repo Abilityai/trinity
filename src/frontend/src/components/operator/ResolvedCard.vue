@@ -11,8 +11,8 @@
             class="text-sm font-medium text-gray-700 dark:text-gray-300"
             :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))"
           >{{ item.agent_name }}</span>
-          <span class="text-xs text-gray-400 dark:text-gray-500">&middot;</span>
-          <span class="text-xs text-gray-400 dark:text-gray-500">{{ timeAgo(item.created_at) }}</span>
+          <span class="text-xs text-gray-500 dark:text-gray-400">&middot;</span>
+          <span class="text-xs text-gray-500 dark:text-gray-400">{{ timeAgo(item.created_at) }}</span>
           <!-- #2915: an answer that never reached the agent says so here. -->
           <BaseBadge
             v-if="syncBadge"
@@ -29,23 +29,23 @@
         <div class="mt-2 flex items-center gap-2">
           <span
             v-if="isTerminalWithoutResponse"
-            class="inline-flex items-center gap-1 text-xs text-gray-400 dark:text-gray-500"
+            class="inline-flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400"
           >
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
             {{ item.status === 'expired' ? 'Expired' : 'Cancelled' }}
           </span>
-          <span v-else class="inline-flex items-center gap-1 text-xs text-status-success-600 dark:text-status-success-400">
+          <span v-else class="inline-flex items-center gap-1 text-xs text-status-success-700 dark:text-status-success-400">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
             </svg>
             {{ item.response }}
           </span>
-          <span v-if="item.response_text" class="text-xs text-gray-400 dark:text-gray-500">
+          <span v-if="item.response_text" class="text-xs text-gray-500 dark:text-gray-400">
             &mdash; {{ item.response_text }}
           </span>
-          <span class="text-xs text-gray-400 dark:text-gray-500 ml-auto">
+          <span class="text-xs text-gray-500 dark:text-gray-400 ml-auto">
             {{ timeAgo(item.responded_at || item.created_at) }}
           </span>
         </div>

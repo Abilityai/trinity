@@ -38,6 +38,8 @@ agent (MCP)                     backend                          Workspace
 ──────────                      ───────                          ─────────
 report(audience_email=…,   ──►  roster check                     agent page
        execution_id=…)          db.email_has_agent_access        (my deliverables)
+                                  ├─ malformed    → 422 (validator — the one
+                                  │    normaliser, utils/addressee.py, #2955)
                                   ├─ not a client → 400 (named)
                                   └─ unreadable   → 503                │
                                                                       │

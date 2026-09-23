@@ -9,14 +9,14 @@ checked", which is the honest state for every existing row, never "confirmed".
 
 Mirrors the SQLite ``operator_queue_sync_state`` migration.
 
-Revision ID: 0071_operator_queue_sync_state
-Revises: 0070_metric_points
+Revision ID: 0072_operator_queue_sync_state
+Revises: 0071_seat_decisions
 """
 from alembic import op
 
 
-revision = "0071_operator_queue_sync_state"
-down_revision = "0070_metric_points"
+revision = "0072_operator_queue_sync_state"
+down_revision = "0071_seat_decisions"
 branch_labels = None
 depends_on = None
 

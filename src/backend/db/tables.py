@@ -924,6 +924,38 @@ agent_role_readiness = Table(
     Column("changed_by", Text),
 )
 
+# ent#638 (R25): the seat-level decision record — see the note in db/schema.py.
+seat_decisions = Table(
+    "seat_decisions",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("seat_email", Text),
+    Column("outcome", Text),
+    Column("decided", Text),
+    Column("alternatives", Text),
+    Column("criterion", Text),
+    Column("reversal", Text),
+    Column("decided_by_role", Text),
+    Column("decided_by_person", Text),
+    Column("decided_at", Text),
+    Column("review_by", Text),
+    Column("notes", Text),
+    Column("ask_class", Text),
+    Column("scope", Text),
+    Column("status", Text),
+    Column("supersedes_id", Text),
+    Column("cites", Text),
+    Column("request_id", Text),
+    Column("close_reason", Text),
+    Column("closed_at", Text),
+    Column("closed_by", Text),
+    Column("reconfirmed_at", Text),
+    Column("source_execution_id", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
+)
+
 agent_git_config = Table(
     "agent_git_config",
     metadata,

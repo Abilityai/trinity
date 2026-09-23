@@ -566,6 +566,37 @@ Both tracks: SQLite `agent_role_readiness_table`, Alembic `0067_agent_role_readi
 `AgentRef("agent_role_readiness", "agent_name", Policy.CASCADE)`. Platform-side because
 `template.yaml`'s `x-role.status` is agent-writable and only the owner may flip a companion.
 
+**seat_decisions** (trinity-enterprise#638 / R25 — the seat-level decision record):
+```sql
+CREATE TABLE seat_decisions (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    seat_email TEXT NOT NULL,            -- lower-cased; the ent#637 seat scope
+    outcome TEXT NOT NULL,               -- approved | deferred | killed
+    decided TEXT NOT NULL,               -- one line
+    alternatives TEXT NOT NULL,          -- JSON list, >= 1 (none = a note, refused)
+    criterion TEXT NOT NULL,             -- the reusable part
+    reversal TEXT NOT NULL,              -- what would reverse it
+    decided_by_role TEXT, decided_by_person TEXT NOT NULL,
+    decided_at TEXT NOT NULL, review_by TEXT NOT NULL,   -- YYYY-MM-DD; `expired` is COMPUTED on read
+    notes TEXT,                          -- the only prose
+    ask_class TEXT,                      -- slug; groups the graduation evidence
+    scope TEXT NOT NULL DEFAULT 'seat',  -- seat | direction
+    status TEXT NOT NULL DEFAULT 'active',  -- active | superseded | closed | reversed | routed
+    supersedes_id TEXT, cites TEXT NOT NULL DEFAULT '[]', request_id TEXT,
+    close_reason TEXT, closed_at TEXT, closed_by TEXT, reconfirmed_at TEXT,
+    source_execution_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_seat_decisions_seat ON seat_decisions(agent_name, seat_email, status);
+CREATE INDEX idx_seat_decisions_review ON seat_decisions(agent_name, review_by);
+```
+Both tracks: SQLite `seat_decisions_table`, Alembic `0071_seat_decisions` (← `0070`);
+`AgentRef("seat_decisions", "agent_name", Policy.CASCADE)`. Rows are the history: a
+correction inserts a new row with `supersedes_id` and flips the old one to `superseded`
+in one CAS transaction (`db/seat_decisions.py::supersede_seat_decision`); nothing is
+deleted or edited in place. JSON lists ride in TEXT (no JSON type on either engine);
+every stat is computed in Python over one seat's rows.
+
 **agent_event_subscriptions / agent_events** (EVT-001 — agent event pub/sub):
 ```sql
 CREATE TABLE agent_event_subscriptions (

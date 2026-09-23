@@ -441,7 +441,13 @@ def format_user_memory_block(memory_record: dict) -> Optional[str]:
         return None
     agent_notes = (memory_record.get("agent_notes") or "").strip()
     summary = (memory_record.get("conversation_summary") or "").strip()
-    if not agent_notes and not summary:
+    # ent#638: the seat's standing decisions ride the same block on every
+    # caller (public link, channel adapters, seat runs, the Workspace) — the
+    # read-into-context path that makes a criterion reusable and `cites`
+    # non-zero. Read here, keyed off the record's own seat, so no caller can
+    # forget it; fail-open, bounded, no person emails.
+    decisions = _seat_decisions_block(memory_record)
+    if not agent_notes and not summary and not decisions:
         return None
 
     lines = ["## What you know about this user", ""]
@@ -449,8 +455,24 @@ def format_user_memory_block(memory_record: dict) -> Optional[str]:
         lines.extend(["### Agent notes", "", agent_notes, ""])
     if summary:
         lines.extend(["### Conversation summary", "", summary, ""])
+    if decisions:
+        lines.extend([decisions])
     lines.append("---")
     return "\n".join(lines)
+
+
+def _seat_decisions_block(memory_record: dict) -> Optional[str]:
+    agent_name = memory_record.get("agent_name")
+    seat_email = memory_record.get("user_email")
+    if not agent_name or not seat_email:
+        return None
+    try:
+        from database import db
+        from services import seat_decision_service
+        return seat_decision_service.prompt_block(db, agent_name, seat_email)
+    except Exception:  # noqa: BLE001 — a prompt never breaks on the decision record
+        logger.debug("[ent#638] decisions block skipped", exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------

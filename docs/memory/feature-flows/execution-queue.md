@@ -777,6 +777,8 @@ Returned by `/api/agents/{name}/chat` when queue is full:
 }
 ```
 
+Since #2919 this 429 — like the async `/task` capacity-and-backlog-full 429 and the sync `/task` at-capacity 429 — also carries the additive header `X-Trinity-Error-Code: capacity` (body unchanged), so a client can tell admission refused from an exhausted subscription (`billing`) without parsing the prose.
+
 ### MCP Response for Busy Agent
 Returned by `chat_with_agent` MCP tool:
 

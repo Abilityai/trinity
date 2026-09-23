@@ -74,9 +74,9 @@
              evidence and is not. Carried over from the agent page unchanged. -->
         <div v-if="ratings.total || ratings.unavailable">
           <div class="text-lg font-semibold tabular-nums leading-tight">
-            <span class="text-status-success-600 dark:text-status-success-400">{{ ratings.up }}</span>
+            <span class="text-status-success-700 dark:text-status-success-400">{{ ratings.up }}</span>
             <span class="text-gray-300 dark:text-gray-600"> / </span>
-            <span class="text-status-warning-600 dark:text-status-warning-400">{{ ratings.down }}</span>
+            <span class="text-status-warning-700 dark:text-status-warning-400">{{ ratings.down }}</span>
           </div>
           <div class="text-[11px] text-gray-500 dark:text-gray-400">{{ ratingsCaption }}</div>
         </div>

@@ -42,8 +42,8 @@
                 :class="[
                   'inline-flex items-center justify-center w-8 h-8 rounded-full',
                   file.exists
-                    ? 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-600 dark:text-status-success-400'
-                    : 'bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500'
+                    ? 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-400'
+                    : 'bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400'
                 ]"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -56,7 +56,7 @@
                 <p v-if="file.exists" class="text-xs text-gray-500 dark:text-gray-400">
                   {{ formatFileSize(file.size) }} &middot; Modified {{ formatDate(file.modified) }}
                 </p>
-                <p v-else class="text-xs text-gray-400 dark:text-gray-500">
+                <p v-else class="text-xs text-gray-500 dark:text-gray-400">
                   Not present
                 </p>
               </div>
@@ -114,10 +114,10 @@
             </button>
           </div>
           <p class="text-xs text-gray-500 dark:text-gray-400">
-            <span v-if="hasEncryptedFile" class="text-status-success-600 dark:text-status-success-400">
+            <span v-if="hasEncryptedFile" class="text-status-success-700 dark:text-status-success-400">
               .credentials.enc exists
             </span>
-            <span v-else class="text-gray-400 dark:text-gray-500">
+            <span v-else class="text-gray-500 dark:text-gray-400">
               No encrypted backup
             </span>
           </p>

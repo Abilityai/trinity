@@ -25,6 +25,7 @@ import os
 import secrets
 from datetime import datetime
 from pathlib import Path
+from typing import List, Optional
 
 # Re-export models for backward compatibility
 from db_models import (
@@ -132,6 +133,7 @@ from db.public_links import PublicLinkOperations
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
 from db.role_readiness import RoleReadinessOperations
+from db.seat_decisions import SeatDecisionOperations
 from db.skill_sources import SkillSourcesOperations
 from db.public_chat import PublicChatOperations
 from db.tags import TagOperations
@@ -1009,6 +1011,7 @@ class DatabaseManager:
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
         self._role_readiness_ops = RoleReadinessOperations()
+        self._seat_decision_ops = SeatDecisionOperations()
         self._skill_sources_ops = SkillSourcesOperations()
         self._public_chat_ops = PublicChatOperations()
         self._tag_ops = TagOperations()
@@ -2733,6 +2736,30 @@ class DatabaseManager:
 
     def set_agent_role_readiness(self, agent_name: str, status: str, changed_by: str):
         return self._role_readiness_ops.set_role_readiness(agent_name, status, changed_by)
+
+    # Seat decisions (delegated to db/seat_decisions.py) — ent#638 / R25.
+    # Explicit signatures on purpose (learnings 2026-09-01: a kwarg the mixin
+    # gains must land here too); parity pinned by test_ent638_seat_decisions.
+    def insert_seat_decision(self, values: dict) -> dict:
+        return self._seat_decision_ops.insert_seat_decision(values)
+
+    def get_seat_decision(self, agent_name: str, decision_id: str) -> Optional[dict]:
+        return self._seat_decision_ops.get_seat_decision(agent_name, decision_id)
+
+    def list_seat_decisions(self, agent_name: str, seat_email: Optional[str] = None, *, limit: int = 500) -> List[dict]:
+        return self._seat_decision_ops.list_seat_decisions(agent_name, seat_email, limit=limit)
+
+    def list_seat_decision_seats(self, agent_name: str, *, limit: int = 50) -> List[str]:
+        return self._seat_decision_ops.list_seat_decision_seats(agent_name, limit=limit)
+
+    def supersede_seat_decision(self, agent_name: str, old_id: str, values: dict) -> Optional[dict]:
+        return self._seat_decision_ops.supersede_seat_decision(agent_name, old_id, values)
+
+    def set_seat_decision_status(self, agent_name: str, decision_id: str, status: str, *, reason: Optional[str], by: str) -> bool:
+        return self._seat_decision_ops.set_seat_decision_status(agent_name, decision_id, status, reason=reason, by=by)
+
+    def reconfirm_seat_decision(self, agent_name: str, decision_id: str, review_by: str) -> bool:
+        return self._seat_decision_ops.reconfirm_seat_decision(agent_name, decision_id, review_by)
 
     def is_skill_assigned(self, agent_name: str, skill_name: str):
         return self._skills_ops.is_skill_assigned(agent_name, skill_name)

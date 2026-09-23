@@ -2422,6 +2422,44 @@ export class TrinityClient {
   }
 
   // ============================================================================
+  // Seat Decision Record (trinity-enterprise#638, R25)
+  // ============================================================================
+
+  /**
+   * Record a decision for the seat an execution serves. The seat is resolved
+   * server-side from `execution_id`; `idempotencyKey` makes a transport retry
+   * record once (Invariant #18).
+   */
+  async recordSeatDecision(
+    agentName: string,
+    data: Record<string, unknown>,
+    idempotencyKey?: string
+  ): Promise<{ success: boolean; decision: Record<string, unknown>; hint?: string | null; replayed?: boolean }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/decisions`,
+      data,
+      false,
+      undefined,
+      idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined
+    );
+  }
+
+  /** The seat's standing decisions + evidence stats (no person emails). */
+  async listSeatDecisions(
+    agentName: string,
+    executionId: string,
+    includeHistory: boolean = false
+  ): Promise<{ agent_name: string; decisions: Record<string, unknown>[]; stats: Record<string, unknown> }> {
+    const q = new URLSearchParams({ execution_id: executionId });
+    if (includeHistory) q.set("include_history", "true");
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/decisions?${q.toString()}`
+    );
+  }
+
+  // ============================================================================
   // Agent Event Subscriptions (EVT-001)
   // ============================================================================
 

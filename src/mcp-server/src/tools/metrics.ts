@@ -23,6 +23,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { resolveActingAgent } from "../access.js";
 
 /** Kept in step with `models.METRIC_BATCH_MAX_POINTS`; the backend enforces. */
 const MAX_POINTS = 1000;
@@ -80,21 +81,16 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
   };
 
   /**
-   * Resolve the recording agent from the auth context. Agent-scoped keys only
-   * — these tools act AS the calling agent, so there is no target parameter to
-   * spoof (the `report` / `set_canvas` shape).
+   * Resolve the recording agent from the auth context. These tools act AS the
+   * caller and take no target parameter to spoof (the `report` / `set_canvas`
+   * shape), so the identity comes from the key — one shared rule
+   * (`resolveActingAgent`, #2975), which admits the platform orchestrator's
+   * system-scoped key alongside an agent-scoped one.
    */
   const getAgentName = (
     authContext: McpAuthContext | undefined,
     toolName: string,
-  ): string => {
-    if (authContext?.scope === "agent" && authContext.agentName) {
-      return authContext.agentName;
-    }
-    throw new Error(
-      `The ${toolName} tool requires an agent-scoped API key (it acts as the calling agent).`,
-    );
-  };
+  ): string => resolveActingAgent(authContext, `The ${toolName} tool`);
 
   return {
     // ========================================================================

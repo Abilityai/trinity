@@ -60,6 +60,11 @@
     </div>
 
     <!-- Matrix table -->
+    <!-- #1925 triage — NOT a tab strip: a bounded wide table. Horizontal scroll
+         INSIDE the container is the correct treatment for unbounded column width
+         (design-system principle 7); collapsing columns into a "More" menu would
+         hide data, not navigation. Left as-is deliberately so a later audit does
+         not re-flag it. -->
     <div v-else class="overflow-x-auto border border-gray-200 dark:border-gray-700 rounded-lg">
       <table class="w-full text-sm">
         <thead>
@@ -107,7 +112,7 @@
                 >
                   No executor
                 </span>
-                <span class="text-xs text-gray-400 dark:text-gray-500">({{ step.type }})</span>
+                <span class="text-xs text-gray-500 dark:text-gray-400">({{ step.type }})</span>
               </div>
             </td>
             <!-- Role cells for each agent -->

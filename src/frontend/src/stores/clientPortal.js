@@ -386,6 +386,16 @@ export const useClientPortalStore = defineStore('clientPortal', {
     roleError: null,
     roleFlipError: null,
     roleFlipping: false,
+    // ent#638 — the seat decision record: why things were approved, deferred
+    // or killed. Same generation guard; refusals (the grammar receipt) land
+    // next to the form, keyed by field.
+    decisionsAgent: null,
+    _decisionsGeneration: 0,
+    decisions: null,          // PortalSeatDecisions
+    decisionsLoaded: false,
+    decisionsError: null,
+    decisionError: null,      // {code, message, fields:{}} of the failed verb
+    decisionBusy: null,       // 'record' | decision id in flight
     reportPayloads: {},
     // id -> {total, loaded}; present only for a payload the server actually
     // windowed, so a bounded document never renders a paging footer.
@@ -1073,6 +1083,89 @@ export const useClientPortalStore = defineStore('clientPortal', {
         return false
       } finally {
         if (gen === this._roleGeneration) this.roleFlipping = false
+      }
+    },
+
+    // ---- ent#638: the seat decision record ------------------------------
+
+    resetAgentDecisions(agentName = null) {
+      this._decisionsGeneration += 1
+      this.decisionsAgent = agentName
+      this.decisions = null
+      this.decisionsLoaded = false
+      this.decisionsError = null
+      this.decisionError = null
+      this.decisionBusy = null
+    },
+
+    async loadAgentDecisions(agentName) {
+      if (this.decisionsAgent !== agentName) this.resetAgentDecisions(agentName)
+      const gen = this._decisionsGeneration
+      this.decisionsError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/decisions`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._decisionsGeneration) return
+        this.decisions = data
+        this.decisionsLoaded = true
+      } catch {
+        if (gen !== this._decisionsGeneration) return
+        this.decisionsError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    _decisionRefusal(e) {
+      const d = e?.response?.data?.detail
+      if (d && typeof d === 'object') {
+        return { code: d.code || null, message: d.message || 'The record was refused.',
+                 fields: (d.receipt && d.receipt.fields) || {} }
+      }
+      return { code: null, message: typeof d === 'string' ? d : 'The request failed. Try again.', fields: {} }
+    },
+
+    /** Record a decision for my seat. Returns the result or null on refusal. */
+    async recordSeatDecision(agentName, body) {
+      const gen = this._decisionsGeneration
+      this.decisionError = null
+      this.decisionBusy = 'record'
+      try {
+        const { data } = await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/decisions`,
+          body, { headers: this.authHeader },
+        )
+        if (gen !== this._decisionsGeneration) return data
+        await this.loadAgentDecisions(agentName)
+        return data
+      } catch (e) {
+        if (gen !== this._decisionsGeneration) return null
+        this.decisionError = this._decisionRefusal(e)
+        return null
+      } finally {
+        if (gen === this._decisionsGeneration) this.decisionBusy = null
+      }
+    },
+
+    /** close / reverse / reconfirm / supersede one of my decisions. */
+    async actOnSeatDecision(agentName, decisionId, body) {
+      const gen = this._decisionsGeneration
+      this.decisionError = null
+      this.decisionBusy = decisionId
+      try {
+        const { data } = await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/decisions/${decisionId}/actions`,
+          body, { headers: this.authHeader },
+        )
+        if (gen !== this._decisionsGeneration) return data
+        await this.loadAgentDecisions(agentName)
+        return data
+      } catch (e) {
+        if (gen !== this._decisionsGeneration) return null
+        this.decisionError = { ...this._decisionRefusal(e), decisionId }
+        return null
+      } finally {
+        if (gen === this._decisionsGeneration) this.decisionBusy = null
       }
     },
 

@@ -61,7 +61,7 @@
         class="ml-auto mr-2 truncate text-xs"
         :class="notice.level === 'critical'
           ? 'text-status-danger-600 dark:text-status-danger-400 font-medium'
-          : 'text-status-warning-600 dark:text-status-warning-400'"
+          : 'text-status-warning-700 dark:text-status-warning-400'"
         :title="`${notice.headline}. ${notice.detail}`"
         data-testid="room-budget-headline"
       >
@@ -117,7 +117,7 @@
           <!-- A system line is the room narrating itself: a join, a budget
                close, a wake that did not happen. It is not from a participant,
                so it renders as neither side of the conversation. -->
-          <p v-if="m.kind === 'system'" class="text-center text-xs text-gray-400 dark:text-gray-500 py-1">
+          <p v-if="m.kind === 'system'" class="text-center text-xs text-gray-500 dark:text-gray-400 py-1">
             {{ m.content }}
           </p>
 

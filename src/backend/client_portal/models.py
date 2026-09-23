@@ -615,6 +615,101 @@ class PortalRoleReadinessFlip(BaseModel):
     status: Literal["calibrating", "ready"]
 
 
+class PortalDecisionBy(BaseModel):
+    role: Optional[str] = None
+    person: Optional[str] = None
+
+
+class PortalSeatDecision(BaseModel):
+    """ent#638 — one seat decision as the Workspace sees it. `status` is the
+    EFFECTIVE state (`expired` is computed from `review_by`, never stored);
+    `writable` says whether this principal may act on it."""
+    id: str
+    seat: str
+    outcome: Literal["approved", "deferred", "killed"]
+    decided: str
+    alternatives: list[str] = Field(default_factory=list)
+    criterion: str
+    reversal: str
+    decided_by: PortalDecisionBy
+    decided_at: str
+    review_by: str
+    notes: Optional[str] = None
+    ask_class: Optional[str] = None
+    scope: Literal["seat", "direction"] = "seat"
+    status: Literal["active", "expired", "superseded", "closed", "reversed", "routed"]
+    supersedes_id: Optional[str] = None
+    cites: list[str] = Field(default_factory=list)
+    request_id: Optional[str] = None
+    close_reason: Optional[str] = None
+    closed_at: Optional[str] = None
+    closed_by: Optional[str] = None
+    reconfirmed_at: Optional[str] = None
+    writable: bool = False
+
+
+class PortalDecisionClassEvidence(BaseModel):
+    ask_class: str
+    count: int
+    criteria: list[str] = Field(default_factory=list)
+    reversals: int = 0
+    expired: int = 0
+    stable: bool = False
+
+
+class PortalDecisionStats(BaseModel):
+    """ent#638 — conversion, not volume: `reused` = records a LATER record
+    cited; per ask class the evidence the autonomy dial (#641) reads."""
+    recorded: int = 0
+    reused: int = 0
+    reuse_rate: float = 0.0
+    reversed: int = 0
+    ask_classes: list[PortalDecisionClassEvidence] = Field(default_factory=list)
+
+
+class PortalSeatDecisions(BaseModel):
+    """ent#638 — the seats this principal may read on the agent, their
+    decisions (newest first, history included and marked), the stats of the
+    principal's OWN seat, and which seat is theirs."""
+    agent_name: str
+    my_seat: str
+    seats: list[str] = Field(default_factory=list)
+    decisions: list[PortalSeatDecision] = Field(default_factory=list)
+    stats: PortalDecisionStats = Field(default_factory=PortalDecisionStats)
+    can_record: bool = True
+
+
+class PortalSeatDecisionRecord(BaseModel):
+    """The person records a decision for their own seat (or the owner for a
+    named seat). Grammar is checked by the service, which answers a receipt."""
+    outcome: str = Field(..., max_length=16)
+    decided: str = Field(..., max_length=2000)
+    alternatives: list[str] = Field(default_factory=list, max_length=32)
+    criterion: str = Field(..., max_length=2000)
+    reversal: str = Field(..., max_length=2000)
+    review_by: str = Field(..., max_length=32)
+    scope: str = Field("seat", max_length=16)
+    notes: Optional[str] = Field(None, max_length=4000)
+    ask_class: Optional[str] = Field(None, max_length=128)
+    decided_by_role: Optional[str] = Field(None, max_length=128)
+    cites: list[str] = Field(default_factory=list, max_length=32)
+    request_id: Optional[str] = Field(None, max_length=200)
+    seat: Optional[str] = Field(None, max_length=254)   # owner only; default = own seat
+
+
+class PortalSeatDecisionAction(BaseModel):
+    """close / reverse / reconfirm / supersede an active decision."""
+    action: Literal["close", "reverse", "reconfirm", "supersede"]
+    reason: Optional[str] = Field(None, max_length=2000)
+    review_by: Optional[str] = Field(None, max_length=32)
+    fields: Optional[dict] = None
+
+
+class PortalSeatDecisionResult(BaseModel):
+    decision: PortalSeatDecision
+    hint: Optional[str] = None
+
+
 class PortalAgentPage(BaseModel):
     """The Workspace agent page (ent#360) — one call, because the page is one
     screen and five round trips would render it in pieces."""
