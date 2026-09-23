@@ -657,18 +657,131 @@ fi
 # (`_GITIGNORE_PATTERNS` in src/backend/services/git_service.py, applied on git
 # init/push by `_build_gitignore_merge_command`) carries `.tmp/`, so the
 # relocated CODEX_HOME under $TMPDIR is excluded from git without a shell write.
+# The AGENTS.md mirror is SHARED by every runtime that reads AGENTS.md as its
+# instruction file — Codex and OpenCode both do — so it lives outside the
+# per-runtime guards. Matched on the lowercased value (#1187 casing trap).
+_agent_runtime_lc="$(printf '%s' "${AGENT_RUNTIME:-}" | tr '[:upper:]' '[:lower:]')"
+case "$_agent_runtime_lc" in
+  codex|opencode)
+    # SYMLINK, not a copy (Abilityai/lilu#257 step 0). The copy was made once,
+    # on the first boot that found no AGENTS.md, and then never again — so every
+    # later edit to CLAUDE.md (a git sync, a skill install, an operator change)
+    # left the Codex agent running on a frozen snapshot of its own identity,
+    # silently and with no way to notice. A relative symlink re-resolves on
+    # every read, so the two files cannot diverge.
+    #
+    # Upgrade path off the copy-era image, in three cases, because a regular
+    # AGENTS.md is ambiguous — it is either the copy this block used to make or
+    # an AGENTS.md the template author deliberately wrote:
+    #   * absent, or a symlink pointing anywhere else  -> (re)link. Self-healing.
+    #   * regular file BYTE-IDENTICAL to CLAUDE.md     -> provably our own
+    #     mirror, so replacing it with the link loses nothing.
+    #   * regular file that DIFFERS                    -> left alone; it may be
+    #     authored. But say so loudly: an unexplained divergence here is exactly
+    #     the failure that was previously silent.
+    if [ -f "/home/developer/CLAUDE.md" ]; then
+        if [ -L "/home/developer/AGENTS.md" ] || [ ! -e "/home/developer/AGENTS.md" ] || \
+           cmp -s /home/developer/CLAUDE.md /home/developer/AGENTS.md; then
+            if [ "$(readlink /home/developer/AGENTS.md 2>/dev/null)" != "CLAUDE.md" ]; then
+                ln -sfn CLAUDE.md /home/developer/AGENTS.md 2>/dev/null && \
+                    echo "  Linked AGENTS.md -> CLAUDE.md for Codex/OpenCode" || \
+                    echo "  Warning: could not create AGENTS.md symlink"
+            fi
+        else
+            echo "  Warning: AGENTS.md is a regular file whose content differs from" \
+                 "CLAUDE.md — leaving it alone. Codex and OpenCode read AGENTS.md, so this" \
+                 "agent identity will NOT track CLAUDE.md. Delete AGENTS.md to adopt the mirror."
+        fi
+    fi
+    ;;
+esac
+
 if [ "${AGENT_RUNTIME}" = "codex" ]; then
     echo "Configuring Codex runtime..."
-
-    if [ -f "/home/developer/CLAUDE.md" ] && [ ! -f "/home/developer/AGENTS.md" ]; then
-        cp /home/developer/CLAUDE.md /home/developer/AGENTS.md 2>/dev/null && \
-            echo "  Mirrored CLAUDE.md -> AGENTS.md for Codex" || \
-            echo "  Warning: could not create AGENTS.md"
-    fi
 
     CODEX_HOME_DIR="${CODEX_HOME:-${AGENT_TMPDIR}/codex}"
     mkdir -p "${CODEX_HOME_DIR}" 2>/dev/null && chmod 700 "${CODEX_HOME_DIR}" 2>/dev/null || \
         echo "  Warning: could not create CODEX_HOME ${CODEX_HOME_DIR}"
+fi
+
+# === OpenCode runtime setup (Abilityai/lilu#257) ===
+# Matched on the LOWERCASED runtime value. The Codex block above compares
+# `"${AGENT_RUNTIME}" = "codex"` literally, which is safe only because
+# crud.py lowercases before writing the env var — a single backend change away
+# from silently skipping the whole block (#1187 casing trap). This one does not
+# depend on that (_agent_runtime_lc is derived above, before the mirror block).
+if [ "$_agent_runtime_lc" = "opencode" ]; then
+    echo "Configuring OpenCode runtime..."
+
+    # XDG relocation (verified working against v1.18.32): opencode.db, logs,
+    # snapshots, the models.json cache and the config tree all follow these.
+    # Left under $HOME they would land inside the git-tracked workspace and
+    # dirty auto-sync on every turn. $AGENT_TMPDIR is the disk-backed scratch
+    # dir (#1098), already covered by the canonical gitignore's `.tmp/` — so
+    # startup.sh still writes no .gitignore (#953).
+    #
+    # $HOME itself is deliberately UNCHANGED: the `.claude/skills` scan and the
+    # `~/.claude/CLAUDE.md` read both resolve through it, and relocating HOME
+    # to make one CLI tidy would blind the platform to the agent's own skills.
+    OPENCODE_ROOT="${AGENT_TMPDIR}/opencode"
+    export XDG_DATA_HOME="${OPENCODE_ROOT}/data"
+    export XDG_CONFIG_HOME="${OPENCODE_ROOT}/config"
+    export XDG_CACHE_HOME="${OPENCODE_ROOT}/cache"
+    export XDG_STATE_HOME="${OPENCODE_ROOT}/state"
+    OPENCODE_CONFIG_DIR="${XDG_CONFIG_HOME}/opencode"
+    mkdir -p "${XDG_DATA_HOME}" "${OPENCODE_CONFIG_DIR}" "${XDG_CACHE_HOME}" \
+             "${XDG_STATE_HOME}" 2>/dev/null || \
+        echo "  Warning: could not create OpenCode XDG dirs under ${OPENCODE_ROOT}"
+    chmod 700 "${OPENCODE_ROOT}" 2>/dev/null || true
+
+    # Nothing here may reach the network at turn time. autoupdate off keeps the
+    # pinned binary pinned; the LSP download and the default plugin set are
+    # both cold-start npm/HTTP fetches; `share: disabled` stops a turn from
+    # being publishable to opencode's hosted share service. Env AND config,
+    # because the env vars cover the paths the config file does not.
+    export OPENCODE_DISABLE_AUTOUPDATE=1
+    export OPENCODE_DISABLE_LSP_DOWNLOAD=1
+    export OPENCODE_DISABLE_DEFAULT_PLUGINS=1
+
+    # Generated, not shipped, and written only if absent so an operator's own
+    # additions survive a restart.
+    #
+    # The Ollama / OpenAI-compatible provider block is deliberately NOT written
+    # here. It is computed per turn by
+    # `agent_server/services/opencode_provider.py` from
+    # OPENCODE_OLLAMA_BASE_URL + the turn's model, because the agent's .env is
+    # re-read at every spawn (#1999): a block baked once at boot would be stale
+    # from the operator's first change onward, and nothing inside the container
+    # should ever need hand-editing to point an agent at a different DGX.
+    # An operator block placed in THIS file is still honoured — the per-turn
+    # merge treats it as authoritative for npm/options.
+    if [ ! -f "${OPENCODE_CONFIG_DIR}/opencode.json" ]; then
+        cat > "${OPENCODE_CONFIG_DIR}/opencode.json" <<'OPENCODE_JSON'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "share": "disabled",
+  "autoupdate": false
+}
+OPENCODE_JSON
+        echo "  Wrote ${OPENCODE_CONFIG_DIR}/opencode.json (privacy defaults)"
+    fi
+
+    # The image pre-seeds the provider npm packages into /opt/trinity/opencode
+    # because OpenCode installs them at RUNTIME into
+    # $XDG_CONFIG_HOME/opencode/node_modules — a live npm-registry dependency
+    # on every cold container, and an air-gap failure. Link, don't copy: the
+    # tree is large and the image copy is read-only and shared.
+    if [ -d /opt/trinity/opencode/node_modules ] && \
+       [ ! -e "${OPENCODE_CONFIG_DIR}/node_modules" ]; then
+        ln -s /opt/trinity/opencode/node_modules "${OPENCODE_CONFIG_DIR}/node_modules" \
+            && echo "  Linked pre-seeded OpenCode provider packages" \
+            || echo "  Warning: could not link pre-seeded provider packages"
+        for _f in package.json package-lock.json; do
+            [ -f "/opt/trinity/opencode/$_f" ] && [ ! -e "${OPENCODE_CONFIG_DIR}/$_f" ] && \
+                cp "/opt/trinity/opencode/$_f" "${OPENCODE_CONFIG_DIR}/$_f" 2>/dev/null || true
+        done
+    fi
+
 fi
 
 # Ensure core agent-server dependencies are installed correctly

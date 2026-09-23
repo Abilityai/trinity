@@ -1,0 +1,7 @@
+{
+  "file": "unit/test_lilu257_opencode_backend_registration.py",
+  "feature": "Abilityai/lilu#257",
+  "added": "2026-09-23",
+  "categories": ["backend", "agents"],
+  "description": "Backend-side acceptance of the `opencode` runtime (Abilityai/lilu#257 step 1) — the four places the backend must know about a fourth runtime, each failing silently and differently if missed. KNOWN_RUNTIME_NAMES (a missing entry turns a valid `runtime: opencode` into a 400 at create time; unknown values still 400). validate_runtime_model (OpenCode's `-m` takes `provider/model`; a bare id would otherwise surface as a failed turn INSIDE the container long after creation reported success — the 400 must name both the rejected value and what a valid id looks like, and the rule must not leak onto Codex/Claude where it would reject every valid `gpt-*` or `sonnet`). is_claude_runtime (a True here would assign a Claude OAuth subscription to an OpenCode agent, #1187 decision 7). RUNTIMES_WITHOUT_SESSION_TAB_RESUME (OpenCode has no cached-UUID --resume, so the Session tab must not claim continuity it cannot deliver). Two parity assertions rather than assumptions: the backend Session-tab gate is checked against the runtime's own capabilities(), and validate_runtime_model is checked against the agent-side validate_provider_model over a shared case list — the backend cannot import the base image, so the two shape rules are a parity pair."
+}

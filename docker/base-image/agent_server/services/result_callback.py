@@ -38,6 +38,7 @@ from fastapi import HTTPException
 
 from ..state import agent_state
 from .process_registry import get_process_registry
+from .runtime_adapter import is_claude_runtime as _is_claude_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +92,15 @@ _inflight: "Set[asyncio.Task[Any]]" = set()
 
 def is_claude_runtime() -> bool:
     """v1 async dispatch is Claude-runtime only (decision 5): the typed
-    terminal-reason envelope is Claude-specific."""
-    return agent_state.agent_runtime in ("claude-code", "claude")
+    terminal-reason envelope is Claude-specific.
+
+    Delegates to the canonical predicate in ``runtime_adapter`` (the module
+    that owns ``_CLAUDE_RUNTIMES``) rather than re-spelling the membership
+    test — the local spelling was also case-SENSITIVE, so ``AGENT_RUNTIME``
+    set to ``Claude-Code`` disabled async dispatch on a Claude agent (the
+    #1187 casing trap, one layer down).
+    """
+    return _is_claude_runtime(agent_state.agent_runtime)
 
 
 def _callbacks_configured() -> bool:

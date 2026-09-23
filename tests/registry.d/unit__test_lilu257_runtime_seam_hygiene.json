@@ -1,0 +1,10 @@
+{
+  "file": "unit/test_lilu257_runtime_seam_hygiene.py",
+  "feature": "Abilityai/lilu#257",
+  "added": "2026-09-23",
+  "categories": [
+    "agents",
+    "docker"
+  ],
+  "description": "Runtime seam hygiene ahead of the OpenCode runtime (Abilityai/lilu#257 step 0) — two defects the Codex runtime already had and a fourth runtime would inherit verbatim. (1) `plugins_reinstall` ran on EVERY runtime, and every subprocess it runs is `claude plugin ...`: on a codex/gemini agent that is two guaranteed-failing execs per boot plus a `withheld:` state file describing a capability that runtime does not have. It is now gated on `is_claude_runtime()` and records a NAMED `skipped_runtime` status, so 'off because this runtime has no Claude plugins' cannot be mistaken for 'it broke' (the #1929 contract). (2) The Codex `CLAUDE.md -> AGENTS.md` mirror was a one-shot `cp` guarded by `[ ! -f AGENTS.md ]`, so it never ran again — every later CLAUDE.md edit (git sync, skill install, operator change) left Codex reading a frozen snapshot of the agent's identity, silently. Now a relative symlink that re-resolves on every read, with a three-case upgrade path off the copy-era image: absent/wrong-symlink relinks, a byte-identical regular file is adopted (provably our own mirror), and a DIFFERING regular file is left alone but warned about loudly. The mirror tests execute the shipped startup.sh block itself against a tmpdir $HOME, not a re-typed copy. Also pins the predicate: case-insensitive (the #1187 casing trap) and importable BOTH as a package member and standalone, because `plugins_reinstall` is a `python3 -m` boot hook — hence the zero-dependency `agent_server/runtime_names.py` leaf, since an import fallback degrading to 'assume Claude' would be a gate that silently does nothing. No Docker, no live backend."
+}
