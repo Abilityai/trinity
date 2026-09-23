@@ -94,5 +94,11 @@
     "title": "please use ***REDACTED*** for this",
     "note": "a secret: masked by the server only",
     "masked": true
+  },
+  {
+    "message": "Basic question: how do I export?",
+    "title": "***REDACTED***: how do I export?",
+    "note": "plain English the server masks too (\"Basic <word>\")",
+    "masked": true
   }
 ]

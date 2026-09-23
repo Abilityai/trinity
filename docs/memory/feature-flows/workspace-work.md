@@ -221,7 +221,9 @@ live path at all. Now:
   chat's synthetic cards (live and terminal) title themselves with
   `previewTitle`, a mirror of `service.clean_title` pinned row-for-row by
   `tests/fixtures/portal-work-titles.json`, so the feed's row lands without
-  re-wrapping the title; only secret masking is not mirrored. Known and out
+  re-wrapping the title; only secret masking is not mirrored, and the
+  server's sanitiser masks some plain words too ("Basic question"), so those
+  titles still change when the row lands. Known and out
   of scope: `stages ↔ unknown`, and a row going stale mid-turn (#2964).
 - **Scroll.** `submitUserText` already pins before `deliver`; the card mounts
   after, so a `watch(sending)` re-pins once, on `nextTick`, guarded by

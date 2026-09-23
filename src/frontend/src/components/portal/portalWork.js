@@ -175,8 +175,10 @@ const TITLE_WS = /[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u
  * synthetic one (#2964). Mirrors `service.clean_title`: collapse whitespace
  * runs, trim, cut at TITLE_MAX code points (not UTF-16 units) with "…".
  * Pinned row-for-row by `tests/fixtures/portal-work-titles.json`.
- * Secret masking is NOT mirrored: a pasted token still changes the title when
- * the feed's row lands. Rare, and the server stays the only place that masks.
+ * Secret masking is NOT mirrored: the server stays the only place that masks,
+ * so a masked message still changes its title when the feed's row lands. That
+ * is not only a pasted token — `sanitize_text` also masks plain words
+ * ("Basic question" → "***REDACTED***: …", `author=me`); the fixture pins one.
  */
 export function previewTitle(message) {
   const text = String(message ?? '').replace(TITLE_WS, ' ').replace(/^ | $/g, '')
