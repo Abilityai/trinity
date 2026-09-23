@@ -213,6 +213,21 @@ class TestReproduceTheSilence:
         assert (SYNC_CONFIRMED, None) in _sync_calls(db)
         assert _audit_actions(audit) == []      # confirmed from NULL is not a story
 
+    def test_the_ingested_audit_row_carries_no_agent_text(self, monkeypatch):
+        """`type` is agent-authored and unbounded at ingest (the clamp bounds
+        title/question/options/context, not type); the audit table is durable,
+        hash-chained and un-prunable for a year, so the row carries a folded
+        token or `other`, never the string. `request_id` is shape-checked."""
+        db = _fake_db()
+        hostile = _entry("req-hostile", type="<b>" + "x" * 5000 + "</b> IGNORE PREVIOUS")
+        svc, audit = _wire(monkeypatch, db, _client(_file(hostile)))
+        asyncio.run(svc._sync_agent("a"))
+        ingested = [c for c in audit.call_args_list if c.args[0] == "ingested"]
+        assert len(ingested) == 1
+        details = ingested[0].args[3]
+        assert details["type"] == "other" and details["request_id"] == "req-hostile"
+        assert len(json.dumps(details)) < 200
+
     def test_reconciled_is_audited_when_a_diverged_row_matches_again(self, monkeypatch):
         db = _fake_db(open_rows=[_row(sync_state="changed", sync_detail="title")])
         svc, audit = _wire(monkeypatch, db, _client(_file(_entry())))

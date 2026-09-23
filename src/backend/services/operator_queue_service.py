@@ -1414,8 +1414,12 @@ class OperatorQueueSyncService:
                 agent_name, {"id": new_id, "sync_state": None, "sync_detail": None},
                 SYNC_CONFIRMED, None, now,
             )
+            # `type` is agent-authored free text the clamp does not bound; the
+            # audit row is durable operator-visible state (G-04), so it carries
+            # the folded token or `other` — never the string itself. `req_id`
+            # passed the `_ID_RE` shape check above.
             await _audit_sync("ingested", agent_name, new_id,
-                              {"request_id": req_id, "type": clamped.get("type")})
+                              {"request_id": req_id, "type": _fold_agent_status(clamped.get("type"))})
 
         # #2915: open rows the file no longer carries. The entry was pruned or the
         # file is gone — the platform used to keep showing a live card for it.
