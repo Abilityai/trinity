@@ -73,7 +73,7 @@ The curated set (three):
 
 | id | tier | why |
 |---|---|---|
-| `claude-opus-5` | Most capable | the top tier |
+| `claude-opus-5-5` | Most capable | the top tier (#2987) |
 | `claude-sonnet-5` | Balanced — fast and smart | the everyday choice |
 | `claude-haiku-4-5-20251001` | Fastest | the cheap/quick tier |
 
@@ -119,7 +119,7 @@ construction.
                          "source": "agent" } }      // "agent" | "platform"
   ],
   "model_options": [                                 // INSTANCE-level, not per card
-    { "id": "claude-opus-5", "tier": "Most capable", "label": "Claude Opus 5" }
+    { "id": "claude-opus-5-5", "tier": "Most capable", "label": "Claude Opus 5.5" }
   ]
 }
 ```
