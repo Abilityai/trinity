@@ -171,6 +171,19 @@ provision_metadata_ip() {
             curl -fsS --max-time 10 \
                 http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address 2>/dev/null
             ;;
+        vultr)
+            # Vultr's plain-text VALUE endpoint, deliberately not `/v1.json`:
+            # this runs as the "am I on a cloud VM" guard BEFORE provision_machine
+            # installs anything, so it may depend on nothing but curl. Vultr's own
+            # image happens to ship jq too, but that is the image's choice and not
+            # a contract this guard should rest on. The service takes no
+            # authentication and no header. Interface 0 is the public one —
+            # verified live (`network-type` reads `public`, and a stock instance
+            # has exactly one interface), and the rule cloud-init's own Vultr
+            # datasource uses.
+            curl -fsS --max-time 10 \
+                http://169.254.169.254/v1/interfaces/0/ipv4/address 2>/dev/null
+            ;;
     esac
 }
 
@@ -186,16 +199,26 @@ provision_default_provenance() {
     esac
 }
 
+# Every apt call here goes through this, because provision_machine runs at FIRST
+# BOOT on an imageless install (#2282) and Ubuntu's own apt-daily /
+# unattended-upgrades units hold the dpkg lock right then. A non-interactive
+# apt-get does not wait for it, so it exits 100 under `set -e` and the install
+# dies before Docker is installed — intermittently, which reads as a flake.
+# The Packer bakery sidesteps this with `cloud-init status --wait` before the
+# build's first apt; that remedy is unavailable to a script cloud-init is
+# itself running, hence the timeout.
+provision_apt() { apt-get -o DPkg::Lock::Timeout=600 "$@"; }
+
 provision_machine() {
     echo "→ Installing Docker, Caddy ${PROVISION_CADDY_VERSION} and the host firewall..."
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -q
+    provision_apt update -q
     # NOT iptables-persistent: ufw declares `Breaks: iptables-persistent`, so apt
     # resolves that install by silently REMOVING ufw. The DOCKER-USER rules are
     # persisted by trinity-docker-firewall.service instead, which is the better
     # mechanism anyway — DOCKER-USER does not exist until Docker creates it, so
     # restoring saved rules at boot is racy.
-    apt-get install -y -q ca-certificates curl gnupg git jq ufw
+    provision_apt install -y -q ca-certificates curl gnupg git jq ufw
 
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
@@ -212,8 +235,8 @@ https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_C
     curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
         > /etc/apt/sources.list.d/caddy-stable.list
 
-    apt-get update -q
-    apt-get install -y -q docker-ce docker-ce-cli containerd.io \
+    provision_apt update -q
+    provision_apt install -y -q docker-ce docker-ce-cli containerd.io \
         docker-buildx-plugin docker-compose-plugin "caddy=${PROVISION_CADDY_VERSION}"
     systemctl enable --now docker
 
@@ -454,9 +477,9 @@ if [ "$PROVISION" = "1" ]; then
     [ "$(uname -s)" = "Linux" ] || provision_die "only runs on Linux — it installs system packages, resets the firewall and claims :80/:443."
     [ "$(id -u)" = "0" ] || provision_die "must run as root."
     case "$PROVISION_CLOUD" in
-        digitalocean) ;;
-        "") provision_die "--cloud is required (supported: digitalocean)." ;;
-        *)  provision_die "unsupported --cloud '${PROVISION_CLOUD}' (supported: digitalocean)." ;;
+        digitalocean|vultr) ;;
+        "") provision_die "--cloud is required (supported: digitalocean, vultr)." ;;
+        *)  provision_die "unsupported --cloud '${PROVISION_CLOUD}' (supported: digitalocean, vultr)." ;;
     esac
     # The metadata service is the "this is a fresh cloud VM, not somebody's
     # laptop" guard, and it costs one request: nothing on a laptop answers on

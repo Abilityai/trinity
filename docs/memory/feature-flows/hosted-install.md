@@ -22,7 +22,7 @@ As an operator provisioning a server (by hand, from a marketplace image, or from
 | `workflow_dispatch` (optional `ref:`) | same workflow | **Smoke build only** — publishes `sha-<short>` and nothing else (see *Tag gating* below) |
 | `./scripts/deploy/start.sh --hosted` | `scripts/deploy/start.sh` | Or `TRINITY_HOSTED=1`. Same script as the source install; only the image source differs |
 | `./scripts/deploy/stop.sh` | `scripts/deploy/stop.sh` | Reads the running stack's own compose label to pick the right `-f`, then `stop` (never `down`) |
-| `start.sh --provision --cloud digitalocean` | `scripts/deploy/start.sh:392-414` | Brings a **bare** cloud VM to the state `--hosted` assumes (#2380). Called by the Packer bakery, the 1-Click first boot, and the installer below — see *Provision Layer* |
+| `start.sh --provision --cloud <digitalocean\|vultr>` | `scripts/deploy/start.sh:392-414` | Brings a **bare** cloud VM to the state `--hosted` assumes (#2380). Called by the Packer bakery, the 1-Click first boot, Vultr's vendor data, and the installer below — see *Provision Layer* |
 | `bash trinity-do-create.sh` (on the operator's machine) | `scripts/deploy/trinity-do-create.sh` | Prompting installer: creates a DigitalOcean droplet whose user-data runs `start.sh --provision … --hosted --unattended` |
 
 ## Publish Layer — `.github/workflows/publish-images.yml`
@@ -108,7 +108,7 @@ The project name is derived by **compose's own rule** (`compose_project_name()`:
 `--hosted` assumes a machine that already has Docker. `--provision` gets a **bare** cloud VM there, and it is the only implementation of that: the Packer bakery, the 1-Click first boot and a hand-written doc script used to carry three copies, which had already drifted (the image's DROP list was missing 8081, so the login page answered plain HTTP past the certificate — #2281 review C1). The `packer/` copies are deleted; every caller enters here. Requirements: PROV-012…015.
 
 ```
-start.sh --provision --cloud digitalocean [--machine-only | --site-only] [--provenance X]
+start.sh --provision --cloud <digitalocean|vultr> [--machine-only | --site-only] [--provenance X]
   ├─ guard: Linux + root + the cloud's metadata service answers         (start.sh:392-404)
   ├─ machine phase — provision_machine (:188)       IP-independent, safe to bake
   │    Docker · Caddy 2.11.4 (floor 2.11.3 asserted) · ufw 22/80/443
@@ -123,6 +123,7 @@ start.sh --provision --cloud digitalocean [--machine-only | --site-only] [--prov
 | Caller | Invocation |
 |---|---|
 | Packer bakery (`packer/digitalocean/scripts/01-provision.sh:67`) | `--machine-only` — packages and the firewall unit go into the snapshot; Trinity is not installed |
+| Vultr vendor data (`scripts/deploy/vultr-vendor-data.sh`) | `--cloud vultr --provenance vultr-marketplace --hosted --unattended`, both phases — imageless, so first boot pays the apt + image pull the DigitalOcean snapshot baked (PROV-017) |
 | 1-Click first boot (`packer/digitalocean/files/opt/trinity-firstboot/firstboot.sh:114`) | `--site-only --provenance do-marketplace --hosted --unattended` — the machine phase is already baked, so no `apt-get update` per droplet |
 | Installer user-data (`scripts/deploy/trinity-do-create.sh:189`) | `--hosted --unattended`, both phases, default provenance `do-script` |
 

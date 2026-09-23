@@ -40,6 +40,9 @@ _FIRSTBOOT = (
     _ROOT / "packer" / "digitalocean" / "files" / "opt" / "trinity-firstboot" / "firstboot.sh"
 )
 _BAKERY = _ROOT / "packer" / "digitalocean" / "scripts" / "01-provision.sh"
+# The imageless Vultr lane (#2282) is the FOURTH caller. It carries no snapshot,
+# so it is the likeliest place for a re-implementation to reappear.
+_VULTR = _ROOT / "scripts" / "deploy" / "vultr-vendor-data.sh"
 
 
 def _code(path: Path) -> str:
@@ -67,8 +70,9 @@ def test_bakery_calls_the_shared_installer_for_the_machine_phase() -> None:
 
 
 def test_packer_tree_does_not_re_implement_provisioning() -> None:
-    """No fourth copy: the packer scripts install nothing and configure nothing."""
-    for path in (_FIRSTBOOT, _BAKERY):
+    """No fourth copy: the per-provider scripts install nothing and configure
+    nothing — they call the shared installer."""
+    for path in (_FIRSTBOOT, _BAKERY, _VULTR):
         body = _code(path)
         for forbidden in (
             "docker-ce",          # Docker install
@@ -81,6 +85,16 @@ def test_packer_tree_does_not_re_implement_provisioning() -> None:
     # The bakery still pulls images — that IS its job, and the one thing the
     # shared installer must not do at build time.
     assert "docker pull" in _code(_BAKERY)
+
+
+def test_every_provider_entry_point_calls_the_shared_installer() -> None:
+    """One implementation, four callers: the bakery (machine phase), the 1-Click
+    first boot, the DigitalOcean doc installer's user-data, and Vultr's vendor
+    data."""
+    for path in (_FIRSTBOOT, _BAKERY, _VULTR):
+        assert "scripts/deploy/start.sh" in path.read_text(), (
+            f"{path.name} must call the shared installer, never re-implement it"
+        )
 
 
 def test_firewall_has_no_port_list() -> None:
@@ -159,7 +173,9 @@ def test_ufw_and_iptables_persistent_are_never_both_installed() -> None:
             f"a comment: {live}. ufw Breaks both, so installing one removes ufw. "
             "Reboot persistence is trinity-docker-firewall.service's job."
         )
-    assert re.search(r"apt-get install\b[^\n]*\bufw\b", _code(_START)), (
+    # provision_apt is start.sh's own apt-get wrapper (#2282 adds a dpkg-lock
+    # timeout there, because imageless first boot races unattended-upgrades).
+    assert re.search(r"(?:apt-get|provision_apt) install\b[^\n]*\bufw\b", _code(_START)), (
         "start.sh --provision no longer installs ufw"
     )
 
