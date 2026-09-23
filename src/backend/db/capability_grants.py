@@ -7,7 +7,7 @@ to its owner carrying the owner's role (Invariant #8), so without a row here it
 would pass every owner fence for every sibling the owner holds.
 
 Rows only. Who may GRANT is the router's decision (admin + interactive); who may
-USE a capability is `dependencies.assert_agent_capability`. A soft-deleted agent
+USE a capability is `dependencies.capability_refusal` (via `enforce_agent_capability`). A soft-deleted agent
 holds nothing — every read joins `agent_ownership` and filters `deleted_at` — and
 recovery restores the grant with the rest of the agent's configuration, the way
 every other per-agent setting behaves. SQLAlchemy Core, so it runs unchanged on
