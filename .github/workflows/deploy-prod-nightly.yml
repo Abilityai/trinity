@@ -1,0 +1,149 @@
+name: Nightly Deploy to Prod
+
+# #2985: deploy origin/dev to the main internal instance once a night.
+# Same shape as deploy-dev.yml (read that file for the reasoning behind each
+# block); this copy only differs where prod needs it to:
+#   * no push trigger -- nightly + manual only
+#   * pre-deploy pg_dump, and the night is SKIPPED if an execution is running
+#   * enterprise is mounted with the host's own deploy key (no PAT transport)
+#
+# `schedule` runs from the DEFAULT branch: this does not fire until the file
+# reaches `main`.
+on:
+  schedule:
+    - cron: '0 4 * * *'   # after the platform's own 03:30 UTC backup (#2216)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # PROD_* secrets belong on this environment; restrict it to `main` in repo
+    # settings so a branch workflow cannot read the prod SSH key.
+    environment: production
+    timeout-minutes: 40
+
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
+
+      - name: Deploy
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
+        # No workflow expressions inside `script:` (#2625 21k expression cap).
+        env:
+          ALWAYS_DEPLOY: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          command_timeout: 25m
+          envs: ALWAYS_DEPLOY
+          script: |
+            set -e
+            cd ~/trinity
+            COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.prod.enterprise.yml"
+            PSQL="sudo docker exec -i trinity-postgres psql -U trinity -d trinity -tA -c"
+
+            echo "=== Pull check ==="
+            git fetch --no-recurse-submodules origin dev
+            TARGET_SHA=$(git rev-parse origin/dev)
+            LAST_SHA=$(cat ~/.trinity-last-deployed-sha 2>/dev/null || echo "")
+            if [ "${ALWAYS_DEPLOY:-0}" != "1" ] && [ "$TARGET_SHA" = "$LAST_SHA" ]; then
+              echo "dev is already deployed at ${TARGET_SHA} -- nothing to do."
+              exit 0
+            fi
+
+            echo "=== In-flight executions ==="
+            # A backend recreate kills running executions. The 3h window skips
+            # rows left `running` by a crash, which would otherwise block forever.
+            RUNNING=$($PSQL "SELECT count(*) FROM schedule_executions WHERE status='running' AND started_at::timestamptz > now() - interval '3 hours'")
+            if [ "${RUNNING:-0}" != "0" ]; then
+              echo "::warning::${RUNNING} execution(s) running -- skipping tonight's deploy."
+              exit 0
+            fi
+
+            echo "=== Pre-deploy backup ==="
+            mkdir -p ~/backups
+            DUMP=~/backups/trinity-pg-predeploy-$(date -u +%Y%m%d-%H%M%S).sql.gz
+            sudo docker exec trinity-postgres pg_dump -U trinity trinity | gzip > "$DUMP"
+            gzip -t "$DUMP" && [ -s "$DUMP" ]
+            echo "Backup: $DUMP ($(du -h "$DUMP" | cut -f1))"
+
+            echo "=== Pull ==="
+            git checkout --no-recurse-submodules dev
+            git pull --ff-only --no-recurse-submodules origin dev
+            echo "Version: $(git log -1 --oneline)"
+            git submodule update --init --recursive src/backend/enterprise
+            WANT=$(git rev-parse HEAD:src/backend/enterprise)
+            HAVE=$(git -C src/backend/enterprise rev-parse HEAD)
+            if [ "$WANT" != "$HAVE" ]; then
+              echo "::error::Enterprise submodule STALE: have ${HAVE}, dev records ${WANT}. Not deploying."
+              exit 1
+            fi
+
+            echo "=== Build ==="
+            BASE_VER=$(cat VERSION 2>/dev/null || echo unknown)
+            sudo env \
+              VERSION="${BASE_VER}+g$(git rev-parse --short=8 HEAD)" \
+              GIT_COMMIT="$(git rev-parse HEAD)" \
+              GIT_COMMIT_SUBJECT="$(git log -1 --pretty=%s)" \
+              GIT_COMMIT_TIMESTAMP="$(git log -1 --pretty=%cI)" \
+              GIT_BRANCH=dev \
+              BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              docker compose ${COMPOSE_FILES} build --pull backend frontend mcp-server scheduler
+
+            echo "=== Restart ==="
+            sudo docker compose ${COMPOSE_FILES} up -d backend frontend mcp-server scheduler
+
+            echo "=== Health ==="
+            for i in $(seq 1 30); do
+              curl -sf http://localhost:8000/health >/dev/null && break
+              sleep 5
+            done
+            curl -sf http://localhost:8000/health && echo " Backend: OK"
+
+            echo "=== Enterprise registration ==="
+            BOOT_SINCE=$(sudo docker inspect -f '{{.State.StartedAt}}' trinity-backend)
+            BOOT_LOG=$(sudo docker logs trinity-backend --since "$BOOT_SINCE" 2>&1 || true)
+            if ! printf '%s\n' "$BOOT_LOG" | grep -q 'Trinity Enterprise modules registered'; then
+              echo "::error::Backend did not register enterprise modules -- running OSS-only."
+              printf '%s\n' "$BOOT_LOG" | grep -i 'enterprise' | tail -20
+              exit 1
+            fi
+
+            git rev-parse HEAD > ~/.trinity-last-deployed-sha
+            echo "=== Done: $(cat ~/.trinity-last-deployed-sha) ==="
+
+  notify-failure:
+    needs: deploy
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: File a deploy-failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          TITLE="bug(ci): Nightly Deploy to Prod is failing"
+          # Deliberately NOT the `deploy-failure` label: deploy-dev.yml dedupes
+          # on it, so an open prod issue would silence dev deploy alerts.
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty' || true)
+          if [ -n "$EXISTING" ]; then
+            echo "Already tracked at #${EXISTING}."
+            exit 0
+          fi
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+            --label "type-bug,priority-p1,theme-infrastructure" \
+            --body "Failed run: ${RUN_URL} (#2985). Read the last \`===\` header reached. Close once a run is green -- an open issue suppresses the next alert."
