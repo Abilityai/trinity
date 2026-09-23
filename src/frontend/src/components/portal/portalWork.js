@@ -160,6 +160,32 @@ export function liveElapsedSeconds(item, { fetchedAtMs = null, nowMs = Date.now(
   return null
 }
 
+// ---------------------------------------------------------------- title
+
+/** Mirrors the server's `TITLE_MAX` (`client_portal/work/service.py`). */
+export const TITLE_MAX = 120
+
+// Python's `\s` on a str, exactly: JS `\s` plus U+001C–U+001F and U+0085,
+// minus U+FEFF. `trim()` is not used for the same reason.
+const TITLE_WS = /[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/g
+
+/**
+ * The title the feed will give this message, before the feed has read the
+ * turn — so the chat's card keeps its title when the feed's row replaces the
+ * synthetic one (#2964). Mirrors `service.clean_title`: collapse whitespace
+ * runs, trim, cut at TITLE_MAX code points (not UTF-16 units) with "…".
+ * Pinned row-for-row by `tests/fixtures/portal-work-titles.json`.
+ * Secret masking is NOT mirrored: a pasted token still changes the title when
+ * the feed's row lands. Rare, and the server stays the only place that masks.
+ */
+export function previewTitle(message) {
+  const text = String(message ?? '').replace(TITLE_WS, ' ').replace(/^ | $/g, '')
+  if (!text) return '(no message)'
+  const chars = Array.from(text)
+  if (chars.length <= TITLE_MAX) return text
+  return chars.slice(0, TITLE_MAX - 1).join('').replace(/ $/, '') + '…'
+}
+
 // ---------------------------------------------------------------- steps
 
 /**

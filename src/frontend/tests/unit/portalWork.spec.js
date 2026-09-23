@@ -443,6 +443,16 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
     expect(tab).not.toContain('reserve-live-rows')
   })
 
+  it('#2964: both synthetic chat cards take the feed\'s title shape (previewTitle), never the raw message', () => {
+    for (const name of ['liveCardItem', 'terminalCardItem']) {
+      const at = conv.indexOf(`const ${name} = computed(`)
+      expect(at).toBeGreaterThan(-1)
+      const body = conv.slice(at, conv.indexOf('\n})', at))
+      expect(body).toMatch(/title: previewTitle\(/)
+      expect(body).not.toMatch(/title: (pendingUserText|lastUserText)/)
+    }
+  })
+
   it('a reattached turn can be stopped (review E3), and the id is cleared with the turn', () => {
     const at = conv.indexOf('async function reattach(')
     const body = conv.slice(at, conv.indexOf('\n}', at))

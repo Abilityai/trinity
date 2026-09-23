@@ -754,7 +754,7 @@ import { agentDisplayName } from '@/utils/agentName'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
-import { askAboutItPrefill, childrenForChat, itemById } from './portalWork'
+import { askAboutItPrefill, childrenForChat, itemById, previewTitle } from './portalWork'
 import { activityFromStreamEvent, resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
@@ -1044,7 +1044,8 @@ const liveCardItem = computed(() => {
     status: 'running',
     outcome: 'running',
     kind: 'turn',
-    title: pendingUserText.value || lastUserText(),
+    // The feed's own title shape, so its row lands without re-wrapping it (#2964).
+    title: previewTitle(pendingUserText.value || lastUserText()),
     chat_id: currentSessionId.value,
     steps: undefined,
     can_stop: false,
@@ -1087,7 +1088,7 @@ const terminalCardItem = computed(() => {
     status: outcome === 'cancelled' ? 'cancelled' : 'failed',
     outcome,
     kind: 'turn',
-    title: lastUserText(),
+    title: previewTitle(lastUserText()),
     chat_id: currentSessionId.value,
     error: outcome === 'cancelled' || outcome === 'lost' ? null : (msg || null),
     steps: null,
