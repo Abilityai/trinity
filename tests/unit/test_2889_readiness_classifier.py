@@ -515,7 +515,8 @@ def _is_laundered_status_check(test: ast.AST):
     has one home: the helper that classifies those statuses.
 
     Known escapes, accepted as #2894 accepted them (written down, not
-    asserted): `!= 429`, `>= 429`, Yoda `429 == x`, a local
+    asserted): a bound that is not the status itself (`>= 400`), Yoda
+    `429 == x`, a local
     `status = resp.status_code` alias, `from pytest import skip`, and
     `.post(url_var)` (the URL is not a literal, so `_turn_response_vars`
     never sees the response).
@@ -531,10 +532,13 @@ def _is_laundered_status_check(test: ast.AST):
     left = test.left
     if not (isinstance(left, ast.Attribute) and left.attr == "status_code" and isinstance(left.value, ast.Name)):
         return None
-    op, comp = test.ops[0], test.comparators[0]
-    if isinstance(op, ast.Eq) and _is_laundered_constant(comp):
+    # Operator-agnostic, as #2894's `_is_503_check` was: `>= 429`, `!= 503`,
+    # `not in [503]` all stay flagged (fail closed — a false positive is one
+    # rewritten line, a false negative is a laundered failure).
+    comp = test.comparators[0]
+    if _is_laundered_constant(comp):
         return left.value.id
-    if isinstance(op, ast.In) and isinstance(comp, (ast.List, ast.Tuple, ast.Set)) and any(
+    if isinstance(comp, (ast.List, ast.Tuple, ast.Set)) and any(
         _is_laundered_constant(e) for e in comp.elts
     ):
         return left.value.id
@@ -549,6 +553,10 @@ def _is_laundered_status_check(test: ast.AST):
     ("resp.status_code in {429}", "resp"),
     ("resp.status_code == 429 or resp.status_code == 503", "resp"),
     ("resp.status_code == 200 or resp.status_code == 429", "resp"),
+    # Operator-agnostic like #2894's matcher — narrowing it would unguard 503.
+    ("resp.status_code >= 429", "resp"),
+    ("resp.status_code != 503", "resp"),
+    ("resp.status_code not in [503]", "resp"),
     ("resp.status_code == 200", None),
     ("resp.status_code in [200, 202]", None),
     ("other.status == 429", None),
