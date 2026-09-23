@@ -1630,6 +1630,20 @@ class SchedulerService:
             logger.debug(f"Execution {execution.id} status '{execution.status}' is not retriable")
             return
 
+        # #2845 / #2514: a row the backend's lease reaper poison-parked has
+        # already been delivered to the cap and handed to an operator ("re-trigger
+        # manually if appropriate"). Retrying it restarts that budget on a new row
+        # — and now that retries are pulled, each retry can be delivered to the
+        # cap and parked again, one high-priority alert per attempt. The tag is
+        # the reaper's own error prefix (`lease_reaper_service._POISON_LEASE_TAG`;
+        # the scheduler cannot import the backend, so it is repeated here).
+        if (execution.error or "").startswith("poison_lease"):
+            logger.info(
+                f"Execution {execution.id} was poison-parked by the lease reaper; "
+                "not retrying — it is with the operator"
+            )
+            return
+
         # Get the schedule to check retry configuration
         schedule = self.db.get_schedule(execution.schedule_id)
         if not schedule:
@@ -1812,10 +1826,15 @@ class SchedulerService:
             )
         except Exception as e:
             logger.error(f"Retry execution failed for {retry_execution.id}: {e}")
+            # #2845: only a row still `running` is ours to fail. On a pull pilot
+            # the backend may already have handed it to the durable queue before
+            # this dispatch timed out; failing a `queued` row strands work no
+            # worker can claim. Same guard as the cron path's exception handler.
             self.db.update_execution_status(
                 execution_id=retry_execution.id,
                 status=ExecutionStatus.FAILED,
-                error=_describe_exception(e)[:2000]  # #1022: never blank
+                error=_describe_exception(e)[:2000],  # #1022: never blank
+                expected_status=ExecutionStatus.RUNNING,
             )
 
     def _recover_pending_retries(self):

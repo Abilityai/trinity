@@ -70,7 +70,7 @@ pytestmark = pytest.mark.unit
 _STRANDED: list = []
 # All of them, now.
 _REACHABLE = ["agent", "event", "schedule", "webhook", "reminder", "loop",
-              "fan_out", "a2a", "operator_response"]
+              "fan_out", "a2a", "operator_response", "retry"]
 # Stands in for "a trigger somebody adds without classifying it", so the
 # diagnostic below is still covered now that nothing real trips it.
 _SYNTHETIC_STRANDED = "agent"
@@ -114,7 +114,9 @@ def test_reachable_set_is_what_the_two_queueing_producers_can_actually_emit():
     from services.task_execution_service import _AUTONOMOUS_TRIGGERS
 
     task_route_can_emit = {"self_task", "agent", "mcp", "manual", "event"}
-    scheduler_async_polled = {"schedule", "webhook", "reminder"}
+    # #2845: `retry` is RETRY-001's second attempt, dispatched and polled
+    # exactly like the cron fire it retries.
+    scheduler_async_polled = {"schedule", "webhook", "reminder", "retry"}
     # #2523 / #2524: `loop_service` is advanced by execution terminals and a
     # fan-out's aggregate is a query over `fan_out_id`, so neither dispatch has
     # a synchronous reader either.
