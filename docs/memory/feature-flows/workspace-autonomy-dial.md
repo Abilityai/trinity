@@ -101,9 +101,9 @@ every turn ──► platform_prompt_service memory block → autonomy_dial_serv
   can never raise it (`reject_non_interactive_principal`, the ent#293/#297 shape). It
   is also blocklisted on the generic `PUT /api/settings/{key}` catch-all — the one door
   that can address any key.
-- **Every block is named.** `level_below_L2`, `agent_autonomy_off`, `evidence_expired`,
-  `insufficient_records`, `criterion_not_settled`, `reversal_in_window`,
-  `negative_rating_30d`, `guard_capped`, `held_by_person` — each with a sentence. A bare
+- **Every block is named.** `level_below_l2`, `agent_autonomy_off`, `evidence_expired`,
+  `too_few_records`, `criterion_not_stable`, `reversal_in_window`,
+  `negative_rating_in_window`, `guard_metric_capped`, `held_by_operator` — each with a sentence. A bare
   "not autonomous yet" teaches nobody what to do next, and the companion needs the
   reason to say why it is asking rather than inventing one.
 - **The companion reads the same verdict as the person.** `prompt_lines` rides the seat's

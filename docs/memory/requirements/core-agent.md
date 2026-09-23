@@ -3359,10 +3359,10 @@ to localStorage in the clear.
   persist NOTHING; writes happen only on a real event (a decision recorded or acted
   on, a rating by the seat, a hold/release) and are CAS'd on an evidence hash, so an
   unchanged verdict writes no row and emits no event.
-- **Every block is NAMED, never a bare boolean**: `level_below_L2` ·
-  `agent_autonomy_off` · `evidence_expired` · `insufficient_records` ·
-  `criterion_not_settled` · `reversal_in_window` · `negative_rating_30d` ·
-  `guard_capped` · `held_by_person`, each with the sentence the panel and the
+- **Every block is NAMED, never a bare boolean**: `level_below_l2` ·
+  `agent_autonomy_off` · `evidence_expired` · `too_few_records` ·
+  `criterion_not_stable` · `reversal_in_window` · `negative_rating_in_window` ·
+  `guard_metric_capped` · `held_by_operator`, each with the sentence the panel and the
   companion both show.
 - **The rating query's three shapes are each a defect first**: it matches
   `operator:<email>` as well as `workspace:<email>` (on a single-operator install the
