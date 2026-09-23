@@ -448,7 +448,7 @@ def test_backend_capacity_code_name_matches():
 
 
 # --------------------------------------------------------------------------- #
-# 3. call-site guard — no model-turn test skips on a bare 503
+# 3. call-site guard — no model-turn test skips on a bare 503 or 429
 # --------------------------------------------------------------------------- #
 
 TURN_URL = re.compile(r"/(task|chat|fan-out)['\"]?$")
@@ -486,24 +486,74 @@ def _turn_response_vars(fn: ast.AST) -> set[str]:
     return names
 
 
-def _is_503_check(test: ast.AST):
-    """`X.status_code == 503` or `X.status_code in [503, ...]` → X, else None."""
+def _is_laundered_constant(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value in R.LAUNDERED_STATUSES
+
+
+def _is_laundered_status_check(test: ast.AST):
+    """`X.status_code == <s>`, `X.status_code in [<s>, ...]` / `(...)` / `{...}`,
+    or an `or` of such checks → X, else None — for any `s` in
+    `readiness.LAUNDERED_STATUSES` (503 #2889, 429 #2919), so the vocabulary
+    has one home: the helper that classifies those statuses.
+
+    Known escapes, accepted as #2894 accepted them (written down, not
+    asserted): `!= 429`, `>= 429`, Yoda `429 == x`, a local
+    `status = resp.status_code` alias, `from pytest import skip`, and
+    `.post(url_var)` (the URL is not a literal, so `_turn_response_vars`
+    never sees the response).
+    """
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+        for value in test.values:
+            var = _is_laundered_status_check(value)
+            if var is not None:
+                return var
+        return None
     if not isinstance(test, ast.Compare) or len(test.comparators) != 1:
         return None
     left = test.left
     if not (isinstance(left, ast.Attribute) and left.attr == "status_code" and isinstance(left.value, ast.Name)):
         return None
-    comp = test.comparators[0]
-    if isinstance(comp, ast.Constant) and comp.value == 503:
+    op, comp = test.ops[0], test.comparators[0]
+    if isinstance(op, ast.Eq) and _is_laundered_constant(comp):
         return left.value.id
-    if isinstance(comp, (ast.List, ast.Tuple)) and any(
-        isinstance(e, ast.Constant) and e.value == 503 for e in comp.elts
+    if isinstance(op, ast.In) and isinstance(comp, (ast.List, ast.Tuple, ast.Set)) and any(
+        _is_laundered_constant(e) for e in comp.elts
     ):
         return left.value.id
     return None
 
 
-def test_no_model_turn_site_skips_on_a_bare_503():
+@pytest.mark.parametrize("src,expected", [
+    ("resp.status_code == 429", "resp"),
+    ("resp.status_code == 503", "resp"),
+    ("resp.status_code in [429, 503]", "resp"),
+    ("resp.status_code in (429,)", "resp"),
+    ("resp.status_code in {429}", "resp"),
+    ("resp.status_code == 429 or resp.status_code == 503", "resp"),
+    ("resp.status_code == 200 or resp.status_code == 429", "resp"),
+    ("resp.status_code == 200", None),
+    ("resp.status_code in [200, 202]", None),
+    ("other.status == 429", None),
+    ("resp.status_code == 429 and flaky", None),
+])
+def test_guard_matcher_recognises_the_laundered_shapes(src, expected):
+    assert _is_laundered_status_check(ast.parse(src, mode="eval").body) == expected
+
+
+def test_guard_walk_still_covers_the_2919_site_files():
+    """The walk is pre-filtered on the import literal (learnings 2026-07-29):
+    pin that the four files #2919 cleaned stay inside it, so dropping the
+    import cannot silently take a file out of the guard."""
+    walked = {p.relative_to(REPO).as_posix() for p in _files_importing_helper()}
+    assert {
+        "tests/test_agent_chat.py",
+        "tests/test_dynamic_thinking_status.py",
+        "tests/test_parallel_task.py",
+        "tests/agent_server/test_agent_chat_direct.py",
+    } <= walked, sorted(walked)
+
+
+def test_no_model_turn_site_skips_on_a_bare_503_or_429():
     files = _files_importing_helper()
     assert len(files) >= 8, [p.name for p in files]
     offenders = []
@@ -518,7 +568,7 @@ def test_no_model_turn_site_skips_on_a_bare_503():
             for node in ast.walk(fn):
                 if not isinstance(node, ast.If):
                     continue
-                var = _is_503_check(node.test)
+                var = _is_laundered_status_check(node.test)
                 if var not in turn_vars:
                     continue
                 for stmt in ast.walk(node):
@@ -531,8 +581,9 @@ def test_no_model_turn_site_skips_on_a_bare_503():
                     ):
                         offenders.append(f"{path.relative_to(REPO)}:{stmt.lineno}")
     assert not offenders, (
-        "a model-turn 503 is skipped on a bare status check — route it through "
-        "testkit.readiness.require_agent_answer instead:\n  " + "\n  ".join(offenders)
+        f"{len(offenders)} model-turn 503/429 skip(s) on a bare status check — "
+        "route it through testkit.readiness.require_agent_answer instead "
+        "(#2889, #2919):\n  " + "\n  ".join(offenders)
     )
 
 

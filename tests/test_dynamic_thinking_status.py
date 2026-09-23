@@ -199,8 +199,6 @@ class TestAsyncModeSubmission:
         )
 
         require_agent_answer(response, what="POST /task")
-        if response.status_code == 429:
-            pytest.skip("Agent at capacity (429)")
 
         assert_status(response, 200)
         data = assert_json_response(response)
@@ -226,8 +224,6 @@ class TestAsyncModeSubmission:
         )
 
         require_agent_answer(submit_response, what="POST /task")
-        if submit_response.status_code == 429:
-            pytest.skip(f"Agent queue full (429)")
 
         assert_status(submit_response, 200)
         execution_id = submit_response.json()["execution_id"]
@@ -264,8 +260,6 @@ class TestAsyncModeSubmission:
         )
 
         require_agent_answer(submit_response, what="POST /task")
-        if submit_response.status_code == 429:
-            pytest.skip(f"Agent queue full (429)")
 
         assert_status(submit_response, 200)
         execution_id = submit_response.json()["execution_id"]
@@ -330,8 +324,6 @@ class TestSSEStreamDuringExecution:
         )
 
         require_agent_answer(submit_response, what="POST /task")
-        if submit_response.status_code == 429:
-            pytest.skip(f"Agent queue full (429)")
 
         assert_status(submit_response, 200)
         execution_id = submit_response.json()["execution_id"]
@@ -421,8 +413,6 @@ class TestAsyncModeSessionPersistence:
         )
 
         require_agent_answer(submit_response, what="POST /task")
-        if submit_response.status_code == 429:
-            pytest.skip(f"Agent queue full (429)")
 
         assert_status(submit_response, 200)
         execution_id = submit_response.json()["execution_id"]
@@ -503,8 +493,6 @@ class TestAsyncModeSessionPersistence:
         )
 
         require_agent_answer(submit_response, what="POST /task")
-        if submit_response.status_code == 429:
-            pytest.skip(f"Agent queue full (429)")
 
         assert_status(submit_response, 200)
         execution_id = submit_response.json()["execution_id"]
