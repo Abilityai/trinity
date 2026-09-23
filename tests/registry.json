@@ -3147,7 +3147,7 @@
         "access-control",
         "workspace"
       ],
-      "description": "A shared file is for the person the turn was for. Real-SQLite ROUND TRIPS — the real create_share / create_share_from_bytes into a real database, read back through the real portal_documents (only the container read and the disk write are stubbed) — because every earlier share test mocked _persist_and_register and every listing test seeded by INSERT, so nothing crossed write → read. Covers: the two-account repro; a terminal share never landing in whichever client is mid-conversation (no evidence ⇒ owner-only); a stale execution id proving the conversation and never the person (rooms); inherited agent-to-agent context; unverified channel ids never stored as emails; the audience_email override against the reader's own roster predicate; the addressee in the effect key; the owner list stripped for every key-authenticated scope, driven through the route; both migration tracks executed; the WhatsApp adapter, voice-note and share-route CALL SITES. 22 call-site mutations, all red."
+      "description": "A shared file is for the person the turn was for. Real-SQLite ROUND TRIPS — the real create_share / create_share_from_bytes into a real database, read back through the real portal_documents (only the container read and the disk write are stubbed) — because every earlier share test mocked _persist_and_register and every listing test seeded by INSERT, so nothing crossed write → read. Covers: the two-account repro; a terminal share never landing in whichever client is mid-conversation (no evidence ⇒ owner-only); a stale execution id proving the conversation and never the person (rooms); inherited agent-to-agent context; unverified channel ids never stored as emails; the audience_email override against the reader's own roster predicate; the addressee in the effect key; the owner list stripped for every key-authenticated scope, driven through the route; both migration tracks executed; the WhatsApp adapter, voice-note and share-route CALL SITES. 22 call-site mutations, all red. #2955: the key-caller withholding tests compare the WHOLE row against the JWT row with addressed_to / addressed_to_channel / audience_source nulled and the row's key set pinned (a fourth audience field turns them red until classified); a validator-vs-resolver parity table over both audience_email models (agreement as the expectation, never a literal); a blank-is-absent regression pin; an AST one-home test (turn_audience re-export identity, utils/addressee.py imports only typing, models.py imports no services, both validators a single wrapper call with no inline Compare). The owner panel's once-per-row derivation is mounted in src/frontend/tests/unit/fileSharingPanelAudience.spec.js."
     },
     {
       "file": "mcp-server/src/files.test.ts",
@@ -3353,6 +3353,16 @@
         "mcp"
       ],
       "description": "The seat-level decision record (ent#638, R25): the grammar and its receipts (prose-only per field, no-alternatives-is-a-note, decided-not-an-alternative, strict review_by with the equal-is-not-expired boundary), lifecycle over a real SQLite file (lower-cased seat, JSON lists, direction kept as routed, supersede chain + CAS refusal, close/reverse/reconfirm + their 409s, uniform 404 for another seat, cites within the seat, request_id must be the agent's queue item), the evidence (reused = later citations only, superseding does not cite, stable = 3 / one criterion / no reversal / expired excluded, the bounded email-free prompt block on the shared memory composer), readers (own seat, owner, provider kinds_for incl. absent/raise/bad-kind → None), the agent router (seat from a seat run or a verified channel email, refused triggers, foreign execution 403, receipt + idempotency release, replay snapshot, email-free list), the portal service (own seat vs owner vs shared platform user, named seat, direction hint), both migration tracks + registry + single head, facade signature parity, the mcp header + registration."
+    },
+    {
+      "file": "../src/mcp-server/src/tools/self-acting-scope.test.ts",
+      "feature": "#2975",
+      "added": "2026-09-23",
+      "categories": [
+        "mcp",
+        "security"
+      ],
+      "description": "A self-acting MCP tool takes its identity from the key (#2975): report / set_canvas / patch_canvas / record_metrics / refresh_metric_definitions all admit the orchestrator's system-scoped key and act as trinity-system, an agent-scoped key is unchanged, and seven other credential shapes (user, connector, portal_delegate, ops, anonymous, a system key naming no agent, an unknown future scope) are refused without reaching the network. Drives the real execute() with a recording fake client; also pins resolveActingAgent's allowlist and its two distinct refusal messages. node:test."
     },
     {
       "file": "mcp-server/src/access-wiring.test.ts",

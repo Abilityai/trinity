@@ -508,3 +508,57 @@ export function withAgentAccess<P extends Record<string, unknown>>(
     return execute(params, context);
   };
 }
+
+/**
+ * The agent a SELF-ACTING tool acts as (#2975).
+ *
+ * `report`, the canvas tools and the metrics tools take no target parameter on
+ * purpose — they act as the caller, so there is nothing to spoof and the
+ * identity has to come from the key. Each resolved it itself with
+ * `scope === "agent" && agentName`, which refused the platform's own
+ * `trinity-system`: its key is `scope: "system"` (`system_agent_service`
+ * mints it agent-scoped and then flips the scope), and #1816 makes that
+ * permanent — the orchestrator's key is never re-minted as `agent`, so
+ * "issue it an agent-scoped key instead" is not available. The system agent
+ * could read everything and publish nothing: its daily fleet-health report and
+ * its canvas both fell back to files and the operator queue.
+ *
+ * ONE home for the rule, for the ent#628 reason the permission edge has one:
+ * ten spellings across nine modules is how the tenth ships with the old rule.
+ *
+ * It stays an ALLOWLIST over `mcp_api_keys.scope` — a free-text column with no
+ * CHECK constraint (#1854, #2323), so a denylist is open at the top:
+ *
+ *   - `agent`  → the calling agent. Unchanged.
+ *   - `system` → the agent the key was minted FOR, and only when the key
+ *     carries one. The name comes from the key row, never from a parameter,
+ *     so this widens identity by exactly zero: a system key already reaches
+ *     every agent's data on the read surfaces.
+ *   - everything else — `user`, `connector`, `portal_delegate`, `ops`,
+ *     `anonymous`, and whatever ships next — is refused. `connector` is the
+ *     one worth naming: it carries an `agentName` too (it is bound to one
+ *     agent), and it is an END USER's consumption key. Letting it through
+ *     would let a client publish reports as the agent serving them.
+ *
+ * A `system` key with no `agentName` is refused as well: there is no identity
+ * to attribute the write to, and inventing one is exactly the spoof these
+ * tools are shaped to prevent.
+ */
+export const SELF_ACTING_SCOPES: ReadonlySet<string> = new Set(["agent", "system"]);
+
+export function resolveActingAgent(
+  authContext: McpAuthContext | undefined,
+  what: string,
+): string {
+  const scope = authContext?.scope;
+  const agentName = authContext?.agentName;
+  if (scope !== undefined && SELF_ACTING_SCOPES.has(scope) && agentName) {
+    return agentName;
+  }
+  throw new Error(
+    `${what}: this call requires a key that carries an agent identity — an ` +
+      `agent-scoped key, or the platform orchestrator's system-scoped key. ` +
+      `This key is ${scope ? `'${scope}'-scoped` : "unscoped"}` +
+      `${agentName ? "" : " and names no agent"}.`,
+  );
+}

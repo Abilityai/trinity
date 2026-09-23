@@ -22,6 +22,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { resolveActingAgent } from "../access.js";
 
 /**
  * Which canvas a call acts on (ent#555).
@@ -138,15 +139,11 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
     return client;
   };
 
-  /** The canvas is written AS the calling agent, so an agent-scoped key is required. */
-  const getAgentName = (authContext: McpAuthContext | undefined): string => {
-    if (authContext?.scope === "agent" && authContext.agentName) {
-      return authContext.agentName;
-    }
-    throw new Error(
-      "The canvas tools require an agent-scoped API key (a canvas belongs to the calling agent).",
-    );
-  };
+  /** The canvas is written AS the calling agent — there is no target parameter,
+   * so the identity comes from the key (`resolveActingAgent`, #2975: an
+   * agent-scoped key, or the orchestrator's system-scoped one). */
+  const getAgentName = (authContext: McpAuthContext | undefined): string =>
+    resolveActingAgent(authContext, "The canvas tools");
 
   const fail = (error: unknown) =>
     JSON.stringify(

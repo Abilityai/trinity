@@ -56,10 +56,14 @@ Two rules keep the three honest:
   is not allowlisted, and a journey may not skip at all (see the acceptance
   bar). Verification means running the command and showing the output — a
   "done" without evidence is not done (CLAUDE.md, Rules of Engagement).
-- **A model turn's 503 is classified, never blanket-skipped (#2889).** The
-  backend answers 503 both for "agent server unreachable" and for "the turn
-  ran and failed" (an exhausted credit balance, a dead token), and a bare
-  `if status == 503: pytest.skip(...)` accepts both. Model-turn tests route the
+- **A model turn's 503 or 429 is classified, never blanket-skipped (#2889,
+  #2919).** The backend answers 503 both for "agent server unreachable" and
+  for "the turn ran and failed" (an exhausted credit balance, a dead token),
+  and a bare `if status == 503: pytest.skip(...)` accepts both. A 429 is
+  likewise either admission refused (`capacity` — skip with evidence) or an
+  exhausted subscription (`billing` — fail); the bare
+  `if status == 429: pytest.skip(...)` shape is the same laundering primitive
+  one status over. Model-turn tests route the
   response through `testkit.readiness.require_agent_answer` — it reads the
   backend's `X-Trinity-Error-Code`; only `network` skips, and the skip names
   its evidence — and carry `@pytest.mark.requires_model`, which opts them into

@@ -280,7 +280,8 @@ class AgentSharedFilesOperations:
         An empty ``viewer_email`` matches nothing rather than everything — a
         caller who cannot be identified must not inherit the unaddressed rows.
         ``viewer_email`` is compared as given: the caller normalises, with the
-        same function the writers use (`turn_audience.normalize_addressee_email`).
+        same function the writers use (`utils/addressee.py::normalize_addressee_email`,
+        re-exported by `turn_audience`).
         """
         audiences = []
         if viewer_email:
