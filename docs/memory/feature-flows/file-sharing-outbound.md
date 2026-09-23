@@ -191,7 +191,7 @@ The email is whatever the binding verified for that number (`db.get_whatsapp_ver
 
 | File | Line | Description |
 |------|------|-------------|
-| `src/frontend/src/components/FileSharingPanel.vue` | 1-258 | Toggle, restart-required banner, quota, table (filename/for/size/expires/downloads), Copy URL + Revoke buttons, empty state. The **For** column says who each file is for — a label plus a second line that says why — rendered through `describeSharedFileAudience(file)` |
+| `src/frontend/src/components/FileSharingPanel.vue` | 1-264 | Toggle, restart-required banner, quota, table (filename/for/size/expires/downloads), Copy URL + Revoke buttons, empty state. The **For** column says who each file is for — a label plus a second line that says why — rendered through `describeSharedFileAudience(file)`, derived ONCE per row by the `rows` computed (`v-for="{ file, audience } in rows"`, #2955) |
 | `src/frontend/src/utils/sharedFileAudience.js` | 38 | `describeSharedFileAudience(file)` → `{ label, detail, ownerOnly }`, pure. An email → the email, with the channel (`WhatsApp +15555550142`) or the reason (`turn` → "The person in the conversation", `override` → "Addressed by the agent") beneath; a channel identity alone → the channel, "No verified email — not in any Files tab"; neither → "Owner only", with `none` ("No person in this turn"), `ambiguous` ("Couldn't tell which conversation it came from") and a pre-column row ("Shared before files had an addressee") kept apart — `ambiguous` is recoverable, so the owner has to be able to see it happen |
 | `src/frontend/src/components/SharingPanel.vue` | — | Embeds `<FileSharingPanel>` between Telegram/WhatsApp and Public Links sections |
 
@@ -403,11 +403,12 @@ Who a file is for (trinity-enterprise#549):
 ```bash
 pytest tests/unit/test_ent549_file_audience.py -v
 (cd src/mcp-server && node --import tsx --test src/files.test.ts)
-(cd src/frontend && npm run test:unit -- tests/unit/sharedFileAudience.spec.js)
+(cd src/frontend && npm run test:unit -- tests/unit/sharedFileAudience.spec.js tests/unit/fileSharingPanelAudience.spec.js)
 ```
 - `test_ent549_file_audience.py` — write→read **round trips**: the real `create_share` / `create_share_from_bytes` into a real SQLite file, read back through the real `portal_documents`; only the container extraction and the disk write are stubbed. Covers the failure direction (a terminal share never lands with the client who happens to be chatting; a human on the route has no turn), stale ids (a finished id proves the conversation, the running turn names the person; none or two running → ambiguous; another agent's id imports nobody), every row of the turn→addressee table through `audience_of`, the override (off-roster refused by name, unreadable roster refuses, the owner is nameable, re-addressing in one turn is a second share while a re-run still replays), the owner's list route with each key scope, the two WhatsApp callers through their call sites, and both migration tracks.
 - `src/mcp-server/src/files.test.ts` — `audience_email` reaches the request body (`undefined` when omitted), the three status fields come back to the agent, and the tool description says whose Files tab a file lands in.
 - `src/frontend/tests/unit/sharedFileAudience.spec.js` — `describeSharedFileAudience`: email, agent-chosen, channel beside an email, channel alone, unknown channel, `none` vs `ambiguous`, a pre-column row, a missing row.
+- `src/frontend/tests/unit/fileSharingPanelAudience.spec.js` — mounts `FileSharingPanel`: the For column renders the rule's own label/detail/tooltips for all three states plus an empty-detail row, the rule is called exactly once per row (expectations via `vi.importActual`, never the spy), and Copy URL still receives the row's file (#2955).
 
 ### End-to-end (manual / shell script)
 
