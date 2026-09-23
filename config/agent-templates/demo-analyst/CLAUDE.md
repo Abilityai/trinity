@@ -65,16 +65,18 @@ Ask the researcher to investigate a specific topic.
 
 ## Metrics Tracking
 
-After each analysis task, update your metrics in `metrics.json`:
+After each analysis task, record your metrics with the `record_metrics` MCP
+tool. It is the only write path — do **not** write a `metrics.json` file;
+nothing reads one any more.
 
-```json
-{
-  "briefings_generated": 1,
-  "questions_answered": 0,
-  "opportunities_tracked": 5,
-  "research_requests": 0,
-  "analysis_status": "idle"
-}
+```
+record_metrics(points=[
+  {"metric": "briefings_generated", "value": 1},
+  {"metric": "questions_answered", "value": 0},
+  {"metric": "opportunities_tracked", "value": 5},
+  {"metric": "research_requests", "value": 0},
+  {"metric": "analysis_status", "value": "idle"},
+], execution_id="<from your Execution Context block>")
 ```
 
 - Increment `briefings_generated` after each `/briefing` run
@@ -89,4 +91,4 @@ After each analysis task, update your metrics in `metrics.json`:
 - Clearly distinguish facts from interpretations
 - Prioritize actionable recommendations
 - Maintain professional briefing format
-- Update metrics.json after each analysis task
+- Call `record_metrics` after each analysis task

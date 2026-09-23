@@ -1232,6 +1232,111 @@ def c_d008(snap):
     return _with_dashboard(snap, f)
 
 
+def c_d009(snap):
+    """STATIC: the `metrics:` block is well-formed (ent#477).
+
+    Delegates to the one reader — `template_metrics.metric_shape_errors` — so
+    the report and the registry can never disagree about which entries are
+    valid: an entry named here is exactly an entry the registry refused to
+    hold, because both answers come out of the same `_parse`.
+
+    Twin of T-018 for the `schedules:` block, including the fail-CLOSED handler
+    below. Function-local import for the same reason T-018 uses one: the leaf
+    must stay importable without dragging the compatibility package with it.
+    """
+    def f(d):
+        try:
+            from services.template_metrics import metric_shape_errors
+            errors = metric_shape_errors(d.get("metrics"))
+        except Exception as e:  # noqa: BLE001
+            # Fail CLOSED, deliberately — the T-018 reasoning verbatim.
+            # `run_static` turns a raise into `skipped` and `_counts` tallies
+            # only `status == "fail"`, so a raising SOFT check drops
+            # soft_count 1->0 and flips the whole report from `issues` to
+            # `compatible` exactly when this check's finding was the only
+            # failure. That is the entire population D-009 exists to serve. And
+            # `build_report` persists `checks_json`, so one transient raise is
+            # replayed as a clean bill of health on every stopped-agent read.
+            #
+            # Type name ONLY: `detail` is persisted to
+            # agent_compatibility_results.checks_json and rendered in the UI,
+            # and `str(e)` can embed untrusted template content.
+            return _fail("metrics block could not be evaluated",
+                         {"error_type": type(e).__name__})
+        if errors:
+            return _fail("template.yaml `metrics:` entries are malformed",
+                         {"errors": errors[:25]})
+        return _ok("metrics block entries are well-formed")
+    return _with_template(snap, f)
+
+
+_ECHO_SAFE_RE = re.compile(r"[^a-zA-Z0-9_.:-]")
+
+
+def _echo_key(value) -> str:
+    """A key name reduced to a charset safe to persist and render.
+
+    The `metric_points_service._safe_echo` rule, spelled locally rather than
+    imported: this leaf must stay importable without dragging a sibling
+    service in (the D-009 / T-018 convention in this module).
+    """
+    return _ECHO_SAFE_RE.sub("?", str(value))[:64]
+
+
+def c_d010(snap):
+    """STATIC: `metrics.json` is superseded by the point store (ent#479).
+
+    The file is no longer READ by anything: `GET /api/agents/{name}/metrics`
+    is backed by `metric_points`, so a number written here is invisible to the
+    tiles, the dashboard binding, the MCP tool and every consumer downstream.
+    An agent still writing it is measuring into a void, which is exactly the
+    failure this check exists to make visible — the alternative (serving the
+    file when the store is empty) would mean two sources of truth for one
+    number, and ent#476 exists to prevent that.
+
+    SOFT, like its D-009 sibling: the agent works, its numbers are simply not
+    arriving. The detail carries KEY NAMES only (charset-bounded, 25 max) —
+    `checks_json` is persisted and rendered in the UI, and both the keys and
+    the values in this file are author-controlled text.
+    """
+    if not _exists(snap, "metrics.json"):
+        return _ok("no superseded metrics.json")
+
+    keys: List[str] = []
+    undeclared: List[str] = []
+    raw = _content(snap, "metrics.json")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            # The legacy file nests values under `metrics` or holds them flat;
+            # both spellings shipped, so both are read rather than guessed at.
+            values = parsed.get("metrics")
+            if not isinstance(values, dict):
+                values = {k: v for k, v in parsed.items()
+                          if k not in ("last_updated", "metrics")}
+            keys = [_echo_key(k) for k in list(values)[:25]]
+
+    declared = set()
+    data, err = _template(snap)
+    if not err and isinstance(data, dict):
+        block = data.get("metrics")
+        if isinstance(block, dict):
+            declared = {str(k) for k in block}
+        elif isinstance(block, list):
+            declared = {str(e.get("name")) for e in block
+                        if isinstance(e, dict) and e.get("name")}
+    undeclared = [k for k in keys if k not in declared]
+
+    return _fail(
+        "metrics.json is superseded and no longer served — record these "
+        "values with `record_metrics`",
+        {"keys": keys, "undeclared": undeclared},
+    )
+
+
 # ===========================================================================
 # X — Cross-File Consistency (static parts)
 # ===========================================================================
@@ -1529,7 +1634,7 @@ STATIC_CHECKS = {
     "P-001": c_p001, "P-002": c_p002, "P-004": c_p004, "P-006": c_p006,
     "A-001": c_a001, "A-002": c_a002, "A-004": c_a004,
     "D-001": c_d001, "D-002": c_d002, "D-003": c_d003, "D-004": c_d004,
-    "D-005": c_d005, "D-008": c_d008,
+    "D-005": c_d005, "D-008": c_d008, "D-009": c_d009, "D-010": c_d010,
     "X-003": c_x003, "X-004": c_x004, "X-007": c_x007,
     "I-006": c_i006,
     "DP-001": c_dp001, "DP-002": c_dp002, "DP-003": c_dp003,

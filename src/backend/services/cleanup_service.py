@@ -90,20 +90,249 @@ def _row_age_seconds(execution: Dict) -> float:
         return float("inf")
 
 
-def _orphan_error_message(agent_name: str, agent_reports_pending: bool) -> str:
+def _orphan_error_message(
+    agent_name: str, agent_reports_pending: bool, no_retained_result: bool = False
+) -> str:
     """#2433: say what was OBSERVED. The old text — "Execution completed on
     agent but status not reported" — asserted a completion for a row the agent
-    had never received."""
+    had never received.
+
+    #2944: `no_retained_result` adds "no retained result" ONLY when the agent
+    was actually asked for one and answered that it has none — an older image
+    that has no such route is not evidence either way, and the string must not
+    claim an observation that was never made."""
     agent_side = (
         "not running, not pending, not recently completed"
         if agent_reports_pending
         else "not running, not recently completed"
     )
+    if no_retained_result:
+        agent_side += ", no retained result"
     return (
         f"Execution not tracked by agent '{agent_name}' ({agent_side}) and no live "
         f"backend dispatcher (not parked in this worker, no cross-worker marker) "
         f"— recovered by watchdog"
     )
+
+
+# ---------------------------------------------------------------------------
+# #2944: claim a terminal the agent retained after the backend lost the
+# connection that was waiting for it.
+#
+# A synchronously dispatched turn (every trigger while DISPATCH_ASYNC is off)
+# returns its result on the held-open HTTP connection. A backend recreate
+# destroys that consumer; the agent still finishes and bills, retains the
+# terminal (agent_server/services/retained_results.py) and surfaces the id in
+# `recently_completed_ids` for 5 minutes. The watchdog used to skip that id for
+# one cycle and FAIL it on the next — asserting a failure for a success that
+# was sitting on the agent's disk (the mirror of #2433's rule: never assert an
+# outcome that was not observed). Now it asks for the result first.
+# ---------------------------------------------------------------------------
+
+#: How old the agent's record must be before the watchdog may claim it. A LIVE
+#: dispatcher is not reliably "alive" between its POST returning and its
+#: terminal CAS: `track_inflight_dispatch` pops the in-process entry the instant
+#: the call returns, the cross-worker marker delete flushes on the next
+#: INFLIGHT_TICK_SECONDS tick, and the SUB-003 subscription-switch / #678
+#: retries reuse the execution id with an uncovered gap. Claiming inside that
+#: window would beat the live caller to the CAS (it would receive an empty
+#: RECONCILED response for a healthy turn, and the slot would be released
+#: twice). 180 s > INFLIGHT_MARKER_TTL_SECONDS (60) + the tick (15) + the switch
+#: gap; a genuinely dead consumer costs at most one extra cycle.
+RETAINED_RESULT_CLAIM_GRACE_SECONDS = 180
+#: Mirrors `routers/agents.py::_MAX_CALLBACK_RESPONSE_CHARS` / `_MAX_CALLBACK_LOG_BYTES`
+#: — the caps the callback endpoint enforces on the same envelope shape. Read
+#: from an agent we already trust, but bounded the same way so a corrupt record
+#: cannot make N workers `.json()` an unbounded body on the event loop. Pinned
+#: equal by tests/unit/test_2944_watchdog_claims_result.py.
+_MAX_RETAINED_RESPONSE_CHARS = 4_000_000
+_MAX_RETAINED_LOG_BYTES = 16_000_000
+_RETAINED_FETCH_TIMEOUT = 15.0
+
+_RECOVERED_NOTICE = (
+    "> ℹ️ Recovered by the watchdog: the backend lost the connection that was "
+    "waiting for this turn (a restart mid-run), so the result below was claimed "
+    "from the agent's retained terminal afterwards. The execution row, cost and "
+    "session are complete; a chat thread that was waiting on this turn may not "
+    "show this reply. (#2944)"
+)
+
+
+def _classify_retained_response(response) -> tuple:
+    """Turn an agent's answer to `GET /api/executions/{id}/result` into one of
+    ``("found", record) | ("none", None) | ("old_image", None) | ("error", None)``.
+
+    The three non-found verdicts are deliberately distinct because they lead
+    to different writes: ``none`` (the agent was asked and has nothing) lets
+    the orphan path proceed and say so; ``old_image`` (a bare FastAPI 404 —
+    no such route) keeps the pre-#2944 orphan path unchanged and silent about
+    results; ``error`` (unreachable, 5xx, over-cap, malformed) withholds the
+    row for a cycle — a read that could not be asked is not a read that said
+    no (#2196)."""
+    status = getattr(response, "status_code", None)
+    if not isinstance(status, int) or isinstance(status, bool):
+        # Stub-leak guard (the `_inflight_verdict_map` rule): a response that is
+        # not a real HTTP response collapses to the pre-#2944 behaviour, never
+        # to a withhold — a MagicMock must not read as "the agent is down".
+        return ("old_image", None)
+    if status == 404:
+        try:
+            body = response.json()
+        except Exception:  # noqa: BLE001
+            return ("old_image", None)
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if isinstance(detail, dict) and detail.get("code") == "no_retained_result":
+            return ("none", None)
+        return ("old_image", None)
+    if status != 200:
+        return ("error", None)
+    try:
+        length = int(response.headers.get("content-length") or 0)
+    except (TypeError, ValueError, AttributeError):
+        length = 0
+    if length > _MAX_RETAINED_LOG_BYTES + _MAX_RETAINED_RESPONSE_CHARS:
+        return ("error", None)
+    try:
+        record = response.json()
+    except Exception:  # noqa: BLE001
+        return ("error", None)
+    if not isinstance(record, dict) or not isinstance(record.get("status"), str):
+        # A 200 that is not a retained record (same stub-leak rule as above):
+        # nothing here says the agent has a result, so the legacy path runs.
+        return ("old_image", None)
+    resp_text = record.get("response")
+    if isinstance(resp_text, str) and len(resp_text) > _MAX_RETAINED_RESPONSE_CHARS:
+        return ("error", None)
+    log = record.get("execution_log")
+    if log is not None:
+        try:
+            if len(json.dumps(log)) > _MAX_RETAINED_LOG_BYTES:
+                return ("error", None)
+        except (TypeError, ValueError):
+            return ("error", None)
+    return ("found", record)
+
+
+async def _fetch_retained_result(get, agent_name: str, execution_id: str) -> tuple:
+    """Ask the agent for the terminal it retained for ``execution_id``.
+
+    ``get`` is a coroutine function ``(url_path) -> response`` so the periodic
+    watchdog (a raw shared ``httpx.AsyncClient`` + explicit auth headers) and
+    the startup recovery (``get_agent_client``) share one classification.
+    Any transport failure is ``error``."""
+    try:
+        response = await get(f"/api/executions/{execution_id}/result")
+    except Exception as e:  # noqa: BLE001 — transport: unknown, not "no"
+        logger.debug(
+            f"[Watchdog] retained-result probe failed for {execution_id} on '{agent_name}': {e}"
+        )
+        return ("error", None)
+    return _classify_retained_response(response)
+
+
+def _retained_age_seconds(record: Dict) -> float:
+    """Seconds since the agent retained the record; +inf when unreadable, so a
+    record with no timestamp is claimable (it cannot be a live consumer's)."""
+    raw = record.get("retained_at")
+    if not raw:
+        return float("inf")
+    try:
+        return (utc_now() - parse_iso_timestamp(raw)).total_seconds()
+    except Exception:  # noqa: BLE001
+        return float("inf")
+
+
+async def _claim_retained_result(
+    agent_name: str,
+    execution_id: str,
+    record: Dict,
+    *,
+    report: Optional["CleanupReport"] = None,
+    stats: Optional[Dict] = None,
+    broadcast=None,
+) -> str:
+    """Apply a retained terminal to its `running` row. Returns
+    ``"claimed" | "deferred" | "lost" | "error"``.
+
+    ``deferred``: the record is younger than the claim grace — a live
+    dispatcher may still be about to write it. ``lost``: the CAS was won by
+    someone else (the live dispatcher, a cancel, another worker's sweep —
+    every worker runs this loop and only the winner counts). The terminal
+    goes through ``apply_result`` with EXACTLY the result-callback's inputs
+    (activity id incl. FAILED, breaker flag, slot release) so a claimed turn
+    finalizes the way a callback-delivered one does — no second writer.
+    """
+    age = _retained_age_seconds(record)
+    if age < RETAINED_RESULT_CLAIM_GRACE_SECONDS:
+        logger.info(
+            f"[Watchdog] retained result for {execution_id} on '{agent_name}' is "
+            f"{int(age)}s old — deferring the claim (a live dispatcher may still write it)"
+        )
+        if report is not None:
+            report.result_claims_deferred += 1
+        return "deferred"
+    try:
+        # Lazy: the cleanup loop deliberately does not import the execution
+        # service at module level (see the #1083 note on `_LEASE_EXPIRED_TAG`).
+        from models import ExecutionResultEnvelope
+        from services.execution_envelope import terminal_from_callback_payload
+        from services.task_execution_service import (
+            TaskExecutionErrorCode,
+            dispatch_breaker_active,
+            get_task_execution_service,
+        )
+
+        payload = ExecutionResultEnvelope(**{
+            k: record.get(k) for k in (
+                "status", "response", "error", "error_code", "terminal_reason",
+                "metadata", "execution_log", "session_id", "execution_time_ms",
+            )
+        })
+        envelope = terminal_from_callback_payload(payload, execution_id)
+        if envelope.status == TaskExecutionStatus.SUCCESS:
+            envelope.response = (
+                f"{_RECOVERED_NOTICE}\n\n{envelope.response}"
+                if envelope.response else _RECOVERED_NOTICE
+            )
+        result = await get_task_execution_service().apply_result(
+            agent_name,
+            envelope,
+            activity_id=db.get_open_activity_id_for_execution(execution_id, include_failed=True),
+            breaker_enabled=dispatch_breaker_active(agent_name),
+            release_slot=True,
+        )
+    except Exception as e:  # noqa: BLE001 — never let a claim take the sweep down
+        logger.warning(f"[Watchdog] claiming retained result for {execution_id} failed: {e}")
+        if stats is not None:
+            stats["errors"] = stats.get("errors", 0) + 1
+        return "error"
+    # Compare by `.value`: the fieldless `@dataclass` str-Enum makes every
+    # member `==` every other (the #1085 quirk documented in `apply_result`).
+    _ec = getattr(result.error_code, "value", None)
+    if _ec == TaskExecutionErrorCode.RECONCILED.value:
+        # Lost the CAS: a live dispatcher, a cancel, or another worker's sweep
+        # wrote first. Nothing to count, nothing to broadcast — the row already
+        # carries the terminal that stands. (A failure-style terminal that
+        # lost its CAS returns unchanged — the counter below is observability,
+        # and the row is correct either way.)
+        return "lost"
+    if report is not None:
+        report.results_recovered += 1
+    if stats is not None:
+        stats["results_recovered"] = stats.get("results_recovered", 0) + 1
+    if broadcast is not None:
+        try:
+            await broadcast(
+                "result_recovered", agent_name, execution_id,
+                f"terminal claimed from the agent's retained result: status={result.status}",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    logger.info(
+        f"[Watchdog] result_recovered: execution {execution_id} on agent "
+        f"'{agent_name}' — status={result.status}, retained {int(age)}s ago"
+    )
+    return "claimed"
 
 # Configuration
 CLEANUP_INTERVAL_SECONDS = 300  # 5 minutes
@@ -214,9 +443,18 @@ def set_cleanup_ws_manager(manager):
 class _KnownIds(set):
     """The agent-known id set, tagged with whether the agent's image reports
     the #2433 `pending_ids` field (so the orphan error string can say
-    "not pending" only when that was actually observed)."""
+    "not pending" only when that was actually observed).
+
+    #2944: also carries the `recently_completed` SUBSET — an id there is a turn
+    the agent has FINISHED, not one it is running, and the two must be told
+    apart: a finished turn whose backend dispatcher is gone has a retained
+    terminal to claim, never a timeout to enforce."""
 
     reports_pending: bool = False
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.recently_completed: set = set()
 
 
 def _extract_agent_known_ids(payload: Dict) -> set:
@@ -239,7 +477,9 @@ def _extract_agent_known_ids(payload: Dict) -> set:
     )
     recent = payload.get("recently_completed_ids")
     if isinstance(recent, (list, tuple, set)):
-        ids.update(eid for eid in recent if isinstance(eid, str))
+        recent_ids = {eid for eid in recent if isinstance(eid, str)}
+        ids.update(recent_ids)
+        ids.recently_completed = recent_ids
     pending = payload.get("pending_ids")
     if isinstance(pending, (list, tuple, set)):
         ids.reports_pending = True
@@ -286,10 +526,13 @@ def _read_retention_setting(key: str) -> int:
     unreadable becomes `0`, which DISABLES the sweep. A malformed setting must
     never enable an unbounded prune.
     """
-    from services.settings_service import OPS_SETTINGS_DEFAULTS
+    from services.settings_service import settings_service
 
     try:
-        raw = db.get_setting_value(key, OPS_SETTINGS_DEFAULTS.get(key, "0"))
+        # Through the resolver, so the env tier minted for ent#478's window is
+        # honoured here too. A sweep that read the defaults dict directly would
+        # prune on a window the settings endpoint never reports.
+        raw, _source = settings_service.resolve_ops_setting(key)
         return max(int(raw), 0)
     except (TypeError, ValueError):
         return 0
@@ -385,12 +628,17 @@ def log_effective_retention_windows() -> None:
     Never raises: this is observability on the boot path.
     """
     try:
-        from services.settings_service import OPS_SETTINGS_DEFAULTS, RETENTION_OPS_KEYS
+        from services.settings_service import (RETENTION_OPS_KEYS,
+                                                settings_service)
 
         parts = []
         for key in RETENTION_OPS_KEYS:
-            row = db.get_setting_value(key, None)
-            source = "db-row" if row is not None else "code-default"
+            # The full chain, named honestly: an `env`-sourced window is one an
+            # operator set in the environment and can still change there, which
+            # is a different promise from both `db-row` and `code-default`.
+            resolved, source = settings_service.resolve_ops_setting(key)
+            if source == "default":
+                source = "code-default"
             if key == "backup_retention_days":
                 # #2216: rendered through the ONE shared reader — its coercion
                 # is inverted (garbage → 14, never → 0/keep-forever), so this
@@ -401,7 +649,7 @@ def log_effective_retention_windows() -> None:
                 )
                 value = effective_backup_retention_days()
             else:
-                value = row if row is not None else OPS_SETTINGS_DEFAULTS.get(key, "?")
+                value = resolved if resolved != "" else "?"
             parts.append(f"{key}={value}d ({source})")
         logger.info(f"[Cleanup] Effective retention windows: {'; '.join(parts)}")
     except Exception as e:
@@ -489,6 +737,8 @@ class CleanupReport:
     # replaces a hardcoded 24h sweep that had no window and no guard).
     headroom_history_pruned: int = 0
     rate_limit_events_pruned: int = 0
+    # trinity-enterprise#478: recorded metric points deleted past their window.
+    metric_points_pruned: int = 0
     # Issue #1804: dispatch activities closed by a recovery path that won the
     # terminal CAS (watchdog, startup recovery, the bulk sweeps). Post-merge
     # signal: `stale_activities` should trend to ~0 while this picks up the
@@ -499,6 +749,14 @@ class CleanupReport:
     # agent-call queue or mid-call) or the cross-worker marker could not be
     # asked. Observability only — not a recovery, so NOT summed into `total`.
     dispatch_inflight_skipped: int = 0
+    # #2944: `running` rows finalized from the terminal the agent RETAINED
+    # after the backend lost the held-open connection — a recovery of the
+    # result, not a fabricated failure. `result_claims_deferred` (record too
+    # young: a live dispatcher may still write it) and `result_probe_deferred`
+    # (the agent could not be asked) are observability only, not recoveries.
+    results_recovered: int = 0
+    result_claims_deferred: int = 0
+    result_probe_deferred: int = 0
 
     @property
     def total(self) -> int:
@@ -516,7 +774,8 @@ class CleanupReport:
                 self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed +
                 self.operator_queue_pruned + self.ssh_credentials_expired +
                 self.agent_reminders_pruned +
-                self.headroom_history_pruned + self.rate_limit_events_pruned)
+                self.headroom_history_pruned + self.rate_limit_events_pruned +
+                self.results_recovered + self.metric_points_pruned)
     # NOTE (#1804): activities_closed_on_recovery is deliberately NOT summed
     # into `total` — it is an observability counter over work already counted
     # by the sweep that closed the execution, not additional cleanup work.
@@ -529,6 +788,10 @@ class CleanupReport:
             "no_session_executions": self.no_session_executions,
             "orphaned_skipped": self.orphaned_skipped,
             "dispatch_inflight_skipped": self.dispatch_inflight_skipped,
+            # #2944
+            "results_recovered": self.results_recovered,
+            "result_claims_deferred": self.result_claims_deferred,
+            "result_probe_deferred": self.result_probe_deferred,
             "stale_activities": self.stale_activities,
             "stale_slots": self.stale_slots,
             "stale_slot_executions": self.stale_slot_executions,
@@ -552,6 +815,7 @@ class CleanupReport:
             "agent_reminders_pruned": self.agent_reminders_pruned,
             "headroom_history_pruned": self.headroom_history_pruned,
             "rate_limit_events_pruned": self.rate_limit_events_pruned,
+            "metric_points_pruned": self.metric_points_pruned,
             "activities_closed_on_recovery": self.activities_closed_on_recovery,
             "total": self.total,
         }
@@ -652,6 +916,7 @@ class CleanupService:
         self._sweep_operator_queue_retention(report)
         self._sweep_agent_reminders_retention(report)
         self._sweep_headroom_history(report)
+        self._sweep_metric_points(report)
         await self._sweep_soft_deleted_agents(report)
         await self._sweep_orphan_agent_volumes(report)
         await self._sweep_ephemeral_agents(report)
@@ -1067,6 +1332,56 @@ class CleanupService:
                     )
         except Exception as e:
             logger.error(f"[Cleanup] Error pruning headroom history: {e}")
+
+    def _sweep_metric_points(self, report: CleanupReport) -> None:
+        """Prune recorded metric points past their window (ent#478).
+
+        Two things differ from the sibling row sweeps, both deliberate.
+
+        **The floor.** `FLOOR_METRIC_POINTS` (one agent-day at the default cap)
+        rather than the default `MAX_ROWS_PER_SWEEP = 1000`: at any real
+        ingest rate more than a thousand points fall out of a 365-day window
+        every five minutes, so the default floor would refuse EVERY cycle,
+        alarm once, and then leave the table growing behind single-use
+        acknowledgements. The guard still fires for what it is for — a window
+        an operator just narrowed.
+
+        **The ack.** The prune is bounded per call (TD-14), so the first cycle
+        after an approval does not necessarily finish the backlog. Consuming
+        the ack there would ask the operator to approve the same intent again
+        for the remainder, so it is consumed only once what is LEFT has fallen
+        under the floor.
+        """
+        from services.retention_guard import FLOOR_METRIC_POINTS
+
+        days = _read_retention_setting("metrics_retention_days")
+        if days <= 0:
+            return
+        try:
+            if _guard_allows(
+                "metrics_retention_days",
+                "metric_points", days,
+                lambda limit: db.count_metric_points_candidates(days, limit),
+                floor=FLOOR_METRIC_POINTS,
+            ):
+                pruned = db.prune_metric_points(
+                    retention_days=days,
+                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
+                )
+                report.metric_points_pruned = pruned
+                remaining = db.count_metric_points_candidates(
+                    days, FLOOR_METRIC_POINTS + 1)
+                if remaining <= FLOOR_METRIC_POINTS:
+                    _after_guarded_prune("metrics_retention_days")
+                if pruned > 0:
+                    _log_prune(
+                        pruned,
+                        f"[Cleanup] Deleted {pruned} metric_points rows older "
+                        f"than {days} days (ent#478); {remaining} still past "
+                        f"the window",
+                    )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error pruning metric points: {e}")
 
     def _sweep_shared_files(self, report: CleanupReport) -> None:
         """4b. Purge expired / old-revoked shared files (C4 / FILES-001).
@@ -1852,7 +2167,8 @@ class CleanupService:
                            + report.operator_queue_pruned  # #1142
                            + report.agent_reminders_pruned  # #1296 — was omitted
                            + report.headroom_history_pruned      # ent#433
-                           + report.rate_limit_events_pruned)    # ent#433
+                           + report.rate_limit_events_pruned    # ent#433
+                           + report.metric_points_pruned)       # ent#478
         if retention_total > 0:
             try:
                 _wal_checkpoint_truncate()
@@ -2159,8 +2475,14 @@ class CleanupService:
                 known = agent_running.get(agent_name)
                 if known is None:
                     continue
+                recently_completed = getattr(known, "recently_completed", set())
                 for ex in executions:
-                    if ex.get("id") and ex["id"] not in known:
+                    # #2944: a FINISHED turn (recently_completed) needs the
+                    # dispatcher verdict too — with no live dispatcher its
+                    # result has nowhere to go but the retained terminal.
+                    if ex.get("id") and (
+                        ex["id"] not in known or ex["id"] in recently_completed
+                    ):
                         candidates.append(ex["id"])
             inflight = await _inflight_verdict_map(candidates)
             skipped_by_agent: Dict[str, Dict[str, int]] = defaultdict(lambda: {"alive": 0, "unknown": 0})
@@ -2171,6 +2493,14 @@ class CleanupService:
                     # Agent unreachable — skip entirely, retry next cycle
                     continue
                 agent_reports_pending = bool(getattr(agent_running_ids, "reports_pending", False))
+                recently_completed = getattr(agent_running_ids, "recently_completed", set())
+
+                async def _probe_retained(path: str, _agent: str = agent_name):
+                    return await client.get(
+                        f"http://agent-{_agent}:8000{path}",
+                        timeout=_RETAINED_FETCH_TIMEOUT,
+                        headers=build_agent_auth_headers(_agent),
+                    )
 
                 for ex in executions:
                     try:
@@ -2180,6 +2510,39 @@ class CleanupService:
                         # Compute age for both orphan grace period and timeout checks
                         started_at = parse_iso_timestamp(ex["started_at"])
                         age_seconds = (utc_now() - started_at).total_seconds()
+
+                        # #2944: a turn the agent has FINISHED whose backend
+                        # dispatcher is gone. This runs BEFORE the on-agent
+                        # timeout branch below: a completed row older than its
+                        # timeout has a result to claim, not a process to
+                        # terminate (the terminate would 404 and the row would
+                        # be "deferred to stale cleanup" for two hours).
+                        if execution_id in recently_completed:
+                            verdict = inflight.get(execution_id, "absent")
+                            if _inflight_skip(verdict, age_seconds):
+                                # A live dispatcher (or one that could not be
+                                # ruled out) is about to write this terminal
+                                # itself — the #921 race, working as designed.
+                                confirmed_running.add(execution_id)
+                                continue
+                            kind, record = await _fetch_retained_result(
+                                _probe_retained, agent_name, execution_id
+                            )
+                            if kind == "found":
+                                outcome = await _claim_retained_result(
+                                    agent_name, execution_id, record,
+                                    report=report,
+                                    broadcast=self._broadcast_watchdog_event,
+                                )
+                                if outcome == "claimed":
+                                    continue
+                            # Nothing claimable (yet): keep treating the id as
+                            # agent-known, exactly as before #2944. An `error`
+                            # probe is not a "no" — it retries next cycle.
+                            if kind == "error" and report is not None:
+                                report.result_probe_deferred += 1
+                            confirmed_running.add(execution_id)
+                            continue
 
                         if not is_on_agent:
                             # Skip very recent executions that may still be dispatching
@@ -2207,8 +2570,39 @@ class CleanupService:
                             # `process_registry.list_recently_completed_ids`
                             # already absorbed the success-write race (#921),
                             # so this is a true orphan.
+                            #
+                            # #2944: ask for the RESULT before asserting a
+                            # failure. The recently-completed marker is only
+                            # five minutes wide; the retained terminal outlives
+                            # it, and a turn that finished while the backend
+                            # was down is exactly what lands here.
+                            kind, record = await _fetch_retained_result(
+                                _probe_retained, agent_name, execution_id
+                            )
+                            if kind == "found":
+                                outcome = await _claim_retained_result(
+                                    agent_name, execution_id, record,
+                                    report=report,
+                                    broadcast=self._broadcast_watchdog_event,
+                                )
+                                # claimed → counted in results_recovered;
+                                # lost → the row already has its terminal;
+                                # deferred → counted by the claim helper;
+                                # error → withhold this cycle, counted here.
+                                if outcome == "error" and report is not None:
+                                    report.result_probe_deferred += 1
+                                continue
+                            if kind == "error":
+                                # The agent could not be asked — withhold; the
+                                # 120-minute stale sweep bounds the wait (#2196).
+                                if report is not None:
+                                    report.result_probe_deferred += 1
+                                continue
                             recovery_attempts += 1
-                            error_msg = _orphan_error_message(agent_name, agent_reports_pending)
+                            error_msg = _orphan_error_message(
+                                agent_name, agent_reports_pending,
+                                no_retained_result=(kind == "none"),
+                            )
                             recovered = await self._recover_execution(
                                 execution_id, agent_name, error_msg, "orphan_recovered",
                                 client, report,
@@ -2700,6 +3094,7 @@ async def recover_orphaned_executions() -> Dict:
         by_agent.setdefault(execution["agent_name"], []).append(execution)
 
     recovered = 0
+    recovered_results = 0  # #2944: rows finalized from the agent's retained terminal
     still_running = 0
     skipped_grace = 0
     errors = 0
@@ -2739,6 +3134,7 @@ async def recover_orphaned_executions() -> Dict:
 
         # Container is up — check agent's process registry
         registry_ids: set = set()
+        registry_reachable = False
         try:
             client = get_agent_client(agent_name)
             resp = await client.get("/api/executions/running", timeout=5.0)
@@ -2747,6 +3143,7 @@ async def recover_orphaned_executions() -> Dict:
                 # recently-completed IDs so a backend restart that races
                 # an in-flight completion doesn't false-orphan it.
                 registry_ids = _extract_agent_known_ids(resp.json())
+                registry_reachable = True
         except AgentClientError as e:
             logger.warning(f"[Recovery] Could not reach agent {agent_name} registry: {e}")
 
@@ -2756,14 +3153,43 @@ async def recover_orphaned_executions() -> Dict:
         # signal). One MGET for the whole agent. After a FULL restart every
         # marker lapses within INFLIGHT_MARKER_TTL_SECONDS, so at worst such a
         # row waits one periodic sweep instead of being recovered here.
+        recently_completed = getattr(registry_ids, "recently_completed", set())
         absent_ids = [
             e["id"] for e in executions
-            if e["id"] not in registry_ids and not _within_startup_grace(e)
+            if (e["id"] not in registry_ids or e["id"] in recently_completed)
+            and not _within_startup_grace(e)
         ]
         inflight = await _inflight_verdict_map(absent_ids)
 
+        async def _probe_retained(path: str, _client=client):
+            return await _client.get(path, timeout=_RETAINED_FETCH_TIMEOUT)
+
         for execution in executions:
-            if execution["id"] in registry_ids:
+            if execution["id"] in recently_completed and not _within_startup_grace(execution):
+                # #2944: the agent FINISHED it and this worker has no
+                # dispatcher for it by construction (it just booted). Unless a
+                # sibling worker's marker says otherwise, claim the retained
+                # terminal now instead of leaving it for the periodic sweep.
+                if _inflight_skip(
+                    inflight.get(execution["id"], "absent"), _row_age_seconds(execution)
+                ):
+                    still_running += 1
+                    continue
+                kind, record = await _fetch_retained_result(
+                    _probe_retained, agent_name, execution["id"]
+                )
+                if kind == "found":
+                    outcome = await _claim_retained_result(
+                        agent_name, execution["id"], record, stats=stats
+                    )
+                    if outcome == "claimed":
+                        recovered_results += 1
+                        continue
+                # Not claimable now — the periodic watchdog retries; the
+                # recently-completed marker keeps the row out of the orphan
+                # path meanwhile, exactly as before #2944.
+                still_running += 1
+            elif execution["id"] in registry_ids:
                 still_running += 1
             elif _within_startup_grace(execution):
                 skipped_grace += 1
@@ -2776,6 +3202,29 @@ async def recover_orphaned_executions() -> Dict:
                     f"(or unverifiable) backend dispatcher in another worker — left running (#2433)"
                 )
             else:
+                # #2944: absent everywhere — ask for a retained terminal before
+                # asserting a failure (the marker is only five minutes wide;
+                # the retained record outlives a long backend outage). Only
+                # when the registry itself answered: an agent whose registry
+                # could not be reached keeps the pre-#2944 startup contract
+                # (orphaned — `test_1811` parity), not a second probe.
+                kind, record = (
+                    await _fetch_retained_result(_probe_retained, agent_name, execution["id"])
+                    if registry_reachable else ("old_image", None)
+                )
+                if kind == "found":
+                    outcome = await _claim_retained_result(
+                        agent_name, execution["id"], record, stats=stats
+                    )
+                    if outcome == "claimed":
+                        recovered_results += 1
+                        continue
+                    if outcome in ("lost", "deferred", "error"):
+                        still_running += 1  # the periodic sweep owns it from here
+                        continue
+                if kind == "error":
+                    still_running += 1  # could not be asked — not a "no" (#2196)
+                    continue
                 if await _recover_execution(execution, agent_name, capacity, stats):
                     recovered += 1
                 else:
@@ -2785,7 +3234,8 @@ async def recover_orphaned_executions() -> Dict:
     cas_lost = not_written - errors
     logger.info(
         f"[Recovery] Task execution recovery complete: "
-        f"recovered={recovered}, still_running={still_running}, "
+        f"recovered={recovered}, recovered_results={recovered_results}, "
+        f"still_running={still_running}, "
         f"skipped_grace={skipped_grace}, cas_lost={cas_lost}, errors={errors}, "
         f"activities_closed={stats['activities_closed']}"
     )
@@ -2800,6 +3250,7 @@ async def recover_orphaned_executions() -> Dict:
 
     return {
         "recovered": recovered,
+        "recovered_results": recovered_results,  # #2944
         "still_running": still_running,
         "skipped_grace": skipped_grace,
         # #1804: a terminal CAS lost to a real completion — benign, and counted

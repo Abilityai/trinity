@@ -1,6 +1,7 @@
 """
 Pydantic models for the Trinity backend API.
 """
+import math
 import os
 import re
 import unicodedata
@@ -1611,6 +1612,26 @@ class ShareFileMcpRequest(BaseModel):
     # same file replays the original signed URL instead of minting a new token.
     execution_id: Optional[str] = Field(default=None, max_length=200)
     dedup_label: str = Field(default="", max_length=200)
+    # ent#549 — the ONE override. By default a shared file is for the person the
+    # turn was for, and the platform decides that; an agent may instead name a
+    # different person on its own roster. Validated against the roster in the
+    # service, exactly as `ReportCreate.audience_email` is — same name, same
+    # rule, one vocabulary.
+    audience_email: Optional[str] = Field(default=None, max_length=320)
+
+    @field_validator("audience_email")
+    @classmethod
+    def _normalize_audience(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip().lower()
+        # Shape only — reachability is the service's check. The empty string is
+        # "absent", so "unaddressed" has exactly one spelling.
+        if not v:
+            return None
+        if "@" not in v or " " in v:
+            raise ValueError("audience_email must be an email address")
+        return v
 
 
 class ShareFileResponse(BaseModel):
@@ -1620,6 +1641,16 @@ class ShareFileResponse(BaseModel):
     expires_at: str
     size_bytes: int
     mime_type: Optional[str] = None
+    # ent#549 — honest status, in the names `set_canvas` already uses (#2577).
+    # True: the person in this conversation finds the file in their Files tab.
+    # False: the platform could not tell which conversation the share came from,
+    # so the file is the owner's only — `visibility_note` says how to fix that.
+    # None: no claim (a turn with no person, or an address the agent chose).
+    visible_to_requester: Optional[bool] = None
+    visibility_note: Optional[str] = None
+    # Echoed only when the agent supplied `audience_email`. An address the
+    # platform resolved is never returned to the model.
+    addressed_to: Optional[str] = None
 
 
 class SharedFileInfo(BaseModel):
@@ -1633,6 +1664,11 @@ class SharedFileInfo(BaseModel):
     expires_at: str
     download_count: int
     last_downloaded_at: Optional[str] = None
+    # ent#549 — who the file is for. Declared here or `response_model` strips
+    # them. Withheld from every key-authenticated caller by the route.
+    addressed_to: Optional[str] = None
+    addressed_to_channel: Optional[str] = None
+    audience_source: Optional[str] = None
 
 
 class SharedFilesList(BaseModel):
@@ -3639,6 +3675,28 @@ class WriteUserMemoryRequest(BaseModel):
     memory_text: str = Field(..., max_length=8000)
 
 
+class RecordDecisionRequest(BaseModel):
+    """Body for POST /api/agents/{name}/decisions — a companion records a
+    decision for the seat it is serving (trinity-enterprise#638, R25). The
+    seat is resolved server-side from `execution_id`, never sent. The grammar
+    (one line per field, alternatives required, `review_by` a date) is checked
+    by `services/seat_decision_service.validate_record`, which answers with a
+    named receipt — these caps only bound the body."""
+    execution_id: str = Field(..., min_length=1, max_length=200)
+    outcome: str = Field(..., max_length=16)            # approved | deferred | killed
+    decided: str = Field(..., max_length=2000)
+    alternatives: List[str] = Field(default_factory=list, max_length=32)
+    criterion: str = Field(..., max_length=2000)
+    reversal: str = Field(..., max_length=2000)
+    review_by: str = Field(..., max_length=32)
+    scope: str = Field("seat", max_length=16)           # seat | direction
+    notes: Optional[str] = Field(None, max_length=4000)
+    ask_class: Optional[str] = Field(None, max_length=128)
+    decided_by_role: Optional[str] = Field(None, max_length=128)
+    cites: List[str] = Field(default_factory=list, max_length=32)
+    request_id: Optional[str] = Field(None, max_length=200)
+
+
 # =============================================================================
 # Schedules Models (routers/schedules.py)
 # =============================================================================
@@ -4557,3 +4615,275 @@ class FirstRunState(BaseModel):
     seeded_agents: List[str] = []
     own_agent_count: int = 0
     demo_agent: Optional[str] = None
+
+
+# =============================================================================
+# Recorded metric points (trinity-enterprise#478)
+# =============================================================================
+
+# The batch caps. Both are checked at two levels — Pydantic bounds the point
+# COUNT, the route bounds the encoded BYTES — because 1000 points × 10
+# dimensions × 128 characters is ~1.4 MB of legal input, so a point cap alone
+# is not a size cap.
+METRIC_BATCH_MAX_POINTS = 1000
+METRIC_BATCH_MAX_BYTES = 2 * 1024 * 1024
+METRIC_DIM_VALUE_MAX_LEN = 128
+METRIC_TS_FUTURE_SKEW_SECONDS = 300
+# A `value` that is text is a LABEL, not a document. Unbounded, a single legal
+# point could carry the whole 2 MiB batch budget in one field, and a `status`
+# label has a 64-character domain anyway — 1024 is deliberately far above any
+# honest label so the refusal reads as "this is not a label" rather than as a
+# limit an author has to design around (ent#478 I1).
+METRIC_VALUE_TEXT_MAX_LEN = 1024
+
+
+class MetricPointIn(BaseModel):
+    """One observation on the wire — the frozen shape for ent#478/#479/#536.
+
+    Read and write use the SAME shape: what an agent records here is what
+    ent#479's history returns and what a canvas `chart`/`kpi` payload binds to.
+    `value` is `float | str` because `status` metrics observe a label, not a
+    number; the validator below is what stops Pydantic's union coercion from
+    turning `True` into `1.0` or accepting `NaN` (both measured).
+    """
+
+    metric: str = Field(
+        ..., pattern=r"^[a-z][a-z0-9_]{0,63}$",
+        description="A metric name declared in the agent's template.yaml",
+    )
+    value: Union[float, str] = Field(
+        ...,
+        description=(
+            f"A finite number, or a declared status label "
+            f"(at most {METRIC_VALUE_TEXT_MAX_LEN} characters)"
+        ),
+    )
+    ts: Optional[str] = Field(
+        None, max_length=64,
+        description="RFC 3339 with an explicit offset; defaults to server now",
+    )
+    dims: Optional[Dict[str, str]] = Field(
+        None, max_length=10,
+        description="Declared dimension keys → string labels",
+    )
+
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _reject_coercions(cls, v):
+        # `bool` is an `int` subclass, so it must be rejected BEFORE the union
+        # ever sees it — otherwise `True` records as the number 1.0 and nothing
+        # downstream can tell it from a real observation. Non-finite floats are
+        # rejected here too: SQLite stores NaN as NULL and PostgreSQL stores it
+        # as NaN, so the same batch means two different things per dialect.
+        if isinstance(v, bool):
+            raise ValueError("value must be a number or a string, not a boolean")
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError("value must be a finite number")
+        return v
+
+
+class MetricPointsBatch(BaseModel):
+    """A `record_metrics` batch — all-or-nothing, idempotent."""
+
+    points: List[MetricPointIn] = Field(
+        ..., min_length=1, max_length=METRIC_BATCH_MAX_POINTS)
+    idempotency_key: Optional[str] = Field(
+        None, max_length=128,
+        description="Batch key; the `Idempotency-Key` header wins over it",
+    )
+    execution_id: Optional[str] = Field(
+        None, max_length=128,
+        description=(
+            "The turn this batch belongs to. Provenance only — the backend "
+            "confirms it belongs to this agent and stores NULL if it does not"
+        ),
+    )
+
+
+class MetricPointAccepted(BaseModel):
+    """What the store made of one accepted point."""
+
+    index: int
+    ts: str
+    idempotency_key: str
+
+
+class MetricPointsResult(BaseModel):
+    """The 201 body. `recorded` and `deduplicated` are separate counts on
+    purpose: an honest "we already had this" is not a failure and must not read
+    as a success that wrote something."""
+
+    success: bool = True
+    agent_name: str
+    recorded: int
+    deduplicated: int
+    replayed: bool = False
+    points: List[MetricPointAccepted] = []
+
+
+# ============================================================================
+# Objective ↔ metric join (trinity-enterprise#666)
+# ============================================================================
+# The model IS the contract. `read_objective_join` returns a dict and the route
+# returns it unchanged; a key-parity test asserts these models carry exactly
+# the keys the service produces, so an additive service field fails the build
+# here instead of being silently filtered out of the response (2026-07-27).
+
+
+class ObjectiveMetricGap(BaseModel):
+    """Position of `actual` relative to `target`, given direction — NEVER pace.
+
+    `behind` means the number is on the wrong side of the target right now; it
+    says nothing about whether the agent is late against `by`. `off_target` is
+    the `hold` arm's only failure word, because a value that should be held has
+    no good side to be on.
+    """
+
+    status: str  # behind | on_target | ahead | off_target | not_computable
+    delta: Optional[float] = None
+    reason: Optional[str] = None
+
+
+class ObjectiveFindingRef(BaseModel):
+    """The finding attached to one metric row, so a card never renders a blank
+    where a number was expected."""
+
+    code: str
+    message: str
+
+
+class ObjectiveFinding(BaseModel):
+    """A finding in the flat list — the same sentence, plus where it came from."""
+
+    code: str
+    objective_id: Optional[str] = None
+    metric: Optional[str] = None
+    path: Optional[str] = None
+    message: str
+
+
+class ObjectiveMetricRead(BaseModel):
+    """One metric of one objective: target from the file, everything else from
+    the registry and the point store."""
+
+    name: str
+    target: Optional[float] = None
+    #: A non-numeric target (a status label, a phrase) kept verbatim and
+    #: bounded, so the card can show what the author wrote even though no gap
+    #: can be computed from it.
+    target_text: Optional[str] = None
+    tolerance: Optional[float] = None
+    by: Optional[str] = None
+    horizon: Optional[str] = None
+    #: What the objective file itself wrote (`up` / `down` / `hold`), kept
+    #: verbatim so an author can see the word they typed beside the resolved
+    #: one.
+    objective_direction: Optional[str] = None
+    declared: bool
+    #: Declared by the OWNING role's agent, not by this one — a supporting
+    #: agent cannot fix that and must not be told to.
+    declared_elsewhere: bool
+    #: The REGISTRY's vocabulary and nothing else — `up_good` | `down_good` |
+    #: `neutral` | `null` — so a direction-aware formatter needs no fourth
+    #: case. An objective's declared `hold` resolves to `neutral`; what tells
+    #: it apart from a registry that never said is `direction_source`, not a
+    #: fourth value.
+    direction: Optional[str] = None
+    direction_source: str = "none"  # registry | objective | none
+    unit: Optional[str] = None
+    type: Optional[str] = None
+    label: Optional[str] = None
+    actual: Optional[Union[float, str]] = None
+    last_point_at: Optional[str] = None
+    stale: bool = False
+    freshness: Optional[str] = None
+    stale_after: Optional[str] = None
+    gap: ObjectiveMetricGap
+    finding: Optional[ObjectiveFindingRef] = None
+
+
+class ObjectiveRead(BaseModel):
+    """One objective this agent owns or supports (framework §3.4)."""
+
+    id: str
+    path: str
+    schema_version: Optional[str] = None
+    statement: Optional[str] = None
+    horizon: Optional[str] = None
+    status: str = "active"
+    owner: Optional[str] = None
+    review_by: Optional[str] = None
+    owned: bool
+    supporting: bool
+    metrics: List[ObjectiveMetricRead] = []
+    metrics_truncated: bool = False
+
+
+class ObjectiveRoleRead(BaseModel):
+    """The role from `x-role`. `null` when the agent has none — it can still
+    support an objective by name."""
+
+    id: Optional[str] = None
+    path: Optional[str] = None
+
+
+class ObjectiveJoinSource(BaseModel):
+    """What was actually read, so "no objectives" can be told from "not read".
+
+    `objectives_listed` / `objectives_scanned` / `objectives_unscanned` are
+    separate because the filter runs AFTER the read: a shared fleet canon can
+    hold more files than the scan bound, and silently keeping the first N is
+    how an agent's own objective disappears. `objectives_skipped` counts the
+    `*.yaml` whose NAME this read refuses (a space, a non-ASCII character), so
+    a file that is there but unfetchable cannot look like a file that is not
+    there; it carries an `objective_file_skipped` finding naming one.
+    """
+
+    template: str = "skipped"  # read | not_found | unreadable | invalid | skipped
+    #: read | absent | unreadable | timeout | skipped — `timeout` is the
+    #: fan-out's wall-clock budget, an agent answering too slowly to join.
+    objectives_dir: str = "skipped"
+    objectives_listed: int = 0
+    objectives_scanned: int = 0
+    objectives_unscanned: int = 0
+    objectives_skipped: int = 0
+    objectives_truncated: bool = False
+
+
+class ObjectiveJoinSummary(BaseModel):
+    """Counts a consumer can act on without walking the rows."""
+
+    objectives: int = 0
+    metrics: int = 0
+    behind: int = 0
+    ahead: int = 0
+    on_target: int = 0
+    off_target: int = 0
+    not_computable: int = 0
+    stale: int = 0
+    undeclared: int = 0
+    declared_elsewhere: int = 0
+
+
+class ObjectiveJoinRead(BaseModel):
+    """`GET /api/agents/{name}/objectives` — target vs actual with freshness.
+
+    Files are truth and they live in the agent's container, so `unavailable`
+    is an honest answer rather than a cached number: `agent_stopped`,
+    `agent_missing` or `agent_unreachable`, each with `message` naming what to
+    do about it.
+    """
+
+    agent_name: str
+    generated_at: str
+    stale_rule: str
+    role: Optional[ObjectiveRoleRead] = None
+    canon_root: Optional[str] = None
+    unavailable: Optional[str] = None
+    source: ObjectiveJoinSource
+    objectives: List[ObjectiveRead] = []
+    findings: List[ObjectiveFinding] = []
+    summary: ObjectiveJoinSummary
+    message: Optional[str] = None

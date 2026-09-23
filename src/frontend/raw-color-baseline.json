@@ -4,24 +4,28 @@
   "commit": "116d73a3a1f78a69a5e49ba31d1db77785ef5378",
   "refrozen": {
     "issue": "#2605",
-    "why": "The ratchet was documented as enforced and nothing ran it, so the tree drifted past the 2026-07-31 freeze. This re-freeze is the deliberate disposition the issue asks for, in its own PR with the increases named \u2014 NOT a silent absorption into a feature diff. From here the guard (tests/unit/rawColorRatchet.spec.js) bites.",
+    "why": "The ratchet was documented as enforced and nothing ran it, so the tree drifted past the 2026-07-31 freeze. This re-freeze is the deliberate disposition the issue asks for, in its own PR with the increases named — NOT a silent absorption into a feature diff. From here the guard (tests/unit/rawColorRatchet.spec.js) bites.",
     "previous_freeze": "2026-07-31",
     "named_increases": {
       "raw_nongray": "737 -> 815 (+78). Grew in 4 baselined files (ReliabilityPanel +4, ReportsPanelFleet +4, Dashboard +5, enterprise/Audit +4) and arrived in 10 files created after the freeze, led by settings/PortalSessionPolicyPanel (30) and AgentListPanel (28). views/Portal.vue is NOT among them: its 6 amber-* classes from #2261 were paid down to semantic status-warning tokens in this PR, since the issue named them as the exact thing the ratchet exists to catch.",
       "raw_gray": "6938 -> 8699 (+1761) across 24 baselined files plus 61 new ones. Gray is the neutral ink ladder and is ratcheted but not held to zero for new files.",
       "hardcoded_colors": "383 -> 456 (+73), which the issue did not report. Almost all of it is FleetGrid.vue (102 -> 156); the other five are single hex literals in ExecutionsPanel, OverviewPanel, ReliabilityPanel, ScheduleAnalyticsCard and settings/TelemetrySharingPanel.",
       "_merge_train_note": "merge-train 2026-09-09: +3 raw_gray in components/portal/PortalRailFiles.vue from #2608 (landed on dev after this branch), absorbed at regeneration; PortalFilePreview.vue is a new file from the same PR.",
-      "_2662_note": "#2662: +4 raw_gray in components/base/fieldClasses.js (11 -> 15) \u2014 the new FIELD_GHOST_CLASS recipe's resting ink and hover ground, light and dark. Gray is the neutral ink ladder and has no semantic token to move to; the recipe was trimmed from 6 to 4 by dropping the hover ink change, matching the Workspace agent picker it now sits beside. No other entry moves.",
-      "_2662_rebase_note": "#2662 regeneration after rebasing onto origin/dev @5a0cb0078: absorbs +1 raw_gray in components/portal/PortalJumpToLatest.vue, a file created on dev by #2652 after this branch was cut and never added to the baseline there. Nothing on this branch moved \u2014 fieldClasses.js stays 15, PortalConversation.vue 90, PortalRoom.vue 47. Totals were 8722/3997/197 against an actual 8723/4020/198 purely because the previous freeze was computed pre-rebase; the ratchet never reads totals, so this was cosmetic rather than a failing gate. Same shape as the _merge_train_note above.",
-      "_ent553_note": "ent#553 (PR #2619): components/canvas/CanvasPanel.vue 25 -> 46 raw_gray, and 0 raw_nongray as before. The delete/pin/search chrome this PR adds is drawn entirely from the neutral ink ladder, which the design-system contract SPELLS as gray-N (surfaces gray-50/100/800/900, borders gray-200/300/700/800, ink gray-300/400/500/600) \u2014 there is no semantic token for a neutral, so honest new chrome cannot avoid the count. raw_nongray stays at zero, which is the rule the ratchet actually holds new code to. Named here rather than absorbed silently; first added in 2794388b and dropped by the dev merge aa248f77, re-added on review."
+      "_2662_note": "#2662: +4 raw_gray in components/base/fieldClasses.js (11 -> 15) — the new FIELD_GHOST_CLASS recipe's resting ink and hover ground, light and dark. Gray is the neutral ink ladder and has no semantic token to move to; the recipe was trimmed from 6 to 4 by dropping the hover ink change, matching the Workspace agent picker it now sits beside. No other entry moves.",
+      "_2662_rebase_note": "#2662 regeneration after rebasing onto origin/dev @5a0cb0078: absorbs +1 raw_gray in components/portal/PortalJumpToLatest.vue, a file created on dev by #2652 after this branch was cut and never added to the baseline there. Nothing on this branch moved — fieldClasses.js stays 15, PortalConversation.vue 90, PortalRoom.vue 47. Totals were 8722/3997/197 against an actual 8723/4020/198 purely because the previous freeze was computed pre-rebase; the ratchet never reads totals, so this was cosmetic rather than a failing gate. Same shape as the _merge_train_note above.",
+      "_ent553_note": "ent#553 (PR #2619): components/canvas/CanvasPanel.vue 25 -> 46 raw_gray, and 0 raw_nongray as before. The delete/pin/search chrome this PR adds is drawn entirely from the neutral ink ladder, which the design-system contract SPELLS as gray-N (surfaces gray-50/100/800/900, borders gray-200/300/700/800, ink gray-300/400/500/600) — there is no semantic token for a neutral, so honest new chrome cannot avoid the count. raw_nongray stays at zero, which is the rule the ratchet actually holds new code to. Named here rather than absorbed silently; first added in 2794388b and dropped by the dev merge aa248f77, re-added on review."
     },
     "also_absorbed": "19 files had IMPROVED below their old entries; those are now recorded at their real values, so the stale-ceiling check has something true to compare against.",
-    "paying_down": "This freeze is a starting line, not an endorsement. Lowering an entry needs no ceremony \u2014 regenerate and the guard keeps biting at the new level.",
-    "2638": "SubscriptionsPanel.vue raw_gray 165 -> 173 (+8): the API-key fallback toggle row. Not paid down because there is nothing to pay it down TO \u2014 `gray` is the sanctioned chrome family and tailwind.config.js defines no semantic neutral to replace it with (status-*/state-*/brand-*/accent-*/action-* are all meaning-carrying). The 8 classes are the label, the help text and the toggle's off-state, copied verbatim from the three identical toggles immediately above it; inventing a one-off semantic token for the fourth would make it the odd one out and leave the other three unconverted. Re-frozen in its own commit as the guard's own message prescribes, and scoped to this ONE entry rather than regenerated, so no unrelated drift is absorbed with it.",
+    "paying_down": "This freeze is a starting line, not an endorsement. Lowering an entry needs no ceremony — regenerate and the guard keeps biting at the new level.",
+    "2638": "SubscriptionsPanel.vue raw_gray 165 -> 173 (+8): the API-key fallback toggle row. Not paid down because there is nothing to pay it down TO — `gray` is the sanctioned chrome family and tailwind.config.js defines no semantic neutral to replace it with (status-*/state-*/brand-*/accent-*/action-* are all meaning-carrying). The 8 classes are the label, the help text and the toggle's off-state, copied verbatim from the three identical toggles immediately above it; inventing a one-off semantic token for the fourth would make it the odd one out and leave the other three unconverted. Re-frozen in its own commit as the guard's own message prescribes, and scoped to this ONE entry rather than regenerated, so no unrelated drift is absorbed with it.",
     "_2718_note": "2026-09-12, #2718: hardcoded_colors 456 -> 447 in 8 files, none of it a code change. The scanner counted a `#` followed by three or six hex digits anywhere in a <template>, so issue references in rendered copy ((ent#184), (#526), >#847</a>) were read as colours; ExecutionsPanel, OverviewPanel, ScheduleAnalyticsCard, settings/OperatorIntakePanel, settings/TelemetrySharingPanel, views/Settings and views/enterprise/Index each lose their only phantom, ReliabilityPanel both of its. Nothing else moves: raw_nongray, raw_gray and semantic_tokens are untouched, and no sample changes line.",
     "_2616_note": "2026-09-10, #2616: components/portal/PortalMarkdown.vue raw_gray 13 -> 34 (+21). The Workspace transcript had no typographic treatment at all; covering tables, headings, ordered lists, blockquotes and rules costs a surface/border/ink pair per element in BOTH themes, and those are gray by definition (the contract's 'everything else is gray'). raw_nongray stays 0 and hardcoded_colors stays 0.",
     "_ent625_note": "2026-09-16, trinity-enterprise#625: components/NavBar.vue raw_nongray 35 -> 23, raw_gray 125 -> 113. The inline light/dark/system picker in the user menu is replaced by the shared ThemeChoice primitive (semantic tokens), which the new Workspace theme switch consumes too. A SHRINK, recorded exactly as the guard's stale-ceiling check requires; scoped to this one entry so no unrelated drift is absorbed. The new files (base/ThemeChoice.vue, base/ThemeIcon.vue, portal/PortalThemeSwitch.vue) carry 0 raw_nongray and stay off the baseline, where the guard holds them to zero.",
-    "ent554": "components/canvas/CanvasPanel.vue raw_gray 46 -> 62 (+16): the Share / Download PDF buttons, the share panel's dividers and its option detail + note text. The branch predates the #2605 freeze, so the guard first bit at the merge train. Not paid down: `gray` is the sanctioned chrome family and there is no semantic neutral to move it to; the classes copy the panel's existing header chrome verbatim. Re-frozen in its own commit as the guard prescribes, scoped to this ONE entry."
+    "ent554": "components/canvas/CanvasPanel.vue raw_gray 46 -> 62 (+16): the Share / Download PDF buttons, the share panel's dividers and its option detail + note text. The branch predates the #2605 freeze, so the guard first bit at the merge train. Not paid down: `gray` is the sanctioned chrome family and there is no semantic neutral to move it to; the classes copy the panel's existing header chrome verbatim. Re-frozen in its own commit as the guard prescribes, scoped to this ONE entry.",
+    "_1923_1924_note": "#1923/#1924: two entries move, scoped by hand rather than regenerated. ConfirmDialog.vue raw_gray 9 -> 7 (IMPROVED — its bespoke backdrop div and the gray-500/gray-900 overlay went away when it adopted BaseModal, and a stale ceiling fails the guard too). base/BaseModal.vue is new at 0/2/0 — the overlay ground and nothing else. Deliberately NOT regenerated: a wholesale run deleted this entire refrozen block and absorbed canvas/CanvasDocument.vue and views/SharedCanvas.vue, two files that landed on dev after this branch was cut and have nothing to do with it. Same rule the 2638 note states.",
+    "_1925_note": "#1925: two entries move, both DOWN, scoped by hand. Operations.vue raw_nongray 26 -> 0 and raw_gray 60 -> 28 — adopting OverflowTabs deleted six hand-rolled tab buttons whose active/badge states were raw blue-500/600/100/900 and gray-*; the primitive carries the tokens. Settings.vue raw_gray 690 -> 683, its tab strip for the same reason (raw_nongray unchanged at 59 — the rest of that file is untouched). Not regenerated: see the _1923_1924_note above for what a wholesale run destroys. NavBar.vue raw_nongray 23 -> 7 and raw_gray 113 -> 93 (post-rebase compose with ent#625) in the same issue's third surface: the priority+ link row replaced six hand-written <router-link>s — each repeating border-blue-500/dark:border-blue-400 and a purple-100/700/900/200 PRO pill — with one v-for over a data-driven set whose active and pill classes are semantic (action-primary, accent-purple). The 7 that remain are the user-menu theme buttons and the avatar fallback, untouched by this issue.",
+    "_2202_note": "#2202: McpKeysTab.vue raw_gray 97 -> 83. The panel gained a filter bar, a bounded-list footer and a three-way empty state, which needed two new container borders — so the additions were built from the Base* primitives (#2122) and paid for by converting the create form's hand-rolled name input and description textarea to BaseInput/BaseTextarea in the same component. Edited by hand, not regenerated: a wholesale scan run deletes this block.",
+    "_2201_note": "#2201: HostTelemetry.vue raw_gray 7 -> 4. The three meter separators are decoration (now aria-hidden) and their one class string is hoisted to a constant instead of repeated three times; the no-data placeholder gained a dark half it was missing. Edited by hand, not regenerated."
   },
   "files": {
     "src/frontend/src/App.vue": {
@@ -126,7 +130,7 @@
     },
     "src/frontend/src/components/ConfirmDialog.vue": {
       "raw_nongray": 0,
-      "raw_gray": 9,
+      "raw_gray": 7,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/ConnectorChannelPanel.vue": {
@@ -171,7 +175,7 @@
     },
     "src/frontend/src/components/FileSharingPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 49,
+      "raw_gray": 37,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/FileTreeNode.vue": {
@@ -216,7 +220,7 @@
     },
     "src/frontend/src/components/HostTelemetry.vue": {
       "raw_nongray": 1,
-      "raw_gray": 7,
+      "raw_gray": 4,
       "hardcoded_colors": 6
     },
     "src/frontend/src/components/ImportIntentPicker.vue": {
@@ -275,8 +279,8 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/NavBar.vue": {
-      "raw_nongray": 23,
-      "raw_gray": 113,
+      "raw_nongray": 7,
+      "raw_gray": 93,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/NeverminedPanel.vue": {
@@ -472,6 +476,11 @@
     "src/frontend/src/components/base/BaseCard.vue": {
       "raw_nongray": 0,
       "raw_gray": 3,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/base/BaseModal.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 2,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/base/BaseSelect.vue": {
@@ -816,7 +825,7 @@
     },
     "src/frontend/src/components/settings/McpKeysTab.vue": {
       "raw_nongray": 0,
-      "raw_gray": 97,
+      "raw_gray": 83,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/settings/OperatorIntakePanel.vue": {
@@ -960,8 +969,8 @@
       "hardcoded_colors": 130
     },
     "src/frontend/src/views/Operations.vue": {
-      "raw_nongray": 26,
-      "raw_gray": 60,
+      "raw_nongray": 0,
+      "raw_gray": 28,
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/Portal.vue": {
@@ -976,7 +985,7 @@
     },
     "src/frontend/src/views/Settings.vue": {
       "raw_nongray": 59,
-      "raw_gray": 690,
+      "raw_gray": 683,
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/SetupPassword.vue": {

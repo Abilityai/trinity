@@ -43,6 +43,7 @@ from services.template_service import (
 )
 from services.template_schedules import normalize_declared_schedules
 from services.template_plugins import normalize_declared_plugins
+from services import metric_registry
 from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
@@ -345,6 +346,14 @@ class _TemplateResolution:
     # as `declared_schedules`, NOT folded into `template_data` (the `github:`
     # path never populates it). Empty dict = opt-in no-op.
     declared_plugins: dict = field(default_factory=dict)
+    # ent#477: NORMALIZED declared `metrics:`, fed by ALL THREE resolver
+    # branches — the same one-carrier-many-producers shape as
+    # `declared_schedules` / `declared_plugins`, and NOT folded into
+    # `template_data` for the same reason (the `github:` path never populates
+    # it). Empty list = this agent declares no metrics, which is a legitimate
+    # reconcile, not a no-op: a template that DROPPED its block retires the
+    # rows it used to declare.
+    declared_metrics: list = field(default_factory=list)
     # trinity-enterprise#15: staged backend-materialized snapshot for the
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
     # design — the container gets NO GitHub env, no git-config row, no PAT.
@@ -606,6 +615,26 @@ def _declared_plugins_for_snapshot(snapshot) -> dict:
             snapshot.source_repo, e,
         )
         return {}
+
+
+def _declared_metrics_for_snapshot(snapshot) -> list:
+    """Normalized `metrics:` for a copy-intent agent, read from the STAGED tree
+    (ent#477) — twin of `_declared_schedules_for_snapshot`. Non-fatal: a
+    declaration the backend cannot read must never cost a creation."""
+    template_yaml = Path(snapshot.staging_dir) / "template.yaml"
+    if not template_yaml.is_file():
+        return []
+    try:
+        metadata = load_template_yaml(template_yaml.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            return []
+        return metric_registry.declared_metrics_from_template(metadata)
+    except Exception as e:  # noqa: BLE001 — metrics are advisory, never fatal
+        logger.warning(
+            "snapshot-import: could not read template.yaml metrics for %s: %s",
+            snapshot.source_repo, e,
+        )
+        return []
 
 
 def _gate_tokenless_request(
@@ -1346,6 +1375,9 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
                 tr.declared_plugins = _declared_plugins_for_snapshot(
                     tr.copy_snapshot
                 )
+                tr.declared_metrics = _declared_metrics_for_snapshot(
+                    tr.copy_snapshot
+                )
                 return tr
 
             (
@@ -1370,6 +1402,9 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             )
             tr.declared_plugins = normalize_declared_plugins(
                 source_metadata.get("plugins")
+            )
+            tr.declared_metrics = metric_registry.declared_metrics_from_template(
+                source_metadata
             )
             (
                 tr.github_repo_for_agent,
@@ -1404,6 +1439,9 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             )
             tr.declared_plugins = normalize_declared_plugins(
                 tr.template_data.get("plugins")
+            )
+            tr.declared_metrics = metric_registry.declared_metrics_from_template(
+                tr.template_data
             )
     return tr
 
@@ -2309,11 +2347,13 @@ async def _materialize_agent_files(
     declared_schedules: Optional[list] = None,
     owner_username: str = "",
     declared_plugins: Optional[dict] = None,
+    declared_metrics: Optional[list] = None,
 ) -> None:
     """Materialize the S4 persistent-state allowlist (#383), the declared
     data_paths (#1169), the declared `plugins:` (#1704) and the declared
-    `schedules:` (trinity-enterprise#89) into the agent, then opt non-source-mode
-    GitHub agents into the auto-sync heartbeat (#389). All are non-fatal."""
+    `schedules:` (trinity-enterprise#89) into the agent, reconcile the declared
+    `metrics:` into the registry (ent#477), then opt non-source-mode GitHub
+    agents into the auto-sync heartbeat (#389). All are non-fatal."""
     # S4 (#383): Materialize persistent-state allowlist into the agent.
     # Runtime sync/reset paths read `.trinity/persistent-state.yaml`;
     # template.yaml is only read at creation (10-min cache), so this
@@ -2387,6 +2427,26 @@ async def _materialize_agent_files(
         except Exception as e:
             logger.warning(
                 f"[ent#89] Failed to materialize declared schedules for "
+                f"{config.name}: {e}"
+            )
+
+    # ent#477: reconcile the template's declared `metrics:` into the registry.
+    # Unconditional on the declaration (unlike plugins/schedules above, which
+    # are gated on a non-empty one): an empty declaration is a legitimate
+    # reconcile — it is how a template that dropped its block retires the rows
+    # it used to declare — and at CREATE the agent has no rows, so the empty
+    # case costs one SELECT and writes nothing. Ghost-skipped for the ent#69
+    # reason: an ephemeral agent is deleted whole, and its rows would exist
+    # only to cascade. Non-fatal and inside the destructive rollback fence, so
+    # a raise here must never cost a successful creation.
+    if not config.ephemeral:
+        try:
+            metric_registry.reconcile_declared_metrics(
+                config.name, declared_metrics or [], source="create",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[ent#477] Failed to reconcile declared metrics for "
                 f"{config.name}: {e}"
             )
 
@@ -3255,6 +3315,7 @@ async def create_agent_internal(
                 tr.declared_schedules,
                 current_user.username,
                 tr.declared_plugins,
+                tr.declared_metrics,
             )
             return agent_status
         except Exception as e:

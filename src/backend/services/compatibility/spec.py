@@ -37,7 +37,11 @@ Retired ids (#2137) — never reissued, so old persisted `checks_json` rows in
   T-017, G-003, G-004, G-005 — the `template.yaml git:` block has NO backend
     reader and no bundled template declares it.
   D-006 — `template.yaml metrics:` has no backend reader (`dashboard.yaml` is
-    the read surface; D-001..D-005/D-008 own it).
+    the read surface; D-001..D-005/D-008 own it). **The premise expired with
+    ent#477**, which gave the block a reader and a registry — but a retired id
+    is never reissued (old persisted `checks_json` rows would be re-read as a
+    verdict about a different check), so the successor is the NEW id **D-009**.
+    D-006 -> D-009 is a mapping, not a revival.
   I-005 — `.trinity/post-check` has no executor anywhere in the platform.
   G-002 — compared against the 58-entry fleet-wide `_GITIGNORE_PATTERNS` that
     Trinity itself injects at git-init. Most of that list is not authorable
@@ -215,6 +219,15 @@ CHECKS: List[CheckDef] = [
     _c("D-007", "soft", "ai", "D", "metrics reflect meaningful domain KPIs",
        prompt="Are the declared metrics meaningful, actionable domain KPIs rather than generic vanity metrics (e.g. 'messages processed')? FAIL if mostly vanity metrics."),
     _c("D-008", "info", "static", "D", "dashboard refresh_interval is >= 5 seconds"),
+    # ent#477. SOFT, following the T-018 precedent for the sibling `schedules:`
+    # reader: a malformed entry is DROPPED from the registry and ent#478 then
+    # rejects its points with a named 422, so the author is already told twice.
+    # HARD would flip a whole agent to incompatible over a mistyped label.
+    _c("D-009", "soft", "static", "D", "template.yaml `metrics:` entries are well-formed"),
+    # ent#479. SOFT for the same reason as D-009: the agent runs fine, its
+    # numbers simply are not arriving anywhere a human or a chart can read
+    # them. HARD would flip a whole agent to incompatible over a legacy file.
+    _c("D-010", "soft", "static", "D", "metrics.json is not used (superseded by record_metrics)"),
     # --- X: Cross-File Consistency -----------------------------------------
     _c("X-001", "soft", "ai", "X", "name, display_name, description tell a coherent story",
        prompt="Do the agent's name, display_name, and description clearly refer to the same agent and purpose, with no signs of a partially-updated clone? FAIL on contradictions."),

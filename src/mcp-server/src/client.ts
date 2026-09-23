@@ -1979,6 +1979,97 @@ export class TrinityClient {
   }
 
   // =========================================================================
+  // Declared business metrics (trinity-enterprise#478)
+  // =========================================================================
+
+  /**
+   * Record a batch of metric points as `agentName`.
+   *
+   * The agent name comes from the MCP auth context, never from tool input; the
+   * backend self-gates it again on its own side.
+   */
+  async recordMetrics(
+    agentName: string,
+    data: {
+      points: Array<{
+        metric: string;
+        value: number | string;
+        ts?: string;
+        dims?: Record<string, string>;
+      }>;
+      idempotency_key?: string;
+      execution_id?: string;
+    }
+  ): Promise<{
+    success: boolean;
+    agent_name: string;
+    recorded: number;
+    deduplicated: number;
+    replayed: boolean;
+    points: Array<{ index: number; ts: string; idempotency_key: string }>;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/metrics/points`,
+      data
+    );
+  }
+
+  /**
+   * Read the calling agent's recorded metrics with freshness (ent#479).
+   *
+   * Query knobs only — the agent is in the PATH and the backend self-gates it,
+   * so there is nothing here that could point the read at another agent.
+   */
+  async getAgentMetrics(
+    agentName: string,
+    options: {
+      metric?: string;
+      window?: string;
+      since?: string;
+      until?: string;
+      include_retired?: boolean;
+      series_limit?: number;
+    } = {}
+  ): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams();
+    if (options.metric) params.set("metric", options.metric);
+    if (options.window) params.set("window", options.window);
+    if (options.since) params.set("since", options.since);
+    if (options.until) params.set("until", options.until);
+    if (options.include_retired) params.set("include_retired", "true");
+    if (options.series_limit) params.set("series_limit", String(options.series_limit));
+    const query = params.toString();
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/metrics${query ? `?${query}` : ""}`
+    );
+  }
+
+  async getAgentObjectives(agentName: string): Promise<Record<string, unknown>> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/objectives`
+    );
+  }
+
+  /**
+   * Re-read the agent's template.yaml and reconcile its declared metrics.
+   *
+   * The remedy named by `record_metrics`'s `metric_undeclared` hint, so it has
+   * to be reachable from the same place the hint is read (ent#478, TD-4).
+   */
+  async refreshMetricDefinitions(
+    agentName: string
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/metrics/definitions/refresh`,
+      {}
+    );
+  }
+
+  // =========================================================================
   // Agent canvas (ent#438)
   // =========================================================================
 
@@ -2195,6 +2286,7 @@ export class TrinityClient {
       expires_in?: number;
       execution_id?: string;
       dedup_label?: string;
+      audience_email?: string;
     }
   ): Promise<{
     file_id: string;
@@ -2202,6 +2294,9 @@ export class TrinityClient {
     expires_at: string;
     size_bytes: number;
     mime_type?: string;
+    visible_to_requester?: boolean | null;
+    visibility_note?: string | null;
+    addressed_to?: string | null;
   }> {
     return this.request(
       "POST",
@@ -2323,6 +2418,44 @@ export class TrinityClient {
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/user-memory`,
       data
+    );
+  }
+
+  // ============================================================================
+  // Seat Decision Record (trinity-enterprise#638, R25)
+  // ============================================================================
+
+  /**
+   * Record a decision for the seat an execution serves. The seat is resolved
+   * server-side from `execution_id`; `idempotencyKey` makes a transport retry
+   * record once (Invariant #18).
+   */
+  async recordSeatDecision(
+    agentName: string,
+    data: Record<string, unknown>,
+    idempotencyKey?: string
+  ): Promise<{ success: boolean; decision: Record<string, unknown>; hint?: string | null; replayed?: boolean }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/decisions`,
+      data,
+      false,
+      undefined,
+      idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined
+    );
+  }
+
+  /** The seat's standing decisions + evidence stats (no person emails). */
+  async listSeatDecisions(
+    agentName: string,
+    executionId: string,
+    includeHistory: boolean = false
+  ): Promise<{ agent_name: string; decisions: Record<string, unknown>[]; stats: Record<string, unknown> }> {
+    const q = new URLSearchParams({ execution_id: executionId });
+    if (includeHistory) q.set("include_history", "true");
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/decisions?${q.toString()}`
     );
   }
 
@@ -2647,6 +2780,18 @@ export class TrinityClient {
     recent_alerts: unknown[];
     uptime_percent_24h?: number;
     avg_latency_24h_ms?: number;
+    // ent#479: informational declared-metric freshness. `null` means the store
+    // could not be read, NOT that the agent declared nothing.
+    metrics?: {
+      declared: number;
+      with_points: number;
+      stale: string[];
+      no_cadence: string[];
+      no_points: string[];
+      retired_with_points: string[];
+      last_point_at: string | null;
+      rule: string;
+    } | null;
   }> {
     return this.request(
       "GET",

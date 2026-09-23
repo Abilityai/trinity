@@ -195,6 +195,9 @@ AGENT_REFS: List[AgentRef] = [
     # agent_public_links.id, not agent_name — we delete them via JOIN.
     AgentRef("agent_public_links",           "agent_name",        Policy.CASCADE),
     AgentRef("public_user_memory",           "agent_name",        Policy.CASCADE),
+    AgentRef("public_user_memory_writes",    "agent_name",        Policy.CASCADE),  # ent#637
+    AgentRef("agent_role_readiness",         "agent_name",        Policy.CASCADE),  # ent#527
+    AgentRef("seat_decisions",               "agent_name",        Policy.CASCADE),  # ent#638
 
     # --- Per-agent config ---------------------------------------------------
     AgentRef("agent_git_config",             "agent_name",        Policy.CASCADE),
@@ -215,6 +218,20 @@ AGENT_REFS: List[AgentRef] = [
     # tenant's reports (cross-tenant disclosure).
     AgentRef("agent_reports",                "agent_name",        Policy.CASCADE),
     AgentRef("agent_evaluations",            "agent_name",        Policy.CASCADE),
+    # ent#477 — the declared metric registry. CASCADE on both halves: a purge
+    # must not leave definitions addressed to a name that is gone (ent#478
+    # validates incoming points against them, so a stale row would ACCEPT
+    # points for a reused agent name), and a rename must carry them or the
+    # agent's next reconcile mints a second full set under the new name while
+    # the old set stays visible to the definitions read.
+    AgentRef("metric_definitions",           "agent_name",        Policy.CASCADE),
+    # ent#478 — the recorded points those definitions interpret. CASCADE for
+    # the same two reasons, plus one this table makes sharper: the point
+    # identity hash is `sha256(metric \0 ts \0 dims)` and deliberately
+    # EXCLUDES `agent_name`, so re-keying a rename is lossless — the same
+    # observation keeps the same key under the new name and cannot collide
+    # with itself.
+    AgentRef("metric_points",                "agent_name",        Policy.CASCADE),
     # ent#438 — the agent canvas is agent-authored output on the same footing
     # as a report: CASCADE so a purge wipes it and a rename re-keys it. The
     # rename half is load-bearing rather than tidy — `agent_name` is half the

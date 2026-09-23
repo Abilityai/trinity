@@ -360,6 +360,72 @@ class TestServiceResult:
         assert "auth" in (row.error or "")
 
 
+class TestClaimTurnLimit:
+    """#2846: the turn limit a claim hands the worker never exceeds the agent's
+    timeout, so a healthy turn always ends inside its lease (agent timeout +
+    SLOT_TTL_BUFFER) and is never re-delivered while it is still running."""
+
+    def _claim_with(self, seed_agent, enqueue, *, cap, meta):
+        import json
+        seed_agent("alpha", execution_timeout_seconds=cap)
+        enqueue("alpha", backlog_metadata=json.dumps(meta))
+        from services import pull_coordination_service as pcs
+
+        return pcs.claim_next_task("alpha", "alpha#w1")
+
+    @pytest.mark.parametrize("meta, expected", [
+        ({"timeout_seconds": 1800}, 600),   # stale: agent timeout lowered after enqueue
+        ({}, 600),                          # none recorded: worker would default to 900
+        ({"timeout_seconds": 300}, 300),    # within the cap: untouched
+    ])
+    def test_turn_limit_is_clamped_to_agent_timeout(
+        self, seed_agent, enqueue, meta, expected
+    ):
+        claim = self._claim_with(seed_agent, enqueue, cap=600, meta=meta)
+        limit = claim["envelope"]["payload"]["task_overrides"]["timeout_seconds"]
+        assert limit == expected
+        from services.slot_service import SLOT_TTL_BUFFER
+        lease = datetime.fromisoformat(claim["lease_expires_at"])
+        remaining = (lease - datetime.now(timezone.utc)).total_seconds()
+        assert remaining > limit + SLOT_TTL_BUFFER - 30  # turn ends well inside its lease
+
+    def test_timeout_failure_says_the_limit_was_shortened(self, seed_agent, enqueue):
+        claim = self._claim_with(seed_agent, enqueue, cap=600, meta={"timeout_seconds": 1800})
+        from services import pull_coordination_service as pcs
+        from database import db
+
+        pcs.apply_task_result(
+            claim["execution_id"], claim["claim_token"], status="failed",
+            content="Task execution timed out after 600 seconds", error_code="timeout",
+        )
+        error = db.get_execution(claim["execution_id"]).error
+        assert "asked for 1800s but the agent's timeout is 600s" in error
+
+    def test_timeout_failure_within_cap_has_no_note(self, seed_agent, enqueue):
+        claim = self._claim_with(seed_agent, enqueue, cap=600, meta={"timeout_seconds": 300})
+        from services import pull_coordination_service as pcs
+        from database import db
+
+        pcs.apply_task_result(
+            claim["execution_id"], claim["claim_token"], status="failed",
+            content="Task execution timed out after 300 seconds", error_code="timeout",
+        )
+        assert "asked for" not in db.get_execution(claim["execution_id"]).error
+
+    def test_note_failure_never_blocks_the_terminal_write(self, seed_agent, enqueue):
+        claim = self._claim_with(seed_agent, enqueue, cap=600, meta={"timeout_seconds": 1800})
+        from services import pull_coordination_service as pcs
+        from database import db
+
+        with patch.object(pcs.db, "get_execution_timeout", side_effect=RuntimeError("db down")):
+            outcome = pcs.apply_task_result(
+                claim["execution_id"], claim["claim_token"], status="failed",
+                content="Task execution timed out after 600 seconds", error_code="timeout",
+            )
+        assert outcome.kind == "applied"
+        assert db.get_execution(claim["execution_id"]).status == "failed"
+
+
 # ===========================================================================
 # HTTP layer — X-Internal-Secret gate + response mapping (TestClient)
 # ===========================================================================

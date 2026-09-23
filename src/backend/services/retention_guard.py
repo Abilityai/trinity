@@ -96,6 +96,15 @@ MAX_ROWS_PER_SWEEP = 1000
 # property of the data, not an operator preference.
 FLOOR_AGENTS = 0      # #1581: every purge destroys Docker volumes. Always ack.
 FLOOR_SCHEDULES = 100
+# trinity-enterprise#478: one agent-day at the default `metrics_daily_point_cap`.
+# The default MAX_ROWS_PER_SWEEP=1000 is "chosen against steady state ... a
+# trickle of tens", which this table is not: a fleet ingesting more than about
+# 288k points a day has more than 1000 rows fall out of the window every 5-minute
+# cycle, so the default floor would refuse EVERY cycle, alarm once, and then sit
+# blocked behind single-use acknowledgements while the table grew. A floor sized
+# to the table keeps the refusal for what it is meant to catch — a window an
+# operator just narrowed, where a year of points expires at once.
+FLOOR_METRIC_POINTS = 100_000
 
 
 @dataclass(frozen=True)

@@ -43,6 +43,12 @@ class AuditEventType(str, Enum):
     SITE_ACCESS = "site_access"  # SITE-001: agent website proxy visits
     OPERATOR_QUEUE = "operator_queue"  # Issue #1017: bulk clear actions
     NOTIFICATION = "notification"  # Issue #1017: bulk dismiss
+    # trinity-enterprise#478 — metric-point quota and rate events ONLY, never
+    # a row per accepted batch: `audit_log` is append-only and undeletable for
+    # 365 days, so a per-batch row would be up to 86k permanent rows per agent
+    # per day at the cap. An agent hitting its daily cap is the security-
+    # relevant signal; a normal write is visible through the counts.
+    METRICS = "metrics"
     SYSTEM = "system"
 
 

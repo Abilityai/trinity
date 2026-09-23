@@ -484,6 +484,9 @@ CREATE TABLE agent_shared_files (
     consumed_at TEXT,                     -- deferred
     download_count INTEGER DEFAULT 0,
     last_downloaded_at TEXT,
+    addressed_to_email TEXT,              -- ent#549: whose Files tab lists the row; NULL + NULL channel = the owner only
+    addressed_to_channel TEXT,            -- ent#549: `whatsapp:+…` / `telegram:<chat>` — DISPLAY ONLY, never filtered on
+    audience_source TEXT,                 -- ent#549: turn | override | channel | none | ambiguous; NULL = pre-column row
     FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
         ON DELETE CASCADE ON UPDATE CASCADE   -- aspirational; manual cascade per platform convention
 );
@@ -522,6 +525,77 @@ existence oracle over every share in the install (Invariant #8), the same fork
 `set_chat_star` already resolved the same way; a row cap bounds the write instead. Both
 purge paths in `db/agent_shared_files.py` (`delete_expired_and_revoked` and
 `delete_for_agent`) delete the matching dismissals in the same transaction.
+
+**public_user_memory_writes** (ent#637 — every write to the MEM-001 `agent_notes` section,
+so a person can see that a scheduled run touched their memory and undo it; also ent#419's
+"write history with rollback" layer):
+```sql
+CREATE TABLE public_user_memory_writes (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    user_email TEXT NOT NULL,
+    execution_id TEXT,
+    triggered_by TEXT NOT NULL,           -- the execution's trigger; 'schedule' for a seat run
+    schedule_id TEXT,
+    previous_notes TEXT NOT NULL DEFAULT '',   -- what undo restores
+    new_notes TEXT NOT NULL DEFAULT '',
+    written_at TEXT NOT NULL,
+    undone_at TEXT,
+    undone_by TEXT
+);
+CREATE INDEX idx_public_user_memory_writes_lookup ON public_user_memory_writes(agent_name, user_email, written_at);
+```
+Both tracks: SQLite `public_user_memory_writes_table`, Alembic `0066_public_user_memory_writes`;
+`AgentRef("public_user_memory_writes", "agent_name", Policy.CASCADE)`. Written only by
+`db/public_links.py::write_user_memory_agent_notes`, in the same transaction as the notes
+replace, so `previous_notes` is what the row held at that instant. Not keyed to
+`public_user_memory.id` — that row is created on demand; `(agent_name, user_email)` is the
+identity. Undo (`undo_user_memory_write`) is latest-first over the open (`undone_at IS NULL`)
+writes of one `(agent, email)`; a foreign write id is `not_found`, never a 403 (Invariant #8).
+
+**agent_role_readiness** (ent#527 / #663 — the agent owner's readiness stamp for a role companion):
+```sql
+CREATE TABLE agent_role_readiness (
+    agent_name TEXT PRIMARY KEY,
+    status TEXT NOT NULL,        -- calibrating | ready
+    changed_at TEXT NOT NULL,
+    changed_by TEXT NOT NULL     -- the owner's email
+);
+```
+Both tracks: SQLite `agent_role_readiness_table`, Alembic `0067_agent_role_readiness`;
+`AgentRef("agent_role_readiness", "agent_name", Policy.CASCADE)`. Platform-side because
+`template.yaml`'s `x-role.status` is agent-writable and only the owner may flip a companion.
+
+**seat_decisions** (trinity-enterprise#638 / R25 — the seat-level decision record):
+```sql
+CREATE TABLE seat_decisions (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    seat_email TEXT NOT NULL,            -- lower-cased; the ent#637 seat scope
+    outcome TEXT NOT NULL,               -- approved | deferred | killed
+    decided TEXT NOT NULL,               -- one line
+    alternatives TEXT NOT NULL,          -- JSON list, >= 1 (none = a note, refused)
+    criterion TEXT NOT NULL,             -- the reusable part
+    reversal TEXT NOT NULL,              -- what would reverse it
+    decided_by_role TEXT, decided_by_person TEXT NOT NULL,
+    decided_at TEXT NOT NULL, review_by TEXT NOT NULL,   -- YYYY-MM-DD; `expired` is COMPUTED on read
+    notes TEXT,                          -- the only prose
+    ask_class TEXT,                      -- slug; groups the graduation evidence
+    scope TEXT NOT NULL DEFAULT 'seat',  -- seat | direction
+    status TEXT NOT NULL DEFAULT 'active',  -- active | superseded | closed | reversed | routed
+    supersedes_id TEXT, cites TEXT NOT NULL DEFAULT '[]', request_id TEXT,
+    close_reason TEXT, closed_at TEXT, closed_by TEXT, reconfirmed_at TEXT,
+    source_execution_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_seat_decisions_seat ON seat_decisions(agent_name, seat_email, status);
+CREATE INDEX idx_seat_decisions_review ON seat_decisions(agent_name, review_by);
+```
+Both tracks: SQLite `seat_decisions_table`, Alembic `0071_seat_decisions` (← `0070`);
+`AgentRef("seat_decisions", "agent_name", Policy.CASCADE)`. Rows are the history: a
+correction inserts a new row with `supersedes_id` and flips the old one to `superseded`
+in one CAS transaction (`db/seat_decisions.py::supersede_seat_decision`); nothing is
+deleted or edited in place. JSON lists ride in TEXT (no JSON type on either engine);
+every stat is computed in Python over one seat's rows.
 
 **agent_event_subscriptions / agent_events** (EVT-001 — agent event pub/sub):
 ```sql
@@ -796,6 +870,69 @@ CREATE TABLE agent_compatibility_results (
     updated_at TEXT NOT NULL
 );
 ```
+
+**metric_definitions** (trinity-enterprise#477 — see [requirements §47](../requirements/lifecycle-observability.md) and [agent-custom-metrics.md](../feature-flows/agent-custom-metrics.md)). The per-agent **declared metric registry**: one row per metric an agent's `template.yaml metrics:` block declares, reconciled at create / git pull / reset / sync-`pull_first` / container start / explicit refresh. Dual-track migration (SQLite `metric_definitions_table` + Alembic `0069_metric_definitions`); cascade/rename via `AGENT_REFS` (CASCADE both halves — ent#478 validates points against these rows, so a stale row under a reused agent name would ACCEPT another tenant's points). `UNIQUE(agent_name, name)` is the **rule, not a performance index** — it is `reconcile`'s `on_conflict_do_update` target, so it is declared in `db/tables.py` too (the ent#366 lesson: autogenerate proposes dropping an index the model does not know about, and accepting that turns one reconcile into a second row per metric on every pull). **No CHECK constraints**: `test_1819_rename_cascade_parity` seeds a placeholder row per AGENT_REFS table from NOT NULL introspection, and a `CHECK (type IN …)` breaks that seed — the enums are enforced by the one writer's one parser (`services/template_metrics.py`). Rows are **retired, never deleted** (`status`), because points stored by name still need a definition to interpret them; `type_conflict` records a type change the store **refused** (a shape flip would make prior points uninterpretable) and is cleared when the template agrees again:
+```sql
+CREATE TABLE metric_definitions (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    name TEXT NOT NULL,                  -- ^[a-z][a-z0-9_]{0,63}$ — ent#478's join key
+    type TEXT NOT NULL,                  -- counter|gauge|percentage|status|duration|bytes
+    label TEXT, description TEXT, unit TEXT,
+    warning_threshold REAL, critical_threshold REAL,
+    status_values_json TEXT,             -- [{value, color, label}] for type=status
+    cadence TEXT,                        -- as declared ("1h", "PT15M")
+    cadence_seconds INTEGER,             -- normalized ONCE; ent#479 never re-parses
+    direction TEXT NOT NULL DEFAULT 'neutral',      -- up_good|down_good|neutral
+    aggregation TEXT NOT NULL DEFAULT 'last',       -- last|sum|avg
+    dimensions_json TEXT,                -- allowed dimension keys (JSON array)
+    extensions_json TEXT,                -- the `x-` escape hatch, ≤20 keys / 1 KB
+    definition_hash TEXT,                -- sha256 of the canonical normalized entry
+    type_conflict TEXT,                  -- a REFUSED type change, surfaced by the read
+    status TEXT NOT NULL DEFAULT 'active',          -- active|retired
+    source TEXT,                         -- create|import|pull|reset|sync|start|refresh
+    first_declared_at TEXT, last_synced_at TEXT, retired_at TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(agent_name, name)
+);
+-- idx_metric_definitions_agent_status (agent_name, status)
+```
+
+**metric_points** (trinity-enterprise#478 — see [requirements §48](../requirements/lifecycle-observability.md) and [agent-custom-metrics.md](../feature-flows/agent-custom-metrics.md)). The **append-only observation store** `record_metrics` writes: one row per observation of a metric the registry above declares for that agent. Dual-track migration (SQLite `metric_points_table` + Alembic `0070_metric_points`); cascade/rename via `AGENT_REFS` (CASCADE).
+
+```sql
+CREATE TABLE metric_points (
+    agent_name TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    ts TEXT NOT NULL,                        -- ISO-Z, Invariant #16
+    idempotency_key TEXT NOT NULL,           -- sha256(metric \0 ts \0 canonical_dims)
+    value_numeric DOUBLE PRECISION,
+    value_text TEXT,
+    dims TEXT /* pg:JSONB */,
+    execution_id TEXT,                       -- provenance only; NO foreign key
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (agent_name, ts, idempotency_key)
+)
+-- idx_metric_points_agent_metric_ts (agent_name, metric, ts DESC)   -- the read (ent#479)
+-- idx_metric_points_ts (ts)                                         -- the sweep
+-- idx_metric_points_agent_created (agent_name, created_at)          -- the daily write cap
+```
+
+Four column-level decisions are load-bearing, each against a plausible default.
+
+**No surrogate `id`.** The PRIMARY KEY *is* the point identity, so a re-posted observation conflicts with itself and `on_conflict_do_nothing` drops it — no second unique index to keep in order, and the partition key (`agent_name`) sits inside the only unique constraint, which PostgreSQL requires before ent#80 can partition by month. A UUID id plus `UNIQUE(agent_name, idempotency_key)` — the sibling shape — would mean a table rebuild at that point.
+
+**`value` is NOT in the hash.** One observation of one metric at one instant with one set of dimensions is one fact; a corrected re-post therefore deduplicates rather than double-counting, and a genuine correction is a new `ts`. Hashing the value would make the same instant hold two contradictory rows.
+
+**`dims` is JSONB on PostgreSQL and TEXT on SQLite**, through a per-column marker in the shared DDL (`col TEXT /* pg:JSONB */`, rewritten by a `_PG_TABLE_SUBS` rule declared last so it cannot eat another rule's marker). Fresh PostgreSQL is built by replaying this DDL through `to_postgres_table_ddl` (`0001_baseline`), upgrades run `0067` — one rule converges both with **no** `ALTER … USING` to keep in step in two places. `db/tables.py` declares `JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")`; `none_as_null` is not decoration — without it `None` binds as the four-character JSON text `null`.
+
+**`value_numeric` is `DOUBLE PRECISION`, not `REAL`.** `to_postgres_table_ddl` does not translate `REAL`, and `REAL` is float4 on PostgreSQL: 1234567.89 would store as 1234567.875. The column that exists to observe a value is the one that must not lose it.
+
+**No CHECK constraints**, for the `metric_definitions` reason above: `test_1819_rename_cascade_parity` seeds a placeholder row per AGENT_REFS table from NOT NULL introspection. The value rules belong to the one writer (`services/metric_points_service.py`).
+
+**The read (ent#479) adds no column and no index.** `idx_metric_points_agent_metric_ts` already prefixes every access `read_agent_metrics` needs: `latest_metric_points` is N per-metric `ORDER BY ts DESC, idempotency_key DESC` seeks unioned in one statement — not a `row_number()` partition over the agent's whole history, which scans rows the answer never uses — and the window cut is `ts >=` on the same index. The `idempotency_key` tiebreak is there because two points at the identical `ts` with different dims otherwise order by whatever the dialect feels like, and SQLite and PostgreSQL disagree. No Alembic revision ships with ent#479; `0067_metric_points` stays head.
+
+The retention sweep prunes by **`ts` range**, not an id list (there are none): each chunk reads the `ts` of the chunk-th oldest candidate and deletes everything at or below it that is still under the cutoff, **ties included**, so a timestamp shared by more rows than the chunk size cannot wedge the loop. Bounded to 20 chunks per call so a just-narrowed window drains over several cleanup cycles rather than monopolising one.
 
 **user_ui_preferences** (trinity-enterprise#413, OSS-core — see [Dashboard Grid View](../feature-flows/dashboard-grid-view.md#layout-model)).
 Dual-track migration (SQLite `user_ui_preferences_table` + Alembic `0053_user_ui_preferences`).

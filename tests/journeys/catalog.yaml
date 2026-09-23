@@ -198,6 +198,28 @@ journeys:
     # must not strand a delivered thread when the agent goes away.
     invariants: [E-01, E-05, L-03]
 
+  - id: J12
+    # ent#477 declares, ent#478 records, ent#479 reads it back with freshness,
+    # ent#666 puts it against the target an objective set — the promise is
+    # whole now. It stays `built: false` because the harness needs a real
+    # container and docker; the unit island proves each leg (test_ent477_*,
+    # test_ent478_*, test_ent479_*, test_ent666_*), which is not the same as
+    # walking the loop once end to end. ent#666's leg is the one the island
+    # can prove least: the join reads objective FILES out of a container.
+    issue: [477, 478, 479, 666]
+    promise: "My agent's own declaration of what it measures is what Trinity actually knows about it."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/journeys/test_j12_declared_metrics_journey.py
+    built: false
+    owner: trinity
+    # L-02: the registry is written as part of an atomic create, so an agent
+    # that exists has the definitions its template declared; L-03: a deleted
+    # agent's definitions cascade, so a reused name never inherits another
+    # tenant's declaration.
+    invariants: [L-02, L-03]
+
 # The agent-lifecycle journey #2336 shipped is NOT a journey of its own — it is
 # J03's first half. Recording it here rather than minting a J11 keeps the
 # catalog a list of PROMISES; "an agent can be restarted" is a step inside

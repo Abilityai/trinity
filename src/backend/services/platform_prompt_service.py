@@ -61,10 +61,12 @@ Use `list_agents` to discover your available collaborators.
 When the user asks for a file (image, PDF, document, generated asset) or when your answer is best delivered as a file instead of inline text — but see **Publishing Reports** below first: rows-and-columns results belong in a report, which the user can already export to Excel or PDF, and which works even when file sharing is off:
 
 1. Write the file to `/home/developer/public/` (NOT `/home/developer/` or any other path).
-2. Call the `mcp__trinity__share_file` MCP tool with the relative filename.
+2. Call the `mcp__trinity__share_file` MCP tool with the relative filename and your `execution_id` (see the Execution Context block).
 3. Include the returned `url` in your reply as-is.
 
 The platform returns a time-limited download URL that works across every channel (web, Slack, Telegram, WhatsApp, email). If the owner has not enabled file sharing for you, the tool returns `FEATURE_DISABLED` — ask the operator to turn it on in the agent's Sharing tab.
+
+**Who sees a shared file.** The link works for anyone you give it to. The file is also listed in the Workspace Files tab of ONE person — the person this conversation is with. The platform works that out from your `execution_id`; you do not choose it. A turn with no person (a schedule, an operator chat, an agent-to-agent call) lists the file for your owner only. To list it for a different person you are already shared with, pass `audience_email`. If the result says `visible_to_requester: false`, the platform could not tell which conversation the share came from — `visibility_note` says what to do.
 
 ### Publishing Reports
 
@@ -251,7 +253,7 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 
 - Write the complete updated memory blob each time (read → update → write).
 - The current memory for this user (if any) appears in the **"What you know about this user"** block above.
-- Only available during user-facing sessions (public link, Slack, Telegram, WhatsApp). The tool returns an error if called from a scheduled task or agent-to-agent call."""
+- Available during user-facing sessions (public link, Slack, Telegram, WhatsApp), and in a scheduled run that is addressed to one person (the run's prompt then says so and carries their memory). The tool returns an error from a scheduled run that names no one, or from an agent-to-agent call."""
 
 # The payload ceiling is INTERPOLATED, never typed twice (#1838 review). The
 # block shipped `256 KB` while `REPORT_PAYLOAD_MAX_BYTES` was already 5 MiB in
@@ -439,7 +441,13 @@ def format_user_memory_block(memory_record: dict) -> Optional[str]:
         return None
     agent_notes = (memory_record.get("agent_notes") or "").strip()
     summary = (memory_record.get("conversation_summary") or "").strip()
-    if not agent_notes and not summary:
+    # ent#638: the seat's standing decisions ride the same block on every
+    # caller (public link, channel adapters, seat runs, the Workspace) — the
+    # read-into-context path that makes a criterion reusable and `cites`
+    # non-zero. Read here, keyed off the record's own seat, so no caller can
+    # forget it; fail-open, bounded, no person emails.
+    decisions = _seat_decisions_block(memory_record)
+    if not agent_notes and not summary and not decisions:
         return None
 
     lines = ["## What you know about this user", ""]
@@ -447,8 +455,24 @@ def format_user_memory_block(memory_record: dict) -> Optional[str]:
         lines.extend(["### Agent notes", "", agent_notes, ""])
     if summary:
         lines.extend(["### Conversation summary", "", summary, ""])
+    if decisions:
+        lines.extend([decisions])
     lines.append("---")
     return "\n".join(lines)
+
+
+def _seat_decisions_block(memory_record: dict) -> Optional[str]:
+    agent_name = memory_record.get("agent_name")
+    seat_email = memory_record.get("user_email")
+    if not agent_name or not seat_email:
+        return None
+    try:
+        from database import db
+        from services import seat_decision_service
+        return seat_decision_service.prompt_block(db, agent_name, seat_email)
+    except Exception:  # noqa: BLE001 — a prompt never breaks on the decision record
+        logger.debug("[ent#638] decisions block skipped", exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------

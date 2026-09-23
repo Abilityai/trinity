@@ -675,7 +675,7 @@ metrics:
     warning_threshold: 80         # Optional (percentage type): yellow if below
     critical_threshold: 50        # Optional (percentage type): red if below
     values:                       # Required for status type only
-      - value: "active"           # Value written to metrics.json
+      - value: "active"           # The value you pass to record_metrics
         color: "green"            # green|red|yellow|gray|blue|orange
         label: "Active"           # Display label in UI
 
@@ -1424,16 +1424,153 @@ Agents can define custom KPIs displayed in the Trinity UI Metrics tab. This enab
 
 ### How It Works
 
-1. Define metrics in `template.yaml` under `metrics:`
-2. Agent writes values to `metrics.json` in workspace
-3. Trinity UI displays metrics in the Metrics tab (auto-refresh every 30 seconds)
-4. **Agent must be running** for metrics to be visible
+1. You declare metrics in `template.yaml` under `metrics:`.
+2. Trinity reads that block and builds a per-agent **metric registry** — a
+   validated, persisted record of what this agent claims to measure
+   (trinity-enterprise#477). It is reconciled when the agent is created, when a
+   `git pull` / reset / `pull_first` sync brings a new `template.yaml` in, when
+   the container starts, and whenever you ask it to.
+3. Your agent records **values** against those declarations.
+4. Trinity renders them.
+
+Step 3 is the **`record_metrics` MCP tool** (trinity-enterprise#478), and it is
+the only write path — there is no second one and there will not be a third:
+
+```
+record_metrics(points=[
+  {"metric": "cycles_completed", "value": 3},
+  {"metric": "revenue", "value": 1240.50, "dims": {"region": "eu"}},
+  {"metric": "pipeline_state", "value": "healthy",
+   "ts": "2026-09-22T08:00:00Z"},
+], execution_id="<from your Execution Context block>")
+```
+
+Each point is checked against the registry your declaration built. A batch is
+all-or-nothing: if one point is wrong the whole batch is refused and every bad
+point comes back with a reason code and a fix, so you can correct and re-send.
+Four rules are worth knowing before your first call:
+
+- **Declare first.** An undeclared name is refused with `metric_undeclared`.
+  Add it to `metrics:` in `template.yaml` and call
+  `refresh_metric_definitions` — the refusal's hint names that tool.
+- **Values are not coerced.** `"42"` is not `42`, `true` is not `1`, and a
+  `status` metric takes one of its declared labels, not a number.
+- **Identity is `(metric, ts, dims)` — the value is not part of it.** Sending
+  the same observation twice deduplicates instead of double-counting, and a
+  **correction is a new `ts`**, not a new value at the same one.
+- **Pass `execution_id`.** It links the batch to the turn and makes a
+  re-delivered turn replay instead of recording twice. Without it, and without
+  your own `ts`, a retry is treated as a new observation.
+
+The old path — writing `metrics.json` into the workspace — is **retired**
+(trinity-enterprise#479). Nothing reads that file any more:
+`GET /api/agents/{name}/metrics` keeps its URL but is backed by the point store,
+and it does **not** fall back to the file when the store is empty. An agent
+still writing one gets compatibility finding **D-010**, which names the file's
+keys and, separately, the keys that are declared nowhere. Delete the file once
+you have declared its keys and switched to `record_metrics`.
+
+Step 2 is what makes the fields below validated rather than merely documented:
+a declaration Trinity cannot read is **dropped** from the registry and reported
+as compatibility finding `D-009`, and a point recorded against a metric the
+registry does not hold is rejected.
+
+### Objectives name your metrics by name
+
+If your agent has a role and a canon (Tandem framework §3.4), its objective
+files set **targets** for these same metrics:
+
+```yaml
+# canon/objectives/q4-close-rate.yaml
+metrics:
+  - name: close_rate       # <- the SAME name as your template.yaml metrics: entry
+    direction: up          # up | down | hold
+    target: 35
+    by: 2026-12-31
+```
+
+`name` is the whole link: an objective does not carry its own copy of the
+number, it names a metric you declared and Trinity joins the two
+(trinity-enterprise#666). Two consequences worth knowing:
+
+- **A name an objective uses must be declared in your `metrics:` block.** If it
+  is not, the objective still shows — with a finding saying so and naming the
+  fix, never a blank cell. Add it to `template.yaml` and call
+  `refresh_metric_definitions`. (If the metric belongs to the role that *owns*
+  the objective and you merely appear in its `supporting_agents`, there is
+  nothing for you to fix — you get `metric_not_declared_here` instead.)
+- **Declare `direction:` somewhere.** Without it on either the template metric
+  or the objective's entry, nothing can say whether you are behind or ahead —
+  only what the number is.
+
+Read the join with the **`get_objectives`** MCP tool. It gives you target,
+actual, freshness and the gap in one call, so do not compute a gap yourself
+from `get_metrics` plus the file: `gap.status` is *position* relative to the
+target (`behind` / `on_target` / `ahead`, or `on_target` / `off_target` for
+`hold`), and `stale: true` means do not act on that number — record a fresh
+point first.
 
 ### File Locations
 
-The agent server reads from the agent's working directory (`/home/developer/`):
-- **Definitions**: `/home/developer/template.yaml`
-- **Values**: `/home/developer/metrics.json`
+- **Definitions**: `/home/developer/template.yaml` — read by the backend into
+  the registry; also readable through
+  `GET /api/agents/{name}/metrics/definitions`.
+- **Values**: the `metric_points` store, written only by `record_metrics`.
+  `/home/developer/metrics.json` is **retired** — unread, never served, and
+  reported as D-010 if present. The agent-server route that used to serve it,
+  `GET /api/metrics` on the container, is retired in place: it still exists but
+  reads no file and answers `410` with
+  `{has_metrics: false, superseded_by: "record_metrics / GET /api/agents/{name}/metrics", finding: "D-010"}`.
+
+### Keeping the Registry in Sync
+
+The registry is rebuilt from `template.yaml` at creation, on `git pull` /
+`reset-to-main-preserve-state` / `git sync --pull_first`, and on container
+start. **If your agent edits its own `metrics:` block and pushes** — the common
+case, since the in-container auto-sync pushes rather than pulls — nothing on
+the backend has seen the change until the agent restarts. Either restart it or
+call:
+
+```bash
+POST /api/agents/{name}/metrics/definitions/refresh
+```
+
+The agent can call this itself with its own Trinity key. It is idempotent, and
+it needs the agent to be **running** (409 otherwise). If the template cannot be
+read or parsed, the registry is left exactly as it is (503) — Trinity never
+retires a definition because it failed to read the file.
+
+### Reading your own metrics back
+
+`get_metrics(metric?, window?, since?, until?)` (trinity-enterprise#479) returns
+your declarations joined to your recorded points, with a freshness verdict on
+each. It is **self-scoped**: your key reads your own metrics and no one else's.
+
+```
+get_metrics()                      # every declared metric, bucketed, auto window
+get_metrics(metric="revenue", window="30d")   # one metric, raw points
+```
+
+Two things to know before you interpret the answer:
+
+- **Staleness has one rule, and it is not yours to compute:**
+  `stale ⟺ now − last_point_at > 2 × cadence`. A metric with **no declared
+  `cadence:`** is **never stale** — there is nothing for it to be late against,
+  and `stale` comes back `null` rather than `false`, because "not stale" and
+  "unanswerable" are different answers. If you want Trinity to be able to tell
+  an operator that your number has gone quiet, declare a cadence.
+- **`series` is bounded.** The default read gives you buckets (≤ 120 per
+  series), not every point. Raw points come back only when you ask for one
+  metric by name, capped, newest first.
+
+An undeclared name comes back as `{success: false, undeclared: true}` with a
+hint naming `refresh_metric_definitions` — the tool never throws, so a metric
+read cannot end your turn.
+
+Your declared metrics also render as **tiles on your Dashboard tab with no
+`dashboard.yaml` at all**, and they render even when you are stopped. Each tile
+shows when its point was recorded; a stale one is visibly marked rather than
+shown as current. That is the payoff for declaring a cadence.
 
 ### template.yaml Metric Definitions
 
@@ -1463,7 +1600,7 @@ metrics:
     type: status
     label: "State"
     values:                         # Required for status type
-      - value: "active"             # The value in metrics.json
+      - value: "active"             # The value you pass to record_metrics
         color: "green"              # green, red, yellow, gray, blue, orange
         label: "Active"             # Display label
       - value: "idle"
@@ -1485,26 +1622,107 @@ metrics:
     label: "Cache Size"
 ```
 
-### metrics.json Format
+#### Additional fields
 
-Your agent writes current values to `metrics.json`:
+Four optional fields make a declaration useful to the platform rather than only
+to a human reading it:
 
-```json
-{
-  "messages_processed": 42,
-  "avg_response_time": 125.5,
-  "success_rate": 87.5,
-  "current_state": "active",
-  "last_cycle_duration": 120,
-  "cache_size": 1048576,
-  "last_updated": "2025-12-10T10:30:00Z"
-}
+```yaml
+metrics:
+  - name: research_cycles
+    type: counter
+    label: "Research Cycles"
+    cadence: 1h                     # how often you expect to record a point
+    direction: up_good              # up_good | down_good | neutral (default)
+    aggregation: sum                # last (default) | sum | avg
+    dimensions: [region, source]    # the dimension keys a point may carry
+    x-owner: research-team          # `x-` keys pass through untouched
 ```
 
-**Notes:**
-- Keys must match the `name` field in template.yaml
-- `last_updated` is optional but recommended (shown as "Updated X ago" in UI)
-- Values are read when the Metrics tab is viewed or refreshed
+| Field | What it is for |
+|-------|----------------|
+| `cadence` | The expected interval between points. Freshness is judged against it ("no point within 2× cadence"), so `1h` means a gap over two hours is worth surfacing. Written as `<n>s`/`m`/`h`/`d`/`w` or an ISO 8601 duration (`PT15M`, `P1D`, `P1DT12H`, `P1W`). Must be between 60 seconds and 366 days. **Years and months are rejected** — `1y` and `P1M` are not fixed durations, so they cannot be compared against a timestamp. |
+| `direction` | Which way is good, so a rise can be rendered as an improvement rather than just a change. |
+| `aggregation` | How a window of points collapses into one number. |
+| `dimensions` | The dimension keys a recorded point is allowed to carry. Each follows the `name` charset; at most 10. |
+| `x-…` | Your own annotations. Preserved verbatim (up to 20 keys / 1 KB per metric) and never interpreted. |
+
+#### Rules Trinity enforces
+
+- `name` must match `^[a-z][a-z0-9_]{0,63}$`. It is the key your points are
+  stored under, so `Cycles` and `cycles` are not two metrics — the first is
+  simply invalid.
+- `type` must be one of the six above. `values:` is required for `status` and
+  refused for everything else.
+- Thresholds must be numbers (`true` is not a number).
+- Status colors come from `green`, `red`, `yellow`, `gray`, `blue`, `orange`,
+  `purple`.
+- Limits: 50 metrics per agent, 50 status values, 10 dimensions; `label` ≤ 200
+  characters, `description` ≤ 1000, `unit` ≤ 32.
+- **A malformed entry is dropped, not repaired.** The rest of your block still
+  works, and the compatibility report (`D-009`) names exactly what was dropped
+  and why.
+
+#### Changing a metric later
+
+Everything except `type` updates in place on the next sync — rename a label,
+add a threshold, tighten a cadence.
+
+**Changing a metric's `type` is a new metric name; the old one retires.**
+Trinity refuses an in-place type change: points are stored by name, so turning
+a `status` into a `gauge` would leave every value already recorded
+uninterpretable. The refusal is not silent — the definitions response shows
+`type_conflict` with the type you declared, and the refresh summary names it.
+Pick a new name and let the old metric retire; that keeps the break visible
+instead of corrupting the history.
+
+A metric you delete from `template.yaml` is **retired**, not erased — its
+definition is kept so past values can still be read, and re-declaring the same
+name brings the original row back.
+
+#### How long values are kept
+
+Points are kept for `metrics_retention_days` (default 365, `0` = forever) and
+an agent may record `metrics_daily_point_cap` of them per UTC day (default
+100,000, `0` = unlimited). Both are operator-adjustable — an operator sets them
+through Settings, or bootstraps them with `METRICS_RETENTION_DAYS` /
+`METRICS_DAILY_POINT_CAP` — and both are **enforced**: a sweep prunes past the
+window, and crossing the cap is a 429 telling you when to come back. Read the
+live numbers from `GET /api/agents/{name}/metrics/definitions` → `policy`
+rather than hard-coding them; they now carry `enforced: true` and say which
+tier supplied each value.
+
+Two consequences for an author. A backfill older than the window is refused
+(`ts_before_retention`) rather than accepted and pruned minutes later. And the
+cap counts WRITES, not observation times, so backfilling last year's points
+still spends today's budget.
+
+### `metrics.json` — retired, and how to migrate off it
+
+Older guides told you to write current values into
+`/home/developer/metrics.json`. **Nothing reads that file.** It is not served,
+not used as a fallback, and its presence is reported as compatibility finding
+**D-010**: *"metrics.json is superseded and no longer served — record these
+values with `record_metrics`"*, with the detail naming its keys and which of
+them have no `template.yaml metrics:` entry.
+
+The container's own `GET /api/metrics` no longer reads it either. That route is
+kept so nothing 404s, but it parses nothing and answers `410` with
+`{has_metrics: false, superseded_by: "record_metrics / GET /api/agents/{name}/metrics", finding: "D-010"}`.
+Read your declarations from `GET /api/template-info` and your values from
+`GET /api/agents/{name}/metrics` (or the `get_metrics` MCP tool).
+
+Trinity refuses to serve it deliberately rather than as an oversight. Two
+sources for one number is the problem this whole area exists to remove, and
+"serve the file when there is nothing better" is exactly how two sources drift
+apart without anyone noticing.
+
+To migrate, per key:
+
+1. Declare it in `template.yaml` under `metrics:` (with a `cadence:`).
+2. Call `refresh_metric_definitions` (or restart the agent).
+3. Replace the file write with `record_metrics(points=[...])`.
+4. Delete `/home/developer/metrics.json`.
 
 ### Complete Example
 
@@ -1545,29 +1763,33 @@ metrics:
     label: "Last Cycle"
 ```
 
-**Updating metrics in your agent:**
-```bash
-# In a script or via Claude Code
-cat > /home/developer/metrics.json << 'EOF'
-{
-  "research_cycles": 5,
-  "findings_discovered": 23,
-  "research_status": "idle",
-  "last_cycle_duration": 180,
-  "last_updated": "2025-12-10T10:30:00Z"
-}
-EOF
+**Recording values from your agent:**
 ```
+record_metrics(points=[
+  {"metric": "research_cycles", "value": 5},
+  {"metric": "findings_discovered", "value": 23},
+  {"metric": "research_status", "value": "idle"},
+  {"metric": "last_cycle_duration", "value": 180},
+], execution_id="<from your Execution Context block>")
+```
+
+No timestamp is needed — Trinity stamps it. Pass your own `ts` only when you are
+recording an observation from a *different* moment (a backfill, or a correction,
+which is a new `ts` and never a new value at the old one).
 
 **In CLAUDE.md instructions:**
 ```markdown
 ## Metrics Tracking
 
-After each research cycle, update metrics.json:
-- Increment `research_cycles`
-- Update `findings_discovered` count
-- Set `research_status` to "active" during work, "idle" when done
-- Record `last_cycle_duration` in seconds
+After each research cycle, call `record_metrics` with:
+- `research_cycles` — the new total
+- `findings_discovered` — the new total
+- `research_status` — "active" during work, "idle" when done
+- `last_cycle_duration` — seconds
+
+Pass the `execution_id` from your Execution Context block so a re-delivered
+turn replays instead of double-counting. Never write metrics.json — it is
+retired and nothing reads it.
 ```
 
 ---
@@ -1576,11 +1798,22 @@ After each research cycle, update metrics.json:
 
 Agents can define a custom dashboard displayed in the Trinity UI Dashboard tab.
 
+### You may not need one
+
+If you declare metrics in `template.yaml` and record them with
+`record_metrics`, Trinity renders them as **tiles on your Dashboard tab with no
+`dashboard.yaml` at all** (trinity-enterprise#479). Each tile carries the value,
+the point time and a stale mark, and they render even while you are stopped.
+
+Write a `dashboard.yaml` when you want *more* than your numbers — tables, lists,
+markdown, links, images — or when you want to arrange them into sections.
+
 ### File Location
 
 Save the dashboard configuration to **`/home/developer/dashboard.yaml`** — the root of the agent's working directory.
 
-If the file does not exist, no dashboard will be displayed.
+If the file does not exist, your declared metrics are still shown as tiles; the
+rest of the dashboard simply has nothing to render.
 
 ### Basic Structure
 
@@ -1613,9 +1846,9 @@ sections:
 
 | Type | Required Fields | Description |
 |------|----------------|-------------|
-| `metric` | label, value | Number with optional trend (up/down) |
-| `status` | label, value, color | Colored badge |
-| `progress` | label, value | Progress bar (0-100) |
+| `metric` | label, value¹ | Number with optional trend (up/down) |
+| `status` | label, value¹, color¹ | Colored badge |
+| `progress` | label, value¹ | Progress bar (0-100) |
 | `text` | **content** | Plain text (NOT `text` or `value`) |
 | `markdown` | **content** | Rendered markdown |
 | `table` | columns, rows | Tabular data |
@@ -1625,7 +1858,55 @@ sections:
 | `divider` | - | Horizontal line |
 | `spacer` | - | Vertical space |
 
+¹ Not required when the widget carries `metric: <name>` — Trinity fills it from
+the declared metric (see below). Older base images still require it; keep a
+placeholder there.
+
 This table is the closed set. Anything else — a chart, badge, or countdown widget, for example — is stripped by the agent server before render, appears in the Dashboard tab's warning banner, and fails compatibility check D-002 by name. For trend lines, give `metric`/`progress` widgets a stable `id:` — Trinity records their values on every fetch and draws the sparkline itself.
+
+### Binding a widget to a declared metric
+
+Do **not** hand-write a business number into `dashboard.yaml`. Declare it, record
+it, and name it:
+
+```yaml
+widgets:
+  - type: metric
+    label: "Monthly Revenue"
+    metric: revenue          # the template.yaml metrics: name
+```
+
+Trinity fills `value`, `color`, sparkline `history`, the point time and the
+stale mark from the registry on every read, and it **skips** bound widgets when
+it snapshots the dashboard — so the number keeps exactly one source.
+
+Works on `metric`, `status` and `progress` widgets. An undeclared name shows the
+reason on the widget and **no number**; a metric store outage degrades that one
+widget and leaves the rest of the dashboard alone.
+
+> **Older base images: keep a placeholder `value:`.** The relaxed validation
+> (`value` — and `color` on a status widget — optional when `metric:` is set)
+> ships in the agent base image. An agent running an image built before
+> trinity-enterprise#479 still enforces the strict rule, so its `dashboard.yaml`
+> fails validation and the tab falls back to the cached copy, which an operator
+> reads as "stale" for entirely the wrong reason. Until your agent is on a
+> rebuilt image, write both:
+>
+> ```yaml
+>   - type: metric
+>     label: "Monthly Revenue"
+>     metric: revenue
+>     value: 0          # placeholder for older base images; the backend
+>                       # OVERWRITES it whenever the binding resolves, so this
+>                       # number is never what an operator sees
+> ```
+>
+> Remove it once the agent is rebuilt. Keeping it costs nothing but noise.
+
+**Unbound widgets still work** — an author-written `value:` is read from the file
+and snapshotted for history, exactly as before. For a *business* number that path
+is deprecated: it has no declaration, no validation and no cadence, so nothing
+can say whether what it shows is still current.
 
 ### Widget Examples (All Types)
 
@@ -2146,6 +2427,7 @@ Closing stdout only (not stderr) preserves error messages from a failing
 
 | Date | Changes |
 |------|---------|
+| 2026-09-22 | **Reading metrics (ent#479)**: added `get_metrics` and the one `2 x cadence` staleness rule (declare a `cadence:` or your metric can never be called stale); declared metrics render as Dashboard tiles with no `dashboard.yaml`; `dashboard.yaml` widgets may bind `metric: <name>`, with the placeholder-`value:` rule for agents on a pre-#479 base image, and a binding to a **retired** metric is refused (`metric_retired`) rather than shown as current. **`metrics.json` is retired** — unread, never served, reported as D-010, with migration steps; the container's `GET /api/metrics` is retired in place and answers `410` with the superseded payload |
 | 2026-09-06 | **Widget Types**: stated as a closed set; no chart/badge/countdown widget exists (#2110) |
 | 2026-02-05 | **Credential System Refactor (CRED-002)**: Updated Credential Management section for new simplified system; Direct file injection replaces Redis-based assignments; Export/Import with encrypted `.credentials.enc` for git storage; Auto-import on agent startup |
 | 2026-01-27 | **Advanced Skills & CLAUDE.md**: Added 8 new skill frontmatter fields (`disable-model-invocation`, `user-invocable`, `argument-hint`, `model`, `context`, `agent`, `hooks`); Added invocation control table; Added string substitutions (`$ARGUMENTS`, `$N`, `${CLAUDE_SESSION_ID}`); Added dynamic context injection (`!`command``); Added skill size guidelines; Added CLAUDE.md imports (`@path` syntax) and best practices table |

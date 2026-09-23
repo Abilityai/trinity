@@ -1,7 +1,9 @@
 """
 Configuration constants for the Trinity backend.
 """
+import logging
 import os
+from typing import Optional
 from urllib.parse import urlparse
 
 # Email Authentication Mode (Phase 12.4)
@@ -699,6 +701,12 @@ RETENTION_OPS_KEYS = (
     # GET /api/settings/retention excludes it from the generic windows map.
     # NOT a community-floor key (fewer days = the destructive direction here).
     "backup_retention_days",
+    # trinity-enterprise#478: recorded metric points. A real row sweep, so it
+    # carries its own `_guard_allows` site in cleanup_service (the #1771a
+    # set-equality assertion is what makes that pairing mandatory rather than
+    # remembered). Deliberately NOT a community-floor key: the 5-day floor
+    # would gut a feature whose whole point is a year of history.
+    "metrics_retention_days",
 )
 
 # The RETENTION_OPS_KEYS members whose prune is NOT a #1644 row sweep (#2216).
@@ -788,6 +796,17 @@ OPS_SETTINGS_DEFAULTS = {
     # "0" is INVALID for this key (validated 1–3650): keep-forever is the
     # disk-fill trap; disabling backups is DB_BACKUP_ENABLED=false.
     "backup_retention_days": "14",
+    # trinity-enterprise#478: how long a recorded metric point is kept. A year
+    # so a metric can be compared against the same month last year, which is
+    # the question a business metric exists to answer. "0" disables the sweep
+    # (keep forever), as on every row window above. Wide/safe per #1638.
+    "metrics_retention_days": "365",
+    # trinity-enterprise#478: per-agent per-UTC-day WRITE budget for recorded
+    # points. "0" is unlimited, following `ops_cost_limit_daily_usd` and the
+    # `max_agents_*` convention — an operator must be able to lift a cap
+    # without typing a huge number. At the ent#482 norm (tens of points a day)
+    # this is a ceiling against a runaway writer, not a working limit.
+    "metrics_daily_point_cap": "100000",
 }
 
 
@@ -826,7 +845,71 @@ OPS_SETTINGS_VALIDATION = {
     # The lower bound 1 plus the fixed BACKUP_MIN_KEEP=3 floor in
     # db/backup_primitives.py carry the "small valid integer" (#1644) safety.
     "backup_retention_days": ("int", 1, _DAYS_MAX),
+    # trinity-enterprise#478. The window follows the row convention (`0`
+    # disables). The cap's `0` means UNLIMITED, so its bounds are its own.
+    "metrics_retention_days": ("int", 0, _DAYS_MAX),
+    "metrics_daily_point_cap": ("int", 0, 10_000_000),
 }
+
+
+# ---------------------------------------------------------------------------
+# Env tier for ops settings (trinity-enterprise#478)
+# ---------------------------------------------------------------------------
+
+# The ops keys that read an environment variable when no `system_settings` row
+# exists. OPT-IN PER KEY, deliberately: making every ops key env-backed would
+# change precedence for ~20 keys that `GET /api/settings/retention` currently
+# documents as having NO env layer — inert today (no such variables exist) but
+# a policy change nobody asked for.
+#
+# The semantic is ONE semantic: env is a LIVE fallback, read on every
+# resolution, never frozen into a row. A later `PUT /ops/config` row still
+# wins; a later env change is honoured until such a row exists. The #2085 boot
+# seeder therefore SKIPS a key whose env var is set and valid, rather than
+# copying it into a row and quietly ending the env's authority.
+ENV_BACKED_OPS_KEYS = {
+    "metrics_retention_days": "METRICS_RETENTION_DAYS",
+    "metrics_daily_point_cap": "METRICS_DAILY_POINT_CAP",
+}
+
+_env_ops_warned: set = set()
+
+
+def env_ops_value(key: str) -> Optional[str]:
+    """The env value for an env-backed ops key, if set AND valid.
+
+    A malformed value is IGNORED with a one-time warning rather than crashing
+    the boot or being silently accepted: an operator who typed
+    `METRICS_RETENTION_DAYS=abc` gets the code default and a log line naming
+    the variable, not a 500 on the first write of the day.
+    """
+    var = ENV_BACKED_OPS_KEYS.get(key)
+    if not var:
+        return None
+    raw = os.getenv(var)
+    if raw is None or raw == "":
+        return None
+    try:
+        return validate_ops_setting(key, raw)
+    except ValueError as exc:
+        if key not in _env_ops_warned:
+            _env_ops_warned.add(key)
+            logging.getLogger(__name__).warning(
+                "Ignoring invalid %s=%r (%s); using the built-in default for %s",
+                var, raw, exc, key,
+            )
+        return None
+
+
+def resolve_ops_default(key: str) -> Optional[str]:
+    """The value an ops key takes when `system_settings` holds no row.
+
+    Env first (for the listed keys only), then the code default. Lives in
+    `config` rather than `settings_service` because the boot seeder runs at
+    IMPORT time and can only import config — which is also why the settings
+    layer resolves through this function instead of duplicating the chain.
+    """
+    return env_ops_value(key) or OPS_SETTINGS_DEFAULTS.get(key)
 
 
 def validate_ops_setting(key: str, value: str) -> str:

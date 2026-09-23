@@ -25,6 +25,7 @@ import os
 import secrets
 from datetime import datetime
 from pathlib import Path
+from typing import List, Optional
 
 # Re-export models for backward compatibility
 from db_models import (
@@ -131,6 +132,8 @@ from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
+from db.role_readiness import RoleReadinessOperations
+from db.seat_decisions import SeatDecisionOperations
 from db.skill_sources import SkillSourcesOperations
 from db.public_chat import PublicChatOperations
 from db.tags import TagOperations
@@ -151,6 +154,8 @@ from db.access_requests import AccessRequestOperations
 from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
 from db.compatibility import CompatibilityOperations
+from db.metric_definitions import MetricDefinitionOperations
+from db.metric_points import MetricPointOperations
 from db.sync_state import SyncStateOperations
 from db.idempotency import IdempotencyOperations
 from db.loops import LoopOperations
@@ -360,13 +365,23 @@ def _retention_window_seed_values():
     # — which this seed's fail-safe contract then SWALLOWS, leaving the feature
     # silently dead on every boot. Verified empirically before the move; the
     # same #1638 circular-import trap, one seed later.
-    from config import OPS_SETTINGS_DEFAULTS, RETENTION_OPS_KEYS
+    from config import (ENV_BACKED_OPS_KEYS, OPS_SETTINGS_DEFAULTS,
+                        RETENTION_OPS_KEYS, env_ops_value)
 
-    return [
-        (key, OPS_SETTINGS_DEFAULTS[key])
-        for key in RETENTION_OPS_KEYS
-        if key in OPS_SETTINGS_DEFAULTS
-    ]
+    pairs = []
+    for key in RETENTION_OPS_KEYS:
+        if key not in OPS_SETTINGS_DEFAULTS:
+            continue
+        # An env-backed window whose variable is SET is skipped on purpose
+        # (trinity-enterprise#478): seeding it would freeze the environment's
+        # value into a row and quietly end the environment's authority, so a
+        # later `METRICS_RETENTION_DAYS` change would be ignored with nothing
+        # to explain why. Env stays a live fallback; a `PUT /ops/config` row
+        # still wins over it, which is the only precedence anyone documented.
+        if key in ENV_BACKED_OPS_KEYS and env_ops_value(key) is not None:
+            continue
+        pairs.append((key, OPS_SETTINGS_DEFAULTS[key]))
+    return pairs
 
 
 def _seed_retention_windows(cursor, conn):
@@ -995,6 +1010,8 @@ class DatabaseManager:
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
+        self._role_readiness_ops = RoleReadinessOperations()
+        self._seat_decision_ops = SeatDecisionOperations()
         self._skill_sources_ops = SkillSourcesOperations()
         self._public_chat_ops = PublicChatOperations()
         self._tag_ops = TagOperations()
@@ -1015,6 +1032,8 @@ class DatabaseManager:
         self._audit_ops = PlatformAuditOperations()
         self._canary_ops = CanaryOperations()
         self._compatibility_ops = CompatibilityOperations()  # #668 agent compatibility
+        self._metric_definition_ops = MetricDefinitionOperations()  # ent#477 metric registry
+        self._metric_point_ops = MetricPointOperations()  # ent#478 recorded points
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
@@ -1303,6 +1322,10 @@ class DatabaseManager:
 
     def list_active_shared_files_for_agent(self, agent_name: str) -> list:
         return self._agent_shared_files_ops.list_active_for_agent(agent_name)
+
+    def list_active_shared_files_for_viewer(self, agent_name: str, viewer_email, *, include_owner_only: bool = False) -> list:
+        return self._agent_shared_files_ops.list_active_for_viewer(
+            agent_name, viewer_email, include_owner_only=include_owner_only)
 
     def mark_shared_file_downloaded(self, file_id: str) -> None:
         return self._agent_shared_files_ops.mark_downloaded(file_id)
@@ -1928,6 +1951,10 @@ class DatabaseManager:
         `__getattr__` — the ent#277 trap, guarded by
         `tests/unit/test_ent525_portal_work.py::test_the_facade_exposes_every_ledger_read_the_service_makes`."""
         return self._schedule_ops.get_running_for_chat(chat_id)
+
+    def get_running_in_conversation(self, agent_name: str, source_channel: str, chat_id: str):
+        """ent#549 — this agent's RUNNING turns in one conversation."""
+        return self._schedule_ops.get_running_in_conversation(agent_name, source_channel, chat_id)
 
     def get_fleet_execution_stats(self, agent_names, hours: int = 24):
         """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
@@ -2700,6 +2727,39 @@ class DatabaseManager:
     def set_skill_delivery_status(self, agent_name: str, conflicted: list, resolved: list):
         # #2914: the inject path's per-row verdict (`conflict` / cleared).
         return self._skills_ops.set_skill_delivery_status(agent_name, conflicted, resolved)
+    # =========================================================================
+    # Role readiness (delegated to db/role_readiness.py) — ent#527 / #663
+    # =========================================================================
+
+    def get_agent_role_readiness(self, agent_name: str):
+        return self._role_readiness_ops.get_role_readiness(agent_name)
+
+    def set_agent_role_readiness(self, agent_name: str, status: str, changed_by: str):
+        return self._role_readiness_ops.set_role_readiness(agent_name, status, changed_by)
+
+    # Seat decisions (delegated to db/seat_decisions.py) — ent#638 / R25.
+    # Explicit signatures on purpose (learnings 2026-09-01: a kwarg the mixin
+    # gains must land here too); parity pinned by test_ent638_seat_decisions.
+    def insert_seat_decision(self, values: dict) -> dict:
+        return self._seat_decision_ops.insert_seat_decision(values)
+
+    def get_seat_decision(self, agent_name: str, decision_id: str) -> Optional[dict]:
+        return self._seat_decision_ops.get_seat_decision(agent_name, decision_id)
+
+    def list_seat_decisions(self, agent_name: str, seat_email: Optional[str] = None, *, limit: int = 500) -> List[dict]:
+        return self._seat_decision_ops.list_seat_decisions(agent_name, seat_email, limit=limit)
+
+    def list_seat_decision_seats(self, agent_name: str, *, limit: int = 50) -> List[str]:
+        return self._seat_decision_ops.list_seat_decision_seats(agent_name, limit=limit)
+
+    def supersede_seat_decision(self, agent_name: str, old_id: str, values: dict) -> Optional[dict]:
+        return self._seat_decision_ops.supersede_seat_decision(agent_name, old_id, values)
+
+    def set_seat_decision_status(self, agent_name: str, decision_id: str, status: str, *, reason: Optional[str], by: str) -> bool:
+        return self._seat_decision_ops.set_seat_decision_status(agent_name, decision_id, status, reason=reason, by=by)
+
+    def reconfirm_seat_decision(self, agent_name: str, decision_id: str, review_by: str) -> bool:
+        return self._seat_decision_ops.reconfirm_seat_decision(agent_name, decision_id, review_by)
 
     def is_skill_assigned(self, agent_name: str, skill_name: str):
         return self._skills_ops.is_skill_assigned(agent_name, skill_name)
@@ -2839,6 +2899,26 @@ class DatabaseManager:
     ) -> bool:
         return self._public_link_ops.update_user_memory_conversation_summary(
             agent_name, user_email, conversation_summary
+        )
+
+    # ent#637: the write boundary records history; the person reads + undoes it.
+    def write_public_user_memory_agent_notes(
+        self, agent_name: str, user_email: str, agent_notes: str, *,
+        execution_id: str = None, triggered_by: str = "", schedule_id: str = None,
+    ) -> dict:
+        return self._public_link_ops.write_user_memory_agent_notes(
+            agent_name, user_email, agent_notes,
+            execution_id=execution_id, triggered_by=triggered_by, schedule_id=schedule_id,
+        )
+
+    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
+        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
+
+    def undo_public_user_memory_write(
+        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str
+    ) -> str:
+        return self._public_link_ops.undo_user_memory_write(
+            agent_name, user_email, write_id, undone_by=undone_by
         )
 
     # =========================================================================
@@ -3815,6 +3895,77 @@ class DatabaseManager:
     def count_agents_with_hard_compatibility_findings(self) -> int:
         """Fleet aggregation: number of agents with ≥1 HARD compatibility finding."""
         return self._compatibility_ops.count_agents_with_hard_findings()
+
+    # =========================================================================
+    # Declared metric registry (ent#477 — delegated to db/metric_definitions.py)
+    # =========================================================================
+    #
+    # `DatabaseManager` delegates BY NAME — there is no `__getattr__` passthrough
+    # — so a method reachable only through `db.<name>(...)` must be listed here
+    # or it `AttributeError`s at runtime while every mocked test stays green
+    # (learning 2026-07-06). `test_ent477_metric_registry.py` derives the
+    # required set by scanning `services/metric_registry.py` for `db.<name>(`.
+
+    def list_metric_definitions(self, agent_name: str, include_retired: bool = False):
+        """Declared metric definitions for an agent. See MetricDefinitionOperations."""
+        return self._metric_definition_ops.list_for_agent(
+            agent_name, include_retired=include_retired
+        )
+
+    def reconcile_metric_definitions(self, agent_name: str, declared, source: str):
+        """Set-diff the declared metrics into the registry; returns a summary dict."""
+        return self._metric_definition_ops.reconcile(agent_name, declared, source)
+
+    # -------------------------------------------------------------------------
+    # Recorded metric points (trinity-enterprise#478 — db/metric_points.py)
+    # -------------------------------------------------------------------------
+
+    def insert_metric_points(self, agent_name: str, rows):
+        """Insert validated points; returns `(recorded, deduplicated)`."""
+        return self._metric_point_ops.insert_points(agent_name, rows)
+
+    def count_metric_points_today(
+        self, agent_name: str, day_start_iso: str, limit: int
+    ) -> int:
+        """Points this agent wrote since `day_start_iso`, counted to `limit`."""
+        return self._metric_point_ops.count_points_today(
+            agent_name, day_start_iso, limit
+        )
+
+    def latest_metric_points(
+        self, agent_name: str, metric_names, per_metric_limit: int = 200
+    ):
+        """Newest-N points per named metric (ent#479 read). See MetricPointOperations."""
+        return self._metric_point_ops.latest_points_for(
+            agent_name, list(metric_names), per_metric_limit
+        )
+
+    def metric_series_points(
+        self,
+        agent_name: str,
+        metric: str,
+        since_iso: str,
+        until_iso=None,
+        limit: int = 2000,
+    ):
+        """One metric's points inside a window, newest first, `limit + 1` deep."""
+        return self._metric_point_ops.series_points(
+            agent_name, metric, since_iso, until_iso, limit
+        )
+
+    def count_metric_points_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of points older than the window (#1644 guard)."""
+        return self._metric_point_ops.count_metric_points_candidates(
+            retention_days, limit
+        )
+
+    def prune_metric_points(
+        self, retention_days: int = 365, chunk_size: int = 5000
+    ) -> int:
+        """Delete points older than the window, bounded per call."""
+        return self._metric_point_ops.prune_metric_points(
+            retention_days, chunk_size
+        )
 
     # =========================================================================
     # Idempotency keys (RELIABILITY-006, #525 — delegated to db/idempotency.py)

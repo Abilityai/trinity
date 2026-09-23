@@ -180,9 +180,9 @@ function fmtSuccessRate(rate) {
   return rate == null ? '—' : `${Math.round(rate * 100)}%`
 }
 function successRateClass(rate) {
-  if (rate == null) return 'text-gray-400 dark:text-gray-500'
-  if (rate >= 0.9) return 'text-status-success-600 dark:text-status-success-400'
-  if (rate >= 0.5) return 'text-status-warning-600 dark:text-status-warning-400'
+  if (rate == null) return 'text-gray-500 dark:text-gray-400'
+  if (rate >= 0.9) return 'text-status-success-700 dark:text-status-success-400'
+  if (rate >= 0.5) return 'text-status-warning-700 dark:text-status-warning-400'
   return 'text-status-danger-600 dark:text-status-danger-400'
 }
 // Reuses the existing `fmtDuration` defined for the Duration chart below.
@@ -317,7 +317,7 @@ onMounted(() => {
         <div class="flex items-center gap-2">
           <span v-if="live" class="text-xs text-gray-500 dark:text-gray-400">
             <span class="font-mono text-action-primary-600 dark:text-action-primary-400">{{ live.running_count }}</span> running ·
-            <span class="font-mono text-status-warning-600 dark:text-status-warning-400">{{ live.queued_count }}</span> queued
+            <span class="font-mono text-status-warning-700 dark:text-status-warning-400">{{ live.queued_count }}</span> queued
           </span>
           <div class="inline-flex rounded-md border border-gray-200 dark:border-gray-700 overflow-hidden">
             <button
@@ -357,7 +357,7 @@ onMounted(() => {
         <div>
           <div class="flex items-baseline justify-between mb-2">
             <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300" title="Runs that finished without erroring — completion, not answer quality (ent#206)">Execution completion rate</h4>
-            <span class="text-sm font-semibold text-status-success-600 dark:text-status-success-400">{{ Math.round(analytics.success_rate * 100) }}%</span>
+            <span class="text-sm font-semibold text-status-success-700 dark:text-status-success-400">{{ Math.round(analytics.success_rate * 100) }}%</span>
           </div>
           <TrendLineChart :dates="dates" :series="successSeries" :y-min="0" :y-max="100" :value-format="(v) => (v == null ? '—' : v + '%')" :axis-format="(v) => v + '%'" />
         </div>
@@ -482,7 +482,7 @@ onMounted(() => {
         >
           Enable it in Operations → Health →
         </router-link>
-        <p v-else class="mt-2 text-xs text-gray-400 dark:text-gray-500">
+        <p v-else class="mt-2 text-xs text-gray-500 dark:text-gray-400">
           An admin can enable it in Operations → Health.
         </p>
       </div>
@@ -521,7 +521,7 @@ onMounted(() => {
           {{ (agent.shares && agent.shares.length) || 0 }} shares
         </button>
         <span class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">
-          Sync: <span :class="syncFailures > 0 ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-600 dark:text-status-success-400'">{{ syncFailures > 0 ? `${syncFailures} failing` : 'ok' }}</span>
+          Sync: <span :class="syncFailures > 0 ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-700 dark:text-status-success-400'">{{ syncFailures > 0 ? `${syncFailures} failing` : 'ok' }}</span>
         </span>
       </div>
     </div>

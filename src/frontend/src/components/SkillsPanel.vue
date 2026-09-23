@@ -200,7 +200,7 @@
               ? 'text-status-danger-600 dark:text-status-danger-400'
               : savedTone === 'pending'
                 ? 'text-status-warning-700 dark:text-status-warning-300'
-                : 'text-status-success-600 dark:text-status-success-400'"
+                : 'text-status-success-700 dark:text-status-success-400'"
           >{{ savedNote }}</span>
         </div>
       </section>

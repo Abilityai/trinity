@@ -852,6 +852,8 @@ is existing output gaining an audience.
 - **FR-7 — Files**: file scoping is unchanged in this pass, as the issue directs — the
   per-agent inbox boundary stays where it is (it is where the last two portal security
   bugs lived). Shared files therefore keep listing per agent and are not yet addressable.
+  *(Closed by trinity-enterprise#549: a shared file now has an addressee — see
+  `content-files.md` §13.10.)*
 - **FR-8 — Ratings deferred**: AC #6 asks deliverable cards to carry the rating
   affordance from trinity-enterprise#366, which is not built. The card is the surface it
   will attach to; nothing here pre-empts its shape.
@@ -2859,9 +2861,11 @@ to localStorage in the clear.
   previous session (this also avoids a one-time false-dot burst on deploy). A
   preview no longer inflates the owner's `download_count` — a ranged prefix read
   is still audited, marked `ranged_prefix: true`, but does not bump the counter.
-  Every rostered client of an agent already sees every active share of that
-  agent; a dismissal is a preference, not authorization (follow-up with the
-  audience model, ent#484/#489).
+  A dismissal is a preference, not authorization. When this shipped every
+  rostered client of an agent saw every active share of that agent;
+  trinity-enterprise#549 gave a share an addressee (`content-files.md` §13.10),
+  so the tab lists the viewer's own files and a dismissal is a preference over
+  those.
 - **Flow**: `docs/memory/feature-flows/workspace-rail.md` (Slice 3),
   `file-sharing-outbound.md`
 
@@ -3210,3 +3214,115 @@ to localStorage in the clear.
   (session-only — the chips carry upload state and inbox ids), server-side
   drafts synced across devices.
 - **Flow**: `docs/memory/feature-flows/workspace-drafts.md`
+
+### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
+- **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
+- **Requirement ID**: WORKSPACE_ROLE_CARD
+- **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness)
+- **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
+  Agent details show a **Role** card: the role it fills, the objectives it owns or
+  supports with each metric's latest value, target and freshness, the viewer's
+  relationship to it, and its **readiness** state. Framework §8's "organisation UI
+  over the canon" shrunk to one agent: **files are truth, this is a projection.**
+- **Files are truth, read through the platform, never a second store.** Everything the
+  card shows about the role comes from the agent's own container on each read
+  (`client_portal/role_card.py`, via the agent client — the same door the Files tab
+  uses): `template.yaml → x-role: {role, status, seat?}` (written by the
+  `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
+  `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
+  (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
+  agent); metric values from the agent's `metrics.json` through its own
+  `/api/metrics` (`last_updated` is the freshness stamp). Nothing is cached or
+  copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
+  card at all (the panel is unchanged, AC 5); a role file that cannot be read or
+  parsed → the card says so (`role.error`), never an empty role; a stopped agent
+  → "the agent is stopped; the card reads its files when it runs".
+- **Freshness is honest, never optimistic (quality bar #4).** A metric is `stale`
+  when its value is missing, when `metrics.json` carries no `last_updated`, or when
+  that stamp is older than the framework's 30-day staleness bound (§3.5); a stale
+  metric renders as stale beside its last value and age, never as current. A
+  per-metric cadence is the business-metrics workstream's to declare; until then
+  the bound is the one rule the framework already states.
+- **Readiness is a platform record, and only the agent owner writes it (#663,
+  ruled 2026-09-20).** `x-role.status` in `template.yaml` is agent-writable, so it
+  cannot be the thing that says a companion is `ready`. `agent_role_readiness`
+  (`agent_name` PK, `status`, `changed_at`, `changed_by`; dual-track — SQLite
+  `agent_role_readiness_table` + Alembic `0067_agent_role_readiness`; CASCADE in
+  `AGENT_REFS`) is the owner's stamp. The effective state is the platform record
+  when one exists, else the template's `calibrating`; a template that says `ready`
+  **without** an owner stamp is shown as `calibrating` with a note that no owner
+  has stamped it — `status: ready` is valid only with an owner stamp (#663 DoD 3).
+  `POST …/role/readiness {status}` is gated on the platform's **owner of the agent
+  record** (`db.get_owned_roster(email)` — creator/infra owner, not an assignment
+  kind, R8/R11): anyone else gets a named 403 (`readiness_owner_only`), the agent
+  never can (portal-token principals are not owners; the route is on the
+  platform-authenticated door). The card shows the state, the date it changed and
+  who flipped it. The flip **records**; it does not switch schedules on — turning
+  the brief schedule on at `ready` stays the operator's act until the wizard owns
+  it (#511).
+- **Walkthrough progress while calibrating** (§7.2 step 8–9): the card shows the
+  viewer's own asks with this agent — user turns in their Main chat, capped at the
+  ten the three-strikes test asks for — and how many of the agent's replies they
+  rated down (ent#366). A proxy for the ten-ask walkthrough, labelled as the
+  viewer's own count, never a fleet number.
+- **Your relationship**: rendered from ent#500's assignment when it lands; until
+  then the line states "no assignment recorded" rather than being blank (AC 3).
+- **Not this issue**: editing the canon from the card (files are truth — edit the
+  file), the organisation view (ent#502), enabling schedules on the flip.
+- **Flow**: `docs/memory/feature-flows/workspace-role-card.md`
+
+### 5.37 Workspace — the seat-level decision record: why a thing was approved, deferred or killed (trinity-enterprise#638)
+- **Status**: ✅ Implemented (2026-09-22). OSS-core (Workspace).
+- **Requirement ID**: WORKSPACE_SEAT_DECISIONS
+- **GitHub Issue**: abilityai/trinity-enterprise#638 (ruling R25; the evidence base for #641)
+- **Description**: The approve / defer / kill judgments a role companion and its
+  human make every week are recorded as a platform primitive owned by the **seat**
+  (agent × person — the ent#637 memory scope). A record is lintable, not prose:
+  `outcome` (approved | deferred | killed) · what was `decided` · the `alternatives`
+  that were live · the `criterion` that discriminated (the reusable part) · who
+  decided (role + person) · `decided_at` and `review_by` · what would `reverse` it ·
+  `notes` (the only free prose) · `ask_class` (slug) · `cites`.
+- **Refusals are receipts** (`services/seat_decision_service.validate_record`): prose
+  where a field belongs (over 280 chars, a second paragraph, a missing field) →
+  422 `decision_prose_only` naming every failing field and its rule; no alternatives
+  → 422 `decision_is_a_note` ("keep it in the seat's memory"); a citation outside the
+  seat's own records → 422 `unknown_citation`. Nothing is stored on refusal.
+- **Direction is not a seat decision (R C3)**: the caller declares `scope`; a
+  `direction` record (pricing, positioning, roadmap) is kept as `routed` — visible,
+  expiring, excluded from the evidence — and the answer carries the canon-proposal
+  hint, so it neither evaporates nor pollutes the seat's record.
+- **It expires, correction supersedes, history stays**: `expired` = `review_by` before
+  today (UTC; equal is not expired), computed on read, never written; `reconfirm`
+  moves `review_by`; `supersede` inserts a new row chained by `supersedes_id` and flips
+  the old one in one CAS transaction; `close` / `reverse` are status flips (`reverse`
+  requires a one-line reason — the evidence). Any action on a non-active row is a
+  named 409 `decision_not_active`. Nothing is deleted.
+- **Evidence (AC 5)**: `reused` = records cited by a LATER record of the seat (a
+  superseding record does not implicitly cite its predecessor) — conversion, not
+  volume; per `ask_class`: the distinct normalized criteria, the reversals, and
+  `stable` (≥3 non-expired records, one criterion, no reversal) — shipped as #641's
+  input, documented as such, not its verdict.
+- **Two surfaces, one seat rule**: the companion records over MCP (`record_decision` /
+  `list_seat_decisions` → `POST/GET /api/agents/{name}/decisions`; the seat is resolved
+  from `execution_id` exactly as `write_user_memory` does, never supplied;
+  `Idempotency-Key` honoured, the tool derives one over the arguments; `decided_by_role`
+  from `assignment_provider.resolve_assignment` or the caller, never a container read;
+  **no email in the answer** — the decider is `seat` / `owner`). The person records,
+  corrects, reconfirms, closes and reverses in Agent details
+  (`GET/POST /api/enterprise/client-portal/agents/{name}/decisions`,
+  `POST …/decisions/{id}/actions`, `PortalAgentDecisions.vue`).
+- **Readers**: own seat always; the agent OWNER (`role_card._is_owner`) every seat,
+  writable; a stakeholder the assignment provider recognises through the optional seam
+  method `kinds_for(agent_name, reader_email) -> {kind, role_id}` every seat read-only
+  (per-agent in v1 — DEBT_INBOX 2026-09-22); no provider → own seat only. Writes: own
+  seat, or the owner on a named seat; a foreign id is the uniform 404.
+- **Read into context**: the seat's active decisions (criterion first, bounded) ride the
+  shared memory block on every turn — public link, channels, seat runs, Workspace — so
+  a criterion is reusable and `cites` can be non-zero.
+- **Storage**: `seat_decisions` (both tracks; Alembic `0071` ← `0070`; cleanup CASCADE);
+  JSON lists in TEXT; stats in Python; reads bounded (500 rows / seat, 50 seats). Field
+  names match the role pack's YAML (`record-decision`, #510) so the canon-folder copy is
+  a move (export deferred — DEBT_INBOX 2026-09-22).
+- **Not in scope**: the autonomy dial itself (#641); auto-recording an answered decision
+  REQUEST (#611 — `request_id` is the link, DEBT_INBOX 2026-09-22).
+- **Flow**: `docs/memory/feature-flows/workspace-seat-decisions.md`

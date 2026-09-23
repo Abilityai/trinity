@@ -50,6 +50,11 @@
     </div>
 
     <!-- Files table -->
+    <!-- #1925 triage — NOT a tab strip: a bounded wide table. Horizontal scroll
+         INSIDE the container is the correct treatment for unbounded column width
+         (design-system principle 7); collapsing columns into a "More" menu would
+         hide data, not navigation. Left as-is deliberately so a later audit does
+         not re-flag it. -->
     <div
       v-if="status.enabled && files.length > 0"
       class="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700"
@@ -57,11 +62,11 @@
       <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
         <thead class="bg-gray-50 dark:bg-gray-800">
           <tr>
-            <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Filename</th>
-            <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Size</th>
-            <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Expires</th>
-            <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Downloads</th>
-            <th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Actions</th>
+            <th
+              v-for="col in COLUMNS"
+              :key="col.label"
+              :class="[HEAD_CELL, col.right ? 'text-right' : 'text-left']"
+            >{{ col.label }}</th>
           </tr>
         </thead>
         <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-800">
@@ -69,11 +74,22 @@
             <td class="px-4 py-2 text-sm text-gray-900 dark:text-gray-100 truncate max-w-[20ch]" :title="file.filename">
               {{ file.filename }}
             </td>
-            <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">{{ formatBytes(file.size_bytes) }}</td>
-            <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400" :title="file.expires_at">
+            <!-- Who the file is for (ent#549). "Owner only" because the turn had
+                 no person and "Owner only" because the platform could not tell
+                 are different claims — the second line says which. -->
+            <td :class="MUTED_CELL" class="max-w-[30ch]">
+              <div class="truncate" :title="audienceOf(file).label">{{ audienceOf(file).label }}</div>
+              <div
+                v-if="audienceOf(file).detail"
+                class="truncate text-xs"
+                :title="audienceOf(file).detail"
+              >{{ audienceOf(file).detail }}</div>
+            </td>
+            <td :class="MUTED_CELL">{{ formatBytes(file.size_bytes) }}</td>
+            <td :class="MUTED_CELL" :title="file.expires_at">
               {{ relativeTime(file.expires_at) }}
             </td>
-            <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">{{ file.download_count }}</td>
+            <td :class="MUTED_CELL">{{ file.download_count }}</td>
             <td class="px-4 py-2 text-right whitespace-nowrap">
               <button
                 @click="copyUrl(file)"
@@ -110,6 +126,7 @@
 import { ref, onMounted } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import { useNotification } from '../composables'
+import { describeSharedFileAudience } from '../utils/sharedFileAudience'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -117,6 +134,22 @@ const props = defineProps({
 
 const agentsStore = useAgentsStore()
 const { showNotification } = useNotification()
+
+// One class string per cell KIND, bound rather than repeated per cell: adding the
+// "For" column (ent#549) would otherwise have grown this file's raw-gray count,
+// which the design-system ratchet only lets shrink.
+const HEAD_CELL = 'px-4 py-2 text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400'
+const MUTED_CELL = 'px-4 py-2 text-sm text-gray-600 dark:text-gray-400'
+const COLUMNS = [
+  { label: 'Filename' },
+  { label: 'For' },
+  { label: 'Size' },
+  { label: 'Expires' },
+  { label: 'Downloads' },
+  { label: 'Actions', right: true },
+]
+
+const audienceOf = describeSharedFileAudience
 
 const status = ref({ enabled: false, restart_required: false, volume_attached: false })
 const files = ref([])

@@ -131,17 +131,20 @@ sections:
         align: right
 ```
 
-6. **Update metrics.json** alongside dashboard:
+6. **Record the same numbers** with the `record_metrics` MCP tool — never a
+   `metrics.json` file, which is retired and read by nothing:
 
-```json
-{
-  "agents_managed": {total_agents},
-  "agents_healthy": {healthy_count},
-  "agents_unhealthy": {warning_count + critical_count},
-  "system_health": "{healthy|degraded|critical}",
-  "last_updated": "{ISO timestamp}"
-}
 ```
+record_metrics(points=[
+  {"metric": "agents_managed", "value": {total_agents}},
+  {"metric": "agents_healthy", "value": {healthy_count}},
+  {"metric": "agents_unhealthy", "value": {warning_count + critical_count}},
+  {"metric": "system_health", "value": "{healthy|degraded|critical}"},
+], execution_id="<from your Execution Context block>")
+```
+
+No `last_updated` field — Trinity stamps every point, and that stamp is what
+the dashboard shows as the metric's freshness.
 
 ## Output
 

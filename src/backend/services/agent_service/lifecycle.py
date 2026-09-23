@@ -542,6 +542,26 @@ async def start_agent_internal(agent_name: str) -> dict:
             e,
         )
 
+    # ent#477 (T1): re-read `template.yaml` and reconcile the declared metric
+    # registry. This is the hook that closes the DOMINANT staleness path — an
+    # agent edits its own `metrics:` block in-container and the 15-minute
+    # auto-sync PUSHES it, so no backend `pull` ever fires and no git hook ever
+    # sees the change. Same fire-and-forget shape as the #2069 merge and the
+    # ent#615 scrub above: zero added start latency, non-fatal, and idempotent
+    # (reconcile converges), so running it on every start is safe. The ent#89
+    # objection to start-hooking schedules does not transfer — a definition has
+    # no operator-delete path, so there is nothing here to resurrect.
+    try:
+        from services import metric_registry
+        metric_registry.spawn_refresh_from_running_agent(agent_name, source="start")
+    except Exception as e:
+        logger.warning(
+            "[ent#477] failed to spawn the metric registry refresh for %s on "
+            "start: %s",
+            agent_name,
+            e,
+        )
+
     return {
         "message": f"Agent {agent_name} started",
         "credentials_injection": credentials_status,
