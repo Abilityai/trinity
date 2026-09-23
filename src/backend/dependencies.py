@@ -1632,12 +1632,26 @@ async def enforce_agent_capability(
     code, message = refusal
     try:  # best-effort: an audit failure must never turn a 403 into a 500
         from services.platform_audit_service import platform_audit_service, AuditEventType
+        # The refused ACTOR is the agent, not its owner. `platform_audit_service`
+        # ranks `actor_user` above `actor_agent_name`, so passing the principal
+        # would file a prompt-injected agent's attempt as the owner's own act —
+        # the exact "the agent did it" vs "the person did it" line (Tandem R29)
+        # this capability exists to keep. For an agent principal: the agent is
+        # the actor, the owner rides as `actor_email`, and the key is named
+        # explicitly (the service derives it from `actor_user` otherwise).
+        agent = getattr(current_user, "agent_name", None)
+        actor = {"actor_user": current_user} if not agent else {
+            "actor_agent_name": agent,
+            "actor_email": getattr(current_user, "email", None),
+            "mcp_key_id": getattr(current_user, "mcp_key_id", None),
+            "mcp_key_name": getattr(current_user, "mcp_key_name", None),
+            "mcp_scope": getattr(current_user, "mcp_scope", None),
+        }
         await platform_audit_service.log(
             event_type=AuditEventType.AUTHORIZATION,
             event_action="capability_refused",
             source="api",
-            actor_user=current_user,
-            actor_agent_name=getattr(current_user, "agent_name", None),
+            **actor,
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=target,

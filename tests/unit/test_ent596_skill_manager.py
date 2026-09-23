@@ -217,6 +217,22 @@ def test_every_refusal_is_an_audit_row(grants, owner_fence, audit):
     assert kw["event_action"] == "capability_refused"
     assert kw["actor_agent_name"] == SIBLING and kw["target_id"] == HOLDER
     assert kw["details"]["capability"] == CAPABILITY_SKILLS_MANAGE
+    # The refused actor is the AGENT. `platform_audit_service` ranks `actor_user`
+    # above `actor_agent_name`, so passing the principal filed the attempt as the
+    # owner's own act (actor_type=user) — found by the live demo, not by review.
+    assert "actor_user" not in kw
+    assert kw["actor_email"] == "o@example.com"      # the owner rides along
+    assert kw["mcp_key_id"] == "key-1" and kw["mcp_scope"] == "agent"
+
+
+def test_a_refused_agent_is_filed_as_an_AGENT_by_the_real_actor_resolver():
+    """The resolver the audit service really uses: with `actor_user` present it
+    returns ('user', owner id) whatever else is passed — so the gate must not
+    pass it for an agent principal."""
+    import importlib
+    svc = importlib.import_module("services.platform_audit_service").PlatformAuditService
+    assert svc._resolve_actor(None, SIBLING, "agent", "key-1")[:2] == ("agent", SIBLING)
+    assert svc._resolve_actor(_principal("agent", SIBLING), SIBLING, "agent", "key-1")[0] == "user"
 
 
 def test_an_audit_failure_never_turns_the_403_into_a_500(grants, owner_fence, monkeypatch):
