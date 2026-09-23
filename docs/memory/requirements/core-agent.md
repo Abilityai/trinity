@@ -3372,6 +3372,13 @@ to localStorage in the clear.
   demotion); and the window is a FIXED 30 days, not "since the oldest surviving
   record" — otherwise a blocking rating falls out as records expire, which is
   promotion by the clock and R25 forbids it.
+- **The level has a control, not just an endpoint**: `AutonomyDialPanel.vue` on
+  Settings → Retention, beside the two panels that already bound what an
+  engagement does on its own. It renders one option per level with the single
+  fact that changes behaviour said on the row (`unprompted possible` /
+  `always asks first`), and it states the two things an admin otherwise fears:
+  raising the level promotes nothing, lowering it destroys nothing. Shown in
+  every edition — the level is in force whether or not anyone has set it.
 - **The level is a grant, not a preference**: `GET/PUT /api/settings/autonomy-dial`,
   `require_admin` **and** interactive-principal only (an agent's own MCP key can read
   the dial but can never raise it — the ent#297 line), validated against the four

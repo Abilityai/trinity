@@ -20,6 +20,7 @@ back up (release); the level is an admin grant that can only cap.
 ```
 ── the ceiling ──────────────────────────────────────────────────────────────────
 admin (interactive principal ONLY — an agent's own MCP key can read, never raise)
+  │  Settings → Retention → AutonomyDialPanel.vue
   │  PUT /api/settings/autonomy-dial {level: L0|L1|L2|L3}
   ▼
 routers/settings/autonomy_dial.py     require_admin + reject_non_interactive_principal
@@ -106,6 +107,13 @@ every turn ──► platform_prompt_service memory block → autonomy_dial_serv
   `negative_rating_in_window`, `guard_metric_capped`, `held_by_operator` — each with a sentence. A bare
   "not autonomous yet" teaches nobody what to do next, and the companion needs the
   reason to say why it is asking rather than inventing one.
+- **The ceiling needs a control, not only an endpoint.** The level is the one
+  thing an admin sets, and a setting reachable only by `curl` is a setting the
+  product does not have. The panel also has to argue for itself: an operator who
+  believes lowering the level throws away what every seat earned will never move
+  it, so the panel says outright that raising promotes nothing and lowering
+  destroys nothing — which is true precisely because the earned half is stored
+  and the level is ANDed at read time.
 - **The seat read needs its own noun.** `/api/agents/{name}/autonomy` is the
   agent-level `autonomy_enabled` toggle (`agent_config`), registered first in
   `main.py`; a second declaration on that path is matched by neither error nor
@@ -128,11 +136,11 @@ every turn ──► platform_prompt_service memory block → autonomy_dial_serv
 | DB | `db/seat_ask_class_state.py` · `db/schema.py` · `db/tables.py` · `db/migrations.py` (`seat_ask_class_state_table`) · `migrations/versions/0072_seat_ask_class_state.py` · `db/agent_cleanup.py` (CASCADE) · `db/evaluations.py` (`latest_negative_seat_rating`) · `database.py` facade | rows, both tracks |
 | Service | `services/autonomy_dial_service.py` | the rule leaf: levels, evidence, the named blocks, `live_verdict`, `evaluate_seat`, `prompt_lines` |
 | Hooks | `services/seat_decision_service.py` (`_reevaluate_autonomy` on `record` + the three terminal `act` branches) · `client_portal/service.py` (`submit_rating`) | re-evaluate on a real event |
-| Level | `routers/settings/autonomy_dial.py` · `routers/settings/__init__.py` (before `generic.router`) · `routers/settings/generic.py` (blocklist) | the instance ceiling |
+| Level | `components/settings/AutonomyDialPanel.vue` · `views/Settings.vue` · `routers/settings/autonomy_dial.py` · `routers/settings/__init__.py` (before `generic.router`) · `routers/settings/generic.py` (blocklist) | the instance ceiling |
 | Agent-facing | `routers/seat_decisions.py` (`GET /{agent_name}/seat-autonomy`) · `src/mcp-server/src/tools/decisions.ts` (`get_autonomy`) · `access.ts` · `client.ts` | the companion's read |
 | Workspace | `client_portal/autonomy.py` · `client_portal/router.py` · `client_portal/models.py` · `PortalAgentAutonomy.vue` · `PortalAgentDetails.vue` · `stores/clientPortal.js` | read / hold / release / guard |
 | Prompt | `services/platform_prompt_service.py` (via `seat_decision_service.prompt_block`) | read-into-context |
-| Tests | `tests/unit/test_ent641_autonomy_dial.py` (44) · `src/frontend/tests/unit/portalAgentAutonomy.spec.js` (10, mounted) · `src/mcp-server/src/tools/decisions.test.ts` (7) | |
+| Tests | `tests/unit/test_ent641_autonomy_dial.py` (44) · `src/frontend/tests/unit/portalAgentAutonomy.spec.js` (10, mounted) · `autonomyDialPanel.spec.js` (5, mounted) · `src/mcp-server/src/tools/decisions.test.ts` (7) | |
 
 ## Deferred (DEBT_INBOX 2026-09-23)
 
