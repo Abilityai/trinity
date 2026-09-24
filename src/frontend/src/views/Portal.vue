@@ -401,7 +401,22 @@
             </div>
           </template>
           <template #empty>
-            <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />
+            <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook">
+              <!-- ent#465: the top 3 suggestions for you and this agent, between
+                   its identity and its hints — platform sessions, 1:1 only;
+                   renders nothing when there is nothing to suggest. -->
+              <template #before-hints>
+                <PortalSuggestions
+                  v-if="store.isPlatformSession && activeAgent && !activeRoomIdFromRoute"
+                  compact
+                  :agent-name="activeAgent.name"
+                  :limit="3"
+                  @use-playbook="usePlaybook"
+                  @open-section="openSuggestionSection"
+                  @open-chat="focusConversationComposer"
+                />
+              </template>
+            </PortalBriefing>
           </template>
           <template #rail-strip>
             <PortalRailStrip v-if="railVisible" :tabs="railTabs" :signals="railSignals" @open="railSheetOpen = true" />
@@ -628,6 +643,8 @@
             :threads="threads"
             @open-thread="openThread"
             @use-playbook="usePlaybook"
+            @open-rail-tab="openRailOn"
+            @focus-composer="focusConversationComposer"
           />
         </template>
       </PortalRail>
@@ -676,6 +693,8 @@
           :threads="threads"
           @open-thread="(t) => { railSheetOpen = false; openThread(t) }"
           @use-playbook="(text) => { railSheetOpen = false; usePlaybook(text) }"
+          @open-rail-tab="openRailOn"
+          @focus-composer="() => { railSheetOpen = false; focusConversationComposer() }"
         />
       </template>
     </PortalRail>
@@ -729,6 +748,7 @@ import {
 } from '@/components/portal/portalAttachments'
 import PortalAgentBand from '@/components/portal/PortalAgentBand.vue'
 import PortalAgentDetails from '@/components/portal/PortalAgentDetails.vue'
+import PortalSuggestions from '@/components/portal/PortalSuggestions.vue'
 import ColumnResizeHandle from '@/components/ColumnResizeHandle.vue'
 import { useColumnResize } from '@/composables/useColumnResize'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
@@ -1108,7 +1128,26 @@ const rail = usePortalRailFeeds({
 })
 // ent#525: the Work signal is store-derived now — the owner merges the
 // conversation's emit into the feed's running rows BY EXECUTION ID.
-const railSignals = computed(() => ({ ...rail.signals.value }))
+// ent#465: Info's dot — suggestions waiting for you on the agent on screen.
+// Read only when the store slice belongs to that agent (the #2162 rule).
+const infoSignal = computed(() => {
+  const name = activeAgent.value?.name
+  if (!name || !store.isPlatformSession || store.suggestionsAgent !== name) return null
+  const n = store.suggestions?.total || 0
+  return n > 0 ? { updated: true, note: n === 1 ? '1 suggestion' : `${n} suggestions` } : null
+})
+// Loaded by the shell, not only by the bodies that render it: the dot exists
+// for the person mid-conversation with the rail collapsed, where neither the
+// empty chat nor the Info tab is mounted. Reused for 60 s across placements.
+watch(
+  () => (store.isPlatformSession && !activeRoomIdFromRoute.value ? activeAgent.value?.name : null),
+  (name) => { if (name) store.loadAgentSuggestions(name) },
+  { immediate: true },
+)
+const railSignals = computed(() => ({
+  ...rail.signals.value,
+  ...(infoSignal.value ? { info: infoSignal.value } : {}),
+}))
 
 function setRailOpen(open) { railState.value = { ...railState.value, open } }
 function setRailTab(tab) { railState.value = { ...railState.value, tab } }
@@ -1143,6 +1182,15 @@ function askForCanvas() {
 function askAboutIt(text) {
   railSheetOpen.value = false
   usePlaybook(text)
+}
+// ent#465: a suggestion's Accept. Asks are answered in Work's "Waiting on
+// you"; decisions live in the Info tab. `open_chat` puts the caret in the
+// composer — never a send.
+function openSuggestionSection(name) {
+  openRailOn(name === 'asks' ? 'work' : 'info')
+}
+function focusConversationComposer() {
+  conversationRef.value?.focusComposer?.()
 }
 function onRoomParticipants(list) { roomParticipants.value = Array.isArray(list) ? list : [] }
 

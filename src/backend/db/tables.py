@@ -809,6 +809,21 @@ portal_file_dismissals = Table(
     Column("dismissed_at", Text),
 )
 
+workspace_suggestion_feedback = Table(
+    "workspace_suggestion_feedback",
+    metadata,
+    Column("client_email", Text, primary_key=True),
+    Column("agent_name", Text, primary_key=True),
+    Column("suggestion_key", Text, primary_key=True),
+    Column("surface", Text),
+    Column("source", Text),
+    Column("dismissed_at", Text),
+    Column("dismissed_fingerprint", Text),
+    Column("accepted_at", Text),
+    Column("accept_count", Integer),
+    Column("updated_at", Text),
+)
+
 system_settings = Table(
     "system_settings",
     metadata,

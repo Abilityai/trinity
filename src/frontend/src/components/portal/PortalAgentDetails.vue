@@ -55,6 +55,16 @@
 
     <p v-if="header?.description" class="text-sm text-gray-600 dark:text-gray-300">{{ header.description }}</p>
 
+    <!-- ent#465: suggestions for you and this agent — platform sessions only
+         (the server 404s a portal token; not mounting it means no request). -->
+    <PortalSuggestions
+      v-if="store.isPlatformSession"
+      :agent-name="agentName"
+      @use-playbook="(text) => $emit('use-playbook', text)"
+      @open-section="openSection"
+      @open-chat="$emit('focus-composer')"
+    />
+
     <!-- ent#527: the role card — rendered only when the agent carries a role. -->
     <PortalAgentRole :agent-name="agentName" />
 
@@ -184,7 +194,9 @@
 
     <!-- ent#638: the seat decision record — why things were approved, deferred
          or killed; own component so record / correct / close are mount-testable. -->
-    <PortalAgentDecisions :agent-name="agentName" />
+    <div ref="decisionsEl">
+      <PortalAgentDecisions :agent-name="agentName" />
+    </div>
   </div>
 </template>
 
@@ -206,6 +218,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalAgentMemory from './PortalAgentMemory.vue'
 import PortalAgentRole from './PortalAgentRole.vue'
 import PortalAgentDecisions from './PortalAgentDecisions.vue'
+import PortalSuggestions from './PortalSuggestions.vue'
 import { agentDisplayName } from '@/utils/agentName'
 import { availabilityChip, threadTitle, MAIN_TAB_LABEL } from './portalUtils'
 import { usePortalAgentPage } from '@/composables/usePortalAgentPage'
@@ -219,10 +232,20 @@ const props = defineProps({
 // control, not a button this body owns — a second X inside the column would
 // be a second way to do one thing, and the two would disagree about whether
 // the rail is shut or merely on another tab.
-defineEmits(['open-thread', 'use-playbook'])
+// ent#465: `open-rail-tab` / `focus-composer` carry a suggestion's Accept to
+// the shell, which owns the rail and the composer.
+const emit = defineEmits(['open-thread', 'use-playbook', 'open-rail-tab', 'focus-composer'])
 
 const store = useClientPortalStore()
 const openReport = ref(null)
+const decisionsEl = ref(null)
+
+// ent#465: a suggestion's "Show …". Decisions live in this panel, so scroll to
+// them; asks are answered in the Work tab's "Waiting on you".
+function openSection(name) {
+  if (name === 'decisions') decisionsEl.value?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+  else if (name === 'asks') emit('open-rail-tab', 'work')
+}
 
 // The window is fixed here: this panel shows no windowed figure, and a second
 // selector disagreeing with the band's would be two controls for one fact.

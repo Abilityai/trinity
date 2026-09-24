@@ -4608,6 +4608,41 @@ def _migrate_agent_capability_grants(cursor, conn):
     conn.commit()
 
 
+def _migrate_workspace_suggestion_feedback_table(cursor, conn):
+    """Accept/dismiss of a Workspace suggestion (trinity-enterprise#465).
+
+    Per viewer + agent + suggestion key. A dismissal holds while the suggestion's
+    state fingerprint is unchanged (`dismissed_fingerprint`); an accept is
+    counted for usefulness and never hides anything. Named generically, with a
+    `surface` column, so the post-action next-step tier shares this one
+    dismissal model rather than growing a second table. Additive only.
+
+    Mirrored by the Alembic revision 0073_workspace_suggestion_feedback.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS workspace_suggestion_feedback (
+            client_email TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            suggestion_key TEXT NOT NULL,
+            surface TEXT NOT NULL DEFAULT 'agent',
+            source TEXT,
+            dismissed_at TEXT,
+            dismissed_fingerprint TEXT,
+            accepted_at TEXT,
+            accept_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (client_email, agent_name, suggestion_key)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_workspace_suggestion_feedback_agent "
+        "ON workspace_suggestion_feedback(agent_name)"
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4750,4 +4785,5 @@ MIGRATIONS = [
     ("metric_points_table", _migrate_metric_points_table),
     ("seat_decisions_table", _migrate_seat_decisions_table),
     ("agent_capability_grants", _migrate_agent_capability_grants),
+    ("workspace_suggestion_feedback_table", _migrate_workspace_suggestion_feedback_table),
 ]

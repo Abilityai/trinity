@@ -912,6 +912,28 @@ TABLES = {
         )
     """,
 
+    # trinity-enterprise#465 — accept/dismiss of a Workspace suggestion, per
+    # viewer + agent + suggestion. Generic name + `surface` so the post-action
+    # next-step tier (OP-5) shares one dismissal model instead of growing a
+    # second table. `dismissed_fingerprint` is the STATE the viewer dismissed;
+    # the item returns when the state changes. `agent_name` makes the row follow
+    # the agent's lifecycle (`AGENT_REFS`, CASCADE).
+    "workspace_suggestion_feedback": """
+        CREATE TABLE IF NOT EXISTS workspace_suggestion_feedback (
+            client_email TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            suggestion_key TEXT NOT NULL,
+            surface TEXT NOT NULL DEFAULT 'agent',
+            source TEXT,
+            dismissed_at TEXT,
+            dismissed_fingerprint TEXT,
+            accepted_at TEXT,
+            accept_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (client_email, agent_name, suggestion_key)
+        )
+    """,
+
     # -------------------------------------------------------------------------
     # Settings Tables
     # -------------------------------------------------------------------------
@@ -2061,6 +2083,10 @@ INDEXES = [
     # this one is for the sweeper, which purges by the share id.
     "CREATE INDEX IF NOT EXISTS idx_portal_file_dismissals_file "
     "ON portal_file_dismissals(file_id)",
+    # ent#465 — the PK leads with `client_email` (the read); this one serves the
+    # per-agent cascade delete.
+    "CREATE INDEX IF NOT EXISTS idx_workspace_suggestion_feedback_agent "
+    "ON workspace_suggestion_feedback(agent_name)",
 
     # Public links indexes
     "CREATE INDEX IF NOT EXISTS idx_public_links_token ON agent_public_links(token)",

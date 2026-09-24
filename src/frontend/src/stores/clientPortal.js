@@ -100,6 +100,10 @@ function writeSuppressed(on) {
 // `axios.defaults` and a suppressed session must carry no Authorization).
 export const portalHttp = axios.create()
 
+// ent#465 — the suggestions read is reused this long across the two
+// placements that mount it together (the Info tab and the empty chat).
+export const SUGGESTIONS_FRESH_MS = 60_000
+
 // #2261 — what to do when a workspace request 401s while the workspace session
 // IS the platform session (ent#357's operator case).
 //
@@ -396,6 +400,16 @@ export const useClientPortalStore = defineStore('clientPortal', {
     decisionsError: null,
     decisionError: null,      // {code, message, fields:{}} of the failed verb
     decisionBusy: null,       // 'record' | decision id in flight
+    // ent#465 — suggestions for one viewer + one agent (platform door only).
+    // Same generation guard. Both placements (the Info tab and the empty chat)
+    // read this one slice, so a dismiss in one is gone from the other.
+    suggestionsAgent: null,
+    _suggestionsGeneration: 0,
+    suggestions: null,        // PortalSuggestions
+    suggestionsLoaded: false,
+    suggestionsError: null,
+    suggestionsFetchedAt: 0,
+    suggestionError: null,    // {key, message} of the failed dismiss
     reportPayloads: {},
     // id -> {total, loaded}; present only for a payload the server actually
     // windowed, so a bounded document never renders a paging footer.
@@ -1085,6 +1099,88 @@ export const useClientPortalStore = defineStore('clientPortal', {
         if (gen === this._roleGeneration) this.roleFlipping = false
       }
     },
+
+    // ---- ent#465: suggestions ------------------------------------------
+
+    resetAgentSuggestions(agentName = null) {
+      this._suggestionsGeneration += 1
+      this.suggestionsAgent = agentName
+      this.suggestions = null
+      this.suggestionsLoaded = false
+      this.suggestionsError = null
+      this.suggestionsFetchedAt = 0
+      this.suggestionError = null
+    },
+
+    /**
+     * Load (or reuse, when fresh) this agent's suggestions. Two placements
+     * mount at once, so a fetch younger than `SUGGESTIONS_FRESH_MS` is reused
+     * rather than repeated; `force` bypasses it.
+     */
+    async loadAgentSuggestions(agentName, { force = false } = {}) {
+      if (this.suggestionsAgent !== agentName) this.resetAgentSuggestions(agentName)
+      if (!force && this.suggestionsLoaded && Date.now() - this.suggestionsFetchedAt < SUGGESTIONS_FRESH_MS) return
+      const gen = this._suggestionsGeneration
+      this.suggestionsError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._suggestionsGeneration) return
+        this.suggestions = data
+        this.suggestionsLoaded = true
+        this.suggestionsFetchedAt = Date.now()
+      } catch {
+        if (gen !== this._suggestionsGeneration) return
+        this.suggestionsError = "Couldn't load suggestions. Check your connection and try again."
+      }
+    },
+
+    /**
+     * Dismiss: hidden at once, restored with the error beside it if the write
+     * fails (design system p18 — a verb's failure sits next to its control).
+     */
+    async dismissSuggestion(agentName, key) {
+      const gen = this._suggestionsGeneration
+      const before = this.suggestions
+      this.suggestionError = null
+      if (before) {
+        this.suggestions = {
+          ...before,
+          suggestions: before.suggestions.filter((s) => s.key !== key),
+          total: Math.max(0, (before.total || 0) - 1),
+        }
+      }
+      try {
+        await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions/feedback`,
+          { key, action: 'dismiss' }, { headers: this.authHeader },
+        )
+        return true
+      } catch {
+        if (gen !== this._suggestionsGeneration) return false
+        this.suggestions = before
+        this.suggestionError = { key, message: "Couldn't dismiss that. Try again." }
+        return false
+      }
+    },
+
+    /**
+     * Accept is recorded for usefulness only. The action itself (prefill, open,
+     * link) has already happened on the client, so a failed record is not the
+     * person's problem and is deliberately not surfaced.
+     */
+    async acceptSuggestion(agentName, key) {
+      try {
+        await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions/feedback`,
+          { key, action: 'accept' }, { headers: this.authHeader },
+        )
+      } catch { /* usefulness data only — see the docblock */ }
+    },
+
+    clearSuggestionError() { this.suggestionError = null },
 
     // ---- ent#638: the seat decision record ------------------------------
 

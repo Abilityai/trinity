@@ -3413,6 +3413,26 @@
         "skills"
       ],
       "description": "Only designated agents may change an agent's skills — their own included (ent#596). The scope ALLOWLIST as a ten-row matrix (JWT / user / system pass unchanged; agent passes only with a live grant; connector, ops, portal_delegate and a scope invented tomorrow are refused; a principal with no mcp_scope fails closed); the composed dependency checks the capability BEFORE the owner fence, so a non-holder gets one uniform named 403 for an existing, nonexistent or foreign target and a holder gains no reach beyond its owner; the route table read off FastAPI's real dependant graph (every skill-changing route takes the fence; the grant routes exist and are not shadowed); a refused agent key changes nothing on any of the four routes through a real FastAPI app; the file-route side door (.claude/skills/** via PUT/DELETE/mkdir, including a delete of an ancestor) and that people and holders still edit skills there; grants over a real SQLite file (live-only via the agent_ownership join, idempotent who/when, soft-delete and recovery, orphan rows fail closed, unknown capability refused at the sink, no call permission written); the grant service (404 / system / ephemeral refusals, revoke needs no validation); the grant route refuses an admin's own MCP key and audits only real changes; attribution (the acting agent recorded, the system agent named, a bulk replace does not re-stamp kept names); both migration tracks executed; the CASCADE AgentRef. Eight mutations each red."
+    },
+    {
+      "file": "unit/test_ent465_suggestions.py",
+      "feature": "trinity-enterprise#465",
+      "added": "2026-09-24",
+      "categories": [
+        "backend",
+        "workspace"
+      ],
+      "description": "Workspace suggestions (ent#465): every rule at its boundary over an injected now (failure streak with skipped/cancelled stepped over, cron-relative never-fired, disabled-that-used-to-run, dormant, capped unused playbooks), autonomy off as ONE item that suppresses never-fired, state-identity fingerprints (no re-nag on another failure, back on a new streak), honest capabilities/basis states, the SQL over a real SQLite file (windowed runs, viewer-scoped usage, accept and dismiss side by side, evict-oldest cap), bounded feedback writes (404 for a key not emitted, 422 for an unknown class, server fingerprint), a stopped agent never calling the briefing, the platform door (portal token 404 on read and write), and is_admin by role AND allowlisted scope."
+    },
+    {
+      "file": "journeys/test_j13_suggestions_journey.py",
+      "feature": "abilityai/trinity-enterprise#465",
+      "added": "2026-09-24",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J13 (suggestions): my agent tells me what I can do with it and what is waiting on me, and only things that are true. A strict=True xfail skeleton — the rules, SQL and doors are unit-proven and the verbs mount-proven; the walk needs a real failing schedule, a shared platform user and a magic-link client on one instance."
     }
   ]
 }

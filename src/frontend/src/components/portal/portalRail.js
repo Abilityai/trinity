@@ -199,17 +199,23 @@ export const RAIL_TABS = Object.freeze([
   //     rail's column; false once it IS the column's content. Collapsing the
   //     rail dismisses it, and the rail already remembers the tab you left.
   //
-  // A STATIC tab — the third registry shape. No signal (nothing about an agent's
-  // context is an event) and no empty state (an agent always has a name, a
-  // health state and a chat list, so the body always renders and the rail's
-  // generic empty branch is unreachable). Both are declared as absent rather
-  // than filled with a plausible value; see RAIL_SIGNAL_NONE.
+  // No empty state (an agent always has a name, a health state and a chat
+  // list, so the body always renders and the rail's generic empty branch is
+  // unreachable) — declared absent rather than filled with a plausible value.
+  //
+  // ent#465 amends ent#547's "static tab": Info now carries the `updated` dot
+  // while suggestions are waiting for you in it (the shell writes an `info`
+  // entry with a `note`, "2 suggestions", which the tooltip and the mobile
+  // strip read instead of "updated"). The dot is the rail's own vocabulary —
+  // one shape, one hue (principle 24) — rather than a numeric badge the design
+  // pass never defined. A signalling tab without an empty state is therefore a
+  // legal registry shape; `RAIL_SIGNAL_NONE` stays for a tab with neither.
   Object.freeze({
     id: 'info',
     label: 'Info',
     door: RAIL_DOORS.SOLO_AGENT,
     scope: RAIL_SCOPE_PARTICIPANTS,
-    signal: RAIL_SIGNAL_NONE,
+    signal: RAIL_SIGNAL_UPDATED,
     icon: 'info',
     empty: null,
   }),
@@ -348,7 +354,12 @@ export function signalFor(signals, tab) {
   if (!raw || typeof raw !== 'object') return emptySignal()
   const live = Number.isInteger(raw.live) && raw.live > 0 ? raw.live : 0
   const agents = participantList(raw.agents)
-  return { live, updated: raw.updated === true, agents }
+  const out = { live, updated: raw.updated === true, agents }
+  // ent#465: an optional short phrase that replaces "updated" in words
+  // ("2 suggestions"). Carried only when present, so every existing signal
+  // keeps its exact shape.
+  if (typeof raw.note === 'string' && raw.note) out.note = raw.note
+  return out
 }
 
 /** Which shape the tab wears: live outranks updated; null = no dot. */
@@ -364,7 +375,7 @@ export function railTitle(tab, sig) {
   const label = tab && tab.label ? tab.label : ''
   const shape = signalShape(sig)
   if (shape === RAIL_SIGNAL_LIVE) return `${label} · ${sig.live} running`
-  if (shape === RAIL_SIGNAL_UPDATED) return `${label} · updated`
+  if (shape === RAIL_SIGNAL_UPDATED) return `${label} · ${sig.note || 'updated'}`
   return label
 }
 
@@ -383,6 +394,7 @@ export function collapsedSignals(signals, visible) {
       live: sig.live,
       updated: sig.updated,
       agents: sig.agents,
+      note: sig.note,
       shape: signalShape(sig),
       title: railTitle(tab, sig),
     }
@@ -405,7 +417,9 @@ export function stripSegments(signals, visible) {
     return signalled.map((s) => ({
       id: s.id,
       shape: s.shape,
-      text: s.shape === RAIL_SIGNAL_LIVE ? `${s.label} · ${s.live} running` : `${s.label} updated`,
+      text: s.shape === RAIL_SIGNAL_LIVE
+        ? `${s.label} · ${s.live} running`
+        : (s.note ? `${s.label} · ${s.note}` : `${s.label} updated`),
     }))
   }
   return (Array.isArray(visible) ? visible : []).map((t) => ({ id: t.id, shape: null, text: t.label }))
