@@ -167,8 +167,13 @@ export function liveElapsedSeconds(item, { fetchedAtMs = null, nowMs = Date.now(
  * reviewed). Returns `{ kind, text }`: `stages` renders the list, the other
  * two render the sentence in tertiary ink.
  */
-export function stepsLine(steps, agentName = null) {
+export function stepsLine(steps, agentName = null, { activitySeen = false } = {}) {
   const who = agentName || 'This agent'
+  // #3001: "doesn't report steps" was ruled before the card gained the live
+  // activity line (#620). Once that line has shown on this run the agent IS
+  // reporting what it does, so the sentence would contradict the card; say
+  // nothing instead. `unknown` keeps its sentence — it stays true either way.
+  const silent = activitySeen ? { kind: 'activity', text: '' } : null
   // `undefined` = not read yet (the chat's card before the feed has the row):
   // say nothing rather than "could not be read", which is a different claim.
   if (steps === undefined) return { kind: 'pending', text: '' }
@@ -176,11 +181,11 @@ export function stepsLine(steps, agentName = null) {
     return { kind: 'unknown', text: 'Steps could not be read right now.' }
   }
   if (steps.state === 'none') {
-    return { kind: 'none', text: `${who} doesn't report steps.` }
+    return silent || { kind: 'none', text: `${who} doesn't report steps.` }
   }
   if (steps.state === 'reported') {
     if (Array.isArray(steps.stages) && steps.stages.length) return { kind: 'stages', text: '' }
-    return { kind: 'none', text: `${who} doesn't report steps.` }
+    return silent || { kind: 'none', text: `${who} doesn't report steps.` }
   }
   return { kind: 'unknown', text: 'Steps could not be read right now.' }
 }

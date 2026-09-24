@@ -18,7 +18,8 @@
   Three sentences for steps, never two (ruling 2, reviewed): the stages when
   the agent publishes them, "doesn't report steps" when it reachably does not,
   "could not be read right now" when nobody can tell — a stopped agent must
-  never be described as one that doesn't report.
+  never be described as one that doesn't report. #3001: the middle sentence
+  is withheld once this run has shown a live activity line.
 
   Presentational: every decision is `portalWork.js`. Two clocks meet here and
   one rule settles them — while the stream is live its last line is the
@@ -72,7 +73,7 @@
           <span v-if="holderOf(s)" class="ml-auto shrink-0 text-gray-500 dark:text-gray-400">{{ holderOf(s) }}</span>
         </li>
       </ol>
-      <p v-else-if="steps.kind !== 'pending'" class="mt-1.5 text-xs text-gray-500 dark:text-gray-400" :data-testid="`portal-work-steps-${steps.kind}`">{{ steps.text }}</p>
+      <p v-else-if="steps.kind !== 'pending' && steps.kind !== 'activity'" class="mt-1.5 text-xs text-gray-500 dark:text-gray-400" :data-testid="`portal-work-steps-${steps.kind}`">{{ steps.text }}</p>
     </template>
 
     <!-- Delegated work this turn handed on: who holds it now. -->
@@ -172,7 +173,13 @@ onBeforeUnmount(() => { if (_tick) clearInterval(_tick) })
 const statusWord = computed(() => workStatusLabel(props.item))
 const kindWord = computed(() => kindLabel(props.item.kind))
 const clock = computed(() => (live.value ? formatElapsed(props.elapsedSeconds) : null))
-const steps = computed(() => stepsLine(props.item.steps, props.item.agent_name))
+// #3001: whether this run has shown a live activity line. Sticky for the run —
+// a beat expires every 15 s, and the sentence must not flicker back in between
+// two of them — and reset when the card starts showing a different run.
+const activitySeen = ref(false)
+watch(shownStep, (v) => { if (v && live.value) activitySeen.value = true }, { immediate: true })
+watch(() => props.item.id, () => { activitySeen.value = false })
+const steps = computed(() => stepsLine(props.item.steps, props.item.agent_name, { activitySeen: activitySeen.value }))
 const stages = computed(() => stageRows(props.item.steps))
 const askable = computed(() => !live.value && isHonestTerminal(props.item.outcome))
 const hasActions = computed(() => (live.value && props.canStop) || askable.value || props.showOpenInWork)

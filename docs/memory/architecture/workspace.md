@@ -487,7 +487,7 @@ sanitized and bounded; only a `portal` stamp becomes a `chat_id`. **Honesty rule
 row past 1.5× the agent's turn bound (floor 30 min) is `stale` — not live, no clock, no
 signal, no poll — because the 120-minute sweep leaves ghost rows after a restart; `can_stop`
 mirrors exactly what the terminate route accepts; steps are **three-state** (`reported` /
-`none` = "doesn't report steps" / `unknown` = stopped, unreachable, unreadable, or two runs on
+`none` = "doesn't report steps", withheld once the card has shown a live activity line (#3001) / `unknown` = stopped, unreachable, unreadable, or two runs on
 one agent so no instance can be attributed) — a stopped agent must never be described as one
 that does not report. The #919 read (`work/pipeline_state.py`) mirrors `pipelines.ts`'s
 hardening: id grammar before any path, `size` from the listing before the download, a streamed

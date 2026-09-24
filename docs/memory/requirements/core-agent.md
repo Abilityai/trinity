@@ -1829,6 +1829,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   render as "held by B". Three states: stages · **"doesn't report steps"**
   (reachable, publishing nothing) · **"could not be read right now"**
   (stopped, unreachable, unreadable, or two runs on one agent).
+  **#3001:** once the card has shown the agent's live activity line (#620) on
+  this run, the `none` sentence is withheld — the agent is visibly reporting
+  what it does, and the sentence would contradict the card. It stays for an
+  agent that reports neither stages nor activity.
 - **AC-3 — honest terminals**: failed / timed out / stopped by you / no longer
   tracked, each its own word; the terminal card renders FROM the durable
   #2320 verdict (applied on load and on reattach), so it survives a reload;

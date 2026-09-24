@@ -112,6 +112,13 @@ with their own sentence — "could not be read right now". Telling a user a
 stopped agent "doesn't report steps" would be the distrust-training misrender
 the ruling exists to prevent, in new clothes.
 
+**#3001 — the `none` sentence yields to the activity line.** "Doesn't report steps" was
+ruled before #620 put the live activity line on the same card; an agent showing
+"Thinking" / "Reading …" with that sentence beneath it reads as the card contradicting
+itself. `stepsLine(steps, agent, { activitySeen })` returns `kind: 'activity'` (render
+nothing) once `PortalWorkCard` has shown a live line on this run — sticky across the 15 s
+beat gaps, reset when the card shows a different run. `unknown` keeps its sentence.
+
 ### The #919 read is hardened like the MCP tool
 
 `pipeline_state.py` restates `pipelines.ts`'s rules because the two cannot
