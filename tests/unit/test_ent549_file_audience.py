@@ -836,6 +836,108 @@ def test_one_normaliser_for_every_writer_and_the_reader(raw, expected):
     assert normalize_addressee_email(raw) == expected
 
 
+def _both_audience_models(raw):
+    """The two request models that carry an `audience_email` — the ent365
+    minimal `ReportCreate` constructor and the share request."""
+    from models import ReportCreate, ShareFileMcpRequest
+    return (
+        lambda: ShareFileMcpRequest(filename="x.txt", audience_email=raw),
+        lambda: ReportCreate(report_type="recon.leads", title="Leads",
+                             payload={"rows": []}, audience_email=raw),
+    )
+
+
+@pytest.mark.parametrize("raw", [
+    "  Ada@Example.COM ",          # case + surrounding spaces
+    "\tada@example.com\t",         # surrounding tabs — strip() takes them
+    ADA,
+    "a@b@c.com",
+    "no-at",
+    "two words@example.com",
+    "a\tb@example.com",            # interior tab — `isspace`, not `" "`
+    "@example.com",                # empty local part
+    "user@",                       # empty domain
+])
+def test_the_validator_and_the_resolver_agree_on_every_addressee(raw):
+    """#2955 — one rule, two callers. The expectation is AGREEMENT, computed
+    from the resolver, never a literal: the validator raises exactly where the
+    resolver answers None for a non-blank input, and returns the resolver's
+    value everywhere else. (AC4 forbids changing the resolver now; it should
+    not forbid tightening it later, so `a@b@c.com` is not promoted to a
+    promise here — the resolver's own decisions stay pinned above.)"""
+    from pydantic import ValidationError
+    from services.turn_audience import normalize_addressee_email
+
+    expected = normalize_addressee_email(raw)
+    for build in _both_audience_models(raw):
+        if expected is None:
+            with pytest.raises(ValidationError) as exc:
+                build()
+            assert "audience_email must be an email address" in str(exc.value)
+        else:
+            assert build().audience_email == expected
+
+
+@pytest.mark.parametrize("raw", ["", "   ", None])
+def test_blank_is_absent_at_every_boundary(raw):
+    """Regression pin (green before #2955, by design — not part of the red
+    set): "absent" has one spelling. Blank never reaches the raise at either
+    boundary, and the resolver says None for it and for a non-`str`."""
+    from services.turn_audience import normalize_addressee_email
+    for build in _both_audience_models(raw):
+        assert build().audience_email is None
+    assert normalize_addressee_email(raw) is None
+    assert normalize_addressee_email(42) is None      # resolver only — a validator never sees a non-str
+
+
+def test_the_one_normaliser_has_one_home():
+    """#2955 — the rule is defined ONCE, in a leaf, and both validators call
+    it through one boundary wrapper. AST, not a line scan: a re-inlined
+    `not "@" in v` passes a text grep and fails this."""
+    import ast
+    import os
+    import models
+    import utils.addressee
+    import services.turn_audience
+
+    # (i) a re-export, never a second copy (Invariant #1(a))
+    assert services.turn_audience.normalize_addressee_email is utils.addressee.normalize_addressee_email
+
+    # (ii) the leaf stays a leaf: `typing` is its only import
+    leaf = ast.parse(open(utils.addressee.__file__).read())
+    imported = set()
+    for node in ast.walk(leaf):
+        if isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module)
+    assert imported == {"typing"}, imported
+
+    # (iii) models.py still imports no `services.*` (the contract module must
+    # not need the runtime config to validate a request)
+    tree = ast.parse(open(models.__file__).read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            assert not (node.module or "").startswith("services"), ast.dump(node)
+        if isinstance(node, ast.Import):
+            assert not any(a.name.startswith("services") for a in node.names), ast.dump(node)
+
+    # (iv) both `_normalize_audience` bodies: one call to the wrapper, zero comparisons
+    bodies = {}
+    for cls in ast.walk(tree):
+        if isinstance(cls, ast.ClassDef) and cls.name in {"ReportCreate", "ShareFileMcpRequest"}:
+            for fn in cls.body:
+                if isinstance(fn, ast.FunctionDef) and fn.name == "_normalize_audience":
+                    bodies[cls.name] = fn
+    assert set(bodies) == {"ReportCreate", "ShareFileMcpRequest"}
+    for name, fn in bodies.items():
+        calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name) and n.func.id == "_validate_audience_email"]
+        compares = [n for n in ast.walk(fn) if isinstance(n, ast.Compare)]
+        assert len(calls) == 1, (name, len(calls))
+        assert compares == [], (name, [ast.dump(c) for c in compares])
+
+
 @pytest.mark.parametrize("channel, chat_id, expected", [
     ("whatsapp", WA_NUMBER, WA_NUMBER),                 # Twilio's `From` is already prefixed
     ("telegram", "424242", "telegram:424242"),
@@ -859,6 +961,18 @@ class _Principal:
         self.agent_name = kw.pop("agent_name", None)
         for k, v in kw.items():
             setattr(self, k, v)
+
+
+# Every field of an owner-list row, classified (#2955). The withholding tests
+# compare a key row to the JWT row with the audience fields nulled — which on
+# its own would let a FOURTH audience field leak (it is equal in both rows).
+# Pinning the key set turns a new `SharedFileInfo` field red here, so whoever
+# adds it has to say which side of the line it is on.
+_AUDIENCE_FIELDS = {"addressed_to", "addressed_to_channel", "audience_source"}
+_OWNER_ROW_FIELDS = {
+    "file_id", "filename", "size_bytes", "mime_type", "url", "created_at",
+    "expires_at", "download_count", "last_downloaded_at",
+} | _AUDIENCE_FIELDS
 
 
 async def _owner_list(principal, monkeypatch):
@@ -887,16 +1001,30 @@ async def test_the_owner_sees_who_each_file_is_for(share_service, monkeypatch):
 async def test_a_key_authenticated_caller_is_told_nobodys_address(share_service, monkeypatch, scope):
     """An agent-scoped key resolves to its OWNER and passes the owner gate on
     this route, so without the strip any agent could read who every file was for
-    — an email AND a phone number. Allow-list, as `is_interactive_principal` is."""
+    — an email AND a phone number — nor whether it was addressed at all (#2955).
+    Allow-list, as `is_interactive_principal` is.
+
+    The WHOLE row is compared against what the JWT sees, with the three
+    audience fields nulled, and the row's key set is pinned
+    (`_OWNER_ROW_FIELDS`): a fourth audience field added to `SharedFileInfo`
+    tomorrow turns this red and has to be classified, instead of leaking to
+    every key while a hand-written list of `is None`s stays green."""
     share_service.create_share_from_bytes(
         AGENT, b"x", display_name="v.ogg",
         addressed_to_email=BOB, addressed_to_channel=WA_NUMBER)
 
-    [row] = await _owner_list(_Principal(mcp_scope=scope, agent_name=AGENT), monkeypatch)
+    [jwt_row] = await _owner_list(_Principal(mcp_scope=None), monkeypatch)
+    [key_row] = await _owner_list(_Principal(mcp_scope=scope, agent_name=AGENT), monkeypatch)
 
-    assert row["addressed_to"] is None
-    assert row["addressed_to_channel"] is None
-    assert row["filename"] == "v.ogg"                  # the row itself is still theirs to see
+    assert set(jwt_row) == _OWNER_ROW_FIELDS, set(jwt_row) ^ _OWNER_ROW_FIELDS
+    assert all(jwt_row[f] is not None for f in _AUDIENCE_FIELDS)   # not vacuous
+    assert key_row == {
+        **jwt_row,
+        "addressed_to": None,
+        "addressed_to_channel": None,
+        "audience_source": None,
+    }
+    assert key_row["filename"] == "v.ogg"              # the row itself is still theirs to see
 
 
 @pytest.mark.asyncio
@@ -904,9 +1032,17 @@ async def test_a_principal_with_no_scope_attribute_fails_closed(share_service, m
     share_service.create_share_from_bytes(
         AGENT, b"x", display_name="v.ogg", addressed_to_email=BOB)
 
+    [jwt_row] = await _owner_list(_Principal(mcp_scope=None), monkeypatch)
     [row] = await _owner_list(_Principal(), monkeypatch)       # no `mcp_scope` at all
 
-    assert row["addressed_to"] is None
+    assert set(jwt_row) == _OWNER_ROW_FIELDS, set(jwt_row) ^ _OWNER_ROW_FIELDS
+    assert jwt_row["addressed_to"] == BOB and jwt_row["audience_source"] is not None
+    assert row == {
+        **jwt_row,
+        "addressed_to": None,
+        "addressed_to_channel": None,
+        "audience_source": None,
+    }
 
 
 # --------------------------------------------------------------------------- #

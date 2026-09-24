@@ -133,6 +133,7 @@ from db.public_links import PublicLinkOperations
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
 from db.role_readiness import RoleReadinessOperations
+from db.capability_grants import CapabilityGrantOperations
 from db.seat_decisions import SeatDecisionOperations
 from db.seat_ask_class_state import SeatAskClassStateOperations
 from db.skill_sources import SkillSourcesOperations
@@ -1012,6 +1013,7 @@ class DatabaseManager:
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
         self._role_readiness_ops = RoleReadinessOperations()
+        self._capability_grant_ops = CapabilityGrantOperations()
         self._seat_decision_ops = SeatDecisionOperations()
         self._seat_ask_class_ops = SeatAskClassStateOperations()
         self._skill_sources_ops = SkillSourcesOperations()
@@ -2709,18 +2711,18 @@ class DatabaseManager:
         return self._skills_ops.get_agent_skill_names(agent_name)
 
     def assign_skill(self, agent_name: str, skill_name: str, assigned_by: str,
-                     source_id: str = None):
+                     source_id: str = None, assigned_by_agent: str = None):
         return self._skills_ops.assign_skill(
-            agent_name, skill_name, assigned_by, source_id
+            agent_name, skill_name, assigned_by, source_id, assigned_by_agent
         )
 
     def unassign_skill(self, agent_name: str, skill_name: str):
         return self._skills_ops.unassign_skill(agent_name, skill_name)
 
     def set_agent_skills(self, agent_name: str, skill_names: list, assigned_by: str,
-                         source_ids: dict = None):
+                         source_ids: dict = None, assigned_by_agent: str = None):
         return self._skills_ops.set_agent_skills(
-            agent_name, skill_names, assigned_by, source_ids
+            agent_name, skill_names, assigned_by, source_ids, assigned_by_agent
         )
 
     def delete_agent_skills(self, agent_name: str):
@@ -2730,6 +2732,22 @@ class DatabaseManager:
         # #2914: the inject path's per-row verdict (`conflict` / cleared).
         return self._skills_ops.set_skill_delivery_status(agent_name, conflicted, resolved)
     # =========================================================================
+    # Agent capability grants (delegated to db/capability_grants.py) — ent#596
+    def agent_has_capability(self, agent_name: str, capability: str) -> bool:
+        return self._capability_grant_ops.agent_has_capability(agent_name, capability)
+
+    def list_capability_holders(self, capability: str):
+        return self._capability_grant_ops.list_capability_holders(capability)
+
+    def grant_agent_capability(self, agent_name: str, capability: str, granted_by: str) -> bool:
+        return self._capability_grant_ops.grant_agent_capability(agent_name, capability, granted_by)
+
+    def revoke_agent_capability(self, agent_name: str, capability: str) -> bool:
+        return self._capability_grant_ops.revoke_agent_capability(agent_name, capability)
+
+    def delete_agent_capability_grants(self, agent_name: str) -> int:
+        return self._capability_grant_ops.delete_agent_capability_grants(agent_name)
+
     # Role readiness (delegated to db/role_readiness.py) — ent#527 / #663
     # =========================================================================
 

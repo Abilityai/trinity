@@ -243,6 +243,7 @@ export function createSkillsTools(
         "`not_delivered` with a `reason` (`injection_in_progress`, `agent_not_ready`, " +
         "`docker_unavailable`, `injection_error`) — the assignment is kept either way and " +
         "sync_agent_skills is the manual retry. " +
+        "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes. " +
         "Skills teach agents specific behaviors defined in SKILL.md files.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to assign the skill to"),
@@ -281,7 +282,8 @@ export function createSkillsTools(
         "Set all skills for an agent (replaces existing assignments). " +
         "Use this to configure multiple skills at once. Added skills are delivered to a running " +
         "agent and dropped skills are removed from it; `delivery` and `removal` in the response " +
-        "report each half honestly (see assign_skill_to_agent for the delivery vocabulary).",
+        "report each half honestly (see assign_skill_to_agent for the delivery vocabulary). " +
+        "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes. ",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent"),
         skills: z.array(z.string()).describe("List of skill names to assign"),
@@ -322,7 +324,8 @@ export function createSkillsTools(
         "running. Per-skill warnings (missing deps, skipped files) are " +
         "reported even on success. A skill whose name matches a directory the " +
         "agent authored itself is reported under `conflicts` and left untouched " +
-        "(the agent's copy runs); syncing again does not change that.",
+        "(the agent's copy runs); syncing again does not change that. " +
+        "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes. ",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to sync skills to"),
       }),

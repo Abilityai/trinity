@@ -614,8 +614,8 @@ CREATE TABLE seat_ask_class_state (
 );
 CREATE INDEX idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email);
 ```
-Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0072_seat_ask_class_state`
-(← `0071`); `AgentRef(..., Policy.CASCADE)`. The row holds only what was EARNED —
+Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0073_seat_ask_class_state`
+(← `0072`); `AgentRef(..., Policy.CASCADE)`. The row holds only what was EARNED —
 the instance level, the agent's autonomy switch and the clock are ANDed at read
 time (`services/autonomy_dial_service.live_verdict`), never materialised. The
 instance LEVEL is not a table at all: one validated `system_settings` key,
@@ -1103,6 +1103,27 @@ coexist on disk). Deleting a source does **not** cascade to assignments.
 `.claude/skills/<name>/` blocks the library package, NULL otherwise — written and cleared
 only by `_inject_skills_locked`, carried across the bulk-replace PUT for retained names,
 read by the Skills tab and MCP `get_agent_skills`.
+`agent_skills.assigned_by_agent` (trinity-enterprise#596; same revision as below) is the
+agent that made the assignment, NULL for a person — `assigned_by` has only ever held the
+owner's username. Audit-only initiator provenance, deliberately **not** an `AgentRef` (the
+`source_agent_name` precedent). The bulk replace carries `assigned_by` / `assigned_at` /
+`assigned_by_agent` across for names it keeps.
+
+**agent_capability_grants** (trinity-enterprise#596) — a capability an instance admin grants
+to a named agent:
+```sql
+CREATE TABLE agent_capability_grants (
+    agent_name TEXT NOT NULL,
+    capability TEXT NOT NULL,          -- closed set: 'skills.manage'
+    granted_by TEXT NOT NULL,
+    granted_at TEXT NOT NULL,
+    PRIMARY KEY (agent_name, capability)
+);
+CREATE INDEX idx_agent_capability_grants_cap ON agent_capability_grants(capability);
+```
+Both tracks: SQLite `agent_capability_grants`, Alembic `0072_agent_capability_grants` (← `0071`).
+`AgentRef(..., CASCADE)` — rename re-keys, delete removes. Every read joins `agent_ownership`
+and filters `deleted_at`, so a soft-deleted agent holds nothing and recovery restores its grant.
 
 **Tag pinning is the supply-chain control (AC#5).** Skills carry executable `scripts/`
 that the ent#139 runner executes and ent#236 re-injects fleet-wide unattended, so the

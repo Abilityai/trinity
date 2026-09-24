@@ -707,6 +707,8 @@ tick. Users opt in (1-5) when a missed tick is genuinely costly.
 
 ```
 Execution fails → _maybe_schedule_retry()
+    ├─ Skip SKIPPED / CANCELLED, and rows the lease reaper poison-parked
+    │    (`error` starts with `poison_lease` — already with the operator, #2845)
     ├─ Check schedule.max_retries > 0
     ├─ Check attempt_number <= max_retries
     ├─ Calculate delay (2x for 429/rate-limit, capped at 300s)
@@ -718,7 +720,15 @@ _execute_retry() fires:
     ├─ Verify schedule still exists and enabled
     ├─ Create new execution record (triggered_by="retry", attempt_number=N+1)
     └─ Call _call_backend_execute_task()
+         └─ on exception: FAILED only if the row is still `running`
+            (CAS — a pull pilot may already have queued it, #2845)
 ```
+
+`retry` is dispatched exactly like the cron fire it retries (async + DB poll), so
+it is in both `_AUTONOMOUS_TRIGGERS` (an unresolved command alerts) and
+`PULL_REACHABLE_TRIGGERS` (a pilot claims it from the durable queue) — #2845. A
+retry is a new row, so it starts with its own `redelivery_count`; RETRY-001
+attempts and lease re-deliveries are counted separately.
 
 ### Execution Record Fields
 

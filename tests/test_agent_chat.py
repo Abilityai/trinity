@@ -36,10 +36,8 @@ class TestSendChatMessage:
             timeout=120.0,  # Chat can take a while
         )
 
-        # May get 503 if agent busy, 429 if queue full
+        # 503/429 are classified by require_agent_answer (#2889/#2919)
         require_agent_answer(response, what="POST /chat")
-        if response.status_code == 429:
-            pytest.skip("Agent queue full (429)")
 
         assert_status(response, 200)
         data = assert_json_response(response)
@@ -63,8 +61,6 @@ class TestSendChatMessage:
         )
 
         require_agent_answer(response, what="POST /chat")
-        if response.status_code == 429:
-            pytest.skip(f"Agent queue full (429)")
 
         assert_status(response, 200)
         data = response.json()
@@ -428,8 +424,6 @@ class TestChatExecutionTracking:
         )
 
         require_agent_answer(response, what="POST /chat")
-        if response.status_code == 429:
-            pytest.skip(f"Agent queue full (429)")
 
         assert_status(response, 200)
         time.sleep(2)
@@ -465,8 +459,6 @@ class TestChatExecutionTracking:
         )
 
         require_agent_answer(response, what="POST /chat")
-        if response.status_code == 429:
-            pytest.skip(f"Agent queue full (429)")
 
         assert_status(response, 200)
         time.sleep(2)
@@ -501,8 +493,6 @@ class TestChatExecutionTracking:
         )
 
         require_agent_answer(response, what="POST /chat")
-        if response.status_code == 429:
-            pytest.skip(f"Agent queue full (429)")
 
         assert_status(response, 200)
         data = response.json()

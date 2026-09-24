@@ -244,6 +244,7 @@ def test_per_model_flags():
 
     # Claude-5 / 5.1 families + prior Opus generation: both flags True (#1660 lists).
     current = (
+        "claude-opus-5-5",
         "claude-opus-5",
         "claude-fable-5-1",
         "claude-fable-5",
@@ -348,3 +349,71 @@ def test_every_workspace_model_carries_a_plain_language_tier():
         "two options leading with the same words are not a choice — the reason "
         "`workspace_tier` exists instead of reusing `note`"
     )
+
+
+# --- opus-5.5 selectable end-to-end (#2987, the headline AC) ---------------
+
+
+def test_opus_5_5_is_present_and_selectable_end_to_end():
+    """The four surfaces #2987 names, and the one that fails LOUDLY.
+
+    Three of the four degrade quietly when the catalog is stale — the picker,
+    the admin dropdown and the Workspace composer just don't list the model.
+    The fourth is a *validation* set, so `PUT /api/agents/{name}/public-channel-model`
+    answers 422 and an owner cannot select it even by API. That asymmetry is why
+    this asserts the gate, not only the membership.
+    """
+    model_catalog = _catalog()
+    by_id = {m.id: m for m in model_catalog.MODEL_CATALOG}
+    assert "claude-opus-5-5" in by_id, "claude-opus-5-5 missing from the catalog"
+    entry = by_id["claude-opus-5-5"]
+    assert entry.label == "Claude Opus 5.5"
+    assert entry.public_channel and entry.admin_default_selectable
+    # 422 → 200: the #894 validation gate must accept it.
+    from services.settings_service import is_valid_public_channel_model
+
+    assert is_valid_public_channel_model(
+        "claude-opus-5-5"
+    ), "PUT /api/agents/{name}/public-channel-model would still 422 claude-opus-5-5"
+    # The Workspace composer's closed allow-list (ent#403) — the security gate on
+    # `PortalChatRequest.model`, so membership here is what makes it selectable.
+    assert "claude-opus-5-5" in model_catalog.WORKSPACE_MODELS
+    assert entry.workspace_tier == "Most capable"
+
+
+def test_the_latest_marker_names_exactly_one_opus_and_it_is_5_5():
+    """`(latest)` is a CLAIM about the lineup, and a stale one misleads the
+
+    operator the picker is written for. Two entries carrying it is the drift this
+    asserts against — #2987 shipped because Opus 5 still said "(latest)" after
+    5.5 existed.
+    """
+    model_catalog = _catalog()
+    opus_latest = [
+        m for m in model_catalog.MODEL_CATALOG
+        if m.id.startswith("claude-opus-5") and "(latest)" in m.note
+    ]
+    assert [m.id for m in opus_latest] == ["claude-opus-5-5"], (
+        "exactly one Opus entry may claim (latest), and it must be the current "
+        f"tier — found {[m.id for m in opus_latest]}"
+    )
+    # …and the prior point release keeps every selectable dimension. It is still
+    # served; demoting its flags would remove a working option, not fix a label.
+    prior = {m.id: m for m in model_catalog.MODEL_CATALOG}["claude-opus-5"]
+    assert prior.public_channel and prior.admin_default_selectable
+    assert not prior.workspace, (
+        "the Workspace 'Most capable' tier is ONE option — two entries claiming "
+        "it would render a duplicate primary label"
+    )
+
+
+def test_the_workspace_tiers_are_unique():
+    """Each Workspace tier is one option in a client-facing dropdown.
+
+    The source asserts a tier is non-empty, never that it is unique — so moving a
+    tier between entries (what #2987 does) could leave both carrying it and the
+    composer would show "Most capable" twice with no error anywhere.
+    """
+    model_catalog = _catalog()
+    tiers = [m.workspace_tier for m in model_catalog.MODEL_CATALOG if m.workspace]
+    assert len(tiers) == len(set(tiers)), f"duplicate Workspace tier: {tiers}"

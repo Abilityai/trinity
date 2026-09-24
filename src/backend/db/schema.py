@@ -1221,7 +1221,23 @@ TABLES = {
             assigned_at TEXT NOT NULL,
             source_id TEXT,
             delivery_status TEXT,
+            assigned_by_agent TEXT,
             UNIQUE(agent_name, skill_name)
+        )
+    """,
+    # trinity-enterprise#596 — capabilities an instance admin grants to a named
+    # agent. `skills.manage` is the first: only a holder may change an agent's
+    # skills (its own included). A row, not a column on agent_ownership, so who
+    # granted it and when is answerable and later capabilities (ent#590, ent#341)
+    # share the seam. `agent_name` is a CASCADE AgentRef (rename re-keys it,
+    # delete removes it).
+    "agent_capability_grants": """
+        CREATE TABLE IF NOT EXISTS agent_capability_grants (
+            agent_name TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, capability)
         )
     """,
 
@@ -2096,6 +2112,8 @@ INDEXES = [
     # Agent skills indexes
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_skill ON agent_skills(skill_name)",
+    # ent#596: "which agents hold capability X" is the grant list's one read.
+    "CREATE INDEX IF NOT EXISTS idx_agent_capability_grants_cap ON agent_capability_grants(capability)",
     # ent#237: resolution order for the custom-wins precedence merge.
     "CREATE INDEX IF NOT EXISTS idx_skill_sources_resolution "
     "ON skill_sources(priority, created_at) WHERE enabled = 1",

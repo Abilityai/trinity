@@ -728,6 +728,11 @@ class AgentSkill(BaseModel):
     # library package (the agent's own copy is what runs); None = no standing
     # conflict. Written and cleared by the inject path only.
     delivery_status: Optional[str] = None
+    # ent#596 (Tandem R29): the agent that made the assignment, when the writer
+    # was an agent principal; None for a human. `assigned_by` stays the owner's
+    # username, so "the agent did it" is distinguishable from "the person did it".
+    assigned_by_agent: Optional[str] = None
+
 
 
 class SkillSource(BaseModel):

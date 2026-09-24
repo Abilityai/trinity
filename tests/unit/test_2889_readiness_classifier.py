@@ -22,6 +22,7 @@ side effects).
 from __future__ import annotations
 
 import ast
+import contextlib
 import pathlib
 import re
 from types import SimpleNamespace
@@ -44,6 +45,23 @@ def _detail(text: str) -> str:
     import json
 
     return json.dumps({"detail": text})
+
+
+@contextlib.contextmanager
+def _must_fail():
+    """`pytest.raises(pytest.fail.Exception)` that also refuses a SKIP.
+
+    `Skipped` is not a subclass of `Failed`, so under plain `pytest.raises` a
+    helper that wrongly *skips* propagates the skip and the test that exists
+    to forbid laundering is itself reported as skipped — green. Mutating the
+    helper to "skip every 429" left this file at 0 failed / 6 skipped until
+    every fail-expecting case went through here (#2919 review).
+    """
+    try:
+        with pytest.raises(pytest.fail.Exception) as exc:
+            yield exc
+    except pytest.skip.Exception as e:
+        raise AssertionError(f"SKIPPED where it must FAIL (the laundering this file guards): {e}") from None
 
 
 # --------------------------------------------------------------------------- #
@@ -129,10 +147,180 @@ def _clean_session_state():
     R.reset_session_provider_failure()
 
 
-def test_non_503_is_a_no_op():
-    for status in (200, 202, 404, 429, 500, 502, 504):
+def test_non_turn_statuses_are_a_no_op():
+    """Only the statuses a model turn can launder (503 — #2889; 429 — #2919)
+    are classified; everything else is the caller's own assertion."""
+    for status in (200, 202, 404, 500, 502, 504):
         R.require_agent_answer(_resp(status=status, body="whatever"), what="POST /task")
     assert R.session_provider_failure() is None
+
+
+# --------------------------------------------------------------------------- #
+# #2919 — the 429 twin: billing fails with attribution, capacity skips with
+# evidence, and an unattributed 429 is a FAILURE (the same doctrine one status
+# code over).
+# --------------------------------------------------------------------------- #
+
+USAGE_LIMIT_BODY = _detail(
+    "Subscription usage limit: You've hit your usage limit for this subscription; "
+    "resets at 2026-09-23T03:00:00Z"
+)
+
+# The three live header-less capacity shapes (dossier §4b), verbatim.
+CAPACITY_ADMISSION_DICT_BODY = (
+    '{"detail": {"error": "Agent queue is full", "agent": "a", "queue_length": 0, '
+    '"retry_after": 30, "message": "Agent \'a\' is busy. Please try again later."}}'
+)
+CAPACITY_BACKLOG_FULL_BODY = _detail(
+    "Agent 'a' is at capacity (2 parallel tasks) and its backlog is full. Try again later."
+)
+CAPACITY_MAP_TASK_BODY = _detail("Agent 'a' is at capacity. Try again later.")
+
+
+def test_billing_429_fails_with_attribution_and_is_remembered():
+    """The issue's case: an exhausted subscription surfaces as 429 (#2638) and
+    the backend labels it `billing`; the test must FAIL, not skip."""
+    with _must_fail() as exc:
+        R.require_agent_answer(
+            _resp(status=429, body=USAGE_LIMIT_BODY, headers={R.ERROR_CODE_HEADER: "billing"}),
+            what="POST /chat",
+        )
+    msg = str(exc.value)
+    assert "answered 429" in msg and "RAN and failed" in msg and "code=billing" in msg
+    assert "usage limit" in msg
+    seen = R.session_provider_failure()
+    assert seen and seen["what"] == "POST /chat" and seen["verdict"].code == "billing"
+
+
+@pytest.mark.parametrize(
+    "body,fragment",
+    [
+        (CAPACITY_ADMISSION_DICT_BODY, "Agent queue is full"),
+        (CAPACITY_BACKLOG_FULL_BODY, "backlog is full"),
+        (CAPACITY_MAP_TASK_BODY, "is at capacity"),
+    ],
+)
+def test_capacity_429_skips_with_evidence_and_is_not_remembered(body, fragment):
+    """A genuine admission refusal (the model never ran) still SKIPS — with the
+    backend's own wording as evidence — and is never a credential verdict."""
+    with pytest.raises(pytest.skip.Exception) as exc:
+        R.require_agent_answer(_resp(status=429, body=body), what="POST /task")
+    msg = str(exc.value)
+    assert "agent at capacity" in msg and "answered 429" in msg
+    assert "POST /task" in msg and "code=capacity" in msg and fragment in msg
+    assert R.session_provider_failure() is None
+
+
+def test_capacity_header_is_authoritative_over_a_billing_looking_body():
+    """Header beats body in both directions: a producer that says `capacity`
+    is believed even when the prose mentions a limit — and nothing is
+    recorded against the credential."""
+    with pytest.raises(pytest.skip.Exception) as exc:
+        R.require_agent_answer(
+            _resp(status=429, body=_detail("usage limit"), headers={R.ERROR_CODE_HEADER: "capacity"}),
+            what="POST /chat",
+        )
+    assert "code=capacity" in str(exc.value)
+    assert R.session_provider_failure() is None
+
+
+def test_billing_header_is_authoritative_over_a_capacity_looking_body():
+    with _must_fail() as exc:
+        R.require_agent_answer(
+            _resp(status=429, body=_detail("Agent 'a' is at capacity"), headers={R.ERROR_CODE_HEADER: "billing"}),
+            what="POST /chat",
+        )
+    assert "code=billing" in str(exc.value)
+    seen = R.session_provider_failure()
+    assert seen and seen["verdict"].code == "billing"
+
+
+def test_unattributed_429_fails_rather_than_skips():
+    """A stack that predates the header answering the agent's usage-limit
+    prose: FAIL as `unknown` (not recorded — nothing attributed it to the
+    credential). The mirror of #2889's unknown-503 doctrine."""
+    with _must_fail() as exc:
+        R.require_agent_answer(
+            _resp(status=429, body=_detail("Claude Code execution failed: Subscription usage limit reached")),
+            what="POST /chat",
+        )
+    assert "code=unknown" in str(exc.value) and "usage limit" in str(exc.value)
+    assert R.session_provider_failure() is None
+
+
+def test_switched_billing_429_dict_body_fails_and_records():
+    """The SUB-003 auto-switched shape: the platform already moved the agent
+    to a working subscription, yet the response is still 429+`billing`.
+
+    Documented choice, not an accident: this mirrors #2894's treatment of the
+    503 auto-switched `auth` shape (which records too). Treating the
+    structural `auto_switch` key as "fail this test, do not arm the cascade"
+    is the Q5 follow-up named in the PR body, not this PR."""
+    body = (
+        '{"detail": {"error": "usage limit", "auto_switch": {"new_subscription": "sub-b"}, '
+        '"message": "Rate limit hit. Subscription auto-switched to \'sub-b\'. Please retry.", '
+        '"retry_after": 15}}'
+    )
+    with _must_fail() as exc:
+        R.require_agent_answer(
+            _resp(status=429, body=body, headers={R.ERROR_CODE_HEADER: "billing"}),
+            what="POST /chat",
+        )
+    assert "auto-switched" in str(exc.value)
+    seen = R.session_provider_failure()
+    assert seen and seen["verdict"].code == "billing"
+
+
+def test_capacity_never_indicts_the_credential():
+    assert R.CAPACITY_CODE not in R.CREDENTIAL_CODES
+    assert R.Verdict(False, "capacity", "x", 429).indicts_credential is False
+
+
+@pytest.mark.parametrize(
+    "body,headers,readiness,code",
+    [
+        # The three live header-less capacity shapes.
+        (CAPACITY_ADMISSION_DICT_BODY, {}, False, "capacity"),
+        (CAPACITY_BACKLOG_FULL_BODY, {}, False, "capacity"),
+        (CAPACITY_MAP_TASK_BODY, {}, False, "capacity"),
+        # Header-less, no capacity wording: unknown, never a skip.
+        (_detail("usage limit"), {}, False, "unknown"),
+        ("", {}, False, "unknown"),
+        # The transport vocabulary is NOT consulted on a 429 — a fall-through
+        # to the 503 arm would launder this as a readiness race.
+        (_detail("Failed to communicate with agent: HTTP error: ConnectError"), {}, False, "unknown"),
+        # The breaker header still wins on a 429.
+        (_detail("x"), {"X-Circuit-Open": "true"}, False, "circuit_open"),
+        # Header is authoritative, normalised.
+        (_detail("x"), {R.ERROR_CODE_HEADER: "network"}, True, "network"),
+        (_detail("x"), {R.ERROR_CODE_HEADER: " CAPACITY "}, False, "capacity"),
+        (_detail("Agent 'a' is at capacity"), {R.ERROR_CODE_HEADER: "billing"}, False, "billing"),
+    ],
+)
+def test_classify_429(body, headers, readiness, code):
+    v = R.classify_unavailable(_resp(status=429, body=body, headers=headers))
+    assert (v.readiness, v.code, v.status) == (readiness, code, 429), v
+
+
+def test_capacity_skip_reason_is_not_on_the_skip_audit_allowlist():
+    """The twin of the readiness case: an admission refusal is still a test
+    that did not run; `tests/run-full.sh`'s audit must keep flagging it."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("audit_skips", TESTS_DIR / "harness" / "audit_skips.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    reason = R.capacity_skip_reason("POST /task", R.Verdict(False, "capacity", "Agent 'a' is at capacity", 429))
+    assert not mod._allowed(reason)
+
+
+def test_reason_builders_name_the_status():
+    v429 = R.Verdict(False, "unknown", "x", 429)
+    v503 = R.Verdict(True, "transport", "x")
+    assert "429" in R.readiness_skip_reason("POST /task", v429)
+    assert "429" in R.execution_failure_reason("POST /task", v429)
+    assert "503" in R.readiness_skip_reason("POST /task", v503)
+    assert "503" in R.execution_failure_reason("POST /task", v503)
 
 
 def test_readiness_race_skips_and_names_the_evidence():
@@ -161,7 +349,7 @@ def test_readiness_skip_reason_is_not_on_the_skip_audit_allowlist():
 
 
 def test_credit_balance_503_fails_and_is_remembered_for_the_session():
-    with pytest.raises(pytest.fail.Exception) as exc:
+    with _must_fail() as exc:
         R.require_agent_answer(
             _resp(body=CREDIT_BALANCE_BODY, headers={R.ERROR_CODE_HEADER: "auth"}),
             what="POST /task",
@@ -181,17 +369,30 @@ def test_first_provider_failure_wins_the_session_slot():
 
 def test_unknown_503_fails_rather_than_skips():
     """The defect: an unattributed 503 hid behind a readiness excuse."""
-    with pytest.raises(pytest.fail.Exception):
+    with _must_fail():
         R.require_agent_answer(_resp(body=_detail("Failed to execute task. The agent may be unavailable.")), what="POST /task")
 
 
-@pytest.mark.parametrize("code,cascades", [("auth", True), ("billing", True), ("circuit_open", True), ("unknown", False), ("agent_error", False), ("timeout", False)])
-def test_only_credential_codes_fail_the_rest_of_the_session_fast(code, cascades):
+@pytest.mark.parametrize(
+    "code,status,cascades",
+    [
+        ("auth", 503, True),
+        ("billing", 503, True),
+        ("circuit_open", 503, True),
+        ("unknown", 503, False),
+        ("agent_error", 503, False),
+        ("timeout", 503, False),
+        # #2919: the same rule one status over.
+        ("billing", 429, True),
+        ("unknown", 429, False),
+    ],
+)
+def test_only_credential_codes_fail_the_rest_of_the_session_fast(code, status, cascades):
     """A one-off OOM (`agent_error`/`unknown`) fails ITS test; it must not take
     every later model turn down with it unrun. A credential verdict does."""
     headers = {} if code == "unknown" else {R.ERROR_CODE_HEADER: code}
-    with pytest.raises(pytest.fail.Exception):
-        R.require_agent_answer(_resp(body=_detail("boom"), headers=headers), what="POST /task")
+    with _must_fail():
+        R.require_agent_answer(_resp(status=status, body=_detail("boom"), headers=headers), what="POST /task")
     assert (R.session_provider_failure() is not None) is cascades
 
 
@@ -239,8 +440,33 @@ def test_transport_markers_carry_no_credential_vocabulary():
         assert not any(bad in m for m in R.TRANSPORT_BODY_MARKERS), bad
 
 
+def test_capacity_markers_carry_no_credential_vocabulary():
+    """#2919: the same rule for the capacity tuple — a usage-limit word in it
+    would launder an exhausted subscription back into a queue-full skip."""
+    for bad in ("credit", "billing", "auth", "token", "subscription", "unauthorized", "limit", "rate"):
+        assert not any(bad in m for m in R.CAPACITY_BODY_MARKERS), bad
+
+
+def test_backend_capacity_wording_still_matches():
+    """The header-less fallback is pinned to the three producers' actual
+    wording (`routers/chat.py` admission dict; `_dispatch_async` and
+    `_map_task_failure` both say "is at capacity")."""
+    chat_router = _src("routers/chat.py")
+    assert '"error": "Agent queue is full"' in chat_router
+    ces = _src("services/chat_execution_service.py")
+    assert ces.count("is at capacity") == 2, ces.count("is at capacity")
+    source = (chat_router + ces).lower()
+    for marker in R.CAPACITY_BODY_MARKERS:
+        assert marker == marker.lower() and marker in source, marker
+
+
+def test_backend_capacity_code_name_matches():
+    env = _src("services/execution_envelope.py")
+    assert f'CAPACITY = "{R.CAPACITY_CODE}"' in env
+
+
 # --------------------------------------------------------------------------- #
-# 3. call-site guard — no model-turn test skips on a bare 503
+# 3. call-site guard — no model-turn test skips on a bare 503 or 429
 # --------------------------------------------------------------------------- #
 
 TURN_URL = re.compile(r"/(task|chat|fan-out)['\"]?$")
@@ -278,24 +504,82 @@ def _turn_response_vars(fn: ast.AST) -> set[str]:
     return names
 
 
-def _is_503_check(test: ast.AST):
-    """`X.status_code == 503` or `X.status_code in [503, ...]` → X, else None."""
+def _is_laundered_constant(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value in R.LAUNDERED_STATUSES
+
+
+def _is_laundered_status_check(test: ast.AST):
+    """`X.status_code == <s>`, `X.status_code in [<s>, ...]` / `(...)` / `{...}`,
+    or an `or` of such checks → X, else None — for any `s` in
+    `readiness.LAUNDERED_STATUSES` (503 #2889, 429 #2919), so the vocabulary
+    has one home: the helper that classifies those statuses.
+
+    Known escapes, accepted as #2894 accepted them (written down, not
+    asserted): a bound that is not the status itself (`>= 400`), Yoda
+    `429 == x`, a local
+    `status = resp.status_code` alias, `from pytest import skip`, and
+    `.post(url_var)` (the URL is not a literal, so `_turn_response_vars`
+    never sees the response).
+    """
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+        for value in test.values:
+            var = _is_laundered_status_check(value)
+            if var is not None:
+                return var
+        return None
     if not isinstance(test, ast.Compare) or len(test.comparators) != 1:
         return None
     left = test.left
     if not (isinstance(left, ast.Attribute) and left.attr == "status_code" and isinstance(left.value, ast.Name)):
         return None
+    # Operator-agnostic, as #2894's `_is_503_check` was: `>= 429`, `!= 503`,
+    # `not in [503]` all stay flagged (fail closed — a false positive is one
+    # rewritten line, a false negative is a laundered failure).
     comp = test.comparators[0]
-    if isinstance(comp, ast.Constant) and comp.value == 503:
+    if _is_laundered_constant(comp):
         return left.value.id
-    if isinstance(comp, (ast.List, ast.Tuple)) and any(
-        isinstance(e, ast.Constant) and e.value == 503 for e in comp.elts
+    if isinstance(comp, (ast.List, ast.Tuple, ast.Set)) and any(
+        _is_laundered_constant(e) for e in comp.elts
     ):
         return left.value.id
     return None
 
 
-def test_no_model_turn_site_skips_on_a_bare_503():
+@pytest.mark.parametrize("src,expected", [
+    ("resp.status_code == 429", "resp"),
+    ("resp.status_code == 503", "resp"),
+    ("resp.status_code in [429, 503]", "resp"),
+    ("resp.status_code in (429,)", "resp"),
+    ("resp.status_code in {429}", "resp"),
+    ("resp.status_code == 429 or resp.status_code == 503", "resp"),
+    ("resp.status_code == 200 or resp.status_code == 429", "resp"),
+    # Operator-agnostic like #2894's matcher — narrowing it would unguard 503.
+    ("resp.status_code >= 429", "resp"),
+    ("resp.status_code != 503", "resp"),
+    ("resp.status_code not in [503]", "resp"),
+    ("resp.status_code == 200", None),
+    ("resp.status_code in [200, 202]", None),
+    ("other.status == 429", None),
+    ("resp.status_code == 429 and flaky", None),
+])
+def test_guard_matcher_recognises_the_laundered_shapes(src, expected):
+    assert _is_laundered_status_check(ast.parse(src, mode="eval").body) == expected
+
+
+def test_guard_walk_still_covers_the_2919_site_files():
+    """The walk is pre-filtered on the import literal (learnings 2026-07-29):
+    pin that the four files #2919 cleaned stay inside it, so dropping the
+    import cannot silently take a file out of the guard."""
+    walked = {p.relative_to(REPO).as_posix() for p in _files_importing_helper()}
+    assert {
+        "tests/test_agent_chat.py",
+        "tests/test_dynamic_thinking_status.py",
+        "tests/test_parallel_task.py",
+        "tests/agent_server/test_agent_chat_direct.py",
+    } <= walked, sorted(walked)
+
+
+def test_no_model_turn_site_skips_on_a_bare_503_or_429():
     files = _files_importing_helper()
     assert len(files) >= 8, [p.name for p in files]
     offenders = []
@@ -310,7 +594,7 @@ def test_no_model_turn_site_skips_on_a_bare_503():
             for node in ast.walk(fn):
                 if not isinstance(node, ast.If):
                     continue
-                var = _is_503_check(node.test)
+                var = _is_laundered_status_check(node.test)
                 if var not in turn_vars:
                     continue
                 for stmt in ast.walk(node):
@@ -323,8 +607,9 @@ def test_no_model_turn_site_skips_on_a_bare_503():
                     ):
                         offenders.append(f"{path.relative_to(REPO)}:{stmt.lineno}")
     assert not offenders, (
-        "a model-turn 503 is skipped on a bare status check — route it through "
-        "testkit.readiness.require_agent_answer instead:\n  " + "\n  ".join(offenders)
+        f"{len(offenders)} model-turn 503/429 skip(s) on a bare status check — "
+        "route it through testkit.readiness.require_agent_answer instead "
+        "(#2889, #2919):\n  " + "\n  ".join(offenders)
     )
 
 

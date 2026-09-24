@@ -38,7 +38,15 @@ pytestmark = pytest.mark.unit
 AGENT = "scout"
 EMAIL = "bob@example.com"
 SESSION = "ps_1"
-OPUS = "claude-opus-5"
+# The curated "Most capable" Workspace model — READ from the catalog, not named.
+# The id behind that tier moves on every Opus release: #2987 moved it from
+# `claude-opus-5` to `claude-opus-5-5`, and the literal that stood here turned
+# `test_a_curated_model_is_accepted` red for a reason unrelated to anything this
+# file tests. Every use below means "a valid curated model", never a specific id.
+# `model_catalog` is a stdlib-only leaf (no DB at import), so this is safe here.
+from services.model_catalog import MODEL_CATALOG as _CATALOG  # noqa: E402
+
+OPUS = next(m.id for m in _CATALOG if m.workspace and m.workspace_tier == "Most capable")
 HAIKU = "claude-haiku-4-5-20251001"
 # public-channel-selectable but deliberately NOT workspace-selectable — the one
 # id that proves "the inherited value is not re-laundered through the composer's

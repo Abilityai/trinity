@@ -522,13 +522,13 @@ def test_the_table_is_on_both_tracks_and_in_the_cleanup_registry():
     tables = (REPO / "src/backend/db/tables.py").read_text()
     mig = (REPO / "src/backend/db/migrations.py").read_text()
     cleanup = (REPO / "src/backend/db/agent_cleanup.py").read_text()
-    rev = (REPO / "src/backend/migrations/versions/0072_seat_ask_class_state.py").read_text()
+    rev = (REPO / "src/backend/migrations/versions/0073_seat_ask_class_state.py").read_text()
     assert "CREATE TABLE IF NOT EXISTS seat_ask_class_state" in schema
     assert "idx_seat_ask_class_state_seat" in schema
     assert "seat_ask_class_state = Table(" in tables
     assert '("seat_ask_class_state_table", _migrate_seat_ask_class_state_table)' in mig
     assert 'AgentRef("seat_ask_class_state"' in cleanup
-    assert 'down_revision = "0071_seat_decisions"' in rev
+    assert 'down_revision = "0072_agent_capability_grants"' in rev
     assert 'has_table("seat_ask_class_state")' in rev
 
 

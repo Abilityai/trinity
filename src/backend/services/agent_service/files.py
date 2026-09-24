@@ -89,6 +89,40 @@ def _is_user_writable_path(path: str) -> bool:
     return True
 
 
+# trinity-enterprise#596: the skills directory is where a library skill lands
+# (`skill_service.inject_skills`). Writing it through the generic file routes is
+# the same act as assigning a skill — an executable package in the agent's head —
+# so it takes the same capability. Without this the skill fence on
+# `routers/skills.py` is decorative: an agent key with no grant would write
+# `.claude/skills/x/SKILL.md` + `scripts/` into a sibling through `PUT /files`,
+# a route that checks only ACCESS. Humans and the system agent pass the
+# capability by scope, so the Files tab is unchanged for them.
+_SKILLS_DIR = "/home/developer/.claude/skills"
+
+
+def _touches_skills_dir(path: str, *, include_ancestors: bool = False) -> bool:
+    """True for the skills dir or anything under it; with `include_ancestors`,
+    also for any directory ABOVE it — deleting `.claude` (or the home dir)
+    removes every skill as surely as deleting the skills dir does."""
+    normalized = _normalize_user_path(path)
+    if not normalized:
+        return False
+    if normalized == _SKILLS_DIR or normalized.startswith(_SKILLS_DIR + "/"):
+        return True
+    if include_ancestors:
+        return _SKILLS_DIR.startswith(normalized.rstrip("/") + "/")
+    return False
+
+
+async def _require_skill_capability(path, current_user, request, agent_name, *, include_ancestors=False):
+    if _touches_skills_dir(path, include_ancestors=include_ancestors):
+        from dependencies import enforce_agent_capability
+        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+        await enforce_agent_capability(
+            request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
+        )
+
+
 async def list_agent_files_logic(
     agent_name: str,
     path: str,
@@ -215,6 +249,9 @@ async def delete_agent_file_logic(
     if not db.can_user_access_agent(current_user.username, agent_name):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
+    # ent#596: a write into the skills dir needs the skill-management capability.
+    await _require_skill_capability(path, current_user, request, agent_name, include_ancestors=True)
+
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -338,6 +375,9 @@ async def update_agent_file_logic(
     if not db.can_user_access_agent(current_user.username, agent_name):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
+    # ent#596: a write into the skills dir needs the skill-management capability.
+    await _require_skill_capability(path, current_user, request, agent_name)
+
     # AISEC-C2 / #590: backend-side deny check before proxying to the agent.
     # Stops the .mcp.json RCE escalation at the platform boundary; the
     # agent-server still re-validates as defense in depth.
@@ -410,6 +450,9 @@ async def create_agent_folder_logic(
     """
     if not db.can_user_access_agent(current_user.username, agent_name):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
+
+    # ent#596: a write into the skills dir needs the skill-management capability.
+    await _require_skill_capability(path, current_user, request, agent_name)
 
     # AISEC-C2 / #590: backend-side deny check before proxying to the agent.
     # Same deny-list used for file writes — a folder under a credential /

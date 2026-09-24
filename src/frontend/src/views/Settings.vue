@@ -2002,6 +2002,13 @@ Example:
           <!-- Skills Library sources (ent#237) -->
           <SkillSourcesPanel v-if="activeTab === 'agents'" />
 
+          <!-- Skill managers (ent#596) — beside the sources panel, because the two
+               together are the skills-governance surface: where skills come
+               FROM, and which agents may change which skills an agent holds.
+               Every agent not granted here is refused, its own skills included,
+               so this is the only place an orchestrator's skill map is unblocked. -->
+          <SkillManagersPanel v-if="activeTab === 'agents'" />
+
           <!-- Skills Library automation (ent#236). Kept in Settings, NOT folded
                into SkillSourcesPanel: auto-sync and fleet re-inject are
                library-WIDE policy over every source, while the panel is a
@@ -2223,6 +2230,7 @@ import SubscriptionsPanel from '../components/settings/SubscriptionsPanel.vue'
 import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
+import SkillManagersPanel from '../components/SkillManagersPanel.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
 import OverflowTabs from '../components/OverflowTabs.vue'

@@ -3147,7 +3147,7 @@
         "access-control",
         "workspace"
       ],
-      "description": "A shared file is for the person the turn was for. Real-SQLite ROUND TRIPS — the real create_share / create_share_from_bytes into a real database, read back through the real portal_documents (only the container read and the disk write are stubbed) — because every earlier share test mocked _persist_and_register and every listing test seeded by INSERT, so nothing crossed write → read. Covers: the two-account repro; a terminal share never landing in whichever client is mid-conversation (no evidence ⇒ owner-only); a stale execution id proving the conversation and never the person (rooms); inherited agent-to-agent context; unverified channel ids never stored as emails; the audience_email override against the reader's own roster predicate; the addressee in the effect key; the owner list stripped for every key-authenticated scope, driven through the route; both migration tracks executed; the WhatsApp adapter, voice-note and share-route CALL SITES. 22 call-site mutations, all red."
+      "description": "A shared file is for the person the turn was for. Real-SQLite ROUND TRIPS — the real create_share / create_share_from_bytes into a real database, read back through the real portal_documents (only the container read and the disk write are stubbed) — because every earlier share test mocked _persist_and_register and every listing test seeded by INSERT, so nothing crossed write → read. Covers: the two-account repro; a terminal share never landing in whichever client is mid-conversation (no evidence ⇒ owner-only); a stale execution id proving the conversation and never the person (rooms); inherited agent-to-agent context; unverified channel ids never stored as emails; the audience_email override against the reader's own roster predicate; the addressee in the effect key; the owner list stripped for every key-authenticated scope, driven through the route; both migration tracks executed; the WhatsApp adapter, voice-note and share-route CALL SITES. 22 call-site mutations, all red. #2955: the key-caller withholding tests compare the WHOLE row against the JWT row with addressed_to / addressed_to_channel / audience_source nulled and the row's key set pinned (a fourth audience field turns them red until classified); a validator-vs-resolver parity table over both audience_email models (agreement as the expectation, never a literal); a blank-is-absent regression pin; an AST one-home test (turn_audience re-export identity, utils/addressee.py imports only typing, models.py imports no services, both validators a single wrapper call with no inline Compare). The owner panel's once-per-row derivation is mounted in src/frontend/tests/unit/fileSharingPanelAudience.spec.js."
     },
     {
       "file": "mcp-server/src/files.test.ts",
@@ -3374,6 +3374,56 @@
         "security"
       ],
       "description": "A self-acting MCP tool takes its identity from the key (#2975): report / set_canvas / patch_canvas / record_metrics / refresh_metric_definitions all admit the orchestrator's system-scoped key and act as trinity-system, an agent-scoped key is unchanged, and seven other credential shapes (user, connector, portal_delegate, ops, anonymous, a system key naming no agent, an unknown future scope) are refused without reaching the network. Drives the real execute() with a recording fake client; also pins resolveActingAgent's allowlist and its two distinct refusal messages. node:test."
+    },
+    {
+      "file": "mcp-server/src/access-wiring.test.ts",
+      "feature": "trinity-enterprise#628 / #2807 / #2952",
+      "added": "2026-09-16",
+      "updated": "2026-09-22",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "audit",
+        "access-control",
+        "transport"
+      ],
+      "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default)."
+    },
+    {
+      "file": "unit/test_2845_retry_trigger_sets.py",
+      "feature": "#2845",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "pull-migration",
+        "scheduler"
+      ],
+      "description": "RETRY-001's `retry` trigger is classified like the run it retries: it is in _AUTONOMOUS_TRIGGERS (an unresolved slash command in a retry raises the operator alert exactly as the scheduled attempt does; `manual` still does not), in PULL_REACHABLE_TRIGGERS (a pilot owns its retries as it owns its scheduled runs, a non-pilot does not), in the executions filter allow-list and in the analytics 'Scheduled' bucket. Class guard: every `triggered_by=` keyword literal the scheduler emits (read from the AST, so comments cannot satisfy it, and asserted non-empty) must appear in all four sets."
+    },
+    {
+      "file": "scheduler_tests/test_2845_retry_pull.py",
+      "feature": "#2845",
+      "added": "2026-09-22",
+      "categories": [
+        "scheduler",
+        "unit",
+        "reliability",
+        "pull-migration"
+      ],
+      "description": "RETRY-001 once retries are pullable: a row the lease reaper poison-parked (`error` starts with `poison_lease`) is not retried, while an ordinary failure still is; a retry whose dispatch times out after the backend already queued the row leaves it `queued` (CAS on `running`) instead of failing it; and a retry is a new row that starts at redelivery_count 0 while the original keeps its own count, so retry and re-delivery counting stay distinct."
+    },
+    {
+      "file": "unit/test_ent596_skill_manager.py",
+      "feature": "trinity-enterprise#596",
+      "added": "2026-09-23",
+      "categories": [
+        "backend",
+        "security",
+        "skills"
+      ],
+      "description": "Only designated agents may change an agent's skills — their own included (ent#596). The scope ALLOWLIST as a ten-row matrix (JWT / user / system pass unchanged; agent passes only with a live grant; connector, ops, portal_delegate and a scope invented tomorrow are refused; a principal with no mcp_scope fails closed); the composed dependency checks the capability BEFORE the owner fence, so a non-holder gets one uniform named 403 for an existing, nonexistent or foreign target and a holder gains no reach beyond its owner; the route table read off FastAPI's real dependant graph (every skill-changing route takes the fence; the grant routes exist and are not shadowed); a refused agent key changes nothing on any of the four routes through a real FastAPI app; the file-route side door (.claude/skills/** via PUT/DELETE/mkdir, including a delete of an ancestor) and that people and holders still edit skills there; grants over a real SQLite file (live-only via the agent_ownership join, idempotent who/when, soft-delete and recovery, orphan rows fail closed, unknown capability refused at the sink, no call permission written); the grant service (404 / system / ephemeral refusals, revoke needs no validation); the grant route refuses an admin's own MCP key and audits only real changes; attribution (the acting agent recorded, the system agent named, a bulk replace does not re-stamp kept names); both migration tracks executed; the CASCADE AgentRef. Eight mutations each red."
     }
   ]
 }
