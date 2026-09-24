@@ -1056,6 +1056,22 @@ def test_restart_delegates_and_reads_a_FRESH_container_for_the_response(
     assert result["recreate_reason"] == "image_drift"
 
 
+def test_restart_reports_the_skill_delivery_of_the_start(rsa, monkeypatch):
+    """#2991: the same pair the agent start endpoint returns — a conflict on the
+    system agent is reported, and only as names/statuses/codes."""
+    monkeypatch.setattr(rsa, "get_agent_container", lambda name: _Container(status="running"))
+    monkeypatch.setattr(rsa, "start_agent_internal", AsyncMock(return_value={
+        "recreated": False, "skills_injection": "success",
+        "skills_result": {"status": "success", "conflicts": ["ops"],
+                          "results": {"ops": {"status": "conflict", "error": "name_conflict: /home/developer/x"}}},
+    }))
+    result = _run(rsa.restart_system_agent(MagicMock(), _human_caller()))
+    assert result["skills_injection"] == "success"
+    assert result["skills_result"]["conflicts"] == ["ops"]
+    assert result["skills_result"]["skills"] == {"ops": {"status": "conflict", "code": "name_conflict"}}
+    assert "/home/developer" not in str(result)
+
+
 def test_restart_reports_unknown_rather_than_crashing_if_the_container_vanished(
     rsa, monkeypatch
 ):

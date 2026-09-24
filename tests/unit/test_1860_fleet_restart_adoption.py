@@ -71,6 +71,8 @@ _START_RECREATED = {
     "recreate_reason": "image_drift",
     "credentials_injection": "success",
     "skills_injection": "success",
+    # #2991: a conflict keeps `success` — the fleet entry must still name it.
+    "skills_result": {"status": "success", "conflicts": ["backlog"]},
 }
 
 
@@ -152,6 +154,7 @@ def test_drift_recreate_is_surfaced_per_agent_and_in_summary(ops, monkeypatch):
         assert entry["recreate_reason"] == "image_drift"
         assert entry["credentials_injection"] == "success"
         assert entry["skills_injection"] == "success"
+        assert entry["skills_conflicts"] == ["backlog"]            # #2991
     assert [c.args for c in ops.restart_agent_internal.await_args_list] == [
         ("a1",), ("a2",),
     ]
