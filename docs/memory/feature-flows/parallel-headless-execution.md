@@ -61,9 +61,11 @@ This feature enables Trinity agents to execute multiple independent tasks in par
 **Prior Limitation**: Trinity agents could only process one request at a time due to:
 1. Platform-level execution queue (Redis) that serializes requests
 2. Container-level execution lock (`asyncio.Lock`)
-3. Use of `--continue` flag which requires sequential execution to maintain conversation context
+3. A single conversation session (`--continue` then; since #2958 `--resume` of the chat's own session id) which requires sequential execution to maintain conversation context
 
-**Solution**: New parallel task mode that bypasses queue and lock, runs stateless (no --continue).
+**Solution**: New parallel task mode that bypasses queue and lock, runs stateless (no chat session).
+
+**Isolation (#2958):** a task that persists its JSONL (effective timeout > 600 s, or `persist_session=True`) writes into the same project dir the chat uses. The chat therefore resumes only its OWN recorded session id (`--resume <chat_session_id>`), never `--continue`, so a sequential chat can no longer silently continue a task's or schedule's session and pay its auto-compaction. See `requirements/core-agent.md` §5.38.
 
 ## Two Execution Modes
 
@@ -77,7 +79,7 @@ This feature enables Trinity agents to execute multiple independent tasks in par
 ```
                                     +-----------------------------+
                                     |     Sequential Chat         |
-User/Agent --> POST /chat --------->|  Execution Queue (Redis)    |--> claude --continue
+User/Agent --> POST /chat --------->|  Execution Queue (Redis)    |--> claude --resume <chat's own id>
                                     |  One at a time              |
                                     +-----------------------------+
 
@@ -791,7 +793,7 @@ mechanism that talks the model into the plan is the sibling issue #2468.
 | Endpoint | POST /api/chat | POST /api/task |
 | Execution Queue | Yes (Redis) | No |
 | Execution Lock | Yes (asyncio.Lock) | No |
-| --continue flag | Yes | No |
+| Session resume | `--resume` of the chat's own id (#2958) | No (unless `resume_session_id`) |
 | Conversation context | Maintained | Stateless |
 | Session updates | Yes | No |
 | Concurrent requests | 1 per agent | N per agent |
