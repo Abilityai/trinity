@@ -972,12 +972,19 @@ curl -X POST http://localhost:8000/api/agents/my-agent/chat \
 
 This section documents the internal implementation details of the Chat API (`POST /api/agents/{name}/chat`) that uses the execution queue. For the deprecated Chat tab UI, users now interact via the Web Terminal - see [agent-terminal.md](agent-terminal.md).
 
-### Claude Code CLI Execution (`agent_server/services/claude_code.py:400-520`)
+### Claude Code CLI Execution (`agent_server/services/claude_code.py`)
 
-The agent server executes Claude Code as a subprocess with specific flags:
+The agent server executes Claude Code as a subprocess with specific flags. Since #2958
+`execute_claude_code` is a thin wrapper that owns the **session choice** — resume
+`agent_state.chat_session_id` unless the effective model changed (fresh session, counters
+reset); one cold retry when a resume fails and its JSONL is absent afterwards (no tool ran,
+not cancelled); capture the new id after a successful turn unless a reset bumped
+`chat_session_generation` mid-turn; publish it to `~/.trinity/chat-session.json` for the
+JSONL reaper's keep set. The subprocess body is `_execute_claude_code_once`, which also
+reads compact events from the JSONL (the backend writes them to `compact_metadata`):
 
 ```python
-async def execute_claude_code(prompt: str, stream: bool = False, model: Optional[str] = None):
+async def _execute_claude_code_once(prompt, stream, model, system_prompt, execution_id, resume_session_id, attempt_state=None):
     # Build command
     cmd = ["claude", "--print", "--output-format", "stream-json",
            "--verbose", "--dangerously-skip-permissions"]
@@ -991,9 +998,10 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
     if agent_state.current_model:
         cmd.extend(["--model", agent_state.current_model])
 
-    # Use --continue flag for subsequent messages (maintains conversation context)
-    if agent_state.session_started:
-        cmd.append("--continue")
+    # #2958: resume the chat's OWN session by id — never --continue, which took
+    # the newest JSONL in the shared project dir (a scheduled run's)
+    if resume_session_id:  # chosen by execute_claude_code (the wrapper)
+        cmd.extend(["--resume", resume_session_id])
 
     # Use Popen for real-time streaming
     process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, ...)
@@ -1023,6 +1031,9 @@ class AgentState:
     def __init__(self):
         self.conversation_history: List[ChatMessage] = []
         self.session_started = False
+        self.chat_session_id: Optional[str] = None      # #2958: captured after a successful turn
+        self.chat_session_model: Optional[str] = None   # a different effective model starts fresh
+        self.chat_session_generation: int = 0           # bumped by reset_session()
         self.session_total_cost: float = 0.0
         self.session_context_tokens: int = 0
         self.session_context_window: int = 200000
@@ -1032,6 +1043,10 @@ class AgentState:
     def reset_session(self):
         self.conversation_history = []
         self.session_started = False
+        self.chat_session_id = None
+        self.chat_session_model = None
+        self.chat_session_generation += 1     # an in-flight turn drops its capture
+        chat_session_marker.clear()           # the reaper's keep-set marker
         self.session_total_cost = 0.0
         self.session_total_output_tokens = 0
         self.session_context_tokens = 0
