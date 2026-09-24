@@ -1,0 +1,122 @@
+{
+  "version": "1.1",
+  "date": "2026-09-23",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": "8/10",
+  "branch": "feature/2915-queue-sync-honest -> dev",
+  "issue": "abilityai/trinity#2915",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_tools": 0,
+    "new_tool_params": 1,
+    "websocket": 1,
+    "docker": "unchanged",
+    "dependencies": "unchanged",
+    "ci": "unchanged",
+    "migrations": 1,
+    "migration_detail": "7 nullable TEXT columns on operator_queue (sync_state/sync_detail/sync_updated_at/last_confirmed_at, delivery_state/delivery_detail/delivery_updated_at); both tracks; Alembic re-chained to 0072_operator_queue_sync_state on 0071_seat_decisions (single head verified)",
+    "new_agent_controlled_inputs": [
+      "file entry `status` (folded through ^[a-z_]{1,32}$ or `other` before it becomes sync_detail)",
+      "file entry title/question/options/expires_at (compared through a pure fingerprint; never stored again; only the changed FIELD NAMES are recorded)",
+      "file entry `platform` block (only the presence of `aging_since` is read, to decide the one receipt write; never read back as authorization)",
+      "agent-server `PUT /api/files?if_match=` (sha256 hex compared to the on-disk text; a mismatch is 412; not a secret)",
+      "file entry `type` (agent-authored, unbounded at ingest and at the DB sink — pre-existing column; the NEW audit copy is folded, see finding F1)"
+    ],
+    "changed_response_surface": "GET /api/operator-queue and /{id} gain sync_state/sync_detail/sync_updated_at/last_confirmed_at, delivery_state/delivery_detail/delivery_updated_at, aging/aged_since; the list gains undelivered_count/closed_by_filer_count (scoped by the caller's accessible set; admin unscoped by design). POST …/respond and the portal answer return 409 item_diverged (operator body: sync_state+sync_detail — the same principal can GET them; portal body: coarse sync only). Portal WorkspaceAsk gains sync (coarse enum) + aging (bool). New ops setting operator_queue_aging_hours (admin-gated ops/config, validated 0-8760; 422-blocked on the generic PUT /settings/{key} by OPS_SETTINGS_VALIDATION membership).",
+    "new_broadcast": "operator_queue_sync — one thin trigger per poll cycle, empty payload, allow-listed as fleet-level in tests/unit/test_ent467_ws_agent_scope.py with its reason; listeners refetch the access-controlled list"
+  },
+  "findings": [],
+  "fixed_during_audit": [
+    {
+      "id": "F1",
+      "severity": "LOW",
+      "confidence": "10/10 mechanics, 8/10 severity",
+      "status": "VERIFIED (independent verifier) — FIXED",
+      "category": "agent-authored text into a durable operator-visible sink (G-04 class)",
+      "title": "the new `ingested` audit row copied the entry's unbounded `type` into audit_log.details",
+      "file": "src/backend/services/operator_queue_service.py:1418 (HEAD) -> :1422 (fixed)",
+      "evidence": "_clamp_ingested_item bounds title/question/context/options/priority/created_at, never `type`; db/operator_queue.py:216 stores item.get('type','question') with no belt; platform_audit_service.log:186 json.dumps(details) with no cap; audit_log is append-only, hash-chained (#2015) and un-prunable for 365 days",
+      "exploit": "agent writes an id-shaped entry with a ~2 MB `type` -> 5 s sync ingests it -> _audit_sync('ingested', …, {'type': <string>}) persists it chain-hashed and undeletable for a year; impact = log-content injection + storage amplification into an immutable table (no auth/control-flow effect, no XSS: Audit.vue renders details in <pre>, no MCP/LLM reader of audit rows in-repo)",
+      "fix": "details['type'] = _fold_agent_status(clamped.get('type')) — ^[a-z_]{1,32}$ or `other`; test_the_ingested_audit_row_carries_no_agent_text pins it with a 5 KB hostile type (asserts `other` and a <200-byte details payload)",
+      "residual": "operator_queue.type itself stays unbounded at ingest and at the DB sink (pre-existing, prunable/clearable, rendered as text) — registered in the debt inbox, not introduced by this branch"
+    }
+  ],
+  "closed_pre_existing_integrity_defects": [
+    "invalid JSON in the agent's queue file was read as an EMPTY request list and the write-back then overwrote the file with the reconstructed responses alone (data loss of every pending entry on a torn write) — now `unconfirmed:invalid_json` and no write that cycle",
+    "expiry ran after the no-running-agents early return, so an all-stopped fleet never expired anything — hoisted",
+    "a pending entry re-using a terminal row's id was re-created every cycle (on-conflict returns the old uuid silently): a phantom admit against the #1632 depth cap + an `operator_queue_new` broadcast per cycle — now `stale_id`"
+  ],
+  "appendix": [
+    "`if_match` compare uses `==` on hex digests — a timing side channel could only reveal the hash of a file the caller can already read; excluded (no secret)",
+    "the atomic write's temp file name embeds the pid in the agent's own home directory — the agent server runs as the same user; no boundary is crossed; excluded"
+  ],
+  "supply_chain_summary": {
+    "python": "unchanged",
+    "node": "unchanged (jsdom/@vue/test-utils installed on the host from the tracked npm lockfile via pnpm import; manifests untouched)"
+  },
+  "filter_stats": {
+    "candidates": 12,
+    "verified": 1,
+    "refuted": 6,
+    "excluded_by_rule": 3,
+    "accepted_by_design": 2,
+    "detail": [
+      "F1 agent `type` into audit details — VERIFIED LOW, fixed in-branch",
+      "409 body discloses sync_state/sync_detail — refuted (same access gate as GET on the row; portal gets the coarse enum only)",
+      "agent can pre-fill platform.aging_since — refuted (only suppresses the receipt write; never read as authorization; aging is computed from the row's created_at)",
+      "sync_detail/delivery_detail could carry agent text — refuted (closed vocabularies: _detail ^[a-z0-9_,]{1,64}$, _fold_agent_status ^[a-z_]{1,32}$, _read_failure_detail maps to tokens; tests pin a free-text status -> `other` and an HTTP body -> http_<code>)",
+      "aging bound reachable through the generic PUT /settings/{key} unvalidated — refuted (key is in OPS_SETTINGS_VALIDATION -> 422 there; only the admin-gated, validated, audited ops/config writes it)",
+      "count_flags enumerates other users' agents — refuted (scoped by _accessible_set; empty set -> zeros; admin unscoped by design)",
+      "operator_queue_sync reaches every client — refuted as a leak (empty payload; allow-listed with reason; ent#467 guard green)",
+      "extra file re-read per write / per-agent index read — excluded (rule 1, DoS/resource)",
+      "audit-table growth from confirmed<->unconfirmed flapping — excluded (rule 1) and designed out (transition-only audit; 3-cycle hysteresis; zero rows on a fleet restart, tested)",
+      "if_match timing side channel — excluded (no secret; appendix)",
+      "upgrade-time one-off: pre-existing cancelled/expired rows whose entries are gone each get one undelivered:entry_missing audit row — accepted, bounded (<=200 per agent per cycle, once per row), documented",
+      "closed_by_filer rows still count toward the depth cap until an operator cancels — accepted, registered (ent#619 owns withdrawal)"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "mutations": {
+    "applied": 7,
+    "red": 7,
+    "detail": [
+      "divergence detection disabled -> 3 red",
+      "Docker-unreadable treated as no agents -> 1 red",
+      "invalid JSON read as empty and written back -> 1 red (after the test was strengthened to pin the first guard)",
+      "fingerprint gate removed from the write-back -> 1 red",
+      "read-failure hysteresis removed -> 1 red",
+      "if_match never refuses (agent server) -> 2 red",
+      "409 item_diverged block removed (router) -> 1 red"
+    ]
+  },
+  "trend": {
+    "prior": "cso-diff-2026-09-21-ent549-file-audience",
+    "prior_findings": 0,
+    "this_findings": 0,
+    "found_and_fixed": 1,
+    "direction": "stable"
+  }
+}

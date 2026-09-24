@@ -1948,10 +1948,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Answer one ask. The row is removed from local state on success rather than
     // patched: the server's answer is authoritative, and a client that keeps a
     // stale "pending" copy would offer to answer it twice.
-    async answerAsk(askId, { response = null, responseText = null } = {}) {
+    async answerAsk(askId, { response = null, responseText = null, acknowledgeDivergence = false } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/asks/${askId}/answer`,
-        { response, response_text: responseText },
+        // #2915: the key rides only when the person acknowledged — the body
+        // stays byte-identical to the #2375 shape for every other answer.
+        { response, response_text: responseText, ...(acknowledgeDivergence ? { acknowledge_divergence: true } : {}) },
         { headers: this.authHeader },
       )
       this.asks = this.asks.filter((a) => a.id !== askId)

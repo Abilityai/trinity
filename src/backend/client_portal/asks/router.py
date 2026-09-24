@@ -65,6 +65,7 @@ def answer_ask(
         return service.answer_ask(
             item_id, principal.email, principal.is_platform,
             body.response, body.response_text,
+            acknowledge_divergence=body.acknowledge_divergence,
         )
     except AskError as e:
         _raise(e)
