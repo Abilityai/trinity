@@ -291,7 +291,7 @@ def test_alembic_seed_matches_the_sqlite_track(seed_db, monkeypatch):
     import importlib.util
     from pathlib import Path
     import sqlalchemy as sa
-    path = Path(__file__).resolve().parents[2] / "src/backend/migrations/versions/0073_role_readiness_rollout_seed.py"
+    path = Path(__file__).resolve().parents[2] / "src/backend/migrations/versions/0074_role_readiness_rollout_seed.py"
     spec = importlib.util.spec_from_file_location("rev0073", path)
     rev = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rev)

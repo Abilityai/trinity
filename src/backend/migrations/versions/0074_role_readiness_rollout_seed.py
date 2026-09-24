@@ -9,7 +9,7 @@ seat-delivery schedule on a live agent with autonomy on) is stamped ``ready`` at
 force (#2085), so no install changes behaviour. ``ON CONFLICT DO NOTHING``: an
 existing stamp is never overwritten. No DDL.
 
-Revision ID: 0073_role_readiness_rollout_seed
+Revision ID: 0074_role_readiness_rollout_seed
 Revises: 0072_agent_capability_grants
 """
 from datetime import datetime, timezone
@@ -17,8 +17,8 @@ from datetime import datetime, timezone
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0073_role_readiness_rollout_seed"
-down_revision = "0072_agent_capability_grants"
+revision = "0074_role_readiness_rollout_seed"
+down_revision = "0073_operator_queue_sync_state"
 branch_labels = None
 depends_on = None
 
