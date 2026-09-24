@@ -4,13 +4,17 @@
  * MCP tools for managing Trinity agent skills:
  * - list_skills: List available skills from the library
  * - get_skill: Get skill details and content
- * - assign_skill_to_agent: Assign a skill to an agent
+ * - assign_skill_to_agent: Assign a skill (or `set:<name>`) to an agent
+ * - unassign_skill_set: Remove a skill set from an agent (ent#530)
  * - sync_agent_skills: Inject assigned skills to a running agent
  */
 
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+
+/** ent#530: a skill SET wherever a skill name is accepted — `:` never occurs in a skill name. */
+const SET_PREFIX = "set:";
 
 /**
  * Skill information from the library.
@@ -244,10 +248,14 @@ export function createSkillsTools(
         "`docker_unavailable`, `injection_error`) — the assignment is kept either way and " +
         "sync_agent_skills is the manual retry. " +
         "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes. " +
-        "Skills teach agents specific behaviors defined in SKILL.md files.",
+        "Skills teach agents specific behaviors defined in SKILL.md files. " +
+        "Pass `set:<name>` to assign a library skill SET — every member is assigned and delivered in " +
+        "one act and kept current as a unit (members added upstream arrive on the next re-inject). " +
+        "An unknown set, or a set naming a skill its source does not ship, is refused by name; the " +
+        "response carries the set's status (prerequisites, suggested schedules — shown, never created).",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to assign the skill to"),
-        skill_name: z.string().describe("Name of the skill to assign"),
+        skill_name: z.string().describe("Name of the skill to assign, or `set:<name>` for a skill set"),
       }),
       execute: async (
         { agent_name, skill_name }: { agent_name: string; skill_name: string },
@@ -255,6 +263,15 @@ export function createSkillsTools(
       ) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
+
+        // ent#530: `set:<name>` is a set — its own route, same ent#596 fence.
+        if (skill_name.startsWith(SET_PREFIX)) {
+          const setResult = await apiClient.request<unknown>(
+            "POST",
+            `/api/agents/${encodeURIComponent(agent_name)}/skill-sets/${encodeURIComponent(skill_name.slice(SET_PREFIX.length))}`
+          );
+          return JSON.stringify(setResult, null, 2);
+        }
 
         // #2703: `delivery` rides the backend body unchanged (three-surface
         // sync, Invariant #13) — the tool never re-derives it.
@@ -283,10 +300,12 @@ export function createSkillsTools(
         "Use this to configure multiple skills at once. Added skills are delivered to a running " +
         "agent and dropped skills are removed from it; `delivery` and `removal` in the response " +
         "report each half honestly (see assign_skill_to_agent for the delivery vocabulary). " +
-        "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes. ",
+        "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes. " +
+        "Entries of the form `set:<name>` ADD skill sets (each must be assignable); the agent's other sets " +
+        "and their members are left as they are. Remove a set with unassign_skill_set.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent"),
-        skills: z.array(z.string()).describe("List of skill names to assign"),
+        skills: z.array(z.string()).describe("List of skill names to assign; `set:<name>` entries are skill sets"),
       }),
       execute: async (
         { agent_name, skills }: { agent_name: string; skills: string[] },
@@ -300,6 +319,7 @@ export function createSkillsTools(
           agent_name: string;
           skills_assigned: number;
           skills: string[];
+          sets?: string[];
           delivery?: SkillDelivery | null;
           removal?: unknown;
         }>(
@@ -385,7 +405,9 @@ export function createSkillsTools(
         "Get the list of skills assigned to an agent. Each entry carries " +
         "`delivery_status`: `conflict` when the agent has its own skill directory of " +
         "that name (the agent's copy runs; the library package was not installed), " +
-        "null otherwise.",
+        "null otherwise. `via_sets` names the assigned skill sets that bring a skill, and " +
+        "`individual` is false when a skill is present ONLY through a set (unassigning that " +
+        "set removes it). `sets` lists the agent's assigned sets.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent"),
       }),
@@ -403,24 +425,67 @@ export function createSkillsTools(
           assigned_by: string;
           assigned_at: string;
           delivery_status?: string | null;
+          individual?: boolean;
+          via_sets?: string[];
         }>>(
           "GET",
           `/api/agents/${encodeURIComponent(agent_name)}/skills`
         );
+        // ent#530: the set list is context, never a reason the skills read fails.
+        let sets: Array<{ name: string; status: string }> | null = null;
+        try {
+          sets = await apiClient.request<Array<{ name: string; status: string }>>(
+            "GET",
+            `/api/agents/${encodeURIComponent(agent_name)}/skill-sets`
+          );
+        } catch {
+          sets = null;
+        }
 
         const conflicts = skills.filter(s => s.delivery_status === "conflict").map(s => s.skill_name);
         return JSON.stringify({
           agent_name,
           skill_count: skills.length,
           ...(conflicts.length ? { conflicts } : {}),
+          ...(Array.isArray(sets) ? { sets: sets.map(x => ({ name: x.name, status: x.status })) } : {}),
           skills: skills.map(s => ({
             name: s.skill_name,
             assigned_by: s.assigned_by,
             assigned_at: s.assigned_at,
             // #2914: durable — survives the assign response the caller never saw.
             delivery_status: s.delivery_status ?? null,
+            // ent#530: why the skill is present.
+            individual: s.individual ?? true,
+            via_sets: s.via_sets ?? [],
           }))
         }, null, 2);
+      },
+    },
+
+    // ========================================================================
+    // unassign_skill_set - Remove a skill set from an agent (ent#530)
+    // ========================================================================
+    unassignSkillSet: {
+      name: "unassign_skill_set",
+      description:
+        "Unassign a skill set from an agent. Removes the members the set alone brought; a member " +
+        "also assigned individually, or named by another set the agent holds, stays. " +
+        "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes.",
+      parameters: z.object({
+        agent_name: z.string().describe("Name of the agent"),
+        set_name: z.string().describe("Name of the skill set (with or without the `set:` prefix)"),
+      }),
+      execute: async (
+        { agent_name, set_name }: { agent_name: string; set_name: string },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const apiClient = getClient(context?.session);
+        const name = set_name.startsWith(SET_PREFIX) ? set_name.slice(SET_PREFIX.length) : set_name;
+        const result = await apiClient.request<unknown>(
+          "DELETE",
+          `/api/agents/${encodeURIComponent(agent_name)}/skill-sets/${encodeURIComponent(name)}`
+        );
+        return JSON.stringify(result, null, 2);
       },
     },
 

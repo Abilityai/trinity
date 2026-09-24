@@ -3413,6 +3413,17 @@
         "skills"
       ],
       "description": "Only designated agents may change an agent's skills — their own included (ent#596). The scope ALLOWLIST as a ten-row matrix (JWT / user / system pass unchanged; agent passes only with a live grant; connector, ops, portal_delegate and a scope invented tomorrow are refused; a principal with no mcp_scope fails closed); the composed dependency checks the capability BEFORE the owner fence, so a non-holder gets one uniform named 403 for an existing, nonexistent or foreign target and a holder gains no reach beyond its owner; the route table read off FastAPI's real dependant graph (every skill-changing route takes the fence; the grant routes exist and are not shadowed); a refused agent key changes nothing on any of the four routes through a real FastAPI app; the file-route side door (.claude/skills/** via PUT/DELETE/mkdir, including a delete of an ancestor) and that people and holders still edit skills there; grants over a real SQLite file (live-only via the agent_ownership join, idempotent who/when, soft-delete and recovery, orphan rows fail closed, unknown capability refused at the sink, no call permission written); the grant service (404 / system / ephemeral refusals, revoke needs no validation); the grant route refuses an admin's own MCP key and audits only real changes; attribution (the acting agent recorded, the system agent named, a bulk replace does not re-stamp kept names); both migration tracks executed; the CASCADE AgentRef. Eight mutations each red."
+    },
+    {
+      "file": "unit/test_ent530_skill_sets.py",
+      "feature": "trinity-enterprise#530",
+      "added": "2026-09-24",
+      "categories": [
+        "backend",
+        "skills",
+        "database"
+      ],
+      "description": "Skill sets — a named slice of the library assigned as a unit (ent#530, absorbs ent#342). The catalog parser (both forms, total, every problem a code, partial on a missing member, bounds); plan_member_rows including the FAIL-CLOSED rule (an unresolvable set removes nothing); sets read through the guarded catalog.yaml over a real git repo; materialised rows over a real SQLite file (overlap — each assignment stands on its own, unassign keeps individual and other-set members, upstream add/remove, the legacy bulk-PUT round trip neither drops nor promotes set members); the service (custom-wins precedence, shadowing, member provenance, named 404/422 refusals, the honest per-agent status with prerequisites probed only while running); both migration tracks executed plus the single Alembic head; the CASCADE AgentRef; the routes through a real FastAPI app (static-before-catch-all, retained-via-set answer, a skills-only PUT leaves sets alone); fleet re-inject prunes a member dropped upstream; the CLAUDE.md 'via <set>' annotation. Mutations of the fail-closed rule and the PUT keep-derived rule each red."
     }
   ]
 }

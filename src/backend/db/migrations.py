@@ -4608,6 +4608,39 @@ def _migrate_agent_capability_grants(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_skill_sets(cursor, conn):
+    """trinity-enterprise#530 — skill sets.
+
+    * ``agent_skill_sets`` — a named set of library skills assigned to an agent.
+    * ``agent_skills.individual`` — 1 (the default, so every existing row keeps
+      its meaning) when the skill was assigned on its own; 0 when it is present
+      only because an assigned set names it. Unassigning a set removes only its
+      individual = 0 rows that no other assigned set names.
+
+    Additive only. Mirrored by the Alembic revision 0073_agent_skill_sets.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_skill_sets (
+            agent_name TEXT NOT NULL,
+            set_name TEXT NOT NULL,
+            source_id TEXT,
+            assigned_by TEXT NOT NULL,
+            assigned_by_agent TEXT,
+            assigned_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, set_name)
+        )
+        """
+    )
+    _safe_add_column(
+        cursor,
+        "agent_skills",
+        "individual",
+        "ALTER TABLE agent_skills ADD COLUMN individual INTEGER NOT NULL DEFAULT 1",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4750,4 +4783,5 @@ MIGRATIONS = [
     ("metric_points_table", _migrate_metric_points_table),
     ("seat_decisions_table", _migrate_seat_decisions_table),
     ("agent_capability_grants", _migrate_agent_capability_grants),
+    ("agent_skill_sets", _migrate_agent_skill_sets),
 ]

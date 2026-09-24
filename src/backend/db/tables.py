@@ -1023,6 +1023,19 @@ agent_skills = Table(
     # username — "the agent did it" must stay distinguishable from "the person
     # did it". Audit column: KEEP on rename (the source_agent_name precedent).
     Column("assigned_by_agent", Text),
+    # ent#530: 0 = present only because an assigned SET names it.
+    Column("individual", Integer, nullable=False, server_default=text("1")),
+)
+
+agent_skill_sets = Table(
+    "agent_skill_sets",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("set_name", Text, primary_key=True),
+    Column("source_id", Text),
+    Column("assigned_by", Text, nullable=False),
+    Column("assigned_by_agent", Text),
+    Column("assigned_at", Text, nullable=False),
 )
 
 

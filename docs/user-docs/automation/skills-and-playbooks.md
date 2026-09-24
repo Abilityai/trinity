@@ -96,6 +96,30 @@ Below the library listing sits **Assigned but no longer in the library** — ass
 
 Every change to an agent's assignments — assign, unassign, save, a manual sync, a background delivery finishing, a fleet re-inject — refreshes the open screens that list its skills: the **Playbooks** tab, the `/` autocomplete in **Chat**, and the `/` popup in the [Workspace](../sharing-and-access/workspace.md). Nothing needs a reload.
 
+### Skill sets
+
+A **skill set** is a named family of library skills that call each other — for example `dev-backlog` (`backlog`, `groom`, `claim`, …). Assigning the set assigns every member in one act, and the platform keeps the family current: a member added upstream arrives on the next re-inject, and one removed upstream is pruned.
+
+A library source declares its sets in `catalog.yaml`, beside `skills_root`. Two forms are accepted:
+
+```yaml
+sets:
+  project-management: [project-init, project-task]    # short form
+  dev-backlog:                                          # long form
+    skills: [backlog, roadmap, groom]
+    requires: {env: [GITHUB_TOKEN]}                     # credentials the set needs
+    schedules:                                          # suggestions only
+      - {name: Weekly groom, cron: "0 9 * * 1", message: /groom}
+```
+
+A set names skills from **its own** source. If it names one that source does not ship, it is listed as **partial** and cannot be assigned until the source is fixed. Set names resolve like skill names: the custom source wins, and a later source declaring the same name is shown as shadowed.
+
+- **Library → Skills** lists the sets above the skills. Expand one to see its members and each member's version, then assign it to an agent.
+- **An agent's Skills tab** shows its sets, each with a status: **complete**, **partial** (a member is missing upstream, not yet delivered, or in a name conflict), or **unresolved** (the set's source is disabled, removed or unreadable — its skills are kept until it can be read again). A skill that is present because of a set is labelled **via <set>**, and it is ticked and locked in the checklist. **Unassign set** removes only what that set alone brought: a skill you also assigned on its own, or that another assigned set names, stays.
+- **Prerequisites** are never a silent failure. If the agent lacks a credential the set declares, or one its members declare, the set says so and points you to the Credentials tab. The check runs while the agent is running; a stopped agent reports that it will check once started.
+- **Suggested schedules** are shown, never created. Add the ones you want on the agent's Schedules tab.
+- Assigning or unassigning a set is governed by the same permission as assigning a skill. An agent needs the skill-management permission an admin grants.
+
 ### Skill injection
 
 Each assigned skill's whole package is written to `~/.claude/skills/<name>/`, and a **Platform Skills** section is written into the agent's `CLAUDE.md` listing what was injected and what is still missing. Injection runs when you assign (running agents), when the agent starts, on a manual **Sync now**, and — if enabled — as a fleet sweep after a library sync.
@@ -182,10 +206,11 @@ MCP tools for skills and playbooks:
 | `list_skills()` | List library skills. Each entry carries its `source` name and any `shadowed_by` sources. |
 | `get_skill(name)` | Skill details and contract |
 | `get_skills_library_status()` | Library sync status, including the per-source array |
-| `assign_skill_to_agent(skill_name, agent_name)` | Assign one skill and deliver it. The response's `delivery` block reports `injected`, `pending_start`, `in_progress`, or `not_delivered` with a `reason` |
-| `set_agent_skills(agent_name, skill_names)` | Set the full skill list. Added names are delivered, dropped names are removed; `delivery` and `removal` report each half |
+| `assign_skill_to_agent(skill_name, agent_name)` | Assign one skill — or a set, as `set:<name>` — and deliver it. The response's `delivery` block reports `injected`, `pending_start`, `in_progress`, or `not_delivered` with a `reason` |
+| `set_agent_skills(agent_name, skill_names)` | Set the full skill list. `set:<name>` entries add sets; the agent's other sets are left alone. Remove a set with `unassign_skill_set`. Added names are delivered, dropped names are removed; `delivery` and `removal` report each half |
 | `sync_agent_skills(agent_name)` | Force re-inject into a running agent — the manual retry after a `not_delivered` |
-| `get_agent_skills(agent_name)` | List an agent's assigned skills |
+| `get_agent_skills(agent_name)` | List an agent's assigned skills. Each carries `via_sets` (the sets that brought it) and `individual`; the agent's `sets` are listed too |
+| `unassign_skill_set(agent_name, set_name)` | Unassign a skill set; members also assigned on their own or through another set stay |
 
 **REST endpoints** — see [Backend API Docs](http://localhost:8000/docs) for full schemas.
 
@@ -201,6 +226,9 @@ MCP tools for skills and playbooks:
 | `/api/skills/assignments` | GET | Which agents hold each skill, batched, plus `assignable_agents` — the agents the caller may assign to. Human-only; admins see the fleet, others their accessible agents (the response says which via `scope`) |
 | `/api/agents/{name}/skills` | GET/PUT | Read / set an agent's assignments (owner). The PUT response carries `delivery` and `removal` |
 | `/api/agents/{name}/skills/{skill}` | POST/DELETE | Assign (and deliver) / unassign one skill (owner). The POST response carries `delivery` |
+| `/api/skills/library/sets` | GET | Every skill set the sources declare, with members, versions and status |
+| `/api/agents/{name}/skill-sets` | GET | The agent's sets with their status and prerequisites |
+| `/api/agents/{name}/skill-sets/{set}` | POST/DELETE | Assign / unassign a set |
 | `/api/agents/{name}/skills/inject` | POST | Force re-inject into this agent (owner); 409 while another injection holds the agent |
 
 Source management is **REST-only and human-only** — there is no MCP tool for it, and agent-scoped keys are rejected. Registering or syncing a source decides which repository your fleet executes code from, so it is an operator action regardless of the caller's role.

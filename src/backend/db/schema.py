@@ -1189,7 +1189,24 @@ TABLES = {
             source_id TEXT,
             delivery_status TEXT,
             assigned_by_agent TEXT,
+            individual INTEGER NOT NULL DEFAULT 1,
             UNIQUE(agent_name, skill_name)
+        )
+    """,
+    # trinity-enterprise#530 — a named skill SET assigned to an agent. The
+    # members are materialised as agent_skills rows (individual = 0 unless also
+    # assigned on their own); this row is what names them, so unassigning the
+    # set removes only what it alone brought. `source_id` is the source the set
+    # resolved from when assigned (drift is reported, not re-pointed).
+    "agent_skill_sets": """
+        CREATE TABLE IF NOT EXISTS agent_skill_sets (
+            agent_name TEXT NOT NULL,
+            set_name TEXT NOT NULL,
+            source_id TEXT,
+            assigned_by TEXT NOT NULL,
+            assigned_by_agent TEXT,
+            assigned_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, set_name)
         )
     """,
     # trinity-enterprise#596 — capabilities an instance admin grants to a named

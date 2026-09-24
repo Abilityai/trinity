@@ -4929,3 +4929,52 @@ class ObjectiveJoinRead(BaseModel):
     findings: List[ObjectiveFinding] = []
     summary: ObjectiveJoinSummary
     message: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#530 — skill sets
+# ---------------------------------------------------------------------------
+
+class SkillSetMember(BaseModel):
+    name: str
+    present: bool
+    version: Optional[str] = None
+    # The source that wins this member when it is NOT the set's own source.
+    shadowed_source: Optional[str] = None
+
+
+class SkillSetInfo(BaseModel):
+    """A set declared by a library source's catalog.yaml. `problems` are codes only."""
+    name: str
+    source_id: str
+    source_name: Optional[str] = None
+    shadowed_by: List[Dict[str, Any]] = []
+    members: List[SkillSetMember] = []
+    status: str  # ok | partial | invalid — only ok is assignable or resolves
+    problems: List[str] = []
+    requires: Dict[str, List[str]] = {}
+    schedules: List[Dict[str, str]] = []  # suggestions only — never created
+
+
+class AgentSkillSetMember(BaseModel):
+    name: str
+    state: str  # assigned | conflict | not_assigned | missing_upstream
+    version: Optional[str] = None
+    shadowed_source: Optional[str] = None
+
+
+class AgentSkillSetStatus(BaseModel):
+    """An assigned set's honest status on one agent (#342)."""
+    name: str
+    status: str  # ok | partial | unresolved
+    # Why a set is unresolved: not_found | invalid | partial_upstream | source_changed.
+    # While any held set is unresolved, no set-derived skill is removed (fail-closed).
+    reason: Optional[str] = None
+    source_id: Optional[str] = None
+    drift: bool = False
+    members: List[AgentSkillSetMember] = []
+    prerequisites: Dict[str, Any] = {}
+    suggested_schedules: List[Dict[str, str]] = []
+    assigned_by: Optional[str] = None
+    assigned_by_agent: Optional[str] = None
+    assigned_at: Optional[str] = None

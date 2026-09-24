@@ -214,6 +214,12 @@ async def inject_assigned_skills(agent_name: str) -> dict:
         dict with injection status
     """
     from database import db
+    from services import skill_set_service
+
+    # ent#530 step 1: bring set-derived rows in line with the catalogs (DB only,
+    # fail-closed) BEFORE the names are read, so a member added upstream is
+    # injected and one removed upstream is pruned by the reconcile below.
+    await asyncio.to_thread(skill_set_service.reconcile_agent, agent_name)
 
     # Get assigned skills
     skill_names = db.get_agent_skill_names(agent_name)

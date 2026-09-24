@@ -46,6 +46,36 @@ export const useSkillsStore = defineStore('skills', () => {
 
   const assignedNames = computed(() => new Set(assigned.value.map(s => s.skill_name)))
 
+  // ent#530 — skill sets. `sets` is the agent's assigned sets with their honest
+  // status (GET /skill-sets); `librarySets` is what could be assigned. Both are
+  // context beside the skills list, so a failed read is its own named state
+  // (`setsError`) and never blanks the skills.
+  const sets = ref([])
+  const librarySets = ref([])
+  const setsError = ref(null)
+  const setsLoaded = ref(false)
+  const setBusy = ref(null)          // the set name being written, not a boolean
+  const setWriteError = ref(null)
+  const lastSetResult = ref(null)    // {set_name, members_added, status, suggested_schedules}
+  const removalDeferred = ref(null)  // the set whose unassign could not remove its members yet
+
+  // Names present ONLY because an assigned set names them. The bulk PUT sends
+  // the individual list; these are shown ticked-and-locked, since unticking one
+  // cannot remove it while its set is assigned.
+  const setOnlyNames = computed(() => new Set(
+    assigned.value.filter(s => s.individual === false).map(s => s.skill_name)
+  ))
+  const individualNames = computed(() => new Set(
+    assigned.value.filter(s => s.individual !== false).map(s => s.skill_name)
+  ))
+  function viaSets(name) {
+    return assigned.value.find(s => s.skill_name === name)?.via_sets || []
+  }
+  const assignableSets = computed(() => {
+    const held = new Set(sets.value.map(x => x.name))
+    return librarySets.value.filter(x => !held.has(x.name))
+  })
+
   // #2703 — the delivery report of the LAST save: {status, reason?, skills:{...}}
   // — see `utils/skillDelivery.js` for the wording. Kept beside
   // `injectionResults` for the same reason that one is separate from
@@ -98,6 +128,9 @@ export const useSkillsStore = defineStore('skills', () => {
     if (agentName.value !== name) {
       agentName.value = name
       assigned.value = []
+      sets.value = []
+      setsLoaded.value = false
+      lastSetResult.value = null
       injectionResults.value = {}
       lastInjectionAt.value = null
     }
@@ -127,6 +160,7 @@ export const useSkillsStore = defineStore('skills', () => {
       if (libraryStatus.value?.configured) {
         const lib = await api.get('/api/skills/library')
         library.value = lib.data || []
+        await loadSets()
       } else {
         library.value = []
       }
@@ -134,6 +168,71 @@ export const useSkillsStore = defineStore('skills', () => {
       error.value = e?.response?.data?.detail || 'Could not load skills'
     } finally {
       loading.value = false
+    }
+  }
+
+  /** ent#530 — never throws: a set outage is named in `setsError`, the skills still render. */
+  async function loadSets() {
+    const name = agentName.value
+    try {
+      const [mine, lib] = await Promise.all([
+        // probe: the Skills tab is where missing credentials are flagged (one exec per load).
+        api.get(`/api/agents/${name}/skill-sets`, { params: { probe: true } }),
+        api.get('/api/skills/library/sets'),
+      ])
+      if (name !== agentName.value) return
+      sets.value = mine.data || []
+      librarySets.value = lib.data || []
+      setsError.value = null
+      setsLoaded.value = true
+    } catch (e) {
+      if (name !== agentName.value) return
+      setsError.value = detailText(e, 'Could not load skill sets')
+    }
+  }
+
+  async function _refreshRows() {
+    try {
+      const { data } = await api.get(`/api/agents/${agentName.value}/skills`)
+      assigned.value = data || []
+    } catch { /* keep the previous rows; loadSets reports its own failure */ }
+    await loadSets()
+  }
+
+  async function assignSet(setName) {
+    setBusy.value = setName
+    setWriteError.value = null
+    try {
+      const { data } = await api.post(
+        `/api/agents/${agentName.value}/skill-sets/${encodeURIComponent(setName)}`,
+        {}, { timeout: ASSIGN_TIMEOUT_MS },
+      )
+      lastSetResult.value = data || null
+      lastDelivery.value = data?.delivery ?? null
+      await _refreshRows()
+      return true
+    } catch (e) {
+      setWriteError.value = detailText(e, `Could not assign set ${setName}`)
+      return false
+    } finally {
+      setBusy.value = null
+    }
+  }
+
+  async function unassignSet(setName) {
+    setBusy.value = setName
+    setWriteError.value = null
+    try {
+      const { data } = await api.delete(`/api/agents/${agentName.value}/skill-sets/${encodeURIComponent(setName)}`)
+      if (lastSetResult.value?.set_name === setName) lastSetResult.value = null
+      removalDeferred.value = data?.removal_deferred ? setName : null
+      await _refreshRows()
+      return true
+    } catch (e) {
+      setWriteError.value = detailText(e, `Could not unassign set ${setName}`)
+      return false
+    } finally {
+      setBusy.value = null
     }
   }
 
@@ -199,6 +298,13 @@ export const useSkillsStore = defineStore('skills', () => {
   function clear() {
     agentName.value = null
     assigned.value = []
+    sets.value = []
+    librarySets.value = []
+    setsError.value = null
+    setsLoaded.value = false
+    setWriteError.value = null
+    lastSetResult.value = null
+    removalDeferred.value = null
     library.value = []
     libraryStatus.value = null
     injectionResults.value = {}
@@ -214,5 +320,15 @@ export const useSkillsStore = defineStore('skills', () => {
     changedAt, noteSkillsChanged,
     assignedNames, assignedSkills, conflictNames, emptyReason,
     setAgent, load, saveAssignments, inject, clear,
+    sets, librarySets, setsError, setsLoaded, setBusy, setWriteError, lastSetResult, removalDeferred,
+    setOnlyNames, individualNames, assignableSets, viaSets,
+    loadSets, assignSet, unassignSet,
   }
 })
+
+/** A named refusal carries `{code, message}` (ent#530); older routes a string. */
+export function detailText(e, fallback) {
+  const d = e?.response?.data?.detail
+  if (d && typeof d === 'object') return d.message || fallback
+  return d || fallback
+}
