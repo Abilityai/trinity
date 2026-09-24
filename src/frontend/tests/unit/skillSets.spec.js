@@ -293,3 +293,21 @@ describe('review regressions (ent#530)', () => {
     expect(w.find('[data-testid="set-removal-deferred"]').text()).toContain('nothing is removed until it can')
   })
 })
+
+describe('status badge honesty (ent#530)', () => {
+  it('a complete set missing credentials reads "needs credentials", never a green complete', async () => {
+    respond({ sets: [{ ...AGENT_SETS[0], status: 'ok',
+      members: AGENT_SETS[0].members.slice(0, 2) }] })
+    const w = await mountPanel()
+    const badge = w.find('[data-testid="set-status-dev-backlog"]')
+    expect(badge.text()).toBe('needs credentials')
+    expect(badge.classes().join(' ')).toContain('status-warning')
+  })
+
+  it('a complete set with its credentials present reads complete', async () => {
+    respond({ sets: [{ ...AGENT_SETS[0], status: 'ok', members: AGENT_SETS[0].members.slice(0, 2),
+      prerequisites: { state: 'ok', missing_env: [] } }] })
+    const w = await mountPanel()
+    expect(w.find('[data-testid="set-status-dev-backlog"]').text()).toBe('complete')
+  })
+})

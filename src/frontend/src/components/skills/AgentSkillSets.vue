@@ -37,8 +37,8 @@
               <span class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">{{ set.name }}</span>
               <BaseBadge variant="purple">set</BaseBadge>
               <!-- Honest status (#342): never a silent "on". -->
-              <BaseBadge :variant="statusVariant(set.status)" dot :data-testid="`set-status-${set.name}`">
-                {{ statusLabel(set.status) }}
+              <BaseBadge :variant="statusVariant(set)" dot :data-testid="`set-status-${set.name}`">
+                {{ statusLabel(set) }}
               </BaseBadge>
               <BaseBadge v-if="set.drift" variant="warning" title="The source this set was assigned from no longer owns its name">
                 source changed
@@ -99,7 +99,15 @@
     </ul>
 
     <div v-if="canManage && store.setsLoaded && store.assignableSets.length" class="mt-3 flex items-end gap-2">
-      <BaseSelect v-model="picked" label="Assign a set" class="min-w-[14rem]" data-testid="set-picker">
+      <!-- Keyed on the option set: re-rendering the options under a live
+           <select> after an assign otherwise leaves it showing blank. -->
+      <BaseSelect
+        :key="store.assignableSets.map(x => x.name).join('|')"
+        v-model="picked"
+        label="Assign a set"
+        class="min-w-[14rem]"
+        data-testid="set-picker"
+      >
         <option value="">Choose a set…</option>
         <option
           v-for="x in store.assignableSets"
@@ -111,7 +119,7 @@
       <BaseButton
         size="sm"
         :disabled="!picked || store.setBusy !== null"
-        :loading="store.setBusy === picked && !!picked"
+        :loading="store.setBusy !== null && !store.sets.some(x => x.name === store.setBusy)"
         loading-label="Assigning…"
         data-testid="set-assign"
         @click="onAssign"
@@ -163,12 +171,20 @@ defineProps({
 const store = useSkillsStore()
 const picked = ref('')
 
-function statusVariant(status) {
-  return { ok: 'success', partial: 'warning', unresolved: 'danger' }[status] || 'neutral'
+// Missing credentials downgrade a complete set: every member is there, but it
+// will not work until they are added — never a green "complete" (principle 15).
+function needsCredentials(set) {
+  return set.status === 'ok' && set.prerequisites?.state === 'missing'
 }
 
-function statusLabel(status) {
-  return { ok: 'complete', partial: 'partial', unresolved: 'unresolved' }[status] || status
+function statusVariant(set) {
+  if (needsCredentials(set)) return 'warning'
+  return { ok: 'success', partial: 'warning', unresolved: 'danger' }[set.status] || 'neutral'
+}
+
+function statusLabel(set) {
+  if (needsCredentials(set)) return 'needs credentials'
+  return { ok: 'complete', partial: 'partial', unresolved: 'unresolved' }[set.status] || set.status
 }
 
 function unresolvedText(set) {
@@ -195,7 +211,12 @@ function memberStateText(state) {
 }
 
 async function onAssign() {
-  if (!picked.value) return
-  if (await store.assignSet(picked.value)) picked.value = ''
+  const name = picked.value
+  if (!name) return
+  // Cleared BEFORE the write: the refetch removes this set from the options,
+  // and a <select> still bound to it renders blank. A failure puts it back so
+  // the retry is one click.
+  picked.value = ''
+  if (!(await store.assignSet(name))) picked.value = name
 }
 </script>
