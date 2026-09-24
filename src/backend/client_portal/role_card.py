@@ -285,7 +285,9 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool) -> 
         "seat": _text(xrole.get("seat"), 128),
         "objectives": [],
         "readiness": effective_readiness(xrole.get("status"), stamp),
-        "brief_held": _brief_held(agent_name, stamp),
+        # Platform viewers only: an external client can neither act on a held
+        # brief nor see the schedules it comes from (the flip is platform-only too).
+        "brief_held": is_platform and _brief_held(agent_name, stamp),
         "walkthrough": _walkthrough(agent_name, email, is_platform),
         "relationship": None,
         "can_flip_readiness": _is_owner(agent_name, email, is_platform),
@@ -337,6 +339,11 @@ def _brief_held(agent_name: str, stamp: Optional[dict]) -> bool:
     if stamp and stamp.get("status") == "ready":
         return False
     try:
+        # Autonomy off stops every schedule before readiness is asked; saying
+        # "paused until you mark it ready" then would promise a flip that
+        # starts nothing.
+        if not db.get_autonomy_enabled(agent_name):
+            return False
         return any(
             s.enabled and (s.deliver_to_workspace_email or "").strip()
             for s in db.list_agent_schedules(agent_name)

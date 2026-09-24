@@ -10,6 +10,9 @@ Two properties are load-bearing:
 * **The owner's stamp is the only authority.** `x-role.status` in template.yaml
   is written by the agent itself, so it is never read as a verdict. The template
   is read only to learn whether the agent declares a role at all — a companion.
+  Honest limit: an UNSTAMPED agent can therefore take itself out of scope (drop
+  `x-role`, or stall the read into fail-open). A stamp it cannot touch: once an
+  owner has stamped `calibrating`, nothing the agent writes releases the brief.
 * **Every ambiguity fails open** (#1638: never mute working behaviour on an
   ambiguous read). Stamp read failed, container not running, Docker unreadable,
   template unreadable within the bound → the brief fires, and the reason is logged.
@@ -33,6 +36,10 @@ ROLLOUT_CHANGED_BY = "rollout:ent#689"
 #: The template read happens on the scheduler's dispatch path; the scheduler's
 #: own call is bounded at 5 s, so this must finish well inside it.
 TEMPLATE_READ_TIMEOUT_SECONDS = 3.0
+
+
+class AgentNotFound(Exception):
+    """No ownership row for the agent — the route answers 404 (the scheduler fails open)."""
 
 
 @dataclass(frozen=True)
@@ -100,9 +107,11 @@ async def _is_companion(agent_name: str) -> Optional[bool]:
 
 
 async def brief_readiness(agent_name: str) -> Verdict:
-    """The verdict the scheduler asks for. Never raises."""
+    """The verdict the scheduler asks for. Raises only `AgentNotFound`."""
     from database import db
 
+    if not await asyncio.to_thread(db.get_agent_owner, agent_name):
+        raise AgentNotFound(agent_name)
     try:
         stamp = await asyncio.to_thread(db.get_agent_role_readiness, agent_name)
     except Exception as e:  # noqa: BLE001

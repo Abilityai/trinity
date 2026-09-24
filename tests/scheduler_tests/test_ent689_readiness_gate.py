@@ -71,6 +71,15 @@ class TestReadinessGate:
         assert HELD in (row.error or "")
 
     @pytest.mark.asyncio
+    async def test_a_held_brief_never_runs_the_agents_pre_check_hook(self, svc, initialized_db):
+        """The readiness gate is asked first: holding costs one backend read,
+        never a `docker exec` of agent code for a brief that will not fire."""
+        _make_seat_brief(initialized_db)
+        svc._run_readiness_check = AsyncMock(return_value={"fire": False, "reason": HELD})
+        await svc._execute_schedule_with_lock("schedule-1")
+        svc._run_pre_check.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_ready_fires(self, svc, initialized_db):
         _make_seat_brief(initialized_db)
         svc._run_readiness_check = AsyncMock(return_value={"fire": True, "reason": "stamped ready"})

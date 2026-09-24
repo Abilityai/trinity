@@ -4613,7 +4613,8 @@ def _migrate_role_readiness_rollout_seed(cursor, conn):
 
     From this release a companion's cron seat brief runs only when its owner
     stamp says `ready`. Every agent whose proactive brief fires TODAY — an
-    enabled, live, seat-delivery schedule on a live agent — is stamped `ready`
+    enabled, live, seat-delivery schedule on a live agent with autonomy on (a
+    schedule on an autonomy-off agent does not fire) — is stamped `ready`
     here, at the value in force (#2085), so no install changes behaviour.
     INSERT OR IGNORE: an existing stamp (an owner's `calibrating`) is never
     overwritten. `changed_by` is the rollout sentinel the role card renders as
@@ -4634,6 +4635,7 @@ def _migrate_role_readiness_rollout_seed(cursor, conn):
           AND s.deliver_to_workspace_email IS NOT NULL
           AND s.deliver_to_workspace_email != ''
           AND o.deleted_at IS NULL
+          AND o.autonomy_enabled = 1
         """,
         (utc_now_iso(),),
     )

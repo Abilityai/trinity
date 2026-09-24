@@ -1012,6 +1012,16 @@ class SchedulerService:
             )
             return
 
+        # Readiness gate (trinity-enterprise#689): a calibrating companion's cron
+        # seat brief is held until its owner marks it ready. Same shape as the
+        # pre-check: cron only, a skipped row with the reason, fail-open. Asked
+        # BEFORE the pre-check, so a held brief never runs the agent's hook.
+        if not await self._apply_readiness_gate(schedule, triggered_by):
+            self._abandon_precreated_execution(
+                execution, "Held: the companion is not marked ready"
+            )
+            return
+
         # Agent-owned pre-check gate (#454): may skip the firing entirely or
         # override the message. Manual triggers always fire.
         should_fire, effective_message = await self._apply_pre_check_gate(schedule, triggered_by)
@@ -1022,15 +1032,6 @@ class SchedulerService:
             # future gate change must not silently strand a running row.
             self._abandon_precreated_execution(
                 execution, "Agent pre-check declined the run"
-            )
-            return
-
-        # Readiness gate (trinity-enterprise#689): a calibrating companion's cron
-        # seat brief is held until its owner marks it ready. Same shape as the
-        # pre-check: cron only, a skipped row with the reason, fail-open.
-        if not await self._apply_readiness_gate(schedule, triggered_by):
-            self._abandon_precreated_execution(
-                execution, "Held: the companion is not marked ready"
             )
             return
 

@@ -71,14 +71,14 @@ owner ──► Mark ready (ConfirmDialog) ──► POST …/role/readiness {st
 
 ```
 scheduler cron fire, schedule.deliver_to_workspace_email set
-  → _apply_pre_check_gate (#454)            → skipped? stop
-  → _apply_readiness_gate                    (cron + seat only)
+  → _apply_readiness_gate                    (cron + seat only; first, so a held brief never runs the hook)
       GET /api/internal/agents/{name}/brief-readiness
         services/role_readiness_gate.brief_readiness
           stamp? → ready fires / else held
           no stamp → container running? template.yaml (≤3 s) has x-role? → held : fires
           any ambiguity → fires (logged)
       fire:false → _record_gate_skip: skipped row + reason, run times advanced, skipped event
+  → _apply_pre_check_gate (#454)            → skipped? stop
   → dispatch
 ```
 
@@ -89,7 +89,8 @@ scheduler cron fire, schedule.deliver_to_workspace_email set
 - **Why the template's `status` is never read:** it is agent-writable; the stamp is the
   owner's act (#663). The template answers only "is this a companion".
 - **Rollout:** a one-time, DB-only seed (both tracks) stamps `ready` —
-  `changed_by = rollout:ent#689` — for every agent whose seat brief fired at deploy,
+  `changed_by = rollout:ent#689` — for every agent whose seat brief fired at deploy
+  (enabled schedule, autonomy on),
   insert-if-absent. The card renders it as "carried over when the readiness gate
   shipped" (`source: "rollout"`), and `brief_held` adds "its scheduled brief is paused
   until you mark it ready" (or "its owner marks") next to the flip.

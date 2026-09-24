@@ -74,6 +74,7 @@ class TestBriefReadiness:
                 raise RuntimeError("db down")
             return state["stamp"]
         monkeypatch.setattr(database.db, "get_agent_role_readiness", stamp)
+        monkeypatch.setattr(database.db, "get_agent_owner", lambda name: {"owner_id": 1})
 
         async def container(agent):
             if state["raise"] == "docker":
@@ -136,6 +137,7 @@ class TestBriefReadiness:
 class TestEndpoint:
     @pytest.mark.asyncio
     async def test_unknown_agent_is_404(self, monkeypatch):
+        """Through the real service: the existence check lives there (Invariant #1)."""
         import database
         from fastapi import HTTPException
         from routers import internal
@@ -146,10 +148,8 @@ class TestEndpoint:
 
     @pytest.mark.asyncio
     async def test_shape(self, monkeypatch):
-        import database
         from routers import internal
         gate = _gate()
-        monkeypatch.setattr(database.db, "get_agent_owner", lambda name: {"owner_id": 1})
 
         async def verdict(agent):
             return gate.Verdict(False, gate.held_reason(agent), "unstamped_companion")
@@ -186,7 +186,41 @@ class TestRoleCard:
     def test_brief_held(self, monkeypatch, stamp, schedules, held):
         from client_portal import role_card
         monkeypatch.setattr(role_card.db, "list_agent_schedules", lambda agent: schedules)
+        monkeypatch.setattr(role_card.db, "get_autonomy_enabled", lambda agent: True)
         assert role_card._brief_held(AGENT, stamp) is held
+
+    def test_autonomy_off_is_not_reported_as_a_held_brief(self, monkeypatch):
+        """The autonomy gate stops the schedule first; "mark it ready" would start nothing."""
+        from client_portal import role_card
+        monkeypatch.setattr(role_card.db, "list_agent_schedules",
+                            lambda agent: [SimpleNamespace(enabled=1, deliver_to_workspace_email="s@example.com")])
+        monkeypatch.setattr(role_card.db, "get_autonomy_enabled", lambda agent: False)
+        assert role_card._brief_held(AGENT, None) is False
+
+    @pytest.mark.asyncio
+    async def test_an_external_client_is_never_told_about_a_held_brief(self, monkeypatch):
+        """The card serves both doors; `brief_held` is computed for platform viewers only."""
+        from client_portal import role_card
+        from services import docker_utils
+        from services import agent_client
+
+        async def running(agent):
+            return "running"
+
+        class Client:
+            async def read_file(self, path, timeout=30.0):
+                if path == "template.yaml":
+                    return {"success": True, "content": "x-role:\n  role: sales-lead\n"}
+                return {"success": True, "not_found": True, "content": None}
+        monkeypatch.setattr(docker_utils, "agent_container_state_async", running)
+        monkeypatch.setattr(agent_client, "get_agent_client", lambda name: Client())
+        monkeypatch.setattr(role_card, "_readiness_stamp", lambda agent: None)
+        monkeypatch.setattr(role_card, "_walkthrough", lambda *a: {"asks": 0, "target": 10, "rated_down": 0, "unavailable": False})
+        monkeypatch.setattr(role_card, "_is_owner", lambda *a: False)
+        monkeypatch.setattr(role_card, "_brief_held", lambda agent, stamp: True)
+        client = await role_card.build_role_card(AGENT, "client@example.com", is_platform=False)
+        platform = await role_card.build_role_card(AGENT, "user@example.com", is_platform=True)
+        assert client["brief_held"] is False and platform["brief_held"] is True
 
     def test_brief_held_says_nothing_when_schedules_are_unreadable(self, monkeypatch):
         from client_portal import role_card
@@ -209,9 +243,9 @@ def seed_db():
         conn.execute(TABLES[t])
     now = "2026-09-24T00:00:00.000000Z"
 
-    def agent(name, deleted=None):
-        conn.execute("INSERT INTO agent_ownership (agent_name, owner_id, created_at, deleted_at) VALUES (?,1,?,?)",
-                     (name, now, deleted))
+    def agent(name, deleted=None, autonomy=1):
+        conn.execute("INSERT INTO agent_ownership (agent_name, owner_id, created_at, deleted_at, autonomy_enabled) "
+                     "VALUES (?,1,?,?,?)", (name, now, deleted, autonomy))
 
     def sched(sid, name, enabled=1, seat="s@example.com", deleted=None):
         conn.execute(
@@ -227,6 +261,7 @@ def seed_db():
     agent("no-seat"); sched("e1", "no-seat", seat=None)
     agent("blank-seat"); sched("f1", "blank-seat", seat="")
     agent("deleted-agent", deleted=now); sched("g1", "deleted-agent")
+    agent("autonomy-off", autonomy=0); sched("h1", "autonomy-off")   # its brief does not fire today
     conn.commit()
     yield conn
     conn.close()
