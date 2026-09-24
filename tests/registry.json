@@ -3386,7 +3386,7 @@
         "backend",
         "unit"
       ],
-      "description": "The operator-queue file sync tells the truth (Trinity 1.0 gate). The seven divergence fixtures from the field trace (rewritten entry → `changed` with the field names and the row untouched; agent-side `acknowledged` on a never-responded row → `closed_by_filer`; folded free-text status; pruned entry / missing file → `missing`; a reused id on a terminal row → `stale_id`, never a phantom admit), read-failure hysteresis (3 cycles; token never `str(e)`), no write-back over invalid JSON, the tri-state poll cycle (Docker unreadable sweeps nothing; expiry before the no-agents return; one thin broadcast per cycle), the write-back gate (deliver only into a matching pending entry; `entry_changed` / `conflict` / `http_<code>` recorded; pre-write re-read is what gets written with its sha as `if_match`; the aging receipt once at the crossing, never at ingest; platform alarms `not_applicable` and never flip-flopping), fingerprint stability, and the accessors on a real migrated SQLite (edge UPDATEs, sync index, delivery-bound terminal query, scoped sweep, header counts)."
+      "description": "The operator-queue file sync tells the truth (Trinity 1.0 gate). The seven divergence fixtures from the field trace (rewritten entry → `changed` with the field names and the row untouched; agent-side `acknowledged` on a never-responded row → `closed_by_filer`; folded free-text status; pruned entry / missing file → `missing`; a reused id on a terminal row → `stale_id`, never a phantom admit), read-failure hysteresis (3 cycles; token never `str(e)`), no write-back over invalid JSON, the tri-state poll cycle (Docker unreadable sweeps nothing; expiry before the no-agents return; one thin broadcast per cycle), the write-back gate (deliver only into a matching pending entry; `entry_changed` / `conflict` / `http_<code>` recorded; pre-write re-read is what gets written with its sha as `if_match`; the aging receipt once at the crossing, never at ingest; platform alarms `not_applicable` and never flip-flopping), fingerprint stability, and the accessors on a real migrated SQLite (edge UPDATEs, sync index, delivery-bound terminal query, scoped sweep, header counts). Review round 2 (PR #2989): wrong-shape files are `unconfirmed:wrong_shape` and never written; an acknowledged divergence is delivered into the rewritten or agent-closed entry and `mark_acknowledged` needs a delivered answer; platform alarms are never `missing`; first entry wins on a duplicated id; the fingerprint covers type / priority / context / addressee; answers owed to a stopped agent are `undelivered:agent_not_running`; the terminal retry set skips `entry_missing` and goes oldest first; a file that vanished between the two reads is left alone."
     },
     {
       "file": "unit/test_2915_agent_server_files_if_match.py",
@@ -3396,7 +3396,43 @@
         "agent",
         "unit"
       ],
-      "description": "The agent server's `PUT /api/files` is atomic (tmp + os.replace, no temp file left) and a compare-and-swap: `if_match` holds for the content that was read and refuses (412) after a concurrent change; absent `if_match` or a missing file always holds; a non-UTF-8 file never matches (fail closed). Loaded by path like test_1795; the handler is asserted to call the helpers it documents."
+      "description": "The agent server's `PUT /api/files` is atomic (tmp + os.replace, no temp file left) and a compare-and-swap: `if_match` holds for the content that was read and refuses (412) after a concurrent change; absent `if_match` or a missing file always holds; a non-UTF-8 file is hashed as the download endpoint serves it (errors='replace'), so the caller's hash over the served text matches and a stale one does not. Loaded by path like test_1795; the handler is asserted to call the helpers it documents, and containment is resolved-path `is_relative_to` (a sibling prefix is 403)."
+    },
+    {
+      "file": "unit/test_2845_retry_trigger_sets.py",
+      "feature": "#2845",
+      "added": "2026-09-22",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "pull-migration",
+        "scheduler"
+      ],
+      "description": "RETRY-001's `retry` trigger is classified like the run it retries: it is in _AUTONOMOUS_TRIGGERS (an unresolved slash command in a retry raises the operator alert exactly as the scheduled attempt does; `manual` still does not), in PULL_REACHABLE_TRIGGERS (a pilot owns its retries as it owns its scheduled runs, a non-pilot does not), in the executions filter allow-list and in the analytics 'Scheduled' bucket. Class guard: every `triggered_by=` keyword literal the scheduler emits (read from the AST, so comments cannot satisfy it, and asserted non-empty) must appear in all four sets."
+    },
+    {
+      "file": "scheduler_tests/test_2845_retry_pull.py",
+      "feature": "#2845",
+      "added": "2026-09-22",
+      "categories": [
+        "scheduler",
+        "unit",
+        "reliability",
+        "pull-migration"
+      ],
+      "description": "RETRY-001 once retries are pullable: a row the lease reaper poison-parked (`error` starts with `poison_lease`) is not retried, while an ordinary failure still is; a retry whose dispatch times out after the backend already queued the row leaves it `queued` (CAS on `running`) instead of failing it; and a retry is a new row that starts at redelivery_count 0 while the original keeps its own count, so retry and re-delivery counting stay distinct."
+    },
+    {
+      "file": "unit/test_ent596_skill_manager.py",
+      "feature": "trinity-enterprise#596",
+      "added": "2026-09-23",
+      "categories": [
+        "backend",
+        "security",
+        "skills"
+      ],
+      "description": "Only designated agents may change an agent's skills — their own included (ent#596). The scope ALLOWLIST as a ten-row matrix (JWT / user / system pass unchanged; agent passes only with a live grant; connector, ops, portal_delegate and a scope invented tomorrow are refused; a principal with no mcp_scope fails closed); the composed dependency checks the capability BEFORE the owner fence, so a non-holder gets one uniform named 403 for an existing, nonexistent or foreign target and a holder gains no reach beyond its owner; the route table read off FastAPI's real dependant graph (every skill-changing route takes the fence; the grant routes exist and are not shadowed); a refused agent key changes nothing on any of the four routes through a real FastAPI app; the file-route side door (.claude/skills/** via PUT/DELETE/mkdir, including a delete of an ancestor) and that people and holders still edit skills there; grants over a real SQLite file (live-only via the agent_ownership join, idempotent who/when, soft-delete and recovery, orphan rows fail closed, unknown capability refused at the sink, no call permission written); the grant service (404 / system / ephemeral refusals, revoke needs no validation); the grant route refuses an admin's own MCP key and audits only real changes; attribution (the acting agent recorded, the system agent named, a bulk replace does not re-stamp kept names); both migration tracks executed; the CASCADE AgentRef. Eight mutations each red."
     }
   ]
 }

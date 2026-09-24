@@ -1018,6 +1018,23 @@ agent_skills = Table(
     # #2914: `conflict` while an agent-authored dir of the same name blocks
     # injection; NULL otherwise. See the agent_skills note in db/schema.py.
     Column("delivery_status", Text),
+    # ent#596 (Tandem R29): the AGENT that made the assignment, when the writer
+    # was an agent principal; NULL for a human. `assigned_by` stays the owner's
+    # username — "the agent did it" must stay distinguishable from "the person
+    # did it". Audit column: KEEP on rename (the source_agent_name precedent).
+    Column("assigned_by_agent", Text),
+)
+
+
+# trinity-enterprise#596 — capabilities an instance admin grants to a named agent.
+# See the agent_capability_grants note in db/schema.py.
+agent_capability_grants = Table(
+    "agent_capability_grants",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("capability", Text, primary_key=True),
+    Column("granted_by", Text, nullable=False),
+    Column("granted_at", Text, nullable=False),
 )
 
 # ent#237: one row per git repo the skills library syncs from.

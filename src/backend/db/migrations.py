@@ -4591,6 +4591,52 @@ def _migrate_seat_decisions_table(cursor, conn):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_seat_decisions_review ON seat_decisions(agent_name, review_by)")
     conn.commit()
 
+
+def _migrate_agent_capability_grants(cursor, conn):
+    """trinity-enterprise#596 — only designated agents may change an agent's skills.
+
+    Two changes, one concern:
+
+    * ``agent_capability_grants`` — a capability an instance admin grants to a
+      named agent. ``skills.manage`` is the first: a holder may change skills on
+      any agent its owner holds, itself included; every other agent key is
+      refused on both. A row, not a column on ``agent_ownership``, so who granted
+      it and when is answerable, and later capabilities share the seam.
+    * ``agent_skills.assigned_by_agent`` — the agent that made an assignment,
+      NULL for a human. ``assigned_by`` has only ever recorded the owner's
+      username, which made "the agent did it" indistinguishable from "the person
+      did it" (Tandem R29).
+
+    Additive only: no existing row changes meaning. Nobody holds the grant on
+    upgrade — that is the ruling (default-deny), and the refusal names the
+    Settings surface where an admin grants it.
+
+    Mirrored by the Alembic revision 0072_agent_capability_grants.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_capability_grants (
+            agent_name TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, capability)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_capability_grants_cap "
+        "ON agent_capability_grants(capability)"
+    )
+    _safe_add_column(
+        cursor,
+        "agent_skills",
+        "assigned_by_agent",
+        "ALTER TABLE agent_skills ADD COLUMN assigned_by_agent TEXT",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4732,5 +4778,6 @@ MIGRATIONS = [
     ("metric_definitions_table", _migrate_metric_definitions_table),
     ("metric_points_table", _migrate_metric_points_table),
     ("seat_decisions_table", _migrate_seat_decisions_table),
+    ("agent_capability_grants", _migrate_agent_capability_grants),
     ("operator_queue_sync_state", _migrate_operator_queue_sync_state),
 ]

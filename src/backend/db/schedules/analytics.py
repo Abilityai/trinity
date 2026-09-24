@@ -39,6 +39,7 @@ _TRIGGER_BUCKETS = {
     "telegram": "Channels", "slack": "Channels", "whatsapp": "Channels",
     "public": "Public", "paid": "Public",
     "schedule": "Scheduled", "webhook": "Scheduled",
+    "retry": "Scheduled",  # #2845: RETRY-001's next attempt at a scheduled run
     "loop": "Loops",  # #1150: first-class bucket so loop bursts don't read as cron load
     "reminder": "Reminders",  # #1296: agent self-direction, not operator cron
     # ent#329: an operator answer waking a parked agent. Bucketed with the
