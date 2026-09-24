@@ -321,6 +321,15 @@ describe('#2375 — the wire shape of an answer', () => {
     const [, posted] = portalHttp.post.mock.calls[0]
     expect(posted).toEqual({ response: 'deploy tuesday', response_text: null })
   })
+
+  it('#2915: an acknowledged resend carries the override; nothing else changes shape', async () => {
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
+    await store.fetchAsks()
+    portalHttp.post.mockResolvedValueOnce({ data: { ...ask('a1'), status: 'responded' } })
+    await store.answerAsk('a1', { response: 'deploy tuesday', responseText: null, acknowledgeDivergence: true })
+    const [, posted] = portalHttp.post.mock.calls[0]
+    expect(posted).toEqual({ response: 'deploy tuesday', response_text: null, acknowledge_divergence: true })
+  })
 })
 
 describe('#2375 — the panel goes through the shared module (source-asserted)', () => {

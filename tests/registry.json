@@ -3379,6 +3379,26 @@
       "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default)."
     },
     {
+      "file": "unit/test_2915_operator_queue_sync_honesty.py",
+      "feature": "abilityai/trinity#2915",
+      "added": "2026-09-23",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "The operator-queue file sync tells the truth (Trinity 1.0 gate). The seven divergence fixtures from the field trace (rewritten entry → `changed` with the field names and the row untouched; agent-side `acknowledged` on a never-responded row → `closed_by_filer`; folded free-text status; pruned entry / missing file → `missing`; a reused id on a terminal row → `stale_id`, never a phantom admit), read-failure hysteresis (3 cycles; token never `str(e)`), no write-back over invalid JSON, the tri-state poll cycle (Docker unreadable sweeps nothing; expiry before the no-agents return; one thin broadcast per cycle), the write-back gate (deliver only into a matching pending entry; `entry_changed` / `conflict` / `http_<code>` recorded; pre-write re-read is what gets written with its sha as `if_match`; the aging receipt once at the crossing, never at ingest; platform alarms `not_applicable` and never flip-flopping), fingerprint stability, and the accessors on a real migrated SQLite (edge UPDATEs, sync index, delivery-bound terminal query, scoped sweep, header counts). Review round 2 (PR #2989): wrong-shape files are `unconfirmed:wrong_shape` and never written; an acknowledged divergence is delivered into the rewritten or agent-closed entry and `mark_acknowledged` needs a delivered answer; platform alarms are never `missing`; first entry wins on a duplicated id; the fingerprint covers type / priority / context / addressee; answers owed to a stopped agent are `undelivered:agent_not_running`; the terminal retry set skips `entry_missing` and goes oldest first; a file that vanished between the two reads is left alone."
+    },
+    {
+      "file": "unit/test_2915_agent_server_files_if_match.py",
+      "feature": "abilityai/trinity#2915",
+      "added": "2026-09-23",
+      "categories": [
+        "agent",
+        "unit"
+      ],
+      "description": "The agent server's `PUT /api/files` is atomic (tmp + os.replace, no temp file left) and a compare-and-swap: `if_match` holds for the content that was read and refuses (412) after a concurrent change; absent `if_match` or a missing file always holds; a non-UTF-8 file is hashed as the download endpoint serves it (errors='replace'), so the caller's hash over the served text matches and a stale one does not. Loaded by path like test_1795; the handler is asserted to call the helpers it documents, and containment is resolved-path `is_relative_to` (a sibling prefix is 403)."
+    },
+    {
       "file": "unit/test_2845_retry_trigger_sets.py",
       "feature": "#2845",
       "added": "2026-09-22",

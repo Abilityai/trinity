@@ -771,6 +771,11 @@ OPS_SETTINGS_DEFAULTS = {
     # (acknowledged/cancelled/expired). "0" disables the sweep. `responded` rows
     # get a more generous fixed floor (never deleted younger than #772's guard).
     "operator_queue_retention_days": "90",
+    # #2915: hours a queue item may sit pending before the card carries an aging
+    # marker and the filing agent gets a receipt. Read at request time (no sweep);
+    # "0" disables — the retention-key idiom. Not a retention window: nothing is
+    # deleted by it, so it is deliberately NOT in RETENTION_OPS_KEYS.
+    "operator_queue_aging_hours": "24",
     # Issue #1296: retention for TERMINAL agent_reminders (fired/cancelled/
     # failed). Rows older than this many days are deleted; pending/firing never
     # deleted. "0" disables the sweep. Wide/safe default per the #1638 floor rule.
@@ -833,6 +838,7 @@ OPS_SETTINGS_VALIDATION = {
     "schedule_soft_delete_retention_days": ("int", 0, _DAYS_MAX),
     "agent_reports_retention_days": ("int", 0, _DAYS_MAX),
     "operator_queue_retention_days": ("int", 0, _DAYS_MAX),
+    "operator_queue_aging_hours": ("int", 0, 8760),  # #2915 — a year of hours
     "agent_reminders_retention_days": ("int", 0, _DAYS_MAX),
     # ent#433 — the two subscription-telemetry windows. `0` means "disable this
     # sweep" on both, same as the row windows above.

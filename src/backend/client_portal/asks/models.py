@@ -29,6 +29,12 @@ class WorkspaceAsk(BaseModel):
     # ANSWER response, where the row this call just recorded is projected back.
     status: str
     chat_id: Optional[str] = None   # the thread it was attached to, when known
+    # #2915: what the platform last established about the agent's own copy of
+    # this ask, COARSE on purpose — `confirmed | changed | closed | unconfirmed`.
+    # A client never sees the reason (it names the operator's infrastructure)
+    # nor a poller timestamp. `aging` is the operator's configured bound.
+    sync: str = "unconfirmed"
+    aging: bool = False
     # ent#430 AC #5: whether answering this ask sets work in motion, so a
     # surface can say "answered" without implying the agent started working.
     # Populated only on the ANSWER response — a pending ask has not been
@@ -52,3 +58,5 @@ class WorkspaceAskAnswer(BaseModel):
     """
     response: Optional[str] = Field(default=None, max_length=500)
     response_text: Optional[str] = Field(default=None, max_length=4000)
+    # #2915: see `OperatorResponse.acknowledge_divergence`.
+    acknowledge_divergence: bool = False

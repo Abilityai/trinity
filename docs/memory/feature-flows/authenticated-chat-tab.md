@@ -173,7 +173,7 @@ await axios.get(`/api/agents/${agentName}/executions/${executionId}`, { headers:
 ### Why `/task` not `/chat`?
 
 - `/task` uses headless execution - activities tracked in Dashboard timeline
-- `/chat` uses `--continue` flag but doesn't track well in Dashboard
+- `/chat` resumes the agent's own chat session (`--resume <id>`; `--continue` until #2958) but doesn't track well in Dashboard. The Chat tab posts `/task`, so #2958's chat-session changes do not reach it
 - For Chat tab, we want visibility in Dashboard like Tasks tab
 
 ### Async Mode Flow (THINK-001)

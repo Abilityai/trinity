@@ -12,7 +12,13 @@ import api from '../api'
 import { useAuthStore } from './auth'
 import { apiErrorMessage } from '../utils/apiError'
 import { decideAutoExpand } from '../utils/loadingState'
-import { queueResponseBody, QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending } from '../utils/operatorQueue'
+import {
+  queueResponseBody,
+  QUEUE_RESPONSE_NOT_RECORDED,
+  QUEUE_RESPONSE_DIVERGED,
+  respondRefusedAsNotPending,
+  respondRefusedAsDiverged,
+} from '../utils/operatorQueue'
 
 // Agent display helpers
 const AGENT_COLORS = [
@@ -46,6 +52,13 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   // "loading" or "failed" — consumers must gate their empty state on this.
   const hasLoaded = ref(false)
   const activeTab = ref('open') // 'open' or 'resolved'
+  // #2915: the visible escalation — answers that never reached the agent and
+  // items the agent closed on its side — from the list response, never
+  // recomputed client-side. `divergedItemId` marks the card whose response was
+  // refused with 409 item_diverged; its next send carries the acknowledgement.
+  const undeliveredCount = ref(0)
+  const closedByFilerCount = ref(0)
+  const divergedItemId = ref(null)
   let _pollTimer = null
 
   // Getters
@@ -104,6 +117,8 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
         headers: authStore.authHeader
       })
       items.value = response.data.items || []
+      undeliveredCount.value = Number(response.data.undelivered_count) || 0
+      closedByFilerCount.value = Number(response.data.closed_by_filer_count) || 0
       hasLoaded.value = true
     } catch (err) {
       error.value = apiErrorMessage(err, 'Request failed')
@@ -113,7 +128,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     }
   }
 
-  async function respondToItem(id, response, responseText = '') {
+  async function respondToItem(id, response, responseText = '', { acknowledgeDivergence = false } = {}) {
     const item = items.value.find(i => i.id === id)
     if (!item) return
     // A decision is required — never let an empty/undefined one be stringified
@@ -123,12 +138,15 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     // #2370: ONE builder for every producer of this body — the decision rides
     // `response`, the note rides `response_text` (trimmed; empty → null).
     const body = queueResponseBody(response, responseText)
+    // #2915: a second send after the divergence notice answers anyway.
+    if (acknowledgeDivergence || divergedItemId.value === id) body.acknowledge_divergence = true
     try {
       await axios.post(
         `/api/operator-queue/${id}/respond`,
         body,
         { headers: authStore.authHeader }
       )
+      if (divergedItemId.value === id) divergedItemId.value = null
 
       // Optimistic update — mirror the body that was sent
       item.status = 'responded'
@@ -144,6 +162,16 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
         expandedItemId.value = nextOpen.id
       }
     } catch (err) {
+      if (respondRefusedAsDiverged(err)) {
+        // #2915: the agent rewrote or closed this item after the card was read.
+        // Refetch so the badge shows the divergence, keep the card open, and let
+        // the next send carry the acknowledgement. Verb outcome, so it lives on
+        // the card (InlineError), not in the fetch-error banner.
+        await fetchItems()
+        divergedItemId.value = id
+        expandedItemId.value = id
+        return
+      }
       if (respondRefusedAsNotPending(err)) {
         // Item left 'pending' under us (409 — e.g. another operator cleared
         // the queue, #1017), was already terminal (400) or the row is gone
@@ -255,6 +283,10 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     } else if (data.type === 'operator_queue_cleared') {
       // Bulk clear by an operator (#1017) — refetch authoritative state
       fetchItems()
+    } else if (data.type === 'operator_queue_sync') {
+      // #2915: the poller changed some row's sync/delivery state — one thin
+      // trigger per cycle; refetch the access-controlled list (#918)
+      fetchItems()
     }
   }
 
@@ -280,6 +312,10 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     error,
     hasLoaded,
     activeTab,
+    undeliveredCount,
+    closedByFilerCount,
+    divergedItemId,
+    QUEUE_RESPONSE_DIVERGED,
     openItems,
     resolvedItems,
     pendingCount,
