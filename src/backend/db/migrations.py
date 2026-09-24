@@ -4649,7 +4649,7 @@ def _migrate_role_readiness_rollout_seed(cursor, conn):
     overwritten. `changed_by` is the rollout sentinel the role card renders as
     "carried over", not as a person. Runs once (tracked in schema_migrations).
 
-    Mirrored by the Alembic revision 0073_role_readiness_rollout_seed.
+    Mirrored by the Alembic revision 0074_role_readiness_rollout_seed.
     """
     from utils.helpers import utc_now_iso
 

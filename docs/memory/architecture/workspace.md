@@ -712,7 +712,7 @@ and a template that claims `ready` without a stamp is shown as calibrating. Requ
 `fire: false`. Stamp `ready` fires; any other stamp holds; no stamp holds only a companion (the
 template is read — bounded 3 s — solely for `x-role` presence, never its `status`); every
 ambiguity fails open and is logged. The rollout is a one-time data seed on both tracks
-(`role_readiness_rollout_seed` / Alembic `0073_role_readiness_rollout_seed`): `ready`,
+(`role_readiness_rollout_seed` / Alembic `0074_role_readiness_rollout_seed`): `ready`,
 `changed_by = rollout:ent#689`, insert-if-absent, for every live agent with autonomy on and an
 enabled seat brief at deploy. `effective_readiness` reports that stamp as `source: "rollout"` with no person; the card's
 `brief_held` (platform viewers only; false when autonomy is off) says a seat brief is paused.
