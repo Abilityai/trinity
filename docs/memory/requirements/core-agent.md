@@ -3273,6 +3273,33 @@ to localStorage in the clear.
   file), the organisation view (ent#502), enabling schedules on the flip.
 - **Flow**: `docs/memory/feature-flows/workspace-role-card.md`
 
+- **Readiness gates the proactive brief (trinity-enterprise#689 — the enforcement half of
+  #663)**: a companion's **cron-fired** seat brief (a schedule with
+  `deliver_to_workspace_email`, ent#498) runs only when the agent's owner stamp says
+  `ready`. An unstamped agent that declares `x-role` is held; an agent without `x-role` is
+  not a companion and is never gated. Manual runs, webhooks, retries and schedules that do
+  not deliver to a seat are untouched. The gate sits in the scheduler just ahead of the
+  #454 pre-check skip gate (so a held brief never runs the agent's hook) and asks the backend (`GET /api/internal/agents/{name}/brief-readiness`)
+  for the verdict: a held brief is a `skipped` execution whose reason names the fix
+  ("Held: … runs once its owner marks it ready"), a `schedule_execution_skipped` event, and
+  advanced run times — never a failure, a retry or an alert. **Every ambiguity fails open
+  and is logged** (verdict call failed, container not running, Docker or template.yaml
+  unreadable within 3 s). The template is read only to learn whether the agent is a
+  companion; `x-role.status` is agent-writable and is never trusted (#663). Honest limit: an
+  *unstamped* companion can take itself out of scope (drop `x-role`, or stall the read into
+  fail-open); an owner's stamp is the one thing it cannot touch.
+  - **Rollout (ruled 2026-09-24, amended from option 1 at plan review)**: a one-time,
+    database-only seed on both migration tracks stamps `ready` (`changed_by =
+    rollout:ent#689`) for every live agent with autonomy on and an enabled, non-deleted
+    seat-delivery schedule at deploy — the brief that fires today is the value in force
+    (#2085; with autonomy off it does not fire, so it is not grandfathered), so no install
+    changes behaviour. Insert-if-absent: an existing stamp is never overwritten (an agent
+    already stamped `calibrating` is held from deploy on).
+  - **The card says so**: a rollout stamp reads "carried over when the readiness gate
+    shipped", never "by <owner>"; when a seat-delivery schedule exists and readiness is not
+    `ready`, the card adds "its scheduled brief is paused until you mark it ready" — for
+    platform viewers only, and not when autonomy is off (the autonomy gate stops it first).
+
 ### 5.37 Workspace — the seat-level decision record: why a thing was approved, deferred or killed (trinity-enterprise#638)
 - **Status**: ✅ Implemented (2026-09-22). OSS-core (Workspace).
 - **Requirement ID**: WORKSPACE_SEAT_DECISIONS
