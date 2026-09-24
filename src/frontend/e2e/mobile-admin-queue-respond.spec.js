@@ -90,6 +90,7 @@ test.describe('/m mobile admin — queue answers (#2370)', () => {
       posts: [],
       failNext: false,    // next POST → 500
       refuseNext: false,  // next POST → 409 (item left pending under us)
+      divergeNext: false, // next POST → 409 item_diverged (#2915: the agent changed it)
     }
   }
 
@@ -105,6 +106,13 @@ test.describe('/m mobile admin — queue answers (#2370)', () => {
         if (state.failNext) {
           state.failNext = false
           return route.fulfill({ status: 500, json: { detail: 'e2e: injected failure' } })
+        }
+        if (state.divergeNext) {
+          state.divergeNext = false
+          // #2915: the agent rewrote its copy after the card was read. The item
+          // STAYS pending; the refetch now carries the divergence for the badge.
+          state.items = state.items.map((i) => i.id === id ? { ...i, sync_state: 'changed', sync_detail: 'question' } : i)
+          return route.fulfill({ status: 409, json: { detail: { code: 'item_diverged', message: 'The agent changed this item after you opened it. Review it and send again.', sync_state: 'changed', sync_detail: 'question' } } })
         }
         if (state.refuseNext) {
           state.refuseNext = false
@@ -280,5 +288,30 @@ test.describe('/m mobile admin — queue answers (#2370)', () => {
     await expect(notice).toContainText(/not recorded/i)
     await expect(approval).toHaveCount(0)
     await expect(page.getByTestId('queue-card')).toHaveCount(2)
+  })
+  test('@smoke diverged (409 item_diverged, #2915): the card stays with the notice and the badge, and the second Send acknowledges', async ({ page }) => {
+    const state = freshState()
+    state.divergeNext = true
+    await openQueue(page, state)
+    const approval = card(page, APPROVAL)
+
+    await approval.getByTestId('queue-option').filter({ hasText: 'Deny' }).click()
+    await Promise.all([respondResponse(page), approval.getByTestId('queue-send').click()])
+
+    // Refused, named: the card stays, the notice sits beside the control, and the
+    // refetched row now renders the divergence badge.
+    const err = approval.getByTestId('queue-respond-error')
+    await expect(err).toBeVisible()
+    await expect(err).toContainText(/changed this item/i)
+    await expect(approval).toHaveCount(1)
+    await expect(approval.getByTestId('queue-sync-badge')).toHaveText(/changed by the agent/i)
+    expect(state.posts).toHaveLength(1)
+    expect(state.posts[0].body).toEqual({ response: 'Deny', response_text: null })
+
+    // The second Send answers anyway — and only that one carries the override.
+    await Promise.all([respondResponse(page), approval.getByTestId('queue-send').click()])
+    expect(state.posts).toHaveLength(2)
+    expect(state.posts[1].body).toEqual({ response: 'Deny', response_text: null, acknowledge_divergence: true })
+    await expect(approval).toHaveCount(0)
   })
 })

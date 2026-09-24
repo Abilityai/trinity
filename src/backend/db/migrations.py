@@ -3618,6 +3618,35 @@ def _migrate_operator_queue_addressed_to(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_queue_sync_state(cursor, conn):
+    """#2915 — the operator-queue file sync tells the truth.
+
+    Eight nullable columns record what the poller last established about the
+    agent's file entry (`sync_state` / `sync_detail` / `sync_updated_at` /
+    `last_confirmed_at`), whether the human's answer ever reached the agent
+    (`delivery_state` / `delivery_detail` / `delivery_updated_at`) and whether the
+    human answered a diverged item knowingly (`divergence_acknowledged_at`, which
+    lets the write-back deliver into the entry as it is now). No default and
+    no backfill on purpose: a NULL renders as "not yet checked" — the honest
+    state for every row the loop has not looked at since this landed — never as
+    confirmed. The row's own title/question/options/expires_at are the ingest
+    snapshot the fingerprint compares against, so nothing else is stored.
+    """
+    for column in (
+        "sync_state", "sync_detail", "sync_updated_at", "last_confirmed_at",
+        "delivery_state", "delivery_detail", "delivery_updated_at",
+        "divergence_acknowledged_at",
+    ):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for sync honesty (#2915)",
+        )
+    conn.commit()
+
+
 def _migrate_channel_report_client(cursor, conn):
     """ent#457 review — WHICH client a portal channel context belongs to.
 
@@ -4750,4 +4779,5 @@ MIGRATIONS = [
     ("metric_points_table", _migrate_metric_points_table),
     ("seat_decisions_table", _migrate_seat_decisions_table),
     ("agent_capability_grants", _migrate_agent_capability_grants),
+    ("operator_queue_sync_state", _migrate_operator_queue_sync_state),
 ]

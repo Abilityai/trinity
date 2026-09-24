@@ -44,6 +44,14 @@
           {{ kindLabel(ask.kind) }}
         </span>
         <span v-if="showAgent" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{{ ask.agent_name }}</span>
+        <!-- #2915: coarse sync state / aging from the projection, same rule as the desktop. -->
+        <BaseBadge
+          v-if="queueSyncBadge(ask)"
+          :variant="queueSyncBadge(ask).variant"
+          dot
+          :title="queueSyncBadge(ask).title"
+          data-testid="queue-sync-badge"
+        >{{ queueSyncBadge(ask).label }}</BaseBadge>
       </div>
 
       <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">{{ ask.title }}</p>
@@ -147,11 +155,14 @@
 
 <script setup>
 import { computed, reactive, ref, onBeforeUnmount } from 'vue'
+import BaseBadge from '../base/BaseBadge.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,
 } from './portalUtils'
 import { optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/operatorQueue'
+// #2915: the same home; a second line so the #2375 import pin above stays byte-exact.
+import { queueSyncBadge, respondRefusedAsDiverged, QUEUE_RESPONSE_DIVERGED } from '@/utils/operatorQueue'
 
 const props = defineProps({
   // Omit to render every ask addressed to this user (chat/global); pass a name to
@@ -176,6 +187,7 @@ const drafts = reactive({})   // question: the typed answer (the DECISION)
 const picks = reactive({})    // approval: the selected option
 const notes = reactive({})    // approval: the optional free-text note
 const errors = reactive({})
+const diverged = reactive({})   // #2915: ask id → the person has seen the divergence notice
 
 const items = computed(() => {
   if (props.agentName) return store.asksForAgent(props.agentName)
@@ -240,7 +252,9 @@ async function submit(ask) {
   try {
     const answered = await store.answerAsk(ask.id, {
       response: body.response, responseText: body.response_text,
+      acknowledgeDivergence: !!diverged[ask.id],
     })
+    delete diverged[ask.id]
     // ent#468: the response was discarded here, so `resume_requested` and the
     // `answered` status were on the wire and read by nothing.
     showConfirmation(answerConfirmation(answered, ask.agent_name))
@@ -248,6 +262,15 @@ async function submit(ask) {
     delete picks[ask.id]
     delete notes[ask.id]
   } catch (err) {
+    if (respondRefusedAsDiverged(err)) {
+      // #2915: the agent changed or closed this ask after it was read. Show it,
+      // refresh the projection so the badge appears, and let the next send
+      // answer anyway.
+      diverged[ask.id] = true
+      errors[ask.id] = QUEUE_RESPONSE_DIVERGED
+      if (typeof store.fetchAsks === 'function') { try { await store.fetchAsks() } catch (_) { /* the notice stands */ } }
+      return
+    }
     // The backend's refusals are already written for a human ("This ask expired
     // before it was answered."), so surface them rather than replacing them with
     // a generic failure.

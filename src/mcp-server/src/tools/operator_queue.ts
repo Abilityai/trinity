@@ -98,7 +98,12 @@ export function createOperatorQueueTools(
         "(pending/responded/acknowledged/expired/cancelled), type " +
         "(alert/question/approval), priority (critical/high/medium/low), since " +
         "(ISO 8601 timestamp). Read-only. Access control: agent-scoped keys see " +
-        "only their own items plus agents they have explicit permission for.",
+        "only their own items plus agents they have explicit permission for. " +
+        "Each item also carries what the platform last established about the " +
+        "agent's own copy of it: sync_state (confirmed | changed | " +
+        "closed_by_filer | missing | stale_id | unconfirmed) with sync_detail, " +
+        "delivery_state (delivered | undelivered | not_applicable) for answered " +
+        "items, and aging/aged_since once it has waited past the operator's bound.",
       parameters: z.object({
         agent_name: z
           .string()
@@ -267,13 +272,19 @@ export function createOperatorQueueTools(
           .describe(
             "The response/decision value — for an approval item the chosen option (e.g. 'approve'/'deny'); for a question, the answer.",
           ),
+        acknowledge_divergence: z
+          .boolean()
+          .optional()
+          .describe(
+            "Set true to answer an item whose sync_state is 'changed' or 'closed_by_filer' anyway; without it the platform refuses with 409 item_diverged (#2915).",
+          ),
         response_text: z
           .string()
           .optional()
           .describe("Optional freeform text accompanying the response."),
       }),
       execute: async (
-        params: { item_id: string; response: string; response_text?: string },
+        params: { item_id: string; response: string; response_text?: string; acknowledge_divergence?: boolean },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
@@ -304,6 +315,11 @@ export function createOperatorQueueTools(
           const updated = await apiClient.respondToOperatorQueueItem(params.item_id, {
             response: params.response,
             response_text: params.response_text,
+            // #2915: only when the caller set it — the body stays byte-identical
+            // to the pre-#2915 shape for every existing caller.
+            ...(params.acknowledge_divergence === undefined
+              ? {}
+              : { acknowledge_divergence: params.acknowledge_divergence }),
           });
           return JSON.stringify(updated, null, 2);
         } catch (error) {
