@@ -537,3 +537,49 @@ async def test_the_platform_door_stamps_is_admin_on_the_principal(monkeypatch, r
 
     principal = await pa.get_portal_principal(SimpleNamespace(), SimpleNamespace(headers={}), token="jwt")
     assert (principal.email, principal.is_platform, principal.is_admin) == ("u1@example.com", True, expected)
+
+
+class TestGatherEndToEnd:
+    """`_gather` + `_compute` over a real SQLite file — the composition the unit
+    rules cannot see: live schedule ids reach the streak query, a chat run never
+    does, and a console-only owner has history."""
+
+    @pytest.fixture()
+    def wired(self, sdb, monkeypatch):
+        import database
+        from client_portal.asks import service as asks_service
+        svc = _svc()
+        monkeypatch.setattr(asks_service, "list_asks", lambda email, is_platform, agent: [])
+        monkeypatch.setattr(database.db, "list_seat_decisions", lambda agent, seat, limit=500: [])
+        monkeypatch.setattr(database.db, "get_autonomy_enabled", lambda agent: True)
+        from client_portal import service as portal
+        monkeypatch.setattr(portal, "portal_owns_agent", lambda email, agent, include_owned: False)
+
+        async def no_playbooks(agent):
+            return []
+        monkeypatch.setattr(svc, "_playbooks", no_playbooks)
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_a_failing_schedule_surfaces_and_chat_runs_do_not_count(self, wired):
+        from db.tables import agent_schedules as sch, schedule_executions as ex
+        _insert(sch, id="s1", agent_name=AGENT, name="Nightly sync", cron_expression="0 2 * * *",
+                message="sync", enabled=1, created_at=_iso(NOW - timedelta(days=30)),
+                updated_at=_iso(NOW - timedelta(days=30)), last_run_at=_iso(NOW - timedelta(days=1)))
+        for i in range(3):
+            _insert(ex, id=f"f{i}", schedule_id="s1", agent_name=AGENT, status="failed",
+                    started_at=_iso(NOW - timedelta(days=i + 1)))
+        # Newer chat runs on the same agent: never part of any schedule's streak.
+        for i in range(5):
+            _insert(ex, id=f"c{i}", schedule_id="__manual__", agent_name=AGENT, status="success",
+                    started_at=_iso(NOW - timedelta(hours=i + 1)), source_user_email="owner@example.com")
+        out = await wired.get_suggestions(AGENT, "owner@example.com", is_admin=True, now=NOW)
+        assert [s.key for s in out.suggestions] == ["schedule_failing:s1"]
+        assert out.suggestions[0].signal.startswith("Failed 3 runs in a row")
+        # The owner never used the Workspace, but ran things from the console: history.
+        assert out.basis == "history"
+
+    @pytest.mark.asyncio
+    async def test_no_workspace_and_no_runs_is_capabilities_only(self, wired):
+        out = await wired.get_suggestions(AGENT, "new@example.com", is_admin=False, now=NOW)
+        assert out.suggestions == [] and out.basis == "capabilities_only"

@@ -411,6 +411,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     suggestionsFetchedAt: 0,
     suggestionError: null,    // {key, message} of the failed dismiss
     _suggestionsInFlight: null, // the running load, shared by both placements
+    _suggestionsLoadSeq: 0,     // only the LATEST load may write
     _suggestionsDismissed: [],  // keys dismissed since the last load STARTED
     reportPayloads: {},
     // id -> {total, loaded}; present only for a payload the server actually
@@ -1128,15 +1129,19 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // request instead of sending (and making the agent answer) its own.
       if (!force && this._suggestionsInFlight) return this._suggestionsInFlight
       const gen = this._suggestionsGeneration
+      const seq = ++this._suggestionsLoadSeq
       this.suggestionsError = null
       this._suggestionsDismissed = []
+      // Superseded: an older load answering after a newer (forced) one must not
+      // overwrite it — same generation, so the agent guard alone cannot tell.
+      const stale = () => gen !== this._suggestionsGeneration || seq !== this._suggestionsLoadSeq
       const run = (async () => {
         try {
           const { data } = await portalHttp.get(
             `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions`,
             { headers: this.authHeader },
           )
-          if (gen !== this._suggestionsGeneration) return
+          if (stale()) return
           // A dismiss that landed while this load was in flight must not come
           // back with it (the server may have answered before the write).
           const gone = new Set(this._suggestionsDismissed)
@@ -1145,7 +1150,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
           this.suggestionsLoaded = true
           this.suggestionsFetchedAt = Date.now()
         } catch {
-          if (gen !== this._suggestionsGeneration) return
+          if (stale()) return
           this.suggestionsError = "Couldn't load suggestions. Check your connection and try again."
         } finally {
           if (gen === this._suggestionsGeneration && this._suggestionsInFlight === run) this._suggestionsInFlight = null

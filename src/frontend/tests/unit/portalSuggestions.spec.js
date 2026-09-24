@@ -236,6 +236,21 @@ describe('PortalSuggestions', () => {
     expect(store.suggestions.total).toBe(0)
   })
 
+  it('an older load that answers after a newer one does not overwrite it', async () => {
+    let first, second
+    axios.get
+      .mockImplementationOnce(() => new Promise((r) => { first = r }))
+      .mockImplementationOnce(() => new Promise((r) => { second = r }))
+    const store = useClientPortalStore()
+    const a = store.loadAgentSuggestions(AGENT)
+    const b = store.loadAgentSuggestions(AGENT, { force: true })
+    second({ data: payload([item({ key: 'dormant', source: 'usage', title: 'New', signal: 's', action: { type: 'open_chat' } })]) })
+    await b
+    first({ data: payload([item()]) })   // the stale answer arrives last
+    await a
+    expect(store.suggestions.suggestions.map((x) => x.key)).toEqual(['dormant'])
+  })
+
   it('a failed dismiss restores only its item into the CURRENT list', async () => {
     axios.get.mockResolvedValueOnce({ data: payload([item()]) })
     let reject
