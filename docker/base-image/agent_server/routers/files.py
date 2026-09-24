@@ -426,14 +426,16 @@ def if_match_holds(path: Path, if_match: Optional[str]) -> bool:
     """True when the caller's `if_match` still describes the file on disk.
 
     No `if_match` → always holds (a plain write). A file that does not exist
-    holds too (there is nothing to clobber). A file that cannot be read as
-    UTF-8 never matches — fail closed, not open.
+    holds too (there is nothing to clobber). The bytes are decoded exactly as
+    the download endpoint serves them (`errors="replace"`), so both sides hash
+    the same text and a stray non-UTF-8 byte cannot wedge delivery behind an
+    endless 412 (#2989 review). An unreadable file never matches.
     """
     if if_match is None or not path.exists():
         return True
     try:
-        return content_sha256(path.read_text(encoding="utf-8")) == if_match
-    except (OSError, UnicodeDecodeError):
+        return content_sha256(path.read_text(encoding="utf-8", errors="replace")) == if_match
+    except OSError:
         return False
 
 

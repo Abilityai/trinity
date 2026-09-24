@@ -1,10 +1,11 @@
 """#2915 — the operator-queue file sync tells the truth.
 
-Seven nullable columns on ``operator_queue`` record what the poller last
+Eight nullable columns on ``operator_queue`` record what the poller last
 established about the agent's file entry (``sync_state`` / ``sync_detail`` /
-``sync_updated_at`` / ``last_confirmed_at``) and whether the human's answer ever
+``sync_updated_at`` / ``last_confirmed_at``), whether the human's answer ever
 reached the agent (``delivery_state`` / ``delivery_detail`` /
-``delivery_updated_at``). No default and no backfill: NULL means "not yet
+``delivery_updated_at``) and whether the human answered a diverged item
+knowingly (``divergence_acknowledged_at``). No default and no backfill: NULL means "not yet
 checked", which is the honest state for every existing row, never "confirmed".
 
 Mirrors the SQLite ``operator_queue_sync_state`` migration.
@@ -28,6 +29,7 @@ _COLUMNS = (
     "delivery_state",
     "delivery_detail",
     "delivery_updated_at",
+    "divergence_acknowledged_at",
 )
 
 

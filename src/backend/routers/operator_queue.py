@@ -274,6 +274,12 @@ async def respond_to_queue_item(
         response_text=body.response_text,
         responded_by_id=str(current_user.id),
         responded_by_email=current_user.email or current_user.username,
+        # #2989 review: the acknowledgement is recorded on the row so the write-back
+        # delivers into the entry as it is now ("send again to answer anyway").
+        divergence_acknowledged=bool(
+            body.acknowledge_divergence
+            and existing.get("sync_state") in operator_queue_service.REFUSE_RESPONSE_STATES
+        ),
     )
 
     # Lost the race: the item left 'pending' between the check above and the

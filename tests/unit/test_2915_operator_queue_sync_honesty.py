@@ -100,6 +100,7 @@ def _fake_db(open_rows=(), terminal=None, responded=(), terminal_items=(), pendi
     db.get_setting_value.return_value = "24"
     db.create_operator_queue_item.return_value = "uuid-new"
     db.mark_operator_queue_expired.return_value = 0
+    db.mark_operator_queue_undelivered_for_stopped_agents.return_value = []
     return db
 
 
@@ -725,7 +726,7 @@ class TestRefusal:
                 "sync_state": "changed", "sync_detail": "question", "request_id": "req-op-1"}
         monkeypatch.setattr(r.db, "get_operator_queue_item", lambda item_id: dict(item))
         recorded = {}
-        def _respond(item_id, response, response_text, responded_by_id, responded_by_email):
+        def _respond(item_id, response, response_text, responded_by_id, responded_by_email, **kw):
             recorded["response"] = response
             return {**item, "status": "responded", "response": response}
         monkeypatch.setattr(r.db, "respond_to_operator_queue_item", _respond)
@@ -748,3 +749,317 @@ class TestRefusal:
         client, recorded = op_client
         res = client.post("/api/operator-queue/op-1/respond", json={"response": "maybe", "acknowledge_divergence": True})
         assert res.status_code == 422 and recorded == {}, (res.status_code, res.text)
+
+
+# ===========================================================================
+# 8. Review round 2 (PR #2989) — every finding the reviewers traced, pinned.
+# ===========================================================================
+
+class TestRound2Reconcile:
+    def test_a_platform_minted_pending_row_is_never_missing(self, monkeypatch):
+        """A platform alarm (reserved id prefix) was never in the agent's file;
+        the "rows the file no longer carries" loop must skip it — it used to
+        record `missing:entry_missing` for every alarm on the first cycle."""
+        alarm = _row("cb-dormant-a-2026", sync_state=None, title="circuit dormant")
+        db = _fake_db(open_rows=[alarm, _row("req-1")])
+        svc, audit = _wire(monkeypatch, db, _client(_file()))
+        asyncio.run(svc._sync_agent("a"))
+        touched = [c.args[0] for c in db.set_operator_queue_sync_state.call_args_list]
+        assert "uuid-cb-dormant-a-2026" not in touched
+        assert "uuid-req-1" in touched and (SYNC_MISSING, "entry_missing") in _sync_calls(db)
+
+    def test_a_responded_row_absent_from_the_file_is_reconstructed_not_marked_missing(self, monkeypatch):
+        """The write-back re-appends a responded entry the file lost; marking it
+        `missing` first minted a `diverged` + `reconciled` pair per cycle."""
+        resp = _row(status="responded")
+        db = _fake_db(open_rows=[resp], responded=[resp])
+        client = _client(_file())
+        svc, audit = _wire(monkeypatch, db, client)
+        asyncio.run(svc._sync_agent("a"))
+        assert (SYNC_MISSING, "entry_missing") not in _sync_calls(db)
+        written = json.loads(client.write_file.call_args.args[1])
+        assert [r["id"] for r in written["requests"]] == ["req-1"]
+        assert ("uuid-req-1", DELIVERY_DELIVERED, None) in _delivery_calls(db)
+        assert "diverged" not in _audit_actions(audit)
+
+    def test_duplicate_ids_take_the_first_entry_and_never_flip(self, monkeypatch):
+        db = _fake_db(open_rows=[_row()])
+        dup = _file(_entry(), _entry(title="a second copy, rewritten"))
+        svc, audit = _wire(monkeypatch, db, _client(dup))
+        asyncio.run(svc._sync_agent("a"))
+        asyncio.run(svc._sync_agent("a"))
+        assert all(state == SYNC_CONFIRMED for state, _ in _sync_calls(db))
+        assert "diverged" not in _audit_actions(audit)
+
+    @pytest.mark.parametrize("field,over,detail", [
+        ("type", {"type": "question"}, "type"),
+        ("priority", {"priority": "low"}, "priority"),
+        ("context", {"context": {"why": "new facts"}}, "context"),
+        ("addressee", {"addressed_to_email": "someone-else@example.com"}, "addressee"),
+    ])
+    def test_a_change_to_type_priority_context_or_addressee_is_detected(self, monkeypatch, field, over, detail):
+        row = _row(addressed_to_email="client@example.com")
+        db = _fake_db(open_rows=[row])
+        entry = _entry(addressed_to_email="client@example.com")
+        entry.update(over)
+        svc, _ = _wire(monkeypatch, db, _client(_file(entry)))
+        asyncio.run(svc._sync_agent("a"))
+        assert (SYNC_CHANGED, detail) in _sync_calls(db)
+
+    def test_an_unpriced_priority_and_an_oversize_context_compare_as_ingested(self):
+        """The clamp's own defaults: an invalid priority became `medium` at ingest
+        and an oversize context became a marker — neither is a change."""
+        row = _row(priority="medium", context={"_truncated": True, "_original_bytes": 99999, "execution_id": None})
+        entry = _entry(priority="urgent!!", context={"blob": "x" * 20000})
+        assert changed_fields(row, entry) == []
+
+    def test_an_addressee_the_row_never_resolved_is_not_a_change(self):
+        assert changed_fields(_row(addressed_to_email=None), _entry(addressed_to_email="x@example.com")) == []
+
+    def test_wrong_shape_requests_is_unconfirmed_and_never_writes_back(self, monkeypatch):
+        """`{"requests": {...}}` used to read as an EMPTY list: every row went
+        `missing`, the write-back replaced the agent's file and recorded
+        `delivered` — the destructive class this PR fixes for invalid JSON."""
+        resp = _row(status="responded")
+        db = _fake_db(open_rows=[_row("req-0"), resp], responded=[resp])
+        client = _client(json.dumps({"$schema": "operator-queue-v1", "requests": {"req-0": {}}}))
+        svc, _ = _wire(monkeypatch, db, client)
+        asyncio.run(svc._sync_agent("a"))
+        db.mark_operator_queue_unconfirmed.assert_called_once()
+        assert db.mark_operator_queue_unconfirmed.call_args.args[0] == "wrong_shape"
+        assert (SYNC_MISSING, "entry_missing") not in _sync_calls(db)
+        client.write_file.assert_not_called()
+        db.set_operator_queue_delivery_state.assert_not_called()
+
+    def test_a_top_level_array_is_wrong_shape_not_a_swallowed_exception(self, monkeypatch):
+        db = _fake_db(open_rows=[_row()])
+        svc, _ = _wire(monkeypatch, db, _client(json.dumps([_entry()])))
+        asyncio.run(svc._sync_agent("a"))
+        assert db.mark_operator_queue_unconfirmed.call_args.args[0] == "wrong_shape"
+        assert _sync_calls(db) == []
+
+
+class TestRound2WriteBack:
+    def _acknowledged(self, **over):
+        base = dict(status="responded", sync_state="changed", sync_detail="question",
+                    divergence_acknowledged_at="2026-09-24T09:00:00Z")
+        base.update(over)
+        return _row(**base)
+
+    def test_an_acknowledged_divergence_delivers_into_the_rewritten_entry(self, monkeypatch):
+        """"Send again to answer anyway" must reach the file: the operator saw the
+        rewritten question and answered it. Without the acknowledgement the
+        row stayed `undelivered:entry_changed` forever."""
+        resp = self._acknowledged()
+        db = _fake_db(open_rows=[resp], responded=[resp])
+        client = _client(_file(_entry(question="A DIFFERENT question")))
+        svc, audit = _wire(monkeypatch, db, client)
+        asyncio.run(svc._sync_agent("a"))
+        written = json.loads(client.write_file.call_args.args[1])
+        assert written["requests"][0]["status"] == "responded"
+        assert written["requests"][0]["response"] == "approve"
+        assert written["requests"][0]["question"] == "A DIFFERENT question"   # the agent's text is kept
+        assert ("uuid-req-1", DELIVERY_DELIVERED, None) in _delivery_calls(db)
+
+    def test_an_acknowledged_divergence_is_written_into_an_entry_the_agent_closed(self, monkeypatch):
+        """The agent marked its entry `acknowledged` before anyone answered. An
+        acknowledged answer is WRITTEN into it (status → responded) — the
+        previous path recorded `delivered` with no write, and the next cycle
+        then claimed the agent acknowledged an answer it never saw."""
+        resp = self._acknowledged(sync_state="closed_by_filer", sync_detail="acknowledged")
+        db = _fake_db(open_rows=[resp], responded=[resp])
+        client = _client(_file(_entry(status="acknowledged")))
+        svc, _ = _wire(monkeypatch, db, client)
+        asyncio.run(svc._sync_agent("a"))
+        client.write_file.assert_awaited_once()
+        written = json.loads(client.write_file.call_args.args[1])
+        assert written["requests"][0]["status"] == "responded"
+        assert written["requests"][0]["responded_at"] == resp["responded_at"]
+        assert ("uuid-req-1", DELIVERY_DELIVERED, None) in _delivery_calls(db)
+
+    def test_an_agent_closed_entry_without_acknowledgement_is_undelivered_not_delivered(self, monkeypatch):
+        resp = _row(status="responded")
+        db = _fake_db(open_rows=[resp], responded=[resp])
+        client = _client(_file(_entry(status="acknowledged")))      # no responded_at: not our write
+        svc, _ = _wire(monkeypatch, db, client)
+        asyncio.run(svc._sync_agent("a"))
+        client.write_file.assert_not_called()
+        assert ("uuid-req-1", DELIVERY_UNDELIVERED, "closed_by_filer") in _delivery_calls(db)
+        assert ("uuid-req-1", DELIVERY_DELIVERED, None) not in _delivery_calls(db)
+
+    def test_our_own_landed_answer_is_recognised_by_its_responded_at(self, monkeypatch):
+        resp = _row(status="responded")
+        landed = _entry(status="acknowledged", response="approve", responded_at=resp["responded_at"])
+        db = _fake_db(open_rows=[resp], responded=[resp])
+        client = _client(_file(landed))
+        svc, _ = _wire(monkeypatch, db, client)
+        asyncio.run(svc._sync_agent("a"))
+        client.write_file.assert_not_called()
+        assert ("uuid-req-1", DELIVERY_DELIVERED, None) in _delivery_calls(db)
+
+    def test_wrong_shape_at_the_reread_never_writes(self, monkeypatch):
+        resp = _row(status="responded")
+        db = _fake_db(open_rows=[resp], responded=[resp])
+        bad = json.dumps({"$schema": "operator-queue-v1", "requests": {"req-1": {}}})
+        client = _client(None, reads=[{"success": True, "content": _file(_entry())}, {"success": True, "content": bad}])
+        svc, _ = _wire(monkeypatch, db, client)
+        asyncio.run(svc._sync_agent("a"))
+        client.write_file.assert_not_called()
+
+    def test_a_file_that_vanished_between_the_two_reads_is_left_alone(self, monkeypatch):
+        """The cycle-start read had a file; the pre-write re-read does not. That
+        is an agent mid-rewrite, not a lost file: nothing is written and
+        nothing is recorded — next cycle decides."""
+        resp = _row(status="responded")
+        db = _fake_db(open_rows=[resp], responded=[resp])
+        client = _client(None, reads=[{"success": True, "content": _file(_entry())},
+                                      {"success": True, "content": None, "not_found": True}])
+        svc, _ = _wire(monkeypatch, db, client)
+        asyncio.run(svc._sync_agent("a"))
+        client.write_file.assert_not_called()
+        db.set_operator_queue_delivery_state.assert_not_called()
+
+    def test_a_file_missing_at_both_reads_is_reconstructed(self, monkeypatch):
+        resp = _row(status="responded")
+        db = _fake_db(open_rows=[resp], responded=[resp])
+        client = _client(None, reads=[{"success": True, "content": None, "not_found": True}])
+        svc, _ = _wire(monkeypatch, db, client)
+        asyncio.run(svc._sync_agent("a"))
+        client.write_file.assert_awaited_once()
+        assert client.write_file.call_args.kwargs["if_match"] is None
+
+
+class TestRound2PollCycle:
+    _run_cycle = TestPollCycle._run_cycle
+
+    def test_answers_for_stopped_agents_are_undelivered_agent_not_running(self, monkeypatch):
+        """AC3: a container that is down cannot receive the answer — the row says
+        so (`undelivered:agent_not_running`), not just `unconfirmed`, and each
+        transition is audited once."""
+        db = _fake_db()
+        db.mark_operator_queue_undelivered_for_stopped_agents.return_value = [
+            {"id": "uuid-x", "status": "responded", "agent_name": "b"},
+        ]
+        audit = AsyncMock()
+        monkeypatch.setattr(oqs, "_audit_sync", audit)
+        db, svc, _ = self._run_cycle(monkeypatch, {"a": "running", "b": "stopped"}, db=db)
+        call = db.mark_operator_queue_undelivered_for_stopped_agents.call_args
+        assert call.kwargs["running_agents"] == ["a"]
+        assert "undeliverable" in _audit_actions(audit)
+        assert audit.call_args.args[2] == "uuid-x"
+
+
+class TestRound2Accessors:
+    _seed = TestAccessorsOnAMigratedDb._seed
+
+    def _now(self):
+        return "2026-09-24T09:00:00Z"
+
+    def test_mark_acknowledged_needs_a_delivered_answer(self, real_db):
+        """An entry the agent marked `acknowledged` flips a responded row ONLY when
+        our answer was delivered into that entry — otherwise the platform claims
+        the agent acknowledged an answer it never saw."""
+        uid = self._seed(real_db, "ack-1", status="responded", agent="agent-2915-ack")
+        assert real_db.mark_operator_queue_acknowledged("agent-2915-ack", "ack-1") is None
+        real_db.set_operator_queue_delivery_state(uid, "delivered", None, self._now())
+        assert real_db.mark_operator_queue_acknowledged("agent-2915-ack", "ack-1") == uid
+
+    def test_mark_unconfirmed_skips_platform_minted_rows(self, real_db):
+        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+        alarm = self._seed(real_db, "cb-dormant-2915", agent="agent-2915-pm")
+        ask = self._seed(real_db, "pm-ask", agent="agent-2915-pm")
+        real_db.mark_operator_queue_unconfirmed("agent_not_running", self._now(), agent_name="agent-2915-pm",
+                                                exclude_request_id_prefixes=_RESERVED_ID_PREFIXES)
+        assert real_db.get_operator_queue_item(alarm)["sync_state"] is None
+        assert real_db.get_operator_queue_item(ask)["sync_state"] == "unconfirmed"
+
+    def test_terminal_flips_skip_a_dropped_entry_and_go_oldest_first(self, real_db):
+        from db.engine import get_engine
+        from db.tables import operator_queue
+        from sqlalchemy import update
+        agent = "agent-2915-order"
+        newer = self._seed(real_db, "o-new", status="cancelled", agent=agent)
+        older = self._seed(real_db, "o-old", status="cancelled", agent=agent)
+        dropped = self._seed(real_db, "o-gone", status="cancelled", agent=agent)
+        with get_engine().begin() as conn:
+            conn.execute(update(operator_queue).where(operator_queue.c.id == older).values(created_at="2026-01-01T00:00:00Z"))
+            conn.execute(update(operator_queue).where(operator_queue.c.id == newer).values(created_at="2026-06-01T00:00:00Z"))
+        real_db.set_operator_queue_delivery_state(dropped, "undelivered", "entry_missing", self._now())
+        real_db.set_operator_queue_delivery_state(newer, "undelivered", "conflict", self._now())
+        ids = [r["id"] for r in real_db.get_operator_queue_terminal_for_agent(agent)]
+        assert dropped not in ids
+        assert ids.index(older) < ids.index(newer)
+
+    def test_count_flags_excludes_a_cancellation_the_agent_already_dropped(self, real_db):
+        agent = "agent-2915-cnt"
+        gone = self._seed(real_db, "c-gone", status="cancelled", agent=agent)
+        real_db.set_operator_queue_delivery_state(gone, "undelivered", "entry_missing", self._now())
+        answer = self._seed(real_db, "c-ans", status="responded", agent=agent)
+        real_db.set_operator_queue_delivery_state(answer, "undelivered", "entry_missing", self._now())
+        assert real_db.count_operator_queue_flags({agent})["undelivered"] == 1
+
+    def test_respond_records_the_acknowledged_divergence(self, real_db):
+        uid = self._seed(real_db, "d-ack", agent="agent-2915-d")
+        item = real_db.respond_to_operator_queue_item(uid, "a", None, None, "op@example.com",
+                                                     divergence_acknowledged=True)
+        assert item["divergence_acknowledged_at"]
+        plain = self._seed(real_db, "d-plain", agent="agent-2915-d")
+        assert real_db.respond_to_operator_queue_item(plain, "a", None, None, "op@example.com")["divergence_acknowledged_at"] is None
+
+    def test_mark_undelivered_for_stopped_agents_is_edge_triggered_and_skips_platform_rows(self, real_db):
+        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+        stopped, running = "agent-2915-off", "agent-2915-on"
+        a = self._seed(real_db, "s-ans", status="responded", agent=stopped)
+        c = self._seed(real_db, "s-can", status="cancelled", agent=stopped)
+        alarm = self._seed(real_db, "cb-dormant-off", status="responded", agent=stopped)
+        r = self._seed(real_db, "s-run", status="responded", agent=running)
+        p = self._seed(real_db, "s-pend", agent=stopped)
+        rows = real_db.mark_operator_queue_undelivered_for_stopped_agents(
+            self._now(), running_agents=[running], exclude_request_id_prefixes=_RESERVED_ID_PREFIXES)
+        mine = {x["id"] for x in rows if x["agent_name"] in (stopped, running)}
+        assert mine == {a, c}
+        assert real_db.get_operator_queue_item(a)["delivery_detail"] == "agent_not_running"
+        assert real_db.get_operator_queue_item(alarm)["delivery_state"] is None
+        assert real_db.get_operator_queue_item(r)["delivery_state"] is None
+        assert real_db.get_operator_queue_item(p)["delivery_state"] is None
+        again = real_db.mark_operator_queue_undelivered_for_stopped_agents(
+            self._now(), running_agents=[running], exclude_request_id_prefixes=_RESERVED_ID_PREFIXES)
+        assert not [x for x in again if x["agent_name"] in (stopped, running)]
+
+
+class TestRound2AcknowledgementReachesTheRow:
+    def test_the_operator_route_records_the_acknowledgement_on_the_row(self, monkeypatch):
+        from fastapi.testclient import TestClient
+        from routers import operator_queue as r
+        app = _operator_queue_app()
+        item = {"id": "op-2", "agent_name": "agent-x", "type": "approval", "status": "pending",
+                "options": ["approve", "reject"], "title": "t", "question": "q", "context": {},
+                "sync_state": "changed", "sync_detail": "question", "request_id": "req-op-2"}
+        monkeypatch.setattr(r.db, "get_operator_queue_item", lambda item_id: dict(item))
+        recorded = {}
+        def _respond(item_id, response, response_text, responded_by_id, responded_by_email, **kw):
+            recorded.update(kw)
+            return {**item, "status": "responded", "response": response}
+        monkeypatch.setattr(r.db, "respond_to_operator_queue_item", _respond)
+        monkeypatch.setattr(r.operator_resume_service, "spawn_resume_dispatch", lambda *a, **k: None)
+        monkeypatch.setattr(r, "_websocket_manager", None)
+        c = TestClient(app, raise_server_exceptions=True)
+        resp = c.post("/api/operator-queue/op-2/respond",
+                      json={"response": "approve", "acknowledge_divergence": True})
+        assert resp.status_code == 200, resp.text
+        assert recorded == {"divergence_acknowledged": True}
+
+    def test_the_portal_answer_records_the_acknowledgement_on_the_row(self, real_db, monkeypatch):
+        import client_portal.service as portal_service
+        monkeypatch.setattr(portal_service, "agent_on_roster", lambda agent, email, include_owned=False: True)
+        import services.operator_resume_service as ors
+        monkeypatch.setattr(ors, "spawn_resume_dispatch", lambda *a, **k: None)
+        from client_portal.asks.service import answer_ask
+        from services.operator_queue_service import _clamp_ingested_item
+        email = "client-2915c@example.com"
+        item = _clamp_ingested_item({"id": "p-ack", "type": "approval", "title": "t", "question": "q",
+                                     "options": ["yes", "no"], "addressed_to_email": email}, "agent-2915-pa")
+        uid = real_db.create_operator_queue_item("agent-2915-pa", item)
+        real_db.set_operator_queue_sync_state(uid, "closed_by_filer", "acknowledged", "2026-09-24T09:00:00Z")
+        answer_ask(uid, email, False, "yes", None, acknowledge_divergence=True)
+        assert real_db.get_operator_queue_item(uid)["divergence_acknowledged_at"]

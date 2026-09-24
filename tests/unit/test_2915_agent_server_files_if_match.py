@@ -50,11 +50,17 @@ def test_no_if_match_and_a_missing_file_both_hold(tmp_path):
     assert mod.if_match_holds(tmp_path / "absent.json", "deadbeef") is True
 
 
-def test_a_file_that_is_not_utf8_never_matches(tmp_path):
+def test_a_file_that_is_not_utf8_matches_the_text_the_download_endpoint_serves(tmp_path):
+    """Both sides hash the SAME text: the download endpoint reads with
+    `errors='replace'`, so a stray byte must not wedge delivery behind an
+    endless 412 — the caller's hash over the served text still matches, and
+    a stale hash still does not."""
     mod = _load()
     f = tmp_path / "bin"
     f.write_bytes(b"\xff\xfe\x00 not text")
-    assert mod.if_match_holds(f, "anything") is False
+    served = f.read_text(encoding="utf-8", errors="replace")
+    assert mod.if_match_holds(f, mod.content_sha256(served)) is True
+    assert mod.if_match_holds(f, "stale") is False
 
 
 def test_write_is_atomic_and_leaves_no_temp_file(tmp_path):

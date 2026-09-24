@@ -133,3 +133,23 @@ describe('store — a refused response becomes a notice and an acknowledged rese
     expect(axios.get).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('queueSyncBadge — review round 2 (#2989)', () => {
+  it('a wrong-shape queue file is named', () => {
+    expect(queueSyncBadge({ sync_state: 'unconfirmed', sync_detail: 'wrong_shape' }).title).toContain('not the expected shape')
+  })
+  it('an answer held by a stopped agent says so and promises delivery on start', () => {
+    const t = queueSyncBadge({ delivery_state: 'undelivered', delivery_detail: 'agent_not_running' }).title
+    expect(t).toContain('not running')
+    expect(t).toContain('starts')
+  })
+  it('a cancellation whose entry the agent dropped never promises a retry', () => {
+    const t = queueSyncBadge({ status: 'cancelled', delivery_state: 'undelivered', delivery_detail: 'entry_missing' }).title
+    expect(t).not.toContain('retrying')
+    expect(t).toContain('dropped')
+  })
+  it('a transient failure names when it was last tried', () => {
+    const t = queueSyncBadge({ delivery_state: 'undelivered', delivery_detail: 'conflict', delivery_updated_at: '2026-09-24T09:00:00Z' }).title
+    expect(t).toContain('2026-09-24T09:00:00Z')
+  })
+})

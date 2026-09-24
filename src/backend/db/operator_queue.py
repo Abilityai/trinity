@@ -103,6 +103,9 @@ class OperatorQueueOperations:
             "delivery_state": row["delivery_state"],
             "delivery_detail": row["delivery_detail"],
             "delivery_updated_at": row["delivery_updated_at"],
+            # #2989 review — the operator answered a diverged item knowingly; the
+            # write-back delivers into the entry as it is now
+            "divergence_acknowledged_at": row["divergence_acknowledged_at"],
         }
 
     # Columns selected for a full queue-item record, in the canonical order.
@@ -135,6 +138,7 @@ class OperatorQueueOperations:
         operator_queue.c.delivery_state,
         operator_queue.c.delivery_detail,
         operator_queue.c.delivery_updated_at,
+        operator_queue.c.divergence_acknowledged_at,
     )
 
     def create_item(self, agent_name: str, item: Dict) -> str:
@@ -367,8 +371,13 @@ class OperatorQueueOperations:
         response_text: Optional[str],
         responded_by_id: Optional[str],
         responded_by_email: str,
+        divergence_acknowledged: bool = False,
     ) -> Optional[Dict]:
         """Record a response to a queue item.
+
+        `divergence_acknowledged` (#2989 review): the operator saw that the agent
+        had rewritten or closed the entry and answered anyway; the write-back then
+        delivers into the entry as it is now instead of refusing it.
 
         Returns the updated item or None if not found.
 
@@ -399,6 +408,7 @@ class OperatorQueueOperations:
                     responded_by_id=responded_by_id,
                     responded_by_email=responded_by_email,
                     responded_at=now,
+                    divergence_acknowledged_at=now if divergence_acknowledged else None,
                 )
             )
 
@@ -612,6 +622,11 @@ class OperatorQueueOperations:
                         operator_queue.c.agent_name == agent_name,
                         operator_queue.c.request_id == request_id,
                         operator_queue.c.status == "responded",
+                        # #2989 review: an agent-side `acknowledged` is an ack of OUR
+                        # answer only when that answer reached the entry. Without
+                        # this, an entry the agent closed itself flipped the row and
+                        # the platform claimed an ack of an answer never seen.
+                        operator_queue.c.delivery_state == "delivered",
                     )
                 )
                 .values(status="acknowledged", acknowledged_at=now)
@@ -786,9 +801,13 @@ class OperatorQueueOperations:
                         operator_queue.c.delivery_state.is_(None),
                         operator_queue.c.delivery_state == "undelivered",
                     ),
+                    # #2989 review: a flip whose entry the agent already dropped can
+                    # never land — it stays recorded, but leaves the retry set so the
+                    # cap cannot starve rows that still can. Oldest first, same reason.
+                    func.coalesce(operator_queue.c.delivery_detail, "") != "entry_missing",
                 )
             )
-            .order_by(operator_queue.c.created_at.desc())
+            .order_by(operator_queue.c.created_at.asc())
             .limit(limit)
         )
         with get_engine().connect() as conn:
@@ -916,10 +935,57 @@ class OperatorQueueOperations:
             )
             return result.rowcount > 0
 
+    @staticmethod
+    def _not_prefixed(prefixes):
+        """`request_id` does not start with any reserved platform prefix — the SQL
+        twin of `is_platform_minted` (#2989 review: a platform alarm was never in
+        the agent's file, so no file-derived state may be written on it)."""
+        return [
+            func.substr(operator_queue.c.request_id, 1, len(p)) != p
+            for p in (prefixes or ())
+        ]
+
+    def mark_undelivered_for_stopped_agents(
+        self, now: str, *, running_agents: List[str],
+        exclude_request_id_prefixes=None,
+    ) -> List[Dict]:
+        """Every answer / terminal flip still owed to an agent that is NOT running
+        becomes `undelivered:agent_not_running` (#2989 review, AC3) — and the
+        transitioned rows are returned so the caller can audit each once.
+        Edge-triggered; an empty running list is an explicit branch."""
+        conds = [
+            operator_queue.c.status.in_(("responded", "cancelled", "expired")),
+            or_(
+                operator_queue.c.delivery_state.is_(None),
+                and_(
+                    operator_queue.c.delivery_state == "undelivered",
+                    func.coalesce(operator_queue.c.delivery_detail, "") != "agent_not_running",
+                ),
+            ),
+            *self._not_prefixed(exclude_request_id_prefixes),
+        ]
+        if running_agents:
+            conds.append(operator_queue.c.agent_name.notin_(list(running_agents)))
+        with get_engine().begin() as conn:
+            rows = conn.execute(
+                select(operator_queue.c.id, operator_queue.c.status, operator_queue.c.agent_name)
+                .where(and_(*conds))
+            ).mappings().all()
+            if not rows:
+                return []
+            conn.execute(
+                update(operator_queue)
+                .where(operator_queue.c.id.in_([r["id"] for r in rows]))
+                .values(delivery_state="undelivered", delivery_detail="agent_not_running",
+                        delivery_updated_at=now)
+            )
+        return [dict(r) for r in rows]
+
     def mark_unconfirmed(
         self, detail: str, now: str, *,
         agent_name: Optional[str] = None,
         exclude_agents: Optional[List[str]] = None,
+        exclude_request_id_prefixes=None,
     ) -> int:
         """Flip open rows to `unconfirmed:<detail>` — for ONE agent (`agent_name`,
         the read-failure path) or for every agent NOT in `exclude_agents` (the
@@ -939,6 +1005,7 @@ class OperatorQueueOperations:
             conds.append(operator_queue.c.agent_name == agent_name)
         elif exclude_agents:
             conds.append(operator_queue.c.agent_name.notin_(list(exclude_agents)))
+        conds.extend(self._not_prefixed(exclude_request_id_prefixes))
         with get_engine().begin() as conn:
             result = conn.execute(
                 update(operator_queue)
@@ -955,9 +1022,13 @@ class OperatorQueueOperations:
             if not accessible_agent_names:
                 return {"undelivered": 0, "closed_by_filer": 0}
             base.append(operator_queue.c.agent_name.in_(list(accessible_agent_names)))
+        # #2989 review: a cancellation whose entry the agent already dropped is
+        # recorded but is not an escalation — nothing is left for anyone to do.
         undelivered = select(func.count()).select_from(operator_queue).where(
             and_(*base, operator_queue.c.delivery_state == "undelivered",
-                 operator_queue.c.cleared_at.is_(None))
+                 operator_queue.c.cleared_at.is_(None),
+                 ~and_(operator_queue.c.status.in_(("cancelled", "expired")),
+                       func.coalesce(operator_queue.c.delivery_detail, "") == "entry_missing"))
         )
         closed = select(func.count()).select_from(operator_queue).where(
             and_(*base, operator_queue.c.status == "pending",

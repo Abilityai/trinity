@@ -505,7 +505,7 @@ DELIVERY_STATES = frozenset({DELIVERY_DELIVERED, DELIVERY_UNDELIVERED, DELIVERY_
 # columns — a CLOSED vocabulary. Field names, folded status tokens and failure
 # kinds only; never `str(e)`, never `response.text` (agent-controlled), never
 # agent-authored text.
-_DETAIL_RE = re.compile(r"^[a-z0-9_,]{1,64}$")
+_DETAIL_RE = re.compile(r"^[a-z0-9_,]{1,96}$")
 _AGENT_STATUS_RE = re.compile(r"^[a-z_]{1,32}$")
 READ_FAILURE_THRESHOLD = 3            # consecutive failed cycles before `unconfirmed` (sync_health precedent)
 LAST_CONFIRMED_REFRESH_SECONDS = 60   # `last_confirmed_at` cadence — one batched UPDATE per agent per minute
@@ -513,7 +513,8 @@ OPERATOR_QUEUE_AGING_HOURS_KEY = "operator_queue_aging_hours"
 OPERATOR_QUEUE_AGING_HOURS_DEFAULT = 24
 _PLATFORM_BLOCK_KEY = "platform"      # the receipt lives under `platform` in the agent's entry
 _AGING_SINCE_KEY = "aging_since"
-_CONTENT_FIELDS = ("title", "question", "options", "expires_at")
+_CONTENT_FIELDS = ("title", "question", "options", "expires_at", "type", "priority", "context", "addressee")
+_CONTEXT_TRUNCATED_SENTINEL = "<truncated>"
 
 
 def _detail(token) -> str:
@@ -577,6 +578,10 @@ def _entry_content(req: dict) -> dict:
         "question": question or title or "(no details provided)",
         "options": _canonical_options(options),
         "expires_at": _normalise_expires(req.get("expires_at")),
+        "type": _comparable_type(req.get("type")),
+        "priority": _comparable_priority(req.get("priority")),
+        "context": _comparable_context(req.get("context")),
+        "addressee": _comparable_addressee(req.get("addressed_to_email")),
     }
 
 
@@ -586,13 +591,85 @@ def _row_content(row: dict) -> dict:
         "question": row.get("question") or row.get("title") or "(no details provided)",
         "options": _canonical_options(row.get("options")),
         "expires_at": _normalise_expires(row.get("expires_at")),
+        "type": _comparable_type(row.get("type")),
+        "priority": _comparable_priority(row.get("priority")),
+        "context": _comparable_context(row.get("context")),
+        "addressee": _comparable_addressee(row.get("addressed_to_email")),
     }
 
 
+def _comparable_type(value) -> str:
+    return "question" if value in (None, "") else str(value)
+
+
+def _comparable_priority(value) -> str:
+    return value if value in _VALID_PRIORITIES else "medium"   # the clamp's default
+
+
+def _comparable_addressee(value) -> Optional[str]:
+    return (str(value).strip().lower() or None) if isinstance(value, str) else None
+
+
+def _comparable_context(ctx) -> str:
+    """The clamp's PURE half for `context` (#2989 review): non-dict → {}, the
+    platform's workspace-thread key stripped (the clamp writes it; it is never
+    agent content), and an oversize / unserialisable value → one sentinel — which
+    is also what a row holds after ingest (`_truncated`). Compared as canonical
+    JSON. Sized the way the clamp sizes it, so the cap is crossed on both sides
+    at (very nearly) the same input."""
+    if not isinstance(ctx, dict):
+        return "{}"
+    if ctx.get("_truncated") is True:
+        return _CONTEXT_TRUNCATED_SENTINEL
+    body = {k: v for k, v in ctx.items() if k != _WORKSPACE_THREAD_KEY}
+    try:
+        if len(json.dumps(body).encode("utf-8")) > OPERATOR_QUEUE_CONTEXT_MAX_BYTES:
+            return _CONTEXT_TRUNCATED_SENTINEL
+        return json.dumps(body, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return _CONTEXT_TRUNCATED_SENTINEL
+
+
 def changed_fields(row: dict, req: dict) -> list:
-    """Which of the four content fields the agent rewrote since ingest."""
+    """Which content fields the agent rewrote since ingest. `addressee` counts
+    only when the row resolved one: the ingest value is an authorization
+    decision against the roster (ent#364), so an addressee the roster refused
+    is not a rewrite — a re-address is ent#619's supersede vocabulary."""
     a, b = _row_content(row), _entry_content(req)
-    return [f for f in _CONTENT_FIELDS if a[f] != b[f]]
+    out = []
+    for f in _CONTENT_FIELDS:
+        if f == "addressee" and not a["addressee"]:
+            continue
+        if a[f] != b[f]:
+            out.append(f)
+    return out
+
+
+def _well_formed_queue(data) -> bool:
+    """An object whose `requests` (if present) is a list. Anything else is the
+    WRONG SHAPE and is read as `unconfirmed`, never as an empty queue (#2989
+    review: `{"requests": {...}}` used to mark every row `missing` and then
+    overwrite the agent's file; a top-level array raised inside `gather`)."""
+    return isinstance(data, dict) and isinstance(data.get("requests", []), list)
+
+
+def _deliver_into(req: dict, resp: dict) -> None:
+    req["status"] = "responded"
+    req["response"] = resp["response"]
+    req["response_text"] = resp.get("response_text")
+    req["responded_by"] = resp.get("responded_by_email")
+    req["responded_at"] = resp.get("responded_at")
+
+
+def _is_our_answer(req: dict, resp: dict) -> bool:
+    """Did a previous write-back land THIS answer in the entry? Matched on the
+    answer's own timestamp, so an entry the agent closed itself (`acknowledged`
+    with no `responded_at`) is never mistaken for a delivered one."""
+    return (
+        req.get("status") in ("responded", "acknowledged")
+        and bool(resp.get("responded_at"))
+        and req.get("responded_at") == resp.get("responded_at")
+    )
 
 
 def aging_hours() -> int:
@@ -1039,12 +1116,31 @@ class OperatorQueueSyncService:
         # (an explicit branch in the accessor; never `notin_([])`).
         try:
             swept = db.mark_operator_queue_unconfirmed(
-                "agent_not_running", now, exclude_agents=running_agents
+                "agent_not_running", now, exclude_agents=running_agents,
+                exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
             )
             if swept:
                 self._changed_this_cycle = True
         except Exception as e:
             logger.error(f"Operator queue not-running sweep failed: {e}")
+
+        # #2989 review (AC3): an answer or terminal flip waiting on an agent that
+        # is NOT running cannot reach its file — the row says so,
+        # `undelivered:agent_not_running`, not merely `unconfirmed`. Edge-triggered
+        # and audited once per transition; the write-back flips it to `delivered`
+        # when the agent is back. Platform alarms (`not_applicable`) are skipped.
+        try:
+            stalled = db.mark_operator_queue_undelivered_for_stopped_agents(
+                now, running_agents=running_agents,
+                exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+            )
+        except Exception as e:
+            logger.error(f"Operator queue not-running delivery sweep failed: {e}")
+            stalled = []
+        for row in stalled:
+            self._changed_this_cycle = True
+            await _audit_sync("undeliverable", row.get("agent_name") or "", row["id"],
+                              {"status": row.get("status"), "detail": "agent_not_running"})
 
         if running_agents:
             # Sync each agent concurrently (with a reasonable limit)
@@ -1152,7 +1248,8 @@ class OperatorQueueSyncService:
             if failures >= READ_FAILURE_THRESHOLD:
                 try:
                     if db.mark_operator_queue_unconfirmed(
-                        _read_failure_detail(result), now, agent_name=agent_name
+                        _read_failure_detail(result), now, agent_name=agent_name,
+                        exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                     ):
                         self._changed_this_cycle = True
                 except Exception as e:
@@ -1175,7 +1272,10 @@ class OperatorQueueSyncService:
             )
             await self._maybe_emit_flood_alert(agent_name, reason="oversize_file")
             try:
-                if db.mark_operator_queue_unconfirmed("oversize_file", now, agent_name=agent_name):
+                if db.mark_operator_queue_unconfirmed(
+                    "oversize_file", now, agent_name=agent_name,
+                    exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+                ):
                     self._changed_this_cycle = True
             except Exception as e:
                 logger.error(f"Failed to mark {agent_name} rows unconfirmed: {e}")
@@ -1191,7 +1291,24 @@ class OperatorQueueSyncService:
                 # file with the reconstructed responses alone.
                 logger.warning(f"Invalid JSON in operator-queue.json for {agent_name}")
                 try:
-                    if db.mark_operator_queue_unconfirmed("invalid_json", now, agent_name=agent_name):
+                    if db.mark_operator_queue_unconfirmed(
+                        "invalid_json", now, agent_name=agent_name,
+                        exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+                    ):
+                        self._changed_this_cycle = True
+                except Exception as e:
+                    logger.error(f"Failed to mark {agent_name} rows unconfirmed: {e}")
+                return
+            if not _well_formed_queue(queue_data):
+                logger.warning(
+                    f"operator-queue.json for {agent_name} is not the expected shape "
+                    f"(an object with a `requests` list); not reconciling, not writing"
+                )
+                try:
+                    if db.mark_operator_queue_unconfirmed(
+                        "wrong_shape", now, agent_name=agent_name,
+                        exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+                    ):
                         self._changed_this_cycle = True
                 except Exception as e:
                     logger.error(f"Failed to mark {agent_name} rows unconfirmed: {e}")
@@ -1199,9 +1316,7 @@ class OperatorQueueSyncService:
         else:
             queue_data = {"$schema": "operator-queue-v1", "requests": []}
 
-        requests = queue_data.get("requests", [])
-        if not isinstance(requests, list):
-            requests = []
+        requests = queue_data.get("requests") or []
         content_sha = (
             hashlib.sha256(content.encode("utf-8")).hexdigest() if file_exists else None
         )
@@ -1270,6 +1385,12 @@ class OperatorQueueSyncService:
             fail_key = (agent_name, req_id)
             req_status = req.get("status", "pending")
             if isinstance(req_id, str):
+                if req_id in seen_rids:
+                    # #2989 review: a duplicated id is reconciled ONCE, on its first
+                    # entry. Two copies with different content used to flip the row
+                    # confirmed ↔ changed every cycle: two audit rows, two writes and
+                    # a broadcast per 5 s.
+                    continue
                 seen_rids.add(req_id)
 
             if req_status == "acknowledged":
@@ -1282,13 +1403,20 @@ class OperatorQueueSyncService:
                     acknowledged_items.append(ack_uuid)
                     open_by_rid.pop(req_id, None)  # it just went terminal
                 elif req_id in open_by_rid:
-                    # #2915: acknowledged on a row that was never responded — the
-                    # agent closed its own ask. The platform used to drop this
-                    # (the UPDATE matches only `responded` rows) and keep showing
-                    # the human a pending card for an item the agent had closed.
-                    await self._apply_sync_state(
-                        agent_name, open_by_rid[req_id], SYNC_CLOSED_BY_FILER, "acknowledged", now
-                    )
+                    row = open_by_rid[req_id]
+                    if row.get("status") == "responded" and _is_our_answer(req, row):
+                        # Our answer landed and the agent acknowledged it, but the
+                        # flip waits for the delivery record (`mark_acknowledged`
+                        # requires `delivered`, #2989 review) — confirmed, not closed.
+                        await self._apply_sync_state(agent_name, row, SYNC_CONFIRMED, None, now)
+                    else:
+                        # #2915: acknowledged on a row that was never responded — the
+                        # agent closed its own ask. The platform used to drop this
+                        # (the UPDATE matches only `responded` rows) and keep showing
+                        # the human a pending card for an item the agent had closed.
+                        await self._apply_sync_state(
+                            agent_name, row, SYNC_CLOSED_BY_FILER, "acknowledged", now
+                        )
                 continue
 
             if req_id in open_by_rid:
@@ -1426,6 +1554,13 @@ class OperatorQueueSyncService:
         for rid, row in open_by_rid.items():
             if rid in seen_rids:
                 continue
+            # A platform alarm (ent#499) was never in this file — there is no entry
+            # to miss (#2989 review: every alarm went `missing` on the first cycle
+            # after upgrade). A `responded` row the file lost is the write-back's
+            # business: it re-appends the entry this same cycle, so marking it
+            # `missing` first only minted a `diverged` + `reconciled` pair.
+            if is_platform_minted(row) or row.get("status") == "responded":
+                continue
             await self._apply_sync_state(
                 agent_name, row, SYNC_MISSING,
                 "entry_missing" if file_exists else "file_missing", now,
@@ -1532,20 +1667,23 @@ class OperatorQueueSyncService:
             if not fresh.get("success"):
                 return
             if fresh.get("not_found") or not fresh.get("content"):
-                queue_data = {"$schema": "operator-queue-v1", "requests": []}
-                content_sha = None
-                file_exists = False
-            else:
-                try:
-                    queue_data = json.loads(fresh["content"])
-                except json.JSONDecodeError:
-                    logger.warning(f"Re-read of operator-queue.json for {agent_name} is not JSON; not writing")
-                    return
-                content_sha = hashlib.sha256(fresh["content"].encode("utf-8")).hexdigest()
+                # The cycle-start read HAD a file and this re-read does not: an
+                # agent mid-rewrite, not a lost file. Write nothing, record
+                # nothing — the next cycle decides. (A file missing at BOTH reads
+                # is the container-restart case and is reconstructed below.)
+                logger.info(f"operator-queue.json for {agent_name} vanished between the two reads; not writing")
+                return
+            try:
+                queue_data = json.loads(fresh["content"])
+            except json.JSONDecodeError:
+                logger.warning(f"Re-read of operator-queue.json for {agent_name} is not JSON; not writing")
+                return
+            if not _well_formed_queue(queue_data):
+                logger.warning(f"Re-read of operator-queue.json for {agent_name} is not the expected shape; not writing")
+                return
+            content_sha = hashlib.sha256(fresh["content"].encode("utf-8")).hexdigest()
 
-        requests = queue_data.get("requests", [])
-        if not isinstance(requests, list):
-            requests = []
+        requests = queue_data.get("requests") or []
         updated = False
         terminal_flips = 0
 
@@ -1582,21 +1720,31 @@ class OperatorQueueSyncService:
             req_id = req.get("id")
             if req_id in response_map:
                 resp = response_map[req_id]
+                # #2989 review: "send again to answer anyway" must reach the file.
+                # The operator saw the divergence and acknowledged it at respond
+                # time (`divergence_acknowledged_at`), so the answer is written
+                # into the entry as it is now — rewritten or closed by the agent.
+                forced = bool(resp.get("divergence_acknowledged_at"))
                 if req.get("status") == "pending":
-                    if changed_fields(resp, req):
+                    if changed_fields(resp, req) and not forced:
                         # The agent rewrote the question after the human answered
                         # it. Never hand an answer to a different question.
                         undelivered[resp["id"]] = (resp, "entry_changed")
                     else:
-                        req["status"] = "responded"
-                        req["response"] = resp["response"]
-                        req["response_text"] = resp.get("response_text")
-                        req["responded_by"] = resp.get("responded_by_email")
-                        req["responded_at"] = resp.get("responded_at")
+                        _deliver_into(req, resp)
                         updated = True
                         delivered[resp["id"]] = resp
-                elif req.get("status") in ("responded", "acknowledged"):
+                elif _is_our_answer(req, resp):
                     delivered[resp["id"]] = resp  # a previous write landed
+                elif forced:
+                    # The agent closed the entry on its side; the acknowledged
+                    # answer is WRITTEN into it (status → responded) so the agent
+                    # finds it. Recording `delivered` without a write let the next
+                    # cycle read the agent's own `acknowledged` as an ack of an
+                    # answer it never saw.
+                    _deliver_into(req, resp)
+                    updated = True
+                    delivered[resp["id"]] = resp
                 else:
                     undelivered[resp["id"]] = (resp, "closed_by_filer")
             elif req_id in terminal_map:

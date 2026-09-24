@@ -81,6 +81,7 @@ def _fake_db(pending=0, exists=False, create_side_effect=None):
     db.set_operator_queue_delivery_state.return_value = False
     db.mark_operator_queue_unconfirmed.return_value = 0
     db.refresh_operator_queue_last_confirmed.return_value = 0
+    db.mark_operator_queue_undelivered_for_stopped_agents.return_value = []
     db.get_setting_value.return_value = "24"
     return db
 

@@ -1398,6 +1398,7 @@ operator_queue = Table(
     Column("delivery_state", Text),    # delivered|undelivered|not_applicable
     Column("delivery_detail", Text),
     Column("delivery_updated_at", Text),
+    Column("divergence_acknowledged_at", Text),
 )
 
 nevermined_agent_config = Table(

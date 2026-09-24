@@ -194,16 +194,16 @@ export function queueSyncBadge(item) {
   // Delivery outranks sync on an answered item: "your answer never landed" is
   // the fact the operator needs first.
   if (item.delivery_state === 'undelivered') {
-    return { label: SYNC_BADGE_COPY.undelivered, variant: 'danger', title: deliveryTitle(item.delivery_detail) }
+    return { label: SYNC_BADGE_COPY.undelivered, variant: 'danger', title: deliveryTitle(item) }
   }
   if (state === 'changed') {
-    return { label: SYNC_BADGE_COPY.changed, variant: 'warning', title: changedTitle(item.sync_detail) }
+    return { label: SYNC_BADGE_COPY.changed, variant: 'warning', title: changedTitle(item.sync_detail) + since(item) }
   }
   if (state === 'closed_by_filer' || state === 'closed') {
-    return { label: SYNC_BADGE_COPY.closed_by_filer, variant: 'warning', title: 'The agent closed this on its side; it is still waiting for you here.' }
+    return { label: SYNC_BADGE_COPY.closed_by_filer, variant: 'warning', title: 'The agent closed this on its side; it is still waiting for you here.' + since(item) }
   }
   if (state === 'missing') {
-    return { label: SYNC_BADGE_COPY.missing, variant: 'warning', title: 'The agent no longer carries this item in its queue file.' }
+    return { label: SYNC_BADGE_COPY.missing, variant: 'warning', title: 'The agent no longer carries this item in its queue file.' + since(item) }
   }
   if (state === 'stale_id') {
     return { label: SYNC_BADGE_COPY.stale_id, variant: 'neutral', title: 'The agent re-used this id after the item was closed; the re-ask was not admitted.' }
@@ -222,14 +222,27 @@ function changedTitle(detail) {
   return `The agent rewrote this item since it was ingested (${fields}). You are reading the original.`
 }
 
-function deliveryTitle(detail) {
-  switch (detail) {
+/** " Since <ts>." when the platform recorded when it established the state. */
+function since(item) {
+  return item.sync_updated_at ? ` Since ${item.sync_updated_at}.` : ''
+}
+
+function deliveryTitle(item) {
+  const tried = item.delivery_updated_at ? ` Last tried ${item.delivery_updated_at}.` : ''
+  const terminal = item.status === 'cancelled' || item.status === 'expired'
+  switch (item.delivery_detail) {
     case 'entry_changed': return 'The agent rewrote the item after you answered; the answer was not delivered.'
     case 'closed_by_filer': return 'The agent closed the item on its side; the answer was not delivered.'
-    case 'entry_missing': return "The item is gone from the agent's queue file; retrying."
-    case 'file_missing': return 'The agent has no queue file; retrying.'
-    case 'conflict': return 'The agent was writing its file at the same moment; retrying.'
-    default: return 'The write to the agent failed; retrying.'
+    case 'entry_missing':
+      // A cancellation whose entry the agent already dropped has nothing left
+      // to land on: recorded, never retried, and not an escalation.
+      return terminal
+        ? "The agent's queue file no longer carries this item, so the cancellation could not be written; the agent has already dropped it."
+        : `The item is gone from the agent's queue file; the answer is re-added when the file is readable.${tried}`
+    case 'file_missing': return `The agent has no queue file; retrying.${tried}`
+    case 'agent_not_running': return 'The agent is not running; the answer is delivered when it starts.'
+    case 'conflict': return `The agent was writing its file at the same moment; retrying.${tried}`
+    default: return `The write to the agent failed; retrying.${tried}`
   }
 }
 
@@ -239,6 +252,7 @@ function unconfirmedTitle(item) {
     timeout: 'the agent did not answer in time',
     unreachable: 'the agent could not be reached',
     invalid_json: "the agent's queue file is not valid JSON",
+    wrong_shape: "the agent's queue file is not the expected shape",
     oversize_file: "the agent's queue file is too large to read",
   }[item.sync_detail] || 'the platform could not reconcile it'
   const when = item.last_confirmed_at ? ` Last confirmed ${item.last_confirmed_at}.` : ' Never confirmed.'

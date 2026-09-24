@@ -1651,6 +1651,7 @@ TABLES = {
             delivery_state TEXT,
             delivery_detail TEXT,
             delivery_updated_at TEXT,
+            divergence_acknowledged_at TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,

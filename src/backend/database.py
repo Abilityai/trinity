@@ -3657,9 +3657,11 @@ class DatabaseManager:
         return self._operator_queue_ops.list_items(**kwargs)
 
     def respond_to_operator_queue_item(self, item_id, response, response_text,
-                                        responded_by_id, responded_by_email):
+                                        responded_by_id, responded_by_email,
+                                        divergence_acknowledged=False):
         return self._operator_queue_ops.respond_to_item(
-            item_id, response, response_text, responded_by_id, responded_by_email
+            item_id, response, response_text, responded_by_id, responded_by_email,
+            divergence_acknowledged=divergence_acknowledged,
         )
 
     def cancel_operator_queue_item(self, item_id):
@@ -3692,9 +3694,18 @@ class DatabaseManager:
     def set_operator_queue_delivery_state(self, item_id, state, detail, now):
         return self._operator_queue_ops.set_delivery_state(item_id, state, detail, now)
 
-    def mark_operator_queue_unconfirmed(self, detail, now, agent_name=None, exclude_agents=None):
+    def mark_operator_queue_unconfirmed(self, detail, now, agent_name=None, exclude_agents=None,
+                                        exclude_request_id_prefixes=None):
         return self._operator_queue_ops.mark_unconfirmed(
-            detail, now, agent_name=agent_name, exclude_agents=exclude_agents
+            detail, now, agent_name=agent_name, exclude_agents=exclude_agents,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
+        )
+
+    def mark_operator_queue_undelivered_for_stopped_agents(self, now, *, running_agents,
+                                                           exclude_request_id_prefixes=None):
+        return self._operator_queue_ops.mark_undelivered_for_stopped_agents(
+            now, running_agents=running_agents,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
         )
 
     def count_operator_queue_flags(self, accessible_agent_names=None):

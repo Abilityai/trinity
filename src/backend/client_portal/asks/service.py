@@ -255,6 +255,9 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
         response_text=response_text,
         responded_by_id=None,
         responded_by_email=email,
+        divergence_acknowledged=bool(
+            acknowledge_divergence and item.get("sync_state") in ("changed", "closed_by_filer")
+        ),
     )
     # A lost race has TWO shapes and only one of them is falsy. `respond_to_
     # operator_queue_item` returns None when the row does not exist, but when the
