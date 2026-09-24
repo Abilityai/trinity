@@ -552,7 +552,9 @@ class PortalRoleReadiness(BaseModel):
     status: Literal["calibrating", "ready"]
     changed_at: Optional[str] = None
     changed_by: Optional[str] = None
-    source: Literal["owner", "template"]
+    # ent#689: `rollout` — the one-time seed at the readiness gate's rollout,
+    # not an owner's act (`changed_by` is then None, never a person).
+    source: Literal["owner", "template", "rollout"]
     unstamped_ready: bool = False
 
 
@@ -607,6 +609,9 @@ class PortalRoleCard(BaseModel):
     # ent#500's assignment kind, when it lands; None renders as "no assignment recorded".
     relationship: Optional[str] = None
     can_flip_readiness: bool = False
+    # ent#689: a live seat-delivery schedule is being held because readiness is
+    # not `ready` — the card says "its scheduled brief is paused".
+    brief_held: bool = False
     # agent_stopped | agent_unreachable — the files live in the container.
     unavailable: Optional[str] = None
 

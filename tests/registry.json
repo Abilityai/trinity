@@ -3413,6 +3413,26 @@
         "skills"
       ],
       "description": "Only designated agents may change an agent's skills — their own included (ent#596). The scope ALLOWLIST as a ten-row matrix (JWT / user / system pass unchanged; agent passes only with a live grant; connector, ops, portal_delegate and a scope invented tomorrow are refused; a principal with no mcp_scope fails closed); the composed dependency checks the capability BEFORE the owner fence, so a non-holder gets one uniform named 403 for an existing, nonexistent or foreign target and a holder gains no reach beyond its owner; the route table read off FastAPI's real dependant graph (every skill-changing route takes the fence; the grant routes exist and are not shadowed); a refused agent key changes nothing on any of the four routes through a real FastAPI app; the file-route side door (.claude/skills/** via PUT/DELETE/mkdir, including a delete of an ancestor) and that people and holders still edit skills there; grants over a real SQLite file (live-only via the agent_ownership join, idempotent who/when, soft-delete and recovery, orphan rows fail closed, unknown capability refused at the sink, no call permission written); the grant service (404 / system / ephemeral refusals, revoke needs no validation); the grant route refuses an admin's own MCP key and audits only real changes; attribution (the acting agent recorded, the system agent named, a bulk replace does not re-stamp kept names); both migration tracks executed; the CASCADE AgentRef. Eight mutations each red."
+    },
+    {
+      "file": "unit/test_ent689_readiness_gate.py",
+      "feature": "trinity-enterprise#689",
+      "added": "2026-09-24",
+      "categories": [
+        "backend",
+        "workspace",
+        "scheduling"
+      ],
+      "description": "Readiness gate on a companion's proactive brief (ent#689): the verdict (stamp ready fires, any other stamp holds, the unstamped companion — every install's case — holds, an unstamped non-companion fires), every fail-open case (stamp unreadable, Docker unreadable, container stopped, template slow/unreadable/unparsable), the internal endpoint's 404 and shape, the role card's rollout source and brief_held, and the one-time rollout seed on BOTH tracks against real SQLite (only live seat briefs, never over an existing stamp, idempotent)."
+    },
+    {
+      "file": "scheduler_tests/test_ent689_readiness_gate.py",
+      "feature": "trinity-enterprise#689",
+      "added": "2026-09-24",
+      "categories": [
+        "scheduler"
+      ],
+      "description": "The scheduler's readiness gate beside the #454 pre-check: a held cron seat brief is a skipped row with the reason plus the skipped event and is never dispatched; manual, webhook and non-seat schedules are not asked; anything but an explicit fire:false fires; every backend failure shape fails open."
     }
   ]
 }

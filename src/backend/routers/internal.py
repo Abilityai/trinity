@@ -262,6 +262,24 @@ async def internal_agent_pre_check(agent_name: str):
         raise HTTPException(status_code=404, detail="Agent not found")
 
 
+@router.get("/agents/{agent_name}/brief-readiness")
+async def internal_agent_brief_readiness(agent_name: str):
+    """Whether a companion's cron seat brief may fire (trinity-enterprise#689).
+
+    Asked by the scheduler's readiness gate, beside the #454 pre-check, only for
+    a `triggered_by="schedule"` run that delivers to a Workspace seat. Thin
+    passthrough — the rule lives in `services/role_readiness_gate.py`. The
+    scheduler fails open on anything but a 200 with `fire: false`.
+    """
+    from database import db as _db
+    from services.role_readiness_gate import brief_readiness
+
+    if not await asyncio.to_thread(_db.get_agent_owner, agent_name):
+        raise HTTPException(status_code=404, detail="Agent not found")
+    verdict = await brief_readiness(agent_name)
+    return {"agent_name": agent_name, "fire": verdict.fire, "reason": verdict.reason, "basis": verdict.basis}
+
+
 @router.get("/agents/{agent_name}/sync-health-status")
 async def internal_agent_sync_health(agent_name: str):
     """#389: lightweight read used by the dedicated scheduler before dispatching.

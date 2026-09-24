@@ -67,6 +67,33 @@ owner ──► Mark ready (ConfirmDialog) ──► POST …/role/readiness {st
 `agent_role_readiness (agent_name PK, status, changed_at, changed_by)` — SQLite
 `agent_role_readiness_table`, Alembic `0067_agent_role_readiness`; CASCADE in `AGENT_REFS`.
 
+## The stamp gates the proactive brief (ent#689)
+
+```
+scheduler cron fire, schedule.deliver_to_workspace_email set
+  → _apply_pre_check_gate (#454)            → skipped? stop
+  → _apply_readiness_gate                    (cron + seat only)
+      GET /api/internal/agents/{name}/brief-readiness
+        services/role_readiness_gate.brief_readiness
+          stamp? → ready fires / else held
+          no stamp → container running? template.yaml (≤3 s) has x-role? → held : fires
+          any ambiguity → fires (logged)
+      fire:false → _record_gate_skip: skipped row + reason, run times advanced, skipped event
+  → dispatch
+```
+
+- **Why the scheduler, not `internal.execute_task`:** the #454 pre-check already owns a
+  cron-only, fail-open skip with a reason and a *skipped* event. Gating later would have
+  created-then-failed a row, published a failure, and opened the seat's Main chat for a
+  brief that never runs.
+- **Why the template's `status` is never read:** it is agent-writable; the stamp is the
+  owner's act (#663). The template answers only "is this a companion".
+- **Rollout:** a one-time, DB-only seed (both tracks) stamps `ready` —
+  `changed_by = rollout:ent#689` — for every agent whose seat brief fired at deploy,
+  insert-if-absent. The card renders it as "carried over when the readiness gate
+  shipped" (`source: "rollout"`), and `brief_held` adds "its scheduled brief is paused
+  until you mark it ready" (or "its owner marks") next to the flip.
+
 ## Testing
 
 `tests/unit/test_ent527_role_card.py` — the card driven through a fake agent door: no
@@ -76,6 +103,10 @@ metrics; the readiness rule; owner-only flip with named refusals; the stamp agai
 real SQLite file; both migration tracks. `src/frontend/tests/unit/portalAgentRole.spec.js`
 mounts the component: nothing for no role, error copy, stale badge, who/when, the
 unstamped-ready call-out, the confirm-then-post flip, the non-owner hiding, the refusal.
+ent#689: `tests/unit/test_ent689_readiness_gate.py` (the verdict, every fail-open case, the
+endpoint, the rollout source, `brief_held`, the seed on both tracks against real SQLite) and
+`tests/scheduler_tests/test_ent689_readiness_gate.py` (held → skipped row + event, never
+dispatched; manual / webhook / non-seat not asked; every error fires).
 
 ## Related Flows
 
