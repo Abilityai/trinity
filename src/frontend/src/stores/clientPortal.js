@@ -410,6 +410,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
     suggestionsError: null,
     suggestionsFetchedAt: 0,
     suggestionError: null,    // {key, message} of the failed dismiss
+    _suggestionsInFlight: null, // the running load, shared by both placements
+    _suggestionsDismissed: [],  // keys dismissed since the last load STARTED
     reportPayloads: {},
     // id -> {total, loaded}; present only for a payload the server actually
     // windowed, so a bounded document never renders a paging footer.
@@ -1110,6 +1112,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.suggestionsError = null
       this.suggestionsFetchedAt = 0
       this.suggestionError = null
+      this._suggestionsInFlight = null
+      this._suggestionsDismissed = []
     },
 
     /**
@@ -1120,21 +1124,35 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async loadAgentSuggestions(agentName, { force = false } = {}) {
       if (this.suggestionsAgent !== agentName) this.resetAgentSuggestions(agentName)
       if (!force && this.suggestionsLoaded && Date.now() - this.suggestionsFetchedAt < SUGGESTIONS_FRESH_MS) return
+      // Both placements mount together: the second caller joins the first
+      // request instead of sending (and making the agent answer) its own.
+      if (!force && this._suggestionsInFlight) return this._suggestionsInFlight
       const gen = this._suggestionsGeneration
       this.suggestionsError = null
-      try {
-        const { data } = await portalHttp.get(
-          `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions`,
-          { headers: this.authHeader },
-        )
-        if (gen !== this._suggestionsGeneration) return
-        this.suggestions = data
-        this.suggestionsLoaded = true
-        this.suggestionsFetchedAt = Date.now()
-      } catch {
-        if (gen !== this._suggestionsGeneration) return
-        this.suggestionsError = "Couldn't load suggestions. Check your connection and try again."
-      }
+      this._suggestionsDismissed = []
+      const run = (async () => {
+        try {
+          const { data } = await portalHttp.get(
+            `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions`,
+            { headers: this.authHeader },
+          )
+          if (gen !== this._suggestionsGeneration) return
+          // A dismiss that landed while this load was in flight must not come
+          // back with it (the server may have answered before the write).
+          const gone = new Set(this._suggestionsDismissed)
+          const list = (data.suggestions || []).filter((x) => !gone.has(x.key))
+          this.suggestions = { ...data, suggestions: list, total: Math.max(0, (data.total || 0) - ((data.suggestions || []).length - list.length)) }
+          this.suggestionsLoaded = true
+          this.suggestionsFetchedAt = Date.now()
+        } catch {
+          if (gen !== this._suggestionsGeneration) return
+          this.suggestionsError = "Couldn't load suggestions. Check your connection and try again."
+        } finally {
+          if (gen === this._suggestionsGeneration && this._suggestionsInFlight === run) this._suggestionsInFlight = null
+        }
+      })()
+      this._suggestionsInFlight = run
+      return run
     },
 
     /**
@@ -1143,15 +1161,18 @@ export const useClientPortalStore = defineStore('clientPortal', {
      */
     async dismissSuggestion(agentName, key) {
       const gen = this._suggestionsGeneration
-      const before = this.suggestions
+      const list = this.suggestions?.suggestions || []
+      const index = list.findIndex((s) => s.key === key)
+      const removed = index >= 0 ? list[index] : null
       this.suggestionError = null
-      if (before) {
+      if (removed) {
         this.suggestions = {
-          ...before,
-          suggestions: before.suggestions.filter((s) => s.key !== key),
-          total: Math.max(0, (before.total || 0) - 1),
+          ...this.suggestions,
+          suggestions: list.filter((s) => s.key !== key),
+          total: Math.max(0, (this.suggestions.total || 0) - 1),
         }
       }
+      this._suggestionsDismissed = [...this._suggestionsDismissed, key]
       try {
         await portalHttp.post(
           `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions/feedback`,
@@ -1160,7 +1181,15 @@ export const useClientPortalStore = defineStore('clientPortal', {
         return true
       } catch {
         if (gen !== this._suggestionsGeneration) return false
-        this.suggestions = before
+        this._suggestionsDismissed = this._suggestionsDismissed.filter((k) => k !== key)
+        // Put back only the item this dismiss removed, into whatever list is
+        // current now — never a snapshot that a newer load has replaced.
+        const now = this.suggestions?.suggestions || []
+        if (removed && !now.some((s) => s.key === key)) {
+          const next = now.slice()
+          next.splice(Math.min(index, next.length), 0, removed)
+          this.suggestions = { ...this.suggestions, suggestions: next, total: (this.suggestions.total || 0) + 1 }
+        }
         this.suggestionError = { key, message: "Couldn't dismiss that. Try again." }
         return false
       }

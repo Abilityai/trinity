@@ -49,12 +49,17 @@ def list_schedules(agent_name: str) -> List[dict]:
         return [dict(r) for r in conn.execute(stmt).mappings()]
 
 
-def recent_runs_by_schedule(agent_name: str, since: str, per_schedule: int) -> Dict[str, List[dict]]:
+def recent_runs_by_schedule(agent_name: str, since: str, per_schedule: int,
+                            schedule_ids: List[str]) -> Dict[str, List[dict]]:
     """`{schedule_id: [run, ...]}` newest first, at most `per_schedule` each.
 
     ONE windowed query for the whole agent (served by
-    `idx_executions_agent_started`) rather than one per schedule.
+    `idx_executions_agent_started`) rather than one per schedule — restricted
+    to the agent's live schedules, so chat/API runs (`schedule_id='__manual__'`)
+    are never ranked just to be thrown away.
     """
+    if not schedule_ids:
+        return {}
     rn = func.row_number().over(
         partition_by=schedule_executions.c.schedule_id,
         order_by=(schedule_executions.c.started_at.desc(), schedule_executions.c.id.desc()),
@@ -65,6 +70,7 @@ def recent_runs_by_schedule(agent_name: str, since: str, per_schedule: int) -> D
     ).where(
         schedule_executions.c.agent_name == agent_name,
         schedule_executions.c.started_at >= since,
+        schedule_executions.c.schedule_id.in_(schedule_ids),
     ).subquery()
     stmt = select(inner.c.id, inner.c.schedule_id, inner.c.status, inner.c.started_at).where(
         inner.c.rn <= per_schedule
@@ -101,6 +107,18 @@ def last_user_message_at(agent_name: str, email: str) -> Optional[str]:
     )
     with get_engine().connect() as conn:
         return conn.execute(stmt).scalar()
+
+
+def viewer_has_runs(agent_name: str, email: str, since: str) -> bool:
+    """Whether this viewer started anything on this agent outside the Workspace
+    (operator chat, MCP) — attributed executions count as history too."""
+    stmt = select(schedule_executions.c.id).where(
+        schedule_executions.c.agent_name == agent_name,
+        schedule_executions.c.started_at >= since,
+        func.lower(schedule_executions.c.source_user_email) == _email(email),
+    ).limit(1)
+    with get_engine().connect() as conn:
+        return conn.execute(stmt).first() is not None
 
 
 def slash_texts_by_viewer(agent_name: str, email: str, since: str) -> List[str]:

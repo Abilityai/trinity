@@ -75,6 +75,14 @@ POST …/suggestions/feedback {key, action: accept|dismiss}
 | Frontend | `components/portal/PortalSuggestions.vue`, `PortalAgentDetails.vue`, `views/Portal.vue`, `stores/clientPortal.js` (suggestions slice), `components/portal/portalRail.js` (Info signal + `note`) |
 | Tests | `tests/unit/test_ent465_suggestions.py`, `src/frontend/tests/unit/portalSuggestions.spec.js`, `portalRail.spec.js`, `tests/journeys/test_j13_suggestions_journey.py` |
 
+## Known limits (review, 2026-09-24)
+
+- "Show decisions" accepted from the **empty chat** opens the Info tab at its top; only the
+  Info-tab placement scrolls to the Decisions section.
+- Two concurrent feedback writes from one viewer on SQLite can meet `SQLITE_BUSY` (a deferred
+  transaction reads, then writes); the client restores the item with its inline error and
+  nothing is lost. Concurrent new keys can leave a viewer one row over the 1,000-row cap.
+
 ## Deferred
 
 - A suggestion that consults another agent (2026-09-21 amendment → ent#698) and

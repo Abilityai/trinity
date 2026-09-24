@@ -207,6 +207,51 @@ describe('PortalSuggestions', () => {
     expect(full.findAll('[data-testid="portal-suggestion"]')).toHaveLength(3)
   })
 
+  it('two placements mounting together send ONE request (the in-flight load is shared)', async () => {
+    let resolve
+    axios.get.mockImplementationOnce(() => new Promise((r) => { resolve = r }))
+    const a = mountIt()
+    const b = mountIt({ compact: true, limit: 3 })
+    resolve({ data: payload([item()]) })
+    await flushPromises()
+    expect(axios.get).toHaveBeenCalledTimes(1)
+    expect(a.findAll('[data-testid="portal-suggestion"]')).toHaveLength(1)
+    expect(b.findAll('[data-testid="portal-suggestion"]')).toHaveLength(1)
+  })
+
+  it('an item dismissed while a reload is in flight does not come back with it', async () => {
+    axios.get.mockResolvedValueOnce({ data: payload([item()]) })
+    axios.post.mockResolvedValue({ data: { ok: true } })
+    const w = mountIt()
+    await flushPromises()
+    let resolve
+    axios.get.mockImplementationOnce(() => new Promise((r) => { resolve = r }))
+    const store = useClientPortalStore()
+    const reload = store.loadAgentSuggestions(AGENT, { force: true })
+    await w.get('[data-testid="portal-suggestion-dismiss"]').trigger('click')
+    resolve({ data: payload([item()]) })   // the server answered before the write landed
+    await reload
+    await flushPromises()
+    expect(w.findAll('[data-testid="portal-suggestion"]')).toHaveLength(0)
+    expect(store.suggestions.total).toBe(0)
+  })
+
+  it('a failed dismiss restores only its item into the CURRENT list', async () => {
+    axios.get.mockResolvedValueOnce({ data: payload([item()]) })
+    let reject
+    axios.post.mockImplementation(() => new Promise((_, r) => { reject = r }))
+    const w = mountIt()
+    await flushPromises()
+    await w.get('[data-testid="portal-suggestion-dismiss"]').trigger('click')
+    // A newer load lands in the meantime with a different item.
+    axios.get.mockResolvedValueOnce({ data: payload([item({ key: 'dormant', source: 'usage', title: 'Pick up', signal: 's', action: { type: 'open_chat' } })]) })
+    await useClientPortalStore().loadAgentSuggestions(AGENT, { force: true })
+    reject(new Error('boom'))
+    await flushPromises()
+    expect(w.findAll('[data-testid="portal-suggestion"]').map((n) => n.attributes('data-key')).sort())
+      .toEqual(['dormant', 'unused_playbook:weekly-report'])
+  })
+
   it('two placements share one fetch while it is fresh', async () => {
     axios.get.mockResolvedValue({ data: payload([item()]) })
     mountIt()

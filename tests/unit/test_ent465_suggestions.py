@@ -276,9 +276,15 @@ class TestSql:
         _insert(t, id="other", schedule_id="s1", agent_name="borealis", status="failed", started_at=_iso(NOW))
         _insert(t, id="old", schedule_id="s1", agent_name=AGENT, status="success",
                 started_at=_iso(NOW - timedelta(days=200)))
-        runs = sdb.recent_runs_by_schedule(AGENT, _iso(NOW - timedelta(days=90)), 3)
+        _insert(t, id="chat", schedule_id="__manual__", agent_name=AGENT, status="failed", started_at=_iso(NOW))
+        since = _iso(NOW - timedelta(days=90))
+        runs = sdb.recent_runs_by_schedule(AGENT, since, 3, ["s1", "s2"])
         assert [r["id"] for r in runs["s1"]] == ["s1-0", "s1-1", "s1-2"]
         assert [r["id"] for r in runs["s2"]] == ["s2-0", "s2-1", "s2-2"]
+        # Only the live schedules asked for are ranked — never chat/API runs.
+        assert "__manual__" not in runs
+        assert set(sdb.recent_runs_by_schedule(AGENT, since, 3, ["s2"])) == {"s2"}
+        assert sdb.recent_runs_by_schedule(AGENT, since, 3, []) == {}
 
     def test_soft_deleted_schedules_excluded(self, sdb):
         from db.tables import agent_schedules as t
@@ -302,6 +308,15 @@ class TestSql:
         assert sorted(texts) == ["/digest", "/weekly-report now"]
         assert sdb.last_user_message_at(AGENT, "alice@example.com") == _iso(NOW - timedelta(days=20))
         assert sdb.last_user_message_at(AGENT, "carol@example.com") is None
+
+    def test_runs_attributed_to_the_viewer_count_as_history(self, sdb):
+        from db.tables import schedule_executions as ex
+        since = _iso(NOW - timedelta(days=90))
+        assert sdb.viewer_has_runs(AGENT, "owner@example.com", since) is False
+        _insert(ex, id="op1", schedule_id="__manual__", agent_name=AGENT, status="success",
+                started_at=_iso(NOW), message="hello", source_user_email="Owner@Example.com")
+        assert sdb.viewer_has_runs(AGENT, "owner@example.com", since) is True
+        assert sdb.viewer_has_runs(AGENT, "someone@example.com", since) is False
 
     def test_overdue_reminders(self, sdb):
         from db.tables import agent_reminders as t
@@ -499,3 +514,26 @@ def test_table_is_a_cascade_agent_ref():
     from db.agent_cleanup import AGENT_REFS
     refs = {(r.table, r.column): r.policy.name for r in AGENT_REFS}
     assert refs[("workspace_suggestion_feedback", "agent_name")] == "CASCADE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role,scope,expected", [("admin", None, True), ("admin", "ops", False), ("user", None, False)])
+async def test_the_platform_door_stamps_is_admin_on_the_principal(monkeypatch, role, scope, expected):
+    """Executes the wiring line itself (`PortalPrincipal(email, True, _is_admin_principal(user))`),
+    not only the helper: a platform principal carries `is_admin`, and a portal token never does."""
+    from types import SimpleNamespace
+    from client_portal import portal_auth as pa
+    from client_portal import db as portal_db
+    import database
+
+    user = SimpleNamespace(username="u1", role=role, mcp_scope=scope, agent_name=None)
+
+    async def current_user(request, token):
+        return user
+    monkeypatch.setattr(pa, "decode_portal_session", lambda t: None)
+    monkeypatch.setattr(pa, "get_current_user", current_user)
+    monkeypatch.setattr(database.db, "get_user_by_username", lambda name: {"email": "U1@Example.com"})
+    monkeypatch.setattr(portal_db, "is_client_blocked", lambda e: False)
+
+    principal = await pa.get_portal_principal(SimpleNamespace(), SimpleNamespace(headers={}), token="jwt")
+    assert (principal.email, principal.is_platform, principal.is_admin) == ("u1@example.com", True, expected)

@@ -49,6 +49,8 @@ RUNS_PER_SCHEDULE = 10
 MAX_NAME_CHARS = 80
 #: The briefing (a live call into the agent) is cached per agent this long.
 BRIEFING_TTL_SECONDS = 60.0
+#: Agents held in that cache per process; the fleet size bounds it in practice.
+BRIEFING_CACHE_MAX = 500
 
 _FAILED = frozenset({"failed", "error"})
 #: Neither count toward a streak nor break it: a skipped tick (lock held, git
@@ -361,6 +363,11 @@ async def _playbooks(agent_name: str) -> Optional[List[Playbook]]:
     availability = (await portal._availability_map([agent_name])).get(agent_name, "unknown")
     briefing, ok = await portal._bounded_briefing(agent_name, availability)
     result = playbooks_from_briefing(briefing.playbooks) if ok else None
+    if len(_briefing_cache) >= BRIEFING_CACHE_MAX:
+        # Bounded: drop entries past their TTL first, then the oldest.
+        cutoff = time.monotonic() - BRIEFING_TTL_SECONDS
+        for k in [k for k, (t, _) in _briefing_cache.items() if t < cutoff] or [min(_briefing_cache, key=lambda k: _briefing_cache[k][0])]:
+            _briefing_cache.pop(k, None)
     _briefing_cache[agent_name] = (time.monotonic(), result)
     return result
 
@@ -395,9 +402,13 @@ def _gather(agent_name: str, email: str, now: datetime, can_configure: bool) -> 
         n for n in (slash_name(t) for t in sdb.slash_texts_by_viewer(agent_name, email, since)) if n
     ), frozenset())
     attempt("dismissed", lambda: sdb.dismissed_fingerprints(agent_name, email), {})
+    attempt("has_runs", lambda: sdb.viewer_has_runs(agent_name, email, since), False)
     if can_configure:
         attempt("autonomy_enabled", lambda: bool(db.get_autonomy_enabled(agent_name)), True)
-        attempt("runs", lambda: sdb.recent_runs_by_schedule(agent_name, since, RUNS_PER_SCHEDULE), {})
+        attempt("runs", lambda: sdb.recent_runs_by_schedule(
+            agent_name, since, RUNS_PER_SCHEDULE,
+            [x["id"] for x in out.get("schedules", []) if x.get("enabled")],
+        ), {})
         attempt("overdue_reminders", lambda: sdb.count_overdue_reminders(agent_name, now_iso), 0)
     return out
 
@@ -416,16 +427,20 @@ async def _compute(agent_name: str, email: str, is_admin: bool, now: Optional[da
         _playbooks(agent_name),
     )
     dismissed = gathered.pop("dismissed", {})
+    has_runs = gathered.pop("has_runs", False)
     signals = Signals(playbooks=playbooks, **gathered)
     pairs = build(signals, agent_name=agent_name, now=now, can_configure=configure)
-    return pairs, dismissed, signals
+    # History = the viewer's own Workspace messages OR runs attributed to them
+    # (operator chat, MCP) — an owner who only uses the console has history.
+    has_history = bool(signals.last_user_message_at) or bool(has_runs)
+    return pairs, dismissed, signals, has_history
 
 
 async def get_suggestions(agent_name: str, email: str, *, is_admin: bool,
                           now: Optional[datetime] = None) -> PortalSuggestions:
-    pairs, dismissed, signals = await _compute(agent_name, email, is_admin, now)
+    pairs, dismissed, signals, has_history = await _compute(agent_name, email, is_admin, now)
     return shape(pairs, dismissed, agent_name=agent_name, playbooks=signals.playbooks,
-                 has_history=bool(signals.last_user_message_at))
+                 has_history=has_history)
 
 
 async def record_feedback(agent_name: str, email: str, *, is_admin: bool, key: str,
@@ -435,7 +450,7 @@ async def record_feedback(agent_name: str, email: str, *, is_admin: bool, key: s
     to real items and the fingerprint is the server's, never the client's."""
     if key.split(":", 1)[0] not in KEY_CLASSES:
         raise SuggestionError(422, "unknown suggestion key")
-    pairs, _, _ = await _compute(agent_name, email, is_admin, now)
+    pairs, _, _, _ = await _compute(agent_name, email, is_admin, now)
     match = next(((s, fp) for s, fp in pairs if s.key == key), None)
     if match is None:
         raise SuggestionError(404, "Suggestion not found")
