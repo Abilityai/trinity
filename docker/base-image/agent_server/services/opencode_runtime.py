@@ -104,6 +104,7 @@ from .opencode_mcp import apply_mcp_config
 from .opencode_provider import (
     OpenCodeProviderConfigError,
     apply_provider_config,
+    require_ollama_base_url,
 )
 from .process_registry import get_process_registry
 from .runtime_adapter import (
@@ -874,6 +875,12 @@ class OpenCodeRuntime(AgentRuntime):
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict], Optional[str]]:
         execution_id = execution_id or str(uuid.uuid4())
         model = validate_provider_model(model)
+        # `-m ollama/…` with no reachable base URL is unrunnable. Refuse it
+        # HERE, next to the other `-m` validation and before any subprocess:
+        # once OpenCode owns the turn the operator's only diagnosis is its
+        # opaque `err_*` ref for a provider it cannot resolve
+        # (Abilityai/lilu#272), which names nothing they can set.
+        require_ollama_base_url(model, config=_load_shared_config())
 
         turn_dir = _prepare_turn_config(execution_id, system_prompt, model)
         cmd = self._build_command(
@@ -1251,6 +1258,10 @@ class OpenCodeRuntime(AgentRuntime):
             )
         except OpenCodeModelShapeError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        except OpenCodeProviderConfigError as exc:
+            # 400 with the reason text, so the execution's `error` names
+            # OPENCODE_OLLAMA_BASE_URL instead of carrying an `err_*` ref.
+            raise HTTPException(status_code=400, detail=str(exc))
         except HTTPException:
             raise
         except TimeoutError as exc:
@@ -1329,6 +1340,10 @@ class OpenCodeRuntime(AgentRuntime):
                 concurrent_reader=True,
             )
         except OpenCodeModelShapeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except OpenCodeProviderConfigError as exc:
+            # 400 with the reason text, so the execution's `error` names
+            # OPENCODE_OLLAMA_BASE_URL instead of carrying an `err_*` ref.
             raise HTTPException(status_code=400, detail=str(exc))
         except HTTPException:
             raise
