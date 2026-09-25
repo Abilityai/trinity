@@ -705,6 +705,18 @@ OWNER's stamp (`POST …/role/readiness`, owner check via `get_owned_roster`, ag
 and a template that claims `ready` without a stamp is shown as calibrating. Requirement
 §5.36 of `core-agent.md`; flow in `workspace-role-card.md`.
 
+**The stamp gates the proactive brief (ent#689).** The scheduler's readiness gate
+(`_apply_readiness_gate`, just ahead of the #454 pre-check and sharing `_record_gate_skip`) asks
+`GET /api/internal/agents/{name}/brief-readiness` (`services/role_readiness_gate.py`) before a
+**cron** fire of a seat-delivery schedule, and records a `skipped` execution with the reason on
+`fire: false`. Stamp `ready` fires; any other stamp holds; no stamp holds only a companion (the
+template is read — bounded 3 s — solely for `x-role` presence, never its `status`); every
+ambiguity fails open and is logged. The rollout is a one-time data seed on both tracks
+(`role_readiness_rollout_seed` / Alembic `0074_role_readiness_rollout_seed`): `ready`,
+`changed_by = rollout:ent#689`, insert-if-absent, for every live agent with autonomy on and an
+enabled seat brief at deploy. `effective_readiness` reports that stamp as `source: "rollout"` with no person; the card's
+`brief_held` (platform viewers only; false when autonomy is off) says a seat brief is paused.
+
 ## The seat decision record — why things were approved, deferred or killed (ent#638, R25)
 
 `client_portal/seat_decisions.py` + `services/seat_decision_service.py` give a seat

@@ -107,6 +107,25 @@ describe('PortalAgentRole (mounted)', () => {
     expect(w.get('[data-testid="portal-role-unavailable"]').text()).toContain('stopped')
   })
 
+  it('a rollout stamp is carried over, never attributed to a person (ent#689)', async () => {
+    const w = await mountWith(card({ readiness: { status: 'ready', changed_at: fresh, changed_by: null, source: 'rollout', unstamped_ready: false } }))
+    const r = w.get('[data-testid="portal-role-readiness"]').text()
+    expect(r).toContain('carried over when the readiness gate shipped')
+    expect(r).not.toContain(' by ')
+    expect(r).not.toContain('ent#689')
+  })
+
+  it('a held brief is said beside the control that releases it (ent#689)', async () => {
+    const owner = await mountWith(card({ brief_held: true }))
+    expect(owner.get('[data-testid="portal-role-brief-held"]').text()).toBe('Its scheduled brief is paused until you mark it ready.')
+    setActivePinia(createPinia()); document.body.innerHTML = ''
+    const viewer = await mountWith(card({ brief_held: true, can_flip_readiness: false }))
+    expect(viewer.get('[data-testid="portal-role-brief-held"]').text()).toBe('Its scheduled brief is paused until its owner marks it ready.')
+    setActivePinia(createPinia()); document.body.innerHTML = ''
+    const none = await mountWith(card({ brief_held: false }))
+    expect(none.find('[data-testid="portal-role-brief-held"]').exists()).toBe(false)
+  })
+
   it('readiness shows who flipped it and when; a template-claimed ready without a stamp is called out', async () => {
     const stamped = await mountWith(card({ readiness: { status: 'ready', changed_at: fresh, changed_by: 'owner@example.com', source: 'owner', unstamped_ready: false } }))
     const r = stamped.get('[data-testid="portal-role-readiness"]').text()
