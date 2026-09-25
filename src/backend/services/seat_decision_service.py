@@ -287,7 +287,21 @@ def record(db, *, agent_name: str, seat_email: str, decided_by_person: str,
         "status": status,
         "source_execution_id": source_execution_id,
     })
+    _reevaluate_autonomy(db, agent_name, seat_email)
     return row
+
+
+def _reevaluate_autonomy(db, agent_name: str, seat_email: str) -> None:
+    """A decision written, corrected, closed or reversed is exactly the event
+    that can move an ask class (ent#641). Fail-open: a verdict that could not be
+    recomputed leaves the stored one, which the reader re-ANDs with the live
+    conjuncts anyway, so a failure here can only ever be stale — never wider."""
+    try:
+        from services import autonomy_dial_service
+
+        autonomy_dial_service.evaluate_seat(db, agent_name, seat_email, persist=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ent#641] autonomy re-evaluation failed for %s: %s", agent_name, e)
 
 
 def act(db, *, agent_name: str, seat_email: str, decision_id: str, action: str,
@@ -321,6 +335,7 @@ def act(db, *, agent_name: str, seat_email: str, decision_id: str, action: str,
         if not db.set_seat_decision_status(agent_name, decision_id, status, reason=reason, by=by):
             raise DecisionRefused("decision_not_active", "This decision changed under you; reload.",
                                   status_code=409)
+        _reevaluate_autonomy(db, agent_name, seat_email)
         return db.get_seat_decision(agent_name, decision_id)
     if action == "reconfirm":
         value, p = parse_review_by(review_by)
@@ -329,6 +344,7 @@ def act(db, *, agent_name: str, seat_email: str, decision_id: str, action: str,
         if not db.reconfirm_seat_decision(agent_name, decision_id, value):
             raise DecisionRefused("decision_not_active", "This decision changed under you; reload.",
                                   status_code=409)
+        _reevaluate_autonomy(db, agent_name, seat_email)
         return db.get_seat_decision(agent_name, decision_id)
     # supersede: the correction is a NEW record; the old one stays as history.
     from utils.helpers import utc_now_iso
@@ -351,6 +367,7 @@ def act(db, *, agent_name: str, seat_email: str, decision_id: str, action: str,
     if new_row is None:
         raise DecisionRefused("decision_not_active", "This decision changed under you; reload.",
                               status_code=409)
+    _reevaluate_autonomy(db, agent_name, seat_email)
     return new_row
 
 
@@ -524,4 +541,18 @@ def prompt_block(db, agent_name: str, seat_email: str, *, today: Optional[date] 
         lines.append(line)
         size += len(line)
     lines.append("")
+    # ent#641: what the companion may do UNPROMPTED for this seat, beside the
+    # decisions themselves. Without this the dial is a surface nobody reads —
+    # "nothing is unprompted until promoted" has to be something the model is
+    # told. Fail-open and bounded, like the block it rides on.
+    try:
+        from services import autonomy_dial_service
+
+        dial = autonomy_dial_service.prompt_lines(
+            autonomy_dial_service.evaluate_seat(db, agent_name, seat_email, today=today)
+        )
+        if dial:
+            lines.append(dial)
+    except Exception:  # noqa: BLE001 — a prompt never breaks on the dial
+        logger.debug("[ent#641] dial block skipped", exc_info=True)
     return "\n".join(lines)

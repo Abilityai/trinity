@@ -597,6 +597,30 @@ in one CAS transaction (`db/seat_decisions.py::supersede_seat_decision`); nothin
 deleted or edited in place. JSON lists ride in TEXT (no JSON type on either engine);
 every stat is computed in Python over one seat's rows.
 
+**seat_ask_class_state** (trinity-enterprise#641 / P12 — the autonomy dial's earned half):
+```sql
+CREATE TABLE seat_ask_class_state (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL, seat_email TEXT NOT NULL, ask_class TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'on_request',   -- on_request | graduated  (EARNED, not live)
+    blocked_by TEXT NOT NULL DEFAULT '[]',      -- JSON list of named blockers
+    evidence TEXT NOT NULL DEFAULT '{}',        -- criterion, decision ids, counts, rule_version
+    evidence_hash TEXT,                         -- the CAS key; an unchanged verdict writes nothing
+    evidence_expires_at TEXT,                   -- the EARLIEST review_by of the window
+    guard_metric TEXT NOT NULL DEFAULT 'not_assessed',  -- not_assessed | capped | clear
+    held INTEGER NOT NULL DEFAULT 0, held_by TEXT, held_at TEXT,
+    promoted_at TEXT, demoted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(agent_name, seat_email, ask_class)
+);
+CREATE INDEX idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email);
+```
+Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0075_seat_ask_class_state`
+(← `0074`); `AgentRef(..., Policy.CASCADE)`. The row holds only what was EARNED —
+the instance level, the agent's autonomy switch and the clock are ANDed at read
+time (`services/autonomy_dial_service.live_verdict`), never materialised. The
+instance LEVEL is not a table at all: one validated `system_settings` key,
+`autonomy_dial_level:instance`.
+
 **agent_event_subscriptions / agent_events** (EVT-001 — agent event pub/sub):
 ```sql
 CREATE TABLE agent_event_subscriptions (

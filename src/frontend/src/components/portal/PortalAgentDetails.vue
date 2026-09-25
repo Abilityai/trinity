@@ -185,6 +185,9 @@
     <!-- ent#638: the seat decision record — why things were approved, deferred
          or killed; own component so record / correct / close are mount-testable. -->
     <PortalAgentDecisions :agent-name="agentName" />
+
+    <!-- ent#641: what this agent may do unprompted for you, per kind of ask. -->
+    <PortalAgentAutonomy :agent-name="agentName" />
   </div>
 </template>
 
@@ -206,6 +209,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalAgentMemory from './PortalAgentMemory.vue'
 import PortalAgentRole from './PortalAgentRole.vue'
 import PortalAgentDecisions from './PortalAgentDecisions.vue'
+import PortalAgentAutonomy from './PortalAgentAutonomy.vue'
 import { agentDisplayName } from '@/utils/agentName'
 import { availabilityChip, threadTitle, MAIN_TAB_LABEL } from './portalUtils'
 import { usePortalAgentPage } from '@/composables/usePortalAgentPage'

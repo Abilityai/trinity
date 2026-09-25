@@ -46,7 +46,7 @@ from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
 from database import db
-from . import agent_page, role_card, seat_decisions, service
+from . import agent_page, autonomy, role_card, seat_decisions, service
 from .models import (
     PortalSessionRename,
     PortalRatingRequest,
@@ -83,6 +83,10 @@ from .models import (
     PortalSeatDecisionRecord,
     PortalSeatDecisionAction,
     PortalSeatDecisionResult,
+    PortalAutonomyDial,
+    PortalAutonomyAction,
+    PortalAutonomyGuard,
+    PortalAutonomyResult,
     PortalAgentReports,
     PortalChatState,
     PortalSessionSummary,
@@ -814,6 +818,70 @@ async def portal_agent_role(
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     return await role_card.build_role_card(agent_name, email, is_platform=principal.is_platform)
+
+
+@router.get("/agents/{agent_name}/autonomy", response_model=PortalAutonomyDial)
+def portal_agent_autonomy(
+    agent_name: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """What this agent may do unprompted for you, per kind of ask (ent#641).
+
+    Roster-gated like every route here, then seat-filtered: a roster member
+    never sees another seat's ask-class slugs. Reads persist nothing — the
+    verdict is recomputed from the decision record, the rating history and the
+    live conjuncts (instance level, the agent's autonomy switch, the clock)."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    return autonomy.page(agent_name, email, is_platform=principal.is_platform)
+
+
+@router.post("/agents/{agent_name}/autonomy/classes/{ask_class}",
+             response_model=PortalAutonomyResult)
+def portal_agent_autonomy_act(
+    agent_name: str,
+    ask_class: str,
+    body: PortalAutonomyAction,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Hold a class on-request, or release it (ent#641).
+
+    Asymmetric on purpose: **hold** is a refusal anyone may make for their own
+    seat; **release** re-enables unprompted work and is the agent owner's alone
+    (a grant, Invariant #8). There is no promote — promotion is earned."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_autonomy:{email}", 30, 60)
+    try:
+        return autonomy.act(agent_name, email, is_platform=principal.is_platform,
+                            ask_class=ask_class, action=body.action, seat=body.seat)
+    except autonomy.AutonomyRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
+
+
+@router.post("/agents/{agent_name}/autonomy/classes/{ask_class}/guard",
+             response_model=PortalAutonomyResult)
+def portal_agent_autonomy_guard(
+    agent_name: str,
+    ask_class: str,
+    body: PortalAutonomyGuard,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Record canon's guard-metric cap for a class (owner only, ent#641): a
+    class that moves another role's held metric can never graduate on rating
+    history alone. The default is `not_assessed`, so an unreviewed class says
+    so rather than reading as cleared."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_autonomy:{email}", 30, 60)
+    try:
+        return autonomy.set_guard(agent_name, email, is_platform=principal.is_platform,
+                                  ask_class=ask_class, guard_metric=body.guard_metric,
+                                  seat=body.seat)
+    except autonomy.AutonomyRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
 
 
 @router.get("/agents/{agent_name}/decisions", response_model=PortalSeatDecisions)

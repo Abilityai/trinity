@@ -369,6 +369,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- decisions.ts (ent#638) --- the target is only ever the seat's own agent
   record_decision: { kind: "enforce", param: "agent_name" },
   list_seat_decisions: { kind: "enforce", param: "agent_name" },
+  get_autonomy: { kind: "enforce", param: "agent_name" },
   // --- loops.ts ---
   run_agent_loop: { kind: "enforce", param: "agent_name" },
   get_loop_status: { kind: "in-tool", how: LOOP_RESOLVE },

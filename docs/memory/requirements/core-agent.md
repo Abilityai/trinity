@@ -3416,3 +3416,79 @@ to localStorage in the clear.
   the real chat and headless paths), `test_2958_chat_compact_metadata.py`,
   `test_2958_session_cleanup_chat_marker.py`, `test_2958_marker_path_parity.py`,
   `test_2610_resume_surface_parity.py`, `src/mcp-server/src/tools/executions.compact.test.ts`.
+
+### 5.39 Workspace — the autonomy dial: what a companion may do unprompted (trinity-enterprise#641)
+- **Status**: ✅ Implemented (2026-09-23). OSS-core (Workspace).
+- **Requirement ID**: WORKSPACE_AUTONOMY_DIAL
+- **GitHub Issue**: abilityai/trinity-enterprise#641 (canon `tandem-06-operations.md` §2.3, ruling P12; consumes §5.37's evidence)
+- **Description**: Autonomy was one boolean per agent — scheduled runs on or off.
+  The dial adds the two scopes the operating model actually needs. **Above**: one
+  instance LEVEL (`L0` Continuity · `L1` Companion · `L2` Delegated classes ·
+  `L3` Load-bearing judgment), the ceiling on the whole fleet. **Below**: a state
+  per (seat, `ask_class`) — `on_request` or `graduated` — earned from the seat's own
+  decision record. Nothing between them is new: a graduated class means the
+  companion acts and reports; everything else it asks first.
+- **Promotion is earned, and there is no promote control.** A class graduates when
+  §5.37's evidence says `stable` for it — **≥3 non-expired records, ONE normalized
+  criterion, no reversal in the window** — AND the seat has no negative rating in the
+  last 30 days AND the guard metric for the class is not `capped`. A person can only
+  move it DOWN (`hold`, any reader for their own seat) or let it back up
+  (`release`, the agent OWNER only — holding is a refusal, releasing is a grant).
+- **Reversals are counted over the WINDOW, not over all history** — `effective_status`
+  returns `reversed` unconditionally, so a reversed record never expires; counted
+  over history, one reversal ever would block a class forever and `on_request` would
+  be the only reachable steady state. A reversed record leaves the window at its own
+  `review_by`, like any other.
+- **The verdict is stored earned-state × three read-time conjuncts** — the instance
+  level (`≥L2` for anything unprompted), the agent's `autonomy_enabled`, and
+  `now <= evidence_expires_at` (the EARLIEST `review_by` of the window). Written
+  instead of read, each fails silently: records lapse at UTC midnight with no event to
+  hook, so a materialised verdict outlives its evidence; and re-evaluating the fleet
+  inside a level change is an unbounded fan-out. As conjuncts a level drop needs zero
+  writes and restores exactly what each class had earned when it goes back up. Reads
+  persist NOTHING; writes happen only on a real event (a decision recorded or acted
+  on, a rating by the seat, a hold/release) and are CAS'd on an evidence hash, so an
+  unchanged verdict writes no row and emits no event.
+- **Every block is NAMED, never a bare boolean**: `level_below_l2` ·
+  `agent_autonomy_off` · `evidence_expired` · `too_few_records` ·
+  `criterion_not_stable` · `reversal_in_window` · `negative_rating_in_window` ·
+  `guard_metric_capped` · `held_by_operator`, each with the sentence the panel and the
+  companion both show.
+- **The rating query's three shapes are each a defect first**: it matches
+  `operator:<email>` as well as `workspace:<email>` (on a single-operator install the
+  seat person IS the platform principal, so their thumbs-down lands under the other
+  prefix and the class could never demote); it reads `COALESCE(updated_at, created_at)`
+  (flipping a rating up→down touches only `updated_at`, and that flip is exactly a
+  demotion); and the window is a FIXED 30 days, not "since the oldest surviving
+  record" — otherwise a blocking rating falls out as records expire, which is
+  promotion by the clock and R25 forbids it.
+- **The level has a control, not just an endpoint**: `AutonomyDialPanel.vue` on
+  Settings → Retention, beside the two panels that already bound what an
+  engagement does on its own. It renders one option per level with the single
+  fact that changes behaviour said on the row (`unprompted possible` /
+  `always asks first`), and it states the two things an admin otherwise fears:
+  raising the level promotes nothing, lowering it destroys nothing. Shown in
+  every edition — the level is in force whether or not anyone has set it.
+- **The level is a grant, not a preference**: `GET/PUT /api/settings/autonomy-dial`,
+  `require_admin` **and** interactive-principal only (an agent's own MCP key can read
+  the dial but can never raise it — the ent#297 line), validated against the four
+  levels, audited as `autonomy_dial_change`, and blocked on the generic
+  `PUT /api/settings/{key}` catch-all so the one door that addresses any key cannot
+  set it.
+- **The companion is told, in the same words**: `autonomy_dial_service.prompt_lines`
+  rides the seat's shared memory block, so the model reads which classes it may act on
+  unprompted and, for every other class, the named reason it must ask first.
+- **Three surfaces, one seat rule**: MCP `get_autonomy` (seat from `execution_id`,
+  never a parameter; no email in the answer) → `GET /api/agents/{name}/seat-autonomy`
+  (`/autonomy` is the agent-level toggle, registered first — a second route on it
+  is silently never reached);
+  the person reads and holds/releases in Agent details (`PortalAgentAutonomy.vue`,
+  `GET /api/enterprise/client-portal/agents/{name}/autonomy`, `…/autonomy/actions`,
+  `…/autonomy/guard`); admins set the level in Settings.
+- **Storage**: `seat_ask_class_state` (both tracks; Alembic `0075` ← `0074`; cleanup
+  CASCADE) holds ONLY the earned half + the hold + the guard metric. The level is one
+  validated `system_settings` key (`autonomy_dial_level:instance`), not a table.
+- **Not in scope**: per-agent or per-seat levels (the instance level is the ceiling in
+  v1); auto-feeding `guard_metric` from the §49 metric registry (set explicitly by the
+  owner for now — DEBT_INBOX 2026-09-23).
+- **Flow**: `docs/memory/feature-flows/workspace-autonomy-dial.md`

@@ -175,6 +175,12 @@ _ADDED_SINCE_SPLIT = {
     # logged a failed request on every Settings tab. Lives in `mcp_url` beside
     # its precedent `/mcp-url`.
     ("/api/settings/public-chat-url", ("GET",), "get_public_chat_url"),
+    # trinity-enterprise#641 — the instance autonomy level (L0-L3). A named,
+    # validated route because the generic `/{key}` catch-all would let any admin
+    # set an unvalidated level, and the PUT is a grant (admin AND interactive),
+    # so it is blocklisted there. Mounted BEFORE `generic.router` (Invariant #4).
+    ("/api/settings/autonomy-dial", ("GET",), "get_autonomy_dial"),
+    ("/api/settings/autonomy-dial", ("PUT",), "set_autonomy_dial"),
 }
 
 

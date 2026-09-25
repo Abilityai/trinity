@@ -25,6 +25,7 @@ from fastapi import APIRouter
 from database import SystemSetting
 
 from . import (
+    autonomy_dial,
     agent_defaults,
     credentials,
     provider_keys,
@@ -71,6 +72,8 @@ router.include_router(mcp_url.router)
 router.include_router(agent_defaults.router)
 router.include_router(integrations.router)
 router.include_router(ops.router)
+# ent#641: validated, and BEFORE the `/{key}` catch-all (Invariant #4).
+router.include_router(autonomy_dial.router)
 # … and the `/{key}` catch-all LAST. See the module docstring.
 router.include_router(generic.router)
 

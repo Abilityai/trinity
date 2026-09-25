@@ -221,6 +221,17 @@
             <RoomBudgetDefaultsPanel />
           </div>
 
+          <!-- The instance autonomy level (ent#641). On the Retention tab
+               beside the two panels above for the same reason they are here:
+               all three bound what an engagement does on its own. It is the
+               only surface that sets the ceiling, so without it the dial is
+               reachable by API alone — and a control an admin cannot find is a
+               control they cannot use. Shown in every edition: the level is in
+               force whether or not anyone has set it. -->
+          <div v-if="activeTab === 'retention'" class="mb-6">
+            <AutonomyDialPanel />
+          </div>
+
           <!-- Platform Section -->
           <!-- Admin sign-in email (#82 Phase 1) — lets an existing admin bind a
                real email so they can sign in with email + password, matching
@@ -2235,6 +2246,7 @@ import FirstRunRerunPanel from '../components/settings/FirstRunRerunPanel.vue'
 import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
 import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
+import AutonomyDialPanel from '../components/settings/AutonomyDialPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
 // #2691: one home for what the Public URL buys, what must be true first, and
 // what saving it re-points — shared with the first-run step so the explanation

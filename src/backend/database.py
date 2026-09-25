@@ -135,6 +135,7 @@ from db.skills import SkillsOperations
 from db.role_readiness import RoleReadinessOperations
 from db.capability_grants import CapabilityGrantOperations
 from db.seat_decisions import SeatDecisionOperations
+from db.seat_ask_class_state import SeatAskClassStateOperations
 from db.skill_sources import SkillSourcesOperations
 from db.public_chat import PublicChatOperations
 from db.tags import TagOperations
@@ -1014,6 +1015,7 @@ class DatabaseManager:
         self._role_readiness_ops = RoleReadinessOperations()
         self._capability_grant_ops = CapabilityGrantOperations()
         self._seat_decision_ops = SeatDecisionOperations()
+        self._seat_ask_class_ops = SeatAskClassStateOperations()
         self._skill_sources_ops = SkillSourcesOperations()
         self._public_chat_ops = PublicChatOperations()
         self._tag_ops = TagOperations()
@@ -2779,6 +2781,32 @@ class DatabaseManager:
     def reconfirm_seat_decision(self, agent_name: str, decision_id: str, review_by: str) -> bool:
         return self._seat_decision_ops.reconfirm_seat_decision(agent_name, decision_id, review_by)
 
+    # Autonomy dial (delegated to db/seat_ask_class_state.py) — ent#641 / P12.
+    # Explicit signatures (learnings 2026-09-01); parity pinned by the test.
+    def list_seat_ask_class_states(self, agent_name: str, seat_email: str) -> List[dict]:
+        return self._seat_ask_class_ops.list_seat_ask_class_states(agent_name, seat_email)
+
+    def get_seat_ask_class_state(self, agent_name: str, seat_email: str, ask_class: str) -> Optional[dict]:
+        return self._seat_ask_class_ops.get_seat_ask_class_state(agent_name, seat_email, ask_class)
+
+    def upsert_seat_ask_class_state(self, *, agent_name: str, seat_email: str, ask_class: str, state: str,
+                                    blocked_by: List[str], evidence: dict, evidence_hash: str,
+                                    evidence_expires_at: Optional[str], previous_hash: Optional[str] = None) -> bool:
+        return self._seat_ask_class_ops.upsert_seat_ask_class_state(
+            agent_name=agent_name, seat_email=seat_email, ask_class=ask_class, state=state,
+            blocked_by=blocked_by, evidence=evidence, evidence_hash=evidence_hash,
+            evidence_expires_at=evidence_expires_at, previous_hash=previous_hash)
+
+    def set_seat_ask_class_hold(self, *, agent_name: str, seat_email: str, ask_class: str,
+                                held: bool, by: str) -> dict:
+        return self._seat_ask_class_ops.set_seat_ask_class_hold(
+            agent_name=agent_name, seat_email=seat_email, ask_class=ask_class, held=held, by=by)
+
+    def set_seat_ask_class_guard(self, *, agent_name: str, seat_email: str, ask_class: str,
+                                 guard_metric: str) -> bool:
+        return self._seat_ask_class_ops.set_seat_ask_class_guard(
+            agent_name=agent_name, seat_email=seat_email, ask_class=ask_class, guard_metric=guard_metric)
+
     def is_skill_assigned(self, agent_name: str, skill_name: str):
         return self._skills_ops.is_skill_assigned(agent_name, skill_name)
 
@@ -2889,6 +2917,10 @@ class DatabaseManager:
 
     def workspace_rating_tally(self, agent_name):
         return self._evaluation_ops.workspace_rating_tally(agent_name)
+
+    def latest_negative_seat_rating(self, agent_name: str, evaluators: list, since: str):
+        """ent#641 — the seat's most recent thumbs-down on this agent in a window."""
+        return self._evaluation_ops.latest_negative_seat_rating(agent_name, evaluators, since)
 
     def list_agent_evaluations(self, agent_name, limit=50):
         return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit)

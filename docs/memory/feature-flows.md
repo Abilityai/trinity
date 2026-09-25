@@ -96,6 +96,7 @@
 | Schedule → Workspace Delivery | [schedule-workspace-delivery.md](feature-flows/schedule-workspace-delivery.md) | A schedule names one Workspace user; its output lands as a brief in their Main chat (ent#498) |
 | Workspace Role Card | [workspace-role-card.md](feature-flows/workspace-role-card.md) | The Info rail's role card — a projection of the agent's canon files, plus the owner's readiness stamp (ent#527, #663) |
 | Workspace Seat Decisions | [workspace-seat-decisions.md](feature-flows/workspace-seat-decisions.md) | The seat-level decision record — why a thing was approved, deferred or killed; recorded by the companion over MCP or the person in Agent details; the evidence base for the autonomy dial (ent#638, R25) |
+| Workspace Autonomy Dial | [workspace-autonomy-dial.md](feature-flows/workspace-autonomy-dial.md) | What a companion may do unprompted, per seat and ask class — the instance level as a ceiling over a state earned from the decision record and the rating history (ent#641, P12) |
 
 ### Dashboard & Monitoring
 

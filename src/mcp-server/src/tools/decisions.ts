@@ -132,6 +132,41 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
       },
     },
 
+    getAutonomy: {
+      name: "get_autonomy",
+      description:
+        "What you may do for this seat WITHOUT being asked, per kind of ask (the autonomy dial). " +
+        "Every class starts on-request and graduates only when its decision records show the same " +
+        "criterion applied repeatedly with no reversals AND the seat has not rated you down recently — " +
+        "never because the ask is frequent.\n\n" +
+        "Read it before acting unprompted. A class you do not see here is on-request. Each class that " +
+        "is not graduated carries `blocked_by`, and `blocker_text` spells each reason out — say that " +
+        "reason to the person instead of guessing. Three of them are not about you: the instance dial " +
+        "being below L2, the agent's autonomy switch being off, and an operator holding the class.\n\n" +
+        "Supply your `execution_id` from the Execution Context block; the seat is resolved from it.",
+      parameters: z.object({
+        execution_id: z.string().min(1).describe("Your current execution_id (Execution Context block)."),
+        agent_name: z.string().optional().describe("Agent name override. Omit in normal use."),
+      }),
+      execute: async (
+        args: { execution_id: string; agent_name?: string },
+        context: any
+      ) => {
+        const authContext = requireApiKey ? context?.session : undefined;
+        const apiClient = getClient(authContext);
+        const resolvedAgent = resolveAgent(authContext, args.agent_name);
+        if (!resolvedAgent) return noAgent();
+        try {
+          const result = await apiClient.getSeatAutonomy(resolvedAgent, args.execution_id);
+          return JSON.stringify(result, null, 2);
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          console.error(`[get_autonomy] Error: ${errorMessage}`);
+          return JSON.stringify({ success: false, error: errorMessage }, null, 2);
+        }
+      },
+    },
+
     listSeatDecisions: {
       name: "list_seat_decisions",
       description:
