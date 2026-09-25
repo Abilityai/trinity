@@ -98,12 +98,12 @@ class TestSchema:
 
     def test_the_alembic_revision_adds_the_same_twelve_columns(self):
         import importlib.util
-        path = os.path.join(_BACKEND, "migrations", "versions", "0075_operator_queue_ask_object.py")
-        spec = importlib.util.spec_from_file_location("rev_0075_ask_object", path)
+        path = os.path.join(_BACKEND, "migrations", "versions", "0076_operator_queue_ask_object.py")
+        spec = importlib.util.spec_from_file_location("rev_0076_ask_object", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        assert mod.revision == "0075_operator_queue_ask_object"
-        assert mod.down_revision == "0074_role_readiness_rollout_seed"
+        assert mod.revision == "0076_operator_queue_ask_object"
+        assert mod.down_revision == "0075_auto_sync_enabled_backfill"
         assert tuple(mod._COLUMNS) == ALL_NEW_COLUMNS
 
 
