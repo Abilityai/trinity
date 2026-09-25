@@ -66,12 +66,14 @@
     <!-- ent#329 — respond → resume ------------------------------------------>
     <hr class="my-6 border-gray-200 dark:border-gray-700" />
 
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Wake this agent when an operator answers</h3>
+    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Wake this agent when its asks end</h3>
     <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      An answer to one of this agent's parked requests always reaches it — but by
+      How one of this agent's parked requests ended always reaches it — but by
       default it is only read on the agent's <em>next</em> turn. An agent with no
       schedule has no next turn, so an approved action waits indefinitely. Turn
-      this on and answering starts one turn so the agent acts on it (ent#329).
+      this on and the agent is woken when an ask it raised ends — answered,
+      cancelled or expired — so it acts on the answer, or stops waiting for one
+      that will not come (ent#329).
     </p>
 
     <div v-if="resumeLoading" class="text-sm text-gray-400">Loading…</div>
@@ -89,11 +91,12 @@
       </label>
       <div class="min-w-0">
         <p class="text-sm text-gray-900 dark:text-gray-100">
-          Answering a request re-triggers this agent
+          Wake this agent when an ask it raised ends
         </p>
         <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-          Each answer then costs one agent turn, billed to you — which is why it
-          is off by default and set per agent, not per request.
+          Each wake-up costs one agent turn, billed to you — one per answer, and one
+          per cancellation or expiry event (a sweep of several asks is one turn).
+          That is why it is off by default and set per agent, not per request.
         </p>
         <p v-if="resumeMessage" class="mt-1 text-xs" :class="resumeMessageOk ? 'text-green-600 dark:text-green-400' : 'text-amber-700 dark:text-amber-400'">
           {{ resumeMessage }}

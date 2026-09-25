@@ -1902,9 +1902,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async fetchAsks(agentName = null) {
       if (!this.isClientSignedIn) return []
       try {
+        // trinity-enterprise#611: the asks that ended in the last 7 days ride the
+        // same list, so a person sees how an ask ended instead of watching it
+        // vanish; `openAsks` (the badge) and the Work tab stay pending-only.
         const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
           headers: this.authHeader,
-          params: agentName ? { agent_name: agentName } : {},
+          params: agentName ? { agent_name: agentName, include_ended: true } : { include_ended: true },
         })
         this.asks = Array.isArray(data) ? data : []
         this.asksAvailable = true
@@ -1945,9 +1948,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
-    // Answer one ask. The row is removed from local state on success rather than
-    // patched: the server's answer is authoritative, and a client that keeps a
-    // stale "pending" copy would offer to answer it twice.
+    // Answer one ask. On success the row is REPLACED by the server's projection
+    // of it — now `answered`, by you (trinity-enterprise#611: an ended ask stays
+    // listed) — never patched locally: the server's answer is authoritative, and
+    // a client that kept a stale "pending" copy would offer to answer it twice.
     async answerAsk(askId, { response = null, responseText = null, acknowledgeDivergence = false } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/asks/${askId}/answer`,
@@ -1956,7 +1960,9 @@ export const useClientPortalStore = defineStore('clientPortal', {
         { response, response_text: responseText, ...(acknowledgeDivergence ? { acknowledge_divergence: true } : {}) },
         { headers: this.authHeader },
       )
-      this.asks = this.asks.filter((a) => a.id !== askId)
+      this.asks = data && data.id === askId
+        ? this.asks.map((a) => (a.id === askId ? data : a))
+        : this.asks.filter((a) => a.id !== askId)
       return data
     },
 

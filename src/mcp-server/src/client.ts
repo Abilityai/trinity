@@ -22,6 +22,7 @@ import type {
   ScheduleToggleResult,
   ScheduleTriggerResult,
   ActivityTimelineResponse,
+  OperatorQueueAskReadback,
   OperatorQueueItem,
   OperatorQueueListResponse,
   CompatibilityReport,
@@ -2250,6 +2251,19 @@ export class TrinityClient {
     return this.request<OperatorQueueItem>(
       "GET",
       `/api/operator-queue/${encodeURIComponent(itemId)}`,
+    );
+  }
+
+  /**
+   * An agent's own ask, by the request_id it chose (trinity-enterprise#611).
+   * Proxies GET /api/agents/{name}/operator-queue/{request_id}: the backend
+   * answers only the agent's own key (or the system key as trinity-system)
+   * with a redacted projection, and still after Clear All.
+   */
+  async getMyAsk(agentName: string, requestId: string): Promise<OperatorQueueAskReadback> {
+    return this.request<OperatorQueueAskReadback>(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/operator-queue/${encodeURIComponent(requestId)}`,
     );
   }
 

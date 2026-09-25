@@ -1,0 +1,4 @@
+## 2026-09-25 — pitfall — An AST guard that checks a marker is PRESENT before a call passes code that reads the marker and ignores it
+
+**Context**: trinity-enterprise#611, re-pinning the ent#329 G2 guard (`tests/unit/test_ent329_operator_resume.py`) to the ask sink. The first version asserted that `_status_conflict` appears in the parsed function body before `_ended(`. Parsing already stripped comments (the #430 lesson), yet the call-site mutation `updated.pop("_status_conflict", False)` on its own line — the marker still named, the `if … raise` gone — passed the guard; only the behavioural tests caught it.
+**Lesson**: For a "the check happens before the effect" rule, assert the check's SHAPE, not the identifier: an `ast.If` whose test reads the marker, whose body raises or returns, positioned above the effect. Then run the mutation that keeps the identifier but drops the branch — if the guard stays green, it checks spelling, not control flow.

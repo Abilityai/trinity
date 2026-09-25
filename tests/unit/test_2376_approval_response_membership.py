@@ -115,11 +115,16 @@ def test_a_text_only_answer_is_not_rejected(empty):
 
 def test_acknowledged_items_never_reach_the_rule():
     """AC #2 names `acknowledged` explicitly. Both entry points refuse a
-    non-pending item BEFORE the validator, so the exemption is structural."""
+    non-pending item BEFORE the validator, so the exemption is structural.
+
+    trinity-enterprise#611: the validator runs inside the ask sink, the one
+    writer of an answer — so the refusal must come before the call into it."""
     import inspect
     from routers import operator_queue as r
-    src = inspect.getsource(r.respond_to_queue_item)
-    assert src.index("!= \"pending\"") < src.index("validate_response_choice")
+    from client_portal.asks import service as asks
+    for fn in (r.respond_to_queue_item, asks.answer_ask):
+        src = inspect.getsource(fn)
+        assert src.index("!= \"pending\"") < src.index("ask_service.answer("), fn.__name__
 
 
 # ---------------------------------------------------------------------------
@@ -128,9 +133,12 @@ def test_acknowledged_items_never_reach_the_rule():
 
 _WRITER = "respond_to_operator_queue_item"
 
+# trinity-enterprise#611: ONE writer. The operator route (JWT / MCP) and the
+# Workspace asks answer path both end an ask through the ask sink, which runs
+# the validator before it writes — so no entry point can reach the approval
+# channel without it, including one added later.
 _EXPECTED_CALLERS = {
-    "routers/operator_queue.py": "the operator route (JWT / MCP)",
-    "client_portal/asks/service.py": "the Workspace asks answer path",
+    "services/ask_service.py": "the ask sink — reached by the operator route and the Workspace answer",
 }
 
 

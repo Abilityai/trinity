@@ -440,6 +440,12 @@ FLEET_LEVEL_ALLOWLIST = {
     # A bulk "clear resolved"/"dismiss all" reports a count for the acting
     # operator's own accessible set; it names no agent.
     ("routers/operator_queue.py", "operator_queue_cleared"),
+    # trinity-enterprise#611: the ask sink's bulk-cancel trigger — ONE per sweep,
+    # and a sweep can span agents, so it names none; it carries only the count
+    # (the acting operator's email, which the router's copy still carries, is not
+    # on it). Listeners refetch the access-controlled list, the same footing as
+    # the entry above.
+    ("services/ask_service.py", "operator_queue_cleared"),
     # #2915: ONE thin trigger per poll cycle when any row's sync or delivery
     # state changed. Carries NO payload (#918); listeners refetch
     # GET /api/operator-queue, which scopes rows to the caller's accessible

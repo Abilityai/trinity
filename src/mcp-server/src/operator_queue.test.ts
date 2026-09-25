@@ -162,3 +162,86 @@ describe("#1104 respond_to_operator_queue", () => {
     assert.match(out.error, /Cannot respond/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// trinity-enterprise#611 — get_my_ask: an agent reads back its OWN ask by the
+// request_id it chose. Self-acting: the identity comes from the key
+// (`resolveActingAgent`), so there is no agent parameter to spoof.
+// ---------------------------------------------------------------------------
+
+function makeGetMyAsk(fake: Partial<TrinityClient>) {
+  return createOperatorQueueTools(fake as unknown as TrinityClient, false).getMyAsk;
+}
+
+function recordingClient(result: unknown = { request_id: "r-1", disposition: "cancelled" }) {
+  const calls: Array<[string, string]> = [];
+  const fake = {
+    getMyAsk: async (agentName: string, requestId: string) => {
+      calls.push([agentName, requestId]);
+      return result;
+    },
+  } as Partial<TrinityClient>;
+  return { fake, calls };
+}
+
+describe("trinity-enterprise#611 get_my_ask", () => {
+  it("reads the calling agent's own ask — the agent comes from the key", async () => {
+    const { fake, calls } = recordingClient();
+    const out = JSON.parse(await makeGetMyAsk(fake).execute({ request_id: "r-1" }, agentCtx("self")));
+    assert.deepEqual(calls, [["self", "r-1"]]);
+    assert.equal(out.disposition, "cancelled");
+  });
+
+  it("declares no agent-target parameter — there is nothing to spoof", () => {
+    const tool = makeGetMyAsk(recordingClient().fake);
+    assert.deepEqual(Object.keys((tool.parameters as any).shape), ["request_id"]);
+  });
+
+  it("the system key reads as the agent it was minted for", async () => {
+    const { fake, calls } = recordingClient();
+    await makeGetMyAsk(fake).execute(
+      { request_id: "r-1" },
+      { session: { scope: "system", agentName: "trinity-system" } as any },
+    );
+    assert.deepEqual(calls, [["trinity-system", "r-1"]]);
+  });
+
+  for (const session of [
+    { scope: "user" },
+    { scope: "connector", agentName: "self" },
+    { scope: "system" },
+  ]) {
+    it(`a ${session.scope}-scoped key${"agentName" in session ? " naming an agent" : ""} is refused before any backend call`, async () => {
+      const { fake, calls } = recordingClient();
+      const out = JSON.parse(await makeGetMyAsk(fake).execute({ request_id: "r-1" }, { session: session as any }));
+      assert.equal(out.success, false);
+      assert.match(out.error, /agent identity/);
+      assert.deepEqual(calls, []);
+    });
+  }
+
+  it("a backend refusal or a missing ask comes back as a structured error, not a throw", async () => {
+    const fake = {
+      getMyAsk: async () => {
+        throw new Error("API error (404): Ask not found");
+      },
+    } as Partial<TrinityClient>;
+    const out = JSON.parse(await makeGetMyAsk(fake).execute({ request_id: "nope" }, agentCtx("self")));
+    assert.match(out.error, /Ask not found/);
+  });
+
+  it("the description teaches the rider and the readback's reach", () => {
+    const { description } = makeGetMyAsk(recordingClient().fake);
+    assert.match(description, /request_id/);
+    assert.match(description, /do not re-ask the same action without new information/);
+    assert.match(description, /disposition/);
+  });
+});
+
+describe("trinity-enterprise#611 respond_to_operator_queue is person-only", () => {
+  it("the description says an agent's key cannot end an ask", () => {
+    const tool = createOperatorQueueTools({} as unknown as TrinityClient, false).respondToOperatorQueue;
+    assert.match(tool.description, /user-scoped/);
+    assert.match(tool.description, /agent- and system-scoped keys are refused/);
+  });
+});

@@ -497,6 +497,43 @@ export interface OperatorQueueItem {
   responded_by_email?: string | null;
   responded_at?: string | null;
   acknowledged_at?: string | null;
+  // trinity-enterprise#611 — how the ask ended (NULL on a row that ended before
+  // the ledger: read `status`). `disposed_by_email` is withheld from agent keys.
+  disposition?: string | null;        // answered | cancelled | expired
+  disposed_at?: string | null;
+  disposed_by?: string | null;        // person | timeout
+  disposition_reason?: string | null; // the operator's optional cancel reason
+}
+
+/**
+ * An agent's own ask, read back by the request_id it chose
+ * (GET /api/agents/{name}/operator-queue/{request_id}, trinity-enterprise#611).
+ * A redacted projection: never a person's email.
+ */
+export interface OperatorQueueAskReadback {
+  id: string;
+  request_id: string;
+  agent_name: string;
+  type: string;
+  priority: string;
+  status: string;
+  title: string;
+  question: string;
+  options?: unknown;
+  created_at: string;
+  expires_at?: string | null;
+  response?: string | null;
+  response_text?: string | null;
+  responded_at?: string | null;
+  disposition?: string | null;
+  disposed_at?: string | null;
+  disposed_by?: string | null;
+  disposition_reason?: string | null;
+  raised_by?: string | null;
+  channel?: string | null;
+  to_role?: string | null;
+  proposal?: unknown;
+  supersedes_expired?: string | null;
 }
 
 export interface OperatorQueueListResponse {

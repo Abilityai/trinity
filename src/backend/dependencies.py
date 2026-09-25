@@ -1098,6 +1098,62 @@ def is_interactive_principal(current_user: User) -> bool:
     return getattr(current_user, "mcp_scope", "__missing__") is None
 
 
+# trinity-enterprise#611: the principals that may END an ask (answer, cancel,
+# bulk-cancel). The interactive human (JWT ⇒ `mcp_scope is None`) and the
+# human's own user-scoped MCP key. Everything else — agent, system, connector,
+# portal_delegate, ops, and whatever scope ships next — is refused.
+PERSON_SCOPES = frozenset({None, "user"})
+
+
+def is_person_principal(current_user: User) -> bool:
+    """Is this caller a PERSON — the only author an ask's ending may record?
+
+    The endings ledger records `disposed_by` as an enum of two, `person` or
+    `timeout` (trinity-enterprise#611). An agent-scoped key resolves to its OWNER
+    carrying the owner's role, so before this an agent could answer or cancel any
+    ask its owner could reach — its own approval included — and the row recorded
+    the owner. Recording that as `person` would make the ledger lie.
+
+    An ALLOWlist over `mcp_scope` for the same reason as
+    `is_interactive_principal`: the scope column is free text with no CHECK
+    constraint, so a denylist naming `agent` is open to the next scope that
+    ships. The identity fields are checked as well (belt-and-braces: a
+    user-scoped principal carrying an agent identity is not a person), and an
+    object with no `mcp_scope` at all fails CLOSED through the sentinel — never
+    `getattr(..., None)`, which would read an absent attribute as the JWT value
+    (the #2323 getattr-discriminator trap).
+    """
+    if getattr(current_user, "mcp_scope", "__missing__") not in PERSON_SCOPES:
+        return False
+    return not (
+        getattr(current_user, "agent_name", None)
+        or getattr(current_user, "connector_agent", None)
+        or getattr(current_user, "portal_delegate", False)
+    )
+
+
+# The refusal every door that ends an ask gives a caller that is not a person —
+# the operator routes below and the Workspace answer (client_portal/asks).
+PERSON_REQUIRED_DETAIL = {
+    "code": "person_required",
+    "message": (
+        "Only a person can answer or cancel an ask; agent- and "
+        "system-scoped keys cannot end one"
+    ),
+}
+
+
+def reject_non_person_principal(current_user: User) -> None:
+    """Refuse — with a named 403 — any caller that is not a person
+    (trinity-enterprise#611). Guards the three ways an ask ends by hand:
+    respond, cancel and bulk-cancel."""
+    if not is_person_principal(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=dict(PERSON_REQUIRED_DETAIL),
+        )
+
+
 def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
     """Lifecycle-mutation gate for agent-scoped callers
     (trinity-enterprise#69 Part 2) — INTERIM until #948 capability tokens.
@@ -1454,6 +1510,46 @@ def get_authorized_agent(
             detail="Agent not found"
         )
     return name
+
+
+def get_self_acting_agent(
+    name: str = Path(..., description="Agent name from path"),
+    current_user: User = Depends(get_current_user),
+) -> str:
+    """The agent in the path, acting as ITSELF (trinity-enterprise#611).
+
+    For the routes whose record claims "an agent did this" or that return what an
+    agent may read only about itself — an agent reading back its own ask. The
+    identity comes from the KEY, never from a body or the path alone: an
+    agent-scoped key may act only as the agent it belongs to, the system key only
+    as `trinity-system`, and every other principal (a person, a user-scoped key,
+    a connector) is refused — a person reads the queue through the operator
+    routes.
+
+    Identity FIRST, as one uniform 403 for every name that is not the caller's,
+    existent or not, so the refusal discloses nothing (Invariant #8's
+    self-uniform rule). Only then the ordinary access check, with its uniform 404.
+    """
+    from db.agents import SYSTEM_AGENT_NAME
+
+    scope = getattr(current_user, "mcp_scope", "__missing__")
+    agent = getattr(current_user, "agent_name", None)
+    is_self = (
+        (scope == "agent" and bool(agent) and agent == name)
+        or (scope == "system" and not agent and name == SYSTEM_AGENT_NAME)
+    )
+    if not is_self:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "agent_identity_required",
+                "message": (
+                    "Only the agent itself can do this, with its own key; "
+                    "use the operator queue routes to read another agent's asks"
+                ),
+            },
+        )
+    return get_authorized_agent(name, current_user)
 
 
 def get_owned_agent(

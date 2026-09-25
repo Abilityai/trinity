@@ -399,8 +399,21 @@ def test_trigger_counts_as_autonomous():
     assert '"operator_response"' in block
 
 
-def _dispatch_call_sites() -> list[pathlib.Path]:
-    """Every module that calls ``spawn_resume_dispatch``, DISCOVERED.
+# trinity-enterprise#611: ONE sink. Every ending — an answer from the operator
+# route or the Workspace, a cancel, a bulk sweep, an expiry — goes through
+# `services/ask_service.py`, and its default ending observer is the ONLY place
+# either spawner is called. So the rule "a wake hangs off the compare-and-set
+# WIN, never the attempt" is checked at the sink: every function that hands rows
+# to the observers must have won a CAS for them first.
+_SPAWNERS = ("spawn_resume_dispatch(", "spawn_ending_dispatch(")
+_SINK = "services/ask_service.py"
+# The set-based CAS writers: their RETURN is the set of rows this call ended
+# (bulk: the sweep's own batch_id re-select; expiry: per-id CAS winners).
+_SET_CAS_ACCESSORS = ("bulk_cancel_operator_queue_items(", "mark_operator_queue_expired(")
+
+
+def _dispatch_call_sites(spawner: str = "spawn_resume_dispatch(") -> list[pathlib.Path]:
+    """Every module that calls `spawner`, DISCOVERED.
 
     Deliberately a walk and not a list (ent#430 review). The guard below started
     as one hardcoded path — `routers/operator_queue.py`, the only caller ent#329
@@ -424,13 +437,13 @@ def _dispatch_call_sites() -> list[pathlib.Path]:
             text = path.read_text()
         except (OSError, UnicodeDecodeError):
             continue
-        if "spawn_resume_dispatch(" in text:
+        if spawner in text:
             hits.append(path)
     return hits
 
 
-def _dispatching_functions(path: pathlib.Path):
-    """Every function in `path` that calls ``spawn_resume_dispatch``, as CODE.
+def _functions_calling(path: pathlib.Path, needle: str):
+    """Every function in `path` whose CODE calls `needle`.
 
     `ast.unparse` is the point, not decoration. The first version of this guard
     tested `"_status_conflict" in source` against the raw file, and a mutation
@@ -445,65 +458,97 @@ def _dispatching_functions(path: pathlib.Path):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         body = ast.unparse(node)
-        if "spawn_resume_dispatch(" in body:
+        if needle in body:
             out.append((node.name, body))
     return out
 
 
+def test_the_ask_sink_is_the_only_place_a_wake_is_spawned():
+    """Re-pinned (trinity-enterprise#611): both spawners are called from the sink
+    and from nowhere else. A route or a service that spawns a wake itself has
+    stepped around the CAS rule below — it must go through the sink instead.
+    Separate floors: each spawner must still be FOUND, or the rule below has gone
+    blind to it (a rename, an alias)."""
+    for spawner in _SPAWNERS:
+        found = {p.relative_to(_BACKEND).as_posix() for p in _dispatch_call_sites(spawner)}
+        assert found == {_SINK}, (
+            f"{spawner} is called from {sorted(found)}; the only call site is "
+            f"{_SINK} — end the ask through services/ask_service.py instead"
+        )
+
+
 def test_every_dispatch_call_site_hangs_off_the_cas_win_only():
-    """A lost respond race must not dispatch — at EVERY call site.
+    """A lost race must not wake anyone — at EVERY way an ask ends.
 
-    ``respond_to_operator_queue_item`` returns a ``_status_conflict`` marker when
-    the item left `pending` between the check and the UPDATE; the caller must
-    refuse there. The dispatch must sit *after* that refusal, or a caller whose
-    answer was never recorded still spends the agent's money — the #1083 rule
-    that side effects hang off the CAS result, not off the attempt.
+    The wake is spawned by the sink's ending observer, which only ever sees the
+    rows `_ended(...)` hands it. So the rule is checked where rows ENTER
+    `_ended(`: each function that calls it must, in code and before the call,
+    either consult `_status_conflict` (a single-row CAS that lost returns the row
+    with that marker, having written nothing) or take its rows from a set-based
+    CAS writer whose return IS the set of winners (`bulk_cancel_…` re-selects by
+    the sweep's own batch_id; `mark_…_expired` collects per-id CAS winners).
 
-    It is worse than one wasted execution: the idempotency key digests the
-    ANSWER TEXT, so the winner and the loser hash differently and one queue item
-    produces TWO paid executions.
-
-    Discovered rather than listed, and asserted against parsed CODE rather than
-    file text, so a third call site inherits the rule instead of re-losing it.
-    `architecture.md`'s "Two callers, one rule" bullet claims exactly this
-    protection; before ent#430's review it claimed it while the guard read a
-    single hardcoded file.
+    It is worse than one wasted execution: the resume key digests the ANSWER
+    TEXT, so a winner and a loser hash differently and one queue item produces
+    TWO paid executions. Discovered, not listed; asserted against parsed CODE.
     """
-    sites = _dispatch_call_sites()
-    assert len(sites) >= 2, (
-        f"expected at least the two known dispatch call sites, found {sites} — "
-        f"if the helper was renamed, this guard has gone blind"
+    sink = _BACKEND / _SINK
+    feeders = [(n, b) for n, b in _functions_calling(sink, "_ended(") if n != "_ended"]
+    assert {n for n, _ in feeders} >= {"answer", "cancel", "bulk_cancel", "expire"}, (
+        f"the four ways an ask ends no longer all reach _ended(): {[n for n, _ in feeders]}"
     )
-    checked = 0
-    for path in sites:
-        rel = path.relative_to(_BACKEND).as_posix()
-        fns = _dispatching_functions(path)
-        assert fns, f"{rel} matched the text scan but no function calls it — alias?"
-        for name, body in fns:
-            assert "_status_conflict" in body, (
-                f"{rel}::{name} dispatches a resume without ever consulting "
-                f"`_status_conflict` IN CODE, so a lost respond race reaches the "
-                f"spawn: the answer is not in the database and the agent is paid "
-                f"to act on it"
-            )
-            assert body.index("_status_conflict") < body.index("spawn_resume_dispatch("), (
-                f"{rel}::{name} dispatches BEFORE checking `_status_conflict` — "
-                f"the race loser spends"
-            )
-            checked += 1
-    assert checked >= 2, checked
+    fns = {n.name: n for n in ast.walk(ast.parse(sink.read_text()))
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for name, body in feeders:
+        at = body.index("_ended(")
+        guarded = (
+            _refuses_on_status_conflict_before_ended(fns[name])
+            or any(a in body[:at] for a in _SET_CAS_ACCESSORS)
+        )
+        assert guarded, (
+            f"{_SINK}::{name} hands rows to the ending observers without having won "
+            f"a compare-and-set for them — a lost race would be woken and paid for"
+        )
 
 
-def test_the_discovery_walk_finds_both_known_callers():
-    """The guard above is only as good as what it finds, so pin the floor.
+def _refuses_on_status_conflict_before_ended(fn) -> bool:
+    """An `if` whose TEST reads `_status_conflict` and whose body raises or
+    returns, above the first `_ended(` call. Presence of the string is not
+    enough: `updated.pop("_status_conflict", False)` on its own line still
+    names it while letting the loser through (trinity-enterprise#611 review
+    mutation M1)."""
+    ended_line = min(
+        (n.lineno for n in ast.walk(fn)
+         if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_ended"),
+        default=None,
+    )
+    if ended_line is None:
+        return False
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.If)
+            and node.lineno < ended_line
+            and "_status_conflict" in ast.unparse(node.test)
+            and any(isinstance(b, (ast.Raise, ast.Return)) for b in node.body)
+        ):
+            return True
+    return False
 
-    A rename of the helper, or a caller that reaches it through an alias, would
-    otherwise leave the loop iterating an empty list and passing in silence —
-    the failure mode a discovery guard trades for the one it fixes.
-    """
-    found = {p.relative_to(_BACKEND).as_posix() for p in _dispatch_call_sites()}
-    assert "routers/operator_queue.py" in found, found
-    assert "client_portal/asks/service.py" in found, found
+
+def test_the_observers_are_only_ever_told_by_the_sink():
+    """Rows reach an observer through `_ended` alone — the one place that runs
+    after a CAS win. Iterating `_observers` anywhere else is a side door."""
+    tree = ast.parse((_BACKEND / _SINK).read_text())
+    iterating = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if isinstance(node, ast.For) and "_observers" in ast.unparse(node.iter):
+                iterating.add(fn.name)
+    assert iterating == {"_ended"}, iterating
+    spawning = {n for s in _SPAWNERS for n, _ in _functions_calling(_BACKEND / _SINK, s)}
+    assert spawning == {"_wake_filer"}, spawning
 
 
 def test_the_knob_is_owner_only():

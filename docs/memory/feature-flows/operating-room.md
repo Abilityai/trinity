@@ -1,6 +1,7 @@
 # Operations (OPS-001)
 
 > **Status**: Implemented (Phases 1-4)
+> **Updated 2026-09-25 (trinity-enterprise#611, PR A)**: how an ask ENDS (OPS-001-ENDINGS). Every ending — the operator answer, the Workspace answer, single cancel, bulk cancel, expiry — goes through one sink, `services/ask_service.py` (compare-and-set → one audit row per transition → one thin WS trigger → ending observers). An endings ledger on the row (`disposition` answered|cancelled|expired, `disposed_at`, `disposed_by` person|timeout, `disposed_by_email`, `disposition_reason`, `batch_id`; migration `operator_queue_ask_object` / Alembic `0076`, which also adds the six agent-raised-ask columns PR B writes). Only a person ends an ask (403 `person_required` for agent/system/other keys). An answer after `expires_at` is 409 `expired`. The ent#329 wake fires on ANY ending (new trigger `operator_ending` for cancel/expiry). An agent reads its own ask back by `request_id` (`GET /api/agents/{name}/operator-queue/{request_id}`, MCP `get_my_ask`), and every composed turn lists the endings of the last 24 h. Surfaces show who and when. See "Endings" below.
 > **Updated 2026-09-23 (#2915)**: the file sync tells the truth (OPS-001-HONEST). Eight nullable columns record what the poller last established about the agent's file entry (`sync_state` / `sync_detail` / `sync_updated_at` / `last_confirmed_at`), whether an answer reached it (`delivery_state` / `delivery_detail` / `delivery_updated_at`) and whether the human answered a diverged item knowingly (`divergence_acknowledged_at`); the write-back delivers only into a matching, still-pending entry, re-reads before writing and writes with `if_match` (the agent server's `PUT /api/files` is atomic and answers 412); `POST …/respond` and the portal answer return **409 `item_diverged`** unless `acknowledge_divergence` is set; every list/get carries server-computed `aging` / `aged_since` and the list carries `undelivered_count` / `closed_by_filer_count`; one `operator_queue_sync` WS trigger per cycle; audit rows for the accountability transitions only. See "Sync honesty" below.
 > **Updated 2026-06-11 (#1017)**: "Clear All" -- per-tab bulk clear on the operator tabs. Two new endpoints (`POST /api/operator-queue/bulk-cancel`, `POST /api/operator-queue/clear-resolved`), a new `cleared_at` hide column (clear-resolved hides, never deletes), a new WS event (`operator_queue_cleared`), a respond-race 409, and terminal-status (cancelled/expired) write-back to agent queue files.
 > **Updated 2026-06-09 (#1109)**: Frontend IA refactor -- "Operating Room" renamed to **Operations** and extended from 3 to **5 tabs** (added Health + Executions). View `OperatingRoom.vue` -> `Operations.vue`, route `/operating-room` -> `/operations`. NavBar "Health"/"Ops"/"Executions" links collapsed into one "Operations" link. Legacy routes redirect.
@@ -43,7 +44,8 @@ As an operator, I want a single inbox where I can see and respond to all agent r
 - **API**: `GET /api/notifications` -- List agent notifications (used by Notifications tab)
 - **API**: `GET /api/monitoring/status` -- Fleet health (Health tab, admin-only)
 - **API**: `GET /api/executions` / `GET /api/executions/stats` -- Fleet execution list + stats (Executions tab)
-- **MCP** (#1101): `list_operator_queue` (broad or scoped by `agent_name`) and `get_operator_queue_item` -- read-only triage surface over the queue for agents and external Claude Code clients (`src/mcp-server/src/tools/operator_queue.ts`). Agent-scoped keys are gated in the MCP layer to `{self} ∪ permitted` (the backend resolves an agent key to its owner, so agent-to-agent gating cannot live in the REST layer). Write/respond over MCP is deferred.
+- **MCP** (#1101): `list_operator_queue` (broad or scoped by `agent_name`) and `get_operator_queue_item` -- read-only triage surface over the queue for agents and external Claude Code clients (`src/mcp-server/src/tools/operator_queue.ts`). Agent-scoped keys are gated in the MCP layer to `{self} ∪ permitted` (the backend resolves an agent key to its owner, so agent-to-agent gating cannot live in the REST layer). `respond_to_operator_queue` (#1104) proxies the respond route — since trinity-enterprise#611 only with a person's user-scoped key (the backend refuses agent- and system-scoped keys, 403 `person_required`).
+- **MCP / API** (trinity-enterprise#611): `get_my_ask` → `GET /api/agents/{name}/operator-queue/{request_id}` -- an agent reads back ITS OWN ask by the `request_id` it chose (self-acting: the agent comes from the key); a redacted projection that survives Clear All.
 - **NavBar**: Single "Operations" link (`to="/operations"`, active when `$route.path === '/operations'`) with one combined badge `combinedOpsCount = operatorQueueStore.pendingCount + notificationsStore.pendingCount`. Replaces the former separate Health (`/monitoring`), Ops (`/operating-room`), and Executions (`/executions`) links + their badges.
 - **Legacy redirects** (all preserve bookmarks): `/operating-room` (FUNCTION form, preserves `?tab=` query) -> `/operations`; `/monitoring` -> `/operations?tab=health`; `/executions` -> `/operations?tab=executions`; `/events` -> `/operations?tab=notifications`
 - **Agent**: Writes `~/.trinity/operator-queue.json` inside container
@@ -168,6 +170,7 @@ Events are keyed by `type` (not `event`), dispatched from the `default` case in 
 ```javascript
 if (data.type === 'operator_queue_new' ||
     data.type === 'operator_queue_responded' ||
+    data.type === 'operator_queue_cancelled' ||   // trinity-enterprise#611
     data.type === 'operator_queue_acknowledged' ||
     data.type === 'operator_queue_cleared' ||
     data.type === 'operator_queue_sync') {   // #2915
@@ -177,7 +180,7 @@ if (data.type === 'operator_queue_new' ||
 
 Event handling in the store (`handleWebSocketEvent`, line 177-200):
 - `operator_queue_new` -- Triggers full `fetchItems()` refetch to get complete item data
-- `operator_queue_responded` -- Updates item status, response, and responded_by locally (avoids refetch)
+- `operator_queue_responded` / `operator_queue_cancelled` (trinity-enterprise#611) -- an ask ended; the trigger is thin (`{id, agent_name}` only, #918) and agent-keyed so the ent#467 `/ws` filter scopes it -- triggers full `fetchItems()` refetch (the old responded payload carried the responder's email and the answer, patched locally)
 - `operator_queue_acknowledged` -- Updates item status to 'acknowledged' locally
 - `operator_queue_cleared` (#1017) -- Bulk clear by an operator (any browser tab/user) -- triggers full `fetchItems()` refetch of authoritative state
 - `operator_queue_sync` (#2915) -- the poller changed some row's sync/delivery state this cycle; ONE thin trigger per cycle (no payload, #918) -- triggers full `fetchItems()` refetch
@@ -272,11 +275,12 @@ All endpoints require JWT authentication via `get_current_user` dependency. Per-
 |--------|------|---------|------|-------------|
 | GET | `/api/operator-queue` | `list_queue_items()` | 83-106 | List with filters: status, type, priority, agent_name, since, limit (1-500, default 100), offset. Rows hidden by Clear All are excluded (`cleared_at IS NULL` default in `list_items`, #1017) |
 | GET | `/api/operator-queue/stats` | `get_queue_stats()` | 109-115 | Counts by status/type/priority/agent, avg response time, responded today |
-| POST | `/api/operator-queue/bulk-cancel` | `bulk_cancel_queue_items()` | 118-155 | (#1017) Cancel a list of still-pending items in one call. Body `{ids: [...]}` (1-500); ids are deduped order-preserving (`list(dict.fromkeys(body.ids))`) so the `skipped` count is honest. Only listed ids are touched; non-pending/inaccessible ids are skipped. Returns `{cancelled, skipped}`. Audit-logged (`OPERATOR_QUEUE` / `bulk_cancel`), broadcasts one `operator_queue_cleared` WS event (`scope: "pending"`) when `cancelled > 0` |
+| POST | `/api/operator-queue/bulk-cancel` | `bulk_cancel_queue_items()` | — | (#1017) Cancel a list of still-pending items in one call. Body `{ids: [...], reason?}` (1-500 ids; `reason` ≤ 500, #611); ids are deduped order-preserving so the `skipped` count is honest. Only listed ids are touched; non-pending/inaccessible ids are skipped. **A person only** (403 `person_required`, #611). Through the ask sink: one `batch_id` stamped on exactly the rows this sweep flipped, ONE `bulk_cancel` audit row (the ids actually cancelled + `batch_id` + `has_reason`), ONE `operator_queue_cleared` trigger (`scope`, `count` — no operator email), ONE ending event to the observers. Returns `{cancelled, skipped, batch_id}` |
 | POST | `/api/operator-queue/clear-resolved` | `clear_resolved_queue_items()` | 158-204 | (#1017) **Hide** terminal items (`acknowledged`/`cancelled`/`expired`) by setting `cleared_at` — NOT a DELETE (a delete would be resurrected by the 5s sync loop; see DB layer). `responded` rows are kept visible so the sync write-back can still deliver the answer. Actual row deletion is deferred to the retention sweep (#1142). Body `{agent_name?}` (403 if inaccessible). Idempotent — empty match returns `{cleared: 0}`. Audit-logged (`clear_resolved`), broadcasts `operator_queue_cleared` (`scope: "resolved"`) when `cleared > 0` |
 | GET | `/api/operator-queue/{item_id}` | `get_queue_item()` | 207-218 | Single item by ID; 404 if not found (does NOT filter on `cleared_at` — hidden items remain fetchable by id) |
-| POST | `/api/operator-queue/{item_id}/respond` | `respond_to_queue_item()` | 221-270 | Submit operator response. Validates status=pending, 409 on respond/cancel race (#1017), broadcasts WebSocket event |
-| POST | `/api/operator-queue/{item_id}/cancel` | `cancel_queue_item()` | 273-293 | Cancel pending item. Validates status=pending |
+| POST | `/api/operator-queue/{item_id}/respond` | `respond_to_queue_item()` | — | Submit operator response. **A person only** (403 `person_required`, checked before the row is read, #611). Validates status=pending (400), divergence (409 `item_diverged`, #2915), the offered option (422, #2376 — enforced by the ask sink); the sink's CAS writes the answer + ledger; 409 on a lost race (#1017) and 409 `expired` when the deadline passed before the poller swept (#611); audit `answered`, thin `operator_queue_responded`, the ent#329 resume |
+| POST | `/api/operator-queue/{item_id}/cancel` | `cancel_queue_item()` | — | Cancel pending item. **A person only** (#611). Optional body `{reason}` (≤ 500). Validates status=pending (400); the sink's CAS writes the cancel + ledger; 409 on a lost race (was a silent 200); audit `cancelled` (`has_reason`, never the text), thin `operator_queue_cancelled`, the ending wake |
+| GET | `/api/agents/{name}/operator-queue/{request_id}` | `get_my_ask()` (`agent_router`) | — | (#611) The agent's OWN ask by its own `request_id` — only as itself (`get_self_acting_agent`: agent key == name, system key == `trinity-system`; any other principal or name → one uniform 403 `agent_identity_required`, then `AuthorizedAgent`'s uniform 404). Ignores `cleared_at`. Redacted projection (`_READBACK_FIELDS`: no person email, no `resolved_to`) |
 | GET | `/api/operator-queue/agents/{agent_name}` | `get_agent_queue_items()` | 296-311 | Items for specific agent with optional status filter, limit (1-500, default 50) |
 
 **Route ordering**: the static `/bulk-cancel` and `/clear-resolved` routes are registered BEFORE the `/{item_id}` catch-all (Architectural Invariant #4).
@@ -426,9 +430,33 @@ Writers are edge-triggered (`WHERE sync_state IS NULL OR != :v …`; the rowcoun
 
 **Surfaces.** ONE rule, `utils/operatorQueue.js::queueSyncBadge(item)` → `{label, variant, title} | null`, rendered as a `BaseBadge` by `QueueCard`, `ResolvedCard` and `PortalAsks`, and as a currentColor pill in `/m` (`MobileAdmin.vue`, so its colour count cannot move). The portal projection (`WorkspaceAsk`) exposes a coarse `sync ∈ {confirmed, changed, closed, unconfirmed}` + `aging` only — no reason, no poller timestamp.
 
-**Residuals (registered in the debt inbox, owned by trinity-enterprise#619/#611):** `closed_by_filer` rows still count toward the #1632 depth cap until cancelled; a response undelivered because the entry changed *after* the answer (with no acknowledgement to carry) has no re-answer path; a re-ask with a reused id after `acknowledged` is swallowed by #1631's design; the four remaining string-prefix workspace guards in the agent server's files router; a NUL byte in a `path` is an unhandled 500 there.
+**Residuals (registered in the debt inbox, owned by trinity-enterprise#619/#611):** `closed_by_filer` rows still count toward the #1632 depth cap until cancelled; a response undelivered because the entry changed *after* the answer (with no acknowledgement to carry) has no re-answer path — narrowed by #611: the agent reads the answer back by its own `request_id` (`get_my_ask`); a re-ask with a reused id after `acknowledged` is swallowed by #1631's design; the four remaining string-prefix workspace guards in the agent server's files router; a NUL byte in a `path` is an unhandled 500 there.
 
 **Tests.** `tests/unit/test_2915_operator_queue_sync_honesty.py` (the seven divergence fixtures, hysteresis, no write on invalid JSON or a wrong-shape file, tri-state sweep, one broadcast per cycle, write-back gating and `if_match`, the pre-write re-read, the vanished-file guard, acknowledged delivery into a rewritten and into a closed entry, first-wins duplicates, the extended fingerprint, the stopped-agent delivery sweep, aging receipt once, fingerprint stability, and the accessors on a real migrated SQLite — delivered-only acknowledge, platform-row exclusion, terminal ordering, header-count exclusion); `tests/unit/test_2915_agent_server_files_if_match.py`; `src/frontend/tests/unit/operatorQueueSyncBadge.spec.js` (rule + store 409 flow), `queueCardSyncBadge.spec.js` (mounted), `operatorQueueAgingSetting.spec.js` (mounted).
+
+### Endings (trinity-enterprise#611)
+
+**Why.** An ask ends in exactly one of three ways — answered, cancelled, expired — and before #611 five write sites ended one, each with its own subset of side effects: single cancel recorded no actor, audited nothing, broadcast nothing and woke nobody; respond audited nothing; expiry never broadcast; bulk-cancel audited the ids it was ASKED to cancel. No surface could say who ended an ask or when (ResolvedCard showed `created_at` as the ending time), and an agent with no next turn waited forever on a cancelled ask. And an agent-scoped key resolved to its owner, so an agent could answer or cancel any ask its owner could reach — its own approval included — recorded as the owner.
+
+**The ledger.** Written in the SAME compare-and-set UPDATE that flips `status`, so a writer that loses the race records nothing: `disposition` (`answered | cancelled | expired`), `disposed_at`, `disposed_by` (`person | timeout` — an enum of two), `disposed_by_email` (NULL for timeout), `disposition_reason` (the operator's optional cancel reason, ≤ 500), `batch_id` (one uuid per bulk sweep). Nullable, no backfill — a row that ended before the ledger reads from `status`, and no surface presents its `created_at` as an ending time. The same migration (`operator_queue_ask_object` / Alembic `0076_operator_queue_ask_object`) adds `raised_by`, `channel`, `to_role`, `resolved_to`, `proposal`, `supersedes_expired` for PR B (agent-raised asks); the file poller already stamps `channel='file', raised_by='agent'` as keyword-only arguments — never read from the agent's entry. `expires_at` is stored ISO-Z at the sink (Invariant #16; an unparseable value is kept verbatim so the #2915 fingerprint never reads it as a rewrite).
+
+**The writers** (`db/operator_queue.py`): `respond_to_item` (CAS adds `expires_at IS NULL OR expires_at > now` — a late answer returns `_status_conflict` with status still `pending`); `cancel_item(item_id, *, disposed_by_email, reason)` (CAS; a lost race returns `_status_conflict`); `bulk_cancel_items(…, *, disposed_by_email, reason) → {batch_id, rows}` (one UPDATE stamps the sweep's own `batch_id`, the re-select `id IN (:ids) AND batch_id = :b` is exactly the winners — dialect-agnostic, no RETURNING); `mark_expired() → rows` (bounded candidate select, then per-id CAS — overlapping leaders end each row once).
+
+**The sink** (`services/ask_service.py`): `answer(item, …)` (runs the #2376 offered-option check first — the one writer of an answer), `cancel`, `bulk_cancel`, `expire`. Each: CAS writer → one audit row per transition (`answered` · `cancelled` (+`has_reason`) · `bulk_cancel` (+`batch_id`, the cancelled ids) · `expired` (`source=system`); ids and enums only) → ONE thin trigger (`operator_queue_responded` / `operator_queue_cancelled` agent-keyed; `operator_queue_cleared` count-only for a sweep; expiry sends none — the poll cycle's one `operator_queue_sync` covers it, its reset now sits above expiry) → the ending observers (`register_ending_observer`), handed only the CAS-won rows. Synchronous: the portal's answer route is a plain `def` on a worker thread, so the audit and broadcast hop to the loop through `operator_resume_service.spawn_on_loop` and are never awaited. `_broadcast_payload` names each trigger so the ent#467 `/ws` guard reads it.
+
+**Only a person ends an ask.** `dependencies.reject_non_person_principal` (an allowlist over `mcp_scope ∈ {None, "user"}`, no `agent_name`/`connector_agent`/`portal_delegate`; a principal with no scope attribute fails closed) guards respond, cancel and bulk-cancel before anything is read → 403 `person_required`. The Workspace answer (`client_portal/asks/router.py`) holds its platform principals to the same rule: `get_portal_principal` sets `PortalPrincipal.is_person` from `is_person_principal`, so a system-scoped key keeps its Workspace read breadth (#2198) but its answer is refused with the same 403 before the row is read.
+
+**The wake (default observer, `_wake_filer`).** Only for agents whose owner opted in (one flag read per agent per event; the spawned work re-reads it at spend time). Answered → the ent#329 `spawn_resume_dispatch`, one per ask, trigger `operator_response`. Cancelled / expired → `spawn_ending_dispatch`: ONE turn per agent per event (a sweep of one agent's 25 asks is one turn), trigger `operator_ending`, idempotency key `operator_ending:{agent}:{sha256(disposition + sorted ids)}`, `source_user_email` = the person (None for timeout). Skipped: platform-minted rows (ent#499), rows the agent already closed (`sync_state = closed_by_filer`), agents that are stopped or missing (audited `operator_resume_dispatch` status `skipped_not_running`; Docker unreadable ⇒ attempted). The framing lists the agent's own request ids + titles; an expiry carries the rider verbatim — "Denied by timeout; do not re-ask the same action without new information." — and the operator's reason is framed as data. A crash between the ending commit and the spawn loses the wake (accepted: the readback and the context line still carry it).
+
+**The agent's read path.** `GET /api/agents/{name}/operator-queue/{request_id}` + MCP `get_my_ask` (see Endpoints), and an `Ended asks (last 24 h)` line in every platform-composed turn's Execution Context (`platform_prompt_service._resolve_ended_asks`: up to 5 request ids + disposition + time, platform alarms excluded, fail-soft). The pull-worker path does not compose the platform prompt (#1629), so pull-claimed turns do not get the line.
+
+**Person fields withheld from machines.** `disposed_by_email` and `resolved_to` are removed from `GET /api/operator-queue`, `/{id}` and `/agents/{name}` for any non-person principal; the pre-existing `responded_by_email` / `addressed_to_email` still pass (registered residual).
+
+**Surfaces.** ONE rule, `utils/operatorQueue.js::queueEnding(item) → {kind, label, who, when} | null` (+ `queueEndingText`, `queueEndingSortTime`, `recentlyEnded`): ResolvedCard shows who and when (relative, absolute on hover) and the cancel reason; the resolved feed and the list API order ended rows by ending time (#627 AC6); `/m` gets a "Recently ended" strip from the fetch it already made; the Workspace (`include_ended`, read past the operator's Clear All) lists asks that ended in the last 7 days on the agent page and in chat with a coarse who (`you` / `the operator` / `timeout`) — never an operator email or the reason — with no answer controls, while the sidebar count and the Work tab's "Waiting on you" (`pending-only`) stay pending-only; an answered ask stays listed as the server's `answered` projection. The wake opt-in copy (ReliabilityPanel) and the Clear-All confirmation say only what the platform delivers.
+
+**Guards.** `test_ent329_operator_resume.py` G2 re-pinned to the sink: both spawners' only call site is `services/ask_service.py` (separate floors), every function feeding `_ended(` must refuse on `_status_conflict` in an `if` or take its rows from a named set-CAS accessor, and only `_ended` iterates the observers. The #2376 writer guard names the sink as the one writer. The route-level test (pending A + already-cancelled B ⇒ the wake gets only A) and three call-site mutations are in `tests/unit/test_ent611_ask_endings.py`.
+
+**Residuals.** Pre-existing person emails to agent keys on get/list; accepted wake loss on a crash; no native path for ephemeral agents; the pull path lacks the context line; the router's clear-resolved trigger still carries `cleared_by`.
 
 ### Ingestion caps (#1632)
 
@@ -526,7 +554,7 @@ CREATE INDEX IF NOT EXISTS idx_operator_queue_created ON operator_queue(created_
 | `_row_to_item(row)` | 19-42 | Convert DB row (19 columns) to dict, JSON-parses options and context. `cleared_at` is `row[18]` — it must stay positionally LAST in `_SELECT_COLS` (line 44-50, #1017) |
 | `create_item(agent_name, item)` | 52-88 | INSERT OR IGNORE from agent JSON data. Extracts execution_id from `context.execution_id` |
 | `get_item(item_id)` | 90-102 | SELECT single item by ID (no `cleared_at` filter) |
-| `list_items(..., include_cleared=False)` | 104-177 | Filtered list with dynamic WHERE clauses. `include_cleared: bool = False` (#1017) — cleared rows (`cleared_at IS NOT NULL`) are excluded by default; only listing honors this — `get_item` and the sync-service accessors never filter on `cleared_at`. Sort: pending first, then by priority order, then created_at DESC |
+| `list_items(..., include_cleared=False)` | 104-177 | Filtered list with dynamic WHERE clauses. `include_cleared: bool = False` (#1017) — cleared rows (`cleared_at IS NOT NULL`) are excluded by default; only listing honors this — `get_item` and the sync-service accessors never filter on `cleared_at`, and the Workspace's ended-asks listing passes `include_cleared=True` (Clear All is the operator's hygiene, #611). `hide_ended_before` (#611) drops rows that ended before a cutoff. Sort: pending first by priority then created_at DESC; ended rows by `coalesce(disposed_at, responded_at, created_at)` DESC (#611, #627 AC6) |
 | `respond_to_item(...)` | 179-221 | UPDATE status=responded WHERE status=pending. Sets response, responded_by_id, responded_by_email, responded_at. **Race marker (#1017)**: `rowcount == 0` with an existing row means the item left 'pending' between the router's check and the UPDATE — returns the current item with `_status_conflict: True` so the router can 409 instead of returning a silent 200 |
 | `cancel_item(item_id)` | 223-239 | UPDATE status=cancelled WHERE status=pending |
 | `bulk_cancel_items(ids, accessible_agent_names)` (#1017) | 241-280 | Single UPDATE status=cancelled WHERE status=pending AND id IN (...). Tri-state scoping: `None` = no filter (admin), empty set = no-op (returns 0), non-empty = SQL-side `agent_name IN (...)`. Returns rowcount |
@@ -601,10 +629,12 @@ The lease reaper (`services/lease_reaper_service.py`) creates operator-queue ite
 ### Status Lifecycle
 
 ```
-Agent creates -> pending -> responded (by operator) -> acknowledged (by agent)
-                         -> cancelled (by operator — single cancel or bulk Clear All)
-                         -> expired (by platform, if expires_at passed)
+Agent creates -> pending -> responded (by a person) -> acknowledged (by agent)
+                         -> cancelled (by a person — single cancel or bulk Clear All)
+                         -> expired (by the platform, once expires_at passed)
 ```
+
+Since trinity-enterprise#611 the same UPDATE writes the endings ledger: `disposition` answered | cancelled | expired, `disposed_by` person | timeout, `disposed_at`, and for a cancel the optional `disposition_reason` (+ `batch_id` for a sweep). `acknowledged` is a delivery fact, not an ending — its row keeps `disposition = answered`.
 
 Cancellations and expirations are propagated back to the agent on the next sync cycle (#1017): still-`pending` entries in the agent's file are flipped in place to their terminal DB status (`cancelled` or `expired`) so the agent stops waiting on them (entries missing from the file are never appended — there is nothing to deliver).
 
@@ -624,7 +654,9 @@ The "Operator Communication" instructions agents receive — the queue-file prot
 - **WebSocket broadcast**: `operator_queue_responded` -- When operator submits response (router, line 255-264)
 - **WebSocket broadcast**: `operator_queue_acknowledged` -- When agent acknowledges response (sync service, line 173-184)
 - **WebSocket broadcast**: `operator_queue_cleared` (#1017) -- One event per bulk-cancel (`scope: "pending"`) or clear-resolved (`scope: "resolved"`) operation; all connected clients refetch
-- **Audit log** (#1017): `AuditEventType.OPERATOR_QUEUE` with `event_action="bulk_cancel"` (details: cancelled/skipped counts + ids) or `event_action="clear_resolved"` (details: cleared count + agent_name) -- only when the operation actually touched rows
+- **Audit log** (#1017): `AuditEventType.OPERATOR_QUEUE` with `event_action="bulk_cancel"` (details: cancelled/skipped counts + the ids actually cancelled + `batch_id` + `has_reason`, #611) or `event_action="clear_resolved"` (details: cleared count + agent_name) -- only when the operation actually touched rows
+- **Audit log** (trinity-enterprise#611): `answered`, `cancelled` (`has_reason`), `expired` (`source=system`) — one row per transition from the ask sink; `operator_resume_dispatch` (`EXECUTION`) now also records ending wakes (`queue_item_ids`, `disposition`, `batch_id`, status incl. `skipped_not_running`)
+- **Execution** (trinity-enterprise#611): an opted-in agent is woken on ANY ending — trigger `operator_response` for an answer, `operator_ending` for a cancel or an expiry (one per agent per event)
 - **File write**: Response data (and #1017 terminal-status flips, cancelled/expired) written back to agent container JSON via `AgentClient.write_file()` (sync service, line 267-286)
 - **NavBar badge**: Updates pending count in real time via WebSocket events and polling
 
@@ -636,7 +668,11 @@ The "Operator Communication" instructions agents receive — the queue-file prot
 |------------|-------------|---------|--------|
 | Item not found | 404 | "Queue item not found" | `operator_queue.py:215,230,281` |
 | Respond to non-pending | 400 | "Cannot respond to item with status '{status}'" | `operator_queue.py:235-239` |
-| Respond/cancel race (#1017) | 409 | "Item is no longer pending (now '{status}') — response was not recorded" | `operator_queue.py:252-256` (via `_status_conflict` DB marker) |
+| Respond/cancel race (#1017) | 409 | "Item is no longer pending (now '{status}') — response was not recorded" (cancel: "— it was not cancelled") | via the `_status_conflict` DB marker, raised by the ask sink as `AskConflict` |
+| Answer after the deadline (#611) | 409 | `{code: "expired", message}` | respond CAS predicate `expires_at > now` |
+| Not a person (#611) | 403 | `{code: "person_required", message}` | `dependencies.reject_non_person_principal` (respond / cancel / bulk-cancel) |
+| Readback by anyone but the agent itself (#611) | 403 | `{code: "agent_identity_required", message}` | `dependencies.get_self_acting_agent` |
+| Cancel reason > 500 chars (#611) | 422 | Validation error | Pydantic `OperatorCancel` / `BulkCancelRequest` |
 | Cancel non-pending | 400 | "Cannot cancel item with status '{status}'" | `operator_queue.py:286-290` |
 | Inaccessible agent | 403 | "Access denied" | `_assert_agent_accessible()` (`operator_queue.py:73-76`) |
 | Bulk-cancel ids out of bounds (#1017) | 422 | Validation error (`ids` 1-500 items) | Pydantic `BulkCancelRequest` |
@@ -731,10 +767,16 @@ Note: bulk-cancel never errors on individual ids — non-pending or inaccessible
 ### Flow 3: Item Expiration
 
 ```
-1. Agent creates request with expires_at field
-2. OperatorQueueSyncService._poll_cycle() calls db.mark_operator_queue_expired()
-3. SQL: UPDATE status=expired WHERE status=pending AND expires_at < now
-4. Item no longer appears in open items on next fetch
+1. Agent creates request with expires_at field (stored ISO-Z, trinity-enterprise#611)
+2. OperatorQueueSyncService._poll_cycle() resets _changed_this_cycle, then calls ask_service.expire()
+3. db.mark_operator_queue_expired(): bounded candidate select, then per-id CAS
+   UPDATE status=expired, disposition=expired, disposed_by=timeout WHERE status=pending
+4. The sink audits `expired` per row (source=system) and hands the rows to the observers:
+   the ent#329 wake sends each opted-in, running filer ONE `operator_ending` turn carrying
+   "Denied by timeout; do not re-ask the same action without new information."
+5. The cycle's ONE thin `operator_queue_sync` trigger announces it; the write-back flips
+   the agent's file entry to expired
+6. Meanwhile, an answer to a row past its deadline but not yet swept is 409 `expired`
 ```
 
 ### Flow 4: Response Delivery After Container Restart
@@ -757,14 +799,18 @@ Note: bulk-cancel never errors on individual ids — non-pending or inaccessible
 
 ```
 1. Operator on the Needs Response tab clicks "Clear All" (data-testid ops-clear-all)
-2. ConfirmDialog warns: agents will be told their requests were cancelled;
-   affects all operators of these agents
+2. ConfirmDialog states only what the platform delivers (#611): each agent's queue
+   file is marked cancelled (it reads that on its next turn), and running agents set
+   to wake when their asks end are woken now, one turn per agent; affects all operators
 3. confirmClearAll() -> operatorQueueStore.bulkCancel(openItems ids)
    (only the rendered ids — a sync-race item the operator never saw is untouched)
-4. POST /api/operator-queue/bulk-cancel {ids} -> db.bulk_cancel_operator_queue_items()
-   Single UPDATE status=cancelled WHERE status=pending AND id IN (...) [+ agent scoping]
-5. Audit log (bulk_cancel) + one WS broadcast {type: "operator_queue_cleared",
-   data: {scope: "pending", count, cleared_by}}
+4. POST /api/operator-queue/bulk-cancel {ids, reason?} (a person only, #611) ->
+   ask_service.bulk_cancel() -> db.bulk_cancel_operator_queue_items(): ONE UPDATE
+   status=cancelled + the endings ledger + one batch_id WHERE status=pending AND
+   id IN (...) [+ agent scoping]; re-select by batch_id = exactly the rows it flipped
+5. Audit log (bulk_cancel: batch_id + the ids actually cancelled) + one WS broadcast
+   {type: "operator_queue_cleared", data: {scope: "pending", count}} + one ending wake
+   per opted-in running agent (trigger operator_ending, #611)
 6. All connected clients refetch; cancelled items move to the Resolved tab
    (resolvedItems now includes cancelled/expired), rendered with a gray badge
 7. Concurrent respond on a just-cancelled item: router status check passed but the
@@ -896,7 +942,7 @@ Clear All on **Resolved** instead calls `clearResolved()` -> `POST /api/operator
 ## Not Yet Implemented
 
 ### Phase 5: MCP Tools & Polish
-- [x] MCP read tools: `list_operator_queue`, `get_operator_queue_item` (#1101); write/respond over MCP still deferred
+- [x] MCP read tools: `list_operator_queue`, `get_operator_queue_item` (#1101); respond (#1104, a person's key only since trinity-enterprise#611); the agent's own readback `get_my_ask` (#611)
 - [x] Batch cancel/clear ("Clear All", #1017); batch **respond** to multiple items still open
 - [ ] Activity feed integration (log responses as activities)
 - [ ] Sound/desktop notifications for critical items
@@ -917,6 +963,7 @@ Clear All on **Resolved** instead calls `clearResolved()` -> `POST /api/operator
 
 | Date | Change |
 |------|--------|
+| 2026-09-25 | trinity-enterprise#611 PR A — endings: one transition sink (`services/ask_service.py`) for every way an ask ends; the endings ledger (migration `operator_queue_ask_object` / Alembic `0076`, twelve nullable columns incl. PR B's); person-only endings (403 `person_required`); 409 `expired` for a late answer; cancel audited/raced/woken like respond with an optional reason; bulk returns its `batch_id` and audits the winners; expiry through the sink with the rider; the ent#329 wake on any ending (trigger `operator_ending`, one per agent per event, opted-in running agents only); the agent's own readback (REST + MCP `get_my_ask`) and the Execution Context "Ended asks" line; person fields withheld from machine keys; surfaces show who + when (ResolvedCard, `/m` strip, Workspace ended asks for 7 days); list ordered by ending time. Tests: `tests/unit/test_ent611_ask_endings.py`, re-pinned G2 / #2376 / ent#430 / ent#499 / #2048 guards, `operatorQueueEnding.spec.js`, `portalAskEndings.spec.js`, `mobileAdminRecentlyEnded.spec.js`, MCP `operator_queue.test.ts` + `access-wiring.test.ts`. |
 | 2026-09-14 | #2744 the legacy skills-library adoption refusal is bounded by its CLASS. `skill_service._adopt_legacy_clone` runs as the first statement of every `sync_library()`, so an install past migration whose `skills_library_url` matches no configured source filed a fresh `priority:"high"`, `expires_at:None` item on every sync — 17 permanent, operator-unclearable rows (~17% of everything pending) on the reporting install, 288/day at the ent#236 auto-sync floor, because the TIMESTAMPED `request_id` defeats `create_item`'s `(agent_name, request_id)` ON CONFLICT DO NOTHING by construction. The terminal *"already has sources"* branch — the designed resting state of a migrated install, not a failure — now emits at `low` + `logger.info` with a STABLE `skills-legacy-adoption-refused-{sha256(url.strip())[:12]}` id, so N syncs collapse to one row per refused URL and, since that conflict target ignores `status`, an operator's dismissal sticks (cancel rather than acknowledge: Acknowledge writes `responded`, which Clear All deliberately excludes and nothing will ever deliver for a container-less `_skills-sync`). A different refused URL still raises its own item. Shaped as a keyword-only `steady_state` flag on the one emitter (one #1677 `_ALLOWED_CALLERS` key; the `False` default leaves the two actionable call sites unchanged lines, which is the AC-4 proof). `skills-legacy-adoption-` joins `_RESERVED_ID_PREFIXES` — a URL-derived id is guessable, and the same tuple drives `is_platform_minted`, gating the ent#499 responded write-back and the ent#329 respond→resume dispatch. The echoed URL is `strip_url_credentials`-scrubbed: `EmbeddedCredentialError` is a `ValueError`, so the validation-reject branch is exactly the one a PAT-bearing URL reaches, and the raw value had been landing at ERROR in the Vector-captured log and durably in `operator_queue.context` (Invariant #12). The #1677 justification's "admin-driven sync cadence" is corrected. No schema change (#1631 shipped `request_id`) ⇒ Invariant #9 not triggered. Pre-existing rows are not retro-cleaned — `POST /api/operator-queue/bulk-cancel` is the zero-code remedy. Tests: `tests/unit/test_2744_skills_adoption_alert_idempotency.py`. |
 | 2026-09-07 | #2529 second budgeted emitter: `git_service._emit_gitignore_untracked_alert` — the per-Push `.gitignore` sweep files a `gitignore_untracked` entry naming what it untracked (both confirmed field incidents were unattended 15-minute cycles that surfaced two months late, so the session-bound surfaces — API response, MCP result, toast, commit message — could not have caught them). Classified as agent-INFLUENCEABLE rather than platform-only, so it routes through `create_bounded_alert`: `sync_to_github` is reachable from the `git_sync` MCP tool an agent-scoped key may call on itself, and a `git add -f <ignored>` + sync loop yields a fresh removed set each time against a timestamped, non-idempotent id. Its `git_bloat`/`sync_failing` siblings stay direct because their cadence is the 60-second poller's — the influence-not-location distinction, applied. `_BUDGETED_ALERT_TYPES` gains `gitignore_untracked`; `_RESERVED_ID_PREFIXES` gains `gitignore-untracked-` so an agent cannot pre-create the id and suppress its own alert through the sink's on-conflict dedup (the C2 class). Tests: `tests/unit/test_2529_gitignore_precedence.py`. |
 | 2026-08-13 | #1677 platform-emitter budget: the #1632 platform exemption split by *influence* — platform-only emitters stay direct/unthrottled; the agent-influenceable `_alert_skill_not_found` (#1410; distinct unknown slash-commands defeated its per-command dedup at $0/turn) now routes through `operator_queue_service.create_bounded_alert`, a per-(agent, registered-type) pending-DEPTH budget (`OPERATOR_ALERT_MAX_PENDING_PER_TYPE`=5, DB-measured; `_BUDGETED_ALERT_TYPES` frozenset; fail-closed on every arm; the paired notification gated on the same bool; command truncated ~200 chars on every echo). At the cap: one cooldown-gated episode alert with deterministic reserved id `alert-budget-{agent}-{type}-b{bucket}` (DB on-conflict = cross-worker dedup; no `held`, no command text). `count_pending_for_agent` gained an optional `item_type` (query-only — no migration); `create_item` belts the derived `execution_id` COLUMN (non-str/>512 → None). AST caller-parity guard `tests/unit/test_1677_operator_alert_emitters.py` forces classification of every `create_operator_queue_item` call site (`_ALLOWED_CALLERS` = the living inventory; OSS-scoped). Tests: `tests/unit/test_1677_operator_alert_budget.py`. Closes the platform-emitter residual named on the #1081 pull-default-ON gate list. |

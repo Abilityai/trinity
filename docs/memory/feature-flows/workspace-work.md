@@ -29,7 +29,7 @@ Portal.vue (shell)
 │                        terminalCardItem → <PortalWorkCard> (from the durable verdict)  @ask-about-it → prefill
 ├─ <PortalRoom>          feed live rows with `chat_id` == the room (∩ server `working`) → <PortalWorkCard show-agent …/>
 │                        no row for the room yet → the server-derived "X is thinking…" line (#2792)
-└─ <PortalRail> #tab-work → <PortalWork>  Waiting on you (PortalAsks over store.asks) · Now · Earlier
+└─ <PortalRail> #tab-work → <PortalWork>  Waiting on you (PortalAsks over store.asks, pending-only — #611) · Now · Earlier
 stores/portalWork.js ──► GET /api/enterprise/client-portal/work?agents=a,b&chat_id=…
 utils/websocket.js: agent_activity (started + terminal) / loop_* for a participant → portalWork (debounced 2 s)
 
