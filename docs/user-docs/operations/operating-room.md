@@ -57,6 +57,8 @@ Consolidated view of agent notifications (replaces the former standalone Events 
 
 Terminal operator-queue items. Responded items stay visible until the agent confirms delivery of the response.
 
+When an agent asks again after one of its asks expired, the two cards name each other: **Re-ask of …** on the new ask and **Re-asked as …** on the expired one, with the other ask's id in full on hover.
+
 ### Clear All
 
 Each operator tab has a **Clear All** button (with a confirmation dialog) when there is something to clear. The action depends on the tab:

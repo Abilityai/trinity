@@ -495,8 +495,8 @@
 ### 26.1 Agent-Side Protocol
 - **Status**: ✅ Implemented (2026-03-07)
 - **Requirement ID**: OPS-001-AGENT
-- **Description**: File-based operator queue (`~/.trinity/operator-queue.json`) for agent-to-platform communication. Request types: approval, question, alert. Meta-prompt section teaches agents the protocol.
-- **Files**: `config/trinity-meta-prompt/prompt.md` (Operator Communication section)
+- **Description**: File-based operator queue (`~/.trinity/operator-queue.json`) for agent-to-platform communication. Request types: approval, question, alert. Meta-prompt section teaches agents the protocol. Since trinity-enterprise#611 agents raise asks natively with the `ask_operator` MCP tool (OPS-001-RAISE, §26.10) and the file is the fallback for two releases; the platform prompt's Operator Communication section teaches the tool first.
+- **Files**: `src/backend/services/platform_prompt_service.py` (Operator Communication section), `config/trinity-meta-prompt/prompt.md` (reference copy)
 
 ### 26.2 Platform File Sync Service
 - **Status**: ✅ Implemented (2026-03-07)
@@ -524,9 +524,9 @@
 - **Description**: Marketplace skill teaching agents how to write requests, read responses, escalate, and internalize operator preferences into memory.
 
 ### 26.6 MCP Tools
-- **Status**: ✅ Implemented (read #1101, respond #1104) · 🚧 `get_my_ask` + person-only respond (trinity-enterprise#611)
+- **Status**: ✅ Implemented (read #1101, respond #1104; `get_my_ask`, `ask_operator` and person-only respond — trinity-enterprise#611)
 - **Requirement ID**: OPS-001-MCP
-- **Description**: MCP tools for programmatic queue access: `list_operator_queue` and `get_operator_queue_item` (read; an agent-scoped key sees its own items plus the agents it has explicit permission for), `respond_to_operator_queue` (resolve a pending item), and `get_my_ask` (an agent reads back one of its OWN asks by its own `request_id` — OPS-001-ENDINGS). Since trinity-enterprise#611 only a person ends an ask: `respond_to_operator_queue` works for a user-scoped key, and the backend refuses agent- and system-scoped keys with 403 `person_required`. The original "orchestrator agents auto-process queue items" use had no consumer, and an agent answering its own approval is self-approval.
+- **Description**: MCP tools for programmatic queue access: `list_operator_queue` and `get_operator_queue_item` (read; an agent-scoped key sees its own items plus the agents it has explicit permission for), `respond_to_operator_queue` (resolve a pending item), `get_my_ask` (an agent reads back one of its OWN asks by its own `request_id` — OPS-001-ENDINGS), and `ask_operator` (an agent raises an ask as itself and gets a receipt — OPS-001-RAISE, §26.10). Since trinity-enterprise#611 only a person ends an ask: `respond_to_operator_queue` works for a user-scoped key, and the backend refuses agent- and system-scoped keys with 403 `person_required`. The original "orchestrator agents auto-process queue items" use had no consumer, and an agent answering its own approval is self-approval.
 - **Files**: `src/mcp-server/src/tools/operator_queue.ts`, `src/mcp-server/src/client.ts`, `src/mcp-server/src/access.ts`
 
 ### 26.7 Ingestion Rate / Depth / Size Caps (OPS-001-CAPS)
@@ -565,7 +565,7 @@
 - **Tests**: `tests/unit/test_1632_operator_queue_caps.py`, `tests/unit/test_1677_operator_alert_budget.py`, `tests/unit/test_1677_operator_alert_emitters.py`
 
 ### 26.9 Ask Endings — ledger, person-only endings, wake on any ending, self-readback (OPS-001-ENDINGS)
-- **Status**: 🚧 In Progress (trinity-enterprise#611 — PR A: endings; PR B: agent-raised asks over MCP)
+- **Status**: ✅ Implemented (trinity-enterprise#611 — PR A: endings; PR B: agent-raised asks, §26.10)
 - **Requirement ID**: OPS-001-ENDINGS
 - **Priority**: P1
 - **Description**: An ask ends in exactly one of three ways — answered, cancelled or expired. Every ending is recorded on the row, audited once, delivered to the agent that raised it, and shown with who and when on every surface that lists the ask.
@@ -579,9 +579,30 @@
   - **Execution Context line:** every platform-composed turn lists the asks this agent raised that ended in the last 24 hours (ids, disposition, time; no human text). Bounded and fail-soft — a read failure omits the line, never the turn.
   - **Surfaces:** Operations (the resolved card shows who ended the ask and when; the resolved feed sorts by ending time), `/m` (a "Recently ended" strip), and the client portal (the in-chat card and the agent page list asks that ended in the last 7 days with a coarse who — you, the operator, or timeout — never an operator's email or the cancel reason; the sidebar count stays pending-only). The Clear-All copy states only what the platform delivers. The wake opt-in copy says it fires "when an ask it raised ends — answered, cancelled or expired".
   - **Audit** (`event_type=operator_queue`, ids and enums only, never agent or operator text): `answered` · `cancelled` (+ `has_reason`) · `bulk_cancel` (+ `batch_id`, the cancelled ids) · `expired` (`source=system`) · `operator_resume_dispatch` (+ `disposition`).
-  - **PR B (pending):** agents raise asks over MCP (`ask_operator`) with a receipt and idempotent replay, a role-addressed `to:`, a frozen `proposal`, and a re-ask that references the agent's own expired ask through `supersedes_expired`; the file poller stays for two releases and logs a deprecation once per agent per boot.
+  - **Agent-raised asks:** the native create path — `ask_operator`, receipts, idempotent replay, role addressing, re-asks — is OPS-001-RAISE (§26.10).
 - **Files**: `src/backend/services/ask_service.py`, `src/backend/services/operator_resume_service.py`, `src/backend/services/operator_queue_service.py`, `src/backend/db/operator_queue.py`, `src/backend/routers/operator_queue.py`, `src/backend/dependencies.py`, `src/backend/client_portal/asks/`, `src/backend/services/platform_prompt_service.py`, `src/mcp-server/src/tools/operator_queue.ts`, `src/frontend/src/utils/operatorQueue.js` + its callers, migrations `operator_queue_ask_object` (SQLite) / `0076_operator_queue_ask_object` (Alembic)
 - **Tests**: `tests/unit/test_ent611_ask_endings.py`, `tests/unit/test_ent329_operator_resume.py`, `src/mcp-server/src/operator_queue.test.ts`, `src/frontend/tests/unit/operatorQueueEnding.spec.js`
+
+### 26.10 Agent-Raised Asks — `ask_operator`, receipts, re-asks (OPS-001-RAISE)
+- **Status**: ✅ Implemented (trinity-enterprise#611, PR B)
+- **Requirement ID**: OPS-001-RAISE
+- **Priority**: P1
+- **Description**: An agent asks a person for a decision through ONE platform call — validated at the call, stored, announced and answered with a receipt — instead of appending to its queue file and waiting for the poller.
+  - **One call, as itself:** `POST /api/agents/{name}/operator-queue` and the MCP tool `ask_operator`. The agent comes from the key: an agent key only as itself, the system key only as `trinity-system`, anything else **403 `agent_identity_required`**. Ephemeral agents stay fenced and keep the file.
+  - **Validated at the call:** every refusal is a named **422** — `invalid_ask`, `invalid_request_id`, `reserved_request_id`, `invalid_type`, `invalid_priority`, `invalid_title`, `field_too_large` (with `field`, `limit`, `unit`), `invalid_question`, `invalid_options`, `options_required`, `invalid_context`, `invalid_proposal`, `invalid_to`, `invalid_expires_at`, `invalid_supersedes_expired`. Sizes are measured exactly as the file ingest clamp measures them; unknown fields are refused; the agent cannot author the Workspace thread.
+  - **Idempotent:** the same `request_id` returns the FIRST receipt (HTTP 200, `status: replayed`) with `differs` naming each field that is not the same; the replay is answered before any time-dependent check, so a retry always gets its receipt.
+  - **Deadline floor:** `expires_at` must carry a timezone and be at least 15 minutes out — the bound on the expiry wake's agent-driven self-trigger.
+  - **Re-asks:** `supersedes_expired` names one of the agent's OWN expired asks (one uniform 422 otherwise); repeating an expired ask's `proposal` without that link is **422 `reask_requires_link`**. The Operations cards show the link both ways.
+  - **Addressed by role (`to`):** a registered assignment provider answers first; otherwise `primary` (the default for approval and question) is the agent's owner, `operator` (the default for alert) names no person, and `approver` / `viewer` are **422 `role_unassigned`** until someone fills them. An owner without an email turns a `primary` ask into an operator ask and the receipt says so (`resolved: false`); several people are recorded but none becomes the single Workspace addressee.
+  - **Caps:** the file path's #1632 rate buckets (**429 `rate_limited`**), and the per-agent depth cap made atomic — replay check, count and insert under one per-agent lock — (**429 `queue_full`**).
+  - **Receipt:** `status`, `id`, `request_id`, `channel`, `type`, `to_role`, `resolved`, `ask_status`, `disposition`, `disposed_at`, `expires_at`, `wakes_on_ending` (the owner's wake opt-in), `supersedes_expired` (the predecessor's `request_id`), `differs` on a replay — the role, never a person's email.
+  - **Provenance and the file contract:** `raised_by` and `channel = mcp` come from the call, never from content. A native row is outside the file contract everywhere: the poller skips a file entry re-using its id, and the write-backs, the stopped-agent sweeps and the delivery bookkeeping never touch it; Clear All hides it once answered.
+  - **Audit** (`event_type=operator_queue`, ids and enums only): `raised` (`source` api or system), plus one thin `operator_queue_new` trigger.
+  - **File compatibility (two releases):** the poller keeps ingesting the file, creates through an outcome-reporting accessor and never counts, announces or audits a row it did not insert, and logs the file channel's deprecation — naming `ask_operator` — once per agent per process.
+  - **Prompt:** the Operator Communication section teaches `ask_operator` / `get_my_ask` by their bare names before the file, which it marks as the fallback with its removal window.
+  - **Out of scope (named owners):** gate-initiated asks (trinity-enterprise#164 calls the same `raise_ask` with `raised_by="gate"`); resolving `approver` / `viewer` (the assignments provider); removing the poller (two releases); a native path for ephemeral agents.
+- **Files**: `src/backend/services/ask_service.py` (`raise_ask`), `src/backend/db/operator_queue.py` (`create_native_item`, `create_item_with_outcome`, the file-contract filter), `src/backend/routers/operator_queue.py` (`raise_my_ask`), `src/backend/models.py` (`OperatorAskCreate`), `src/backend/services/assignment_provider.py` (`people_for`), `src/backend/services/operator_queue_service.py` (the poller's side), `src/backend/services/platform_prompt_service.py`, `src/mcp-server/src/tools/operator_queue.ts` (`ask_operator`), `src/frontend/src/utils/operatorQueue.js` (`queueReaskBadges`) + `QueueCard.vue` / `ResolvedCard.vue`
+- **Tests**: `tests/unit/test_ent611_native_ask.py`, `tests/unit/test_1402_prompt_contract.py`, `tests/unit/test_1677_operator_alert_emitters.py` (G3), `src/mcp-server/src/operator_queue.test.ts`, `src/mcp-server/src/access-wiring.test.ts`, `src/frontend/tests/unit/operatorQueueReask.spec.js`
 
 ---
 
