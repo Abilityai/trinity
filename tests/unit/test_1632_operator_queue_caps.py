@@ -72,6 +72,17 @@ def _fake_db(pending=0, exists=False, create_side_effect=None):
     db.mark_operator_queue_acknowledged.return_value = False
     db.get_operator_queue_responded_for_agent.return_value = []
     db.get_operator_queue_terminal_for_agent.return_value = []
+    # #2915: the sync index replaced the per-entry exists() probe. Explicit
+    # empties, not MagicMock defaults — a MagicMock iterates as empty and
+    # `in` is False, which would keep these suites green without exercising
+    # the path (the #2826 C1 class).
+    db.get_operator_queue_sync_index_for_agent.return_value = {"open": [], "terminal": {}}
+    db.set_operator_queue_sync_state.return_value = False
+    db.set_operator_queue_delivery_state.return_value = False
+    db.mark_operator_queue_unconfirmed.return_value = 0
+    db.refresh_operator_queue_last_confirmed.return_value = 0
+    db.mark_operator_queue_undelivered_for_stopped_agents.return_value = []
+    db.get_setting_value.return_value = "24"
     return db
 
 
@@ -153,9 +164,11 @@ class TestDepthCap:
 
         asyncio.run(svc._sync_agent("a"))
 
-        # At the cap the very first admittable item breaks — exists() is probed
-        # at most once (for that first item), never 500×.
-        assert db.operator_queue_item_exists.call_count <= 1
+        # At the cap the very first admittable item breaks. #2915 replaced the
+        # per-entry exists() probe with ONE sync-index read per agent, so the
+        # bound is now: one index fetch, zero per-entry probes, never 500×.
+        assert db.operator_queue_item_exists.call_count == 0
+        assert db.get_operator_queue_sync_index_for_agent.call_count == 1
 
 
 # ---------------------------------------------------------------------------
