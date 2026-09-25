@@ -84,6 +84,9 @@ OPERATOR_QUEUE_TITLE_MAX = int(os.getenv("OPERATOR_QUEUE_TITLE_MAX", "300"))
 OPERATOR_QUEUE_QUESTION_MAX = int(os.getenv("OPERATOR_QUEUE_QUESTION_MAX", "4000"))
 OPERATOR_QUEUE_CONTEXT_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_CONTEXT_MAX_BYTES", "8192"))
 OPERATOR_QUEUE_OPTIONS_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_OPTIONS_MAX_BYTES", "4096"))
+# trinity-enterprise#611: the frozen action an agent-raised ask carries (the
+# values a decision would submit). Refused above this on the native path.
+OPERATOR_QUEUE_PROPOSAL_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_PROPOSAL_MAX_BYTES", "8192"))
 OPERATOR_QUEUE_ID_MAX = int(os.getenv("OPERATOR_QUEUE_ID_MAX", "256"))
 OPERATOR_QUEUE_EXECUTION_ID_MAX = int(os.getenv("OPERATOR_QUEUE_EXECUTION_ID_MAX", "128"))
 # ent#364: RFC 5321 caps an address at 320 chars; anything longer is not an
@@ -353,6 +356,17 @@ def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:
         return None
 
 
+def _json_bytes(value) -> Optional[int]:
+    """The UTF-8 size of `value` serialized as JSON, or None when it does not
+    serialize. The ONE measure every operator-queue size cap reads, so the file
+    path's clamp and the native path's refusal (trinity-enterprise#611) cannot
+    disagree about how big a field is."""
+    try:
+        return len(json.dumps(value).encode("utf-8"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     """#1632: total field-hygiene clamp for an agent-authored queue item.
 
@@ -434,10 +448,7 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
             thread_id = _workspace_thread_for(agent_name, out["addressed_to_email"])
             if thread_id:
                 context[_WORKSPACE_THREAD_KEY] = thread_id
-        try:
-            ctx_bytes = len(json.dumps(context).encode("utf-8"))
-        except (TypeError, ValueError):
-            ctx_bytes = None  # non-serializable
+        ctx_bytes = _json_bytes(context)  # None = non-serializable
         if ctx_bytes is None or ctx_bytes > OPERATOR_QUEUE_CONTEXT_MAX_BYTES:
             marker = {
                 "_truncated": True,
@@ -453,10 +464,7 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
 
     options = out.get("options")
     if options is not None:
-        try:
-            opt_bytes = len(json.dumps(options).encode("utf-8"))
-        except (TypeError, ValueError):
-            opt_bytes = None  # non-serializable
+        opt_bytes = _json_bytes(options)  # None = non-serializable
         if opt_bytes is None or opt_bytes > OPERATOR_QUEUE_OPTIONS_MAX_BYTES:
             out["options"] = [_OPTIONS_DROPPED_MARKER]
 
@@ -974,6 +982,12 @@ class OperatorQueueSyncService:
         # quarantine map so a crafted stream of unique reserved ids can't grow it
         # without bound.
         self._rejected_reserved: set[tuple[str, str]] = set()
+        # trinity-enterprise#611: (agent, req_id) already logged for a file entry
+        # that re-uses the id of an ask the agent raised over the platform, and
+        # the agents already told the file channel is deprecated. Logged once
+        # per process each, bounded like the sets above.
+        self._skipped_native: set[tuple[str, str]] = set()
+        self._file_channel_noticed: set[str] = set()
         # #1632: unique per worker process so the cross-worker leader lock only
         # ever refreshes/releases ITS OWN lease (mirror monitoring #1464).
         self._worker_id = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
@@ -1237,6 +1251,20 @@ class OperatorQueueSyncService:
                               {"status": row.get("status"), "detail": detail})
         return True
 
+    def _notice_file_channel(self, agent_name: str) -> None:
+        """trinity-enterprise#611: name the file channel's deprecation once per
+        agent per process, on the first ask the poller actually ingests."""
+        if agent_name in self._file_channel_noticed:
+            return
+        if len(self._file_channel_noticed) >= _MAX_QUARANTINE_ENTRIES:
+            self._file_channel_noticed.clear()  # safety valve
+        self._file_channel_noticed.add(agent_name)
+        logger.warning(
+            f"Agent '{agent_name}' raised an ask through {QUEUE_FILE_PATH}. The file "
+            f"channel is deprecated: raise asks with the ask_operator MCP tool. The "
+            f"file stays supported for two releases (trinity-enterprise#611)."
+        )
+
     async def _sync_agent(self, agent_name: str):
         """Sync a single agent's operator queue file."""
         client = AgentClient(agent_name)
@@ -1347,6 +1375,7 @@ class OperatorQueueSyncService:
             return
         open_rows = list(index["open"] or [])
         terminal_index = index["terminal"] or {}
+        native_rids = set(index["foreign"] or ())
         open_by_rid = {r["request_id"]: r for r in open_rows if r.get("request_id")}
         seen_rids: set = set()
         hours = aging_hours()
@@ -1391,6 +1420,25 @@ class OperatorQueueSyncService:
                         f"Rejecting operator-queue request '{req_id}' from "
                         f"'{agent_name}': ids with a reserved platform prefix are "
                         f"minted only by the platform (#1631)"
+                    )
+                continue
+
+            # trinity-enterprise#611: an id this agent raised over the platform.
+            # The native ask lives outside the file contract, so the entry is
+            # skipped before any branch reads it: the acknowledged branch matches
+            # rows by request_id alone, and the create branch would read the id
+            # as brand new every cycle (the phantom admit).
+            if isinstance(req_id, str) and req_id in native_rids:
+                key = (agent_name, req_id)
+                if key not in self._skipped_native:
+                    if len(self._skipped_native) >= _MAX_QUARANTINE_ENTRIES:
+                        self._skipped_native.clear()  # safety valve
+                    self._skipped_native.add(key)
+                    logger.warning(
+                        f"Ignoring operator-queue file entry '{req_id}' from "
+                        f"'{agent_name}': the agent raised that id with ask_operator, "
+                        f"and a native ask is never read from or written back to the "
+                        f"file (trinity-enterprise#611)"
                     )
                 continue
 
@@ -1527,12 +1575,19 @@ class OperatorQueueSyncService:
                 # trinity-enterprise#611: provenance from what the POLLER knows,
                 # keyword-only — never from the entry, which could claim any
                 # channel it likes.
-                new_id = db.create_operator_queue_item(
+                new_id, inserted = db.create_operator_queue_item_with_outcome(
                     agent_name, clamped, channel="file", raised_by="agent",
                 )
+                self._create_failures.pop(fail_key, None)  # recovered — clear count
+                if not inserted:
+                    # The row already exists: an ask raised with the same id
+                    # over the platform between this cycle's index read and
+                    # now. Nothing was admitted, so nothing spends a depth-cap
+                    # slot, announces itself or opens an audit story.
+                    continue
                 admitted += 1
                 new_items.append(clamped)
-                self._create_failures.pop(fail_key, None)  # recovered — clear count
+                self._notice_file_channel(agent_name)
             except Exception as e:
                 attempts = self._create_failures.get(fail_key, 0) + 1
                 if len(self._create_failures) >= _MAX_QUARANTINE_ENTRIES:

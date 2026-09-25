@@ -36,10 +36,15 @@ def _fake_db(create_side_effect):
     # #1525 quarantine path (a MagicMock default would misfire the >= cap check).
     db.count_operator_queue_pending_for_agent.return_value = 0
     db.create_operator_queue_item.side_effect = create_side_effect
+    # trinity-enterprise#611: the poller creates through the outcome accessor.
+    # Route it through the plain create mock, so every assertion here still
+    # counts the poller's creates and a raising create still raises.
+    db.create_operator_queue_item_with_outcome.side_effect = (
+        lambda agent, item, **kw: (db.create_operator_queue_item(agent, item, **kw), True))
     db.get_operator_queue_responded_for_agent.return_value = []
     db.get_operator_queue_terminal_for_agent.return_value = []
     # #2915: explicit empties for the sync index (see test_1632's note).
-    db.get_operator_queue_sync_index_for_agent.return_value = {"open": [], "terminal": {}}
+    db.get_operator_queue_sync_index_for_agent.return_value = {"open": [], "terminal": {}, "foreign": []}
     db.set_operator_queue_sync_state.return_value = False
     db.mark_operator_queue_unconfirmed.return_value = 0
     db.refresh_operator_queue_last_confirmed.return_value = 0

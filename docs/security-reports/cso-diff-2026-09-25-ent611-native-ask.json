@@ -1,0 +1,88 @@
+{
+  "version": "1.1",
+  "date": "2026-09-25",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/ent611-native-ask",
+  "base": "feature/ent611-ask-object (merge-base dfcb7c07b)",
+  "issue": "abilityai/trinity-enterprise#611 (PR B)",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "endpoints_new": 1,
+    "mcp_tools_new": 1,
+    "ws_types_new": 0,
+    "migrations": 0,
+    "infra_ci_deps_changed": false,
+    "detail": "POST /api/agents/{name}/operator-queue (agent-callable write, self-acting); MCP ask_operator"
+  },
+  "findings": [],
+  "fixed_during_audit": [],
+  "fixed_during_review": [
+    "raised audit row attributed to the owner as a person -> agent-attributed (ent#614 rule)",
+    "atomic depth cap proven on both backends with a forced overlap (requires_postgres module)"
+  ],
+  "appendix": [
+    "Demoted by verification (REFUTED as a new disclosure): a native ask's addressed_to_email was readable by the agent's own key, but GET /api/users/me already returns the key owner's email to that key in every case. Hardening kept: addressed_to_email withheld from non-person principals on native rows (matching resolved_to), which also closes a latent path once a people_for provider resolves a role to someone other than the owner.",
+    "Non-security: the published MCP schema said context/proposal accept no keys (fastmcp strictJsonSchema); fixed with an object-or-null declaration, pinned over listTools. Existing record parameters (e.g. emit_event.payload) share the quirk; outside this diff."
+  ],
+  "supply_chain_summary": "No dependency changes in the diff.",
+  "filter_stats": {
+    "candidates": 1,
+    "reported": 0,
+    "demoted_by_verifier": 1,
+    "discarded": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "open": 0
+  },
+  "mutations": [
+    "addressed_to_email pop removed -> 3 route tests red (pre-fix state)"
+  ],
+  "trend": {
+    "compared_with": "cso-diff-2026-09-25-ent611-ask-endings",
+    "resolved": [],
+    "persistent": [],
+    "new": []
+  },
+  "demoted": [
+    {
+      "id": "F1",
+      "severity": "LOW",
+      "confidence": 9,
+      "status": "REFUTED",
+      "state": "hardening applied",
+      "category": "Information disclosure",
+      "phase": "P9-A01",
+      "title": "An agent could read its owner's email back through a native ask's addressed_to_email",
+      "file": "src/backend/routers/operator_queue.py",
+      "symbol": "_for_principal",
+      "exploit": "An agent key raises ask_operator(to=primary), then lists its own queue; addressed_to_email carries the owner's email (new for the admin account, whose username is not an email).",
+      "fix": "Withhold addressed_to_email from non-person principals on native rows (channel not NULL/file).",
+      "tests": [
+        "tests/unit/test_ent611_native_ask.py::TestRaiseRoute::test_a_native_asks_addressee_is_withheld_from_machine_keys"
+      ],
+      "verification": "Live probe with a real agent key before and after the fix; fresh-context verifier"
+    }
+  ]
+}

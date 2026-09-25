@@ -343,3 +343,35 @@ export function recentlyEnded(items, max = 5) {
     .sort((a, b) => String(queueEndingSortTime(b)).localeCompare(String(queueEndingSortTime(a))))
     .slice(0, max)
 }
+
+/**
+ * trinity-enterprise#611 (#627 AC6) — the re-ask link, as badges: a re-ask
+ * names the expired ask it re-raises ("Re-ask of …"), and the expired ask names
+ * the ask that re-raised it ("Re-asked as …"). The successor carries the link
+ * (`supersedes_expired` = the predecessor's platform id); the predecessor
+ * stores nothing, so its side is found among the loaded `items`. A re-ask whose
+ * predecessor is not loaded still says it is one. One fact per badge: an ask in
+ * a chain gets both. Each badge is `{ key, prefix, id, title }`; `id` is the
+ * other ask's request_id (machine text), or null when it is not loaded.
+ */
+export function queueReaskBadges(item, items = []) {
+  if (!item || typeof item !== 'object') return []
+  const list = Array.isArray(items) ? items : []
+  const out = []
+  if (item.supersedes_expired) {
+    const pred = list.find((i) => i && i.id === item.supersedes_expired)
+    out.push(pred?.request_id
+      ? { key: 'reask-of', prefix: 'Re-ask of', id: pred.request_id, title: `Re-asks "${pred.title}", which expired unanswered.` }
+      : { key: 'reask-of', prefix: 'Re-ask of an expired ask', id: null, title: 'Re-asks an earlier ask that expired unanswered.' })
+  }
+  const succ = item.id ? list.find((i) => i && i.supersedes_expired === item.id) : null
+  if (succ) {
+    out.push({
+      key: 'reasked-as',
+      prefix: succ.request_id ? 'Re-asked as' : 'Re-asked',
+      id: succ.request_id || null,
+      title: `The agent asked again after this expired: "${succ.title}".`,
+    })
+  }
+  return out
+}

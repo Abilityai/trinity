@@ -23,6 +23,8 @@ import type {
   ScheduleTriggerResult,
   ActivityTimelineResponse,
   OperatorQueueAskReadback,
+  OperatorAskCreate,
+  OperatorAskReceipt,
   OperatorQueueItem,
   OperatorQueueListResponse,
   CompatibilityReport,
@@ -2264,6 +2266,21 @@ export class TrinityClient {
     return this.request<OperatorQueueAskReadback>(
       "GET",
       `/api/agents/${encodeURIComponent(agentName)}/operator-queue/${encodeURIComponent(requestId)}`,
+    );
+  }
+
+  /**
+   * Raise an ask as the agent itself (trinity-enterprise#611). Proxies
+   * POST /api/agents/{name}/operator-queue: the backend answers only the
+   * agent's own key (or the system key as trinity-system), 201 with the
+   * receipt on a new ask and 200 with the first receipt on a replay. A refusal
+   * (422 / 429 / 403) is thrown as an ApiError carrying the named code.
+   */
+  async raiseAsk(agentName: string, body: OperatorAskCreate): Promise<OperatorAskReceipt> {
+    return this.request<OperatorAskReceipt>(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/operator-queue`,
+      body,
     );
   }
 

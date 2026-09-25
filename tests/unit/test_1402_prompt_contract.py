@@ -126,8 +126,8 @@ def test_stale_dateserial_id_only_as_negative_example():
 def test_operator_section_identical_across_runtimes():
     """The Operator Communication section is MCP-tool-name-free by design, so
     every runtime build must render it byte-identically. If this fails, someone
-    added an ``mcp__trinity__`` reference to the section — keep it file-protocol
-    only (#1402 / #1187)."""
+    added an ``mcp__trinity__`` reference to the section — name tools bare
+    (``ask_operator``, trinity-enterprise#611; #1402 / #1187)."""
     baseline = _operator_section(get_platform_system_prompt("claude-code"))
     for runtime in RUNTIMES:
         assert _operator_section(get_platform_system_prompt(runtime)) == baseline
@@ -135,6 +135,18 @@ def test_operator_section_identical_across_runtimes():
 
 def test_operator_section_is_mcp_name_free():
     assert "mcp__trinity__" not in _operator_section(PLATFORM_INSTRUCTIONS)
+
+
+def test_operator_section_teaches_the_native_tools_by_bare_name():
+    """trinity-enterprise#611: the section leads with the platform tool and
+    names it BARE (the prefix-free rule above), keeps the file as the fallback,
+    and says when the fallback goes. The tool's own description carries the
+    field-level detail (ent#243: one source of truth)."""
+    section = _operator_section(PLATFORM_INSTRUCTIONS)
+    for name in ("`ask_operator`", "`get_my_ask`", "`supersedes_expired`", "`wakes_on_ending"):
+        assert name in section, f"operator section does not teach {name}"
+    assert section.index("`ask_operator`") < section.index("~/.trinity/operator-queue.json")
+    assert "fallback" in section and "two releases" in section
 
 
 # ---------------------------------------------------------------------------
