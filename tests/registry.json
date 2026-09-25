@@ -3453,6 +3453,16 @@
         "scheduler"
       ],
       "description": "The scheduler's readiness gate beside the #454 pre-check: a held cron seat brief is a skipped row with the reason plus the skipped event and is never dispatched; manual, webhook and non-seat schedules are not asked; anything but an explicit fire:false fires; every backend failure shape fails open."
+    },
+    {
+      "file": "unit/test_2107_push_access_probe.py",
+      "feature": "#2107",
+      "added": "2026-09-25",
+      "categories": [
+        "backend",
+        "git"
+      ],
+      "description": "Git-sync write access is validated where GitHub enforces it (#2107): probe_push_access runs REAL `git push --dry-run` against a local fake smart-HTTP server — 403 + `Write access to repository not granted.` → denied with GitHub's line verbatim; a valid receive-pack advertisement → ok with nothing POSTed; 5xx / unreachable → transient; the PAT reaches the server as an Authorization header and is never on git's argv; is_push_denied over refusal vs non-refusal texts. Create-path cases (400 before any container, transient non-blocking, source mode not probed) in test_1484_create_agent_characterization.py; the named sync_failing item in test_sync_health_service.py. 20 of 23 red with the fix reverted."
     }
   ]
 }
