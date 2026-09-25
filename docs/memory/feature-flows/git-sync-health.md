@@ -94,7 +94,8 @@ Migration: `sync_health` in `src/backend/db/migrations.py` (idempotent,
 
 - `.trinity/sync-state.json` — written by the agent's auto-sync loop after
   every cycle. Fields: `last_sync_status`, `last_sync_at`,
-  `last_error_summary`, `consecutive_failures`. Read/merged into
+  `last_error_summary`, `consecutive_failures`, and (#3011)
+  `last_successful_push_at` + `behind_after_fetch`. Read/merged into
   `GET /api/git/status` so the backend poller picks it up.
 
 ## Execution Flow
@@ -171,9 +172,14 @@ merge_gitignore_after_clone(name)   monotonic deadline _MERGE_READY_TIMEOUT_SECO
              │
              ▼
 ┌──────────────────────────────┐
-│ routers/git._run_auto_sync_  │  git add -A
-│ once(home_dir)               │  git commit (if dirty)
-│                              │  git push origin HEAD
+│ routers/git._run_auto_sync_  │  refuse: source-mode on default branch (#3011)
+│ once(home_dir)               │  git add -A
+│                              │  git commit (if dirty)
+│                              │  git fetch origin <branch>
+│                              │  behind > 0 → git rebase --autostash
+│                              │     conflict → rebase --abort, record diverged
+│                              │     clean    → push --force-with-lease=<fetched>
+│                              │  else git push origin HEAD
 └────────────┬─────────────────┘
              │
              ▼
@@ -315,6 +321,39 @@ _run_auto_sync_once (worker thread, repo lock held)
 - **Rollout:** everything ships in the base image — existing fleets need a
   base-image rebuild + agent recreate; pre-existing bloat recovery is
   ops-side (trinity-ops-agent#127) using `GIT_MAINTENANCE_TIMEOUT_SECONDS`.
+
+### 1b. Reconcile before push (#3011)
+
+The cycle used to be `add -A → commit → push origin HEAD` with no fetch, so
+the first foreign push to the agent's branch failed every later cycle
+non-fast-forward, forever — the `sync_failing` alert fired but the divergence
+was never repaired and the agent's commits piled up on the container disk. The
+heartbeat is now the durability mechanism for agents whose humans also push,
+so it reconciles (all under `_REPO_LOCK`, every child via `run_registered`):
+
+- **Refusal first.** `GIT_SOURCE_MODE=true` (pull-only by contract) on the
+  repo's default branch (`origin/HEAD`, else `main`/`master`) refuses before
+  anything is committed: `failed`, `refused: source-mode on <branch>`. The
+  clone stays a clean mirror and three refusals raise `sync_failing`, naming
+  the contradictory config. Fork-to-own agents own their fork's `main` and are
+  exempt — recognised by `GIT_UPSTREAM_REPO` or, since that env is not
+  re-derived on recreate, the `upstream` remote on the persistent volume.
+- **Fetch** `origin <branch>` (the one new network call). A branch missing on
+  the remote (a fresh working branch) is not an error — the push creates it.
+- **Behind → rebase** `--autostash` onto `origin/<branch>`. A clean rebase
+  pushes with `--force-with-lease=refs/heads/<branch>:<fetched sha>`, so a
+  push landing between fetch and push is rejected (recorded, retried next
+  cycle), never overwritten; never the bare forced form. Not behind → the
+  plain `git push origin HEAD` as before.
+- **Conflict → abort.** `git rebase --abort` (also on a timeout-killed
+  rebase) leaves the repo exactly as it was — the agent's commit intact, the
+  remote untouched, nothing reset, nothing resolved automatically — and
+  records `diverged: rebase conflict on <branch>`; the existing three-strike
+  `sync_failing` path raises it. Resolution stays with the operator
+  `sync_to_github` endpoint, which is unchanged.
+- **Recorded:** `behind_after_fetch` (the commits the remote had that we
+  lacked, before the rebase) and `last_successful_push_at` (stamped on success)
+  in `sync-state.json`, for the divergence-age work (trinity-enterprise#706).
 
 ### 2. Backend poller
 
