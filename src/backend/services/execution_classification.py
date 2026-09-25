@@ -183,16 +183,26 @@ def classify_switch_failure(response: httpx.Response) -> Optional[str]:
     handler so the #792 contract — "any switch-success retries" — is actually
     true (not just 429/503 by status code):
 
+        model rejection (#3012)      -> None, whatever the status
         429                          -> "rate_limit"
         503 / 401 / 403 / 402        -> "auth"
         other 4xx/5xx whose body trips ``is_auth_failure`` -> "auth"
         anything else (incl. 2xx)    -> None
+
+    A model rejection comes first because an agent image older than #3012
+    answers it 503 — no subscription can fix a model the CLI refuses, and
+    switching walks the agent through every seat onto the platform API key.
     """
     # Imported here (not at module scope) to match the except-handler import and
     # keep the test patch target `subscription_auto_switch.is_auth_failure` live.
+    from services.failure_classifier import is_model_rejection
     from services.subscription_auto_switch import is_auth_failure
 
     code = response.status_code
+    if code >= 400:
+        error_msg, _, _ = _extract_agent_error(response, "")
+        if is_model_rejection(error_msg):
+            return None
     if code == 429:
         return "rate_limit"
     if code in (503, 401, 403, 402):

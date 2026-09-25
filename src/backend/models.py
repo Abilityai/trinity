@@ -2295,6 +2295,7 @@ class ExecutionResultEnvelope(BaseModel):
 _PULL_ERROR_CODES = frozenset({
     "timeout", "capacity", "auth", "billing", "agent_error", "network",
     "circuit_open", "reconciled", "lease_expired", "oom", "max_turns",
+    "model_unsupported",  # #3012 — the agent's model-rejection 400
 })
 # reply.status value set (MESSAGE_ENVELOPE_SCHEMA §2.4/§4; `cancelled` per the
 # live #1083 3-way map — OPEN-1).
