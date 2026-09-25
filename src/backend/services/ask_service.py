@@ -370,8 +370,15 @@ def raise_ask(
     audit = [{
         "event_action": "raised",
         "source": "api" if raised_by == "agent" else "system",
+        # The AGENT raised it, not the owner its key resolves to (the ent#614
+        # rule, routers/fan_out.py): the resolver ranks a user first, so there is
+        # no `actor_user`; the presented credential and the owner's email — the
+        # join back to the human — are carried explicitly.
         "actor_agent_name": agent_name,
-        "actor_user": actor_user,
+        "actor_email": getattr(actor_user, "email", None),
+        "mcp_key_id": getattr(actor_user, "mcp_key_id", None),
+        "mcp_key_name": getattr(actor_user, "mcp_key_name", None),
+        "mcp_scope": getattr(actor_user, "mcp_scope", None),
         "target_type": "operator_queue",
         "target_id": row["id"],
         "details": {

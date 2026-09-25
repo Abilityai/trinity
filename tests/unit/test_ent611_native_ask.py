@@ -108,9 +108,17 @@ class TestNativeCreate:
         again = _create(real_db, agent, "r-0", max_pending=1)
         assert again["outcome"] == "replayed" and again["row"]["id"] == first["id"]
 
-    def test_concurrent_creates_at_the_cap_admit_exactly_one(self, real_db):
+    def test_concurrent_creates_at_the_cap_admit_exactly_one(self, real_db, monkeypatch):
         """The count and the insert are ONE serialized step per agent: a
-        count-then-insert across workers would turn the cap into a rate limit."""
+        count-then-insert across workers would turn the cap into a rate limit.
+        Each create is held inside its critical section (after the count,
+        before the insert) so the racers overlap deterministically; unforced,
+        the threads serialize on connection setup and a missing lock passes.
+        test_ent611_native_ask_pg.py pins the same on real PostgreSQL."""
+        import time
+        import db.operator_queue as dbq
+        real_insert = dbq.make_insert
+        monkeypatch.setattr(dbq, "make_insert", lambda table: (time.sleep(0.15), real_insert(table))[1])
         agent = "agent-611b-race"
         for n in range(4):
             _create(real_db, agent, f"seed-{n}", max_pending=5)
@@ -453,6 +461,22 @@ class TestReplay:
                                               to="operator", proposal={"pay": 900}))
         assert again["differs"] == ["proposal", "title", "to"]
 
+    @pytest.mark.parametrize("offset", ["Z", "+02:00", "-05:30"])
+    def test_an_identical_retry_with_a_deadline_differs_in_nothing(self, ask, offset):
+        """The stored deadline is ISO-Z; the retry's is compared after the same
+        normalisation, whatever offset the agent wrote it in."""
+        from datetime import datetime, timedelta, timezone
+        sign = -1 if offset.startswith("-") else 1
+        hours, minutes = (0, 0) if offset == "Z" else map(int, offset[1:].split(":"))
+        tz = timezone(sign * timedelta(hours=hours, minutes=minutes))
+        when = (datetime.now(timezone.utc) + timedelta(hours=3)).astimezone(tz).replace(microsecond=0)
+        text = when.strftime("%Y-%m-%dT%H:%M:%S") + ("Z" if offset == "Z" else offset)
+        rid = "rp-dl-" + offset.replace("+", "p").replace("-", "m").replace(":", "")
+        body = _body(rid, expires_at=text)
+        first = _raise(ask, self.AGENT, body)
+        again = _raise(ask, self.AGENT, body)
+        assert (first["status"], again["status"], again["differs"]) == ("created", "replayed", [])
+
     def test_a_replay_is_answered_before_the_deadline_floor(self, ask):
         """A retry minutes later carries a deadline that has come closer; it
         must get its first receipt back, not a refusal (the gate's retry)."""
@@ -650,12 +674,26 @@ class TestRaiseRoute:
         assert route.ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "rt-extra") is None
 
     @pytest.mark.asyncio
-    async def test_the_audit_row_names_the_key_that_raised_it(self, route):
+    async def test_the_audit_row_is_the_agents_and_names_the_key_that_raised_it(self, route):
+        """The AGENT raised the ask, not the owner its key resolves to (the
+        ent#614 rule, routers/fan_out.py). The resolver ranks a user first, so
+        the row carries no `actor_user`; the REAL resolver then makes it the
+        agent's, with the presented credential and the owner's email (the join
+        back to the human) carried explicitly."""
+        from services.platform_audit_service import PlatformAuditService
+        route.as_(mcp_scope="agent", agent_name=self.AGENT, mcp_key_id="key-611", mcp_key_name="agent-key")
         res = self._post(route, _body("rt-aud"))
         await _drain()
         raised = [a for a in route.ask.audit if a["event_action"] == "raised" and a["target_id"] == res.json()["id"]]
-        assert len(raised) == 1 and raised[0]["actor_user"].id == 7
-        assert raised[0]["actor_agent_name"] == self.AGENT
+        assert len(raised) == 1
+        row = raised[0]
+        assert row.get("actor_user") is None
+        assert (row["actor_agent_name"], row["actor_email"], row["mcp_key_id"], row["mcp_key_name"],
+                row["mcp_scope"]) == (self.AGENT, "op@example.com", "key-611", "agent-key", "agent")
+        assert PlatformAuditService._resolve_actor(
+            actor_user=row.get("actor_user"), actor_agent_name=row["actor_agent_name"],
+            mcp_scope=row["mcp_scope"], mcp_key_id=row["mcp_key_id"],
+        ) == ("agent", self.AGENT, None)
 
 
 # ===========================================================================

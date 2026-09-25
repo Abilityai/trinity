@@ -3433,6 +3433,17 @@
       "description": "Agent-raised asks (trinity-enterprise#611, PR B). DB layer on real SQLite: the native create is atomic per agent (replay, depth cap and insert under one lock; a six-thread race at the cap admits exactly one), stores ISO-Z deadlines and the platform columns, and a native row never takes part in the file contract (the sync index names it foreign; the responded write-back, both sweeps and Clear All treat it as outside the file); facade signature parity for the new accessors. raise_ask: named 422 refusals that write nothing, the role on the receipt and never an email, owner / provider / operator addressing, the 15-minute deadline floor, the agent never authoring the Workspace thread, replay of the first receipt with `differs` answered before every time-dependent check, the own-expired-ask re-ask link and reask_requires_link, 429 rate_limited / queue_full, one `raised` audit row by ids and a thin operator_queue_new. The route: 201 / 200 replay, only the agent itself (or the system key as trinity-system), named codes, unknown fields refused. The poller: a file entry re-using a native id is skipped before any branch (logged once), creates go through the outcome accessor with file provenance, a row it did not insert is never counted, announced or audited, and the file channel's deprecation is named once per agent."
     },
     {
+      "file": "unit/test_ent611_native_ask_pg.py",
+      "feature": "trinity-enterprise#611",
+      "added": "2026-09-25",
+      "categories": [
+        "backend",
+        "unit",
+        "database"
+      ],
+      "description": "The native ask create is atomic per agent on BOTH backends (trinity-enterprise#611, PR B): `requires_postgres` + the db_backend harness, so schema-parity CI runs it on real PostgreSQL. Each create is held inside its critical section (after the count, before the insert) so racers overlap deterministically: six creates at the cap admit exactly one, six retries of one id make one row, one agent's full queue never holds back another's, and the file create reports whether its ON CONFLICT DO NOTHING insert happened. Removing the pg_advisory_xact_lock / BEGIN IMMEDIATE turns the matching backend red on every run."
+    },
+    {
       "file": "unit/test_2845_retry_trigger_sets.py",
       "feature": "#2845",
       "added": "2026-09-22",
