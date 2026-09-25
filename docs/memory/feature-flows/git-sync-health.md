@@ -355,6 +355,45 @@ so it reconciles (all under `_REPO_LOCK`, every child via `run_registered`):
   lacked, before the rebase) and `last_successful_push_at` (stamped on success)
   in `sync-state.json`, for the divergence-age work (trinity-enterprise#706).
 
+### 1d. Pull cycle — origin reaches the agent (trinity-enterprise#703)
+
+Invariant **G3**: human and fleet work reaches the agent within a bound. Before
+this, nothing inside the container ever pulled. The only pulls were an
+operator's, the fleet orchestrator's daily sweep, or a marketplace
+SessionStart hook, and the 2026-09-24 audit found agents up to 31 commits behind.
+
+- **Loop:** `auto_sync.run_pull_loop`, beside the push loop, every
+  `GIT_SYNC_PULL_INTERVAL_SECONDS` (defaults to the push interval, 900 s).
+- **Gate:** each cycle reads the owner's `pull_sync_enabled` live
+  (`GET .../git/pull-sync`, agent key), with `GIT_SYNC_PULL` as the fallback,
+  the #3010 pattern.
+- **Where it's on:**
+  - new `github:` agents: on at creation, source-mode included
+  - existing agents: on only where `auto_sync_enabled` was already on
+  - everyone else: off until toggled in Settings → Git sync
+- **Cycle** (`_run_pull_once`, under `_REPO_LOCK`):
+  - Skipped while any execution is running, checked again right before the
+    tree is touched; an unreadable registry counts as busy.
+  - Fetches the **checked-out** branch: source-mode agents sit on their source
+    branch, working-branch agents on theirs.
+  - Nothing committed locally → a fast-forward. A local commit → a rebase,
+    aborted on conflict (`diverged: …`).
+- **Uncommitted edits** (`_integrate_remote`) are stashed explicitly and
+  re-applied. `--autostash` is deliberately not used: when the incoming commits
+  touch the same files, its re-apply conflicts, leaves the edits *only in the
+  stash*, and still reports success. Instead a colliding pull is **undone**:
+  back to the pre-pull HEAD, where the stash applies cleanly. The result is
+  recorded as `local edits conflict with incoming changes on <branch>`.
+- **Recorded:**
+  - `sync-state.json`: `last_pull_at`, `last_pull_status`
+    (`success`/`failed`/`skipped`), `last_pull_error`, `behind_after_pull`.
+    These are written through `_patch_sync_state`, so the push's
+    `consecutive_failures` / `last_sync_*` are never touched.
+  - The poller persists them on `agent_sync_state` (status bounded to the
+    vocabulary, counter coerced).
+- **Not here:** merging the source branch into a working branch on a longer
+  interval (noted in the issue); the hooks-vs-heartbeat owner (ent#708).
+
 ### 2. Backend poller
 
 ```

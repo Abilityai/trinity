@@ -241,6 +241,18 @@ def set_websocket_manager(manager):
     _websocket_manager = manager
 
 
+# trinity-enterprise#703: the pull cycle's status vocabulary (agent-written).
+_PULL_STATUSES = frozenset({"success", "failed", "skipped", "never"})
+
+
+def _pull_status(value) -> Optional[str]:
+    return value if isinstance(value, str) and value in _PULL_STATUSES else None
+
+
+def _pull_text(value, limit: int) -> Optional[str]:
+    return value[:limit] if isinstance(value, str) and value else None
+
+
 class SyncHealthService:
     """Background service that keeps agent_sync_state fresh and raises alerts."""
 
@@ -454,6 +466,12 @@ class SyncHealthService:
             pack_count=pack_count,  # #1595
             loose_objects=loose_objects,  # #1595
             maintenance_failures=maintenance_failures,  # #1595
+            # trinity-enterprise#703: the container's pull cycle. Agent-written
+            # JSON, so the status is bounded to the vocabulary and the counter
+            # coerced like its neighbours.
+            last_pull_at=_pull_text(sync_state.get("last_pull_at"), 64),
+            last_pull_status=_pull_status(sync_state.get("last_pull_status")),
+            behind_after_pull=_coerce_nonneg_int(sync_state.get("behind_after_pull")),
             last_check_at=utc_now_iso(),
         )
 

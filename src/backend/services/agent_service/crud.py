@@ -1880,6 +1880,10 @@ def _apply_github_env(
             config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
         ):
             env_vars['GIT_SYNC_AUTO'] = 'true'
+        # trinity-enterprise#703: the pull cycle's fallback env — the DB flag
+        # written below at creation is the one the loop reads live.
+        if not config.ephemeral:
+            env_vars['GIT_SYNC_PULL'] = 'true'
 
         # Source mode (default): Track source branch directly for pull-only sync
         # Legacy mode: Create a unique working branch for bidirectional sync
@@ -2593,6 +2597,15 @@ async def _materialize_agent_files(
                 logger.error(
                     f"Failed to enable freeze-on-sync-failure for {config.name}: {e}"
                 )
+
+    # trinity-enterprise#703: the container pulls origin on its own — for every
+    # `github:` agent, source mode included (a pull-only agent is exactly the one
+    # that needs a pull). Ghosts are excluded: their workspace is throwaway.
+    if github_repo_for_agent and not config.ephemeral:
+        try:
+            db.set_git_pull_sync_enabled(config.name, True)
+        except Exception as e:
+            logger.error(f"Failed to enable the pull cycle for {config.name}: {e}")
 
     # #2069: the fleet-wide `.gitignore` merge never ran at creation, so the
     # 15-min in-container auto-sync loop (on from birth for the GIT_SYNC_AUTO

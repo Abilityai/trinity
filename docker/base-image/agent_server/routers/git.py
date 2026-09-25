@@ -118,6 +118,10 @@ _SYNC_STATE_DEFAULT: Dict = {
     "last_lock_recovery": None,  # #2742: the boot reap's own record of a wedge
     "last_successful_push_at": None,  # #3011: last cycle whose push landed
     "behind_after_fetch": None,  # #3011: commits origin/<branch> had that we lacked
+    "last_pull_at": None,  # trinity-enterprise#703: the container's pull cycle
+    "last_pull_status": "never",
+    "last_pull_error": None,
+    "behind_after_pull": None,
 }
 
 
@@ -823,6 +827,146 @@ def _rebase_onto_remote(home_dir: Path, branch: str) -> Optional[str]:
     return _summarize_git_error(rebase.stderr or rebase.stdout or "rebase failed")
 
 
+def _executions_in_flight() -> Optional[int]:
+    """How many executions are running on this agent, or None if unknown.
+    Indirection so the pull cycle's execution gate is unit-testable."""
+    try:
+        from ..services.process_registry import get_process_registry
+        return len(get_process_registry().list_running())
+    except Exception:  # noqa: BLE001 — unknown is treated as busy by the caller
+        logger.debug("pull: could not read the process registry", exc_info=True)
+        return None
+
+
+def _record_pull(home_dir: Path, status: str, *, error: Optional[str] = None,
+                 behind: Optional[int] = None) -> Dict:
+    """Persist one pull outcome WITHOUT touching the push fields — the push's
+    `consecutive_failures` / `last_sync_*` stay the push's (trinity-enterprise#703)."""
+    _patch_sync_state(home_dir, {
+        "last_pull_at": datetime.now(timezone.utc).isoformat(),
+        "last_pull_status": status,
+        "last_pull_error": error,
+        "behind_after_pull": behind,
+    })
+    result = {"status": status}
+    if error:
+        result["error"] = error
+    return result
+
+
+def _integrate_remote(home_dir: Path, branch: str, ahead: int) -> Optional[str]:
+    """Bring `origin/<branch>` into the checked-out branch without ever losing
+    local work (trinity-enterprise#703). Returns None, or the error recorded.
+
+    Uncommitted tracked edits are stashed EXPLICITLY — not `--autostash`: when
+    incoming commits touch the same files, autostash's re-apply conflicts and
+    leaves the edits only in the stash while the pull reports success, so the
+    files silently lose them. Here a conflicting re-apply is undone: back to the
+    pre-pull HEAD, where the stash applies cleanly to its own base, and the
+    failure is recorded. Untracked files are never stashed; one an incoming
+    commit would overwrite fails the fast-forward/rebase instead.
+    """
+    def git(*args, timeout=60):
+        return run_registered(["git", *args], cwd=str(home_dir), timeout=timeout)
+
+    pre_head = git("rev-parse", "HEAD", timeout=10).stdout.strip()
+    dirty = git("status", "--porcelain", "--untracked-files=no", timeout=10).stdout.strip()
+    stashed = False
+    if dirty:
+        push = git("stash", "push", "-m", "trinity-pull (ent#703)", timeout=30)
+        if push.returncode != 0:
+            return _summarize_git_error(push.stderr or push.stdout or "stash failed")
+        stashed = True
+
+    if ahead == 0:
+        step = git("merge", "--ff-only", f"origin/{branch}")
+        err = None if step.returncode == 0 else _summarize_git_error(
+            step.stderr or step.stdout or "fast-forward failed")
+    else:
+        err = _rebase_onto_remote(home_dir, branch)  # aborts itself on failure
+
+    if err:
+        if stashed:  # nothing moved (ff refused / rebase aborted): put the edits back
+            git("stash", "pop", timeout=30)
+        return err
+
+    if stashed:
+        pop = git("stash", "pop", timeout=30)
+        if pop.returncode != 0:
+            # The edits collide with what came in. Undo the pull — the stash is
+            # still there — and re-apply on the base it was taken from.
+            git("reset", "--hard", pre_head, timeout=30)
+            back = git("stash", "pop", timeout=30)
+            if back.returncode != 0:
+                return ("local edits conflict with incoming changes on "
+                        f"{branch}; they are kept in `git stash`")
+            return f"local edits conflict with incoming changes on {branch}"
+    return None
+
+
+def _run_pull_once(home_dir: Path) -> Dict:
+    """One pull cycle (trinity-enterprise#703, invariant G3): bring origin's
+    commits for the checked-out branch to the agent.
+
+    Source-mode agents are checked out on their source branch and working-branch
+    agents on their working branch, so the checked-out branch is the one to pull.
+
+    - Never while an execution runs (a rebase under a running turn changes the
+      files it is reading) — checked before the fetch and again right before the
+      tree is touched; an unreadable registry counts as busy.
+    - Serialised with the push cycle and the operator git endpoints on
+      `_REPO_LOCK`; a busy repo skips quietly.
+    - `_integrate_remote`: a fast-forward when nothing is committed locally, a
+      rebase (aborted on conflict) when something is; uncommitted edits are
+      stashed explicitly and re-applied, and a pull whose incoming changes
+      collide with them is undone. Local work is never discarded; a failure is
+      recorded, not resolved.
+    """
+    # The lock first: every write to sync-state.json happens under it, because
+    # the push cycle read-modify-writes the same file from another thread.
+    if not _REPO_LOCK.acquire(blocking=False):
+        return {"status": "skipped", "reason": "repo_busy"}
+    try:
+        running = _executions_in_flight()
+        if running is None or running > 0:
+            return _record_pull(home_dir, "skipped", error=(
+                "execution in flight" if running else "execution state unknown"))
+        branch = run_registered(
+            ["git", "symbolic-ref", "--short", "-q", "HEAD"],
+            cwd=str(home_dir), timeout=10,
+        ).stdout.strip()
+        if not branch:
+            return _record_pull(home_dir, "failed", error="detached HEAD: nothing to pull onto")
+        fetch = run_registered(
+            ["git", "fetch", "origin", branch], cwd=str(home_dir), timeout=120,
+        )
+        if fetch.returncode != 0:
+            if _is_missing_remote_ref(fetch.stderr):
+                return _record_pull(home_dir, "success", behind=0)  # not on origin yet
+            return _record_pull(home_dir, "failed", error=_summarize_git_error(
+                fetch.stderr or fetch.stdout or "fetch failed"))
+        ahead, behind = _compute_ahead_behind(home_dir, branch)
+        if behind == 0:
+            return _record_pull(home_dir, "success", behind=0)
+        running = _executions_in_flight()
+        if running is None or running > 0:
+            return _record_pull(home_dir, "skipped", behind=behind, error=(
+                "execution in flight" if running else "execution state unknown"))
+        err = _integrate_remote(home_dir, branch, ahead)
+        if err:
+            return _record_pull(home_dir, "failed", behind=behind, error=err)
+        _, after = _compute_ahead_behind(home_dir, branch)
+        logger.info("pull: %s brought in %s commit(s) on %s", home_dir, behind, branch)
+        return _record_pull(home_dir, "success", behind=after)
+    except subprocess.CalledProcessError as exc:
+        return _record_pull(home_dir, "failed", error=_summarize_git_error(
+            exc.stderr or exc.stdout or str(exc)))
+    except Exception as exc:  # noqa: BLE001 — the loop must never die
+        return _record_pull(home_dir, "failed", error=_summarize_git_error(str(exc)))
+    finally:
+        _REPO_LOCK.release()
+
+
 def _run_auto_sync_once(home_dir: Path) -> Dict:
     """One auto-sync cycle: reap stale lock litter, measure, stage, commit if
     dirty, fetch + rebase onto the remote branch, push, maybe consolidate .git.
@@ -1437,6 +1581,9 @@ def _compute_git_status(home_dir: Path) -> Dict:
         # flag as last read, the same source `GET .../git/auto-sync` returns.
         from ..auto_sync import current_auto_sync_enabled
         response["auto_sync_enabled"] = current_auto_sync_enabled()
+        # trinity-enterprise#703: the pull gate the pull loop is running with.
+        from ..auto_sync import current_pull_sync_enabled
+        response["pull_sync_enabled"] = current_pull_sync_enabled()
         # #2742: a currently-stuck lock is REPORTED, never removed. This is the
         # "tell the truth about state" half — a stale lock does not fail
         # `git status` (rc=0, empty stderr), so before this the read could not

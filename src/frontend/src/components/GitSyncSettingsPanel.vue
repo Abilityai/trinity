@@ -64,6 +64,27 @@
 
       <div>
         <BaseToggle
+          :model-value="pull"
+          :disabled="savingPull"
+          label="Pull changes from GitHub every 15 minutes"
+          data-testid="pull-sync-toggle"
+          @update:model-value="setPull"
+        />
+        <p class="mt-1 pl-[46px] text-xs text-gray-500 dark:text-gray-400">
+          Brings in edits people and other agents push to the repository. Never
+          runs while the agent is working, and never discards its own changes.
+        </p>
+        <InlineError
+          class="mt-2"
+          :message="pullError"
+          retryable
+          @retry="setPull(!pull)"
+          @dismiss="pullError = ''"
+        />
+      </div>
+
+      <div>
+        <BaseToggle
           :model-value="freeze"
           :disabled="savingFreeze"
           label="Pause schedules while sync is failing"
@@ -108,6 +129,9 @@ const loadError = ref('')
 const retrying = ref(false)
 const autoSync = ref(false)
 const freeze = ref(false)
+const pull = ref(false)
+const savingPull = ref(false)
+const pullError = ref('')
 const savingAutoSync = ref(false)
 const savingFreeze = ref(false)
 const autoSyncError = ref('')
@@ -129,12 +153,14 @@ function isUnbound(e) {
 
 async function load() {
   try {
-    const [a, f] = await Promise.all([
+    const [a, f, p] = await Promise.all([
       agents.getGitAutoSync(props.agentName),
       agents.getGitFreezeSchedules(props.agentName),
+      agents.getGitPullSync(props.agentName),
     ])
     autoSync.value = !!a?.auto_sync_enabled
     freeze.value = !!f?.freeze_schedules_if_sync_failing
+    pull.value = !!p?.pull_sync_enabled
     bound.value = true
     loadError.value = ''
     hasLoaded.value = true
@@ -171,6 +197,22 @@ async function setAutoSync(next) {
     autoSyncError.value = `Couldn't turn auto-sync ${next ? 'on' : 'off'}: ${errorDetail(e)}`
   } finally {
     savingAutoSync.value = false
+  }
+}
+
+async function setPull(next) {
+  savingPull.value = true
+  pullError.value = ''
+  try {
+    const data = await agents.setGitPullSync(props.agentName, next)
+    pull.value = !!data?.pull_sync_enabled
+    if (props.notify) {
+      props.notify(next ? 'Pulling on — the next cycle brings in new commits.' : 'Pulling off — the next cycle is skipped.', 'success')
+    }
+  } catch (e) {
+    pullError.value = `Couldn't turn pulling ${next ? 'on' : 'off'}: ${errorDetail(e)}`
+  } finally {
+    savingPull.value = false
   }
 }
 

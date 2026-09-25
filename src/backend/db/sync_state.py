@@ -35,6 +35,9 @@ _COLUMNS = (
     "pack_count",  # #1595: packs from `git count-objects -v`
     "loose_objects",  # #1595: loose objects (gc-health signal)
     "maintenance_failures",  # #1595: consecutive failed maintenance attempts
+    "last_pull_at",  # trinity-enterprise#703: the container's pull cycle
+    "last_pull_status",
+    "behind_after_pull",
     "last_check_at",
     "updated_at",
 )
@@ -80,6 +83,9 @@ class SyncStateOperations:
         pack_count: Optional[int] = None,
         loose_objects: Optional[int] = None,
         maintenance_failures: Optional[int] = None,
+        last_pull_at: Optional[str] = None,
+        last_pull_status: Optional[str] = None,
+        behind_after_pull: Optional[int] = None,
         last_check_at: Optional[str] = None,
     ) -> Dict:
         """Upsert a sync-state row.
@@ -124,6 +130,11 @@ class SyncStateOperations:
             # 0 is a meaningful reset here (post-success), not "unset" — it
             # passes _merged as-is; only a true None falls back to prior.
             "maintenance_failures": _merged("maintenance_failures", maintenance_failures) or 0,
+            # trinity-enterprise#703: the pull cycle's own outcome. It never
+            # touches consecutive_failures — that counter is the PUSH health.
+            "last_pull_at": _merged("last_pull_at", last_pull_at),
+            "last_pull_status": _merged("last_pull_status", last_pull_status),
+            "behind_after_pull": _merged("behind_after_pull", behind_after_pull),
             "last_check_at": last_check_at or now,
             "updated_at": now,
         }

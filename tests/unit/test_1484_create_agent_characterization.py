@@ -1445,3 +1445,18 @@ async def test_ent705_a_fork_reports_the_kind_that_was_asked_for(crud_env, kind,
     assert decision["kind"] == expected
     assert decision["reason"] == "fork-to-own: the agent owns its fork"
     ctx["git_service"].probe_push_access.assert_not_awaited()
+
+
+# ===========================================================================
+# trinity-enterprise#703 — the container pulls origin on its own
+# ===========================================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw", [{}, {"kind": "deployment"}], ids=["agent", "deployment"])
+async def test_ent703_a_github_create_turns_the_pull_cycle_on(crud_env, monkeypatch, kw):
+    """Source mode included: a pull-only agent is exactly the one that needs a pull."""
+    crud, ctx = crud_env
+    await _create_default(crud, ctx, monkeypatch, "gc-pull", **kw)
+
+    assert _agent_run_kwargs(ctx)["environment"]["GIT_SYNC_PULL"] == "true"
+    ctx["db"].set_git_pull_sync_enabled.assert_called_once_with("gc-pull", True)
