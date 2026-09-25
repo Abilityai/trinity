@@ -21,7 +21,7 @@ from dependencies import get_current_user, assert_admin, reject_agent_principal
 from services.docker_service import get_agent_container, docker_client, list_all_agents_fast
 from services.docker_utils import container_stop
 from services.agent_client import get_agent_client
-from services.agent_service.lifecycle import restart_agent_internal
+from services.agent_service.lifecycle import public_skills_result, restart_agent_internal
 from services.agent_service.stats import invalidate_context_stats_cache
 from redis_breaker_util import get_breaker_redis, SingleFlightLock, LeaseState
 from utils.helpers import utc_now_iso
@@ -373,6 +373,10 @@ async def restart_fleet_impl(
                         "recreate_reason": start_result.get("recreate_reason"),
                         "credentials_injection": start_result.get("credentials_injection"),
                         "skills_injection": start_result.get("skills_injection"),
+                        # #2991: a conflict keeps `success` (#2914) — the list is
+                        # what tells a fleet caller a skill was not installed.
+                        "skills_conflicts": public_skills_result(
+                            start_result.get("skills_result")).get("conflicts", []),
                     }
                     if entry["recreated"]:
                         recreated_count += 1

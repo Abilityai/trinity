@@ -23,7 +23,7 @@
 | GET | `/api/agents/{name}` | Get agent details |
 | GET/PUT | `/api/agents/{name}/label` | Get / set-or-clear the agent's human-facing **display label** (ent#181/#1640). Owner-only (`OwnedAgentByName`); `label` is **required-but-nullable** and unknown fields are rejected (`extra="forbid"`, #1821 — an ignored extra plus a `None` default made `{"display_label": …}` a silent 200 + wipe, so `{}` and any unrecognised body now 422); an explicit null or blank clears to the slug fallback; presentation-only (the slug never moves, unlike `PUT /rename`); trims + rejects control chars/line-breaks with a **named** error, **not** unique (the slug guarantees uniqueness), audit-logged, broadcasts `agent_label_changed` |
 | DELETE | `/api/agents/{name}` | Soft-delete agent (see [Soft Delete](reliability.md#soft-delete-retention--recovery-834-772)) |
-| POST | `/api/agents/{name}/start` | Start agent |
+| POST | `/api/agents/{name}/start` | Start agent. The response is a whitelist rebuilt in the router (a field added only to `start_agent_internal` never reaches it): credentials pair, `skills_injection` + `skills_result` (#2991 — a projection of names, statuses and codes via `public_skills_result`; `conflicts` lists skills the agent's own copy shadowed; a no-op is `skipped` + reason, never absent), `recreated` / `recreate_reason` / `recreate_deferred` |
 | POST | `/api/agents/{name}/stop` | Stop agent |
 | POST | `/api/agents/{name}/chat` | Send chat message |
 | GET | `/api/agents/{name}/chat/history` | In-memory chat history (container) |

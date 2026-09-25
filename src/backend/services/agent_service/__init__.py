@@ -16,6 +16,7 @@ from .helpers import (
 )
 from .lifecycle import (
     inject_assigned_credentials,
+    public_skills_result,
     start_agent_internal,
     recreate_container_with_updated_config,
 )
@@ -98,6 +99,7 @@ __all__ = [
     # Lifecycle
     "inject_assigned_credentials",
     "start_agent_internal",
+    "public_skills_result",
     "recreate_container_with_updated_config",
     # CRUD
     "create_agent_internal",
