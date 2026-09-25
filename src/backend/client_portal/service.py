@@ -166,6 +166,12 @@ PORTAL_FAILURE_CATEGORIES = (
     # closed taxonomy in BOTH directions precisely so a new raise site cannot
     # silently degrade like that.
     "auth_switched",
+    # #3012 — the agent's OWN default model is one its Claude Code refuses (CLI
+    # too old, or an id the API does not know). Not `auth`: that copy says the
+    # agent hit a usage limit, which sent people to resend into the same
+    # failure. Not `invalid_model`: the client did not choose this model, so
+    # there is no stored preference to clear. Only an operator can fix it.
+    "model_unsupported",
     "internal",            # anything uncategorised; copy is fixed, never raw
 )
 
@@ -3078,6 +3084,19 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # The substring tests stay as the fallback for a None code, so this is
         # additive — nothing that classified before stops classifying now.
         code = _error_code_name(result)
+        # #3012: the runtime refused the model. When the client picked it, the
+        # generic branch below answers `invalid_model` and self-heals the stored
+        # choice. When the agent's own default is the problem, only an operator
+        # can fix it — the CLI's version sentence stays on the execution row for
+        # them and is not shown to an external client.
+        if code == "MODEL_UNSUPPORTED" and not model:
+            raise ClientPortalError(
+                502,
+                "This agent's model isn't supported by its runtime, so sending "
+                "again won't help. An admin needs to update the agent image or "
+                "pick another model.",
+                category="model_unsupported", retryable=False,
+            )
         if code in ("AUTH", "BILLING"):
             # #2638: "re-sending re-fails" is only true while nothing changed
             # underneath. SUB-003 may have MOVED the agent onto a different
@@ -3127,8 +3146,9 @@ async def portal_chat(agent_name: str, message: str, email: str,
         #
         # ent#403: this — the GENERIC branch, and only it — names the chosen
         # model when the user chose one. The three branches above are left
-        # ALONE deliberately. There is no "this model is unavailable" code in
-        # the #2320 ladder (`_PULL_ERROR_CODES` has no model member), and the
+        # ALONE deliberately. The one model code in the #2320 ladder is #3012's
+        # MODEL_UNSUPPORTED, which reaches here only when the client chose the
+        # model (the self-heal below is the right answer for it), and the
         # AUTH/BILLING branch merges into one "reached its usage limit" answer
         # with a true and specific cause — rewording it whenever a model was
         # picked would blame the model for an exhausted subscription.

@@ -39,6 +39,7 @@ class TaskExecutionErrorCode(str, Enum):
     LEASE_EXPIRED = "lease_expired" # Fire-and-forget lease expired — no callback before slot TTL (#1083)
     SKILL_NOT_FOUND = "skill_not_found"  # Slash-command message didn't resolve to an installed skill (#1410)
     EPHEMERAL_EXHAUSTED = "ephemeral_exhausted"  # Ghost agent budget spent — expired TTL or exec count (trinity-enterprise#69)
+    MODEL_UNSUPPORTED = "model_unsupported"  # Claude Code refused the model — CLI too old or unknown id; never a subscription fault (#3012)
 
 
 @dataclass
@@ -165,6 +166,15 @@ def terminal_from_callback_payload(payload: Any, execution_id: str) -> TerminalE
         except ValueError:
             # Unknown codes are non-fatal — apply_result only special-cases AUTH.
             error_code = None
+
+    # #3012: an agent image older than #3012 reports a model the CLI refused as
+    # 503 → error_code "auth", which would trip the AUTH dispatch breaker. The
+    # error text says what it really was.
+    if error_code is not None and error_code.value == TaskExecutionErrorCode.AUTH.value:
+        from services.failure_classifier import is_model_rejection  # noqa: WPS433 — leaf, lazy like above
+
+        if is_model_rejection(getattr(payload, "error", None) or ""):
+            error_code = TaskExecutionErrorCode.MODEL_UNSUPPORTED
 
     return TerminalEnvelope(
         execution_id=execution_id,
