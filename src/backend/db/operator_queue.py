@@ -826,11 +826,13 @@ class OperatorQueueOperations:
 
         `open` — full rows for pending + responded items (the ones the file is
         expected to carry); `terminal` — `{request_id: {"id", "status",
-        "sync_state"}}` for every other status, so a pending file entry whose id
-        matches a row that already went terminal is recognised as `stale_id`
-        instead of being re-admitted (the on-conflict create returns the
-        surviving uuid silently, so without this index it would count against the
-        depth cap and broadcast "new" every cycle).
+        "sync_state", "delivery_state", "delivery_detail"}}` for every other
+        status, so a pending file entry whose id matches a row that already went
+        terminal is recognised as `stale_id` instead of being re-admitted (the
+        on-conflict create returns the surviving uuid silently, so without this
+        index it would count against the depth cap and broadcast "new" every
+        cycle). The delivery columns tell that re-use apart from the ORIGINAL
+        entry this cycle's write-back is about to flip (#3024).
         """
         open_stmt = select(*self._SELECT_COLS).where(
             and_(
@@ -843,6 +845,8 @@ class OperatorQueueOperations:
             operator_queue.c.id,
             operator_queue.c.status,
             operator_queue.c.sync_state,
+            operator_queue.c.delivery_state,  # #3024
+            operator_queue.c.delivery_detail,
         ).where(
             and_(
                 operator_queue.c.agent_name == agent_name,
@@ -855,7 +859,10 @@ class OperatorQueueOperations:
         return {
             "open": [self._row_to_item(r) for r in open_rows],
             "terminal": {
-                r["request_id"]: {"id": r["id"], "status": r["status"], "sync_state": r["sync_state"]}
+                r["request_id"]: {
+                    "id": r["id"], "status": r["status"], "sync_state": r["sync_state"],
+                    "delivery_state": r["delivery_state"], "delivery_detail": r["delivery_detail"],
+                }
                 for r in term_rows
             },
         }

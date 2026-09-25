@@ -501,6 +501,27 @@ DELIVERY_UNDELIVERED = "undelivered"
 DELIVERY_NOT_APPLICABLE = "not_applicable"
 DELIVERY_STATES = frozenset({DELIVERY_DELIVERED, DELIVERY_UNDELIVERED, DELIVERY_NOT_APPLICABLE})
 
+# #3024: the terminal statuses the write-back itself writes into the agent's file
+# (#1017). `db.get_terminal_items_for_agent` hands the write-back exactly the rows
+# `awaits_terminal_flip` is True for — one rule in two spellings, pinned together
+# by a real-DB test (test_2915_operator_queue_sync_honesty.py).
+_FLIPPED_BY_WRITE_BACK = frozenset({"cancelled", "expired"})
+
+
+def awaits_terminal_flip(row) -> bool:
+    """Will this cycle's write-back write the row's ending into the agent's entry?
+
+    A cancelled / expired row whose flip has not landed: never attempted, or
+    retried after `undelivered` — except `entry_missing`, whose entry the agent
+    had already dropped. Until the flip lands, a still-`pending` entry with the
+    row's id is the ORIGINAL entry awaiting it, not a re-used id (#3024).
+    """
+    return (
+        row.get("status") in _FLIPPED_BY_WRITE_BACK
+        and row.get("delivery_state") in (None, DELIVERY_UNDELIVERED)
+        and (row.get("delivery_detail") or "") != "entry_missing"
+    )
+
 # `sync_detail` / `delivery_detail` are durable, operator-visible, audited
 # columns — a CLOSED vocabulary. Field names, folded status tokens and failure
 # kinds only; never `str(e)`, never `response.text` (agent-controlled), never
@@ -1447,12 +1468,28 @@ class OperatorQueueSyncService:
                 continue
 
             if isinstance(req_id, str) and req_id in terminal_index:
+                term = terminal_index[req_id]
                 if req_status == "pending":
-                    term = terminal_index[req_id]
+                    # #3024: this runs BEFORE the write-back (step 4), so right
+                    # after the platform ends a row the file still holds the
+                    # ORIGINAL pending entry — the one step 4 is about to flip.
+                    # That is not a re-use; only an entry the write-back will not
+                    # flip is.
+                    if not awaits_terminal_flip(term):
+                        await self._apply_sync_state(
+                            agent_name,
+                            {"id": term["id"], "sync_state": term.get("sync_state"), "sync_detail": None},
+                            SYNC_STALE_ID, _fold_agent_status(term.get("status")), now,
+                        )
+                elif term.get("sync_state") == SYNC_STALE_ID and req_status == term.get("status"):
+                    # #3024: the entry reads the row's own ending — file and row
+                    # agree. Heals the rows flagged before this fix; a genuine
+                    # re-use cannot get here, because the write-back never flips an
+                    # entry once the row has left its set.
                     await self._apply_sync_state(
                         agent_name,
-                        {"id": term["id"], "sync_state": term.get("sync_state"), "sync_detail": None},
-                        SYNC_STALE_ID, _fold_agent_status(term.get("status")), now,
+                        {"id": term["id"], "sync_state": SYNC_STALE_ID, "sync_detail": None},
+                        SYNC_CONFIRMED, None, now,
                     )
                 continue
 
