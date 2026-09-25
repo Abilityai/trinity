@@ -50,6 +50,7 @@ from typing import Dict, Optional
 
 from database import db
 from redis_breaker_util import get_breaker_redis
+from services import git_service
 from services.agent_client import AgentClient
 from utils.helpers import parse_iso_timestamp, utc_now_iso
 
@@ -238,6 +239,18 @@ _websocket_manager = None
 def set_websocket_manager(manager):
     global _websocket_manager
     _websocket_manager = manager
+
+
+# trinity-enterprise#703: the pull cycle's status vocabulary (agent-written).
+_PULL_STATUSES = frozenset({"success", "failed", "skipped", "never"})
+
+
+def _pull_status(value) -> Optional[str]:
+    return value if isinstance(value, str) and value in _PULL_STATUSES else None
+
+
+def _pull_text(value, limit: int) -> Optional[str]:
+    return value[:limit] if isinstance(value, str) and value else None
 
 
 class SyncHealthService:
@@ -453,6 +466,12 @@ class SyncHealthService:
             pack_count=pack_count,  # #1595
             loose_objects=loose_objects,  # #1595
             maintenance_failures=maintenance_failures,  # #1595
+            # trinity-enterprise#703: the container's pull cycle. Agent-written
+            # JSON, so the status is bounded to the vocabulary and the counter
+            # coerced like its neighbours.
+            last_pull_at=_pull_text(sync_state.get("last_pull_at"), 64),
+            last_pull_status=_pull_status(sync_state.get("last_pull_status")),
+            behind_after_pull=_coerce_nonneg_int(sync_state.get("behind_after_pull")),
             last_check_at=utc_now_iso(),
         )
 
@@ -545,22 +564,42 @@ class SyncHealthService:
         now = utc_now_iso()
         last_sync_at = state.get("last_sync_at") or now
         item_id = f"sync-failing-{agent_name}-{now}"
+        error = state.get("last_error_summary") or ""
+        failures = state["consecutive_failures"]
+        context = {
+            "last_error_summary": error,
+            "last_sync_at": last_sync_at,
+            "consecutive_failures": failures,
+        }
+        # #2107: a refused push is not a flaky one — it fails identically every
+        # cycle until someone changes the token, so name the cause and the fix
+        # instead of a count that reads the same at 3 as at 64.
+        if git_service.is_push_denied(error):
+            title = "Git token can't push"
+            question = (
+                f"{agent_name}'s GitHub token can read its repository but is not "
+                f"allowed to push, so none of its work is being saved "
+                f"({failures} syncs refused). This will not recover on its own."
+            )
+            context["cause"] = "push_denied"
+            context["remediation"] = (
+                "Give the agent's GitHub token write access to the repository "
+                "(fine-grained token: Contents: Read and write; classic token: "
+                "the `repo` scope), or set a per-agent token that has it. The "
+                "next sync pushes everything that is waiting."
+            )
+        else:
+            title = "Git sync failing"
+            question = f"{agent_name}'s git sync has failed {failures} times in a row."
         item = {
             "id": item_id,
             "agent_name": agent_name,
             "type": "sync_failing",
             "status": "pending",
             "priority": "high",
-            "title": "Git sync failing",
-            "question": (
-                f"{agent_name}'s git sync has failed "
-                f"{state['consecutive_failures']} times in a row."
-            ),
-            "context": {
-                "last_error_summary": state.get("last_error_summary") or "",
-                "last_sync_at": last_sync_at,
-                "consecutive_failures": state["consecutive_failures"],
-            },
+            "title": title,
+            "question": question,
+            "context": context,
             "created_at": now,
         }
         try:

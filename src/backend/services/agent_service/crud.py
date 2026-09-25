@@ -330,6 +330,9 @@ class _TemplateResolution:
     git_instance_id: Optional[str] = None
     git_working_branch: Optional[str] = None
     fork_upstream_repo: Optional[str] = None
+    # trinity-enterprise#705: how the git mode was decided, surfaced in the log
+    # (and on the create response) so "why is this agent pull-only?" is answerable.
+    git_mode_decision: Optional[dict] = None
     template_shared_folders: Optional[dict] = None
     # trinity-enterprise#89: NORMALIZED declared `schedules:`, fed by BOTH
     # resolver branches. Deliberately NOT folded into `template_data`, which
@@ -891,12 +894,74 @@ async def _apply_fork_to_own(
     return github_repo_for_agent, github_pat_for_agent, github_pat_tier, fork_upstream_repo
 
 
+async def _apply_agent_kind_default(
+    config: AgentConfig,
+    github_repo: str,
+    github_pat: Optional[str],
+    fork_upstream: Optional[str],
+) -> dict:
+    """trinity-enterprise#705: decide the git mode for a `github:` create.
+
+    "The repository is the agent; the container is a cache of it." An agent
+    created AS an agent (`kind` "agent", the default) gets a working branch it
+    alone writes, so its heartbeat can keep the repo current. That is only
+    granted when its token can actually PUSH to that repo: a template someone
+    else owns — a shared public upstream above all — must never receive an
+    agent's branches (the ent#162 class), and a token without write access
+    would freeze the agent for what looks like a sync failure (#2107). Every
+    other case stays pull-only, with the reason recorded:
+
+    - an explicit `source_mode` from the caller wins (existing callers unchanged)
+    - fork-to-own is already decided by the fork (it owns its repo)
+    - `kind` "deployment" — a deployment of a codebase
+    - an ephemeral ghost — its workspace is throwaway (ent#69)
+    - no token — nothing can push anonymously (ent#123)
+    - the push probe refused, or could not be completed
+
+    Mutates `config.source_mode` only in the one granting case.
+    """
+    kind = config.kind or "agent"
+    decision = {"kind": kind, "source_mode": bool(config.source_mode)}
+    if "source_mode" in config.model_fields_set:
+        return {**decision, "reason": "source_mode set explicitly"}
+    if config.fork_to_own or fork_upstream:
+        return {**decision, "reason": "fork-to-own: the agent owns its fork"}
+    if kind == "deployment":
+        return {**decision, "reason": "a deployment of a codebase: pull-only"}
+    if config.ephemeral:
+        return {**decision, "reason": "ephemeral agents never auto-push (ent#69)"}
+    if not github_pat:
+        return {**decision, "reason": "no GitHub token: pull-only"}
+    outcome, detail = await git_service.probe_push_access(github_repo, github_pat)
+    if outcome == "ok":
+        config.source_mode = False
+        return {**decision, "source_mode": False, "push_verified": True,
+                "reason": "the token can push: working branch"}
+    if outcome == "denied":
+        return {**decision, "reason": (
+            f"the token cannot push to {github_repo}: pull-only. Fork it to "
+            f"your own repository to keep this agent's work in git"
+        )}
+    return {**decision, "reason": "push access could not be verified: pull-only"}
+
+
 async def _validate_github_access(
-    config: AgentConfig, github_repo_for_agent: str, github_pat_for_agent: Optional[str]
+    config: AgentConfig,
+    github_repo_for_agent: str,
+    github_pat_for_agent: Optional[str],
+    *,
+    will_push: bool = False,
+    push_verified: bool = False,
 ) -> None:
     """#218: validate PAT access to the repo (and branch) before container create,
     so a bad token fails loud here instead of silently in startup.sh. Transient
     network errors are logged and NOT fatal (matches the monolith).
+
+    #2107: when the agent will auto-push (``will_push`` — the
+    ``_git_auto_sync_baked`` predicate), READ access is not enough. A token that
+    can clone but not push used to pass every check here and then fail each
+    15-minute sync for the agent's whole life; ``probe_push_access`` asks the
+    receive-pack side, and a refusal fails creation with a 400 naming the fix.
 
     ent#123 tokenless path: no PAT ⇒ probe over the git transport instead of
     REST (`probe_anonymous_repo_access` — same transport as the container's
@@ -979,6 +1044,9 @@ async def _validate_github_access(
                     raise
                 except Exception as e:
                     logger.warning(f"Could not validate branch '{config.source_branch}': {e}")
+
+            if will_push and not push_verified:
+                await _validate_push_access(github_repo_for_agent, github_pat_for_agent)
     except HTTPException:
         raise
     except GitHubError as e:
@@ -989,6 +1057,33 @@ async def _validate_github_access(
     except Exception as e:
         # Log but don't block creation for transient network errors
         logger.warning(f"GitHub repo validation failed (non-blocking): {e}")
+
+
+async def _validate_push_access(github_repo: str, github_pat: str) -> None:
+    """#2107: refuse to create an auto-pushing agent whose token cannot push.
+    A transient probe failure is logged and does not block (the PAT path's
+    existing policy): it says nothing about the token."""
+    outcome, detail = await git_service.probe_push_access(github_repo, github_pat)
+    if outcome == "denied":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"The GitHub token can read '{github_repo}' but is not allowed to "
+                f"push to it ({detail or 'push refused'}). This agent saves its "
+                f"work to that repository automatically, so every sync would "
+                f"fail. Give the token write access — for a fine-grained token, "
+                f"Repository permissions → Contents: Read and write on "
+                f"'{github_repo}'; for a classic token, the `repo` scope — or "
+                f"create the agent in source mode (pull only)."
+            ),
+        )
+    if outcome != "ok":
+        logger.warning(
+            "[#2107] could not verify push access to %s (%s); creating anyway",
+            github_repo, outcome,
+        )
+    else:
+        logger.info("[#2107] validated push access to %s", github_repo)
 
 
 async def _reserve_git_instance(
@@ -1422,10 +1517,27 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
                 source_metadata=source_metadata,
                 source_metadata_reason=source_metadata_reason,
             )
+            # trinity-enterprise#705: agent vs deployment decides the git mode —
+            # BEFORE validation and branch reservation, which both read it.
+            tr.git_mode_decision = await _apply_agent_kind_default(
+                config, tr.github_repo_for_agent, tr.github_pat_for_agent,
+                tr.fork_upstream_repo,
+            )
+            logger.info(
+                f"[ent#705] git mode for {config.name}: "
+                f"{'source (pull-only)' if tr.git_mode_decision['source_mode'] else 'working branch'}"
+                f" — {tr.git_mode_decision['reason']}"
+            )
             # Validate PAT has access to the repository before creating container
             # This prevents silent clone failures in startup.sh (#218)
             await _validate_github_access(
-                config, tr.github_repo_for_agent, tr.github_pat_for_agent
+                config, tr.github_repo_for_agent, tr.github_pat_for_agent,
+                push_verified=bool(tr.git_mode_decision.get("push_verified")),
+                # #2107: the agents that will auto-push must be able to push.
+                will_push=git_service._git_auto_sync_baked(
+                    config, tr.github_repo_for_agent,
+                    tr.github_pat_for_agent, tr.fork_upstream_repo,
+                ),
             )
             tr.git_instance_id, tr.git_working_branch = await _reserve_git_instance(
                 config, current_user, tr.github_repo_for_agent
@@ -1768,6 +1880,10 @@ def _apply_github_env(
             config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
         ):
             env_vars['GIT_SYNC_AUTO'] = 'true'
+        # trinity-enterprise#703: the pull cycle's fallback env — the DB flag
+        # written below at creation is the one the loop reads live.
+        if not config.ephemeral:
+            env_vars['GIT_SYNC_PULL'] = 'true'
 
         # Source mode (default): Track source branch directly for pull-only sync
         # Legacy mode: Create a unique working branch for bidirectional sync
@@ -2454,16 +2570,42 @@ async def _materialize_agent_files(
     # auto-sync heartbeat by default. Source-mode agents stay opt-in
     # (auto-pushing to main would clobber protected branches) —
     # except fork-to-own agents (#93), which own their repo.
-    # trinity-enterprise#69: ghosts never auto-push — their workspace
-    # is throwaway by definition, so the 15-min sync heartbeat stays off.
     # ent#123: tokenless agents never auto-push (belt — see _apply_github_env).
-    if github_repo_for_agent and github_pat_for_agent and not config.ephemeral and (not config.source_mode or fork_upstream_repo):
+    # #3010: the DB flag is now the ONLY gate the agent's loop obeys, so it is
+    # written from the SAME predicate that bakes GIT_SYNC_AUTO — ghosts
+    # included, since the baked env has always auto-pushed them (the old
+    # `and not config.ephemeral` here only made env and DB disagree at birth).
+    if git_service._git_auto_sync_baked(
+        config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
+    ):
         try:
             db.set_git_auto_sync_enabled(config.name, True)
         except Exception as e:
-            logger.warning(
+            # Loud: with the DB authoritative, a lost write leaves this agent's
+            # auto-sync OFF until an owner toggles it on.
+            logger.error(
                 f"Failed to enable auto-sync for {config.name}: {e}"
             )
+        # trinity-enterprise#705: an agent whose repository IS the agent pauses
+        # its schedules while its work cannot reach the repo, rather than piling
+        # up work that exists only on a container disk. A deployment never
+        # reaches here with auto-push, but is excluded by name as well.
+        if (config.kind or "agent") == "agent":
+            try:
+                db.set_freeze_schedules_if_sync_failing(config.name, True)
+            except Exception as e:
+                logger.error(
+                    f"Failed to enable freeze-on-sync-failure for {config.name}: {e}"
+                )
+
+    # trinity-enterprise#703: the container pulls origin on its own — for every
+    # `github:` agent, source mode included (a pull-only agent is exactly the one
+    # that needs a pull). Ghosts are excluded: their workspace is throwaway.
+    if github_repo_for_agent and not config.ephemeral:
+        try:
+            db.set_git_pull_sync_enabled(config.name, True)
+        except Exception as e:
+            logger.error(f"Failed to enable the pull cycle for {config.name}: {e}")
 
     # #2069: the fleet-wide `.gitignore` merge never ran at creation, so the
     # 15-min in-container auto-sync loop (on from birth for the GIT_SYNC_AUTO
@@ -2473,9 +2615,9 @@ async def _materialize_agent_files(
     # list after startup.sh's FULL git setup (gated inside the merge on
     # agent-server /health readiness, which follows the clone+checkout at
     # startup.sh:517) and before the first auto-sync cycle. Fire-and-forget so it
-    # adds no creation latency; non-fatal. Gated on the SAME ENV predicate that
-    # bakes GIT_SYNC_AUTO (NOT the DB-flag block above, which excludes ghosts),
-    # so the merge covers exactly the auto-committing population.
+    # adds no creation latency; non-fatal. Gated on the SAME predicate that
+    # bakes GIT_SYNC_AUTO and writes the DB flag above (#3010), so the merge
+    # covers exactly the auto-committing population.
     if git_service._git_auto_sync_baked(
         config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
     ):
@@ -3299,6 +3441,10 @@ async def create_agent_internal(
                     "file_count": tr.copy_snapshot.file_count,
                 }
             await _broadcast_agent_created(agent_status, ws_manager)
+            # trinity-enterprise#705: tell the CALLER how the git mode was decided.
+            # Set after the broadcast on purpose: /ws is unfiltered (#918) and the
+            # reason names the repo, so it rides the create response only.
+            agent_status.git_mode = tr.git_mode_decision
             _register_agent(
                 config,
                 current_user,

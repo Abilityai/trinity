@@ -1146,6 +1146,10 @@ TABLES = {
             github_pat_encrypted TEXT,
             auto_sync_enabled INTEGER DEFAULT 0,
             freeze_schedules_if_sync_failing INTEGER DEFAULT 0,
+            -- trinity-enterprise#703. No trailing comment on the column above the
+            -- FK clause: _PG_TABLE_SUBS strips the clause only when it follows
+            -- the comma directly, so a comment there breaks PostgreSQL.
+            pull_sync_enabled INTEGER DEFAULT 0,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
         )
     """,
@@ -1170,6 +1174,9 @@ TABLES = {
             pack_count INTEGER,
             loose_objects INTEGER,
             maintenance_failures INTEGER DEFAULT 0,
+            last_pull_at TEXT,  -- trinity-enterprise#703: the container's pull cycle
+            last_pull_status TEXT,
+            behind_after_pull INTEGER,
             last_check_at TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)

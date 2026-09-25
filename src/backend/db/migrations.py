@@ -4671,6 +4671,70 @@ def _migrate_role_readiness_rollout_seed(cursor, conn):
     conn.commit()
 
 
+def _migrate_auto_sync_enabled_backfill(cursor, conn):
+    """The auto-sync toggle becomes authoritative (#3010), data only.
+
+    From this release the agent's auto-sync loop obeys `agent_git_config.
+    auto_sync_enabled` alone; the baked `GIT_SYNC_AUTO` env no longer ORs it on.
+    The slice that auto-pushed on env with the DB flag at 0 — and that the DB
+    can identify — is live ghost agents: creation baked the env for them but
+    skipped the DB write (`and not config.ephemeral`). Set their flag so no
+    ghost that auto-pushes today silently stops. Non-source-mode only: a
+    tokenless ghost is always source-mode (ent#123), so `source_mode = 0`
+    implies the PAT the creation predicate required. Runs once (tracked in
+    schema_migrations); an owner's later OFF is then the only writer.
+
+    Mirrored by the Alembic revision 0075_auto_sync_enabled_backfill.
+    """
+    cursor.execute(
+        """
+        UPDATE agent_git_config SET auto_sync_enabled = 1
+        WHERE COALESCE(auto_sync_enabled, 0) = 0
+          AND COALESCE(source_mode, 0) = 0
+          AND agent_name IN (
+              SELECT agent_name FROM agent_ownership
+              WHERE is_ephemeral = 1 AND deleted_at IS NULL
+          )
+        """
+    )
+    conn.commit()
+
+
+def _migrate_pull_sync(cursor, conn):
+    """The container's pull cycle (trinity-enterprise#703).
+
+    * `agent_git_config.pull_sync_enabled` — the per-agent switch the agent's
+      pull loop reads live each cycle (the #3010 one-writer discipline).
+    * `agent_sync_state.last_pull_at / last_pull_status / behind_after_pull` —
+      the pull cycle's own outcome, persisted by the sync-health poller.
+
+    Backfill (operator ruling 2026-09-25): on only where auto-sync is already
+    on, so no agent that is not already writing to git starts rebasing its
+    working tree on upgrade; everyone else is off until toggled. New `github:`
+    agents get it at creation. Runs once (schema_migrations).
+
+    Mirrored by the Alembic revision 0076_pull_sync.
+    """
+    _safe_add_column(
+        cursor, "agent_git_config", "pull_sync_enabled",
+        "ALTER TABLE agent_git_config ADD COLUMN pull_sync_enabled INTEGER DEFAULT 0",
+    )
+    for column, ddl in (
+        ("last_pull_at", "TEXT"),
+        ("last_pull_status", "TEXT"),
+        ("behind_after_pull", "INTEGER"),
+    ):
+        _safe_add_column(
+            cursor, "agent_sync_state", column,
+            f"ALTER TABLE agent_sync_state ADD COLUMN {column} {ddl}",
+        )
+    cursor.execute(
+        "UPDATE agent_git_config SET pull_sync_enabled = 1 "
+        "WHERE COALESCE(auto_sync_enabled, 0) = 1"
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4815,4 +4879,6 @@ MIGRATIONS = [
     ("agent_capability_grants", _migrate_agent_capability_grants),
     ("operator_queue_sync_state", _migrate_operator_queue_sync_state),
     ("role_readiness_rollout_seed", _migrate_role_readiness_rollout_seed),
+    ("auto_sync_enabled_backfill", _migrate_auto_sync_enabled_backfill),
+    ("pull_sync", _migrate_pull_sync),
 ]

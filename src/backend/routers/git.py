@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from models import (
     AutoSyncToggle,
+    PullSyncToggle,
     BindAgentRepoRequest,
     BindAgentRepoResponse,
     FreezeSchedulesToggle,
@@ -1183,6 +1184,33 @@ async def set_auto_sync_config(
         raise HTTPException(status_code=404, detail="Git not configured")
     db.set_git_auto_sync_enabled(agent_name, body.enabled)
     return {"agent_name": agent_name, "auto_sync_enabled": body.enabled}
+
+
+@router.get("/{agent_name}/git/pull-sync")
+async def get_pull_sync_config(agent_name: AuthorizedAgentByName):
+    """trinity-enterprise#703: whether the agent's container pulls origin on its
+    own. The agent's pull loop reads this every cycle with its own key."""
+    config = db.get_git_config(agent_name)
+    if not config:
+        raise HTTPException(status_code=404, detail="Git not configured")
+    return {
+        "agent_name": agent_name,
+        "pull_sync_enabled": bool(getattr(config, "pull_sync_enabled", False)),
+    }
+
+
+@router.put("/{agent_name}/git/pull-sync")
+async def set_pull_sync_config(
+    agent_name: OwnedAgentByName,
+    body: PullSyncToggle,
+):
+    """trinity-enterprise#703: turn the container's pull cycle on or off; live
+    on the agent's next pull cycle, no recreate."""
+    config = db.get_git_config(agent_name)
+    if not config:
+        raise HTTPException(status_code=404, detail="Git not configured")
+    db.set_git_pull_sync_enabled(agent_name, body.enabled)
+    return {"agent_name": agent_name, "pull_sync_enabled": body.enabled}
 
 
 @router.get("/{agent_name}/git/freeze-schedules-if-failing")

@@ -814,3 +814,66 @@
 - **GitHub Issue**: abilityai/trinity-enterprise#615
 
 ---
+
+### 11.17 An Agent Created as an Agent Owns Its Repository (trinity-enterprise#705)
+
+- **Status**: 🚧 In review. Merges only after #3016, #3017 and #3018, the three named blockers.
+- **Ruling (2026-09-24):** *the repository is the agent; the container is a cache of it.*
+  The 2026-09-24 fleet audit found every git-bound agent with auto-sync off and
+  work on container disks that existed nowhere else.
+- **Create-time `kind`:** `agent` (the default) or `deployment`, on
+  `POST /api/agents` and MCP `create_agent`. The UI half of the choice is
+  trinity-enterprise#704. An **explicit `source_mode` always wins for the
+  mode**. Every auto-pushing agent, including an explicit working branch and
+  fork-to-own, also gets freeze-on-failure; a `deployment` never does.
+- **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
+  `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
+  them **when its token can push to that repo** (the #2107 receive-pack probe).
+- **Stays pull-only, with the reason on the create response's `git_mode`:**
+  - a deployment
+  - an ephemeral ghost (ent#69)
+  - no token (ent#123; not a 400)
+  - a refused probe (a template someone else owns — never branches pushed
+    into it, the ent#162 class; the reason points to fork-to-own)
+  - an unverifiable probe
+- **Fork-to-own** gets the trio (it owns its fork). **Cornelius** is pinned
+  pull-only: it is built from a shared public upstream.
+- **Not changed:**
+  - existing agents (the default applies to new creates; migration is per
+    agent and explicit — runbook `docs/migrations/AGENT_WORKING_BRANCH_DEFAULT_2026-09.md`)
+  - freeze paging (the `sync_failing` item). Until trinity-enterprise#706
+    adds divergence age, the freeze trips on today's trigger: 3 consecutive
+    failed syncs (about 45 minutes at the 15-minute cadence), including a
+    rebase conflict, which needs a human anyway
+  - the pull cycle — on when trinity-enterprise#703 lands
+  - divergence-age freeze semantics — trinity-enterprise#706
+- **Edition**: open-core (operator ruling 2026-09-25): defaults on the existing
+  open-source create and sync paths.
+- **Flow**: `docs/memory/feature-flows/github-sync.md`
+- **GitHub Issue**: abilityai/trinity-enterprise#705
+
+---
+
+### 11.18 The Container Pulls Origin on Its Own (trinity-enterprise#703)
+
+- **Status**: 🚧 In review. Stacked on #3020; merges after it.
+- **Invariant G3:** human and fleet work reaches the agent within a bound.
+- **Pull cycle** in the agent server beside the push cycle:
+  - on its interval: fetch, then fast-forward or rebase
+  - uncommitted edits stashed and re-applied explicitly
+  - never discards local work: a conflict is aborted or undone, and recorded
+  - never runs while an execution is in flight
+- **Flag:** per-agent `pull_sync_enabled` (both migration tracks), read live
+  each cycle, with `GIT_SYNC_PULL` as the fallback; interval
+  `GIT_SYNC_PULL_INTERVAL_SECONDS` (defaults to the push interval).
+  - on for new `github:` agents, source-mode included
+  - on for existing agents only where auto-sync is already on
+  - off otherwise; toggle in Settings → Git sync
+- **Observability:** `last_pull_at`, `last_pull_status`, `behind_after_pull`
+  in `sync-state.json`, persisted on `agent_sync_state`. A failed pull never
+  counts toward the push's `consecutive_failures`.
+- **Edition**: open-core (operator ruling 2026-09-25).
+- **Flow**: `docs/memory/feature-flows/git-sync-health.md` §1d
+- **GitHub Issue**: abilityai/trinity-enterprise#703
+
+---

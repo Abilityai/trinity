@@ -330,6 +330,7 @@ class AgentGitConfig(BaseModel):
     # #389 sync health observability
     auto_sync_enabled: bool = False
     freeze_schedules_if_sync_failing: bool = False
+    pull_sync_enabled: bool = False  # trinity-enterprise#703: the container's pull cycle
 
 
 class GitSyncResult(BaseModel):
