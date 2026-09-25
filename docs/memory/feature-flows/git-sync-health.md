@@ -314,6 +314,37 @@ _run_auto_sync_once (worker thread, repo lock held)
   base-image rebuild + agent recreate; pre-existing bloat recovery is
   ops-side (trinity-ops-agent#127) using `GIT_MAINTENANCE_TIMEOUT_SECONDS`.
 
+### 1c. Durability owner and `.claude/settings.json` (trinity-enterprise#708)
+
+**Ruling (2026-09-25): on a deployed agent the platform heartbeat owns
+commit-and-push durability.** It is fleet-wide, one writer, observable in
+`agent_sync_state` and freeze-capable. The marketplace `add-git-sync`
+Stop/SessionStart hooks own it for **local** sessions only; they are invisible to
+sync health and do not run under headless `claude --print`. On Trinity the skill
+stands down when it sees the platform (`TRINITY_*` env), which is a marketplace
+follow-up. Two writers doing `git add -A` on one tree is the race this rules out.
+
+**`.claude/settings.json` is committable.** It is Claude Code's project settings
+file, and the #2036 file-level ignore silently dropped every template's hooks
+(`add-git-sync` had to learn to negate it). What #2036 fixed was one content:
+absolute `/opt/trinity/` hook paths, which brick any clone made outside the
+container. Every platform commit path now runs a guard after staging:
+
+| Path | Guard |
+|---|---|
+| heartbeat `_run_auto_sync_once` | `routers/git.py::_guard_container_only_settings` |
+| operator Push `sync_to_github` | same |
+| `initialize_git_in_container` (backend) | `gitignore.CONTAINER_ONLY_SETTINGS_GUARD` (shell twin, same rule) |
+
+If the index copy registers `/opt/trinity/`, the guard restores a clean HEAD copy
+when one exists, and otherwise untracks the file. A harmful copy committed before
+#2036 is therefore deleted from the remote on the next commit. The working-tree
+file is never touched. This also covers the legacy copies that `startup.sh`'s
+exact-match removal (ent#345) leaves on long-lived volumes. The heartbeat decides
+"anything to commit?" from **staged** entries only (`_has_staged_changes`, the
+same rule Push uses), so a guarded-out file that stays untracked on disk never
+turns a cycle into an empty-commit failure.
+
 ### 2. Backend poller
 
 ```

@@ -3453,6 +3453,16 @@
         "scheduler"
       ],
       "description": "The scheduler's readiness gate beside the #454 pre-check: a held cron seat brief is a skipped row with the reason plus the skipped event and is never dispatched; manual, webhook and non-seat schedules are not asked; anything but an explicit fire:false fires; every backend failure shape fails open."
+    },
+    {
+      "file": "unit/test_ent708_settings_json_guard.py",
+      "feature": "trinity-enterprise#708",
+      "added": "2026-09-25",
+      "categories": [
+        "agent-server",
+        "git"
+      ],
+      "description": "`.claude/settings.json` is kept out of a commit by CONTENT, not name (ent#708): the agent server's _guard_container_only_settings and the backend shell twin CONTAINER_ONLY_SETTINGS_GUARD run the same matrix on real repos (clean file commits; harmful untracked stays out and on disk; harmful edit of a clean tracked file restores the clean copy; a harmful copy already in HEAD is untracked; fresh repo; no-op); the heartbeat end to end (a harmful file never reaches the remote and the next cycle makes no empty commit; a clean file syncs; a legacy committed copy is deleted from the remote); the guard sits between add and commit in sync_to_github and _run_auto_sync_once and after both `git add .` in initialize; the pattern is gone from the canonical list. 11 of 19 red with the fix reverted."
     }
   ]
 }

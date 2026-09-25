@@ -67,6 +67,22 @@ _TRINITY_AUTHORED_PATHS: Tuple[str, ...] = (
     ".trinity/plugins.yaml",
 )
 
+# ent#708: the shell twin of the agent server's `_guard_container_only_settings`
+# (the agent server ships as its own image and cannot import this module), for
+# the backend-driven commit in `provisioning.initialize_git_in_container`. Runs
+# after staging: when the INDEX copy of `.claude/settings.json` registers
+# container-only `/opt/trinity/` hook paths, restore a clean HEAD copy if there
+# is one, else untrack it. The working-tree file is never touched. Written with
+# no quotes at all — it is spliced into `bash -c "cd <dir> && <cmd>"`.
+CONTAINER_ONLY_SETTINGS_GUARD = (
+    "if git show :.claude/settings.json 2>/dev/null | grep -qF /opt/trinity/; then "
+    "if git show HEAD:.claude/settings.json >/dev/null 2>&1 "
+    "&& ! git show HEAD:.claude/settings.json | grep -qF /opt/trinity/; "
+    "then git reset -q -- .claude/settings.json; "
+    "else git rm -q --cached -- .claude/settings.json; fi; fi"
+)
+
+
 _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # Shell init / history (instance-specific)
     ".bash_logout",
@@ -142,21 +158,19 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     #
     # ent#345 UPDATE: the platform no longer bakes this file — the guardrail
     # registration moved to root-owned `/etc/claude-code/managed-settings.json`,
-    # out of the agent's write reach and out of the synced tree. The rule STAYS
-    # load-bearing, for the two copies that can still exist: a legacy one on a
-    # volume that predates ent#345 (removed by `startup.sh` only on an exact
-    # content match, so an agent that never restarts still has it) and an
-    # agent-authored one. Either still registers absolute `/opt/trinity` paths, so
-    # committing either still bricks a foreign clone — the damage above, unchanged.
+    # out of the agent's write reach and out of the synced tree.
     #
-    # Trade-off, stated: `.claude/settings.json` doubles as Claude Code's
-    # PROJECT-level settings file, so a template can no longer commit one. The
-    # original justification ("the baked file always exists and would collide") no
-    # longer holds — nothing bakes it — but the rule survives on the leak argument
-    # alone, and an agent that genuinely needs it keeps the #1596 escape hatch:
-    # negate in its own `.gitignore` (`!.claude/settings.json`).
-    # `settings.local.json` is already covered by the `*.local.json` rule below.
-    ".claude/settings.json",
+    # ent#708: `.claude/settings.json` is therefore NOT ignored any more. It is
+    # Claude Code's PROJECT settings file — a template ships hooks there, and the
+    # file-level rule silently dropped them (the marketplace `add-git-sync` hooks
+    # vanished from every deployed agent until the skill learned to negate it).
+    # The damage #2036 fixed was never the file, it was one CONTENT: absolute
+    # `/opt/trinity/` hook paths. That content is now kept out of every platform
+    # commit by a guard instead — `agent_server/routers/git.py::
+    # _guard_container_only_settings` (heartbeat + Push) and
+    # `CONTAINER_ONLY_SETTINGS_GUARD` below (initialize) — which also covers the
+    # legacy copies `startup.sh`'s exact-match removal leaves on long-lived
+    # volumes. `settings.local.json` is covered by the `*.local.json` rule below.
     ".claude/remote-settings.json",
     ".claude/policy-limits.json",
     ".claude/backups/",

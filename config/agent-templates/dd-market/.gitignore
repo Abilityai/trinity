@@ -32,7 +32,6 @@ __pycache__/
 .claude/sessions/
 .claude/shell-snapshots/
 .claude/plugins/
-.claude/settings.json
 .claude/remote-settings.json
 .claude/policy-limits.json
 .claude/backups/

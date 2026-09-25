@@ -744,6 +744,68 @@ def _maybe_run_git_maintenance(home_dir: Path, stats: Dict) -> Optional[str]:
         return "failed"
 
 
+# ent#708: the ONE Claude Code settings file whose content (not its name) makes
+# it unfit for the repo. `.claude/settings.json` is the agent's project settings
+# and may be committed — unless it registers the container's absolute
+# `/opt/trinity/` hook paths, which brick any clone made outside the container
+# (#2036: a PreToolUse hook whose script is missing exits 2 = "block"). The base
+# image stopped baking such a copy in ent#345, but a legacy one survives on
+# volumes whose copy does not byte-match the managed file, and an agent can
+# write one. Mirrored for the backend's initialize path by
+# `services/git_service/gitignore.py::CONTAINER_ONLY_SETTINGS_GUARD` — same rule.
+_CONTAINER_ONLY_SETTINGS = ".claude/settings.json"
+_CONTAINER_ONLY_MARKER = "/opt/trinity/"
+
+
+def _guard_container_only_settings(home_dir: Path) -> Optional[str]:
+    """Keep a container-only `.claude/settings.json` out of the next commit.
+
+    Runs after staging. When the INDEX copy registers `/opt/trinity/` paths:
+    restore the HEAD copy if HEAD holds a clean one, else untrack it (which also
+    heals a harmful copy committed before #2036 — the commit records the
+    deletion). The working-tree file is never touched: the running agent keeps
+    whatever it registers. Returns what it did ("restored" / "untracked"), or
+    None when there was nothing to keep out.
+    """
+    def _blob(spec: str) -> Optional[str]:
+        res = run_registered(["git", "show", spec], cwd=str(home_dir), timeout=10)
+        return res.stdout if res.returncode == 0 else None
+
+    staged = _blob(f":{_CONTAINER_ONLY_SETTINGS}")
+    if staged is None or _CONTAINER_ONLY_MARKER not in staged:
+        return None
+    head = _blob(f"HEAD:{_CONTAINER_ONLY_SETTINGS}")
+    if head is not None and _CONTAINER_ONLY_MARKER not in head:
+        run_registered(
+            ["git", "reset", "-q", "--", _CONTAINER_ONLY_SETTINGS],
+            cwd=str(home_dir), timeout=10, check=True,
+        )
+        action = "restored"
+    else:
+        run_registered(
+            ["git", "rm", "-q", "--cached", "--", _CONTAINER_ONLY_SETTINGS],
+            cwd=str(home_dir), timeout=10, check=True,
+        )
+        action = "untracked"
+    logger.warning(
+        "git: kept %s out of the commit (%s) — it registers container-only "
+        "%s hook paths, which would break any clone made outside the container",
+        _CONTAINER_ONLY_SETTINGS, action, _CONTAINER_ONLY_MARKER,
+    )
+    return action
+
+
+def _has_staged_changes(porcelain: str) -> bool:
+    """True when `git status --porcelain` shows a STAGED entry. Untracked
+    (`??`) and unstaged-only (` M`) lines do not count — a guarded-out
+    settings file stays untracked on disk and must not trigger an empty
+    commit every cycle (ent#708)."""
+    return any(
+        line and line[0] not in (" ", "?")
+        for line in porcelain.splitlines()
+    )
+
+
 def _run_auto_sync_once(home_dir: Path) -> Dict:
     """One auto-sync cycle: reap stale lock litter, measure, stage, commit if
     dirty, push, maybe consolidate .git. Records outcome.
@@ -780,6 +842,7 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
             run_registered(
                 ["git", "add", "-A"], cwd=str(home_dir), timeout=30, check=True,
             )
+            _guard_container_only_settings(home_dir)
 
             # Is there anything to commit? check=True: a swept/killed status
             # (rc −9, empty stdout) must fail the cycle loudly, not be
@@ -788,7 +851,7 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
                 ["git", "status", "--porcelain"],
                 cwd=str(home_dir), timeout=10, check=True,
             )
-            if status.stdout.strip():
+            if _has_staged_changes(status.stdout):
                 commit_msg = f"Trinity auto-sync: {now}"
                 run_registered(
                     ["git", "commit", "-m", commit_msg],
@@ -1552,6 +1615,10 @@ async def sync_to_github(request: GitSyncRequest):
             )
             if add_result.returncode != 0:
                 raise HTTPException(status_code=500, detail=f"Git add failed: {add_result.stderr}")
+
+        # ent#708: whichever way it was staged, a container-only settings file
+        # never reaches the remote.
+        _guard_container_only_settings(home_dir)
 
         # Check if there's anything to commit
         status_result = subprocess.run(
