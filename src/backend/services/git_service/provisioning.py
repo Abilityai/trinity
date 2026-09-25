@@ -304,10 +304,13 @@ async def probe_push_access(github_repo: str, github_pat: str) -> Tuple[str, str
     detail = _first_line(err, github_pat)
     if is_push_denied(err):
         return "denied", detail
+    # The stderr line is NOT logged: it was produced in a child that held the
+    # token, so it stays out of the platform log (it is returned, scrubbed, to
+    # the caller that asked).
     logger.warning(
         "probe_push_access: push --dry-run for %s exited %s with an "
-        "unrecognised error — treating as transient: %s",
-        github_repo, rc, detail,
+        "unrecognised error — treating as transient",
+        github_repo, rc,
     )
     return "transient", detail
 

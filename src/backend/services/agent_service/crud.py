@@ -1025,7 +1025,7 @@ async def _validate_push_access(github_repo: str, github_pat: str) -> None:
     if outcome != "ok":
         logger.warning(
             "[#2107] could not verify push access to %s (%s); creating anyway",
-            github_repo, detail or outcome,
+            github_repo, outcome,
         )
     else:
         logger.info("[#2107] validated push access to %s", github_repo)
