@@ -30,11 +30,15 @@ from fastapi import HTTPException
 from agent_server.services import opencode_runtime  # noqa: E402
 from agent_server.services.opencode_provider import (  # noqa: E402
     ENV_BASE_URL,
+    OLLAMA_DEFAULT_PORT,
     OPENAI_COMPATIBLE_NPM,
     OpenCodeProviderConfigError,
     apply_provider_config,
     build_ollama_provider,
+    derive_gateway_base_url,
     normalize_base_url,
+    read_default_gateway,
+    require_ollama_base_url,
     resolve_models,
 )
 from agent_server.models import ExecutionMetadata  # noqa: E402
@@ -169,11 +173,20 @@ def test_operator_declaration_wins_on_options_and_models_are_unioned():
     assert entry["models"] == {"custom:7b": {}, "gemma4:12b": {}}
 
 
-def test_operator_block_without_a_base_url_and_no_env_is_a_named_failure():
+def test_operator_block_without_a_base_url_and_no_env_is_a_named_failure(tmp_path):
+    """No env, no gateway, no declared URL => named failure.
+
+    `route_path` is pinned at a routeless fixture rather than left to the real
+    `/proc/net/route`: since Abilityai/lilu#272 the gateway IS a source of base
+    URLs, so a test that let the host supply one would assert nothing on a
+    machine with a default route (i.e. every container this ever runs in).
+    """
     config = dict(_BASE)
     config["provider"] = {"ollama": {"models": {"x:1b": {}}}}
     with pytest.raises(OpenCodeProviderConfigError) as exc:
-        apply_provider_config(config, model="ollama/x:1b", env={})
+        apply_provider_config(
+            config, model="ollama/x:1b", env={}, route_path=str(_routeless(tmp_path))
+        )
     assert ENV_BASE_URL in str(exc.value)
 
 
@@ -465,3 +478,219 @@ def test_prompt_is_passed_after_an_end_of_options_separator():
     # The separator is appended by `_execute_opencode`, immediately before the
     # prompt — assert the adjacency, not just that '--' appears somewhere.
     assert 'cmd.append("--")\n        cmd.append(prompt)' in body
+
+
+# ---------------------------------------------------------------------------
+# The derived gateway default (Abilityai/lilu#272)
+#
+# The measured defect: with OPENCODE_OLLAMA_BASE_URL unset and the turn pinned
+# to `ollama/…`, no provider block was emitted at all and OpenCode died in
+# 1.6s with the opaque ref `err_411e3b55`. The one value that works — the
+# container's default gateway, where the host's Ollama answers; localhost is
+# refused in 0ms — appeared in no config and no env, so it was unknowable
+# without inspecting the host. It is DERIVED per turn rather than stored,
+# because it is a property of the network the container is attached to.
+# ---------------------------------------------------------------------------
+
+#: A real `/proc/net/route` from a Trinity agent on trinity-agent-network.
+#: `Gateway` is a LITTLE-ENDIAN hex word: 01001CAC unpacks to the bytes
+#: AC 1C 00 01 = 172.28.0.1. Read in string order it would be 1.0.28.172 —
+#: a plausible-looking address that is not the gateway, which is exactly the
+#: kind of wrong a fixture has to pin.
+_ROUTE_WITH_DEFAULT = (
+    "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+    "eth0\t00000000\t01001CAC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+    "eth0\t00001CAC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+)
+
+#: Same table with the default route removed — an on-link-only container.
+_ROUTE_WITHOUT_DEFAULT = (
+    "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+    "eth0\t00001CAC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+)
+
+
+def _route_file(tmp_path, body: str, name: str = "route"):
+    path = tmp_path / name
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _routeless(tmp_path):
+    return _route_file(tmp_path, _ROUTE_WITHOUT_DEFAULT, name="route-no-default")
+
+
+def test_default_gateway_is_decoded_little_endian(tmp_path):
+    """01001CAC -> 172.28.0.1, and the value is verified against the live
+    kernel table's own encoding, not a guess."""
+    assert read_default_gateway(str(_route_file(tmp_path, _ROUTE_WITH_DEFAULT))) == "172.28.0.1"
+
+
+def test_derived_base_url_is_the_gateway_on_ollamas_port(tmp_path):
+    derived = derive_gateway_base_url(str(_route_file(tmp_path, _ROUTE_WITH_DEFAULT)))
+    assert derived == f"http://172.28.0.1:{OLLAMA_DEFAULT_PORT}/v1"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _ROUTE_WITHOUT_DEFAULT,
+        # An on-link default route: destination is zero but there is no next
+        # hop, so there is no host address to dial.
+        "Iface\tDestination\tGateway\n" "eth0\t00000000\t00000000\t0003\t0\t0\t0\n",
+        # Header only.
+        "Iface\tDestination\tGateway\n",
+    ],
+)
+def test_no_usable_default_route_yields_no_gateway(tmp_path, body):
+    assert read_default_gateway(str(_route_file(tmp_path, body))) is None
+
+
+def test_unreadable_route_file_yields_no_gateway_rather_than_raising(tmp_path):
+    """An OSError here must not take the turn down by itself — the caller
+    decides, and for a non-ollama turn a missing route file is irrelevant."""
+    assert read_default_gateway(str(tmp_path / "does-not-exist")) is None
+
+
+def test_unset_env_on_an_ollama_turn_derives_the_gateway(tmp_path):
+    """The defect, directly: unset env + `ollama/…` used to emit nothing."""
+    emitted = apply_provider_config(
+        dict(_BASE),
+        model="ollama/gemma4:12b",
+        env={},
+        route_path=str(_route_file(tmp_path, _ROUTE_WITH_DEFAULT)),
+    )
+    assert emitted["provider"]["ollama"] == {
+        "npm": OPENAI_COMPATIBLE_NPM,
+        "options": {"baseURL": "http://172.28.0.1:11434/v1"},
+        "models": {"gemma4:12b": {}},
+    }
+
+
+def test_the_env_var_still_wins_over_the_derived_gateway(tmp_path):
+    """The gateway is a DEFAULT, not a policy: an operator who points the
+    agent at a remote DGX must not be silently redirected to their host."""
+    emitted = apply_provider_config(
+        dict(_BASE),
+        model="ollama/gemma4:12b",
+        env={ENV_BASE_URL: "http://dgx:11434"},
+        route_path=str(_route_file(tmp_path, _ROUTE_WITH_DEFAULT)),
+    )
+    assert emitted["provider"]["ollama"]["options"]["baseURL"] == "http://dgx:11434/v1"
+
+
+def test_agent_wide_pin_alone_derives_the_gateway(tmp_path):
+    """`runtime: {type: opencode, model: "ollama/gemma4:12b"}` sets
+    AGENT_RUNTIME_MODEL and no `-m`; that is the shipped shape."""
+    emitted = apply_provider_config(
+        dict(_BASE),
+        model=None,
+        env={"AGENT_RUNTIME_MODEL": "ollama/gemma4:12b"},
+        route_path=str(_route_file(tmp_path, _ROUTE_WITH_DEFAULT)),
+    )
+    assert emitted["provider"]["ollama"]["options"]["baseURL"] == "http://172.28.0.1:11434/v1"
+
+
+def test_a_non_ollama_turn_with_no_env_still_emits_nothing(tmp_path):
+    """Graceful degradation is not traded away for the fix: the
+    Anthropic/OpenRouter agent must not acquire a provider key — nor dial the
+    host — just because a gateway happens to exist."""
+    emitted = apply_provider_config(
+        dict(_BASE),
+        model="anthropic/claude-sonnet-5",
+        env={},
+        route_path=str(_route_file(tmp_path, _ROUTE_WITH_DEFAULT)),
+    )
+    assert "provider" not in emitted
+
+
+def test_an_ollama_turn_with_no_env_and_no_gateway_is_a_named_failure(tmp_path):
+    """Neither path resolves => the operator is told what to set, rather than
+    handed OpenCode's `err_*` ref."""
+    with pytest.raises(OpenCodeProviderConfigError) as exc:
+        apply_provider_config(
+            dict(_BASE), model="ollama/gemma4:12b", env={}, route_path=str(_routeless(tmp_path))
+        )
+    assert ENV_BASE_URL in str(exc.value)
+
+
+def test_the_derivation_is_logged_at_info_with_the_value(tmp_path, caplog):
+    """A failing local-Ollama turn's first question is which host it dialled;
+    "DERIVED" vs "set" is the difference between fixing the network and
+    fixing the .env."""
+    with caplog.at_level("INFO", logger="agent_server.services.opencode_provider"):
+        apply_provider_config(
+            dict(_BASE),
+            model="ollama/gemma4:12b",
+            env={},
+            route_path=str(_route_file(tmp_path, _ROUTE_WITH_DEFAULT)),
+        )
+    derived = [r.getMessage() for r in caplog.records if "DERIVED" in r.getMessage()]
+    assert derived, caplog.text
+    assert "http://172.28.0.1:11434/v1" in derived[0]
+    assert ENV_BASE_URL in derived[0]
+
+
+# ---------------------------------------------------------------------------
+# The `-m` boundary guard
+# ---------------------------------------------------------------------------
+
+def test_boundary_guard_refuses_an_unrunnable_ollama_pin(tmp_path):
+    with pytest.raises(OpenCodeProviderConfigError) as exc:
+        require_ollama_base_url(
+            "ollama/gemma4:12b", env={}, route_path=str(_routeless(tmp_path))
+        )
+    assert ENV_BASE_URL in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # nothing to run against Ollama at all
+        {"model": "anthropic/claude-sonnet-5", "env": {}},
+        # the env names a host
+        {"model": "ollama/gemma4:12b", "env": {ENV_BASE_URL: "http://dgx:11434"}},
+        # the operator declared one in the shared config
+        {
+            "model": "ollama/gemma4:12b",
+            "env": {},
+            "config": {"provider": {"ollama": {"options": {"baseURL": "http://op:11434/v1"}}}},
+        },
+    ],
+)
+def test_boundary_guard_is_silent_when_a_url_exists_anywhere(tmp_path, kwargs):
+    """It refuses the unrunnable and decides nothing else — in particular it
+    must not veto an operator-declared block just because this container has
+    no default route."""
+    model = kwargs.pop("model")
+    require_ollama_base_url(model, route_path=str(_routeless(tmp_path)), **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_an_unrunnable_ollama_turn_fails_with_the_env_var_not_an_err_ref(
+    monkeypatch, tmp_path
+):
+    """End to end at the seam that matters: the turn never reaches OpenCode,
+    and the execution's error names OPENCODE_OLLAMA_BASE_URL. Past the `-m`
+    boundary the only diagnosis an operator gets is `err_411e3b55`, which
+    names nothing they can set."""
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path))
+    monkeypatch.setattr(opencode_runtime, "_load_shared_config", lambda: dict(_BASE))
+    monkeypatch.delenv(ENV_BASE_URL, raising=False)
+    monkeypatch.delenv("AGENT_RUNTIME_MODEL", raising=False)
+    # Bind the guard to a container that has no default route; everything else
+    # on the path is the real code.
+    routeless = str(_routeless(tmp_path))
+    monkeypatch.setattr(
+        opencode_runtime,
+        "require_ollama_base_url",
+        lambda model, **kw: require_ollama_base_url(model, route_path=routeless, **kw),
+    )
+
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    with pytest.raises(HTTPException) as exc:
+        await runtime.execute_headless("ping", model="ollama/gemma4:12b")
+    assert exc.value.status_code == 400
+    assert ENV_BASE_URL in str(exc.value.detail)
+    assert "err_" not in str(exc.value.detail)
