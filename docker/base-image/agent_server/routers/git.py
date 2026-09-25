@@ -116,6 +116,8 @@ _SYNC_STATE_DEFAULT: Dict = {
     "maintenance_failures": 0,  # #1595: consecutive failed maintenance attempts
     "maintenance_next_attempt_at": None,  # #1595: backoff gate (ISO timestamp)
     "last_lock_recovery": None,  # #2742: the boot reap's own record of a wedge
+    "last_successful_push_at": None,  # #3011: last cycle whose push landed
+    "behind_after_fetch": None,  # #3011: commits origin/<branch> had that we lacked
 }
 
 
@@ -174,13 +176,16 @@ def _write_sync_state_file(
     pack_count: Optional[int] = None,
     loose_objects: Optional[int] = None,
     maintenance_status: Optional[str] = None,
+    behind_after_fetch: Optional[int] = None,
 ) -> Dict:
     """Persist one sync outcome.
 
     consecutive_failures is bumped on `failed`, reset on `success`, untouched
     on `never`. last_error_summary is cleared on success, kept on never.
-    git_dir_bytes (#1596) / pack_count / loose_objects (#1595) are updated when
-    measured; a None here preserves the last known value.
+    git_dir_bytes (#1596) / pack_count / loose_objects (#1595) /
+    behind_after_fetch (#3011) are updated when measured; a None here preserves
+    the last known value. last_successful_push_at (#3011) is stamped on
+    `success` only — a sync outcome here always means the push landed.
 
     maintenance_status (#1595) drives the maintenance backoff bookkeeping:
     "failed" increments maintenance_failures and pushes
@@ -210,6 +215,8 @@ def _write_sync_state_file(
         prior["pack_count"] = pack_count
     if loose_objects is not None:
         prior["loose_objects"] = loose_objects
+    if behind_after_fetch is not None:
+        prior["behind_after_fetch"] = behind_after_fetch
 
     if maintenance_status is not None:
         prior["maintenance_status"] = maintenance_status
@@ -235,6 +242,8 @@ def _write_sync_state_file(
 
     prior["last_sync_status"] = last_sync_status
     prior["last_sync_at"] = last_sync_at or datetime.now(timezone.utc).isoformat()
+    if last_sync_status == "success":
+        prior["last_successful_push_at"] = prior["last_sync_at"]
 
     path = _sync_state_path(home_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -744,13 +753,86 @@ def _maybe_run_git_maintenance(home_dir: Path, stats: Dict) -> Optional[str]:
         return "failed"
 
 
+def _is_missing_remote_ref(stderr: Optional[str]) -> bool:
+    """`git fetch origin <branch>` failed only because the branch is not on the
+    remote yet (a working branch whose first push has not happened)."""
+    return "couldn't find remote ref" in (stderr or "").lower()
+
+
+def _is_shared_source_branch(home_dir: Path, branch: str) -> bool:
+    """#3011: True when the heartbeat must NOT push — a source-mode agent
+    (pull-only by contract) sitting on the repo's default branch.
+
+    Fork-to-own agents are source-mode too but own their fork's `main`; they are
+    recognised by `GIT_UPSTREAM_REPO` (baked at creation) or, since that env is
+    not re-derived on recreate, by the `upstream` remote startup.sh writes into
+    `.git/config` on the persistent volume.
+    """
+    if os.getenv("GIT_SOURCE_MODE", "").lower() != "true":
+        return False
+    if os.getenv("GIT_UPSTREAM_REPO"):
+        return False
+    upstream = run_registered(
+        ["git", "remote", "get-url", "upstream"], cwd=str(home_dir), timeout=10,
+    )
+    if upstream.returncode == 0:
+        return False
+    head = run_registered(
+        ["git", "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"],
+        cwd=str(home_dir), timeout=10,
+    ).stdout.strip()
+    if head.startswith("origin/"):
+        return branch == head[len("origin/"):]
+    # origin/HEAD unset (not a fresh clone): fall back to the conventional names.
+    return branch in ("main", "master")
+
+
+def _rebase_onto_remote(home_dir: Path, branch: str) -> Optional[str]:
+    """#3011: rebase local commits onto the freshly fetched `origin/<branch>`.
+
+    Returns None on a clean rebase, else the error summary to record. Any
+    failure is aborted, so the repo is back exactly where it was — a conflict is
+    never resolved automatically, the remote never overwritten, nothing reset.
+    """
+    try:
+        rebase = run_registered(
+            ["git", "rebase", "--autostash", f"origin/{branch}"],
+            cwd=str(home_dir), timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        # Killed mid-rebase: abort, or the next cycle meets a half-done rebase.
+        run_registered(["git", "rebase", "--abort"], cwd=str(home_dir), timeout=60)
+        return f"rebase timed out on {branch}"
+    if rebase.returncode == 0:
+        return None
+    conflicted = run_registered(
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        cwd=str(home_dir), timeout=10,
+    ).stdout.strip()
+    abort = run_registered(
+        ["git", "rebase", "--abort"], cwd=str(home_dir), timeout=60,
+    )
+    if abort.returncode != 0:
+        logger.error(
+            "auto-sync: rebase --abort failed on %s: %s",
+            branch, _summarize_git_error(abort.stderr),
+        )
+    output = f"{rebase.stdout or ''}\n{rebase.stderr or ''}"
+    if conflicted or "CONFLICT" in output:
+        return f"diverged: rebase conflict on {branch}"
+    return _summarize_git_error(rebase.stderr or rebase.stdout or "rebase failed")
+
+
 def _run_auto_sync_once(home_dir: Path) -> Dict:
     """One auto-sync cycle: reap stale lock litter, measure, stage, commit if
-    dirty, push, maybe consolidate .git. Records outcome.
+    dirty, fetch + rebase onto the remote branch, push, maybe consolidate .git.
+    Records outcome.
 
-    Intentionally minimal — heavy conflict handling stays in the operator-
-    initiated `sync_to_github` endpoint. Auto-sync is a heartbeat, not a
-    rescue.
+    #3011: the cycle reconciles before it pushes — a foreign push to the branch
+    is rebased over (lease-protected push), a conflicting one is aborted and
+    recorded as `diverged: …` for the `sync_failing` path, and a source-mode
+    agent on the default branch refuses to push at all. Conflict RESOLUTION
+    still belongs to the operator-initiated `sync_to_github` endpoint.
 
     #1595: runs in a worker thread (asyncio.to_thread) so a long repack no
     longer starves /health, the 5s liveness heartbeat, and chat. Every
@@ -775,7 +857,31 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
         stats = _collect_git_object_stats(home_dir)
         gdb = _git_dir_bytes(home_dir)
 
+        def _fail(err: str, behind: Optional[int] = None) -> Dict:
+            _write_sync_state_file(
+                home_dir, "failed", last_sync_at=now, last_error_summary=err,
+                git_dir_bytes=gdb,
+                pack_count=stats.get("pack_count"),
+                loose_objects=stats.get("loose_objects"),
+                behind_after_fetch=behind,
+            )
+            return {"status": "failed", "error": err}
+
         try:
+            branch = run_registered(
+                ["git", "symbolic-ref", "--short", "-q", "HEAD"],
+                cwd=str(home_dir), timeout=10,
+            ).stdout.strip()
+            if not branch:
+                return _fail("detached HEAD: auto-sync needs a branch")
+
+            # #3011: a source-mode agent is pull-only by contract. On the repo's
+            # default branch its commits would land straight on `main` of a repo
+            # that may deploy on push — refuse BEFORE committing, so the clone
+            # stays a clean mirror. Fork-to-own agents own their fork's `main`.
+            if _is_shared_source_branch(home_dir, branch):
+                return _fail(f"refused: source-mode on {branch}")
+
             # Stage everything.
             run_registered(
                 ["git", "add", "-A"], cwd=str(home_dir), timeout=30, check=True,
@@ -795,18 +901,46 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
                     cwd=str(home_dir), timeout=30, check=True,
                 )
 
-            push = run_registered(
-                ["git", "push", "origin", "HEAD"], cwd=str(home_dir), timeout=300,
+            # #3011: reconcile with the remote before pushing — anyone else's
+            # push to this branch otherwise fails every later cycle
+            # non-fast-forward, forever.
+            fetch = run_registered(
+                ["git", "fetch", "origin", branch], cwd=str(home_dir), timeout=120,
             )
+            behind: Optional[int] = None
+            push_cmd = ["git", "push", "origin", "HEAD"]
+            if fetch.returncode != 0:
+                if not _is_missing_remote_ref(fetch.stderr):
+                    return _fail(_summarize_git_error(
+                        fetch.stderr or fetch.stdout or "fetch failed"))
+                # Branch not on the remote yet (a fresh working branch): the
+                # first push creates it — nothing to reconcile.
+                behind = 0
+            else:
+                _, behind = _compute_ahead_behind(home_dir, branch)
+                if behind > 0:
+                    fetched_sha = run_registered(
+                        ["git", "rev-parse", f"origin/{branch}"],
+                        cwd=str(home_dir), timeout=10, check=True,
+                    ).stdout.strip()
+                    rebase_err = _rebase_onto_remote(home_dir, branch)
+                    if rebase_err:
+                        return _fail(rebase_err, behind)
+                    # Lease on the ref we rebased onto: a push that lands
+                    # between our fetch and this push is rejected, never
+                    # overwritten. Never the bare forced form.
+                    push_cmd = [
+                        "git", "push",
+                        f"--force-with-lease=refs/heads/{branch}:{fetched_sha}",
+                        "origin", f"HEAD:refs/heads/{branch}",
+                    ]
+
+            push = run_registered(push_cmd, cwd=str(home_dir), timeout=300)
             if push.returncode != 0:
-                err = _summarize_git_error(push.stderr or push.stdout or "push failed")
-                _write_sync_state_file(
-                    home_dir, "failed", last_sync_at=now, last_error_summary=err,
-                    git_dir_bytes=gdb,
-                    pack_count=stats.get("pack_count"),
-                    loose_objects=stats.get("loose_objects"),
+                return _fail(
+                    _summarize_git_error(push.stderr or push.stdout or "push failed"),
+                    behind,
                 )
-                return {"status": "failed", "error": err}
 
             # #1596/#1595: consolidate .git when packs or loose objects pile up
             # (self-throttling, non-fatal), then record the resulting size so
@@ -822,6 +956,7 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
                 pack_count=stats.get("pack_count"),
                 loose_objects=stats.get("loose_objects"),
                 maintenance_status=maintenance,
+                behind_after_fetch=behind,
             )
             result = {"status": "success"}
             if maintenance:
@@ -1020,6 +1155,43 @@ def _is_stale_lease_rejection(stderr: str) -> bool:
     return "stale info" in s or "stale" in s and "rejected" in s
 
 
+def _ahead_behind_vs(home_dir: Path, ref: str) -> Optional[tuple]:
+    """``(ahead, behind)`` of HEAD vs ``origin/<ref>``, or ``None`` when that
+    can't be computed: the ref doesn't exist or git failed (#2105).
+
+    Unlike :func:`_compute_ahead_behind`, which returns a best-effort ``(0, 0)``
+    for the conflict classifier, this never turns "unknown" into a
+    believable 0.
+    """
+    try:
+        result = run_registered(
+            ["git", "rev-list", "--left-right", "--count", f"origin/{ref}...HEAD"],
+            cwd=str(home_dir), timeout=10,
+        )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split()
+            if len(parts) == 2:
+                return int(parts[1]), int(parts[0])
+    except Exception:  # best-effort diagnostic only
+        pass
+    return None
+
+
+def _count_on_no_remote(home_dir: Path) -> Optional[int]:
+    """Commits reachable from HEAD that no remote-tracking ref contains:
+    the unpushed count for a branch that has no upstream yet (#2105)."""
+    try:
+        result = run_registered(
+            ["git", "rev-list", "--count", "HEAD", "--not", "--remotes"],
+            cwd=str(home_dir), timeout=10,
+        )
+        if result.returncode == 0:
+            return int(result.stdout.strip())
+    except Exception:  # best-effort diagnostic only
+        pass
+    return None
+
+
 def _dual_ahead_behind_payload(current_branch: str, home_dir: Path) -> dict:
     """Return ahead/behind tuples for both `origin/main` and the working branch.
 
@@ -1031,18 +1203,31 @@ def _dual_ahead_behind_payload(current_branch: str, home_dir: Path) -> dict:
     - `ahead_working`/`behind_working` — against `origin/<current_branch>`
       (peer divergence / P5-style silent clobber)
 
+    #2105: the working tuple is measured against `origin/<current_branch>`
+    whatever the branch is called. It used to do that only for `trinity/*`
+    and hand every other branch the `origin/main` counts under the working
+    label, which the fleet audit read as unpushed commits. When the branch has
+    no upstream (never pushed, or a detached HEAD), `ahead_working` counts the
+    commits no remote holds and `behind_working` is `None`. A count that can't
+    be computed is `None`, never 0. For example, the main tuple on a repo that
+    has no `main` is `None`.
+
     Legacy aliases `ahead` and `behind` track the main tuple to preserve
     backward compatibility with clients written against the old response.
     """
-    # Uses upstream's `_compute_ahead_behind(home_dir, branch) -> (ahead, behind)`
-    # defined near the top of this module.
-    main_ahead, main_behind = _compute_ahead_behind(home_dir, "main")
-    # Non-trinity branches use the same ref twice; avoid a second subprocess
-    # for the common case.
-    if current_branch.startswith("trinity/") and current_branch != "main":
-        working_ahead, working_behind = _compute_ahead_behind(home_dir, current_branch)
+    main = _ahead_behind_vs(home_dir, "main")
+    main_ahead, main_behind = main if main is not None else (None, None)
+
+    if current_branch == "main":
+        working = main
+    elif current_branch in ("HEAD", "unknown", ""):
+        working = None  # detached: `origin/HEAD` is the default branch, not ours
     else:
-        working_ahead, working_behind = main_ahead, main_behind
+        working = _ahead_behind_vs(home_dir, current_branch)
+    if working is not None:
+        working_ahead, working_behind = working
+    else:
+        working_ahead, working_behind = _count_on_no_remote(home_dir), None
 
     return {
         "ahead": main_ahead,  # legacy alias
@@ -1066,7 +1251,7 @@ _STATUS_HOME_DIR = Path("/home/developer")
 _STATUS_FOLLOWER_WAIT_SECONDS = 35
 
 # #2742 — COMPUTATION bound, deliberately a different number and a different
-# kind of thing. The child timeouts sum to ~130 s nominal (see
+# kind of thing. The child timeouts sum to ~130-150 s nominal (see
 # `_compute_git_status`'s docstring for the arithmetic) before `run_registered`'s
 # post-killpg drain, and on this design a slow leader costs no follower threads
 # but DOES hold the in-flight slot — so every caller in that window 504s. Cap it
@@ -1128,8 +1313,9 @@ def _compute_git_status(home_dir: Path) -> Dict:
     caller-side bounds.** Sequential worst case:
     `rev-parse` 10 + `status` 10 + `log` 10 + `fetch` **30** + `merge-base` 10 +
     `log`(ancestor) 10 + `remote get-url` 10 = 90, plus `_persist_last_remote_sha`
-    10, `_get_pull_branch` 10 and `_dual_ahead_behind_payload` 10 (20 on a
-    `trinity/*` branch) = **~130 s nominal**, before `run_registered`'s
+    10, `_get_pull_branch` 10 and `_dual_ahead_behind_payload` 10 (20 on any
+    branch other than `main`, 30 when that branch has no upstream, #2105)
+    = **~130-150 s nominal**, before `run_registered`'s
     post-`killpg` drain of up to 10 s per timing-out child. The flow doc's old
     "~30 s worst case" was wrong and is corrected there.
     """
@@ -1283,7 +1469,10 @@ def _compute_git_status(home_dir: Path) -> Dict:
             "behind": behind,
             "common_ancestor_sha": common_ancestor_sha,
             "common_ancestor_age_days": common_ancestor_age_days,
-            "sync_status": "up_to_date" if ahead == 0 and len(changes) == 0 else "pending_sync",
+            # #2105: `ahead` aliases the main tuple, which is now None (not a
+            # best-effort 0) on a repo with no `main`. Treat unknown as 0 so a
+            # clean `master` repo keeps reading "Synced", as it did before.
+            "sync_status": "up_to_date" if (ahead or 0) == 0 and len(changes) == 0 else "pending_sync",
         }
         # #389: dual ahead/behind tuples plus legacy ahead/behind aliases.
         response.update(ahead_behind)

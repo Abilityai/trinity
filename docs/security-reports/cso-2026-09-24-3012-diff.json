@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "date": "2026-09-24",
+  "issue": "abilityai/trinity#3012",
+  "mode": "daily",
+  "scope": "diff",
+  "base": "dev",
+  "branch": "feature/3012-model-unsupported-not-auth",
+  "phases_run": [0, 1, 2, 3, 5, 9, 10, 12, 13, 14],
+  "attack_surface_delta": {"endpoints": 0, "websocket_channels": 0, "mcp_tools": 0, "public_surfaces": 0, "background_jobs": 0, "external_integrations": 0},
+  "findings": [],
+  "supply_chain_summary": "claude-code pinned to 2.1.281 (was @latest); resolves the Claude Code part of cso-2026-07-13 F5",
+  "filter_stats": {"candidates": 0, "reported": 0},
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "posture_delta": "net positive",
+  "trend": "no new findings"
+}

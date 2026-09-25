@@ -43,13 +43,37 @@ NON_AUTH_KILL_MARKERS = [
 ]
 
 
+# #3012: Claude Code refusing the requested model — a CLI too old for the id, or
+# an id the API does not know. No subscription can fix it, so it must never
+# drive a SUB-003 switch or the API-key fallback. Current agent images answer
+# 400 with `error_code: "model_unsupported"`; these literals are the fallback for
+# images that still answer 503 with the raw text. Each one is copied from the
+# producer (agent_server/services/error_classifier.py, or the CLI output quoted
+# there); parity is pinned by tests/unit/test_3012_model_rejection.py.
+MODEL_REJECTION_MARKERS = [
+    "[claude-code:unrecognized_model]",
+    "does not support this model",
+    "model unsupported:",
+]
+
+
+def is_model_rejection(error_message: str) -> bool:
+    """Return True if `error_message` is Claude Code refusing the model (#3012)."""
+    if not error_message:
+        return False
+    error_lower = error_message.lower()
+    return any(marker in error_lower for marker in MODEL_REJECTION_MARKERS)
+
+
 def is_auth_failure(error_message: str) -> bool:
     """Return True if `error_message` contains any AUTH_INDICATORS substring
     AND does not also contain an unambiguous signal-kill / OOM / timeout
-    marker (#904)."""
+    marker (#904) or a model-rejection marker (#3012)."""
     if not error_message:
         return False
     error_lower = error_message.lower()
     if any(marker in error_lower for marker in NON_AUTH_KILL_MARKERS):
+        return False
+    if is_model_rejection(error_message):
         return False
     return any(ind in error_lower for ind in AUTH_INDICATORS)

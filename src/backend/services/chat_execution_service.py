@@ -632,12 +632,20 @@ def _error_code_headers(code, extra: Optional[dict] = None) -> Optional[dict]:
     return headers
 
 
-def _classify_agent_http_failure(agent_status_code) -> TaskExecutionErrorCode:
+def _classify_agent_http_failure(
+    agent_status_code, error_msg: str = ""
+) -> TaskExecutionErrorCode:
     """The /chat path's twin of task_execution_service's producer-side rule:
-    the agent answered 503 → AUTH, 429 → BILLING, never answered → NETWORK,
-    any other agent status → AGENT_ERROR."""
+    Claude Code refused the model → MODEL_UNSUPPORTED (#3012, any status — an
+    older agent image answers it 503), the agent answered 503 → AUTH,
+    429 → BILLING, never answered → NETWORK, any other agent status →
+    AGENT_ERROR."""
+    from services.failure_classifier import is_model_rejection
+
     if agent_status_code is None:
         return TaskExecutionErrorCode.NETWORK
+    if is_model_rejection(error_msg):
+        return TaskExecutionErrorCode.MODEL_UNSUPPORTED
     if agent_status_code == 503:
         return TaskExecutionErrorCode.AUTH
     if agent_status_code == 429:
@@ -655,7 +663,14 @@ async def _apply_sub003_autoswitch(name: str, error_msg: str, agent_status_code)
         is_auth_failure,
     )
 
-    code_headers = _error_code_headers(_classify_agent_http_failure(agent_status_code))
+    code = _classify_agent_http_failure(agent_status_code, error_msg)
+    code_headers = _error_code_headers(code)
+
+    # #3012: no subscription can fix a model the CLI refuses — switching would
+    # walk the agent through every seat onto the platform API key. Surface the
+    # runtime's own sentence as a 400, the status the agent itself answers.
+    if code.value == TaskExecutionErrorCode.MODEL_UNSUPPORTED.value:
+        raise ChatDispatchError(400, error_msg, headers=code_headers)
 
     if agent_status_code == 429:
         try:
@@ -1693,6 +1708,12 @@ def _map_task_failure(name, result, *, idem):
             )
         elif "timed out" in (result.error or ""):
             raise ChatDispatchError(504, result.error, headers=code_headers)
+        elif getattr(getattr(result, "error_code", None), "value", None) == (
+            TaskExecutionErrorCode.MODEL_UNSUPPORTED.value
+        ):
+            # #3012: same 400 as the /chat path — a refused model is not an
+            # unavailable agent, and a caller must not wait-and-retry it.
+            raise ChatDispatchError(400, result.error, headers=code_headers)
         else:
             raise ChatDispatchError(
                 503,

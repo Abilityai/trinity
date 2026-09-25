@@ -49,6 +49,8 @@ from .error_classifier import (
     _format_rate_limit_error,
     _is_auth_failure_message,
     _is_rate_limit_message,
+    _model_rejection_detail,
+    _model_rejection_message,
 )
 from .jsonl_recovery import (
     _extract_compact_events_from_jsonl,
@@ -1345,6 +1347,20 @@ def _finalize_headless_result(
             status_code=503,
             detail=f"Authentication failure: {auth_msg[:300]}. Check subscription token or API key configuration."
         )
+
+    # #3012: Claude Code refused the model (CLI too old for the id, or an id the
+    # API does not know). Exit 1 with zero tokens, so without this it fell to
+    # the zero-token heuristic below and came back 503 — which the backend reads
+    # as an auth failure and answers by rotating the agent through every
+    # subscription and onto the platform API key. No subscription can fix it.
+    # Keyed on the stream parser's record first so a future exit-0 shape is
+    # caught too; the stderr marker is the fallback for a non-zero exit only.
+    model_rejection = _model_rejection_message(
+        ctx.metadata, verbose_transcript if ctx.return_code != 0 else ""
+    )
+    if model_rejection is not None:
+        logger.error(f"[Headless Task] Model rejected by Claude Code: {model_rejection[:200]}")
+        raise HTTPException(status_code=400, detail=_model_rejection_detail(model_rejection))
 
     # Check for errors
     if ctx.return_code != 0:

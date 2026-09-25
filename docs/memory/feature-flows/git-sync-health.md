@@ -94,7 +94,8 @@ Migration: `sync_health` in `src/backend/db/migrations.py` (idempotent,
 
 - `.trinity/sync-state.json` — written by the agent's auto-sync loop after
   every cycle. Fields: `last_sync_status`, `last_sync_at`,
-  `last_error_summary`, `consecutive_failures`. Read/merged into
+  `last_error_summary`, `consecutive_failures`, and (#3011)
+  `last_successful_push_at` + `behind_after_fetch`. Read/merged into
   `GET /api/git/status` so the backend poller picks it up.
 
 ## Execution Flow
@@ -171,9 +172,14 @@ merge_gitignore_after_clone(name)   monotonic deadline _MERGE_READY_TIMEOUT_SECO
              │
              ▼
 ┌──────────────────────────────┐
-│ routers/git._run_auto_sync_  │  git add -A
-│ once(home_dir)               │  git commit (if dirty)
-│                              │  git push origin HEAD
+│ routers/git._run_auto_sync_  │  refuse: source-mode on default branch (#3011)
+│ once(home_dir)               │  git add -A
+│                              │  git commit (if dirty)
+│                              │  git fetch origin <branch>
+│                              │  behind > 0 → git rebase --autostash
+│                              │     conflict → rebase --abort, record diverged
+│                              │     clean    → push --force-with-lease=<fetched>
+│                              │  else git push origin HEAD
 └────────────┬─────────────────┘
              │
              ▼
@@ -314,6 +320,39 @@ _run_auto_sync_once (worker thread, repo lock held)
   base-image rebuild + agent recreate; pre-existing bloat recovery is
   ops-side (trinity-ops-agent#127) using `GIT_MAINTENANCE_TIMEOUT_SECONDS`.
 
+### 1b. Reconcile before push (#3011)
+
+The cycle used to be `add -A → commit → push origin HEAD` with no fetch, so
+the first foreign push to the agent's branch failed every later cycle
+non-fast-forward, forever — the `sync_failing` alert fired but the divergence
+was never repaired and the agent's commits piled up on the container disk. The
+heartbeat is now the durability mechanism for agents whose humans also push,
+so it reconciles (all under `_REPO_LOCK`, every child via `run_registered`):
+
+- **Refusal first.** `GIT_SOURCE_MODE=true` (pull-only by contract) on the
+  repo's default branch (`origin/HEAD`, else `main`/`master`) refuses before
+  anything is committed: `failed`, `refused: source-mode on <branch>`. The
+  clone stays a clean mirror and three refusals raise `sync_failing`, naming
+  the contradictory config. Fork-to-own agents own their fork's `main` and are
+  exempt — recognised by `GIT_UPSTREAM_REPO` or, since that env is not
+  re-derived on recreate, the `upstream` remote on the persistent volume.
+- **Fetch** `origin <branch>` (the one new network call). A branch missing on
+  the remote (a fresh working branch) is not an error — the push creates it.
+- **Behind → rebase** `--autostash` onto `origin/<branch>`. A clean rebase
+  pushes with `--force-with-lease=refs/heads/<branch>:<fetched sha>`, so a
+  push landing between fetch and push is rejected (recorded, retried next
+  cycle), never overwritten; never the bare forced form. Not behind → the
+  plain `git push origin HEAD` as before.
+- **Conflict → abort.** `git rebase --abort` (also on a timeout-killed
+  rebase) leaves the repo exactly as it was — the agent's commit intact, the
+  remote untouched, nothing reset, nothing resolved automatically — and
+  records `diverged: rebase conflict on <branch>`; the existing three-strike
+  `sync_failing` path raises it. Resolution stays with the operator
+  `sync_to_github` endpoint, which is unchanged.
+- **Recorded:** `behind_after_fetch` (the commits the remote had that we
+  lacked, before the rebase) and `last_successful_push_at` (stamped on success)
+  in `sync-state.json`, for the divergence-age work (trinity-enterprise#706).
+
 ### 2. Backend poller
 
 ```
@@ -361,10 +400,10 @@ Two bounds, deliberately distinct. `_STATUS_FOLLOWER_WAIT_SECONDS = 35` is a
 given up (poller 10 s, backend `git_service` 30 s) — a follower waiting longer
 can only produce work nobody awaits, and times out as `504`. The leader carries
 its own **computation** bound (`_STATUS_LEADER_DEADLINE_SECONDS = 90`) because
-the child timeouts sum to ~130 s nominal (10 `rev-parse` + 10 `status` + 10
+the child timeouts sum to ~130–150 s nominal (10 `rev-parse` + 10 `status` + 10
 `log` + **30 `fetch`** + 10 `merge-base` + 10 `log` + 10 `remote get-url`, plus
-10 `_persist_last_remote_sha` + 10 `_get_pull_branch` + 10‥20
-`_dual_ahead_behind_payload`, before `run_registered`'s post-`killpg` drain), and
+10 `_persist_last_remote_sha` + 10 `_get_pull_branch` + 10‥30
+`_dual_ahead_behind_payload` (#2105), before `run_registered`'s post-`killpg` drain), and
 a wedged leader would otherwise hold the in-flight slot for all of it.
 
 Coalescing **is** bounded staleness and the doc says so rather than denying it:
@@ -388,6 +427,15 @@ computes BOTH tuples:
   (template-improvements signal)
 - `ahead_working` / `behind_working` — `HEAD` vs `origin/<current_branch>`
   (peer-divergence signal — the P6 case)
+
+The working tuple uses `origin/<current_branch>` whatever the branch is named
+(#2105). It used to do that only for `trinity/*` branches. Every other branch got
+the `origin/main` counts under the working label, and the fleet audit reads
+`ahead_working` as unpushed commits. When there is no upstream (the branch was
+never pushed, or HEAD is detached), `ahead_working` counts the commits that no
+remote holds, and `behind_working` is `null`. A count that can't be computed is
+`null`, never 0: for example, the main tuple on a repo with no `main`. The
+backend stores `null` as 0 (`sync_health_service._coerce_counter`).
 
 Legacy `ahead` / `behind` in the response alias the main tuple so older
 clients keep working.
