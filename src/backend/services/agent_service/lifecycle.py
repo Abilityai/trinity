@@ -586,8 +586,8 @@ async def start_agent_internal(agent_name: str) -> dict:
     # `.gitignore` merge protects only agents created after that fix; existing
     # auto-sync agents converge HERE on their next base-image-drift recreate /
     # restart. Gated on the DB `auto_sync_enabled` flag — the persisted owner
-    # intent the runtime already honors (`_apply_git_env_from_db`: GIT_SYNC_AUTO
-    # = DB flag OR baked env). The R2 ephemeral gap does NOT apply on this path:
+    # intent the runtime honors (#3010: the DB flag is the ONLY source of
+    # GIT_SYNC_AUTO and the agent's per-cycle gate). The R2 ephemeral gap does NOT apply on this path:
     # ghosts never recreate (they are volume-less by design), so no ephemeral
     # agent reaches start/recreate and the DB flag is correct and complete here.
     # Same readiness-gated, idempotent, non-fatal merge as creation — a warm
@@ -790,10 +790,8 @@ def _apply_git_env_from_db(
     construction. The population is transient (an aborted create, or an
     orphan-cleanup window), and popping runs in the same direction as ent#162.
 
-    **Reads DB state; writes none.** `GIT_SYNC_AUTO` is derived as
-    `DB flag OR baked env` and the disagreement is only logged — see the inline
-    note for why a write-back cannot distinguish a creation-time discrepancy
-    from an owner's explicit disable.
+    **Reads DB state; writes none.** `GIT_SYNC_AUTO` is derived from the DB
+    `auto_sync_enabled` flag alone (#3010) — see the inline note.
     """
     git_config = db.get_git_config(agent_name)
 
@@ -880,44 +878,22 @@ def _apply_git_env_from_db(
         env_vars.pop("GIT_SOURCE_MODE", None)
         env_vars.pop("GIT_SOURCE_BRANCH", None)
 
-    # --- GIT_SYNC_AUTO: DB flag OR baked env, then converge -----------------
-    # #389's `auto_sync_enabled` column and the creation-time env genuinely
-    # disagree today: `crud.py`'s DB writer carries `and not config.ephemeral`
-    # inside a swallowing try/except while `_apply_github_env` does not, and the
-    # column defaults to 0. So env-`true`/DB-`0` is reachable from a single
-    # transient DB hiccup at creation and permanently for ghosts — and deriving
-    # from the DB flag alone would silently STOP auto-push for that slice of the
-    # fleet (no error, just a stale `agent_sync_state`). So: OR the two.
-    #
-    # Deliberately NO write-back. A `PUT /{agent}/git/auto-sync {enabled:false}`
-    # writes the DB row and nothing else (routers/git.py), while the agent gates
-    # on container env (`agent_server/auto_sync.py`) — and creation sets BOTH to
-    # true for the ordinary non-source-mode PAT agent. So "baked true / DB 0" is
-    # ALSO exactly what an owner's explicit disable looks like, and a backfill
-    # cannot tell the two apart: it would silently re-enable the flag, erase the
-    # only record of that intent, and make the toggle unable to ever stick.
-    # Worse, `PUT .../auto-sync` is OwnedAgentByName while `POST .../start` (the
-    # recreate's trigger) is AuthorizedAgentByName, so the write would let a
-    # shared non-owner — or an agent-scoped key resolving to its owner WITH the
-    # owner's role (trinity-ops-agent#232) — flip an owner-only flag that arms a
-    # 15-minute background commit-and-push loop. Log the disagreement instead.
-    # Making the #389 toggle authoritative (one writer, env re-baked on toggle)
-    # is the separate follow-up that retires this OR honestly.
-    _baked_auto = str(env_vars.get("GIT_SYNC_AUTO") or "").strip().lower() == "true"
-    _db_auto = bool(_gc("auto_sync_enabled"))
-    if _db_auto or _baked_auto:
+    # --- GIT_SYNC_AUTO: the DB flag, alone (#3010) -------------------------
+    # `agent_git_config.auto_sync_enabled` is the ONE source of truth. The
+    # agent's loop asks it every cycle through `GET .../git/auto-sync` (so a
+    # toggle is live without a recreate); this env is only that loop's fallback
+    # when the backend is unreachable, so it must say what the DB says. The old
+    # `DB OR baked env` kept an owner's OFF from ever sticking: creation sets
+    # both, a PUT clears only the DB, and the OR re-armed it on every recreate.
+    # Derive-only, never written back — the recreate trigger (`POST .../start`,
+    # AuthorizedAgentByName) must not be able to flip the owner-only flag.
+    # The env-true/DB-0 slice this used to paper over is closed at the source
+    # (creation writes the flag from the same predicate that bakes the env) and
+    # backfilled once (migration `auto_sync_enabled_backfill`).
+    if _gc("auto_sync_enabled"):
         env_vars["GIT_SYNC_AUTO"] = "true"
     else:
         env_vars.pop("GIT_SYNC_AUTO", None)
-
-    if _baked_auto and not _db_auto:
-        logger.info(
-            "Agent %s carries GIT_SYNC_AUTO=true but auto_sync_enabled=0; "
-            "keeping auto-push on (the env wins until the #389 toggle is "
-            "authoritative). NOT rewriting the DB flag — it may be a "
-            "deliberate owner disable (ent#109)",
-            agent_name,
-        )
 
     # --- optional self-hosted git base URL: refresh from the CURRENT backend
     # env (the AGENT_TOOL_STALL_LIMIT_S idiom), so pointing the platform at or
