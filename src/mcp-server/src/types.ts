@@ -524,6 +524,46 @@ export interface OperatorQueueAskReadback {
   supersedes_expired?: string | null;
 }
 
+/**
+ * trinity-enterprise#611: an ask an agent raises as itself
+ * (POST /api/agents/{name}/operator-queue). The backend validates every field
+ * and names each refusal; this is the wire shape only.
+ */
+export interface OperatorAskCreate {
+  request_id: string;
+  title: string;
+  question?: string;
+  type?: "approval" | "question" | "alert";
+  priority?: "critical" | "high" | "medium" | "low";
+  options?: string[];
+  context?: Record<string, unknown>;
+  proposal?: Record<string, unknown>;
+  to?: "primary" | "approver" | "viewer" | "operator";
+  expires_at?: string;
+  supersedes_expired?: string;
+}
+
+/**
+ * trinity-enterprise#611: the receipt a raise returns. It names the ROLE the
+ * ask went to, never a person's email. `differs` is present on a replay only.
+ */
+export interface OperatorAskReceipt {
+  status: "created" | "replayed";
+  id: string;
+  request_id: string;
+  channel: string;
+  type: string;
+  to_role: string;
+  resolved: boolean;
+  ask_status: string;
+  disposition?: string | null;
+  disposed_at?: string | null;
+  expires_at?: string | null;
+  wakes_on_ending: boolean;
+  supersedes_expired?: string | null;
+  differs?: string[];
+}
+
 export interface OperatorQueueListResponse {
   items: OperatorQueueItem[];
   count: number;

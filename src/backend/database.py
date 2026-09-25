@@ -3665,6 +3665,24 @@ class DatabaseManager:
             agent_name, item, channel=channel, raised_by=raised_by,
         )
 
+    def create_operator_queue_item_with_outcome(self, agent_name, item, *, channel=None, raised_by=None):
+        # trinity-enterprise#611: the file poller's create — `(id, inserted)`, so a
+        # repeat is never counted as an admission.
+        return self._operator_queue_ops.create_item_with_outcome(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )
+
+    def create_native_operator_queue_item(self, agent_name, item, *, max_pending, channel,
+                                          raised_by, to_role, resolved_to, proposal,
+                                          supersedes_expired):
+        # trinity-enterprise#611: an agent-raised ask — replay, depth cap and insert
+        # in one per-agent serialized step.
+        return self._operator_queue_ops.create_native_item(
+            agent_name, item, max_pending=max_pending, channel=channel,
+            raised_by=raised_by, to_role=to_role, resolved_to=resolved_to,
+            proposal=proposal, supersedes_expired=supersedes_expired,
+        )
+
     def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
         # #1142: retention sweep for terminal operator-queue rows.
         return self._operator_queue_ops.prune_terminal_items(
@@ -3677,6 +3695,10 @@ class DatabaseManager:
     def get_operator_queue_item_for_agent_by_request_id(self, agent_name, request_id):
         # trinity-enterprise#611: the agent's own readback — ignores Clear All.
         return self._operator_queue_ops.get_item_for_agent_by_request_id(agent_name, request_id)
+
+    def list_expired_operator_queue_proposals(self, agent_name, limit):
+        # trinity-enterprise#611: the native create's re-ask guard (C6).
+        return self._operator_queue_ops.list_expired_proposals_for_agent(agent_name, limit)
 
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):

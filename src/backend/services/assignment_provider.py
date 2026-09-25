@@ -51,7 +51,7 @@ produces the *wrong* answer without raising.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Mapping, Optional, Protocol
+from typing import Any, Dict, List, Mapping, Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,15 @@ class AssignmentProvider(Protocol):
     # consumer (``services/seat_decision_service.reader_kind``) — never a
     # wider read. Per-agent in v1: a kind on the agent reads every seat.
     # def kinds_for(self, agent_name: str, reader_email: str) -> Optional[dict]: ...
+
+    # OPTIONAL (trinity-enterprise#611): the people who fill ``role`` for
+    # ``agent_name`` — how an agent-raised ask addressed ``to:`` a role reaches a
+    # person. Read through ``getattr``: a provider that predates it (or answers
+    # ``None``) leaves the core defaults in force (primary → the agent's owner,
+    # operator → the operators, anything else refused). Shaped as
+    # ``{"emails": [str, ...]}``; unlike ``assignment_for`` these ARE emails —
+    # the value addresses a person, it is never rendered into a prompt.
+    # def people_for(self, agent_name: str, role: str) -> Optional[dict]: ...
 
 
 _provider: Optional[AssignmentProvider] = None
@@ -149,6 +158,46 @@ def _validated(answer: Any, agent_name: str) -> Optional[Dict[str, Any]]:
                 continue
             out[key] = value
     return out or None
+
+
+def resolve_role_people(agent_name: str, role: str) -> Optional[List[str]]:
+    """The emails a registered provider says fill ``role`` on ``agent_name``, or
+    ``None`` for no answer (trinity-enterprise#611).
+
+    ``None`` covers every degraded case alike — no provider, a provider without
+    the optional ``people_for`` method, an answer of ``None``, a raise, or a
+    malformed shape — because the caller's fallback is the same for all of them:
+    the core defaults. An empty list is a real answer ("nobody fills it").
+    Addresses are lower-cased, de-duplicated in order, and must look like one.
+    """
+    provider = _provider
+    people_for = getattr(provider, "people_for", None) if provider is not None else None
+    if people_for is None:
+        return None
+    try:
+        answer = people_for(agent_name, role)
+    except Exception:  # noqa: BLE001 — a provider bug must not break a create
+        logger.warning(
+            "[assignment_provider] provider.people_for failed for %s/%s; "
+            "using the core defaults", agent_name, role, exc_info=True,
+        )
+        return None
+    if answer is None:
+        return None
+    emails = answer.get("emails") if isinstance(answer, Mapping) else None
+    if not isinstance(emails, (list, tuple)):
+        logger.warning(
+            "[assignment_provider] provider.people_for returned %s for %s/%s "
+            "(expected {'emails': [...]}); using the core defaults",
+            type(answer).__name__, agent_name, role,
+        )
+        return None
+    out: List[str] = []
+    for value in emails:
+        email = value.strip().lower() if isinstance(value, str) else ""
+        if "@" in email and email not in out:
+            out.append(email)
+    return out
 
 
 def resolve_assignment(

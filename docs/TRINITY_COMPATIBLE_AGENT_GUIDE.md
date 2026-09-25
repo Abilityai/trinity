@@ -2078,27 +2078,28 @@ Stage advancement, retry, and escalation are owned by your agent: run a single `
 
 ## Operator Communication Is Asynchronous (fire-and-park) — #1402
 
-All human/operator communication on Trinity is **asynchronous**, mediated by the operator queue (`~/.trinity/operator-queue.json` ⇄ the Operating Room UI). Design your agent around this from day one:
+All human/operator communication on Trinity is **asynchronous**, mediated by the operator queue (the Operating Room UI). An agent raises an ask with the **`ask_operator`** MCP tool: the platform validates it at the call, stores it, shows it to the person and returns a receipt. The queue file (`~/.trinity/operator-queue.json`) still works as a fallback for two releases, then it is removed. Design your agent around this from day one:
 
 **The contract: fire-and-park, never block-and-wait.**
 
-1. **Park** the request (approval / question / alert) by appending an entry to the queue file.
+1. **Park** the request (approval / question / alert) with `ask_operator`, or, as the fallback, by appending an entry to the queue file.
 2. **End the turn.** A turn must never wait, poll, or sleep for a human response — a human may answer in minutes or days, and a blocked turn burns its entire timeout budget while pinning platform capacity. Never assume a synchronous human answer is available mid-turn.
-3. **Process responses in a later turn.** At the start of each autonomous run, check the queue file for `status: "responded"` items, act on them, then mark them `"acknowledged"`.
+3. **Process the outcome in a later turn.** `get_my_ask` returns how an ask ended (answered, cancelled or expired, with the answer when there is one), and the Execution Context block of the system prompt lists the agent's asks that ended in the last 24 hours. For a queue-file entry, check the file for `status: "responded"` items, act on them, then mark them `"acknowledged"`.
 
-**Ask before irreversible actions.** Before an action the platform cannot undo or verify — payments, emails/messages through the agent's own credentials, public posts, destructive deletions — park an `approval` and end the turn when uncertain. This matters most under re-delivery: pull-mode coordination (#1081) re-runs a turn whose worker died, so a task you receive may have partially run before. Check your own records and the queue file before repeating an irreversible effect; do the reversible parts first and gate only the irreversible step.
+**Ask before irreversible actions.** Before an action the platform cannot undo or verify — payments, emails/messages through the agent's own credentials, public posts, destructive deletions — park an `approval` and end the turn when uncertain. Put the exact action in the ask's `proposal`. This matters most under re-delivery: pull-mode coordination (#1081) re-runs a turn whose worker died, so a task you receive may have partially run before. Check your own records and your earlier asks before repeating an irreversible effect; do the reversible parts first and gate only the irreversible step.
 
-**Request IDs must be globally unique.** Derive them from the current execution ID (`approval-{execution_id}-{short-slug}`, execution ID is in the Execution Context block of your system prompt). Date-serial IDs (`req-20260307-001`) collide across agents and a colliding request is silently swallowed; a derived ID also makes a re-park under re-delivery idempotent instead of duplicating the request.
+**Request IDs must be globally unique.** Derive them from the current execution ID (`approval-{execution_id}-{short-slug}`, execution ID is in the Execution Context block of your system prompt). Asking again with the same ID returns the first ask's receipt instead of making a second ask, which makes a re-park under re-delivery idempotent. The same rule makes date-serial IDs (`req-20260307-001`) dangerous: a second task that picks the same ID gets the first ask's receipt and its own request is never raised.
 
-**Plan for the response's return path.** The operator's answer is written back to your queue file within seconds, but only a *future turn* can act on it:
+**Plan for the response's return path.** Only a *future turn* can act on the answer:
 
-- An agent with a schedule or heartbeat picks it up on the next run — nothing extra needed.
-- An agent with **no** future turn (one-shot webhook/chat tasks) must include resume instructions in the request itself ("after approving, re-trigger schedule X" / "send me a chat message with your decision") — otherwise an approved action never executes.
-- Set `expires_at` on gating requests; an `expired` flip means "not approved — do not proceed."
+- When the receipt says `wakes_on_ending: true` (the owner turned on "Wake this agent when its asks end"), the platform starts a turn when the ask ends.
+- An agent with a schedule or heartbeat picks the outcome up on the next run — nothing extra needed.
+- An agent with **no** future turn (one-shot webhook/chat tasks) and no wake must include resume instructions in the request itself ("after approving, re-trigger schedule X" / "send me a chat message with your decision") — otherwise an approved action never executes.
+- Set `expires_at` on gating requests. An expired ask is denied by timeout: do not proceed, and do not re-ask the same action without new information. A re-ask names the expired ask in `supersedes_expired`; repeating an expired `proposal` without that link is refused.
 
-**This is a compliance contract, not a security boundary.** The agent writes and reads its own queue file, so a misbehaving or prompt-injected agent can skip parking or forge a response. Operators must not treat "the agent asked for approval" as a guarantee; rails that need a hard guarantee belong behind confined Trinity-owned tools, not agent-side judgment. The queue's value here is disciplined recovery plus an audit trail.
+**This is a compliance contract, not a security boundary.** The agent decides whether to ask at all, so a misbehaving or prompt-injected agent can skip parking; with the queue file it can also forge a response in its own file. Only a person can end an ask raised with `ask_operator` (agent- and system-scoped keys are refused), and `get_my_ask` reads the platform's record rather than a file the agent writes. Even so, operators must not treat "the agent asked for approval" as a guarantee; rails that need a hard guarantee belong behind confined Trinity-owned tools, not agent-side judgment. The queue's value here is disciplined recovery plus an audit trail.
 
-The full queue-file protocol (JSON schema, request types, priorities, hygiene) is documented in the platform system prompt every agent receives; the escalation-grouping convention for pipelines is in [Agent-Defined Pipelines](#agent-defined-pipelines-919) above.
+The `ask_operator` tool description documents every field and each named refusal; the fallback queue-file protocol (JSON schema, request types, priorities, hygiene) is in the platform system prompt every agent receives. The escalation-grouping convention for pipelines is in [Agent-Defined Pipelines](#agent-defined-pipelines-919) above.
 
 ---
 
