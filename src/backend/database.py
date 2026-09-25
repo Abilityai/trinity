@@ -132,6 +132,7 @@ from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
+from db.skill_sets import SkillSetsOperations
 from db.role_readiness import RoleReadinessOperations
 from db.capability_grants import CapabilityGrantOperations
 from db.seat_decisions import SeatDecisionOperations
@@ -1011,6 +1012,7 @@ class DatabaseManager:
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
+        self._skill_sets_ops = SkillSetsOperations()
         self._role_readiness_ops = RoleReadinessOperations()
         self._capability_grant_ops = CapabilityGrantOperations()
         self._seat_decision_ops = SeatDecisionOperations()
@@ -2718,10 +2720,36 @@ class DatabaseManager:
         return self._skills_ops.unassign_skill(agent_name, skill_name)
 
     def set_agent_skills(self, agent_name: str, skill_names: list, assigned_by: str,
-                         source_ids: dict = None, assigned_by_agent: str = None):
+                         source_ids: dict = None, assigned_by_agent: str = None,
+                         set_resolver=None, result: dict = None):
         return self._skills_ops.set_agent_skills(
-            agent_name, skill_names, assigned_by, source_ids, assigned_by_agent
+            agent_name, skill_names, assigned_by, source_ids, assigned_by_agent,
+            set_resolver, result,
         )
+
+    # ent#530 — skill sets (delegated to db/skill_sets.py)
+    def list_agent_skill_sets(self, agent_name: str):
+        return self._skill_sets_ops.list_agent_sets(agent_name)
+
+    def agent_skill_set_names(self, agent_name: str):
+        return self._skill_sets_ops.agent_set_names(agent_name)
+
+    def assign_skill_set(self, agent_name, set_name, source_id, assigned_by, assigned_by_agent, resolved):
+        return self._skill_sets_ops.assign_set(agent_name, set_name, source_id, assigned_by,
+                                               assigned_by_agent, resolved)
+
+    def unassign_skill_set(self, agent_name, set_name, resolved, assigned_by):
+        return self._skill_sets_ops.unassign_set(agent_name, set_name, resolved, assigned_by)
+
+    def reconcile_skill_sets(self, agent_name, resolved):
+        return self._skill_sets_ops.reconcile(agent_name, resolved)
+
+    def replace_skill_sets(self, agent_name, set_names, source_ids, assigned_by, assigned_by_agent, resolved):
+        return self._skill_sets_ops.replace_sets(agent_name, set_names, source_ids, assigned_by,
+                                                 assigned_by_agent, resolved)
+
+    def set_skill_individual(self, agent_name, skill_name, individual):
+        return self._skill_sets_ops.set_individual(agent_name, skill_name, individual)
 
     def delete_agent_skills(self, agent_name: str):
         return self._skills_ops.delete_agent_skills(agent_name)

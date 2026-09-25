@@ -284,6 +284,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   assign_skill_to_agent: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
   set_agent_skills: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
   sync_agent_skills: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
+  unassign_skill_set: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
   get_agent_skills: { kind: "baselined", owner: ENT629 },
   run_skill: { kind: "none", why: "runs on the calling agent; a skill name, not an agent" },
   list_runnable_skills: { kind: "none", why: "no agent target" },

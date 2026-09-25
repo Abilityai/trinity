@@ -113,6 +113,8 @@
            Skills tab (ent#182: one skill model); ent#384 added the READ of
            who already holds each skill, not a second write path. -->
       <div v-else-if="hasSkills">
+        <!-- ent#530: sets declared by the synced sources, above the skills they name. -->
+        <LibrarySkillSets />
         <ul class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <li v-for="s in store.library" :key="s.name">
             <BaseCard class="h-full flex flex-col">
@@ -193,6 +195,7 @@ import { useSkillsLibraryStore } from '../stores/skillsLibrary'
 import { useRole } from '../composables/useRole'
 import SkillContractChips from './skills/SkillContractChips.vue'
 import AssignedAgents from './skills/AssignedAgents.vue'
+import LibrarySkillSets from './skills/LibrarySkillSets.vue'
 import { deps } from './skills/contract'
 import BaseBadge from './base/BaseBadge.vue'
 import BaseButton from './base/BaseButton.vue'

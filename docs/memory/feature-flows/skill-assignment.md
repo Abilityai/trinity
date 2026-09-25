@@ -6,6 +6,7 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-09-24 | **ent#530** — skill **sets**. `agent_skill_sets` + `agent_skills.individual`; `POST`/`DELETE /api/agents/{name}/skill-sets/{set}` (ent#596 fence), `GET …/skill-sets` (honest status), `GET /api/skills/library/sets`. The PUT adds `set:` entries / replaces with `sets` (absent = untouched) and resolves held sets inside its transaction so set-derived rows survive a replace; a single unassign of a set-named skill answers `retained_via_sets`. The Skills tab renders `AgentSkillSets.vue`, badges `via <set>`, locks set-only members, and its draft is the INDIVIDUAL list. See *Skill sets* below. |
 | 2026-09-11 | **#2703** — assignment now DELIVERS. `POST` (both branches) and `PUT` (added names) call `skill_service.deliver_assigned` and return a `delivery` block beside the existing keys; `PUT` is symmetric (added injected, dropped removed). Every listing change — assign, unassign, replace, manual Sync, background completion, fleet sweep — fires the thin `agent_skills_changed` WS trigger, and the Skills tab's Save note / the Library control say what happened instead of "Saved. Sync now, or…". Full flow in [skill-injection.md](skill-injection.md) → *Delivery on assign*. |
 | 2026-08-12 | **ent#384** — the Library page gained a fleet-wide **read** of who holds each skill (`GET /api/skills/assignments`, access-scoped + human-only; see [library-page.md](library-page.md)). Assignment itself is unchanged and still lives here: this per-agent tab and the REST/MCP surfaces remain the only WRITERS (ent#182 — one skill model). The Library's assign/unassign controls were split to ent#386, so if you are adding them, reuse `POST`/`DELETE /api/agents/{name}/skills/{skill}` rather than adding a skill-keyed writer — a second write path is a second place for the owner gate to drift. Note the two surfaces have DIFFERENT scopes: the ent#384 read is owned ∪ shared, while these writes are owner-or-admin, so a shared agent can appear as a holder that the same caller may not modify. |
 | 2026-01-25 | Initial documentation of skill assignment feature flow |
@@ -663,6 +664,22 @@ User Action                Frontend                     Backend API             
 ### Status: Untested (New Documentation)
 
 ---
+
+## Skill sets (ent#530)
+
+```
+AgentSkillSets.vue / LibrarySkillSets.vue
+  → stores/skills.js assignSet / unassignSet   (stores/skillsLibrary.js assignSet)
+  → POST|DELETE /api/agents/{a}/skill-sets/{set}   [get_skill_managed_agent_by_name]
+  → skill_set_service.assign|unassign  (require_set: 404 unknown_set / 422 set_member_missing)
+  → db.assign_skill_set|unassign_skill_set → db/skill_sets._apply  (one txn, plan_member_rows)
+  → _deliver_assigned_skills(added) | _remove_unassigned_skills(removed)
+```
+
+- **Rows**: members are `agent_skills` rows with `individual = 0`; a member also assigned on its own keeps `1`. `_apply` re-reads the rows and assigned sets inside the transaction and re-plans — add members with no row, drop `individual = 0` rows no assigned set names — and removes nothing while any assigned set is unresolvable (fail-closed).
+- **Overlap**: each assignment stands on its own. `POST /skills/{s}` on a set-derived row promotes it to `individual = 1`; `DELETE /skills/{s}` on a set-named skill demotes it to `0` and answers `{removed: false, retained_via_sets}`.
+- **Bulk PUT**: `skills` is the individual list; `set:` entries ADD sets (all-or-nothing), the `sets` field replaces them, neither leaves them. `db.set_agent_skills(set_resolver=…)` resolves the held sets inside its own transaction under the agent lock and keeps every row a set still names — listed rows keep their flag, unlisted ones are demoted to `individual = 0` — so a legacy read-then-write client can neither drop nor promote them.
+- **Reads**: `GET /skills` carries `individual` + `via_sets`; `GET /skill-sets` the per-set status (`skill_set_service.agent_set_status`).
 
 ## Related Flows
 

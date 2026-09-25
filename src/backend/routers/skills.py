@@ -37,6 +37,8 @@ from models import (
     SkillManagerGrantResult,
     SkillManagersResponse,
     SkillsLibraryStatus,
+    SkillSetInfo,
+    AgentSkillSetStatus,
     SkillSourceCreate,
     SkillSourceUpdate,
 )
@@ -213,6 +215,19 @@ async def get_library_status(current_user: User = Depends(get_current_user)):
     is fail-closed. Keep it, and see the model's docstring before widening it.
     """
     return skill_service.get_library_status()
+
+
+@router.get("/skills/library/sets", response_model=List[SkillSetInfo])
+async def list_skill_sets(current_user: User = Depends(get_current_user)):
+    """Every skill SET the library's sources declare (trinity-enterprise#530).
+
+    Registered BEFORE `/skills/library/{skill_name}` (Invariant #4) — otherwise
+    "sets" would be read as a skill name. Metadata only (names, member versions,
+    problem codes, suggested schedules), open like the skills listing so an agent
+    can discover what exists.
+    """
+    from services import skill_set_service
+    return list((await asyncio.to_thread(skill_set_service.library_sets)).values())
 
 
 @router.get("/skills/library/{skill_name}")
@@ -406,9 +421,20 @@ async def get_agent_skills(
     """
     Get skills assigned to an agent.
 
-    Returns list of AgentSkill objects with assignment metadata.
+    Returns list of AgentSkill objects with assignment metadata. ent#530:
+    `individual` is False for a skill present only because an assigned set names
+    it; `via_sets` names those sets.
     """
-    return db.get_agent_skills(agent_name)
+    from services import skill_set_service
+
+    rows = db.get_agent_skills(agent_name)
+    try:
+        via = await asyncio.to_thread(skill_set_service.via_sets_map, agent_name)
+    except Exception:  # noqa: BLE001 — provenance is annotation, never a failed read
+        via = {}
+    for row in rows:
+        row.via_sets = via.get(row.skill_name, [])
+    return rows
 
 
 @router.put("/agents/{agent_name}/skills")
@@ -429,9 +455,20 @@ async def update_agent_skills(
     endpoint alone would leave the common path silently accumulating packages
     forever, which is the gap this issue exists to close.
     """
+    from services import skill_set_service
+
+    # ent#530: `sets` REPLACES the agent's sets; `set:<name>` entries in `skills`
+    # only ADD (a client treating them as additive can never strip another set,
+    # cso L2); neither leaves the agent's sets untouched.
+    skill_names, prefixed_sets = skill_set_service.strip_set_prefix(update.skills)
+    explicit_sets = getattr(update, "sets", None)
+    set_names = (list(dict.fromkeys(list(explicit_sets) + prefixed_sets))
+                 if explicit_sets is not None else None)
+    added_sets = prefixed_sets if explicit_sets is None else []
+
     # The ONE name guard (ent#183): assigned names later reach path math and
     # in-container execs — a traversal-shaped name must never be persisted.
-    invalid = [s for s in update.skills if not validate_skill_name(s)]
+    invalid = [s for s in skill_names + list(set_names or []) if not validate_skill_name(s)]
     if invalid:
         raise HTTPException(
             status_code=422,
@@ -444,12 +481,45 @@ async def update_agent_skills(
     except Exception:  # noqa: BLE001 — never block the assignment itself
         previous = set()
 
+    if set_names is not None:
+        try:
+            await asyncio.to_thread(
+                skill_set_service.replace,
+                agent_name, list(set_names), current_user.username, acting_agent_name(current_user))
+        except skill_set_service.SetError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail)
+    if added_sets:
+        held = set(db.agent_skill_set_names(agent_name))
+        new_sets = [n for n in dict.fromkeys(added_sets) if n not in held]
+        try:
+            # Validate every new set before writing any (no partial add).
+            for name in new_sets:
+                await asyncio.to_thread(skill_set_service.require_set, name)
+            for name in new_sets:
+                await asyncio.to_thread(
+                    skill_set_service.assign,
+                    agent_name, name, current_user.username, acting_agent_name(current_user))
+        except skill_set_service.SetError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+    # The library snapshot (git I/O) is taken HERE, off the event loop; the held
+    # sets are read inside `set_agent_skills`' own transaction under the agent
+    # lock, so a set assigned concurrently is never missed (review finding 5).
+    # An agent holding no sets reads no library; a set that lands concurrently
+    # then resolves against the empty snapshot, i.e. fails closed.
+    holds_sets = bool(set_names) or bool(added_sets) or bool(db.agent_skill_set_names(agent_name))
+    lib = await asyncio.to_thread(skill_set_service.library_sets) if holds_sets else {}
+    written: dict = {}
     count = db.set_agent_skills(
         agent_name=agent_name,
-        skill_names=update.skills,
+        skill_names=skill_names,
         assigned_by=current_user.username,
         assigned_by_agent=acting_agent_name(current_user),  # ent#596, R29
+        set_resolver=skill_set_service.set_resolver(lib),
+        result=written,
     )
+    # What the agent holds now — the names that transaction wrote.
+    current = set(written.get("names", skill_names))
 
     # #2703: symmetric — added names are delivered, dropped names removed. Both
     # are best-effort reports on a committed write; either may defer to the
@@ -457,19 +527,20 @@ async def update_agent_skills(
     # and a removal that lands while delivery holds the lock reads as
     # `deferred` (the start-path reconcile finishes it), which is the honest
     # order for a replace that mostly ADDS.
-    added = sorted(set(update.skills) - previous)
+    added = sorted(current - previous)
     delivery = await _deliver_assigned_skills(agent_name, added)
     removal = await _remove_unassigned_skills(
-        agent_name, sorted(previous - set(update.skills)), current_user, request
+        agent_name, sorted(previous - current), current_user, request
     )
-    if added or (previous - set(update.skills)):
+    if added or (previous - current):
         await broadcast_skills_changed(agent_name)
 
     return {
         "success": True,
         "agent_name": agent_name,
         "skills_assigned": count,
-        "skills": update.skills,
+        "skills": skill_names,
+        "sets": db.agent_skill_set_names(agent_name),
         "delivery": delivery,
         "removal": removal,
     }
@@ -489,10 +560,19 @@ async def inject_skills(
     (agent start uses force=False and skips version-unchanged skills).
     Per-skill warnings (missing deps, skipped files) ride the results map.
     """
+    from services import skill_set_service
+
+    # ent#530 order: sets reconciled (DB) → inject (lock) → prune (outside the
+    # lock, not reentrant), so a member dropped upstream leaves on a manual Sync.
+    await asyncio.to_thread(skill_set_service.reconcile_agent, agent_name)
     try:
         result = await skill_service.inject_skills(agent_name, force=True)
     except SkillInjectionBusy as e:
         raise HTTPException(status_code=409, detail=str(e))
+    try:
+        result["reconcile"] = await skill_service.reconcile_agent_skills(agent_name)
+    except Exception as e:  # noqa: BLE001 — pruning is best-effort; the start path retries
+        logger.warning("[ent#530] prune after manual inject failed for %s: %s", agent_name, e)
     # #2703: a Sync changes the listing too — open surfaces refetch.
     await broadcast_skills_changed(agent_name)
     return result
@@ -519,6 +599,10 @@ async def assign_skill(
         agent_name, skill_name, current_user.username,
         assigned_by_agent=acting_agent_name(current_user),  # ent#596, R29
     )
+    if result is None:
+        # ent#530: a row that exists only because a set names it becomes an
+        # individual assignment — unassigning the set no longer removes it.
+        db.set_skill_individual(agent_name, skill_name, True)
     # #2703: deliver on BOTH branches. "Already assigned" used to return early,
     # which made a re-click after a `not_delivered` a no-op — and the Library
     # page's assign control has no Sync button beside it, so that re-click is
@@ -557,6 +641,32 @@ async def unassign_skill(
     package removal is best-effort and never fails the unassign; see
     `_remove_unassigned_skills`.
     """
+    from services import skill_set_service
+
+    # ent#530: a skill an assigned set still names stays (as set-derived) — the
+    # set is what brought it. Said, never a silent no-op.
+    retained_via = (await asyncio.to_thread(skill_set_service.via_sets_map, agent_name)).get(skill_name, [])
+    row = next((r for r in db.get_agent_skills(agent_name) if r.skill_name == skill_name), None)
+    if (not retained_via and row is not None and not row.individual
+            and await asyncio.to_thread(skill_set_service.any_unresolved, agent_name)):
+        # A set brought this skill and cannot be read right now. Deleting the row
+        # would be silently undone by the next reconcile once the set resolves
+        # (review finding 7) — say so instead.
+        raise HTTPException(status_code=409, detail={
+            "code": "skill_set_unresolved",
+            "message": f"'{skill_name}' was assigned through a skill set that cannot be read right now; "
+                       "unassign the set, or retry once its source is available.",
+        })
+    if retained_via and db.set_skill_individual(agent_name, skill_name, False):
+        await broadcast_skills_changed(agent_name)
+        return {
+            "success": True,
+            "removed": False,
+            "skill_name": skill_name,
+            "retained_via_sets": retained_via,
+            "message": f"Still assigned through set {', '.join(retained_via)}; unassign the set to remove it.",
+        }
+
     removed = db.unassign_skill(agent_name, skill_name)
 
     removal = None
@@ -573,6 +683,95 @@ async def unassign_skill(
         "success": True,
         "removed": removed,
         "skill_name": skill_name,
+        "removal": removal,
+    }
+
+
+# ============================================================================
+# Skill sets (trinity-enterprise#530)
+# ============================================================================
+#
+# `/skill-sets` is its own noun (the `/skill-manager` precedent below), never a
+# segment under `/skills/{skill_name}`. The two writes carry the SAME ent#596
+# fence as the skill writes — assigning a set changes an agent's skills.
+
+@router.get("/agents/{agent_name}/skill-sets", response_model=List[AgentSkillSetStatus])
+async def get_agent_skill_sets(
+    agent_name: str = Depends(get_authorized_agent_by_name),
+    current_user: User = Depends(get_current_user),
+    probe: bool = False,
+):
+    """The sets this agent holds, each with its honest status (#342): `ok`,
+    `partial` (a member missing upstream, unassigned or in conflict) or
+    `unresolved` (the set cannot be read right now — its skills are kept).
+
+    `probe=true` checks the declared credentials inside a running agent (one
+    in-container exec). Off by default, so a plain read is never an exec
+    amplifier; prerequisites then read `unknown` (cso L1)."""
+    from services import skill_set_service
+    return await skill_set_service.agent_set_status(agent_name, probe=probe)
+
+
+@router.post("/agents/{agent_name}/skill-sets/{set_name}")
+async def assign_skill_set(
+    set_name: str,
+    agent_name: str = Depends(get_skill_managed_agent_by_name),
+    current_user: User = Depends(get_current_user),
+):
+    """Assign every member of a library set; deliver the ones that were new."""
+    from services import skill_set_service
+
+    if not validate_skill_name(set_name):
+        raise HTTPException(status_code=422, detail=f"invalid_set_name: {set_name!r}")
+    try:
+        result = await asyncio.to_thread(
+            skill_set_service.assign,
+            agent_name, set_name, current_user.username, acting_agent_name(current_user))
+    except skill_set_service.SetError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    delivery = await _deliver_assigned_skills(agent_name, result["added"]) if result["added"] else None
+    await broadcast_skills_changed(agent_name)
+    # The assign response probes prerequisites: one exec, on a write the fence already gated.
+    status = next((s for s in await skill_set_service.agent_set_status(agent_name, probe=True)
+                   if s["name"] == set_name), None)
+    return {
+        "success": True,
+        "set_name": set_name,
+        "created": result["created"],
+        "members_added": result["added"],
+        "delivery": delivery,
+        "status": status,
+        "suggested_schedules": result["entry"]["schedules"],
+    }
+
+
+@router.delete("/agents/{agent_name}/skill-sets/{set_name}")
+async def unassign_skill_set(
+    set_name: str,
+    request: Request,
+    agent_name: str = Depends(get_skill_managed_agent_by_name),
+    current_user: User = Depends(get_current_user),
+):
+    """Unassign a set: removes the members it alone brought — never one also
+    assigned individually or named by another set the agent holds."""
+    from services import skill_set_service
+
+    if not validate_skill_name(set_name):
+        raise HTTPException(status_code=422, detail=f"invalid_set_name: {set_name!r}")
+    result = await asyncio.to_thread(skill_set_service.unassign, agent_name, set_name, current_user.username)
+    removal = None
+    if result["removed"]:
+        removal = await _remove_unassigned_skills(agent_name, result["removed"], current_user, request)
+    if result["existed"]:
+        await broadcast_skills_changed(agent_name)
+    return {
+        "success": True,
+        "set_name": set_name,
+        "removed": result["existed"],
+        "members_removed": result["removed"],
+        # Another held set is unresolved, so nothing could be removed yet; the
+        # next reconcile after it resolves finishes this (fail-closed, stated).
+        "removal_deferred": result.get("removal_deferred", False),
         "removal": removal,
     }
 

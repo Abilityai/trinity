@@ -1061,7 +1061,7 @@ class TestFleetReinject:
             staticmethod(lambda: ["ok", "bad", "busy"]),
         ), patch.object(
             SkillsLibrarySyncService, "_reinject_agent",
-            staticmethod(AsyncMock(side_effect=lambda n: outcomes[n])),
+            staticmethod(AsyncMock(side_effect=lambda n, sets_lib=None: outcomes[n])),
         ), patch.object(
             sync_module.db, "set_setting",
             MagicMock(side_effect=lambda k, v: stored.__setitem__(k, v)),

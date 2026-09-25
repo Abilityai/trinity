@@ -203,6 +203,8 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("agent_git_config",             "agent_name",        Policy.CASCADE),
     AgentRef("agent_sync_state",             "agent_name",        Policy.CASCADE),
     AgentRef("agent_skills",                 "agent_name",        Policy.CASCADE),
+    # ent#530 — the sets assigned to an agent follow it (delete AND rename).
+    AgentRef("agent_skill_sets",             "agent_name",        Policy.CASCADE),
     # ent#596: `agent_skills.assigned_by_agent` (the agent that MADE the
     # assignment) is audit-only initiator provenance and intentionally NOT
     # registered — the `source_agent_name` precedent above. A renamed actor

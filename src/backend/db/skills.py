@@ -11,7 +11,7 @@ table handle in ``db/tables.py``; the engine is resolved via ``db/engine.py``.
 """
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from sqlalchemy import select, insert, delete, or_, update
 from sqlalchemy.exc import IntegrityError
@@ -40,6 +40,8 @@ class SkillsOperations:
             delivery_status=row["delivery_status"],
             # ent#596: the agent that made the assignment; None for a human.
             assigned_by_agent=row["assigned_by_agent"],
+            # ent#530: False = present only because an assigned set names it.
+            individual=row.get("individual") is None or bool(row.get("individual")),
         )
 
     # =========================================================================
@@ -66,6 +68,7 @@ class SkillsOperations:
                 agent_skills.c.source_id,
                 agent_skills.c.delivery_status,
                 agent_skills.c.assigned_by_agent,
+                agent_skills.c.individual,
             )
             .where(agent_skills.c.agent_name == agent_name)
             .order_by(agent_skills.c.skill_name)
@@ -207,9 +210,23 @@ class SkillsOperations:
         assigned_by: str,
         source_ids: Optional[Dict[str, str]] = None,
         assigned_by_agent: Optional[str] = None,
+        set_resolver: Optional[Callable[[Dict[str, Optional[str]]], Optional[set]]] = None,
+        result: Optional[dict] = None,
     ) -> int:
         """
-        Set skills for an agent (full replacement).
+        Set skills for an agent (full replacement of the INDIVIDUAL assignments).
+
+        ent#530: ``set_resolver(held)`` maps the agent's held sets
+        (``{set: source_id}``, read INSIDE this transaction under the agent
+        lock, so a set assigned concurrently cannot be missed) to every skill
+        they name, or None when any cannot be resolved. A row a set names
+        survives the replace whether or not it is listed: listed, it keeps its
+        individual flag (a legacy client writing back what it read can neither
+        drop nor promote a member); unlisted, it is demoted to individual = 0
+        (the set still holds it — the single-unassign rule). Fail-closed: with an
+        unresolved set every existing set-derived row is kept. No resolver keeps
+        the pre-ent#530 behaviour. ``result['names']`` receives the names the
+        agent holds afterwards.
 
         Removes all existing skills and assigns the new list.
 
@@ -260,13 +277,41 @@ class SkillsOperations:
                 )
             }
 
+            existing = {
+                row.skill_name: row.individual is None or bool(row.individual)
+                for row in conn.execute(
+                    select(agent_skills.c.skill_name, agent_skills.c.individual)
+                    .where(agent_skills.c.agent_name == agent_name)
+                )
+            }
+            set_named: set = set()
+            if set_resolver is not None:
+                from .skill_sets import agent_held_sets, lock_agent_rows
+                lock_agent_rows(conn, agent_name)
+                resolved = set_resolver(agent_held_sets(conn, agent_name))
+                set_named = (
+                    {n for n, ind in existing.items() if not ind}   # fail closed
+                    if resolved is None else set(resolved)
+                )
+            listed = set(skill_names)
+            kept_by_set = {n for n in existing if n in set_named and n not in listed}
+
+            def _individual(name: str) -> int:
+                if name in kept_by_set:
+                    return 0
+                # A listed set member keeps what it was; a new listed name is individual.
+                return 0 if (name in set_named and existing.get(name) is False) else 1
+
             # Remove all existing skills for this agent
             conn.execute(
                 delete(agent_skills).where(agent_skills.c.agent_name == agent_name)
             )
 
-            # Add new skills
-            for skill_name in skill_names:
+            # Add new skills — the listed ones, then the rows a set still holds.
+            names = list(dict.fromkeys(list(skill_names) + sorted(kept_by_set)))
+            if result is not None:
+                result["names"] = names
+            for skill_name in names:
                 try:
                     with conn.begin_nested():
                         by, at, by_agent = kept_by.get(
@@ -281,6 +326,7 @@ class SkillsOperations:
                                 source_id=source_ids.get(skill_name),
                                 delivery_status=kept_status.get(skill_name),
                                 assigned_by_agent=by_agent,
+                                individual=_individual(skill_name),
                             )
                         )
                 except IntegrityError:
