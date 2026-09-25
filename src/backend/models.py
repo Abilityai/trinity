@@ -1237,6 +1237,10 @@ class SystemAgentConfig(BaseModel):
     folders: Optional[dict] = None  # {"expose": bool, "consume": bool}
     schedules: Optional[List[dict]] = None  # [{name, cron, message, ...}]
     tags: Optional[List[str]] = None  # Additional tags for this agent (ORG-001 Phase 4)
+    # trinity-enterprise#704: what each member is — "agent" (its repository IS
+    # the agent) or "deployment" (a deployment of a codebase). Omitted → the
+    # platform default (AgentConfig.kind, ent#705).
+    kind: Optional[Literal["agent", "deployment"]] = None
 
 
 class SystemPermissions(BaseModel):

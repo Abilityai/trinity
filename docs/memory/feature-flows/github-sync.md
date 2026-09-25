@@ -25,6 +25,19 @@ The decision is logged (`[ent#705] git mode for …`) and returned as
 `git_mode` on the create response only, never on the `/ws` broadcast (#918).
 Cornelius is pinned `kind=deployment`: it is built from a shared public upstream.
 
+**Where `kind` is chosen (trinity-enterprise#704):**
+
+- **Create modal:** `CreateAgentModal.vue` shows `AgentKindPicker.vue` when
+  the create binds git (a GitHub template from the list, or a custom repo
+  with the *clone* intent). The answer rides the payload as `kind`.
+  Otherwise nothing is sent.
+- **After create:** `ImportValidationStep.vue` renders `GitModeNotice.vue` from
+  the response's `git_mode`. It warns when an agent fell back to pull-only.
+- **Git panel:** `GitPanel.vue` renders `GitBindingBadge.vue` from
+  `db_config.source_mode` on `GET /api/agents/{name}/git/status`.
+- **System manifest:** a per-agent `kind:` key (`system_service.parse_manifest`)
+  is passed to create by `deploy_manifest`.
+
 ### Source Mode
 **Unidirectional pull-only sync**: Agent tracks a source branch (default: `main`) and can pull updates on demand. Changes made in the agent are local only and not pushed back. This is ideal for agents developed locally and deployed to Trinity. **Public** templates need no GitHub PAT at all — see [Tokenless (Anonymous) Clone of Public Templates](#tokenless-anonymous-clone-of-public-templates-ent123) (ent#123).
 

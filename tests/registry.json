@@ -3465,6 +3465,16 @@
       "description": "The auto-sync heartbeat reconciles before it pushes (#3011), over real repos with a foreign clone pushing underneath: a foreign commit is rebased over and pushed (linear, across repeated cycles, behind-only fast-forwards, a branch missing on the remote is created); a conflicting one aborts the rebase and records `diverged: rebase conflict on <branch>` with the repo untouched and the remote never overwritten; the post-rebase push carries a lease and a push racing it survives; a source-mode agent on the default branch (origin/HEAD, else main/master) refuses before committing, while fork-to-own (env or upstream remote), other branches and working-branch mode push; sync-state gains behind_after_fetch and last_successful_push_at; the operator sync_to_github path does not use the heartbeat reconcile. 8 of 16 red on the pre-fix cycle."
     },
     {
+      "file": "unit/test_ent704_git_status_binding.py",
+      "feature": "trinity-enterprise#704",
+      "added": "2026-09-25",
+      "categories": [
+        "backend",
+        "git"
+      ],
+      "description": "The git status reports the binding (trinity-enterprise#704): db_config.source_mode on GET /api/agents/{name}/git/status, for both a pull-only and a working-branch agent, feeding the Git panel badge. Manifest `kind` (parsed, not warned about; an out-of-range value rejected; passed to create) is in test_2373_system_endpoints.py and test_ent125_resilient_system_deploy.py; the create-modal question in src/frontend/tests/unit/createAgentKind.spec.js."
+    },
+    {
       "file": "unit/test_3010_autosync_toggle.py",
       "feature": "#3010",
       "added": "2026-09-25",

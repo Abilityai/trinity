@@ -206,6 +206,8 @@
                   </svg>
                   {{ gitStatus.branch }}
                 </span>
+                <!-- trinity-enterprise#704: own branch vs pull-only -->
+                <GitBindingBadge :source-mode="gitStatus.db_config?.source_mode ?? null" />
                 <span v-if="gitStatus.ahead > 0" class="text-xs text-status-success-600">
                   {{ gitStatus.ahead }} ahead
                 </span>
@@ -466,6 +468,7 @@
 </template>
 
 <script setup>
+import GitBindingBadge from './GitBindingBadge.vue'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import BindRepoPanel from './BindRepoPanel.vue'

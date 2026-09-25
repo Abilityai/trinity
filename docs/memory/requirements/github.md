@@ -822,9 +822,8 @@
   The 2026-09-24 fleet audit found every git-bound agent with auto-sync off and
   work on container disks that existed nowhere else.
 - **Create-time `kind`:** `agent` (the default) or `deployment`, on
-  `POST /api/agents` and MCP `create_agent`. The UI half of the choice is
-  trinity-enterprise#704. An **explicit `source_mode` always wins for the
-  mode**. Every auto-pushing agent, including an explicit working branch and
+  `POST /api/agents` and MCP `create_agent`. An **explicit `source_mode`
+  always wins for the mode**. Every auto-pushing agent, including an explicit working branch and
   fork-to-own, also gets freeze-on-failure; a `deployment` never does.
 - **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
   `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
@@ -838,6 +837,18 @@
   - an unverifiable probe
 - **Fork-to-own** gets the trio (it owns its fork). **Cornelius** is pinned
   pull-only: it is built from a shared public upstream.
+- **Asked in the UI and the manifest (trinity-enterprise#704):**
+  - the create modal asks "What is this repository?" (an agent / a deployment
+    of a codebase) exactly when the create binds git: a GitHub template from the
+    list, or a custom repository with the *clone* intent. It is never asked for
+    blank or local agents, copy or fork, or a fork-to-own template. Unasked, no
+    `kind` is sent.
+  - the create response's `git_mode` is shown after creation, and it says so
+    plainly when an agent was created pull-only, with the reason.
+  - the Git panel shows the binding as a badge (`Agent · own branch` /
+    `Pull-only`), from `db_config.source_mode` on the git status.
+  - a system manifest takes `kind` per agent; an unset `kind` uses the create
+    default.
 - **Not changed:**
   - existing agents (the default applies to new creates; migration is per
     agent and explicit — runbook `docs/migrations/AGENT_WORKING_BRANCH_DEFAULT_2026-09.md`)

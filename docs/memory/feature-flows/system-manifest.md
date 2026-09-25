@@ -41,6 +41,7 @@ system_view:
 agents:
   orchestrator:
     template: github:YourOrg/orchestrator-agent
+    kind: agent       # trinity-enterprise#704: agent (default) | deployment — see github-sync.md
     resources:
       cpu: "2"
       memory: "4g"

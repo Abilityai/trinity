@@ -232,6 +232,9 @@
                   </div>
                 </div>
 
+                <!-- trinity-enterprise#704: agent vs deployment, on the paths that bind git -->
+                <AgentKindPicker v-if="showKindPicker" v-model="agentKind" />
+
                 <!-- Fork-to-own fields (trinity-enterprise#93; also shown for
                      the github-custom 'fork' intent, trinity-enterprise#15) -->
                 <div v-if="showForkFields" class="mt-3 p-3 border border-action-primary-200 dark:border-action-primary-800 rounded-lg space-y-3">
@@ -331,6 +334,7 @@
           v-else
           :agent-name="postCreate.name"
           :import-snapshot="postCreate.snapshot"
+          :git-mode="postCreate.gitMode"
           @close="$emit('close')"
         />
       </div>
@@ -343,6 +347,7 @@ import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import api from '../api'
 import ImportIntentPicker from './ImportIntentPicker.vue'
+import AgentKindPicker from './AgentKindPicker.vue'
 import ImportValidationStep from './ImportValidationStep.vue'
 
 const props = defineProps({
@@ -367,6 +372,12 @@ const githubRepoInput = ref(null)
 // trinity-enterprise#15: import intent for the github-custom path.
 // 'clone' (default) | 'copy' | 'fork'. Featured templates never send it.
 const importIntent = ref('clone')
+
+// trinity-enterprise#704: 'agent' (default) | 'deployment'. Asked only where the
+// create binds git: a GitHub template from the list, or a custom repo CLONE.
+// Copy has no git link; Fork is an agent in the user's own repo by definition;
+// featured fork-to-own templates are the same case.
+const agentKind = ref('agent')
 
 // trinity-enterprise#15: post-create validation context. Non-null swaps the
 // modal body to ImportValidationStep ({name, snapshot}) — set only for
@@ -423,6 +434,11 @@ const isGithubCustomFork = computed(
   () => form.template === 'github-custom' && importIntent.value === 'fork'
 )
 const showForkFields = computed(() => isForkToOwn.value || isGithubCustomFork.value)
+
+const showKindPicker = computed(() => {
+  if (form.template === 'github-custom') return importIntent.value === 'clone'
+  return selectedTemplate.value?.source === 'github' && !isForkToOwn.value
+})
 
 const selectedTemplate = computed(() => {
   if (!form.template) return null
@@ -516,6 +532,9 @@ const createAgent = async () => {
       payload.template = form.template
     }
 
+    // trinity-enterprise#704: the answer to "what is this repository?"
+    if (showKindPicker.value) payload.kind = agentKind.value
+
     // Fork-to-own (trinity-enterprise#93): destination + token are required
     // for templates that declare it — and for the github-custom 'fork' intent
     // (trinity-enterprise#15). Shape check only — the backend owns the
@@ -553,6 +572,7 @@ const createAgent = async () => {
       postCreate.value = {
         name: agent?.name || form.name,
         snapshot: agent?.import_snapshot || null,
+        gitMode: agent?.git_mode || null,  // trinity-enterprise#704
       }
     } else {
       emit('close')

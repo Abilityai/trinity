@@ -299,6 +299,28 @@ def test_a_fully_recognised_manifest_warns_about_nothing_per_agent():
     assert manifest.unknown_agent_keys == {}
 
 
+def test_manifest_kind_is_a_recognised_per_agent_key():
+    """trinity-enterprise#704: a composed fleet declares per member whether it
+    is an agent or a deployment of a codebase — parsed, not warned about."""
+    from services.system_service import parse_manifest
+    manifest = parse_manifest(
+        "name: acme\nagents:\n  web:\n    template: github:acme/web\n"
+        "    kind: deployment\n  brain:\n    template: github:acme/brain\n"
+    )
+    assert manifest.unknown_agent_keys == {}
+    assert manifest.agents["web"].kind == "deployment"
+    assert manifest.agents["brain"].kind is None
+
+
+def test_manifest_kind_outside_the_two_values_is_rejected():
+    from services.system_service import parse_manifest
+    with pytest.raises(ValueError):
+        parse_manifest(
+            "name: acme\nagents:\n  web:\n    template: github:acme/web\n"
+            "    kind: fork\n"
+        )
+
+
 def test_preview_and_deploy_resolve_the_same_resource_default():
     """`_preflight_template` validated against the admin-configurable default
     while deploy hardcoded `{"cpu": "2", "memory": "4g"}` — so they disagreed the
