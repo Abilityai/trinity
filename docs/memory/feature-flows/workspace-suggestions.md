@@ -70,7 +70,7 @@ POST …/suggestions/feedback {key, action: accept|dismiss}
 |---|---|
 | Router | `src/backend/client_portal/suggestions/router.py` (registered in `main.py`) |
 | Service | `src/backend/client_portal/suggestions/service.py` (`build`, `shape`, thresholds) |
-| DB | `src/backend/client_portal/suggestions/db.py`; table `workspace_suggestion_feedback` in `db/schema.py`, `db/tables.py`, `db/migrations.py`, Alembic `0073_workspace_suggestion_feedback`; CASCADE in `db/agent_cleanup.py` |
+| DB | `src/backend/client_portal/suggestions/db.py`; table `workspace_suggestion_feedback` in `db/schema.py`, `db/tables.py`, `db/migrations.py`, Alembic `0075_workspace_suggestion_feedback`; CASCADE in `db/agent_cleanup.py` |
 | Auth | `client_portal/portal_auth.py` — `PortalPrincipal.is_admin`, `_is_admin_principal` |
 | Frontend | `components/portal/PortalSuggestions.vue`, `PortalAgentDetails.vue`, `views/Portal.vue`, `stores/clientPortal.js` (suggestions slice), `components/portal/portalRail.js` (Info signal + `note`) |
 | Tests | `tests/unit/test_ent465_suggestions.py`, `src/frontend/tests/unit/portalSuggestions.spec.js`, `portalRail.spec.js`, `tests/journeys/test_j13_suggestions_journey.py` |

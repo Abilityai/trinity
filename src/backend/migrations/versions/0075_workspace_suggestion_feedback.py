@@ -7,14 +7,14 @@ One row per viewer + agent + suggestion key. A dismissal holds while the
 suggestion's state fingerprint is unchanged; an accept is counted for
 usefulness. ``agent_name`` is a CASCADE entry in ``db/agent_cleanup.py``.
 
-Revision ID: 0073_workspace_suggestion_feedback
-Revises: 0072_agent_capability_grants
+Revision ID: 0075_workspace_suggestion_feedback
+Revises: 0074_role_readiness_rollout_seed
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0073_workspace_suggestion_feedback"
-down_revision = "0072_agent_capability_grants"
+revision = "0075_workspace_suggestion_feedback"
+down_revision = "0074_role_readiness_rollout_seed"
 branch_labels = None
 depends_on = None
 
