@@ -213,3 +213,98 @@ class TestDualAheadBehindPayload:
         _run(["git", "checkout", "-b", "trinity/alpha/deadbeef"], local)
         assert _get_pull_branch("trinity/alpha/deadbeef", local) == "main"
         assert _get_pull_branch("main", local) == "main"
+
+
+# ---------------------------------------------------------------------------
+# #2105 — the working tuple is measured against the agent's OWN branch
+# ---------------------------------------------------------------------------
+
+
+def _commit(repo: Path, name: str) -> None:
+    (repo / name).write_text(name)
+    _run(["git", "add", "."], repo)
+    _run(["git", "commit", "-m", name], repo)
+
+
+def _peer(remote: Path, parent: Path) -> Path:
+    peer = parent / "peer"
+    _run(["git", "clone", str(remote), str(peer)], parent)
+    _run(["git", "config", "user.email", "peer@test.com"], peer)
+    _run(["git", "config", "user.name", "Peer"], peer)
+    return peer
+
+
+class TestWorkingTupleOnAnyBranchName:
+    """#2105: a branch named neither `main` nor `trinity/*` used to get the
+    `origin/main` counts labelled as `ahead_working` — a fleet renamed to
+    `asus/*` reported ~9,000 unpushed commits while the true gap was 0."""
+
+    def test_pushed_branch_far_from_main_reports_zero_unpushed(self, repos):
+        local, _ = repos
+        _run(["git", "checkout", "-b", "asus/oracle-3-ai"], local)
+        for i in range(3):
+            _commit(local, f"work{i}.txt")
+        _run(["git", "push", "-u", "origin", "asus/oracle-3-ai"], local)
+
+        payload = _dual_ahead_behind_payload("asus/oracle-3-ai", local)
+        assert (payload["ahead_main"], payload["behind_main"]) == (3, 0)
+        assert (payload["ahead_working"], payload["behind_working"]) == (0, 0)
+
+    def test_unpushed_and_peer_commits_on_a_non_trinity_branch(self, repos):
+        local, remote = repos
+        _run(["git", "checkout", "-b", "asus/cleon"], local)
+        _commit(local, "base.txt")
+        _run(["git", "push", "-u", "origin", "asus/cleon"], local)
+
+        peer = _peer(remote, local.parent)
+        _run(["git", "checkout", "asus/cleon"], peer)
+        _commit(peer, "peer.txt")
+        _run(["git", "push", "origin", "asus/cleon"], peer)
+
+        _commit(local, "mine.txt")
+        _run(["git", "fetch", "origin"], local)
+        payload = _dual_ahead_behind_payload("asus/cleon", local)
+        assert (payload["ahead_working"], payload["behind_working"]) == (1, 1)
+        assert (payload["ahead_main"], payload["behind_main"]) == (2, 0)
+
+    def test_master_repo_without_main_counts_the_unpushed_commit(self, tmp_path):
+        """Second field report: a `master` repo with no `main` read 0 ahead
+        for 7 days while one commit sat unpushed."""
+        local, remote = tmp_path / "local", tmp_path / "remote"
+        local.mkdir()
+        remote.mkdir()
+        _run(["git", "init", "--bare", "-b", "master"], remote)
+        _run(["git", "init", "-b", "master"], local)
+        _run(["git", "config", "user.email", "t@test.com"], local)
+        _run(["git", "config", "user.name", "T"], local)
+        _run(["git", "remote", "add", "origin", str(remote)], local)
+        _commit(local, "a.txt")
+        _run(["git", "push", "-u", "origin", "master"], local)
+        _commit(local, "b.txt")
+
+        payload = _dual_ahead_behind_payload("master", local)
+        assert (payload["ahead_working"], payload["behind_working"]) == (1, 0)
+        # No origin/main: the main tuple is unknown, never a believable 0.
+        assert payload["ahead_main"] is None and payload["behind_main"] is None
+        assert payload["ahead"] is None and payload["behind"] is None
+
+    def test_never_pushed_branch_counts_commits_on_no_remote(self, repos):
+        local, _ = repos
+        _run(["git", "checkout", "-b", "asus/fresh"], local)
+        _commit(local, "one.txt")
+        _commit(local, "two.txt")
+
+        payload = _dual_ahead_behind_payload("asus/fresh", local)
+        # Nothing upstream to be behind; both commits exist on no remote.
+        assert payload["ahead_working"] == 2
+        assert payload["behind_working"] is None
+
+    def test_trinity_branch_never_pushed_is_not_read_as_main(self, repos):
+        local, _ = repos
+        _commit(local, "on-main.txt")
+        _run(["git", "push", "origin", "main"], local)
+        _run(["git", "checkout", "-b", "trinity/a/1"], local)
+        _commit(local, "w.txt")
+        payload = _dual_ahead_behind_payload("trinity/a/1", local)
+        assert payload["ahead_working"] == 1
+        assert payload["ahead_main"] == 1

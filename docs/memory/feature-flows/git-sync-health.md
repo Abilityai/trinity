@@ -400,10 +400,10 @@ Two bounds, deliberately distinct. `_STATUS_FOLLOWER_WAIT_SECONDS = 35` is a
 given up (poller 10 s, backend `git_service` 30 s) — a follower waiting longer
 can only produce work nobody awaits, and times out as `504`. The leader carries
 its own **computation** bound (`_STATUS_LEADER_DEADLINE_SECONDS = 90`) because
-the child timeouts sum to ~130 s nominal (10 `rev-parse` + 10 `status` + 10
+the child timeouts sum to ~130–150 s nominal (10 `rev-parse` + 10 `status` + 10
 `log` + **30 `fetch`** + 10 `merge-base` + 10 `log` + 10 `remote get-url`, plus
-10 `_persist_last_remote_sha` + 10 `_get_pull_branch` + 10‥20
-`_dual_ahead_behind_payload`, before `run_registered`'s post-`killpg` drain), and
+10 `_persist_last_remote_sha` + 10 `_get_pull_branch` + 10‥30
+`_dual_ahead_behind_payload` (#2105), before `run_registered`'s post-`killpg` drain), and
 a wedged leader would otherwise hold the in-flight slot for all of it.
 
 Coalescing **is** bounded staleness and the doc says so rather than denying it:
@@ -427,6 +427,15 @@ computes BOTH tuples:
   (template-improvements signal)
 - `ahead_working` / `behind_working` — `HEAD` vs `origin/<current_branch>`
   (peer-divergence signal — the P6 case)
+
+The working tuple uses `origin/<current_branch>` whatever the branch is named
+(#2105). It used to do that only for `trinity/*` branches. Every other branch got
+the `origin/main` counts under the working label, and the fleet audit reads
+`ahead_working` as unpushed commits. When there is no upstream (the branch was
+never pushed, or HEAD is detached), `ahead_working` counts the commits that no
+remote holds, and `behind_working` is `null`. A count that can't be computed is
+`null`, never 0: for example, the main tuple on a repo with no `main`. The
+backend stores `null` as 0 (`sync_health_service._coerce_counter`).
 
 Legacy `ahead` / `behind` in the response alias the main tuple so older
 clients keep working.
