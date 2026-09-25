@@ -57,6 +57,7 @@ from services.agent_service import (
     get_accessible_agents,
     # Lifecycle
     start_agent_internal,
+    public_skills_result,
     # CRUD
     create_agent_internal as _create_agent_internal,
     # Deploy
@@ -866,6 +867,13 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
             "message": f"Agent {agent_name} started",
             "credentials_injection": credentials_status,
             "credentials_result": credentials_result,
+            # #2991: skill delivery, mirroring the credentials pair. Dropping it
+            # here made a `conflict` or a failed package invisible to every REST
+            # and MCP caller. `skills_result` is a PROJECTION (names, statuses,
+            # codes — never the raw per-skill error text); a no-op start still
+            # answers `skipped` with a reason, never an absent field.
+            "skills_injection": result.get("skills_injection", "unknown"),
+            "skills_result": public_skills_result(result.get("skills_result")),
             # #1809: whether (and why) this start replaced the container —
             # answers "why did my container id change / uptime reset".
             "recreated": bool(result.get("recreated")),

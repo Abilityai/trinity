@@ -3494,6 +3494,17 @@
         "git"
       ],
       "description": "Git-sync write access is validated where GitHub enforces it (#2107): probe_push_access runs REAL `git push --dry-run` against a local fake smart-HTTP server — 403 + `Write access to repository not granted.` → denied with GitHub's line verbatim; a valid receive-pack advertisement → ok with nothing POSTed; 5xx / unreachable → transient; the PAT reaches the server as an Authorization header and is never on git's argv; is_push_denied over refusal vs non-refusal texts. Create-path cases (400 before any container, transient non-blocking, source mode not probed) in test_1484_create_agent_characterization.py; the named sync_failing item in test_sync_health_service.py. 20 of 23 red with the fix reverted."
+    },
+    {
+      "file": "unit/test_2991_start_skills_result.py",
+      "feature": "#2991",
+      "added": "2026-09-24",
+      "categories": [
+        "backend",
+        "api",
+        "skills"
+      ],
+      "description": "POST /api/agents/{name}/start returns skills_injection + skills_result (#2991): the real endpoint driven with the lifecycle stubbed — clean, conflict under a success status, failed/partial, no skills (stated skip), already running, absent (unknown, never missing); the projection carries names, statuses and codes only (an exception string, URL or path in a per-skill error is reduced to a code; unaddressable names dropped); inject_assigned_skills names conflicts. Mutations: whitelist reverted (6 red), raw result passed through (5 red), lifecycle drops conflicts (1 red)."
     }
   ]
 }
