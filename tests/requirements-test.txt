@@ -82,7 +82,10 @@ redis>=5.2.0
 # db/tables.py and the migrated db/users.py pilot; psycopg2-binary is the
 # PostgreSQL driver exercised by the dual-backend pilot test (skipped when no
 # postgres is reachable). Versions match docker/backend/Dockerfile.
-sqlalchemy>=2.0.0
+# Capped below 2.1: SQLAlchemy 2.1 (2026-09-24) resolves a bare `postgresql://`
+# URL to the psycopg (v3) driver, which neither this file nor the image ships —
+# the image pins 2.0.36, so an uncapped floor made CI run a stack prod never does.
+sqlalchemy>=2.0.0,<2.1
 psycopg2-binary>=2.9.0
 # fakeredis: dispatch-breaker fail-open unit tests (#526). No Lua/EVALSHA
 # support → those tests exercise the breaker's fail-open path; the Lua state

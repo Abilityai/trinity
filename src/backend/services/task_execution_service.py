@@ -2557,7 +2557,12 @@ class TaskExecutionService:
         # again — a second switch would burn another rate-limit event and churn
         # to a third never-used subscription.
         agent_status_code = getattr(getattr(e, "response", None), "status_code", None)
-        if not state.subscription_switch_attempted:
+        # #3012: Claude Code refused the model. An agent image older than #3012
+        # answers that 503, which read as auth below and rotated the agent
+        # through every subscription. No subscription can fix it — never switch.
+        from services.failure_classifier import is_model_rejection
+        model_rejected = is_model_rejection(error_msg)
+        if not state.subscription_switch_attempted and not model_rejected:
             try:
                 from services.subscription_auto_switch import (
                     handle_subscription_failure,
@@ -2581,7 +2586,10 @@ class TaskExecutionService:
         # Issue #285: Detect auth failures (HTTP 503 from agent server)
         # Return structured error code so callers can handle appropriately
         error_code = None
-        if agent_status_code == 503:
+        if model_rejected:
+            logger.warning(f"[TaskExecService] Model rejected on {agent_name}: {error_msg[:200]}")
+            error_code = TaskExecutionErrorCode.MODEL_UNSUPPORTED
+        elif agent_status_code == 503:
             logger.warning(f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.AUTH
         elif agent_status_code == 429:
@@ -2618,7 +2626,7 @@ class TaskExecutionService:
             execution_id=execution_id,
             status=TaskExecutionStatus.FAILED,
             error=error_msg,
-            error_code=error_code,  # AUTH (503) / BILLING (429, #2638) / None
+            error_code=error_code,  # MODEL_UNSUPPORTED (#3012) / AUTH (503) / BILLING (429, #2638) / None
             metadata=partial_metadata,
             # #1853: thread the agent's salvaged transcript + session id onto
             # the FAILED envelope so apply_result persists them (mirrors
