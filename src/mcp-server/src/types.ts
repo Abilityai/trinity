@@ -308,6 +308,9 @@ export interface ScheduleExecution {
   execution_log?: string;
   model_used?: string;
   claude_session_id?: string;
+  // #2958: JSON array of auto-compaction events ({trigger, pre_tokens,
+  // post_tokens, duration_ms, timestamp}); null when the turn did not compact.
+  compact_metadata?: string | null;
   source_agent_name?: string;
   source_user_email?: string;
   // AUDIT-001: MCP key origin tracking — used by #914 chat-timeout

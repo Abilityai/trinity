@@ -614,8 +614,8 @@ CREATE TABLE seat_ask_class_state (
 );
 CREATE INDEX idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email);
 ```
-Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0073_seat_ask_class_state`
-(← `0072`); `AgentRef(..., Policy.CASCADE)`. The row holds only what was EARNED —
+Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0075_seat_ask_class_state`
+(← `0074`); `AgentRef(..., Policy.CASCADE)`. The row holds only what was EARNED —
 the instance level, the agent's autonomy switch and the clock are ANDed at read
 time (`services/autonomy_dial_service.live_verdict`), never materialised. The
 instance LEVEL is not a table at all: one validated `system_settings` key,
@@ -760,6 +760,14 @@ CREATE TABLE operator_queue (
     responded_at TEXT,
     acknowledged_at TEXT,
     cleared_at TEXT,                    -- #1017: NULL = visible; set = hidden by Clear All (rows deleted by the #1142 retention sweep past operator_queue_retention_days)
+    sync_state TEXT,                    -- #2915: confirmed|changed|closed_by_filer|missing|stale_id|unconfirmed (leader-locked poller, edge-triggered)
+    sync_detail TEXT,                   -- #2915: closed vocabulary (field names / folded status / failure kind), never agent text
+    sync_updated_at TEXT,               -- #2915: transition time
+    last_confirmed_at TEXT,             -- #2915: refreshed ≤ once/min per agent, batched
+    delivery_state TEXT,                -- #2915: delivered|undelivered|not_applicable
+    delivery_detail TEXT,               -- #2915: conflict|http_<code>|unreachable|timeout|entry_missing|entry_changed|closed_by_filer|agent_not_running|platform_minted
+    delivery_updated_at TEXT,           -- #2915
+    divergence_acknowledged_at TEXT,    -- #2915 (PR #2989 review): the human answered a changed/closed item knowingly; the write-back delivers into the entry as it is now
     addressed_to_email TEXT,            -- ent#364: the human this ask is for; NULL = operator ask. Validated at ingestion against the agent's roster, never trusted from the payload
     FOREIGN KEY (responded_by_id) REFERENCES users(id)
 );

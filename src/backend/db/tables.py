@@ -1427,6 +1427,18 @@ operator_queue = Table(
     # (every pre-ent#364 row). Validated at ingestion against the agent's
     # roster — never trusted from the agent-authored payload.
     Column("addressed_to_email", Text),
+    # #2915: what the poller last established about the agent's file entry, and
+    # whether the human's answer ever reached it. Written ONLY by the leader-
+    # locked sync loop, on change (rowcount is the edge). Nullable, no backfill:
+    # NULL renders as "not yet checked", never as confirmed.
+    Column("sync_state", Text),        # confirmed|changed|closed_by_filer|missing|stale_id|unconfirmed
+    Column("sync_detail", Text),       # closed vocabulary — never agent text
+    Column("sync_updated_at", Text),   # transition time
+    Column("last_confirmed_at", Text), # refreshed ≤ once/min per agent, batched
+    Column("delivery_state", Text),    # delivered|undelivered|not_applicable
+    Column("delivery_detail", Text),
+    Column("delivery_updated_at", Text),
+    Column("divergence_acknowledged_at", Text),
 )
 
 nevermined_agent_config = Table(

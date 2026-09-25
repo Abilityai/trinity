@@ -3707,9 +3707,11 @@ class DatabaseManager:
         return self._operator_queue_ops.list_items(**kwargs)
 
     def respond_to_operator_queue_item(self, item_id, response, response_text,
-                                        responded_by_id, responded_by_email):
+                                        responded_by_id, responded_by_email,
+                                        divergence_acknowledged=False):
         return self._operator_queue_ops.respond_to_item(
-            item_id, response, response_text, responded_by_id, responded_by_email
+            item_id, response, response_text, responded_by_id, responded_by_email,
+            divergence_acknowledged=divergence_acknowledged,
         )
 
     def cancel_operator_queue_item(self, item_id):
@@ -3724,10 +3726,40 @@ class DatabaseManager:
             agent_name, accessible_agent_names
         )
 
-    def get_operator_queue_terminal_for_agent(self, agent_name, since_hours=168):
+    def get_operator_queue_terminal_for_agent(self, agent_name, limit=200):
         return self._operator_queue_ops.get_terminal_items_for_agent(
-            agent_name, since_hours
+            agent_name, limit
         )
+
+    # #2915 — sync honesty (leader-locked poller writers + the header counts)
+    def get_operator_queue_sync_index_for_agent(self, agent_name):
+        return self._operator_queue_ops.get_sync_index_for_agent(agent_name)
+
+    def set_operator_queue_sync_state(self, item_id, state, detail, now):
+        return self._operator_queue_ops.set_sync_state(item_id, state, detail, now)
+
+    def refresh_operator_queue_last_confirmed(self, agent_name, now, older_than):
+        return self._operator_queue_ops.refresh_last_confirmed(agent_name, now, older_than)
+
+    def set_operator_queue_delivery_state(self, item_id, state, detail, now):
+        return self._operator_queue_ops.set_delivery_state(item_id, state, detail, now)
+
+    def mark_operator_queue_unconfirmed(self, detail, now, agent_name=None, exclude_agents=None,
+                                        exclude_request_id_prefixes=None):
+        return self._operator_queue_ops.mark_unconfirmed(
+            detail, now, agent_name=agent_name, exclude_agents=exclude_agents,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
+        )
+
+    def mark_operator_queue_undelivered_for_stopped_agents(self, now, *, running_agents,
+                                                           exclude_request_id_prefixes=None):
+        return self._operator_queue_ops.mark_undelivered_for_stopped_agents(
+            now, running_agents=running_agents,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
+        )
+
+    def count_operator_queue_flags(self, accessible_agent_names=None):
+        return self._operator_queue_ops.count_flags(accessible_agent_names)
 
     def mark_operator_queue_acknowledged(self, agent_name, item_id):
         # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.

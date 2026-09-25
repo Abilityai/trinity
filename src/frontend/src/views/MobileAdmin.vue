@@ -238,6 +238,14 @@
                 <div class="ops-card-header">
                   <span class="ops-agent-name" :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))">{{ item.agent_name }}</span>
                   <span class="ops-priority" :class="'priority-' + item.priority">{{ item.priority }}</span>
+                  <!-- #2915: the same badge rule as the desktop card; styled with
+                       currentColor only so this view's colour count cannot move. -->
+                  <span
+                    v-if="queueSyncBadge(item)"
+                    class="ops-sync"
+                    :title="queueSyncBadge(item).title"
+                    data-testid="queue-sync-badge"
+                  >{{ queueSyncBadge(item).label }}</span>
                 </div>
                 <!-- The API field is `type`; a read of a misnamed field here rendered a blank line for months (issue 2370). -->
                 <div class="ops-card-type" data-testid="queue-type">{{ queueTypeLabel(item.type) }}</div>
@@ -601,8 +609,8 @@ import { apiErrorMessage } from '../utils/apiError'
 import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
 import {
   optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel,
-  QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending,
-} from '../utils/operatorQueue'
+  QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending, queueSyncBadge,
+  QUEUE_RESPONSE_DIVERGED, respondRefusedAsDiverged } from '../utils/operatorQueue'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
 
@@ -1172,8 +1180,10 @@ function pruneQueueItemState(items) {
 // with no way to clear it. It therefore clears the maps directly instead of
 // delegating to the prune above, which would inherit that exemption: this is a
 // wipe, not a reconcile against a served list.
+const divergedQueueItems = reactive({})   // #2915: id → the operator saw the divergence notice
+
 function resetQueueItemState() {
-  for (const map of [selectedOptions, responseTexts, respondErrors, respondingItems]) {
+  for (const map of [selectedOptions, responseTexts, respondErrors, respondingItems, divergedQueueItems]) {
     for (const id of Object.keys(map)) delete map[id]
   }
 }
@@ -1183,11 +1193,23 @@ async function sendQueueResponse(item, body) {
   if (!body || respondingItems[id]) return false
   respondingItems[id] = true
   delete respondErrors[id]
+  // #2915: a second send after the divergence notice answers anyway.
+  const payload = divergedQueueItems[id] ? { ...body, acknowledge_divergence: true } : body
   try {
-    await http.post(`/api/operator-queue/${id}/respond`, body)
+    await http.post(`/api/operator-queue/${id}/respond`, payload)
+    delete divergedQueueItems[id]
   } catch (e) {
     console.error('Failed to send queue response:', e?.response?.status ?? e?.message ?? e)
     respondingItems[id] = false
+    if (respondRefusedAsDiverged(e)) {
+      // #2915: the agent changed or closed this item after the card was read.
+      // Keep the card and the selection, say so beside the control (p18), refetch
+      // so the badge renders, and let the next tap carry the acknowledgement.
+      divergedQueueItems[id] = true
+      respondErrors[id] = { message: QUEUE_RESPONSE_DIVERGED }
+      await fetchQueue()
+      return false
+    }
     if (respondRefusedAsNotPending(e)) {
       // 409 (somebody else resolved it first, #1017), 400 (already terminal)
       // or 404 (row gone): the answer was NOT recorded and the item is not
@@ -1880,6 +1902,14 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
   color: white;
 }
 
+.ops-sync {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  opacity: 0.85;
+  white-space: nowrap;
+}
 .ops-priority {
   font-size: 11px;
   padding: 2px 8px;

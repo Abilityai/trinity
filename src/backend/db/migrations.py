@@ -3618,6 +3618,35 @@ def _migrate_operator_queue_addressed_to(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_queue_sync_state(cursor, conn):
+    """#2915 — the operator-queue file sync tells the truth.
+
+    Eight nullable columns record what the poller last established about the
+    agent's file entry (`sync_state` / `sync_detail` / `sync_updated_at` /
+    `last_confirmed_at`), whether the human's answer ever reached the agent
+    (`delivery_state` / `delivery_detail` / `delivery_updated_at`) and whether the
+    human answered a diverged item knowingly (`divergence_acknowledged_at`, which
+    lets the write-back deliver into the entry as it is now). No default and
+    no backfill on purpose: a NULL renders as "not yet checked" — the honest
+    state for every row the loop has not looked at since this landed — never as
+    confirmed. The row's own title/question/options/expires_at are the ingest
+    snapshot the fingerprint compares against, so nothing else is stored.
+    """
+    for column in (
+        "sync_state", "sync_detail", "sync_updated_at", "last_confirmed_at",
+        "delivery_state", "delivery_detail", "delivery_updated_at",
+        "divergence_acknowledged_at",
+    ):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for sync honesty (#2915)",
+        )
+    conn.commit()
+
+
 def _migrate_channel_report_client(cursor, conn):
     """ent#457 review — WHICH client a portal channel context belongs to.
 
@@ -4571,7 +4600,7 @@ def _migrate_seat_ask_class_state_table(cursor, conn):
     (`autonomy_dial_service.LEVEL_KEY`). The live conjuncts (level, the agent's
     autonomy switch, the clock) are read, never written.
 
-    Mirrored by the Alembic revision 0073_seat_ask_class_state.
+    Mirrored by the Alembic revision 0075_seat_ask_class_state.
     """
     cursor.execute(
         """
@@ -4642,6 +4671,40 @@ def _migrate_agent_capability_grants(cursor, conn):
         "agent_skills",
         "assigned_by_agent",
         "ALTER TABLE agent_skills ADD COLUMN assigned_by_agent TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_role_readiness_rollout_seed(cursor, conn):
+    """The readiness gate's rollout (trinity-enterprise#689), data only.
+
+    From this release a companion's cron seat brief runs only when its owner
+    stamp says `ready`. Every agent whose proactive brief fires TODAY — an
+    enabled, live, seat-delivery schedule on a live agent with autonomy on (a
+    schedule on an autonomy-off agent does not fire) — is stamped `ready`
+    here, at the value in force (#2085), so no install changes behaviour.
+    INSERT OR IGNORE: an existing stamp (an owner's `calibrating`) is never
+    overwritten. `changed_by` is the rollout sentinel the role card renders as
+    "carried over", not as a person. Runs once (tracked in schema_migrations).
+
+    Mirrored by the Alembic revision 0074_role_readiness_rollout_seed.
+    """
+    from utils.helpers import utc_now_iso
+
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO agent_role_readiness (agent_name, status, changed_at, changed_by)
+        SELECT DISTINCT s.agent_name, 'ready', ?, 'rollout:ent#689'
+        FROM agent_schedules s
+        JOIN agent_ownership o ON o.agent_name = s.agent_name
+        WHERE s.enabled = 1
+          AND s.deleted_at IS NULL
+          AND s.deliver_to_workspace_email IS NOT NULL
+          AND s.deliver_to_workspace_email != ''
+          AND o.deleted_at IS NULL
+          AND o.autonomy_enabled = 1
+        """,
+        (utc_now_iso(),),
     )
     conn.commit()
 
@@ -4788,5 +4851,7 @@ MIGRATIONS = [
     ("metric_points_table", _migrate_metric_points_table),
     ("seat_decisions_table", _migrate_seat_decisions_table),
     ("agent_capability_grants", _migrate_agent_capability_grants),
+    ("operator_queue_sync_state", _migrate_operator_queue_sync_state),
+    ("role_readiness_rollout_seed", _migrate_role_readiness_rollout_seed),
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
 ]

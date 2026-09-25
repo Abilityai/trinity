@@ -133,7 +133,7 @@ every turn ──► platform_prompt_service memory block → autonomy_dial_serv
 
 | Layer | File | Role |
 |---|---|---|
-| DB | `db/seat_ask_class_state.py` · `db/schema.py` · `db/tables.py` · `db/migrations.py` (`seat_ask_class_state_table`) · `migrations/versions/0073_seat_ask_class_state.py` · `db/agent_cleanup.py` (CASCADE) · `db/evaluations.py` (`latest_negative_seat_rating`) · `database.py` facade | rows, both tracks |
+| DB | `db/seat_ask_class_state.py` · `db/schema.py` · `db/tables.py` · `db/migrations.py` (`seat_ask_class_state_table`) · `migrations/versions/0075_seat_ask_class_state.py` · `db/agent_cleanup.py` (CASCADE) · `db/evaluations.py` (`latest_negative_seat_rating`) · `database.py` facade | rows, both tracks |
 | Service | `services/autonomy_dial_service.py` | the rule leaf: levels, evidence, the named blocks, `live_verdict`, `evaluate_seat`, `prompt_lines` |
 | Hooks | `services/seat_decision_service.py` (`_reevaluate_autonomy` on `record` + the three terminal `act` branches) · `client_portal/service.py` (`submit_rating`) | re-evaluate on a real event |
 | Level | `components/settings/AutonomyDialPanel.vue` · `views/Settings.vue` · `routers/settings/autonomy_dial.py` · `routers/settings/__init__.py` (before `generic.router`) · `routers/settings/generic.py` (blocklist) | the instance ceiling |

@@ -1907,6 +1907,9 @@ Example:
                   />
                 </button>
               </div>
+              <!-- #2915: the operator-queue aging bound — its own component so
+                   this view's raw-colour count cannot move (the registry-panel precedent). -->
+              <OperatorQueueAgingSetting />
             </div>
           </div>
 
@@ -2222,6 +2225,7 @@ import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
 import { readOpsBool, opsBoolValue } from '../utils/opsSettings'
+import OperatorQueueAgingSetting from '../components/settings/OperatorQueueAgingSetting.vue'
 import { describeSttCapability, describeSttLastFailure } from '../utils/sttCapability'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'

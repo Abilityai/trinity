@@ -1693,6 +1693,14 @@ TABLES = {
             acknowledged_at TEXT,
             cleared_at TEXT,
             addressed_to_email TEXT,
+            sync_state TEXT,
+            sync_detail TEXT,
+            sync_updated_at TEXT,
+            last_confirmed_at TEXT,
+            delivery_state TEXT,
+            delivery_detail TEXT,
+            delivery_updated_at TEXT,
+            divergence_acknowledged_at TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,
