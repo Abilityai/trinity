@@ -548,8 +548,8 @@ export interface OperatorAskCreate {
   type?: "approval" | "question" | "alert";
   priority?: "critical" | "high" | "medium" | "low";
   options?: string[];
-  context?: Record<string, unknown>;
-  proposal?: Record<string, unknown>;
+  context?: Record<string, unknown> | null;
+  proposal?: Record<string, unknown> | null;
   to?: "primary" | "approver" | "viewer" | "operator";
   expires_at?: string;
   supersedes_expired?: string;

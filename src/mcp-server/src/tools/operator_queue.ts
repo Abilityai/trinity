@@ -73,6 +73,17 @@ export function askRefusal(error: unknown): Record<string, unknown> {
   return { success: false, status: error.status, error: typeof detail === "string" ? detail : error.body };
 }
 
+/**
+ * A free-form JSON object an agent may fill with any keys. A union with null on
+ * purpose: fastmcp publishes every tool through xsschema's `strictJsonSchema`,
+ * which stamps `additionalProperties: false` on each object-typed property —
+ * a plain `z.record` included — so the published schema would read "no keys
+ * allowed" to the model and to any client that enforces it. The walker skips a
+ * property whose schema is an `anyOf`, so the record keeps its "any keys".
+ * `null` means the same as leaving the field out (the backend drops it).
+ */
+const anyJsonObject = () => z.union([z.record(z.string(), z.unknown()), z.null()]);
+
 /** The ask an agent raises — every field the backend's `OperatorAskCreate` takes. */
 const askOperatorParameters = z.object({
   request_id: z
@@ -96,12 +107,10 @@ const askOperatorParameters = z.object({
     .array(z.string().min(1))
     .optional()
     .describe("The choices a person picks from. Required for an approval."),
-  context: z
-    .record(z.string(), z.unknown())
+  context: anyJsonObject()
     .optional()
     .describe("Supporting data shown with the ask (JSON, up to 8 KB)."),
-  proposal: z
-    .record(z.string(), z.unknown())
+  proposal: anyJsonObject()
     .optional()
     .describe("For an approval: the exact action you will take if it is approved, frozen with the ask (JSON, up to 8 KB)."),
   to: z

@@ -668,6 +668,48 @@ class TestRaiseRoute:
         res = self._post(route, _body("rt-rate"))
         assert res.status_code == 429 and res.json()["detail"]["code"] == "rate_limited"
 
+    @pytest.mark.parametrize("path", ["item", "list", "agent_list"])
+    def test_a_native_asks_addressee_is_withheld_from_machine_keys(self, route, path):
+        """The receipt never names the person a role resolved to, and neither
+        does a read: `resolved_to` and `addressed_to_email` hold the same email,
+        so both are withheld from machines. Today that person is the owner
+        (whose email an agent key can read anyway); once an assignment provider
+        answers `people_for` it can be someone else. A file entry's addressee is
+        the agent's own input and stays."""
+        uid = self._post(route, _body(f"rt-wh-{path}")).json()["id"]
+        filed = route.ask.db.create_operator_queue_item(
+            self.AGENT, {"id": f"rt-file-{path}", "type": "question", "title": "t", "question": "q",
+                         "context": {}, "addressed_to_email": "client@example.com"},
+            channel="file", raised_by="agent")
+        urls = {"item": [f"/api/operator-queue/{uid}", f"/api/operator-queue/{filed}"],
+                "list": [f"/api/operator-queue?agent_name={self.AGENT}"] * 2,
+                "agent_list": [f"/api/operator-queue/agents/{self.AGENT}"] * 2}[path]
+
+        def rows(principal):
+            principal()
+            got = []
+            for url, want in zip(urls, (uid, filed)):
+                body = route.client.get(url).json()
+                got.append(body if path == "item" else next(i for i in body["items"] if i["id"] == want))
+            return got
+
+        native, file_row = rows(lambda: route.as_())                      # a person
+        assert native["addressed_to_email"] == OWNER
+        native, file_row = rows(lambda: route.as_(mcp_scope="agent", agent_name=self.AGENT))
+        assert "addressed_to_email" not in native and "resolved_to" not in native
+        assert file_row["addressed_to_email"] == "client@example.com"
+
+    def test_a_null_context_or_proposal_reads_as_absent(self, route):
+        """The MCP tool publishes both as object-or-null (so the published
+        schema can say "any keys"); null must mean the same as leaving it out."""
+        res = self._post(route, {**_body("rt-null", type="question"), "options": None,
+                                 "proposal": None, "context": None})
+        assert res.status_code == 201, res.text
+        row = route.ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "rt-null")
+        assert row["proposal"] is None
+        # Nothing agent-authored: only the platform's own Workspace thread key.
+        assert set(row["context"]) <= {"workspace_session_id"}
+
     def test_an_unknown_field_is_refused(self, route):
         res = self._post(route, {**_body("rt-extra"), "channel": "file"})
         assert res.status_code == 422

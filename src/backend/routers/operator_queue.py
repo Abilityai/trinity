@@ -88,6 +88,12 @@ def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict
     for item in items:
         for key in _PERSON_FIELDS_WITHHELD_FROM_MACHINES:
             item.pop(key, None)
+        # trinity-enterprise#611: a native ask's addressee is the person the
+        # PLATFORM resolved a role to — the email `resolved_to` also holds — so a
+        # machine does not get it back (the receipt's rule). A file entry's
+        # addressee is the agent's own input and stays (the registered residual).
+        if item.get("channel") not in (None, "file"):
+            item.pop("addressed_to_email", None)
     return items
 
 

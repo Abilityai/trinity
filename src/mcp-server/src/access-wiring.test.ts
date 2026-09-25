@@ -486,4 +486,25 @@ describe("trinity-enterprise#611 ask_operator raises as the key's agent (real tr
     const out = await callAs("trinity_mcp_611_agent", { ...ASK, request_id: "refuse-me" });
     assert.deepEqual(out, { success: false, status: 422, ...REFUSAL });
   });
+
+  it("the published schema lets context and proposal carry keys", async () => {
+    // fastmcp publishes every tool through xsschema's strictJsonSchema, which
+    // stamps `additionalProperties: false` on each object-typed property —
+    // a record included — so a plain z.record reads "no keys allowed" to the
+    // model and to any client that enforces the schema.
+    const client = new Client({ name: "schema", version: "1.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(mcpUrl, {
+      requestInit: { headers: { Authorization: "Bearer trinity_mcp_611_agent" } },
+    }));
+    const { tools } = await client.listTools();
+    await client.close();
+    const props = (tools.find((t) => t.name === "ask_operator")?.inputSchema as any)?.properties ?? {};
+    for (const field of ["context", "proposal"]) {
+      const branches = props[field]?.anyOf ?? [props[field]];
+      const objectBranch = branches.find((b: any) => b?.type === "object");
+      assert.ok(objectBranch, `${field} publishes no object branch: ${JSON.stringify(props[field])}`);
+      assert.notEqual(objectBranch.additionalProperties, false,
+        `${field} is published as an object that accepts no keys: ${JSON.stringify(props[field])}`);
+    }
+  });
 });
