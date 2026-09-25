@@ -350,7 +350,7 @@ GET /api/git/status  (poller 10 s · UI git panel 60 s · MCP get_git_status)
                            ctx.terminate, auto-sync and pipe-close)
                 └── _compute_git_status()                  (worker thread)
                       rev-parse / log / merge-base / remote -> run_registered
-                      git --no-optional-locks status --porcelain -> NO index.lock
+                      git --no-optional-locks status --porcelain -z -> NO index.lock
                       git fetch origin (30 s)               -> run_registered
                       lstat index.lock -> index_lock_stuck  (REPORT, never unlink)
                       + computed_at, lock_recovery

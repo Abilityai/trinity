@@ -38,6 +38,12 @@ def _fake_db(create_side_effect):
     db.create_operator_queue_item.side_effect = create_side_effect
     db.get_operator_queue_responded_for_agent.return_value = []
     db.get_operator_queue_terminal_for_agent.return_value = []
+    # #2915: explicit empties for the sync index (see test_1632's note).
+    db.get_operator_queue_sync_index_for_agent.return_value = {"open": [], "terminal": {}}
+    db.set_operator_queue_sync_state.return_value = False
+    db.mark_operator_queue_unconfirmed.return_value = 0
+    db.refresh_operator_queue_last_confirmed.return_value = 0
+    db.get_setting_value.return_value = "24"
     return db
 
 

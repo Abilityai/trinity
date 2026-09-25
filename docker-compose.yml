@@ -640,6 +640,7 @@ services:
       # #1022: scheduler→backend dispatch + pre-check deadlines (operator-tunable).
       - DISPATCH_TIMEOUT=${DISPATCH_TIMEOUT:-30}
       - PRE_CHECK_TIMEOUT=${PRE_CHECK_TIMEOUT:-70}
+      - READINESS_CHECK_TIMEOUT=${READINESS_CHECK_TIMEOUT:-5}
       - MISFIRE_GRACE_TIME=3600
       - PUBLISH_EVENTS=true
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}

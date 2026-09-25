@@ -2260,7 +2260,7 @@ export class TrinityClient {
    */
   async respondToOperatorQueueItem(
     itemId: string,
-    body: { response: string; response_text?: string },
+    body: { response: string; response_text?: string; acknowledge_divergence?: boolean },
   ): Promise<OperatorQueueItem> {
     return this.request<OperatorQueueItem>(
       "POST",

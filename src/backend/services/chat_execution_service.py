@@ -335,6 +335,30 @@ def build_chat_payload(
     return payload
 
 
+def _compact_metadata_json(metadata) -> Optional[str]:
+    """#2958: the agent's compact events as the `compact_metadata` column
+    value (same shape the task path writes), or None when nothing compacted."""
+    events = (metadata or {}).get("compact_events") or []
+    return json.dumps(events) if events else None
+
+
+def _compaction_summary(metadata) -> Optional[dict]:
+    """#2958 AC3: a one-glance compaction summary for the `/chat` response, so
+    a synchronous caller can tell a one-off auto-compaction from a degraded
+    agent without a second call. None when the turn did not compact."""
+    events = [e for e in ((metadata or {}).get("compact_events") or []) if isinstance(e, dict)]
+    if not events:
+        return None
+    durations = [e["duration_ms"] for e in events if isinstance(e.get("duration_ms"), (int, float))]
+    return {
+        "events": len(events),
+        "trigger": events[0].get("trigger"),
+        "pre_tokens": events[0].get("pre_tokens"),
+        "post_tokens": events[-1].get("post_tokens"),
+        "duration_ms": sum(durations) if durations else None,
+    }
+
+
 async def _finalize_chat_success(
     *,
     name,
@@ -458,6 +482,9 @@ async def _finalize_chat_success(
             tool_calls=tool_calls_json,
             execution_log=execution_log_json,
             claude_session_id=real_session_id,
+            # #2958 AC3: a chat turn that auto-compacted is attributed on the
+            # row, as the task path already does (the column is on both tracks).
+            compact_metadata=_compact_metadata_json(metadata),
         )
 
     # Add execution metadata to response
@@ -466,6 +493,8 @@ async def _finalize_chat_success(
         "task_execution_id": task_execution_id,  # Database ID (permanent)
         "queue_status": queue_result,
         "was_queued": is_queued,
+        # #2958 AC3: None, or {events, trigger, pre_tokens, post_tokens, duration_ms}.
+        "compaction": _compaction_summary(metadata),
     }
 
     # RELIABILITY-006 (#525): store the result so a duplicate Idempotency-Key
@@ -744,6 +773,9 @@ async def _finalize_http_failure(
             cost=salvage_cost,
             context_used=salvage_context,
             context_max=salvage_context_max,
+            # #2958: the #678 structured body carries the turn's compact events
+            # (504/429/plain-500 bodies carry no metadata — a known gap).
+            compact_metadata=_compact_metadata_json(partial_metadata),
         )
 
     if collaboration_activity_id:
