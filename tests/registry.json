@@ -56,6 +56,16 @@
       "description": "Static guard on backend-unit-nightly.yml's merge check (#1941). The job shallow-fetched both dev and the PR head, so the merge had no common ancestor and git's `refusing to merge unrelated histories` was recorded as `merge_conflict=true` for EVERY open PR (9/9, 8 of them MERGEABLE) — the detector's output was independent of its input, so the suite never ran and the regression signal defaulted to clean. Asserts: base checkout is fetch-depth 0; the pull/N/head fetch carries no --depth; the merge_conflict=true branch is gated on actual unmerged paths (--diff-filter=U) so an infrastructure failure can't be reported as a PR conflict; --allow-unrelated-histories is never used (it would fabricate a merge of unrelated trees and run the suite against a worktree that isn't the real merge result); and the `git merge dev` advice stays inside the conflict/regression branches. Comment lines are stripped before matching — the fix's own comment says 'no --depth' and a naive substring search matches it and passes while the command is shallow again."
     },
     {
+      "file": "unit/test_git_status_dual_ahead_behind.py",
+      "feature": "#2105",
+      "added": "2026-09-25",
+      "categories": [
+        "agent-server",
+        "git"
+      ],
+      "description": "The git-status ahead/behind tuples over real repos (#389 P6, #2105): the working tuple is measured against origin/<current_branch> whatever the branch is named. Cases: a pushed asus/* branch far from main reports 0 unpushed; unpushed and peer commits on a non-trinity branch; a master repo with no main counts its unpushed commit and reports the main tuple as null, not 0; a never-pushed branch (trinity/* included) counts the commits no remote holds, with behind null. 5 of 12 red with the fix reverted."
+    },
+    {
       "file": "unit/test_2015_hash_chain_persistence.py",
       "feature": "#2015",
       "added": "2026-08-05",
