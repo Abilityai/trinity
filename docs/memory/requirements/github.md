@@ -823,8 +823,9 @@
   work on container disks that existed nowhere else.
 - **Create-time `kind`:** `agent` (the default) or `deployment`, on
   `POST /api/agents` and MCP `create_agent`. The UI half of the choice is
-  trinity-enterprise#704. An **explicit `source_mode` always wins**, so every
-  existing caller keeps its behaviour.
+  trinity-enterprise#704. An **explicit `source_mode` always wins for the
+  mode**. Every auto-pushing agent, including an explicit working branch and
+  fork-to-own, also gets freeze-on-failure; a `deployment` never does.
 - **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
   `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
   them **when its token can push to that repo** (the #2107 receive-pack probe).
@@ -840,7 +841,10 @@
 - **Not changed:**
   - existing agents (the default applies to new creates; migration is per
     agent and explicit — runbook `docs/migrations/AGENT_WORKING_BRANCH_DEFAULT_2026-09.md`)
-  - freeze paging (the `sync_failing` item)
+  - freeze paging (the `sync_failing` item). Until trinity-enterprise#706
+    adds divergence age, the freeze trips on today's trigger: 3 consecutive
+    failed syncs (about 45 minutes at the 15-minute cadence), including a
+    rebase conflict, which needs a human anyway
   - the pull cycle — on when trinity-enterprise#703 lands
   - divergence-age freeze semantics — trinity-enterprise#706
 - **Edition**: open-core (operator ruling 2026-09-25): defaults on the existing

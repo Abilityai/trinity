@@ -1430,3 +1430,18 @@ def test_ent705_cornelius_is_pinned_pull_only():
     kws = {k.arg: k.value for k in calls[0].keywords}
     assert ast.literal_eval(kws["kind"]) == "deployment"
     assert ast.literal_eval(kws["source_mode"]) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind, expected", [(None, "agent"), ("deployment", "deployment")])
+async def test_ent705_a_fork_reports_the_kind_that_was_asked_for(crud_env, kind, expected):
+    """The decision must name the kind the freeze write reads — a fork asked for
+    as a deployment is reported as one, never silently relabelled an agent."""
+    crud, ctx = crud_env
+    config = _github_config("gc-fork", kind=kind)
+    decision = await crud._apply_agent_kind_default(
+        config, "alice/brain", "ghp_user", "Abilityai/cornelius")
+
+    assert decision["kind"] == expected
+    assert decision["reason"] == "fork-to-own: the agent owns its fork"
+    ctx["git_service"].probe_push_access.assert_not_awaited()

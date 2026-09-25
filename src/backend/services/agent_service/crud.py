@@ -925,7 +925,7 @@ async def _apply_agent_kind_default(
     if "source_mode" in config.model_fields_set:
         return {**decision, "reason": "source_mode set explicitly"}
     if config.fork_to_own or fork_upstream:
-        return {**decision, "kind": "agent", "reason": "fork-to-own: the agent owns its fork"}
+        return {**decision, "reason": "fork-to-own: the agent owns its fork"}
     if kind == "deployment":
         return {**decision, "reason": "a deployment of a codebase: pull-only"}
     if config.ephemeral:

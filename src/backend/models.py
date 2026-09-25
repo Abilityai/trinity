@@ -217,7 +217,8 @@ class AgentConfig(BaseModel):
     # writes, auto-sync on, freeze-on-failure on — granted only when its token can
     # actually push to that repo; otherwise it stays pull-only. "deployment" is a
     # deployment of a codebase: source mode, no auto-push. An EXPLICIT
-    # `source_mode` always wins, so every existing caller keeps its behaviour.
+    # `source_mode` always wins for the MODE; an auto-pushing agent (explicit
+    # working branch and fork-to-own included) also gets freeze-on-failure.
     kind: Optional[Literal["agent", "deployment"]] = None
     # Multi-runtime support
     runtime: Optional[str] = "claude-code"  # "claude-code" or "gemini-cli"
@@ -323,6 +324,7 @@ class AgentStatus(BaseModel):
             # Use to_utc_iso to ensure 'Z' suffix for frontend compatibility
             datetime: lambda v: to_utc_iso(v) if v else None
         }
+
 
 class AgentSubscriptionPressure(BaseModel):
     """One agent's subscription-pressure row for the Dashboard batch endpoint
