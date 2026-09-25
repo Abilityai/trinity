@@ -185,6 +185,28 @@ class TestLoopStart:
         assert auto_sync.current_auto_sync_enabled() is True
 
 
+class TestLoopReadsTheFlagAtBoot:
+    def test_the_flag_is_resolved_before_the_first_sleep(self, tmp_path, monkeypatch):
+        """Found live on a dev instance: the first cycle waits a full interval,
+        so without an up-front read `/api/git/status` reported the env fallback
+        (off) for 15 minutes while the owner's flag said on."""
+        order = []
+
+        async def fake_resolve(client):
+            order.append("resolve")
+            return True
+
+        async def fake_sleep(_):
+            order.append("sleep")
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(auto_sync, "resolve_auto_sync_enabled", fake_resolve)
+        monkeypatch.setattr(auto_sync.asyncio, "sleep", fake_sleep)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(auto_sync.run_auto_sync_loop(tmp_path, interval_seconds=900))
+        assert order == ["resolve", "sleep"]
+
+
 class TestStatusReportsTheRunningValue:
     def test_git_status_carries_auto_sync_enabled(self, tmp_path, monkeypatch):
         import subprocess

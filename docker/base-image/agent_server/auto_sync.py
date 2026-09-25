@@ -134,11 +134,18 @@ async def run_auto_sync_loop(
     interval = interval_seconds if interval_seconds is not None else get_interval_seconds()
     logger.info("auto-sync loop started (interval=%ss, home=%s)", interval, home)
 
-    # Sleep first so containers that just started aren't penalized by a
-    # heartbeat happening before .git is even initialized.
-    await asyncio.sleep(interval)
-
     async with httpx.AsyncClient() as client:
+        # Read the flag once up front so `/api/git/status` reports the owner's
+        # value from boot, not the env fallback for the first interval (#3010).
+        try:
+            await resolve_auto_sync_enabled(client)
+        except Exception:  # noqa: BLE001 — loop must never die
+            logger.exception("auto-sync: initial flag read raised unexpectedly")
+
+        # Sleep first so containers that just started aren't penalized by a
+        # heartbeat happening before .git is even initialized.
+        await asyncio.sleep(interval)
+
         while True:
             try:
                 await run_one_cycle(client, home, _run_auto_sync_once)

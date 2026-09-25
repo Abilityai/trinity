@@ -2479,9 +2479,9 @@ async def _materialize_agent_files(
     # list after startup.sh's FULL git setup (gated inside the merge on
     # agent-server /health readiness, which follows the clone+checkout at
     # startup.sh:517) and before the first auto-sync cycle. Fire-and-forget so it
-    # adds no creation latency; non-fatal. Gated on the SAME ENV predicate that
-    # bakes GIT_SYNC_AUTO (NOT the DB-flag block above, which excludes ghosts),
-    # so the merge covers exactly the auto-committing population.
+    # adds no creation latency; non-fatal. Gated on the SAME predicate that
+    # bakes GIT_SYNC_AUTO and writes the DB flag above (#3010), so the merge
+    # covers exactly the auto-committing population.
     if git_service._git_auto_sync_baked(
         config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
     ):
