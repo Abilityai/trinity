@@ -738,6 +738,32 @@ The seat's active decisions ride the shared memory block into every turn
 reusable and `cites` — the health metric — non-zero. `PortalAgentDecisions.vue` in
 Agent details. Requirement §5.37 of `core-agent.md`; flow in `workspace-seat-decisions.md`.
 
+## Suggestions — what you can do with this agent, and what is waiting (ent#465)
+
+`client_portal/suggestions/` (router → service → db, the `work/` shape) answers
+`GET /api/enterprise/client-portal/agents/{name}/suggestions` for ONE viewer and
+ONE agent. `service.build` is pure over an injected `now`: signals in (my pending
+asks, my seat's decisions past `review_by`, the agent's schedules + one windowed
+query of recent runs, overdue reminders, my last Workspace message, the playbooks
+I have started, the exposed playbooks from the ONE briefing path), ranked
+`(Suggestion, fingerprint)` pairs out. **Door, per class:** the router 404s a
+portal token before any read (ent#78 auth-path invariant); `configure` classes
+reach only owner or admin — `PortalPrincipal.is_admin` exists for this ONE
+decision (role `admin` AND scope in `ADMIN_GATE_SCOPES`); everywhere else a
+non-owner admin stays a viewer (ent#358). **Fingerprint = the identity of the
+state, never a count** (the first failure of a streak, the set of held schedules),
+so a dismissal outlives more of the same and ends when the state changes. The
+feedback write (`POST …/suggestions/feedback`, key in the body) recomputes and 404s
+a key not currently emitted — writes are bounded to real items and the fingerprint
+is the server's. `workspace_suggestion_feedback` is named generically with a
+`surface` column so the post-action next-step tier (design-system p27) shares one
+dismissal model; CASCADE on the agent. The briefing is fetched only when the agent
+can answer (#2196 availability first) and cached 60 s. Frontend:
+`PortalSuggestions.vue` in the Info tab (full) and on the empty chat (compact, top
+3, no chrome when empty); the shell loads the slice for the active 1:1 agent so
+Info's rail dot (`updated` + a `note`, "2 suggestions") lights mid-conversation.
+Requirement §5.39 of `core-agent.md`; flow in `workspace-suggestions.md`.
+
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 
 Clicking an agent opens the **conversation** you were last in. `/workspace/a/:agentName`
@@ -955,11 +981,13 @@ exactly ONE participant, never "at least one". Two properties are load-bearing:
   leave N−1 in a **permanent loading skeleton**. Grouping is unblocked by keying that store
   per agent — a store change, not a rail change.
 
-Info is the registry's first **static** tab: `signal: RAIL_SIGNAL_NONE` and `empty: null`,
-declared rather than filled, because an agent always has a name, a health state and a chat
-list (no empty state to teach) and nothing writes an `info` signal (no dot that can light).
-`signalFor` already answers `emptySignal()` for an unmentioned tab, so the static form needs
-no read-side special case. It is also absent from `feedsFor` by design — its body owns its
+Info declares `empty: null` — an agent always has a name, a health state and a chat list, so
+there is no empty state to teach. It shipped as the registry's first **static** tab
+(`signal: RAIL_SIGNAL_NONE`, ent#547); **ent#465 amended that**: Info now carries
+`RAIL_SIGNAL_UPDATED`, and the shell writes an `info` entry — with a `note`, "N suggestions",
+that the tooltip and mobile strip read instead of "updated" — while suggestions are waiting
+in it. A signalling tab without an empty state is therefore a legal registry shape;
+`RAIL_SIGNAL_NONE` stays for a tab with neither. It is also absent from `feedsFor` by design — its body owns its
 own two reads, the one docked tab not fed by the shell. Both `<PortalRail>` mounts (the
 column and the mobile sheet) receive `#tab-info`; one alone leaves the phone on the generic
 empty state. Mobile is a **gain**: the old panel was `hidden sm:flex`, so the header button

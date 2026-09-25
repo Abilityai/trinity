@@ -3416,3 +3416,72 @@ to localStorage in the clear.
   the real chat and headless paths), `test_2958_chat_compact_metadata.py`,
   `test_2958_session_cleanup_chat_marker.py`, `test_2958_marker_path_parity.py`,
   `test_2610_resume_surface_parity.py`, `src/mcp-server/src/tools/executions.compact.test.ts`.
+
+### 5.39 Workspace — suggestions: what you can do with this agent, and what is waiting (trinity-enterprise#465)
+- **Status**: 🚧 In progress
+- **Requirement ID**: WORKSPACE_SUGGESTIONS
+- **GitHub Issue**: abilityai/trinity-enterprise#465 (1.0 story step 3, #649)
+- **Description**: A platform user who opens an agent in the Workspace sees a short list of
+  suggestions computed for **that user and that agent** — never a list identical for every
+  user. Each is an actionable object, not advice: **Accept** or **Dismiss**, both recorded.
+  Every item displays the signal it came from so the claim can be checked. When nothing
+  crosses a threshold the surface says so and is never padded to a fixed count.
+- **Two kinds (decision 15, option 1 — the engine-bay ruling)**: `invoke` items act inside
+  the Workspace — Accept **prefills** the composer (`/<playbook> `) or opens the section the
+  item names; nothing is ever sent on the person's behalf (the ent#138 prefill rule).
+  `configure` items (a schedule's health, autonomy) are read-only awareness whose Accept is a
+  **deep link** to the operator agent page (`/agents/<name>?tab=schedules`). Building agents
+  stays operator-side (§5.11 "it reports; it does not configure").
+- **Door, declared per class**: every v1 class is behind the **platform-authenticated door**
+  (ent#357). A verified-email portal token gets a uniform 404 on the read and the feedback
+  write — usage- and schedule-derived data must be unreachable from the external projection
+  (ent#78 auth-path invariant). `configure` classes additionally require **owner or admin**,
+  the same audience that may enable/disable a schedule (`OwnedAgent`). The Workspace
+  principal carries `is_admin` for this one decision only; everywhere else a non-owner admin
+  stays a viewer (ent#358).
+- **v1 classes** (order = display priority; at most 5 shown, `total` returned; UTC):
+  | Class | Kind | Emitted when | Signal shown |
+  |---|---|---|---|
+  | `asks` | invoke | ≥1 pending ask addressed to me on this agent | "N questions waiting on you" |
+  | `decisions_due` | invoke | ≥1 decision on my seat past `review_by` | "N decisions past their review date" |
+  | `schedule_failing:<id>` | configure | last ≥3 terminal runs failed (skipped/cancelled neither count nor break the streak) | "Failed K runs in a row, last <date>" |
+  | `autonomy_held` | configure | autonomy off and ≥1 enabled schedule or a pending reminder past `fire_at` | "N schedules won't run — autonomy is off" |
+  | `schedule_never_fired:<id>` | configure | enabled, autonomy on, never run, and the cron's first expected fire after creation is >1h past | "Enabled since <date>, has never run" |
+  | `schedule_disabled:<id>` | configure | disabled ≥7 days and it had run before | "Disabled since <date> — it used to run" |
+  | `dormant` | invoke | I have chatted here and my last message is ≥14 days old | "Your last conversation was <date>" |
+  | `unused_playbook:<name>` | invoke | an exposed playbook I have not started, at most 3 | "You haven't run /name yet" |
+  One agent-level `autonomy_held` item replaces per-schedule "held" items: autonomy is off by
+  default, so per-schedule items would fill every slot, and no timestamp records when it was
+  turned off — a "held N days" figure would be invented. Autonomy off suppresses
+  `schedule_never_fired`.
+- **Usage dimension (recorded decision)**: per-user — yes, keyed by the viewer's email.
+  Per-skill — **explicit slash invocations only**: `/<name>` at the start of the person's own
+  Workspace messages or of executions attributed to them (`source_user_email`), and a
+  playbook an enabled schedule already runs is never offered. A plain-language request for
+  the same work is not detected, which is why the copy says "haven't run /name" rather than
+  "never used". Reads existing rows only — no parallel tracking store.
+- **Capabilities**: the same briefing ladder as the hints and "What it can do" (ent#380) —
+  the ent#178 curated set slots into that seam when it lands. **Playbooks only**: template
+  use-case text is not offered, because whether someone has "used" a free-text example is
+  unverifiable. When the agent is not running or does not answer, capability items are
+  omitted and the response says capabilities are unavailable — never "nothing unused".
+  With no usage history the list is capability-only and says so.
+- **Dismissal**: per user + agent + suggestion, persisted. A dismissed item stays hidden
+  while its **state fingerprint** is unchanged — the identity of the state, never a count
+  (the first failure of a streak, the set of held schedules, the set of waiting asks), so a
+  failing schedule does not return with every additional failure but does return when a new
+  streak starts. Accept is recorded (usefulness) and does not hide an item: the signal clears
+  itself when the thing is done. Writes are bounded to items currently emitted for the
+  caller; the server computes the fingerprint.
+- **Placement**: the rail's **Info** tab carries the full list and the tab shows its count;
+  an empty chat shows the top 3 above "Things you can ask". Suggestions never arrive as
+  messages.
+- **Cost**: no LLM call. Per read: at most one bounded briefing fetch (cached 60s, skipped
+  for a stopped agent), a handful of indexed queries and one windowed executions query.
+  Rate-limited per viewer.
+- **Not in scope (follow-ups)**: a suggestion that consults another agent (2026-09-21
+  amendment → ent#698); suggestions derived from the current conversation (2026-09-22 →
+  ent#699); role, project
+  and objective-gap inputs (#500, #661, #477–#479) — each attaches as a new class without
+  changing the object; the Inbox placement (#610).
+- **Flow**: `docs/memory/feature-flows/workspace-suggestions.md`

@@ -113,6 +113,11 @@ describe('ent#474 — the tab contract', () => {
       const isStatic = tab.signal === RAIL_SIGNAL_NONE
       if (isStatic) {
         expect(tab.empty, `${tab.id}: a static tab declares no empty state`).toBeNull()
+      } else if (tab.empty === null) {
+        // ent#465: a tab whose body always renders may still signal — Info's
+        // dot says suggestions are waiting in it. It can only borrow the
+        // "updated" shape; "live" means something is running.
+        expect(tab.signal, `${tab.id}: a body-always tab signals only "updated"`).toBe(RAIL_SIGNAL_UPDATED)
       } else {
         expect([RAIL_SIGNAL_LIVE, RAIL_SIGNAL_UPDATED]).toContain(tab.signal)
         expect(typeof tab.empty.title).toBe('string')
@@ -129,7 +134,7 @@ describe('ent#474 — the tab contract', () => {
     // ent#547 — Info, the static tab. Its icon must have its OWN entry in
     // `PortalRail.vue`'s ICONS map; `iconPath` falls back to `bolt` for an
     // unknown id, so a missing entry is silent and shows Work's glyph.
-    expect(tab('info')).toMatchObject({ door: RAIL_DOORS.SOLO_AGENT, signal: RAIL_SIGNAL_NONE, icon: 'info' })
+    expect(tab('info')).toMatchObject({ door: RAIL_DOORS.SOLO_AGENT, signal: RAIL_SIGNAL_UPDATED, icon: 'info', empty: null })
     expect(src('components/portal/PortalRail.vue')).toMatch(/\n\s*info:\s*'M/)
     // Each teaches its next action (design pass, "Tab contract").
     expect(railEmptyCopy(tab('loops'), ['scout'])).toMatchObject({ title: 'No loops running', action: 'Start a loop', event: 'start-loop' })
@@ -292,6 +297,21 @@ describe('ent#474 — the collapsed signal', () => {
     expect(forClient.find((s) => s.id === 'info').shape).toBeNull()
     expect(hasLiveSignal({ work: { live: 1 } }, visibleTabs(RAIL_TABS, CLIENT))).toBe(false)
     expect(hasLiveSignal({ work: { live: 1 } }, visibleTabs(RAIL_TABS, PLATFORM))).toBe(true)
+  })
+
+  it('Info lights the updated dot for waiting suggestions and says how many (ent#465)', () => {
+    const visible = visibleTabs(ALL_TABS, PLATFORM)
+    const signals = { info: { updated: true, note: '2 suggestions' } }
+    const info = collapsedSignals(signals, visible).find((s) => s.id === 'info')
+    expect(info.shape).toBe(RAIL_SIGNAL_UPDATED)
+    expect(info.title).toBe('Info · 2 suggestions')
+    expect(stripSegments(signals, visible)).toEqual([
+      { id: 'info', shape: RAIL_SIGNAL_UPDATED, text: 'Info · 2 suggestions' },
+    ])
+    // Without a note the words are the rail's usual ones.
+    expect(railTitle(tab('canvas'), { live: 0, updated: true, agents: [] })).toBe('Canvas · updated')
+    // A signal carries `note` only when one was written.
+    expect(signalFor({ info: { updated: true } }, 'info')).toEqual({ live: 0, updated: true, agents: [] })
   })
 
   it('the mobile strip says the same thing in words, and names the tabs when there is nothing to say', () => {
@@ -844,7 +864,14 @@ describe('ent#475 — the shell owns the feeds (source guards)', () => {
     // ent#525: the Work signal is store-derived through the owner now (the
     // emit is merged in by execution id), so the shell no longer spreads it.
     expect(call).toContain('workEmit: workSignal')
-    expect(portal).toContain('const railSignals = computed(() => ({ ...rail.signals.value }))')
+    // ent#465 adds ONE shell-owned entry, Info's suggestions dot; Work stays
+    // the owner's (no `work:` key is re-spread here).
+    const sigAt = portal.indexOf('const railSignals = computed(() => ({')
+    expect(sigAt).toBeGreaterThan(-1)
+    const sigBody = portal.slice(sigAt, portal.indexOf('}))', sigAt))
+    expect(sigBody).toContain('...rail.signals.value,')
+    expect(sigBody).toContain('{ info: infoSignal.value }')
+    expect(sigBody).not.toMatch(/\bwork\s*:/)
   })
 
   it('feeds nothing behind a door, nothing before the stage verdict, and does not blank a room\'s first beat', () => {

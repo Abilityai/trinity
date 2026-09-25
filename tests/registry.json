@@ -3453,6 +3453,26 @@
         "scheduler"
       ],
       "description": "The scheduler's readiness gate beside the #454 pre-check: a held cron seat brief is a skipped row with the reason plus the skipped event and is never dispatched; manual, webhook and non-seat schedules are not asked; anything but an explicit fire:false fires; every backend failure shape fails open."
+      },
+      {
+      "file": "unit/test_ent465_suggestions.py",
+      "feature": "trinity-enterprise#465",
+      "added": "2026-09-24",
+      "categories": [
+        "backend",
+        "workspace"
+      ],
+      "description": "Workspace suggestions (ent#465): every rule at its boundary over an injected now (failure streak with skipped/cancelled stepped over, cron-relative never-fired, disabled-that-used-to-run, dormant, capped unused playbooks), autonomy off as ONE item that suppresses never-fired, state-identity fingerprints (no re-nag on another failure, back on a new streak), honest capabilities/basis states, the SQL over a real SQLite file (windowed runs, viewer-scoped usage, accept and dismiss side by side, evict-oldest cap), bounded feedback writes (404 for a key not emitted, 422 for an unknown class, server fingerprint), a stopped agent never calling the briefing, the platform door (portal token 404 on read and write), and is_admin by role AND allowlisted scope."
+    },
+    {
+      "file": "journeys/test_j13_suggestions_journey.py",
+      "feature": "abilityai/trinity-enterprise#465",
+      "added": "2026-09-24",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J13 (suggestions): my agent tells me what I can do with it and what is waiting on me, and only things that are true. A strict=True xfail skeleton — the rules, SQL and doors are unit-proven and the verbs mount-proven; the walk needs a real failing schedule, a shared platform user and a magic-link client on one instance."
     }
   ]
 }

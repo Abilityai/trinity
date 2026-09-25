@@ -224,3 +224,22 @@ journeys:
 # J03's first half. Recording it here rather than minting a J11 keeps the
 # catalog a list of PROMISES; "an agent can be restarted" is a step inside
 # "I get a useful answer", not something a user asks for on its own.
+
+  - id: J13
+    # ent#465 — the issue asked for "J11-recommended-actions"; J11 was taken by
+    # #2565's brief delivery and J12 by the declared metrics, so this is J13.
+    # `built: false`: the unit island proves the rules, the SQL and the doors
+    # (test_ent465_suggestions.py) and the mount proves the verbs
+    # (portalSuggestions.spec.js); neither is a person opening a real agent
+    # whose schedule really failed and seeing it named.
+    issue: [465]
+    promise: "My agent tells me what I can do with it and what is waiting on me — and only things that are true."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/journeys/test_j13_suggestions_journey.py
+    built: false
+    owner: trinity
+    # No catalog invariant covers "a surface computed per viewer stays behind
+    # the platform door" yet — an empty list, not an invented id.
+    invariants: []

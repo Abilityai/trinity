@@ -34,6 +34,11 @@
          rather than adding a second keeps the raw-gray count flat. -->
     <p v-else class="text-sm text-gray-400">{{ fallbackLine }}</p>
 
+    <!-- ent#465: the shell's per-viewer suggestions (top 3) sit between the
+         agent's identity and its hints. A slot, so this component stays the
+         briefing and the suggestions keep their own store, verbs and door. -->
+    <slot name="before-hints" />
+
     <!-- Capability hints as clickable cards (pre-fill the composer, no auto-run).
          Exposed playbooks when the operator curated a set; the template's
          "What You Can Ask" use-cases otherwise (ent#380 — backend ladder).
