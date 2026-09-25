@@ -188,32 +188,34 @@ merge_gitignore_after_clone(name)   monotonic deadline _MERGE_READY_TIMEOUT_SECO
 └──────────────────────────────┘
 ```
 
-- Loop is guarded by `should_run_auto_sync()` (`GIT_SYNC_AUTO=true` env).
-- `containers_run` env-var wiring in
-  `services/agent_service/crud.py` sets `GIT_SYNC_AUTO=true` only for
-  non-source-mode GitHub-template agents (auto-pushing to `main` would
-  clobber protected branches).
-- **On every container rebuild (ent#109)** the flag is re-derived by
-  `lifecycle.py::_apply_git_env_from_db` as **`auto_sync_enabled` OR the baked
-  env**, not from the column alone. The two creation writers disagree today:
-  the DB opt-in in `crud.py::_materialize_agent_files` carries
-  `and not config.ephemeral` inside a swallowing `try/except` while
-  `_apply_github_env` does not, and the column defaults to `0` — so
-  env-`true`/DB-`0` is reachable from one transient DB hiccup at creation and
-  permanently for ghosts, and DB-only derivation would **silently stop
-  auto-push** for that slice of the fleet (no error, just a stale
-  `agent_sync_state`). The helper **derives only — it never writes the column
-  back**: `PUT /{agent}/git/auto-sync` writes the row and nothing else while
-  the agent gates on container env, so "baked `true` / DB `0`" is *also*
-  exactly what an owner's explicit disable looks like. A backfill would
-  silently re-enable it, erase the only record of that intent, and — since
-  `PUT .../auto-sync` is `OwnedAgentByName` while `POST .../start` (which
-  triggers the recreate) is `AuthorizedAgentByName` — let a shared non-owner,
-  or an agent-scoped key resolving to its owner with the owner's role
-  (trinity-ops-agent#232), flip an owner-only flag. The disagreement is
-  logged instead. Making
-  `PUT /git/auto-sync` authoritative over the baked env is a tracked
-  follow-up.
+- **The toggle is authoritative and live (#3010).** The loop starts whenever
+  the agent can ask the platform (`TRINITY_BACKEND_URL` + its own
+  `TRINITY_MCP_API_KEY`) or was baked with `GIT_SYNC_AUTO=true`, and **every
+  cycle** reads the owner's flag through `GET /api/agents/{name}/git/auto-sync`
+  (`auto_sync.resolve_auto_sync_enabled`). OFF skips that cycle, ON runs it —
+  a `PUT .../git/auto-sync` lands within one interval, no recreate. 404 "Git
+  not configured" → off; the platform unreachable, a 5xx, an auth refusal or a
+  uniform 404 → the `GIT_SYNC_AUTO` env, which is the last value the platform
+  handed the container. The agent-side `GET /api/git/status` reports the value
+  the loop is running with as `auto_sync_enabled`.
+- `auto_sync_enabled` in `agent_git_config` is the **one writer**. Creation
+  (`crud.py::_materialize_agent_files`) sets it from the same
+  `_git_auto_sync_baked` predicate that bakes `GIT_SYNC_AUTO` — ghosts
+  included — and on every container rebuild (ent#109)
+  `lifecycle.py::_apply_git_env_from_db` derives `GIT_SYNC_AUTO` from the
+  flag **alone**. The old `DB flag OR baked env` meant an owner's OFF never
+  stuck (creation set both; the PUT cleared only the DB; the OR re-armed it
+  on every recreate). Still derive-only, never written back, so the recreate
+  trigger (`POST .../start`, `AuthorizedAgentByName`) cannot flip the
+  owner-only flag (`PUT .../auto-sync`, `OwnedAgentByName`).
+- **One-shot backfill** (`auto_sync_enabled_backfill` + Alembic `0075`):
+  live non-source-mode ghosts — the env-true/DB-0 slice the DB can
+  identify — get the flag set so they keep auto-pushing. Agents bound later
+  through `POST /git/initialize` are also `source_mode = 0` but never baked
+  the env, so a wider backfill would arm pushes they never had; a non-ghost
+  whose flag is 0 now stays off (an owner's earlier OFF finally takes effect).
+- Settings → **Git sync** (`GitSyncSettingsPanel.vue`) carries both toggles
+  (auto-sync and pause-schedules-while-failing).
 - Loop swallows every exception so a single bad tick can't kill the
   heartbeat.
 - **#1595:** the cycle runs in a worker thread (`asyncio.to_thread`) so a
@@ -491,7 +493,7 @@ the data-loss setup.
 | `services/sync_health_service.py` | Background poller + operator-queue emitter. #2742: `synchealth:leader` lease (fail-open, compare-and-delete release), the `SYNC_HEALTH_POLL_INTERVAL_SECONDS` knob, and `_coerce_lock_recovery` / `_coerce_lock_stuck` + the one-shot recovery WARNING |
 | `services/fleet_audit_service.py` | `build_fleet_sync_audit()` aggregation |
 | `services/agent_service/crud.py` | Sets `GIT_SYNC_AUTO` env + `auto_sync_enabled=1` for non-source-mode agents; `_apply_github_env` gates on `git_service._git_auto_sync_baked` (#2069, single owner of the bake predicate); `_materialize_agent_files` fires `spawn_gitignore_merge_after_clone` on the same predicate (#2069 creation seed) |
-| `services/agent_service/lifecycle.py` | `_apply_git_env_from_db` re-derives `GIT_SYNC_AUTO` on every container rebuild as `auto_sync_enabled` OR the baked env — derive-only, never writing the column back (ent#109); `start_agent_internal` fires `spawn_gitignore_merge_after_clone` on the DB `auto_sync_enabled` flag (#2069 T1 fleet remediation) |
+| `services/agent_service/lifecycle.py` | `_apply_git_env_from_db` re-derives `GIT_SYNC_AUTO` on every container rebuild from `auto_sync_enabled` alone (#3010) — derive-only, never writing the column back (ent#109); `start_agent_internal` fires `spawn_gitignore_merge_after_clone` on the DB `auto_sync_enabled` flag (#2069 T1 fleet remediation) |
 | `services/git_service.py` | `merge_gitignore_after_clone` (readiness-gated poll-then-merge, reusing `_build_gitignore_merge_command`), `spawn_gitignore_merge_after_clone` (fire-and-forget, Semaphore-capped), `_git_auto_sync_baked` (the `GIT_SYNC_AUTO`-bake predicate) — #2069 creation-time seed |
 | `services/git_service.py` | `_GITIGNORE_PROTECTED` + the four `_GITIGNORE_BLOCK_*`/`_GITIGNORE_FLOOR_*` markers, the rebuilt `_build_gitignore_merge_command`, the reporting probes on `_build_rm_cached_ignored_command`, `GitignoreSweep`/`_parse_gitignore_sweep`/`_shadowed_negations`/`_coerce_sweep`/`_with_sweep`, `_emit_gitignore_untracked_alert`, `_augment_commit_message` — #2529 precedence + honest sweep reporting |
 | `db_models.py`, `routers/git.py`, `src/mcp-server/src/tools/git.ts`, `src/frontend/src/composables/useGitSync.js` | the three sweep fields on `GitSyncResult` and their five surfaces (#2529) |
