@@ -892,11 +892,21 @@ async def _apply_fork_to_own(
 
 
 async def _validate_github_access(
-    config: AgentConfig, github_repo_for_agent: str, github_pat_for_agent: Optional[str]
+    config: AgentConfig,
+    github_repo_for_agent: str,
+    github_pat_for_agent: Optional[str],
+    *,
+    will_push: bool = False,
 ) -> None:
     """#218: validate PAT access to the repo (and branch) before container create,
     so a bad token fails loud here instead of silently in startup.sh. Transient
     network errors are logged and NOT fatal (matches the monolith).
+
+    #2107: when the agent will auto-push (``will_push`` — the
+    ``_git_auto_sync_baked`` predicate), READ access is not enough. A token that
+    can clone but not push used to pass every check here and then fail each
+    15-minute sync for the agent's whole life; ``probe_push_access`` asks the
+    receive-pack side, and a refusal fails creation with a 400 naming the fix.
 
     ent#123 tokenless path: no PAT ⇒ probe over the git transport instead of
     REST (`probe_anonymous_repo_access` — same transport as the container's
@@ -979,6 +989,9 @@ async def _validate_github_access(
                     raise
                 except Exception as e:
                     logger.warning(f"Could not validate branch '{config.source_branch}': {e}")
+
+            if will_push:
+                await _validate_push_access(github_repo_for_agent, github_pat_for_agent)
     except HTTPException:
         raise
     except GitHubError as e:
@@ -989,6 +1002,33 @@ async def _validate_github_access(
     except Exception as e:
         # Log but don't block creation for transient network errors
         logger.warning(f"GitHub repo validation failed (non-blocking): {e}")
+
+
+async def _validate_push_access(github_repo: str, github_pat: str) -> None:
+    """#2107: refuse to create an auto-pushing agent whose token cannot push.
+    A transient probe failure is logged and does not block (the PAT path's
+    existing policy): it says nothing about the token."""
+    outcome, detail = await git_service.probe_push_access(github_repo, github_pat)
+    if outcome == "denied":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"The GitHub token can read '{github_repo}' but is not allowed to "
+                f"push to it ({detail or 'push refused'}). This agent saves its "
+                f"work to that repository automatically, so every sync would "
+                f"fail. Give the token write access — for a fine-grained token, "
+                f"Repository permissions → Contents: Read and write on "
+                f"'{github_repo}'; for a classic token, the `repo` scope — or "
+                f"create the agent in source mode (pull only)."
+            ),
+        )
+    if outcome != "ok":
+        logger.warning(
+            "[#2107] could not verify push access to %s (%s); creating anyway",
+            github_repo, outcome,
+        )
+    else:
+        logger.info("[#2107] validated push access to %s", github_repo)
 
 
 async def _reserve_git_instance(
@@ -1425,7 +1465,12 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             # Validate PAT has access to the repository before creating container
             # This prevents silent clone failures in startup.sh (#218)
             await _validate_github_access(
-                config, tr.github_repo_for_agent, tr.github_pat_for_agent
+                config, tr.github_repo_for_agent, tr.github_pat_for_agent,
+                # #2107: the agents that will auto-push must be able to push.
+                will_push=git_service._git_auto_sync_baked(
+                    config, tr.github_repo_for_agent,
+                    tr.github_pat_for_agent, tr.fork_upstream_repo,
+                ),
             )
             tr.git_instance_id, tr.git_working_branch = await _reserve_git_instance(
                 config, current_user, tr.github_repo_for_agent
