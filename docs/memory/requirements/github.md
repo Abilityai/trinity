@@ -814,3 +814,38 @@
 - **GitHub Issue**: abilityai/trinity-enterprise#615
 
 ---
+
+### 11.17 An Agent Created as an Agent Owns Its Repository (trinity-enterprise#705)
+
+- **Status**: 🚧 In review. Merges only after #3016, #3017 and #3018, the three named blockers.
+- **Ruling (2026-09-24):** *the repository is the agent; the container is a cache of it.*
+  The 2026-09-24 fleet audit found every git-bound agent with auto-sync off and
+  work on container disks that existed nowhere else.
+- **Create-time `kind`:** `agent` (the default) or `deployment`, on
+  `POST /api/agents` and MCP `create_agent`. The UI half of the choice is
+  trinity-enterprise#704. An **explicit `source_mode` always wins**, so every
+  existing caller keeps its behaviour.
+- **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
+  `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
+  them **when its token can push to that repo** (the #2107 receive-pack probe).
+- **Stays pull-only, with the reason on the create response's `git_mode`:**
+  - a deployment
+  - an ephemeral ghost (ent#69)
+  - no token (ent#123; not a 400)
+  - a refused probe (a template someone else owns — never branches pushed
+    into it, the ent#162 class; the reason points to fork-to-own)
+  - an unverifiable probe
+- **Fork-to-own** gets the trio (it owns its fork). **Cornelius** is pinned
+  pull-only: it is built from a shared public upstream.
+- **Not changed:**
+  - existing agents (the default applies to new creates; migration is per
+    agent and explicit — runbook `docs/migrations/AGENT_WORKING_BRANCH_DEFAULT_2026-09.md`)
+  - freeze paging (the `sync_failing` item)
+  - the pull cycle — on when trinity-enterprise#703 lands
+  - divergence-age freeze semantics — trinity-enterprise#706
+- **Edition**: open-core (operator ruling 2026-09-25): defaults on the existing
+  open-source create and sync paths.
+- **Flow**: `docs/memory/feature-flows/github-sync.md`
+- **GitHub Issue**: abilityai/trinity-enterprise#705
+
+---

@@ -4,10 +4,31 @@
 
 GitHub-native agents can synchronize with GitHub repositories in two modes:
 
-### Source Mode (Default - Recommended)
+### Which mode a new agent gets (trinity-enterprise#705)
+
+`POST /api/agents` / MCP `create_agent` take `kind`: `agent` (default) or
+`deployment`. An explicit `source_mode` always wins. Otherwise
+`crud.py::_apply_agent_kind_default` decides before validation and branch
+reservation:
+
+| Case | Mode | Why |
+|---|---|---|
+| `kind=agent`, token can push (the #2107 probe says `ok`) | **working branch** + auto-sync + freeze-on-failure | the repository is the agent |
+| `kind=agent`, probe refused | source (pull-only) | a template someone else owns never receives an agent's branches; fork-to-own is the durable path |
+| `kind=agent`, probe unverifiable | source | fail safe |
+| `kind=agent`, no token | source | nothing pushes anonymously (ent#123) |
+| ephemeral ghost | source | its workspace is throwaway (ent#69) |
+| `kind=deployment` | source | a deployment of a codebase |
+| fork-to-own | fork's own trio | it owns its fork |
+
+The decision is logged (`[ent#705] git mode for …`) and returned as
+`git_mode` on the create response only, never on the `/ws` broadcast (#918).
+Cornelius is pinned `kind=deployment`: it is built from a shared public upstream.
+
+### Source Mode
 **Unidirectional pull-only sync**: Agent tracks a source branch (default: `main`) and can pull updates on demand. Changes made in the agent are local only and not pushed back. This is ideal for agents developed locally and deployed to Trinity. **Public** templates need no GitHub PAT at all — see [Tokenless (Anonymous) Clone of Public Templates](#tokenless-anonymous-clone-of-public-templates-ent123) (ent#123).
 
-### Working Branch Mode (Legacy)
+### Working Branch Mode
 **Bidirectional sync**: Agent gets a unique working branch (`trinity/{agent-name}/{instance-id}`) and can push changes back to GitHub. This is the original Phase 7 implementation, now available as an opt-in feature.
 
 ## User Stories

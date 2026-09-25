@@ -260,6 +260,16 @@ export function createAgentTools(
             "Branch to track for this agent. Default: 'main'. " +
             "Can also be specified in template URL as 'github:owner/repo@branch'."
           ),
+        kind: z
+          .enum(["agent", "deployment"])
+          .optional()
+          .describe(
+            "What is being created from a 'github:owner/repo' template (trinity-enterprise#705). " +
+            "'agent' (default when omitted): the repository IS the agent — it gets a working branch it " +
+            "alone writes, auto-sync on and schedules paused while sync fails, but only when its GitHub " +
+            "token can push to that repo; otherwise it is created pull-only and the response's git_mode " +
+            "says why. 'deployment': a deployment of a codebase — pull-only, no auto-push."
+          ),
         import_intent: z
           .enum(["copy", "clone"])
           .optional()
@@ -310,6 +320,7 @@ export function createAgentTools(
           mcp_servers?: string[];
           custom_instructions?: string;
           source_branch?: string;
+          kind?: "agent" | "deployment";
           import_intent?: "copy" | "clone";
           ephemeral?: { max_executions?: number; ttl_seconds?: number };
         },
@@ -328,6 +339,7 @@ export function createAgentTools(
           mcp_servers: args.mcp_servers,
           custom_instructions: args.custom_instructions,
           source_branch: args.source_branch,
+          kind: args.kind,
           import_intent: args.import_intent,
           ephemeral: args.ephemeral,
         };
