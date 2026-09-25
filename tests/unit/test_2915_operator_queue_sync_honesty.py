@@ -99,7 +99,7 @@ def _fake_db(open_rows=(), terminal=None, responded=(), terminal_items=(), pendi
     db.get_operator_queue_terminal_for_agent.return_value = [dict(r) for r in terminal_items]
     db.get_setting_value.return_value = "24"
     db.create_operator_queue_item.return_value = "uuid-new"
-    db.mark_operator_queue_expired.return_value = 0
+    db.mark_operator_queue_expired.return_value = []
     db.mark_operator_queue_undelivered_for_stopped_agents.return_value = []
     return db
 
@@ -313,6 +313,11 @@ class TestPollCycle:
     def _run_cycle(self, monkeypatch, states, db=None):
         db = db or _fake_db()
         monkeypatch.setattr(oqs, "db", db)
+        # trinity-enterprise#611: expiry goes through the ask sink, whose own `db`
+        # is the real one — stubbed to the fake so the cycle stays hermetic.
+        from types import SimpleNamespace
+        monkeypatch.setattr(oqs, "ask_service", SimpleNamespace(
+            expire=lambda: SimpleNamespace(rows=list(db.mark_operator_queue_expired() or []))))
         import services.docker_service as ds
         monkeypatch.setattr(ds, "agent_container_states", lambda: states)
         svc = OperatorQueueSyncService()
@@ -548,7 +553,7 @@ class TestAccessorsOnAMigratedDb:
         if status == "responded":
             real_db.respond_to_operator_queue_item(uuid, "a", None, None, "op@example.com")
         elif status == "cancelled":
-            real_db.cancel_operator_queue_item(uuid)
+            real_db.cancel_operator_queue_item(uuid, disposed_by_email="op@example.com")
         return uuid
 
     def test_set_sync_state_is_an_edge_and_confirmed_stamps_last_confirmed(self, real_db):
@@ -730,7 +735,10 @@ class TestRefusal:
             recorded["response"] = response
             return {**item, "status": "responded", "response": response}
         monkeypatch.setattr(r.db, "respond_to_operator_queue_item", _respond)
-        monkeypatch.setattr(r.operator_resume_service, "spawn_resume_dispatch", lambda *a, **k: None)
+        # trinity-enterprise#611: the resume is spawned by the ask sink now, which
+        # calls the real module's attribute — patch it there.
+        import services.operator_resume_service as ors
+        monkeypatch.setattr(ors, "spawn_resume_dispatch", lambda *a, **k: None)
         monkeypatch.setattr(r, "_websocket_manager", None)
         return TestClient(app, raise_server_exceptions=True), recorded
 
@@ -1041,7 +1049,10 @@ class TestRound2AcknowledgementReachesTheRow:
             recorded.update(kw)
             return {**item, "status": "responded", "response": response}
         monkeypatch.setattr(r.db, "respond_to_operator_queue_item", _respond)
-        monkeypatch.setattr(r.operator_resume_service, "spawn_resume_dispatch", lambda *a, **k: None)
+        # trinity-enterprise#611: the resume is spawned by the ask sink now, which
+        # calls the real module's attribute — patch it there.
+        import services.operator_resume_service as ors
+        monkeypatch.setattr(ors, "spawn_resume_dispatch", lambda *a, **k: None)
         monkeypatch.setattr(r, "_websocket_manager", None)
         c = TestClient(app, raise_server_exceptions=True)
         resp = c.post("/api/operator-queue/op-2/respond",

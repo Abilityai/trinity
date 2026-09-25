@@ -27,7 +27,7 @@ from typing import Optional
 
 from database import db
 from redis_breaker_util import get_breaker_redis
-from services import rate_limiter
+from services import ask_service, rate_limiter
 from services.operator_queue_choices import OPTIONS_DROPPED_MARKER
 from services.agent_client import AgentClient
 from utils.helpers import iso_cutoff, parse_iso_timestamp, to_utc_iso, utc_now_iso
@@ -1083,13 +1083,22 @@ class OperatorQueueSyncService:
 
         from services.docker_service import agent_container_states
 
+        # Reset BEFORE expiry (trinity-enterprise#611): an expiry is a change, and
+        # the reset used to sit below it, so an expired ask reached the UI only on
+        # its 15 s poll.
+        self._changed_this_cycle = False
+
         # Expire items past their deadline — BEFORE the running-agents gate
         # (#2915): the early return below used to sit above this, so an
-        # all-stopped fleet never expired anything.
+        # all-stopped fleet never expired anything. Through the ask sink
+        # (trinity-enterprise#611): the ledger (`disposed_by = 'timeout'`), one
+        # audit row per ask, and the wake for each filer; the sink sends no
+        # trigger of its own — this cycle's ONE trigger announces it.
         try:
-            expired_count = db.mark_operator_queue_expired()
-            if expired_count > 0:
-                logger.info(f"Expired {expired_count} operator queue items")
+            expired = ask_service.expire().rows
+            if expired:
+                self._changed_this_cycle = True
+                logger.info(f"Expired {len(expired)} operator queue items")
         except Exception as e:
             logger.error(f"Operator queue expiry failed: {e}")
 
@@ -1104,11 +1113,14 @@ class OperatorQueueSyncService:
             logger.debug(f"Could not read agent container states: {e}")
             states = None
         if states is None:
+            # Nothing is swept or synced — but an expiry that already happened
+            # is still announced.
+            if self._changed_this_cycle:
+                await self._broadcast_sync()
             return
 
         running_agents = sorted(name for name, state in states.items() if state == "running")
         now = utc_now_iso()
-        self._changed_this_cycle = False
 
         # Sweep: every open row of an agent that is NOT running is
         # `unconfirmed:agent_not_running`. Edge-triggered — at steady state the
@@ -1512,7 +1524,12 @@ class OperatorQueueSyncService:
             # clamp/create failure is quarantined by #1525 rather than hot-looping.
             try:
                 clamped = _clamp_ingested_item(req, agent_name)
-                new_id = db.create_operator_queue_item(agent_name, clamped)
+                # trinity-enterprise#611: provenance from what the POLLER knows,
+                # keyword-only — never from the entry, which could claim any
+                # channel it likes.
+                new_id = db.create_operator_queue_item(
+                    agent_name, clamped, channel="file", raised_by="agent",
+                )
                 admitted += 1
                 new_items.append(clamped)
                 self._create_failures.pop(fail_key, None)  # recovered — clear count

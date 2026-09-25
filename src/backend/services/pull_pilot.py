@@ -78,6 +78,11 @@ def is_pull_pilot_agent(agent_name: str) -> bool:
 # elsewhere, which the adapter does by waiting out the queue and rebuilding the
 # result from the row.
 #
+# ``operator_ending`` (trinity-enterprise#611) is the same wake as
+# ``operator_response`` for an ask that was cancelled or expired instead of
+# answered: dispatched from ``operator_resume_service`` through the same
+# adapter, for the same receipt.
+#
 # ``retry`` (#2845) is RETRY-001's second attempt at a failed scheduler run. The
 # scheduler creates the row and dispatches it through the SAME async-poll path as
 # the cron fire (``_execute_retry`` → ``_call_backend_execute_task``), so it is
@@ -98,7 +103,7 @@ def is_pull_pilot_agent(agent_name: str) -> bool:
 # still drops it here, and widening reach is a deliberate edit to this set.
 PULL_REACHABLE_TRIGGERS = frozenset(
     {"agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
-     "a2a", "operator_response", "retry"}
+     "a2a", "operator_response", "operator_ending", "retry"}
 )
 
 

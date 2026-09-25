@@ -257,3 +257,109 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
     await client.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// trinity-enterprise#611 — get_my_ask reads as the KEY's own agent, over the
+// real transport. The stub backend answers the key validation by bearer (an
+// agent key, a person's user-scoped key, the orchestrator's system key) and
+// RECORDS every readback request: identity must come from the key, and a key
+// with no agent identity must never reach the backend.
+// ---------------------------------------------------------------------------
+
+describe("trinity-enterprise#611 get_my_ask acts as the key's agent (real transport)", () => {
+  let backend: Server;
+  let mcpServer: { stop: () => Promise<void> };
+  let mcpUrl: URL;
+  const readbacks: string[] = [];
+
+  const KEYS: Record<string, { scope: string; agent_name?: string }> = {
+    "trinity_mcp_611_agent": { scope: "agent", agent_name: CALLER },
+    "trinity_mcp_611_user": { scope: "user" },
+    "trinity_mcp_611_system": { scope: "system", agent_name: "trinity-system" },
+  };
+
+  before(async () => {
+    backend = createHttpServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        const send = (status: number, payload: unknown) => {
+          res.writeHead(status, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(payload));
+        };
+        const url = req.url ?? "";
+        if (url === "/api/mcp/validate") {
+          const key = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
+          const row = KEYS[key];
+          if (!row) return send(401, { valid: false });
+          return send(200, {
+            valid: true, key_id: `id-${key}`, user_id: "owner",
+            user_email: "owner@example.com", key_name: key, ...row,
+          });
+        }
+        const readback = url.match(/^\/api\/agents\/([^/]+)\/operator-queue\/([^/]+)$/);
+        if (readback && req.method === "GET") {
+          readbacks.push(`${readback[1]}/${readback[2]}`);
+          return send(200, { request_id: readback[2], agent_name: readback[1], disposition: "expired" });
+        }
+        return send(200, {});
+      });
+    });
+    await new Promise<void>((r) => backend.listen(0, "127.0.0.1", () => r()));
+    const backendPort = (backend.address() as AddressInfo).port;
+    const probe = createHttpServer();
+    await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()));
+    const mcpPort = (probe.address() as AddressInfo).port;
+    await new Promise<void>((r) => probe.close(() => r()));
+    const { server } = await createServer({
+      trinityApiUrl: `http://127.0.0.1:${backendPort}`,
+      requireApiKey: true,
+      port: mcpPort,
+    });
+    await server.start({ transportType: "httpStream", httpStream: { port: mcpPort, host: "127.0.0.1" } });
+    mcpServer = server;
+    mcpUrl = new URL(`http://127.0.0.1:${mcpPort}/mcp`);
+  });
+
+  after(async () => {
+    await mcpServer?.stop();
+    await new Promise<void>((r) => backend.close(() => r()));
+  });
+
+  const callAs = async (key: string, args: Record<string, unknown>) => {
+    const client = new Client({ name: key, version: "1.0.0" });
+    const transport = new StreamableHTTPClientTransport(mcpUrl, {
+      requestInit: { headers: { Authorization: `Bearer ${key}` } },
+    });
+    await client.connect(transport);
+    const r: any = await client.callTool({ name: "get_my_ask", arguments: args });
+    await client.close();
+    return JSON.parse(r.content.map((c: any) => c.text).join("\n"));
+  };
+
+  it("an agent key reads its own ask — the backend is asked about the key's agent, and no other", async () => {
+    readbacks.length = 0;
+    const out = await callAs("trinity_mcp_611_agent", { request_id: "deploy-42" });
+    assert.equal(out.disposition, "expired");
+    assert.deepEqual(readbacks, [`${CALLER}/deploy-42`]);
+  });
+
+  it("an agent cannot aim it at a sibling — an agent_name argument is not part of the tool", async () => {
+    readbacks.length = 0;
+    await callAs("trinity_mcp_611_agent", { request_id: "deploy-42", agent_name: SIBLING }).catch(() => undefined);
+    assert.ok(!readbacks.some((r) => r.startsWith(`${SIBLING}/`)), `the backend was asked about ${SIBLING}: ${readbacks}`);
+  });
+
+  it("a person's user-scoped key is refused before the backend is asked anything", async () => {
+    readbacks.length = 0;
+    const out = await callAs("trinity_mcp_611_user", { request_id: "deploy-42" });
+    assert.equal(out.success, false);
+    assert.match(out.error, /agent identity/);
+    assert.deepEqual(readbacks, []);
+  });
+
+  it("the orchestrator's system key reads as trinity-system", async () => {
+    readbacks.length = 0;
+    await callAs("trinity_mcp_611_system", { request_id: "fleet-7" });
+    assert.deepEqual(readbacks, ["trinity-system/fleet-7"]);
+  });
+});

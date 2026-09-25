@@ -382,7 +382,13 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- operator_queue.ts ---
   list_operator_queue: { kind: "in-tool", how: OPERATOR_QUEUE_GATE },
   get_operator_queue_item: { kind: "in-tool", how: "operator_queue.ts resolves the item's agent, then " + OPERATOR_QUEUE_GATE },
-  respond_to_operator_queue: { kind: "in-tool", how: "operator_queue.ts resolves the item's agent, then " + OPERATOR_QUEUE_GATE },
+  respond_to_operator_queue: {
+    kind: "in-tool",
+    how:
+      "operator_queue.ts resolves the item's agent, then " + OPERATOR_QUEUE_GATE +
+      "; the backend then refuses every key but a person's (reject_non_person_principal, trinity-enterprise#611)",
+  },
+  get_my_ask: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent); the backend re-checks identity (trinity-enterprise#611)" },
   // --- git.ts ---
   get_git_status: { kind: "in-tool", how: GIT_GATE },
   git_sync: { kind: "in-tool", how: GIT_GATE },

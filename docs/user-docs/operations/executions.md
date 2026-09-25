@@ -23,7 +23,8 @@ View, monitor, and manage task executions across all agents. Executions are crea
 | `reminder` | An agent's own deferred self-trigger |
 | `room` | A turn inside a shared multi-agent room |
 | `a2a` | A task sent in by an external A2A orchestrator |
-| `operator_response` | An answer to a parked request waking the agent, on an agent with wake-on-answer turned on (see [Approvals](../automation/approvals.md)) |
+| `operator_response` | An answer to a parked request waking the agent, on an agent with the ask-ending wake turned on (see [Approvals](../automation/approvals.md)) |
+| `operator_ending` | A parked request that was cancelled or expired waking the agent — one turn per agent per sweep or expiry, same switch |
 
 Channel and voice triggers (`telegram`, `slack`, `whatsapp`, `voip`, `voice`, `paid`) are recorded too and are folded into the **Channels**, **Voice**, and **Public** groups on the analytics charts. Rooms and operator answers get their own **Rooms** and **Operator queue** groups, beside **Loops** and **Reminders**.
 

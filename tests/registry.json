@@ -3366,9 +3366,9 @@
     },
     {
       "file": "mcp-server/src/access-wiring.test.ts",
-      "feature": "trinity-enterprise#628 / #2807 / #2952",
+      "feature": "trinity-enterprise#628 / #2807 / #2952 / trinity-enterprise#611",
       "added": "2026-09-16",
-      "updated": "2026-09-22",
+      "updated": "2026-09-25",
       "categories": [
         "mcp-server",
         "typescript",
@@ -3376,7 +3376,7 @@
         "access-control",
         "transport"
       ],
-      "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default)."
+      "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default). trinity-enterprise#611: a second suite drives get_my_ask over the same real transport against a stub that answers key validation by bearer and records every readback — an agent key is served its OWN agent and no other, a person's user-scoped key is refused before the backend is asked anything, and the orchestrator's system key reads as trinity-system."
     },
     {
       "file": "unit/test_2915_operator_queue_sync_honesty.py",
@@ -3453,6 +3453,28 @@
         "scheduler"
       ],
       "description": "The scheduler's readiness gate beside the #454 pre-check: a held cron seat brief is a skipped row with the reason plus the skipped event and is never dispatched; manual, webhook and non-seat schedules are not asked; anything but an explicit fire:false fires; every backend failure shape fails open."
+    },
+    {
+      "file": "unit/test_ent611_ask_endings.py",
+      "feature": "trinity-enterprise#611",
+      "added": "2026-09-25",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "Ask endings (trinity-enterprise#611, PR A). Schema: all twelve new columns selectable on the migrated DB and on the item projection, the name-keyed SQLite migration (idempotent) and the Alembic 0075 revision (same tuple, parented on 0074). Ledger writers on real SQLite: respond stamps answered/person in the same CAS and refuses after the deadline without writing; cancel records the person and the reason, and a lost race is a `_status_conflict` that overwrites nothing; bulk stamps ONE batch_id on exactly the rows it flipped (a second sweep ends nothing); expiry returns the rows it ended with timeout as the author and is edge-triggered; expires_at stored ISO-Z without a false #2915 divergence; platform columns only from keyword arguments (a hostile entry forges nothing); the readback by request_id survives Clear All and is agent-scoped; ended rows sort by ending time; facade signature parity. The person gate: JWT and user keys pass; agent, system, connector, portal_delegate, ops, unknown scopes and a scope-less principal get 403 person_required. The sink: CAS, then one audit row per transition (never the answer or the reason), ONE thin trigger (agent-keyed; count-only for a sweep; none for expiry), then observers with only the CAS winners; lost and late answers leave no trace; an observer failure never undoes the ending; the worker-thread (portal) path still announces. The wake: one turn per agent per event, trigger operator_ending, the rider verbatim, the reason framed as data, platform alarms / closed_by_filer rows / stopped agents skipped (audited), idempotency over disposition + sorted ids, opted-in agents only (one flag read per agent). The routes over TestClient: the person gate before existence, named 409s (expired, lost races incl. cancel), the cancel-reason bound, bulk batch_id, the route-level wake (pending A + already-cancelled B wakes for A only), the redacted self-readback (key set pinned on a row whose person fields are all non-null; one uniform 403 for any other name, for persons, and for the system key outside trinity-system), new person fields withheld from machine keys on get/list. The Workspace: status from the ending, the 7-day ended listing, a coarse who that never carries an email or the reason, the answer through the sink. The poller: expiry through the sink announced by the cycle's one trigger (even when Docker is unreadable); file ingest stamped channel=file / raised_by=agent whatever the entry claims. The Execution Context 'Ended asks' line: own non-platform endings of the last day, newest first, bounded, no human text, fail-soft. Call-site mutations red: the answer CAS, the bulk wake argument, the platform-minted skip."
+    },
+    {
+      "file": "mcp-server/src/operator_queue.test.ts",
+      "feature": "#1101 / #1104 / trinity-enterprise#611",
+      "added": "2026-09-25",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "access-control"
+      ],
+      "description": "Operator-queue MCP tools: the #1101 agent-scope post-filter (pure), the #1104 respond gate and proxy (stub client), and trinity-enterprise#611 get_my_ask — identity from the key (resolveActingAgent), no agent-target parameter, the system key reads as trinity-system, user / connector / agent-less system keys refused before any backend call, backend refusals returned as structured errors, the description teaching the rider — plus the person-only wording on respond_to_operator_queue. node:test."
     }
   ]
 }

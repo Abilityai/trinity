@@ -93,7 +93,7 @@ No. An agent can write a canvas and mark it for its roster, but it cannot create
 
 ## Can an agent turn on its own wake-on-answer?
 
-No. **Wake this agent when an operator answers** means each answer can start a turn the owner pays for, so the switch belongs to people. An agent's key acts for its owner, but `PUT /api/agents/{name}/operator-resume` refuses it with `403` before anything changes. Only the agent's owner or an admin can turn the switch on or off, from **Settings → Reliability**. An agent can still read the setting, so it can tell whether an answer will wake it. See [Agent Configuration](../agents/agent-configuration.md#wake-on-operator-answer).
+No. **Wake this agent when an ask it raised ends** means each answer, cancellation or expiry can start a turn the owner pays for, so the switch belongs to people. An agent's key acts for its owner, but `PUT /api/agents/{name}/operator-resume` refuses it with `403` before anything changes. Only the agent's owner or an admin can turn the switch on or off, from **Settings → Reliability**. An agent can still read the setting, so it can tell whether an answer will wake it. See [Agent Configuration](../agents/agent-configuration.md#wake-when-an-ask-ends).
 
 ## Is a webhook URL secure enough on its own?
 

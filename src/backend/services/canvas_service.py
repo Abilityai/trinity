@@ -230,6 +230,7 @@ _NO_OPERATOR_SURFACE_TRIGGERS = frozenset({"public", "paid"})
 _OPERATOR_SIDE_TRIGGERS = frozenset({
     "manual", "chat", "session", "schedule", "webhook", "mcp",
     "loop", "reminder", "event", "retry", "validation", "operator_response",
+    "operator_ending",  # trinity-enterprise#611: the wake for a cancelled/expired ask
 })
 
 
