@@ -2499,14 +2499,20 @@ async def _materialize_agent_files(
     # auto-sync heartbeat by default. Source-mode agents stay opt-in
     # (auto-pushing to main would clobber protected branches) —
     # except fork-to-own agents (#93), which own their repo.
-    # trinity-enterprise#69: ghosts never auto-push — their workspace
-    # is throwaway by definition, so the 15-min sync heartbeat stays off.
     # ent#123: tokenless agents never auto-push (belt — see _apply_github_env).
-    if github_repo_for_agent and github_pat_for_agent and not config.ephemeral and (not config.source_mode or fork_upstream_repo):
+    # #3010: the DB flag is now the ONLY gate the agent's loop obeys, so it is
+    # written from the SAME predicate that bakes GIT_SYNC_AUTO — ghosts
+    # included, since the baked env has always auto-pushed them (the old
+    # `and not config.ephemeral` here only made env and DB disagree at birth).
+    if git_service._git_auto_sync_baked(
+        config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
+    ):
         try:
             db.set_git_auto_sync_enabled(config.name, True)
         except Exception as e:
-            logger.warning(
+            # Loud: with the DB authoritative, a lost write leaves this agent's
+            # auto-sync OFF until an owner toggles it on.
+            logger.error(
                 f"Failed to enable auto-sync for {config.name}: {e}"
             )
 
@@ -2518,9 +2524,9 @@ async def _materialize_agent_files(
     # list after startup.sh's FULL git setup (gated inside the merge on
     # agent-server /health readiness, which follows the clone+checkout at
     # startup.sh:517) and before the first auto-sync cycle. Fire-and-forget so it
-    # adds no creation latency; non-fatal. Gated on the SAME ENV predicate that
-    # bakes GIT_SYNC_AUTO (NOT the DB-flag block above, which excludes ghosts),
-    # so the merge covers exactly the auto-committing population.
+    # adds no creation latency; non-fatal. Gated on the SAME predicate that
+    # bakes GIT_SYNC_AUTO and writes the DB flag above (#3010), so the merge
+    # covers exactly the auto-committing population.
     if git_service._git_auto_sync_baked(
         config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
     ):

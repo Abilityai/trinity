@@ -253,17 +253,22 @@ def _failed_result_body_from_http(claim_token: Optional[str], exc: HTTPException
     other paths carry a string detail."""
     detail = exc.detail
     metadata: Dict[str, Any] = {}
+    error_code = _PULL_STATUS_MAP.get(exc.status_code, "agent_error")
     if isinstance(detail, dict):
         error_msg = detail.get("message") or str(detail)[:500]
         if isinstance(detail.get("metadata"), dict):
             metadata = detail["metadata"]
+        # #3012: a body that names its own class (the model-rejection 400) wins
+        # over the status-code guess.
+        if isinstance(detail.get("error_code"), str):
+            error_code = detail["error_code"]
     else:
         error_msg = str(detail)[:500]
     return {
         "claim_token": claim_token,
         "status": "failed",
         "content": error_msg,
-        "error_code": _PULL_STATUS_MAP.get(exc.status_code, "agent_error"),
+        "error_code": error_code,
         "cost": None,
         "tokens": None,
         "session_id": None,
