@@ -1334,7 +1334,10 @@ def _compute_git_status(home_dir: Path) -> Dict:
             "behind": behind,
             "common_ancestor_sha": common_ancestor_sha,
             "common_ancestor_age_days": common_ancestor_age_days,
-            "sync_status": "up_to_date" if ahead == 0 and len(changes) == 0 else "pending_sync",
+            # #2105: `ahead` aliases the main tuple, which is now None (not a
+            # best-effort 0) on a repo with no `main`. Treat unknown as 0 so a
+            # clean `master` repo keeps reading "Synced", as it did before.
+            "sync_status": "up_to_date" if (ahead or 0) == 0 and len(changes) == 0 else "pending_sync",
         }
         # #389: dual ahead/behind tuples plus legacy ahead/behind aliases.
         response.update(ahead_behind)
