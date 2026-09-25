@@ -5,6 +5,7 @@
  */
 
 import type {
+  StartAgentResult,
   Agent,
   AgentConfig,
   ChatResponse,
@@ -662,8 +663,8 @@ export class TrinityClient {
   /**
    * Start a stopped agent
    */
-  async startAgent(name: string): Promise<{ message: string }> {
-    return this.request<{ message: string }>(
+  async startAgent(name: string): Promise<StartAgentResult> {
+    return this.request<StartAgentResult>(
       "POST",
       `/api/agents/${encodeURIComponent(name)}/start`
     );

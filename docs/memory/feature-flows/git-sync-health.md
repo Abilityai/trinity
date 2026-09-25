@@ -371,6 +371,11 @@ SyncHealthService._poll_loop (SYNC_HEALTH_POLL_INTERVAL_SECONDS, default 60 s)
     │     ├── if consecutive_failures crossed 3:
     │     │     └── db.create_operator_queue_item(
     │     │           type='sync_failing', priority='high', …)
+    │     │         #2107: when last_error_summary is a refused push
+    │     │         (git_service.is_push_denied) the item is titled
+    │     │         "Git token can't push", says it will not recover on
+    │     │         its own, and carries context.cause='push_denied' +
+    │     │         context.remediation (grant Contents: write / `repo`)
     │     ├── #1595 git_bloat alerts (same edge-trigger pattern):
     │     │     ├── git_dir_bytes crossed GIT_DIR_ALERT_BYTES (10 GiB)
     │     │     └── maintenance_failures crossed 3
