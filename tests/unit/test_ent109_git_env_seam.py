@@ -18,15 +18,12 @@ The five load-bearing behaviours, each with a named test:
      `configure_push_remote` then clears the push blackhole, and a tokenless
      agent (Cornelius) can push a private knowledge base to the shared public
      upstream.
-  2. **`GIT_SYNC_AUTO` is `DB flag OR baked env`, derive-only.** The two
-     writers in `crud.py` genuinely disagree (`and not config.ephemeral` inside
-     a swallowing try/except on the DB side only, column default 0), so DB-only
-     derivation silently stops auto-push fleet-wide. The column is never
-     written back: "baked true / DB 0" is ALSO exactly an owner's explicit
-     `PUT /{agent}/git/auto-sync {enabled: false}`, so a convergence backfill
-     would erase that intent — and cross a privilege boundary doing it
-     (`PUT .../auto-sync` is `OwnedAgentByName`, `POST .../start` is
-     `AuthorizedAgentByName`). The disagreement is logged, not resolved.
+  2. **`GIT_SYNC_AUTO` is the DB flag alone, derive-only (#3010).** It used
+     to be `DB flag OR baked env`, which kept an owner's OFF from ever sticking
+     (creation bakes both; a PUT clears only the DB; the OR re-armed it on every
+     recreate). The column is still never written back — the recreate trigger
+     (`POST .../start`, `AuthorizedAgentByName`) must not flip the owner-only
+     flag (`PUT .../auto-sync`, `OwnedAgentByName`).
   3. **Correct, never introduce** (config-drift path only). The repo half is
      repo-gated (ent#123) while the PAT half keeps #211's narrower per-agent
      gate, and those two disagree for a real row shape — an agent bound via
@@ -324,14 +321,13 @@ class TestPatGate:
 
 
 # ---------------------------------------------------------------------------
-# 2. GIT_SYNC_AUTO — DB flag OR baked env, derive-only (never written back)
+# 2. GIT_SYNC_AUTO — the DB flag alone, derive-only (#3010)
 # ---------------------------------------------------------------------------
 class TestGitSyncAuto:
-    def test_baked_true_db_zero_keeps_auto_push(self, lc_env):
-        """The disagreement is real: crud.py writes the DB flag under
-        `and not config.ephemeral` inside a swallowing try/except, the env
-        writer does not, and the column defaults to 0. Deriving from the DB flag
-        alone would silently stop auto-push for that slice of the fleet."""
+    def test_recreate_after_an_owner_off_stays_off(self, lc_env):
+        """#3010: the case the old `DB OR baked env` could never honour.
+        Creation baked GIT_SYNC_AUTO=true; the owner's PUT cleared the DB flag;
+        the recreate must carry the OFF forward, not re-arm it from the env."""
         lc, db, _rg = lc_env
         db.get_git_config.return_value = _row(
             source_mode=False, auto_sync_enabled=False
@@ -340,28 +336,14 @@ class TestGitSyncAuto:
         env = _carried(GIT_SYNC_AUTO="true")
         lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
 
-        assert env["GIT_SYNC_AUTO"] == "true", (
-            "DB-only derivation silently disabled the 15-min auto-sync "
-            "heartbeat for an agent whose container was auto-pushing"
+        assert "GIT_SYNC_AUTO" not in env, (
+            "the baked env re-armed auto-sync over the owner's OFF"
         )
 
-    def test_the_disagreement_is_never_written_back(self, lc_env):
-        """The helper DERIVES env from the DB; it must not mutate the DB.
-
-        `PUT /{agent}/git/auto-sync {enabled:false}` writes the row and nothing
-        else, while the agent gates on container env — and creation sets BOTH
-        true for the ordinary non-source-mode PAT agent. So "baked true / DB 0"
-        is ALSO exactly what an owner's explicit disable looks like, and a
-        backfill cannot tell the two apart: it would re-enable the flag, erase
-        the only record of that intent, and make the toggle unable to stick.
-
-        It is a privilege boundary too: `PUT .../auto-sync` is
-        `OwnedAgentByName`, but `POST .../start` — which triggers the recreate —
-        is `AuthorizedAgentByName`, so the write would let a shared non-owner
-        (or an agent-scoped key resolving to its owner WITH the owner's role,
-        trinity-ops-agent#232) flip an owner-only flag that arms a 15-minute
-        background commit-and-push loop.
-        """
+    def test_the_flag_is_never_written_back(self, lc_env):
+        """Derive-only: the recreate trigger is AuthorizedAgentByName, the
+        toggle is OwnedAgentByName — a write here would let a shared non-owner
+        flip an owner-only flag."""
         lc, db, _rg = lc_env
         db.get_git_config.return_value = _row(
             source_mode=False, auto_sync_enabled=False

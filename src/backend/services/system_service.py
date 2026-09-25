@@ -56,6 +56,7 @@ _KNOWN_MANIFEST_KEYS = frozenset({
 # dropped everything else silently.
 _KNOWN_AGENT_KEYS = frozenset({
     "template", "resources", "folders", "schedules", "tags",
+    "kind",  # trinity-enterprise#704
 })
 
 
@@ -161,7 +162,8 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             resources=agent_config.get("resources"),
             folders=agent_config.get("folders"),
             schedules=agent_config.get("schedules"),
-            tags=agent_config.get("tags")  # ORG-001 Phase 4
+            tags=agent_config.get("tags"),  # ORG-001 Phase 4
+            kind=agent_config.get("kind"),  # trinity-enterprise#704
         )
 
     # Parse permissions
@@ -1928,7 +1930,10 @@ async def deploy_manifest(
                     # the fleet default through
                     # `PUT /api/settings/agent-defaults/resources` — the one spot
                     # that escaped ent#126's pure-resolver no-drift pattern.
-                    resources=config.resources or _manifest_default_resources()
+                    resources=config.resources or _manifest_default_resources(),
+                    # trinity-enterprise#704: a composed fleet declares per member
+                    # whether it is an agent or a deployment of a codebase.
+                    kind=config.kind,
                 )
 
                 # Create agent using existing internal function

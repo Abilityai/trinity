@@ -121,7 +121,10 @@ async def get_git_status(
         status["db_config"] = {
             "last_sync_at": git_config.last_sync_at.isoformat() if git_config.last_sync_at else None,
             "last_commit_sha": git_config.last_commit_sha,
-            "sync_enabled": git_config.sync_enabled
+            "sync_enabled": git_config.sync_enabled,
+            # trinity-enterprise#704: the binding, so the Git panel can say
+            # whether this agent writes its own branch or is pull-only.
+            "source_mode": bool(git_config.source_mode),
         }
 
     return status

@@ -814,3 +814,53 @@
 - **GitHub Issue**: abilityai/trinity-enterprise#615
 
 ---
+
+### 11.17 An Agent Created as an Agent Owns Its Repository (trinity-enterprise#705)
+
+- **Status**: 🚧 In review. Merges only after #3016, #3017 and #3018, the three named blockers.
+- **Ruling (2026-09-24):** *the repository is the agent; the container is a cache of it.*
+  The 2026-09-24 fleet audit found every git-bound agent with auto-sync off and
+  work on container disks that existed nowhere else.
+- **Create-time `kind`:** `agent` (the default) or `deployment`, on
+  `POST /api/agents` and MCP `create_agent`. An **explicit `source_mode`
+  always wins for the mode**. Every auto-pushing agent, including an explicit working branch and
+  fork-to-own, also gets freeze-on-failure; a `deployment` never does.
+- **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
+  `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
+  them **when its token can push to that repo** (the #2107 receive-pack probe).
+- **Stays pull-only, with the reason on the create response's `git_mode`:**
+  - a deployment
+  - an ephemeral ghost (ent#69)
+  - no token (ent#123; not a 400)
+  - a refused probe (a template someone else owns — never branches pushed
+    into it, the ent#162 class; the reason points to fork-to-own)
+  - an unverifiable probe
+- **Fork-to-own** gets the trio (it owns its fork). **Cornelius** is pinned
+  pull-only: it is built from a shared public upstream.
+- **Asked in the UI and the manifest (trinity-enterprise#704):**
+  - the create modal asks "What is this repository?" (an agent / a deployment
+    of a codebase) exactly when the create binds git: a GitHub template from the
+    list, or a custom repository with the *clone* intent. It is never asked for
+    blank or local agents, copy or fork, or a fork-to-own template. Unasked, no
+    `kind` is sent.
+  - the create response's `git_mode` is shown after creation, and it says so
+    plainly when an agent was created pull-only, with the reason.
+  - the Git panel shows the binding as a badge (`Agent · own branch` /
+    `Pull-only`), from `db_config.source_mode` on the git status.
+  - a system manifest takes `kind` per agent; an unset `kind` uses the create
+    default.
+- **Not changed:**
+  - existing agents (the default applies to new creates; migration is per
+    agent and explicit — runbook `docs/migrations/AGENT_WORKING_BRANCH_DEFAULT_2026-09.md`)
+  - freeze paging (the `sync_failing` item). Until trinity-enterprise#706
+    adds divergence age, the freeze trips on today's trigger: 3 consecutive
+    failed syncs (about 45 minutes at the 15-minute cadence), including a
+    rebase conflict, which needs a human anyway
+  - the pull cycle — on when trinity-enterprise#703 lands
+  - divergence-age freeze semantics — trinity-enterprise#706
+- **Edition**: open-core (operator ruling 2026-09-25): defaults on the existing
+  open-source create and sync paths.
+- **Flow**: `docs/memory/feature-flows/github-sync.md`
+- **GitHub Issue**: abilityai/trinity-enterprise#705
+
+---

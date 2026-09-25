@@ -212,6 +212,14 @@ class AgentConfig(BaseModel):
     # GitHub source mode (unidirectional pull from a branch)
     source_branch: Optional[str] = "main"  # Branch to pull updates from
     source_mode: Optional[bool] = True  # True = track source branch (pull only), False = create working branch
+    # trinity-enterprise#705: what is being created. "agent" (the default when
+    # None) is an agent whose repository IS the agent — a working branch it alone
+    # writes, auto-sync on, freeze-on-failure on — granted only when its token can
+    # actually push to that repo; otherwise it stays pull-only. "deployment" is a
+    # deployment of a codebase: source mode, no auto-push. An EXPLICIT
+    # `source_mode` always wins for the MODE; an auto-pushing agent (explicit
+    # working branch and fork-to-own included) also gets freeze-on-failure.
+    kind: Optional[Literal["agent", "deployment"]] = None
     # Multi-runtime support
     runtime: Optional[str] = "claude-code"  # "claude-code" or "gemini-cli"
     runtime_model: Optional[str] = None  # Model override (e.g., "sonnet-4.5", "gemini-2.5-pro")
@@ -307,6 +315,9 @@ class AgentStatus(BaseModel):
     # trinity-enterprise#15: copy-intent provenance — {source_repo, source_branch,
     # head_sha, file_count}; set only on the create response of a snapshot import.
     import_snapshot: Optional[Dict[str, Any]] = None
+    # trinity-enterprise#705: on a `github:` create, how the git mode was decided
+    # — {kind, source_mode, reason} — so "why is this agent pull-only?" has an answer.
+    git_mode: Optional[dict] = None
 
     class Config:
         json_encoders = {
@@ -1226,6 +1237,10 @@ class SystemAgentConfig(BaseModel):
     folders: Optional[dict] = None  # {"expose": bool, "consume": bool}
     schedules: Optional[List[dict]] = None  # [{name, cron, message, ...}]
     tags: Optional[List[str]] = None  # Additional tags for this agent (ORG-001 Phase 4)
+    # trinity-enterprise#704: what each member is — "agent" (its repository IS
+    # the agent) or "deployment" (a deployment of a codebase). Omitted → the
+    # platform default (AgentConfig.kind, ent#705).
+    kind: Optional[Literal["agent", "deployment"]] = None
 
 
 class SystemPermissions(BaseModel):

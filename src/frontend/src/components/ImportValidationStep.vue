@@ -35,6 +35,9 @@
         Agent <span class="font-mono">{{ agentName }}</span> created
       </h3>
 
+      <!-- trinity-enterprise#704: what the git binding came out as, and why. -->
+      <GitModeNotice v-if="gitMode" :git-mode="gitMode" class="mt-3" />
+
       <!-- Copy-intent provenance: the only durable record of what a snapshot
            agent was cloned from (present only on copy-intent responses). -->
       <p v-if="importSnapshot" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -172,11 +175,14 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAgentsStore } from '../stores/agents'
 import api from '../api'
+import GitModeNotice from './GitModeNotice.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
   // {source_repo, source_branch, head_sha, file_count} — copy intent only.
   importSnapshot: { type: Object, default: null },
+  // trinity-enterprise#704: the create response's git_mode ({kind, source_mode, reason}).
+  gitMode: { type: Object, default: null },
 })
 const emit = defineEmits(['close'])
 
