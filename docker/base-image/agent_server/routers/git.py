@@ -1433,6 +1433,10 @@ def _compute_git_status(home_dir: Path) -> Dict:
         # rebuilds it from coerced values and never trusts the nested copy,
         # which `_read_sync_state_file` merges wholesale from agent-written JSON.
         response["lock_recovery"] = response["sync_state"].get("last_lock_recovery")
+        # #3010: the auto-sync gate the loop is running with — the owner's DB
+        # flag as last read, the same source `GET .../git/auto-sync` returns.
+        from ..auto_sync import current_auto_sync_enabled
+        response["auto_sync_enabled"] = current_auto_sync_enabled()
         # #2742: a currently-stuck lock is REPORTED, never removed. This is the
         # "tell the truth about state" half — a stale lock does not fail
         # `git status` (rc=0, empty stderr), so before this the read could not

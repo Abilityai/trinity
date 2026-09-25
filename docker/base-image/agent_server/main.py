@@ -96,7 +96,8 @@ arm_subscription_auth_guard()
 def _clear_chat_session_marker() -> None:
     chat_session_marker.clear()
 
-# #389 S1a: auto-sync heartbeat loop (gated by GIT_SYNC_AUTO env var).
+# #389 S1a: auto-sync heartbeat loop — each cycle gated on the owner's
+# auto_sync_enabled flag, read live; GIT_SYNC_AUTO is the fallback (#3010).
 schedule_auto_sync_if_enabled(app)
 
 # RELIABILITY-004 / #307: liveness heartbeat loop. Gated on TRINITY_BACKEND_URL

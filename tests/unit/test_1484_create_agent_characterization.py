@@ -152,6 +152,14 @@ def _load_crud(monkeypatch, docker_available=True):
         return_value=("iid-1", "main"))
     git_service.materialize_persistent_state = AsyncMock()
     git_service.materialize_data_paths = AsyncMock()
+    # #3010: crud writes the DB auto-sync flag from this predicate, so the mock
+    # must answer it (a bare MagicMock attribute is truthy for every agent).
+    # Same shape as services/git_service/gitignore_clone.py::_git_auto_sync_baked.
+    git_service._git_auto_sync_baked = MagicMock(
+        side_effect=lambda config, repo, pat, fork: (
+            bool(repo) and bool(pat) and (not config.source_mode or bool(fork))
+        )
+    )
 
     settings_service = MagicMock()
     settings_service.get_anthropic_api_key = MagicMock(return_value="sk-ant-key")

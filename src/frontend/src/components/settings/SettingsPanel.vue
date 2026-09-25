@@ -10,9 +10,10 @@
     Growth path (each a follow-up PR, endpoints already exist):
       Behavior/Execution (/autonomy, /read-only, /timeout, model, /capacity),
       Resources (/resources),
-      Compute/Auth (api-key, /github-pat), Git sync (/git/auto-sync,
-      /git/freeze-schedules-if-failing).
+      Compute/Auth (api-key, /github-pat).
     Reliability (/circuit-breaker) shipped as the ReliabilityPanel section (#1712).
+    Git sync (/git/auto-sync, /git/freeze-schedules-if-failing) shipped as the
+    GitSyncSettingsPanel section (#3010).
   -->
   <div class="space-y-4">
     <!-- Section 1: Guardrails -->
@@ -40,6 +41,10 @@
       <ReliabilityPanel :agent-name="agentName" :notify="notify" />
     </section>
 
+    <!-- Section 4b: Git sync — auto-sync + schedule freeze (#3010); the panel
+         renders its own section card. -->
+    <GitSyncSettingsPanel :agent-name="agentName" :notify="notify" />
+
     <!-- Section 4: Voice replies (ent#117) — agent-level enable + voice selection.
          Per-channel on/off flags live in each channel's panel (Sharing tab). -->
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden p-6">
@@ -58,6 +63,7 @@ import CapacityPanel from '../CapacityPanel.vue'
 import McpExposedPanel from '../McpExposedPanel.vue'
 import AgentMcpKeyPanel from '../AgentMcpKeyPanel.vue'
 import ReliabilityPanel from '../ReliabilityPanel.vue'
+import GitSyncSettingsPanel from '../GitSyncSettingsPanel.vue'
 import VoiceRepliesControl from '../VoiceRepliesControl.vue'
 
 defineProps({
