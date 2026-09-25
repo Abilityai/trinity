@@ -424,10 +424,10 @@ def test_the_sqlite_migration_builds_the_table_and_the_column(tmp_path):
 def test_the_alembic_revision_extends_the_single_head():
     import importlib.util
     root = _BACKEND / "migrations" / "versions"
-    spec = importlib.util.spec_from_file_location("rev530", root / "0073_agent_skill_sets.py")
+    spec = importlib.util.spec_from_file_location("rev530", root / "0075_agent_skill_sets.py")
     rev = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rev)
-    assert (rev.revision, rev.down_revision) == ("0073_agent_skill_sets", "0072_agent_capability_grants")
+    assert (rev.revision, rev.down_revision) == ("0075_agent_skill_sets", "0074_role_readiness_rollout_seed")
     script = Path(__file__).resolve().parents[2] / "scripts" / "ci" / "check_alembic_heads.py"
     proc = subprocess.run([sys.executable, str(script), str(root)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -440,7 +440,7 @@ def test_the_alembic_upgrade_runs_against_a_real_database(tmp_path):
     from alembic.operations import Operations
     from sqlalchemy import create_engine, inspect, text
     spec = importlib.util.spec_from_file_location(
-        "rev530b", _BACKEND / "migrations" / "versions" / "0073_agent_skill_sets.py")
+        "rev530b", _BACKEND / "migrations" / "versions" / "0075_agent_skill_sets.py")
     rev = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rev)
     engine = create_engine(f"sqlite:///{tmp_path / 'a.db'}")

@@ -1111,7 +1111,7 @@ CREATE TABLE agent_skill_sets (
     PRIMARY KEY (agent_name, set_name)
 );
 ```
-Both tracks: SQLite `agent_skill_sets`, Alembic `0073_agent_skill_sets` (← `0072`). `AgentRef(..., CASCADE)`.
+Both tracks: SQLite `agent_skill_sets`, Alembic `0075_agent_skill_sets` (← `0074`). `AgentRef(..., CASCADE)`.
 Every write ends in one transaction (`db/skill_sets._apply`, PostgreSQL row-locks `agent_ownership`)
 over the pure `services/skill_sets.plan_member_rows`, which **fails closed**: while any assigned set
 is unresolvable no set-derived row is removed.
