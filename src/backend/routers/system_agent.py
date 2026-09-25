@@ -32,7 +32,7 @@ from services.docker_utils import (
     container_exec_run, api_exec_create, api_exec_start
 )
 from services.agent_service.helpers import check_base_image_state
-from services.agent_service.lifecycle import start_agent_internal
+from services.agent_service.lifecycle import public_skills_result, start_agent_internal
 from services.system_agent_service import BASE_IMAGE_STATE_LABELS
 from db.agents import SYSTEM_AGENT_NAME
 
@@ -289,6 +289,9 @@ async def restart_system_agent(
             # `image_drift` is the adoption that answers the staleness alarm.
             "recreated": bool(start_result.get("recreated")),
             "recreate_reason": start_result.get("recreate_reason"),
+            # #2991: the same skill-delivery pair the agent start endpoint returns.
+            "skills_injection": start_result.get("skills_injection", "unknown"),
+            "skills_result": public_skills_result(start_result.get("skills_result")),
         }
 
     except Exception as e:

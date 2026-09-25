@@ -1,5 +1,17 @@
 // Types for Trinity API responses
 
+/** #2991: `POST /api/agents/{name}/start` — skill delivery rides the response. */
+export interface StartAgentResult {
+  message: string;
+  skills_injection?: string;
+  skills_result?: {
+    status: string;
+    reason?: string | null;
+    conflicts?: string[];
+    skills?: Record<string, { status: string; code?: string; warnings?: string[] }>;
+  };
+}
+
 export interface Agent {
   name: string;
   status: string;

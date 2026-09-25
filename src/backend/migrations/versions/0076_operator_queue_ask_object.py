@@ -16,14 +16,14 @@ disposition and reads from ``status``.
 
 Mirrors the SQLite ``operator_queue_ask_object`` migration.
 
-Revision ID: 0075_operator_queue_ask_object
-Revises: 0074_role_readiness_rollout_seed
+Revision ID: 0076_operator_queue_ask_object
+Revises: 0075_auto_sync_enabled_backfill
 """
 from alembic import op
 
 
-revision = "0075_operator_queue_ask_object"
-down_revision = "0074_role_readiness_rollout_seed"
+revision = "0076_operator_queue_ask_object"
+down_revision = "0075_auto_sync_enabled_backfill"
 branch_labels = None
 depends_on = None
 

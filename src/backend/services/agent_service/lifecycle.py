@@ -5,6 +5,7 @@ Contains functions for starting, stopping, and reconfiguring agents.
 """
 import asyncio
 import logging
+import re
 import os
 import time
 from typing import Literal, Optional
@@ -246,12 +247,19 @@ async def inject_assigned_skills(agent_name: str) -> dict:
     warning_count = sum(
         len(r.get("warnings") or []) for r in result.get("results", {}).values()
     )
+    # #2991: a name conflict is not a failure (#2914 — the agent's own copy runs,
+    # `success` stays true), so without this list a start that did NOT install
+    # an assigned skill read exactly like a clean one.
+    conflicts = sorted(
+        n for n, r in (result.get("results") or {}).items() if r.get("status") == "conflict"
+    )
     if result.get("success"):
         return {
             "status": "success",
             "skills_injected": result.get("skills_injected", 0),
             "skills_unchanged": result.get("skills_unchanged", 0),
             "skills_warnings": warning_count,
+            "conflicts": conflicts,
             "results": result.get("results", {}),
             "reconcile": reconcile,
         }
@@ -263,9 +271,85 @@ async def inject_assigned_skills(agent_name: str) -> dict:
             "skills_unchanged": result.get("skills_unchanged", 0),
             "skills_failed": result.get("skills_failed", 0),
             "skills_warnings": warning_count,
+            "conflicts": conflicts,
             "results": result.get("results", {}),
             "reconcile": reconcile,
         }
+
+
+# #2991 — the public projection of a start's skill-delivery result. The start
+# endpoint returns it to REST and MCP callers, so it carries NAMES, STATUSES and
+# CODES only (the ent#334 projection rule): a per-skill `error` is free text
+# that can hold an exception string, a transport URL or a path, and is reduced
+# to a code here, never passed through.
+_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+_WARNING_RE = re.compile(r"^(missing_binary|missing_env):[A-Za-z0-9_.+-]{1,128}$")
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_PROSE_ERRORS = {
+    "Skill not found in library": "not_in_library",
+    "skill package empty (no committed regular files)": "empty_package",
+    "SKILL.md missing from package": "skill_md_missing",
+    "restore failed (transport)": "restore_failed",
+}
+_COUNTS = ("skills_injected", "skills_unchanged", "skills_failed", "skills_warnings")
+
+
+def _error_code(error) -> Optional[str]:
+    if not error:
+        return None
+    text = str(error)
+    if text in _PROSE_ERRORS:
+        return _PROSE_ERRORS[text]
+    head = text.split(":", 1)[0].strip()
+    return head if _CODE_RE.match(head) else "error"
+
+
+def public_skills_result(raw) -> dict:
+    """``skills_result`` as the start endpoint returns it (#2991).
+
+    Always carries ``status`` — an absent result reads ``unknown``, never an
+    absent field (quality bar #1) — plus ``reason`` for a skip, the counts,
+    ``conflicts`` (names), and per-skill ``{status, code?, warnings?}``.
+    """
+    if not isinstance(raw, dict):
+        return {"status": "unknown"}
+    out: dict = {"status": str(raw.get("status") or "unknown")}
+    if raw.get("reason"):
+        out["reason"] = _error_code(raw["reason"])
+    for key in _COUNTS:
+        if isinstance(raw.get(key), int):
+            out[key] = raw[key]
+    skills: dict = {}
+    results = raw.get("results")
+    # Defensive on shape: this runs inside the start endpoint's try, so a raise
+    # here would turn a start that HAPPENED into a 500 the caller retries.
+    for name, r in (results.items() if isinstance(results, dict) else ()):
+        if not isinstance(name, str) or not _SKILL_NAME_RE.match(name) or not isinstance(r, dict):
+            continue
+        entry = {"status": str(r.get("status") or ("injected" if r.get("success") else "failed"))}
+        code = _error_code(r.get("error"))
+        if code:
+            entry["code"] = code
+        warnings = [w for w in (r.get("warnings") or []) if isinstance(w, str)
+                    and (_WARNING_RE.match(w) or _CODE_RE.match(w))]
+        if warnings:
+            entry["warnings"] = warnings
+        skills[name] = entry
+    if skills:
+        out["skills"] = skills
+    conflicts = raw.get("conflicts")
+    if not isinstance(conflicts, list):
+        conflicts = [n for n, e in skills.items() if e["status"] == "conflict"]
+    out["conflicts"] = sorted(n for n in conflicts if isinstance(n, str) and _SKILL_NAME_RE.match(n))
+    reconcile = raw.get("reconcile")
+    if isinstance(reconcile, dict):
+        rec = {"status": str(reconcile.get("status") or "unknown")}
+        if isinstance(reconcile.get("removed"), int):
+            rec["removed"] = reconcile["removed"]
+        if reconcile.get("reason"):
+            rec["reason"] = _error_code(reconcile["reason"])
+        out["reconcile"] = rec
+    return out
 
 
 async def start_agent_internal(agent_name: str) -> dict:
@@ -502,8 +586,8 @@ async def start_agent_internal(agent_name: str) -> dict:
     # `.gitignore` merge protects only agents created after that fix; existing
     # auto-sync agents converge HERE on their next base-image-drift recreate /
     # restart. Gated on the DB `auto_sync_enabled` flag — the persisted owner
-    # intent the runtime already honors (`_apply_git_env_from_db`: GIT_SYNC_AUTO
-    # = DB flag OR baked env). The R2 ephemeral gap does NOT apply on this path:
+    # intent the runtime honors (#3010: the DB flag is the ONLY source of
+    # GIT_SYNC_AUTO and the agent's per-cycle gate). The R2 ephemeral gap does NOT apply on this path:
     # ghosts never recreate (they are volume-less by design), so no ephemeral
     # agent reaches start/recreate and the DB flag is correct and complete here.
     # Same readiness-gated, idempotent, non-fatal merge as creation — a warm
@@ -706,10 +790,8 @@ def _apply_git_env_from_db(
     construction. The population is transient (an aborted create, or an
     orphan-cleanup window), and popping runs in the same direction as ent#162.
 
-    **Reads DB state; writes none.** `GIT_SYNC_AUTO` is derived as
-    `DB flag OR baked env` and the disagreement is only logged — see the inline
-    note for why a write-back cannot distinguish a creation-time discrepancy
-    from an owner's explicit disable.
+    **Reads DB state; writes none.** `GIT_SYNC_AUTO` is derived from the DB
+    `auto_sync_enabled` flag alone (#3010) — see the inline note.
     """
     git_config = db.get_git_config(agent_name)
 
@@ -796,44 +878,22 @@ def _apply_git_env_from_db(
         env_vars.pop("GIT_SOURCE_MODE", None)
         env_vars.pop("GIT_SOURCE_BRANCH", None)
 
-    # --- GIT_SYNC_AUTO: DB flag OR baked env, then converge -----------------
-    # #389's `auto_sync_enabled` column and the creation-time env genuinely
-    # disagree today: `crud.py`'s DB writer carries `and not config.ephemeral`
-    # inside a swallowing try/except while `_apply_github_env` does not, and the
-    # column defaults to 0. So env-`true`/DB-`0` is reachable from a single
-    # transient DB hiccup at creation and permanently for ghosts — and deriving
-    # from the DB flag alone would silently STOP auto-push for that slice of the
-    # fleet (no error, just a stale `agent_sync_state`). So: OR the two.
-    #
-    # Deliberately NO write-back. A `PUT /{agent}/git/auto-sync {enabled:false}`
-    # writes the DB row and nothing else (routers/git.py), while the agent gates
-    # on container env (`agent_server/auto_sync.py`) — and creation sets BOTH to
-    # true for the ordinary non-source-mode PAT agent. So "baked true / DB 0" is
-    # ALSO exactly what an owner's explicit disable looks like, and a backfill
-    # cannot tell the two apart: it would silently re-enable the flag, erase the
-    # only record of that intent, and make the toggle unable to ever stick.
-    # Worse, `PUT .../auto-sync` is OwnedAgentByName while `POST .../start` (the
-    # recreate's trigger) is AuthorizedAgentByName, so the write would let a
-    # shared non-owner — or an agent-scoped key resolving to its owner WITH the
-    # owner's role (trinity-ops-agent#232) — flip an owner-only flag that arms a
-    # 15-minute background commit-and-push loop. Log the disagreement instead.
-    # Making the #389 toggle authoritative (one writer, env re-baked on toggle)
-    # is the separate follow-up that retires this OR honestly.
-    _baked_auto = str(env_vars.get("GIT_SYNC_AUTO") or "").strip().lower() == "true"
-    _db_auto = bool(_gc("auto_sync_enabled"))
-    if _db_auto or _baked_auto:
+    # --- GIT_SYNC_AUTO: the DB flag, alone (#3010) -------------------------
+    # `agent_git_config.auto_sync_enabled` is the ONE source of truth. The
+    # agent's loop asks it every cycle through `GET .../git/auto-sync` (so a
+    # toggle is live without a recreate); this env is only that loop's fallback
+    # when the backend is unreachable, so it must say what the DB says. The old
+    # `DB OR baked env` kept an owner's OFF from ever sticking: creation sets
+    # both, a PUT clears only the DB, and the OR re-armed it on every recreate.
+    # Derive-only, never written back — the recreate trigger (`POST .../start`,
+    # AuthorizedAgentByName) must not be able to flip the owner-only flag.
+    # The env-true/DB-0 slice this used to paper over is closed at the source
+    # (creation writes the flag from the same predicate that bakes the env) and
+    # backfilled once (migration `auto_sync_enabled_backfill`).
+    if _gc("auto_sync_enabled"):
         env_vars["GIT_SYNC_AUTO"] = "true"
     else:
         env_vars.pop("GIT_SYNC_AUTO", None)
-
-    if _baked_auto and not _db_auto:
-        logger.info(
-            "Agent %s carries GIT_SYNC_AUTO=true but auto_sync_enabled=0; "
-            "keeping auto-push on (the env wins until the #389 toggle is "
-            "authoritative). NOT rewriting the DB flag — it may be a "
-            "deliberate owner disable (ent#109)",
-            agent_name,
-        )
 
     # --- optional self-hosted git base URL: refresh from the CURRENT backend
     # env (the AGENT_TOOL_STALL_LIMIT_S idiom), so pointing the platform at or

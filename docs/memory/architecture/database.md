@@ -745,7 +745,7 @@ CREATE TABLE operator_queue (
     delivery_updated_at TEXT,           -- #2915
     divergence_acknowledged_at TEXT,    -- #2915 (PR #2989 review): the human answered a changed/closed item knowingly; the write-back delivers into the entry as it is now
     addressed_to_email TEXT,            -- ent#364: the human this ask is for; NULL = operator ask. Validated at ingestion against the agent's roster, never trusted from the payload
-    -- trinity-enterprise#611 (SQLite `operator_queue_ask_object` / Alembic `0075_operator_queue_ask_object`; nullable, no backfill):
+    -- trinity-enterprise#611 (SQLite `operator_queue_ask_object` / Alembic `0076_operator_queue_ask_object`; nullable, no backfill):
     disposition TEXT,                   -- answered|cancelled|expired — written in the SAME CAS UPDATE that flips `status`; NULL = ended before the ledger
     disposed_at TEXT,
     disposed_by TEXT,                   -- person|timeout (an enum of two: only a person or the clock ends an ask)
