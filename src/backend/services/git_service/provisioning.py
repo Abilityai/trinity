@@ -482,6 +482,7 @@ async def initialize_git_in_container(
         commit_commands = [
             'git reset origin/main',
             'git add .',
+            gitignore.CONTAINER_ONLY_SETTINGS_GUARD,  # ent#708
             'git commit -m "Initial commit from Trinity Agent" || echo "Nothing to commit"',
             # Always set upstream; no-op when there is nothing new to push.
             'git push -u origin main',
@@ -490,6 +491,7 @@ async def initialize_git_in_container(
         # Empty repo: force push creates the initial history.
         commit_commands = [
             'git add .',
+            gitignore.CONTAINER_ONLY_SETTINGS_GUARD,  # ent#708
             'git commit -m "Initial commit from Trinity Agent" || echo "Nothing to commit"',
             'git push -u origin main --force',
         ]
