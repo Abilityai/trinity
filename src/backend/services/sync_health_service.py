@@ -50,6 +50,7 @@ from typing import Dict, Optional
 
 from database import db
 from redis_breaker_util import get_breaker_redis
+from services import git_service
 from services.agent_client import AgentClient
 from utils.helpers import parse_iso_timestamp, utc_now_iso
 
@@ -545,22 +546,42 @@ class SyncHealthService:
         now = utc_now_iso()
         last_sync_at = state.get("last_sync_at") or now
         item_id = f"sync-failing-{agent_name}-{now}"
+        error = state.get("last_error_summary") or ""
+        failures = state["consecutive_failures"]
+        context = {
+            "last_error_summary": error,
+            "last_sync_at": last_sync_at,
+            "consecutive_failures": failures,
+        }
+        # #2107: a refused push is not a flaky one — it fails identically every
+        # cycle until someone changes the token, so name the cause and the fix
+        # instead of a count that reads the same at 3 as at 64.
+        if git_service.is_push_denied(error):
+            title = "Git token can't push"
+            question = (
+                f"{agent_name}'s GitHub token can read its repository but is not "
+                f"allowed to push, so none of its work is being saved "
+                f"({failures} syncs refused). This will not recover on its own."
+            )
+            context["cause"] = "push_denied"
+            context["remediation"] = (
+                "Give the agent's GitHub token write access to the repository "
+                "(fine-grained token: Contents: Read and write; classic token: "
+                "the `repo` scope), or set a per-agent token that has it. The "
+                "next sync pushes everything that is waiting."
+            )
+        else:
+            title = "Git sync failing"
+            question = f"{agent_name}'s git sync has failed {failures} times in a row."
         item = {
             "id": item_id,
             "agent_name": agent_name,
             "type": "sync_failing",
             "status": "pending",
             "priority": "high",
-            "title": "Git sync failing",
-            "question": (
-                f"{agent_name}'s git sync has failed "
-                f"{state['consecutive_failures']} times in a row."
-            ),
-            "context": {
-                "last_error_summary": state.get("last_error_summary") or "",
-                "last_sync_at": last_sync_at,
-                "consecutive_failures": state["consecutive_failures"],
-            },
+            "title": title,
+            "question": question,
+            "context": context,
             "created_at": now,
         }
         try:

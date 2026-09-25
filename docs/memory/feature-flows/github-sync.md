@@ -442,8 +442,31 @@ the clone will succeed), and immune to the anonymous REST 60/hr cap that makes
 | `unavailable` | Remote answered with auth-challenge / not-found (anonymous GitHub deliberately cannot distinguish private from nonexistent) | 400 combined message: "was not found or is private. If it is private, add your GitHub token…" |
 | `transient` | GitHub itself unreachable (timeout / DNS / no git binary) | **502 — FAIL-CLOSED.** The clone would fail too, and with monitoring default-off (#1121) a fail-open would produce a silently empty agent |
 
-The PAT-ful validation path is byte-identical to before (REST probe;
+The PAT-ful validation path is otherwise unchanged (REST probe;
 `GitHubError` → 502; other transient errors logged, non-blocking).
+
+### Push-access probe — `crud.py::_validate_push_access` → `git_service.probe_push_access` (#2107)
+
+READ access is not enough for an agent that will auto-push (`will_push` = the
+`_git_auto_sync_baked` predicate: working-branch mode, or fork-to-own, with a
+PAT). Neither earlier check can see a read-only token: `ls-remote` talks to
+upload-pack, and the REST `permissions.push` field reports the **user's role on
+the repo**, not what a fine-grained token was granted — a Contents: read-only
+PAT passed both and then failed every 15-minute sync for its agent's whole life
+(64 in the reported case, `remote: Write access to repository not granted.`).
+The probe asks receive-pack, where GitHub enforces write: `git push --dry-run
+--porcelain <url> HEAD:refs/heads/__trinity_write_probe` from an empty scratch
+repo on the backend host, the PAT carried by `git_auth_env` (an
+`http.extraHeader` in the child's env, never argv). `--dry-run` negotiates auth
+and permissions and creates nothing.
+
+| Probe outcome | Create result |
+|---------------|---------------|
+| `ok` | Proceed |
+| `denied` (stderr matches `git_service.is_push_denied`) | **400**, naming GitHub's own reason and the fix (fine-grained: Contents: Read and write; classic: `repo`; or source mode) — before any branch is reserved or container created |
+| `transient` (timeout, 5xx, unreachable, unrecognised) | Logged, non-blocking (the PAT path's policy — it says nothing about the token) |
+
+Source-mode (pull-only) agents are not probed: they never push.
 
 ### Env baking — `crud.py::_apply_github_env`
 
@@ -564,6 +587,7 @@ produce a clearer message, never block a working push.
 | Repo private or nonexistent (anonymous) | `crud.py::_validate_github_access` | 400 | Combined "not found or is private — add a GitHub token" |
 | GitHub unreachable during tokenless create | `crud.py::_validate_github_access` | **502 (fail-closed)** | "GitHub is unreachable — could not verify anonymous access…" |
 | Source branch missing (anonymous) | `crud.py::_validate_github_access` | 400 | "Branch '…' not found in public repository…" |
+| Token can read but not push (auto-pushing agent) | `crud.py::_validate_push_access` (#2107) | 400 | "The GitHub token can read '…' but is not allowed to push to it (…)" |
 | Push from a tokenless agent | `git_service.sync_to_github` | 409 | `X-Conflict-Type: no_write_credentials`, class `AUTH_FAILURE` |
 | Reset-to-main on a tokenless agent | `git_service.reset_to_main_preserve_state` | 409 | `X-Conflict-Type: no_write_credentials` |
 
