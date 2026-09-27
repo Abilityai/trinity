@@ -18,8 +18,9 @@ prefix `/api/enterprise/client-portal`, Vue at `/workspace`). A caller is either
 code — or a **signed-in platform user**, who reaches the same surface in one click
 because their platform session *is* the workspace session (ent#357). Both resolve
 through `client_portal/portal_auth.py::get_portal_principal`, which returns
-`(email, is_platform)`; the roster is every agent shared with that email, plus — for a
-platform session only — the agents they own.
+`(email, is_platform, is_person)`; the roster is every agent shared with that email, plus — for a
+platform session only — the agents they own. `is_person` (trinity-enterprise#611) is False only
+for a platform principal that is not a person: a system-scoped key reads here but cannot answer an ask.
 
 **Sign-out ends whichever credential is live — never a derivation of it (#2258).** The
 implicit entry above runs the other way too: `isPlatformSession = !portalToken &&
@@ -109,7 +110,9 @@ as `is_platform=True` (it could previously read the owner's threads with agents 
 calling agent holds no `agent_permissions` edge to, and this route would have made that
 one call). User-scoped keys, `scope='system'` and portal session tokens are unaffected;
 there is no legitimate agent caller of this surface (no MCP tool targets it, no agent
-image calls it).
+image calls it). Since trinity-enterprise#611 `scope='system'` keeps that read breadth but is
+not a person: `PortalPrincipal.is_person` is False and the ask answer refuses it (403
+`person_required`), as the operator respond route does.
 
 It was an entitled module and returned 404 in community builds; ent#356 moved it into
 OSS core (adoption: this is the main surface a non-operator uses to work with agents).
@@ -500,7 +503,7 @@ feed's live rows plus the conversation's in-flight emit joined **by execution id
 (under the message; the stream's last line is the current step while live; the terminal card
 renders FROM the durable #2320 verdict, so it survives a reload; **Ask about it** is a prefill,
 never a send — the ruled lesser control) and for `PortalWork`, the tab body (Waiting on you =
-`PortalAsks` over `store.asks` filtered to participants, the fourth rendering of the ask row — since #2915 the projection (`WorkspaceAsk`) carries a coarse `sync ∈ {confirmed, changed, closed, unconfirmed}` + `aging` (never the reason or a poller timestamp), rendered by the shared `queueSyncBadge` rule, and an answer to a changed/closed ask is refused with `AskError(409, "item_diverged")` until `acknowledge_divergence` rides the resend;
+`PortalAsks` over `store.asks` filtered to participants, the fourth rendering of the ask row — since #2915 the projection (`WorkspaceAsk`) carries a coarse `sync ∈ {confirmed, changed, closed, unconfirmed}` + `aging` (never the reason or a poller timestamp), rendered by the shared `queueSyncBadge` rule, and an answer to a changed/closed ask is refused with `AskError(409, "item_diverged")` until `acknowledge_divergence` rides the resend; since trinity-enterprise#611 the list also carries asks that ENDED in the last 7 days (`include_ended`, read past the operator's Clear All) with a coarse `ended_by ∈ {you, operator, timeout}` + `ended_at` and never an email or the cancel reason — `pending-only` keeps Waiting on you to what is still open — and the answer is person-only;
 rooms grouped by participant, absence visible). **OSS-core by decision (ent#525): deliberately
 ungated.** See [workspace-work.md](../feature-flows/workspace-work.md).
 
@@ -764,7 +767,7 @@ The companion is told: `autonomy_dial_service.prompt_lines` rides the seat's
 memory block, so the model reads which classes it may act on unprompted and, for
 the rest, the same sentence the panel shows. `PortalAgentAutonomy.vue` in Agent
 details; `get_autonomy` on MCP (seat from `execution_id`, never a parameter).
-Requirement §5.39 of `core-agent.md`; flow in `workspace-autonomy-dial.md`.
+Requirement §5.40 of `core-agent.md`; flow in `workspace-autonomy-dial.md`.
 
 ## The seat decision record — why things were approved, deferred or killed (ent#638, R25)
 
@@ -786,6 +789,32 @@ The seat's active decisions ride the shared memory block into every turn
 (`platform_prompt_service.format_user_memory_block`), which is what makes a criterion
 reusable and `cites` — the health metric — non-zero. `PortalAgentDecisions.vue` in
 Agent details. Requirement §5.37 of `core-agent.md`; flow in `workspace-seat-decisions.md`.
+
+## Suggestions — what you can do with this agent, and what is waiting (ent#465)
+
+`client_portal/suggestions/` (router → service → db, the `work/` shape) answers
+`GET /api/enterprise/client-portal/agents/{name}/suggestions` for ONE viewer and
+ONE agent. `service.build` is pure over an injected `now`: signals in (my pending
+asks, my seat's decisions past `review_by`, the agent's schedules + one windowed
+query of recent runs, overdue reminders, my last Workspace message, the playbooks
+I have started, the exposed playbooks from the ONE briefing path), ranked
+`(Suggestion, fingerprint)` pairs out. **Door, per class:** the router 404s a
+portal token before any read (ent#78 auth-path invariant); `configure` classes
+reach only owner or admin — `PortalPrincipal.is_admin` exists for this ONE
+decision (role `admin` AND scope in `ADMIN_GATE_SCOPES`); everywhere else a
+non-owner admin stays a viewer (ent#358). **Fingerprint = the identity of the
+state, never a count** (the first failure of a streak, the set of held schedules),
+so a dismissal outlives more of the same and ends when the state changes. The
+feedback write (`POST …/suggestions/feedback`, key in the body) recomputes and 404s
+a key not currently emitted — writes are bounded to real items and the fingerprint
+is the server's. `workspace_suggestion_feedback` is named generically with a
+`surface` column so the post-action next-step tier (design-system p27) shares one
+dismissal model; CASCADE on the agent. The briefing is fetched only when the agent
+can answer (#2196 availability first) and cached 60 s. Frontend:
+`PortalSuggestions.vue` in the Info tab (full) and on the empty chat (compact, top
+3, no chrome when empty); the shell loads the slice for the active 1:1 agent so
+Info's rail dot (`updated` + a `note`, "2 suggestions") lights mid-conversation.
+Requirement §5.39 of `core-agent.md`; flow in `workspace-suggestions.md`.
 
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 
@@ -882,7 +911,7 @@ case:
 | Agent-shared, I am the owner **in a platform session** | both, "Delete for everyone" offered | `db.revoke_agent_shared_file` (soft; the sweeper reclaims bytes) |
 
 **The matrix is session-type dependent and the UI copy says so.** `PortalPrincipal` is
-`(email, is_platform)` and carries no role, so `include_owned` is `principal.is_platform`
+`(email, is_platform, is_person)` and carries no role, so `include_owned` is `principal.is_platform`
 at every call site (ent#358). Therefore a **non-owner admin is a viewer here** — stricter
 than the platform surface, and correct — and an **owner signed in with a magic-link portal
 token also gets the viewer affordance**. `portal_owns_agent` is the same membership the
@@ -1004,11 +1033,13 @@ exactly ONE participant, never "at least one". Two properties are load-bearing:
   leave N−1 in a **permanent loading skeleton**. Grouping is unblocked by keying that store
   per agent — a store change, not a rail change.
 
-Info is the registry's first **static** tab: `signal: RAIL_SIGNAL_NONE` and `empty: null`,
-declared rather than filled, because an agent always has a name, a health state and a chat
-list (no empty state to teach) and nothing writes an `info` signal (no dot that can light).
-`signalFor` already answers `emptySignal()` for an unmentioned tab, so the static form needs
-no read-side special case. It is also absent from `feedsFor` by design — its body owns its
+Info declares `empty: null` — an agent always has a name, a health state and a chat list, so
+there is no empty state to teach. It shipped as the registry's first **static** tab
+(`signal: RAIL_SIGNAL_NONE`, ent#547); **ent#465 amended that**: Info now carries
+`RAIL_SIGNAL_UPDATED`, and the shell writes an `info` entry — with a `note`, "N suggestions",
+that the tooltip and mobile strip read instead of "updated" — while suggestions are waiting
+in it. A signalling tab without an empty state is therefore a legal registry shape;
+`RAIL_SIGNAL_NONE` stays for a tab with neither. It is also absent from `feedsFor` by design — its body owns its
 own two reads, the one docked tab not fed by the shell. Both `<PortalRail>` mounts (the
 column and the mobile sheet) receive `#tab-info`; one alone leaves the phone on the generic
 empty state. Mobile is a **gain**: the old panel was `hidden sm:flex`, so the header button

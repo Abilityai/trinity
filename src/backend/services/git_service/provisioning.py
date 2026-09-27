@@ -51,6 +51,35 @@ _ANON_PROBE_DEFINITIVE_PATTERNS = (
     "could not read password",
 )
 
+# #2107: what a push that was REFUSED looks like, as opposed to one that never
+# reached GitHub. Matched lower-cased against git's stderr (and against an
+# agent's recorded `last_error_summary`, whose first line is git's). The first
+# is GitHub's own text for a token without Contents: write — it arrives as
+# `remote: Write access to repository not granted.`, which is why the old
+# probes (`ls-remote`, REST `permissions.push`) all passed: they never ask.
+_PUSH_DENIED_PATTERNS = (
+    "write access to repository not granted",
+    "the requested url returned error: 403",
+    "authentication failed",
+    "could not read username",       # credential refused, GIT_TERMINAL_PROMPT=0
+    "could not read password",
+    "repository not found",          # the token cannot see the repo at all
+)
+
+# The ref the probe names. `--dry-run` never creates it; the name only has to
+# be one no repository plausibly carries.
+_WRITE_PROBE_REF = "refs/heads/__trinity_write_probe"
+
+
+def is_push_denied(text: Optional[str]) -> bool:
+    """True when git output (or a recorded sync error) says the push was
+    refused for lack of write access (#2107)."""
+    lowered = (text or "").lower()
+    if "permission to" in lowered and "denied" in lowered:
+        return True  # "Permission to o/r.git denied to <user>." (classic PAT / SSH)
+    return any(p in lowered for p in _PUSH_DENIED_PATTERNS)
+
+
 def generate_instance_id() -> str:
     """Generate a unique instance ID for an agent.
 
@@ -201,6 +230,99 @@ async def probe_anonymous_repo_access(github_repo: str) -> str:
         proc.returncode,
     )
     return "transient"
+
+
+async def probe_push_access(github_repo: str, github_pat: str) -> Tuple[str, str]:
+    """Can this token PUSH to ``github_repo``? (#2107)
+
+    Every earlier check answers a different question: ``ls-remote`` proves READ
+    (the upload-pack side), and the REST ``permissions.push`` field reports the
+    *user's role on the repo*, not what a fine-grained token was granted — so a
+    Contents: read-only PAT passed both and then failed every auto-sync, forever.
+    This asks the receive-pack side, where GitHub enforces write: a
+    ``git push --dry-run`` of a throwaway ref from an empty scratch repo. It
+    performs the full auth + permission negotiation and creates nothing.
+
+    The token rides ``git_auth_env`` (an ``http.extraHeader`` in the child's
+    env), never argv. Returns ``(outcome, detail)``:
+      - ``("ok", "")``            — the push would be accepted
+      - ``("denied", <line>)``    — GitHub refused it; ``<line>`` is git's own
+                                    one-line reason, for the error message
+      - ``("transient", <line>)`` — GitHub unreachable or an unrecognised
+                                    failure; says nothing about the token
+    """
+    import tempfile
+    from services.git_credential_helper import git_auth_env
+
+    base = os.getenv("TRINITY_GIT_BASE_URL", "https://github.com").rstrip("/")
+    remote_url = f"{base}/{github_repo}.git"
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", **git_auth_env(github_pat)}
+
+    async def _git(*args: str, cwd: str, timeout: float):
+        proc = await asyncio.create_subprocess_exec(
+            "git", *args, cwd=cwd, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
+        return proc.returncode, (err or b"").decode("utf-8", errors="replace")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="trinity-write-probe-") as scratch:
+            rc, err = await _git("init", "-q", cwd=scratch, timeout=10.0)
+            if rc != 0:
+                return "transient", _first_line(err, github_pat)
+            rc, err = await _git(
+                "-c", "user.name=trinity", "-c", "user.email=probe@trinity.invalid",
+                "-c", "commit.gpgsign=false",
+                "commit", "-q", "--allow-empty", "-m", "trinity write probe",
+                cwd=scratch, timeout=10.0,
+            )
+            if rc != 0:
+                return "transient", _first_line(err, github_pat)
+            rc, err = await _git(
+                "push", "--dry-run", "--porcelain", remote_url,
+                f"HEAD:{_WRITE_PROBE_REF}",
+                cwd=scratch, timeout=20.0,
+            )
+    except asyncio.TimeoutError:
+        logger.warning("probe_push_access: push --dry-run timed out for %s", github_repo)
+        return "transient", "timed out"
+    except FileNotFoundError:
+        logger.warning("probe_push_access: git not installed on backend host")
+        return "transient", "git unavailable"
+    except Exception as exc:  # noqa: BLE001 — defensive
+        logger.warning("probe_push_access: failed for %s: %s", github_repo, exc)
+        return "transient", type(exc).__name__
+
+    if rc == 0:
+        return "ok", ""
+    detail = _first_line(err, github_pat)
+    if is_push_denied(err):
+        return "denied", detail
+    # The stderr line is NOT logged: it was produced in a child that held the
+    # token, so it stays out of the platform log (it is returned, scrubbed, to
+    # the caller that asked).
+    logger.warning(
+        "probe_push_access: push --dry-run for %s exited %s with an "
+        "unrecognised error — treating as transient",
+        github_repo, rc,
+    )
+    return "transient", detail
+
+
+def _first_line(stderr: str, secret: str) -> str:
+    """The most informative stderr line: GitHub's own `remote:` reason when
+    present, else the first line. Scrubbed and capped — it is echoed to the
+    caller in a 400."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    remote = [ln for ln in lines if ln.lower().startswith("remote:")]
+    line = (remote or lines or [""])[0]
+    return scrub_secret_and_urls(line, secret)[:240]
 
 
 async def reserve_and_generate_instance_id(

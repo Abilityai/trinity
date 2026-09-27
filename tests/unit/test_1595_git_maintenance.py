@@ -532,6 +532,11 @@ class TestLoopDispatchesViaThread:
             raise asyncio.CancelledError  # first iteration is enough
 
         monkeypatch.setattr(auto_sync.asyncio, "to_thread", _fake_to_thread)
+        # #3010: each cycle is gated on the owner's flag; with no platform to
+        # ask, the env decides — enabled here so the first cycle dispatches.
+        for var in ("TRINITY_BACKEND_URL", "TRINITY_MCP_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("GIT_SYNC_AUTO", "true")
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(auto_sync.run_auto_sync_loop(repo, interval_seconds=0))
         # Resolve the expected function through sys.modules at assert time:

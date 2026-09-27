@@ -2295,6 +2295,7 @@ class ExecutionResultEnvelope(BaseModel):
 _PULL_ERROR_CODES = frozenset({
     "timeout", "capacity", "auth", "billing", "agent_error", "network",
     "circuit_open", "reconciled", "lease_expired", "oom", "max_turns",
+    "model_unsupported",  # #3012 — the agent's model-rejection 400
 })
 # reply.status value set (MESSAGE_ENVELOPE_SCHEMA §2.4/§4; `cancelled` per the
 # live #1083 3-way map — OPEN-1).
@@ -3638,13 +3639,36 @@ class OperatorResponse(BaseModel):
     acknowledge_divergence: bool = False
 
 
+def _blank_reason_is_none(value: Optional[str]) -> Optional[str]:
+    """An empty or whitespace-only cancel reason is no reason."""
+    if isinstance(value, str):
+        return value.strip() or None
+    return value
+
+
+class OperatorCancel(BaseModel):
+    """Optional body for cancelling one queue item (trinity-enterprise#611).
+
+    `reason` is the operator's note to the agent: recorded on the row and framed
+    as data in the agent's wake turn. Never written into an audit row (the row
+    records only whether one was given) and never shown to a Workspace client.
+    """
+    reason: Optional[str] = Field(None, max_length=500)
+
+    _blank_is_none = field_validator("reason")(_blank_reason_is_none)
+
+
 class BulkCancelRequest(BaseModel):
     """Body for bulk-cancelling pending queue items (#1017).
 
     The client sends the ids it actually rendered, so a sync-loop race can
-    never cancel items the operator never saw.
+    never cancel items the operator never saw. `reason` (trinity-enterprise#611)
+    is one note for the whole sweep, recorded on every row it ends.
     """
     ids: List[str] = Field(..., min_length=1, max_length=500)
+    reason: Optional[str] = Field(None, max_length=500)
+
+    _blank_is_none = field_validator("reason")(_blank_reason_is_none)
 
 
 class ClearResolvedRequest(BaseModel):

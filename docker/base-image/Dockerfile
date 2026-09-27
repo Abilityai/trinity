@@ -159,9 +159,18 @@ RUN git config --system gc.auto 0 && \
 # `@google/gemini-cli` and `@openai/codex` below resolve their binaries through
 # the same optional-dependency mechanism and carry the same silent-failure risk,
 # and the Go tarball above is hardcoded to linux-amd64.
+#
+# Pinned, never `@latest` (#3012). Docker caches a RUN layer by its text, so
+# `@latest` is resolved once and then reused by every rebuild: an instance
+# rebuilt on 2026-09-24 still shipped 2.1.278, and `claude-opus-5-5` needs
+# >= 2.1.280. The ARG value is part of the layer's cache key, so bumping it is
+# what actually upgrades the CLI. `MODEL_CATALOG[*].min_claude_code`
+# (src/backend/services/model_catalog.py) must not exceed this value;
+# tests/unit/test_3012_claude_code_pin.py fails the build when it does.
+ARG CLAUDE_CODE_VERSION=2.1.281
 RUN set -eu; \
     npm install -g --include=optional --no-ignore-scripts --foreground-scripts \
-        @anthropic-ai/claude-code@latest; \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
     CC_DIR="$(npm root -g)/@anthropic-ai/claude-code"; \
     if ! claude --version >/dev/null 2>&1; then \
         echo "[base-image] claude did not run after npm install: the platform-native optionalDependency did not land. Re-installing it as a direct (non-optional) dependency."; \

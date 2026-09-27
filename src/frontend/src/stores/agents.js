@@ -677,6 +677,42 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // Git sync settings (#3010) — the owner's auto-sync flag (the agent's loop
+    // reads it every cycle) and the schedule-freeze-when-sync-failing flag.
+    async getGitAutoSync(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/git/auto-sync`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setGitAutoSync(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/git/auto-sync`,
+        { enabled },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
+    async getGitFreezeSchedules(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/git/freeze-schedules-if-failing`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setGitFreezeSchedules(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/git/freeze-schedules-if-failing`,
+        { enabled },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
     // Per-agent GitHub PAT methods (#347)
     async getGitHubPATStatus(name) {
       const authStore = useAuthStore()

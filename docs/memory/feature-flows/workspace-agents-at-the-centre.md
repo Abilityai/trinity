@@ -416,7 +416,10 @@ render** (ent#468 Option A), recorded on the issue.
   of INTENT — the dispatch is backgrounded — so the copy is "is picking this up",
   not "has done it". `null`/`false` says only "Sent."; reading an absent value as
   "started" is the over-claim ent#430 spent a blocker removing from this field.
-- **It cannot live on the ask row**, which answering removes. `visible` gates on
+- **It does not live on the ask row.** Answering removed the row until
+  trinity-enterprise#611; now the row is replaced by the server's `answered`
+  projection and stays listed without controls, and the confirmation is still its
+  own item. `visible` gates on
   `items.length > 0 || confirmations.length > 0`; on `items.length` alone the
   surface unmounted at the same instant the confirmation was created, so the
   message would have rendered for zero frames. Timers are cleared on unmount —

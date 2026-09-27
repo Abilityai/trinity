@@ -27,7 +27,7 @@ from typing import Optional
 
 from database import db
 from redis_breaker_util import get_breaker_redis
-from services import rate_limiter
+from services import ask_service, rate_limiter
 from services.operator_queue_choices import OPTIONS_DROPPED_MARKER
 from services.agent_client import AgentClient
 from utils.helpers import iso_cutoff, parse_iso_timestamp, to_utc_iso, utc_now_iso
@@ -500,6 +500,27 @@ DELIVERY_DELIVERED = "delivered"
 DELIVERY_UNDELIVERED = "undelivered"
 DELIVERY_NOT_APPLICABLE = "not_applicable"
 DELIVERY_STATES = frozenset({DELIVERY_DELIVERED, DELIVERY_UNDELIVERED, DELIVERY_NOT_APPLICABLE})
+
+# #3024: the terminal statuses the write-back itself writes into the agent's file
+# (#1017). `db.get_terminal_items_for_agent` hands the write-back exactly the rows
+# `awaits_terminal_flip` is True for — one rule in two spellings, pinned together
+# by a real-DB test (test_2915_operator_queue_sync_honesty.py).
+_FLIPPED_BY_WRITE_BACK = frozenset({"cancelled", "expired"})
+
+
+def awaits_terminal_flip(row) -> bool:
+    """Will this cycle's write-back write the row's ending into the agent's entry?
+
+    A cancelled / expired row whose flip has not landed: never attempted, or
+    retried after `undelivered` — except `entry_missing`, whose entry the agent
+    had already dropped. Until the flip lands, a still-`pending` entry with the
+    row's id is the ORIGINAL entry awaiting it, not a re-used id (#3024).
+    """
+    return (
+        row.get("status") in _FLIPPED_BY_WRITE_BACK
+        and row.get("delivery_state") in (None, DELIVERY_UNDELIVERED)
+        and (row.get("delivery_detail") or "") != "entry_missing"
+    )
 
 # `sync_detail` / `delivery_detail` are durable, operator-visible, audited
 # columns — a CLOSED vocabulary. Field names, folded status tokens and failure
@@ -1083,13 +1104,22 @@ class OperatorQueueSyncService:
 
         from services.docker_service import agent_container_states
 
+        # Reset BEFORE expiry (trinity-enterprise#611): an expiry is a change, and
+        # the reset used to sit below it, so an expired ask reached the UI only on
+        # its 15 s poll.
+        self._changed_this_cycle = False
+
         # Expire items past their deadline — BEFORE the running-agents gate
         # (#2915): the early return below used to sit above this, so an
-        # all-stopped fleet never expired anything.
+        # all-stopped fleet never expired anything. Through the ask sink
+        # (trinity-enterprise#611): the ledger (`disposed_by = 'timeout'`), one
+        # audit row per ask, and the wake for each filer; the sink sends no
+        # trigger of its own — this cycle's ONE trigger announces it.
         try:
-            expired_count = db.mark_operator_queue_expired()
-            if expired_count > 0:
-                logger.info(f"Expired {expired_count} operator queue items")
+            expired = ask_service.expire().rows
+            if expired:
+                self._changed_this_cycle = True
+                logger.info(f"Expired {len(expired)} operator queue items")
         except Exception as e:
             logger.error(f"Operator queue expiry failed: {e}")
 
@@ -1104,11 +1134,14 @@ class OperatorQueueSyncService:
             logger.debug(f"Could not read agent container states: {e}")
             states = None
         if states is None:
+            # Nothing is swept or synced — but an expiry that already happened
+            # is still announced.
+            if self._changed_this_cycle:
+                await self._broadcast_sync()
             return
 
         running_agents = sorted(name for name, state in states.items() if state == "running")
         now = utc_now_iso()
-        self._changed_this_cycle = False
 
         # Sweep: every open row of an agent that is NOT running is
         # `unconfirmed:agent_not_running`. Edge-triggered — at steady state the
@@ -1447,12 +1480,28 @@ class OperatorQueueSyncService:
                 continue
 
             if isinstance(req_id, str) and req_id in terminal_index:
+                term = terminal_index[req_id]
                 if req_status == "pending":
-                    term = terminal_index[req_id]
+                    # #3024: this runs BEFORE the write-back (step 4), so right
+                    # after the platform ends a row the file still holds the
+                    # ORIGINAL pending entry — the one step 4 is about to flip.
+                    # That is not a re-use; only an entry the write-back will not
+                    # flip is.
+                    if not awaits_terminal_flip(term):
+                        await self._apply_sync_state(
+                            agent_name,
+                            {"id": term["id"], "sync_state": term.get("sync_state"), "sync_detail": None},
+                            SYNC_STALE_ID, _fold_agent_status(term.get("status")), now,
+                        )
+                elif term.get("sync_state") == SYNC_STALE_ID and req_status == term.get("status"):
+                    # #3024: the entry reads the row's own ending — file and row
+                    # agree. Heals the rows flagged before this fix; a genuine
+                    # re-use cannot get here, because the write-back never flips an
+                    # entry once the row has left its set.
                     await self._apply_sync_state(
                         agent_name,
-                        {"id": term["id"], "sync_state": term.get("sync_state"), "sync_detail": None},
-                        SYNC_STALE_ID, _fold_agent_status(term.get("status")), now,
+                        {"id": term["id"], "sync_state": SYNC_STALE_ID, "sync_detail": None},
+                        SYNC_CONFIRMED, None, now,
                     )
                 continue
 
@@ -1512,7 +1561,12 @@ class OperatorQueueSyncService:
             # clamp/create failure is quarantined by #1525 rather than hot-looping.
             try:
                 clamped = _clamp_ingested_item(req, agent_name)
-                new_id = db.create_operator_queue_item(agent_name, clamped)
+                # trinity-enterprise#611: provenance from what the POLLER knows,
+                # keyword-only — never from the entry, which could claim any
+                # channel it likes.
+                new_id = db.create_operator_queue_item(
+                    agent_name, clamped, channel="file", raised_by="agent",
+                )
                 admitted += 1
                 new_items.append(clamped)
                 self._create_failures.pop(fail_key, None)  # recovered — clear count

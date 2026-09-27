@@ -1901,6 +1901,19 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **Description**: Agents communicate via Trinity MCP with agent-scoped API keys
 - **Flow**: `docs/memory/feature-flows/agent-to-agent-collaboration.md`
 
+#### 9.1.1 Chain-depth guard (#2806)
+- **Status**: ✅ Implemented (2026-09-22)
+- **Problem**: nothing marked an agent-to-agent call as part of a chain, so two agents allowed to call each other could bounce a call A→B→A→B… until an incidental limit (per-hop timeout, parallel slots, the agent-call limiter's deadlock timeout) happened to stop it. Rooms had a cap (`ROOM_MAX_CHAIN_DEPTH = 8`); chat had none.
+- **Depth semantics**: every execution row carries `schedule_executions.chain_depth` (INTEGER, NULL read as 0). A call made by a **non-agent principal** (human JWT, user-scoped key, connector, portal delegate, event loopback) is a root: its child row is depth 0 and stored NULL. A call made by an **agent principal** (an agent-scoped key, keyed on `current_user.agent_name`; a `scope=system` key counts as caller `trinity-system`) stamps its child `1 + MAX(chain_depth)` over the **calling agent's `status='running'` rows** (0 when it has none). The raw `X-Source-Agent` header and the model-typed `parent_execution_id` play no part, so an agent cannot strip the guard by omitting either. Taking the max fails toward over-refusal, never under-refusal.
+- **Limit**: ops setting `inter_agent_max_chain_depth`, **default 8, validated 1–32**, resolved `system_settings` row → env `INTER_AGENT_MAX_CHAIN_DEPTH` → default, and changed with `PUT /api/settings/ops/config` (API + env only; no Settings UI field). A child at depth ≤ max runs; **max + 1 is the first refused**. The floor of 1 means no value can refuse a direct agent→agent call. The value is read per call and clamped to [1, 32] on use; an unreadable or non-integer stored value falls back to 8 with a warning and never fails the dispatch.
+- **Covered paths**: `POST /api/agents/{name}/chat` (MCP `chat_with_agent` sequential and every `chat_with_<slug>` tool), `POST /api/agents/{name}/task` (parallel, self-task and the #946 pull-routed sequential path), `POST /api/agents/{name}/fan-out`, and raw REST on those three routes with an agent-scoped key. Fan-out subtasks carry the depth captured at request time.
+- **Refusal contract**: HTTP **403**, `detail = {"error": "inter_agent_depth_exceeded", "depth", "max_depth", "caller", "target", "message"}`, header `X-Trinity-Error-Code: inter_agent_depth_exceeded`. The check runs **after** the uniform-404 target-access dependency (so it never discloses whether a target exists, Invariant #8) and **before** the idempotency claim, capacity acquire and row insert (Invariant #18), so a refused hop burns no key, holds no slot, starts no model work and **creates no execution row**. The message tells the calling model not to retry or re-route.
+- **Recording**: a platform audit row (`event_type=execution`, `event_action=inter_agent_depth_exceeded`) and an `agent_collaboration` activity on the **caller**, opened and closed FAILED with the code. Both are best-effort; the refusal is raised whether or not they are written.
+- **MCP**: `chat_with_agent` (all branches) and `fan_out` return a structured `{"status": "inter_agent_depth_exceeded", "retryable": false, ...}` result instead of throwing `API error (403)` (see `requirements/mcp.md`).
+- **Named residuals** (the guarantee holds for a call made with an agent-scoped credential while the calling agent has a running execution): **(a)** a non-agent credential held by an agent (a hand-pasted user-scoped key, detected by #1854) resolves to the human owner and counts as a root; **(b)** agent-key calls with no running row (a web-terminal session, a spawned background process, an orphan after its row went terminal) count as depth 1, or max+1 over any other running rows. An exact parent link needs a platform-injected execution id (#2392).
+- **Deferred**: loops (`run_agent_loop`), schedule trigger (`trigger_schedule`) and agent-emitted events each start a new root at depth 0 and so do not inherit depth yet — follow-up #2973. A2A cross-instance chains are the peer's to bound.
+- **Tests**: `tests/unit/test_2806_inter_agent_depth.py`; keyed end-to-end `tests/journeys/test_j10_agent_calls_agent_journey.py::test_two_agents_cannot_bounce_a_call_between_each_other_forever`; invariant IA-04 in `docs/testing/orchestration-invariant-catalog.md`.
+
 ### 9.2 Agent Permissions
 - **Status**: ✅ Implemented (2025-12-10, Updated 2026-02-19)
 - **Description**: Explicit permission model controlling which agents can call which
@@ -3417,7 +3430,76 @@ to localStorage in the clear.
   `test_2958_session_cleanup_chat_marker.py`, `test_2958_marker_path_parity.py`,
   `test_2610_resume_surface_parity.py`, `src/mcp-server/src/tools/executions.compact.test.ts`.
 
-### 5.39 Workspace — the autonomy dial: what a companion may do unprompted (trinity-enterprise#641)
+### 5.39 Workspace — suggestions: what you can do with this agent, and what is waiting (trinity-enterprise#465)
+- **Status**: 🚧 In progress
+- **Requirement ID**: WORKSPACE_SUGGESTIONS
+- **GitHub Issue**: abilityai/trinity-enterprise#465 (1.0 story step 3, #649)
+- **Description**: A platform user who opens an agent in the Workspace sees a short list of
+  suggestions computed for **that user and that agent** — never a list identical for every
+  user. Each is an actionable object, not advice: **Accept** or **Dismiss**, both recorded.
+  Every item displays the signal it came from so the claim can be checked. When nothing
+  crosses a threshold the surface says so and is never padded to a fixed count.
+- **Two kinds (decision 15, option 1 — the engine-bay ruling)**: `invoke` items act inside
+  the Workspace — Accept **prefills** the composer (`/<playbook> `) or opens the section the
+  item names; nothing is ever sent on the person's behalf (the ent#138 prefill rule).
+  `configure` items (a schedule's health, autonomy) are read-only awareness whose Accept is a
+  **deep link** to the operator agent page (`/agents/<name>?tab=schedules`). Building agents
+  stays operator-side (§5.11 "it reports; it does not configure").
+- **Door, declared per class**: every v1 class is behind the **platform-authenticated door**
+  (ent#357). A verified-email portal token gets a uniform 404 on the read and the feedback
+  write — usage- and schedule-derived data must be unreachable from the external projection
+  (ent#78 auth-path invariant). `configure` classes additionally require **owner or admin**,
+  the same audience that may enable/disable a schedule (`OwnedAgent`). The Workspace
+  principal carries `is_admin` for this one decision only; everywhere else a non-owner admin
+  stays a viewer (ent#358).
+- **v1 classes** (order = display priority; at most 5 shown, `total` returned; UTC):
+  | Class | Kind | Emitted when | Signal shown |
+  |---|---|---|---|
+  | `asks` | invoke | ≥1 pending ask addressed to me on this agent | "N questions waiting on you" |
+  | `decisions_due` | invoke | ≥1 decision on my seat past `review_by` | "N decisions past their review date" |
+  | `schedule_failing:<id>` | configure | last ≥3 terminal runs failed (skipped/cancelled neither count nor break the streak) | "Failed K runs in a row, last <date>" |
+  | `autonomy_held` | configure | autonomy off and ≥1 enabled schedule or a pending reminder past `fire_at` | "N schedules won't run — autonomy is off" |
+  | `schedule_never_fired:<id>` | configure | enabled, autonomy on, never run, and the cron's first expected fire after creation is >1h past | "Enabled since <date>, has never run" |
+  | `schedule_disabled:<id>` | configure | disabled ≥7 days and it had run before | "Disabled since <date> — it used to run" |
+  | `dormant` | invoke | I have chatted here and my last message is ≥14 days old | "Your last conversation was <date>" |
+  | `unused_playbook:<name>` | invoke | an exposed playbook I have not started, at most 3 | "You haven't run /name yet" |
+  One agent-level `autonomy_held` item replaces per-schedule "held" items: autonomy is off by
+  default, so per-schedule items would fill every slot, and no timestamp records when it was
+  turned off — a "held N days" figure would be invented. Autonomy off suppresses
+  `schedule_never_fired`.
+- **Usage dimension (recorded decision)**: per-user — yes, keyed by the viewer's email.
+  Per-skill — **explicit slash invocations only**: `/<name>` at the start of the person's own
+  Workspace messages or of executions attributed to them (`source_user_email`), and a
+  playbook an enabled schedule already runs is never offered. A plain-language request for
+  the same work is not detected, which is why the copy says "haven't run /name" rather than
+  "never used". Reads existing rows only — no parallel tracking store.
+- **Capabilities**: the same briefing ladder as the hints and "What it can do" (ent#380) —
+  the ent#178 curated set slots into that seam when it lands. **Playbooks only**: template
+  use-case text is not offered, because whether someone has "used" a free-text example is
+  unverifiable. When the agent is not running or does not answer, capability items are
+  omitted and the response says capabilities are unavailable — never "nothing unused".
+  With no usage history the list is capability-only and says so.
+- **Dismissal**: per user + agent + suggestion, persisted. A dismissed item stays hidden
+  while its **state fingerprint** is unchanged — the identity of the state, never a count
+  (the first failure of a streak, the set of held schedules, the set of waiting asks), so a
+  failing schedule does not return with every additional failure but does return when a new
+  streak starts. Accept is recorded (usefulness) and does not hide an item: the signal clears
+  itself when the thing is done. Writes are bounded to items currently emitted for the
+  caller; the server computes the fingerprint.
+- **Placement**: the rail's **Info** tab carries the full list and the tab shows its count;
+  an empty chat shows the top 3 above "Things you can ask". Suggestions never arrive as
+  messages.
+- **Cost**: no LLM call. Per read: at most one bounded briefing fetch (cached 60s, skipped
+  for a stopped agent), a handful of indexed queries and one windowed executions query.
+  Rate-limited per viewer.
+- **Not in scope (follow-ups)**: a suggestion that consults another agent (2026-09-21
+  amendment → ent#698); suggestions derived from the current conversation (2026-09-22 →
+  ent#699); role, project
+  and objective-gap inputs (#500, #661, #477–#479) — each attaches as a new class without
+  changing the object; the Inbox placement (#610).
+- **Flow**: `docs/memory/feature-flows/workspace-suggestions.md`
+
+### 5.40 Workspace — the autonomy dial: what a companion may do unprompted (trinity-enterprise#641)
 - **Status**: ✅ Implemented (2026-09-23). OSS-core (Workspace).
 - **Requirement ID**: WORKSPACE_AUTONOMY_DIAL
 - **GitHub Issue**: abilityai/trinity-enterprise#641 (canon `tandem-06-operations.md` §2.3, ruling P12; consumes §5.37's evidence)

@@ -402,14 +402,23 @@ def _context_used(metadata: Dict[str, Any], tokens: Optional[int]) -> Optional[i
 _SWITCH_FAILURE_KINDS = {"billing": "rate_limit", "auth": "auth"}
 
 
-def _switch_failure_kind(error_code: Optional[str]) -> Optional[str]:
+def _switch_failure_kind(
+    error_code: Optional[str], error_text: str = ""
+) -> Optional[str]:
     """Which SUB-003 failure kind, if any, a pull terminal's code means (#2643).
 
     An ALLOWLIST, deliberately: a code this map has not heard of switches
     nothing. The inverse — "switch unless the code is one we know is benign" —
     would churn an agent through every subscription it owns the first time a
     worker reports a crash class nobody has taught this map about.
+
+    #3012: a worker older than #3012 reports a model the CLI refused as 503 →
+    ``auth``. No subscription can fix that, so the text overrides the code.
     """
+    from services.failure_classifier import is_model_rejection
+
+    if is_model_rejection(error_text):
+        return None
     return _SWITCH_FAILURE_KINDS.get((error_code or "").strip().lower())
 
 
@@ -579,7 +588,7 @@ def apply_task_result(
         switch_kind = (
             None
             if row_status == TaskExecutionStatus.SUCCESS
-            else _switch_failure_kind(error_code)
+            else _switch_failure_kind(error_code, err_text)
         )
         if switch_kind is not None:
             subscription_auto_switch.spawn_subscription_failure(

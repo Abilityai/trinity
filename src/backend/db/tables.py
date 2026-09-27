@@ -293,6 +293,8 @@ schedule_executions = Table(
     Column("source_channel_client", Text),
     # ent#555 — the canvas the user had open for this turn (context, not authority).
     Column("open_canvas_id", Text),
+    # #2806 — agent-to-agent hops from a non-agent root; NULL = root (0).
+    Column("chain_depth", Integer),
 )
 
 agent_loops = Table(
@@ -807,6 +809,21 @@ portal_file_dismissals = Table(
     Column("file_id", Text, primary_key=True),
     Column("agent_name", Text),
     Column("dismissed_at", Text),
+)
+
+workspace_suggestion_feedback = Table(
+    "workspace_suggestion_feedback",
+    metadata,
+    Column("client_email", Text, primary_key=True),
+    Column("agent_name", Text, primary_key=True),
+    Column("suggestion_key", Text, primary_key=True),
+    Column("surface", Text),
+    Column("source", Text),
+    Column("dismissed_at", Text),
+    Column("dismissed_fingerprint", Text),
+    Column("accepted_at", Text),
+    Column("accept_count", Integer),
+    Column("updated_at", Text),
 )
 
 system_settings = Table(
@@ -1439,6 +1456,24 @@ operator_queue = Table(
     Column("delivery_detail", Text),
     Column("delivery_updated_at", Text),
     Column("divergence_acknowledged_at", Text),
+    # trinity-enterprise#611: how the ask ended — written in the same
+    # compare-and-set UPDATE that flips `status`, so only the winning writer
+    # records an ending. Nullable, no backfill: a row that ended before the
+    # ledger reads from `status`.
+    Column("disposition", Text),         # answered|cancelled|expired
+    Column("disposed_at", Text),
+    Column("disposed_by", Text),         # person|timeout
+    Column("disposed_by_email", Text),   # NULL for timeout; withheld from agent principals
+    Column("disposition_reason", Text),  # the operator's optional cancel reason
+    Column("batch_id", Text),            # one uuid per bulk-cancel sweep
+    # trinity-enterprise#611: the agent-raised ask. Platform-owned — written only
+    # from keyword-only arguments, never from an agent's file entry.
+    Column("raised_by", Text),           # agent|gate (NULL: legacy row or platform alarm)
+    Column("channel", Text),             # file|mcp
+    Column("to_role", Text),
+    Column("resolved_to", Text),         # JSON list of person refs
+    Column("proposal", Text),            # JSON — the frozen action
+    Column("supersedes_expired", Text),  # the predecessor row's uuid
 )
 
 nevermined_agent_config = Table(

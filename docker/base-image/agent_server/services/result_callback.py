@@ -196,14 +196,18 @@ def _envelope_from_http_exception(exc: HTTPException) -> Dict:
     """
     detail = exc.detail
     metadata: Dict = {}
+    error_code, terminal_reason = _STATUS_MAP.get(exc.status_code, (None, "error"))
     if isinstance(detail, dict):
         error_msg = detail.get("message") or json.dumps(detail)[:500]
         if isinstance(detail.get("metadata"), dict):
             metadata = detail["metadata"]
+        # #3012: a body that names its own class (the model-rejection 400) wins
+        # over the status-code guess.
+        if isinstance(detail.get("error_code"), str):
+            error_code = detail["error_code"]
     else:
         error_msg = str(detail)[:500]
 
-    error_code, terminal_reason = _STATUS_MAP.get(exc.status_code, (None, "error"))
     return {
         "status": "failed",
         "error": error_msg,

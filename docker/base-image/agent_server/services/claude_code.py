@@ -40,6 +40,8 @@ from .error_classifier import (
     _diagnose_exit_failure,
     _format_rate_limit_error,
     _is_rate_limit_message,
+    _model_rejection_detail,
+    _model_rejection_message,
 )
 from . import chat_session_marker
 from . import jsonl_recovery as _jsonl_recovery
@@ -519,6 +521,16 @@ async def _execute_claude_code_once(
                     detail=f"Authentication failure: {auth_msg[:300]}. Check subscription token or API key configuration."
                 )
 
+            # #3012: Claude Code refused the model. Mirrors the check in
+            # headless_executor._finalize_headless_result — a 400 with
+            # error_code "model_unsupported", never the generic 500.
+            model_rejection = _model_rejection_message(
+                metadata, stderr_output if return_code != 0 else ""
+            )
+            if model_rejection is not None:
+                logger.error(f"[Chat] Model rejected by Claude Code: {model_rejection[:200]}")
+                raise HTTPException(status_code=400, detail=_model_rejection_detail(model_rejection))
+
             # Check for errors
             if return_code != 0:
                 # Issue #906: Signal terminations (SIGKILL/SIGTERM/SIGINT — OOM,
@@ -635,8 +647,9 @@ async def _execute_claude_code_once(
 
 # #2958: statuses that are never a dead-session symptom — a rate limit, an auth
 # failure or a timeout is retried by nobody here, and a cold retry would only
-# double the cost of the same failure.
-_NO_COLD_RETRY_STATUSES = frozenset({429, 503, 504})
+# double the cost of the same failure. #3012: 400 is a model the CLI refused —
+# a cold retry sends the same --model and is refused the same way.
+_NO_COLD_RETRY_STATUSES = frozenset({400, 429, 503, 504})
 
 
 def _reset_session_counters() -> None:
