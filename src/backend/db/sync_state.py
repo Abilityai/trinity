@@ -9,14 +9,14 @@ Converted from raw sqlite3 to SQLAlchemy Core (#300) so it runs unchanged on
 both SQLite and PostgreSQL.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
-from sqlalchemy import select, delete
+from sqlalchemy import and_, select, delete
 
 from utils.helpers import utc_now_iso
 
 from .engine import get_engine, make_insert
-from .tables import agent_sync_state
+from .tables import agent_git_config, agent_ownership, agent_sync_state
 
 # Keep in sync with agent_sync_state column order so row indexes match.
 _COLUMNS = (
@@ -83,6 +83,74 @@ class SyncStateOperations:
         with get_engine().connect() as conn:
             rows = conn.execute(stmt).mappings().all()
         return [_row_to_dict(r) for r in rows]
+
+    def list_health_rows(self, agent_names: Optional[Iterable[str]] = None) -> Dict[str, Dict]:
+        """Git config flags + sync-state row per live git-bound agent (trinity-enterprise#706).
+
+        ONE query — `agent_git_config` joined to `agent_ownership` (soft-deleted
+        agents excluded, the #1561 filter of `list_git_enabled_agents`) and
+        LEFT-joined to `agent_sync_state` — so every sync-health surface reads
+        the same set the poller polls. Returns
+        `{name: {"config": {...}, "state": {...} | None}}`; `state` is None for
+        an agent the poller has not written yet.
+
+        `agent_names` scopes the result (an empty iterable returns `{}`). The
+        scope is applied in Python rather than as an `IN (...)` list, which
+        needs no chunking under SQLite's host-parameter cap (#73); the table is
+        one row per git-bound agent, so the scan is fleet-sized.
+        """
+        scope = None if agent_names is None else set(agent_names)
+        if scope is not None and not scope:
+            return {}
+        state_cols = [agent_sync_state.c[col].label(f"s_{col}") for col in _COLUMNS]
+        stmt = (
+            select(
+                agent_git_config.c.agent_name,
+                agent_git_config.c.source_mode,
+                agent_git_config.c.auto_sync_enabled,
+                agent_git_config.c.freeze_schedules_if_sync_failing,
+                agent_git_config.c.created_at,
+                *state_cols,
+            )
+            .select_from(
+                agent_git_config.join(
+                    agent_ownership,
+                    agent_ownership.c.agent_name == agent_git_config.c.agent_name,
+                ).outerjoin(
+                    agent_sync_state,
+                    agent_sync_state.c.agent_name == agent_git_config.c.agent_name,
+                )
+            )
+            .where(
+                and_(
+                    agent_git_config.c.sync_enabled == 1,
+                    agent_ownership.c.deleted_at.is_(None),
+                )
+            )
+        )
+        result: Dict[str, Dict] = {}
+        with get_engine().connect() as conn:
+            for row in conn.execute(stmt).mappings():
+                name = row["agent_name"]
+                if scope is not None and name not in scope:
+                    continue
+                state = (
+                    {col: row[f"s_{col}"] for col in _COLUMNS}
+                    if row["s_agent_name"] is not None
+                    else None
+                )
+                result[name] = {
+                    "config": {
+                        "source_mode": bool(row["source_mode"]),
+                        "auto_sync_enabled": bool(row["auto_sync_enabled"]),
+                        "freeze_schedules_if_sync_failing": bool(
+                            row["freeze_schedules_if_sync_failing"]
+                        ),
+                        "created_at": row["created_at"],
+                    },
+                    "state": state,
+                }
+        return result
 
     def upsert(
         self,

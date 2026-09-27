@@ -265,31 +265,46 @@ async def get_all_sync_health(
 ):
     """Dashboard batch endpoint for sync-health dots (#389).
 
-    Returns one entry per accessible agent. Entries join `agent_sync_state`
-    with the per-agent auto-sync flag so the UI can colour dots and badge
-    agents that have auto-sync off.
+    Returns one entry per accessible agent. trinity-enterprise#706: each entry
+    carries the backend's verdict — `state` / `reason` / `recommendation` /
+    `binding` / `freeze` from `services/sync_health_view.py` — and the new
+    columns, so the dot renders a state the backend owns. The pre-#706 keys are
+    unchanged. One shared query (`db.list_sync_health_rows`) replaces the
+    per-table reads (still no N+1, #73).
     """
+    from services.sync_health_view import sync_view
+
     accessible = {a["name"] for a in get_accessible_agents(current_user)}
-    rows = db.list_sync_states()
-    by_name = {r["agent_name"]: r for r in rows if r["agent_name"] in accessible}
-    # #73: one scoped query instead of an N+1 per-agent lookup.
-    auto_sync_map = db.get_all_git_auto_sync_enabled(accessible)
+    rows = db.list_sync_health_rows(accessible)
 
     entries = []
     for name in sorted(accessible):
-        row = by_name.get(name)
+        bound = rows.get(name)
+        row = (bound or {}).get("state")
+        config = (bound or {}).get("config")
+        view = sync_view(row, config)
+        row = row or {}
         entries.append({
             "agent_name": name,
-            "auto_sync_enabled": auto_sync_map.get(name, False),
-            "last_sync_at": (row or {}).get("last_sync_at"),
-            "last_sync_status": (row or {}).get("last_sync_status") or "never",
-            "consecutive_failures": (row or {}).get("consecutive_failures") or 0,
-            "last_error_summary": (row or {}).get("last_error_summary"),
-            "behind_working": (row or {}).get("behind_working") or 0,
-            "behind_main": (row or {}).get("behind_main") or 0,
-            "ahead_working": (row or {}).get("ahead_working") or 0,
-            "ahead_main": (row or {}).get("ahead_main") or 0,
-            "git_dir_bytes": (row or {}).get("git_dir_bytes"),  # #1596 bloat curve
+            "auto_sync_enabled": bool((config or {}).get("auto_sync_enabled")),
+            "last_sync_at": row.get("last_sync_at"),
+            "last_sync_status": row.get("last_sync_status") or "never",
+            "consecutive_failures": row.get("consecutive_failures") or 0,
+            "last_error_summary": row.get("last_error_summary"),
+            "behind_working": row.get("behind_working") or 0,
+            "behind_main": row.get("behind_main") or 0,
+            "ahead_working": row.get("ahead_working") or 0,
+            "ahead_main": row.get("ahead_main") or 0,
+            "git_dir_bytes": row.get("git_dir_bytes"),  # #1596 bloat curve
+            # trinity-enterprise#706
+            "dirty_files": row.get("dirty_files"),
+            "last_successful_push_at": row.get("last_successful_push_at"),
+            "state": view["state"],
+            "reason": view["reason"],
+            "recommendation": view["recommendation"],
+            "binding": view["binding"] if config else None,
+            "divergence_age_s": view["divergence_age_s"],
+            "freeze": view["freeze"],
         })
     return {"agents": entries}
 

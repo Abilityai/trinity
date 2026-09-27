@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent706_sync_health_surfaces.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "api"
+      ],
+      "description": "The sync-health read surfaces carry the backend's verdict (trinity-enterprise#706); real DB via db_harness, handlers called directly with the Docker-backed accessibility lookup stubbed. Shared reader db.list_sync_health_rows: config flags + sync-state row per live git-bound agent in one query, soft-deleted and sync_enabled=0 agents excluded, state None before the first poll, scoped by name, empty scope -> {}. GET /api/agents/sync-health: every pre-#706 key kept with its meaning plus state / reason / recommendation / binding / dirty_files / divergence_age_s / last_successful_push_at / freeze; a work agent diverged 26 h is red + frozen with the issue's reason string, a deployment the same age is yellow and not frozen, an agent with no git binding is unknown with the old defaults; scoped to accessible agents. GET /api/agents/{name}/git/sync-state: the raw row (new columns included) plus the verdict; no row -> the old minimal dict plus state unknown."
+    },
+    {
       "file": "unit/test_ent706_internal_sync_health.py",
       "feature": "ent#706",
       "added": "2026-09-27",
@@ -34,7 +46,7 @@
         "git-sync",
         "reliability"
       ],
-      "description": "The SyncHealthService poller keeps the trinity-enterprise#706 columns, driven through the REAL _poll_cycle on a real DB (db_harness) with only /api/git/status faked. diverged_since: set once on the first ahead/behind > 0 poll and unchanged across later polls with different counts; cleared at (0, 0) AND at (0, None) (no upstream, #2105); an uncomputable ahead neither starts nor clears it; a known behind with unknown ahead starts it. dirty_files/dirty_since from changes_count: set-once / clear at 0; garbage (str, negative, bool, > int4) keeps both prior values; dirt never starts the divergence clock. last_successful_push_at: the later of the heartbeat's own #3011 record and an operator Push (agent_git_config.last_sync_at), either direction; an agent image older than #3011 (key absent) falls back to a success cycle but not a failed one; a #3011 image that never pushed (key present, None) does not fall back; the agent value is validated (garbage, naive, future, non-str rejected); monotonic. An unreachable agent changes nothing. Plus the one-sync_diverged-item-per-episode cases (see the episode-item entry)."
+      "description": "The SyncHealthService poller keeps the trinity-enterprise#706 columns, driven through the REAL _poll_cycle on a real DB (db_harness) with only /api/git/status faked. diverged_since: set once on the first ahead/behind > 0 poll and unchanged across later polls with different counts; cleared at (0, 0) AND at (0, None) (no upstream, #2105); an uncomputable ahead neither starts nor clears it; a known behind with unknown ahead starts it. dirty_files/dirty_since from changes_count: set-once / clear at 0; garbage (str, negative, bool, > int4) keeps both prior values; dirt never starts the divergence clock. last_successful_push_at: the later of the heartbeat's own #3011 record and an operator Push (agent_git_config.last_sync_at), either direction; an image older than #3011 (key absent) falls back to a success cycle but not a failed one; a #3011 image that never pushed (key present, None) does not; the agent value is validated (garbage, naive, future, non-str rejected); monotonic. An unreachable agent changes nothing. The sync_diverged operator-queue item: exactly one across repeated polls of an aged episode (id sync-diverged-{agent}-{diverged_since}, high priority, reason in the question, counts + recommendation in context, NO last_error_summary); two SyncHealthService instances (fail-open double leader) converge on one; a new episode after a clear gets a second; control arms: the same aged seed with the freeze flag off, or as a deployment, raises ZERO; the prefix is platform-reserved."
     },
     {
       "file": "unit/test_ent706_sync_state_columns.py",

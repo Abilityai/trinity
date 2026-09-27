@@ -2095,6 +2095,9 @@ class DatabaseManager:
     def list_sync_states(self):
         return self._sync_state_ops.list_all()
 
+    def list_sync_health_rows(self, agent_names=None):
+        return self._sync_state_ops.list_health_rows(agent_names)
+
     def upsert_sync_state(self, agent_name: str, **fields):
         return self._sync_state_ops.upsert(agent_name, **fields)
 
