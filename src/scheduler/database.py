@@ -16,6 +16,10 @@ from typing import Optional, List
 
 from .config import config
 from .models import Schedule, ScheduleExecution, ExecutionStatus, ProcessSchedule, ProcessScheduleExecution, Reminder
+# #389/#1808: consecutive failed syncs before a freeze-enabled agent stops
+# firing. ONE number: it lives in the sync policy, which this package vendors
+# byte-identically from the backend (trinity-enterprise#706).
+from .sync_freeze_policy import SYNC_FAILURE_FREEZE_THRESHOLD
 from .utils import (
     duration_ms_between,
     parse_scheduler_ts,
@@ -24,11 +28,6 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
-
-# #389/#1808: consecutive failed syncs before a freeze-enabled agent stops
-# firing. Mirrors the threshold in the backend's
-# routers/internal.py::internal_agent_sync_health — keep the two in step.
-SYNC_FAILURE_FREEZE_THRESHOLD = 3
 
 
 def _scheduler_pg_url() -> Optional[str]:

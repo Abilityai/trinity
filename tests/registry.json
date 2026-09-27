@@ -1,6 +1,30 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent706_sync_policy.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "reliability"
+      ],
+      "description": "The one sync-health policy (trinity-enterprise#706, services/sync_freeze_policy.py::classify), table-driven: unknown (no row / never observed); green in sync; one failed poll red not frozen; sync_failing (3 polls) freezes ANY binding and ignores observation freshness (#1808 unchanged); the failed reason carries at most 120 chars of error; the 24 h boundary at +/-1 s (yellow/runs vs red/frozen, divergence_age_s = 86401, freeze_reason names the divergence clause); freeze flag off -> red not frozen; a deployment behind 31 for 26 h is yellow and never freezes; fork-to-own (source_mode=1, auto_sync=1) freezes, source_mode=1 auto_sync=0 never does; a stale observation (16 min) stays red but does not freeze and names its age, 14 min freezes; aware Z, naive string, naive datetime and +03:00 offset give the same verdict; garbage timestamps degrade; behind_main is information only; dirt 24 h +/- 1 s (red not frozen for a work agent, yellow for a deployment, not a state under 24 h); the 7-day no-heartbeat floor (9 d red, 6 d not, never-heartbeat measured from the binding's creation, auto-sync off exempt); first red names the reason and the rest append; the recommendation mapping incl. push_denied / source-mode refusal; the constants; hostile types never raise. Non-ambient pins throughout."
+    },
+    {
+      "file": "unit/test_ent706_sync_policy_parity.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "scheduler",
+        "unit",
+        "git-sync"
+      ],
+      "description": "Vendored-mirror guard (trinity-enterprise#706, the #1088 precedent): src/scheduler/sync_freeze_policy.py is byte-identical to src/backend/services/sync_freeze_policy.py; the policy is a stdlib-only leaf with no relative imports (it must import in the scheduler image); the scheduler's SYNC_FAILURE_FREEZE_THRESHOLD is imported from the mirror, never re-assigned (one number)."
+    },
+    {
       "file": "unit/test_ent600_telegram_group_context.py",
       "feature": "ent#600",
       "added": "2026-09-11",
