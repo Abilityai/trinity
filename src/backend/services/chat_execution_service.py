@@ -142,6 +142,7 @@ async def prepare_chat_execution(
     chat_execution_id: str,
     capacity_result: object,
     queue_result: str,
+    chain_depth: Optional[int] = None,
 ) -> ChatExecutionContext:
     """Execution setup for chat_with_agent (#1026 slice 2).
 
@@ -189,6 +190,8 @@ async def prepare_chat_execution(
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
         source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
         subscription_id=_exec_subscription_id,
+        # #2806: from admission — None for a non-agent principal (a root).
+        chain_depth=chain_depth,
     )
     task_execution_id = task_execution.id if task_execution else None
     idempotency_service.attach_execution(idem, task_execution_id)
@@ -632,12 +635,20 @@ def _error_code_headers(code, extra: Optional[dict] = None) -> Optional[dict]:
     return headers
 
 
-def _classify_agent_http_failure(agent_status_code) -> TaskExecutionErrorCode:
+def _classify_agent_http_failure(
+    agent_status_code, error_msg: str = ""
+) -> TaskExecutionErrorCode:
     """The /chat path's twin of task_execution_service's producer-side rule:
-    the agent answered 503 → AUTH, 429 → BILLING, never answered → NETWORK,
-    any other agent status → AGENT_ERROR."""
+    Claude Code refused the model → MODEL_UNSUPPORTED (#3012, any status — an
+    older agent image answers it 503), the agent answered 503 → AUTH,
+    429 → BILLING, never answered → NETWORK, any other agent status →
+    AGENT_ERROR."""
+    from services.failure_classifier import is_model_rejection
+
     if agent_status_code is None:
         return TaskExecutionErrorCode.NETWORK
+    if is_model_rejection(error_msg):
+        return TaskExecutionErrorCode.MODEL_UNSUPPORTED
     if agent_status_code == 503:
         return TaskExecutionErrorCode.AUTH
     if agent_status_code == 429:
@@ -655,7 +666,14 @@ async def _apply_sub003_autoswitch(name: str, error_msg: str, agent_status_code)
         is_auth_failure,
     )
 
-    code_headers = _error_code_headers(_classify_agent_http_failure(agent_status_code))
+    code = _classify_agent_http_failure(agent_status_code, error_msg)
+    code_headers = _error_code_headers(code)
+
+    # #3012: no subscription can fix a model the CLI refuses — switching would
+    # walk the agent through every seat onto the platform API key. Surface the
+    # runtime's own sentence as a 400, the status the agent itself answers.
+    if code.value == TaskExecutionErrorCode.MODEL_UNSUPPORTED.value:
+        raise ChatDispatchError(400, error_msg, headers=code_headers)
 
     if agent_status_code == 429:
         try:
@@ -1404,6 +1422,7 @@ async def create_task_execution_and_activities(
     triggered_by,
     is_self_task,
     idem,
+    chain_depth=None,
 ):
     """Create the execution record (#95/#96), attach the idempotency claim, and
     track the collaboration / self-task activity (mirrors the /chat pattern).
@@ -1444,6 +1463,8 @@ async def create_task_execution_and_activities(
         source_channel_thread=src_thread,
         source_channel_agent=src_channel_agent,
         source_channel_client=src_channel_client,
+        # #2806: stamped once here; a backlog-queued row keeps it when drained.
+        chain_depth=chain_depth,
     )
     execution_id = execution.id if execution else None
     idempotency_service.attach_execution(idem, execution_id)
@@ -1693,6 +1714,12 @@ def _map_task_failure(name, result, *, idem):
             )
         elif "timed out" in (result.error or ""):
             raise ChatDispatchError(504, result.error, headers=code_headers)
+        elif getattr(getattr(result, "error_code", None), "value", None) == (
+            TaskExecutionErrorCode.MODEL_UNSUPPORTED.value
+        ):
+            # #3012: same 400 as the /chat path — a refused model is not an
+            # unavailable agent, and a caller must not wait-and-retry it.
+            raise ChatDispatchError(400, result.error, headers=code_headers)
         else:
             raise ChatDispatchError(
                 503,
@@ -2043,6 +2070,16 @@ async def dispatch_parallel_task(
         current_user=current_user,
     )
 
+    # #2806: chain-depth guard — keyed on the principal, ahead of the claim,
+    # the uploads, the row and the capacity acquire, so a refused hop leaves
+    # nothing behind. Raises InterAgentDepthExceeded (the router maps it).
+    chain_depth = await dispatch_admission_service.enforce_inter_agent_depth(
+        current_user=current_user,
+        target=name,
+        endpoint=f"/api/agents/{name}/task",
+        x_via_mcp=x_via_mcp,
+    )
+
     # RELIABILITY-006 (#525): idempotency begin/replay (shared with /chat, RD2).
     idem, replay = dispatch_admission_service.begin_task_idempotency(
         name=name,
@@ -2080,6 +2117,7 @@ async def dispatch_parallel_task(
         triggered_by=derivation.triggered_by,
         is_self_task=derivation.is_self_task,
         idem=idem,
+        chain_depth=chain_depth,
     )
 
     if request.async_mode:

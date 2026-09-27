@@ -6,9 +6,37 @@
 
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
-import type { McpAuthContext } from "../types.js";
+import type { McpAuthContext, StartAgentResult } from "../types.js";
 import { accessDenied } from "../access.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
+
+/** Statuses of a start's skill delivery that need no follow-up line. */
+const QUIET_SKILL_STATUSES = new Set(["success", "skipped"]);
+/** Per-skill outcomes that mean the package is on the agent. */
+// `unassigned_meanwhile`: unassigned mid-start, correctly not installed — not a problem.
+const DELIVERED = new Set(["injected", "unchanged", "fallback", "unassigned_meanwhile"]);
+
+/**
+ * #2991: the skill-delivery part of a start, as text an agent can act on.
+ * Empty for a clean delivery or a no-op (no skills, or an already-running
+ * container) — the start message alone then says everything.
+ */
+export function skillsDeliveryLines(result: StartAgentResult): string[] {
+  const status = result.skills_injection ?? "unknown";
+  const detail = result.skills_result ?? { status };
+  const problems = Object.entries(detail.skills ?? {}).filter(([, s]) => !DELIVERED.has(s.status));
+  const conflicts = detail.conflicts ?? [];
+  if (QUIET_SKILL_STATUSES.has(status) && problems.length === 0 && conflicts.length === 0) return [];
+  const reason = detail.reason ? ` (${detail.reason})` : "";
+  const lines = [`Skills delivery: ${status}${reason}`];
+  for (const [skill, s] of problems) {
+    lines.push(`- ${skill}: ${s.status}${s.code ? ` (${s.code})` : ""}`);
+  }
+  for (const skill of conflicts) {
+    if (!problems.some(([n]) => n === skill)) lines.push(`- ${skill}: conflict`);
+  }
+  return lines;
+}
 
 /**
  * Create agent management tools with the given client
@@ -459,7 +487,11 @@ export function createAgentTools(
       description:
         "Start a stopped agent. " +
         "Use this to restart an agent that was previously stopped. " +
-        "The agent must already exist in the platform.",
+        "The agent must already exist in the platform. " +
+        "The first line is the start message; when its assigned skills did not all land cleanly, the " +
+        "lines after it give the skills delivery status and one line per skill that was not delivered " +
+        "(`conflict` = the agent has its own skill of that name, which runs; the library copy was not " +
+        "installed). No extra lines means the skills landed or there was nothing to deliver.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to start"),
       }),
@@ -467,7 +499,7 @@ export function createAgentTools(
         const authContext = context?.session;
         const apiClient = getClient(authContext);
         const result = await apiClient.startAgent(name);
-        return result.message;
+        return [result.message, ...skillsDeliveryLines(result)].join("\n");
       },
     },
 

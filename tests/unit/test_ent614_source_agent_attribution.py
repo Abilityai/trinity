@@ -338,6 +338,8 @@ def _admit_env():
     db = MagicMock()
     db.get_execution_timeout.return_value = 600
     db.get_max_parallel_tasks.return_value = 3
+    # #2806: admission now reads the caller's running chain depth first.
+    db.get_max_running_chain_depth.return_value = 0
     cap = MagicMock()
     cap.acquire = AsyncMock(return_value=MagicMock(state="admitted", queue_position=0))
     audit = MagicMock(log=AsyncMock())

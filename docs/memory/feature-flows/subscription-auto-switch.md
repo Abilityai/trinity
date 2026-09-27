@@ -21,6 +21,7 @@ Backend catches the failure in:
   - chat_with_agent()                     [interactive chat sync path]
     ↓
 Classify:
+  - model rejection (is_model_rejection, #3012) → NO switch, error_code MODEL_UNSUPPORTED
   - 429 → handle_subscription_failure(..., failure_kind="rate_limit")
   - 503 OR is_auth_failure(error_msg) → handle_subscription_failure(..., failure_kind="auth")
     ↓
@@ -96,6 +97,19 @@ value `.env` supplied, re-arming if the key is removed and re-added.
 | Error message matches `AUTH_INDICATORS` | credit balance / expired token / unauthorized / etc. | `auth` |
 | Pull terminal `error_code=billing` (#2643) | a pull-owned turn the provider refused on quota | `rate_limit` |
 | Pull terminal `error_code=auth` (#2643) | a pull-owned turn the provider refused on credentials | `auth` |
+
+**Never a trigger (#3012):** Claude Code refusing the model — a CLI too old for the id
+(`claude_code_version_too_old`) or an id the API does not know (`model_not_found`). No
+subscription can fix it. The agent answers **400** with `detail.error_code: "model_unsupported"`
+and the API's sentence; images older than #3012 answer 503 with
+`[claude-code:unrecognized_model]`, so `failure_classifier.is_model_rejection` (markers in
+`MODEL_REJECTION_MARKERS`, pinned to the producer by `test_3012_model_rejection.py`) is checked
+first at every site above: `classify_switch_failure`, the TES except-handler, `/chat`
+`_apply_sub003_autoswitch`, the pull `_switch_failure_kind`, and the #1083 callback (an
+`auth` code carrying the marker becomes `model_unsupported`, so the AUTH breaker does not count
+it). `is_auth_failure` itself returns False on a model rejection. The Workspace answers
+`model_unsupported` (the agent's default was refused) or `invalid_model` (the client's pick,
+which self-heals).
 
 `AUTH_INDICATORS` (canonical list in
 `src/backend/services/failure_classifier.py::is_auth_failure`, #1088):

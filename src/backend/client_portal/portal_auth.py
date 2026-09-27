@@ -28,6 +28,7 @@ from dependencies import (
     oauth2_scheme,
     decode_portal_session,
     get_current_user,
+    is_person_principal,
     portal_session_needs_rotation,
     reject_agent_principal,
     renew_portal_session,
@@ -55,6 +56,25 @@ def _reject_if_blocked(email: str) -> None:
         raise HTTPException(status_code=403, detail="Access has been revoked.")
 
 
+def _is_admin_principal(user) -> bool:
+    """Admin by role AND by credential scope (trinity-enterprise#465).
+
+    The same allowlist the admin gates use (`ADMIN_GATE_SCOPES`, #2323): a key
+    whose scope is not on it does not inherit its owner's admin role here
+    either. Agent keys never reach this line (`reject_agent_principal` above).
+    Fails closed on a principal missing either attribute.
+    """
+    from dependencies import ADMIN_GATE_SCOPES
+
+    if getattr(user, "role", None) != "admin":
+        return False
+    try:
+        scope = user.mcp_scope
+    except AttributeError:
+        return False
+    return scope in ADMIN_GATE_SCOPES
+
+
 class PortalPrincipal(NamedTuple):
     """Who is asking, and by which credential (ent#357).
 
@@ -71,6 +91,18 @@ class PortalPrincipal(NamedTuple):
     """
     email: str
     is_platform: bool
+    # trinity-enterprise#611: may this principal END an ask? A portal session is
+    # a verified person. A platform principal is one only when
+    # `is_person_principal` holds: a system-scoped key keeps its read breadth
+    # here (#2198) but is not a person, and an answer is recorded as a person's.
+    is_person: bool = True
+    #: trinity-enterprise#465 — whether the platform principal is an instance
+    #: admin, for ONE decision: who sees a suggestion that deep-links to agent
+    #: configuration. Everywhere else a non-owner admin stays a viewer in the
+    #: Workspace (ent#358, `service.portal_owns_agent`). Last field with a
+    #: default so every positional construction keeps its meaning; always False
+    #: for a portal token, which carries no platform identity.
+    is_admin: bool = False
 
 
 #: Response header carrying a rotated Workspace session token (ent#375). The
@@ -150,7 +182,7 @@ async def get_portal_principal(
     # show what that client sees, and an operator whose OWN email is blocked has
     # been blocked as a client — the block is on the identity, not on the route.
     _reject_if_blocked(email)
-    return PortalPrincipal(email, True)
+    return PortalPrincipal(email, True, is_person_principal(user), _is_admin_principal(user))
 
 
 async def get_portal_identity(

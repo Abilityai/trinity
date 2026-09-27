@@ -478,7 +478,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 24. Identity is encoded in form as well as color — classes and states are distinguishable by shape or icon, never by hue alone.
 25. Meaningful errors everywhere: every failure surface says what happened, what it means, and what to do — in user vocabulary; stack traces and HTTP codes go behind a details disclosure, never the headline.
 26. Expectation setting: non-instant actions state what will happen and roughly how long; multi-step operations show staged progress; say where the result will appear.
-27. Post-action next steps: after a completed action, offer the natural next move via static per-flow sequencing. (An adaptive, system-wide suggestion tier is deliberately deferred.)
+27. Post-action next steps: after a completed action, offer the natural next move via static per-flow sequencing. (An adaptive, system-wide suggestion tier is deliberately deferred.) The per-agent, per-viewer suggestions list (ent#465, `PortalSuggestions.vue`) is not that tier — it is computed from state, not triggered by the action just taken — but it owns the dismissal model that tier should reuse (`workspace_suggestion_feedback.surface`).
 28. Unbounded data is contained: any surface that can render a large or unbounded set (tables, logs, activity streams, execution lists) gets a bounded viewport — max-height with internal scroll, pagination, or virtualization — and never grows the page itself without limit. Sticky headers stay visible while scrolling; the surface states the total ("412 executions · latest 50 shown") so what's beyond the fold is known, not hidden. Companion of 7 (horizontal) and 4 (stable footprint).
 
 ## 8. Do / don't — the shape of a violation
