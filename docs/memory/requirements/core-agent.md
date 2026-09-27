@@ -3516,6 +3516,16 @@ to localStorage in the clear.
   last 30 days AND the guard metric for the class is not `capped`. A person can only
   move it DOWN (`hold`, any reader for their own seat) or let it back up
   (`release`, the agent OWNER only — holding is a refusal, releasing is a grant).
+- **Evidence is counted per CONVERSATION, not per record.** The companion writes
+  its own records (MCP `record_decision` stores the seat as `decided_by_person` and
+  its execution as `source_execution_id`), so three `record()` calls inside one
+  execution must not graduate a class it just invented. The qualifying records must
+  come from **at least `STABLE_MIN_COUNT` (3) distinct sources**: each distinct
+  non-null `source_execution_id` is one source, and every person-written record (the
+  Workspace path, `source_execution_id IS NULL`) is its own source. The count is
+  carried as `evidence.sources`; short of it the class is blocked
+  `too_few_conversations` ("the decisions for this kind of ask come from fewer than
+  three separate conversations"). Every other conjunct is unchanged.
 - **Reversals are counted over the WINDOW, not over all history** — `effective_status`
   returns `reversed` unconditionally, so a reversed record never expires; counted
   over history, one reversal ever would block a class forever and `on_request` would
@@ -3533,7 +3543,7 @@ to localStorage in the clear.
   unchanged verdict writes no row and emits no event.
 - **Every block is NAMED, never a bare boolean**: `level_below_l2` ·
   `agent_autonomy_off` · `evidence_expired` · `too_few_records` ·
-  `criterion_not_stable` · `reversal_in_window` · `negative_rating_in_window` ·
+  `too_few_conversations` · `criterion_not_stable` · `reversal_in_window` · `negative_rating_in_window` ·
   `guard_metric_capped` · `held_by_operator`, each with the sentence the panel and the
   companion both show.
 - **The rating query's three shapes are each a defect first**: it matches

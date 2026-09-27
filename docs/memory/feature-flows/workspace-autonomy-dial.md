@@ -41,8 +41,11 @@ services/autonomy_dial_service.evaluate_seat(db, agent, seat, persist=True)
   │        reversed row → counted ONLY if it has not lapsed (effective_status returns
   │        `reversed` unconditionally, so a reversed row never becomes `expired`;
   │        counted over all history, one reversal ever blocks the class forever)
-  │        → records · distinct normalized criteria · reversals · earliest review_by
-  │     evaluate_class: ≥3 records · exactly 1 criterion · 0 reversals
+  │        → records · distinct SOURCES (one per source_execution_id; each
+  │          person-written row is its own) · distinct normalized criteria ·
+  │          reversals · earliest review_by
+  │     evaluate_class: ≥3 records · ≥3 sources (too_few_conversations)
+  │                     · exactly 1 criterion · 0 reversals
   │                     · no negative rating in the last 30 days
   │                     · guard_metric != capped   · not held
   │        → state ∈ {on_request, graduated} + blocked_by[] (every reason NAMED)
@@ -103,7 +106,7 @@ every turn ──► platform_prompt_service memory block → autonomy_dial_serv
   is also blocklisted on the generic `PUT /api/settings/{key}` catch-all — the one door
   that can address any key.
 - **Every block is named.** `level_below_l2`, `agent_autonomy_off`, `evidence_expired`,
-  `too_few_records`, `criterion_not_stable`, `reversal_in_window`,
+  `too_few_records`, `too_few_conversations`, `criterion_not_stable`, `reversal_in_window`,
   `negative_rating_in_window`, `guard_metric_capped`, `held_by_operator` — each with a sentence. A bare
   "not autonomous yet" teaches nobody what to do next, and the companion needs the
   reason to say why it is asking rather than inventing one.

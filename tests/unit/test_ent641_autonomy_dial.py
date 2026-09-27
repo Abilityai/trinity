@@ -118,13 +118,18 @@ def dial(monkeypatch):
 
 
 def _decide(db, *, ask_class="vendor-renewal", criterion=CRITERION, seat=SEAT,
-            review_by=FUTURE, decided="Renew Acme", i=0, status="active"):
+            review_by=FUTURE, decided="Renew Acme", i=0, status="active",
+            execution_id=None):
+    """A person-written record by default (no `source_execution_id`, the
+    Workspace path); `execution_id=` makes it the companion's own write, the
+    MCP `record_decision` path."""
     from services import seat_decision_service as sd
     row = sd.record(db, agent_name=AGENT, seat_email=seat, decided_by_person=seat,
                     payload=dict(outcome="approved", decided=f"{decided} {i}",
                                  alternatives=["let it lapse"], criterion=criterion,
                                  reversal="the price moves", review_by=review_by,
-                                 ask_class=ask_class))
+                                 ask_class=ask_class),
+                    source_execution_id=execution_id)
     if status != "active":
         db.set_seat_decision_status(AGENT, row["id"], status, reason="x", by=seat)
     return row
@@ -205,6 +210,65 @@ class TestTheRule:
         store.set_setting(dial.LEVEL_KEY, "L3")
         assert _classes(dial, store) == {}
         assert dial.live_verdict(None, level="L3", autonomy_enabled=True, today=TODAY)["unprompted"] is False
+
+
+class TestEvidenceIsCountedPerConversation:
+    """The companion writes its own evidence: MCP `record_decision` stores the
+    seat as `decided_by_person` and the calling execution as
+    `source_execution_id`. Counted per RECORD, three `record()` calls inside ONE
+    execution graduated a class the agent had just invented. Counted per
+    CONVERSATION, a class needs its records to come from at least
+    `STABLE_MIN_COUNT` distinct sources — each distinct execution is one, and
+    every person-written record (no execution) is its own."""
+
+    def test_three_records_in_one_execution_do_not_graduate(self, dial, store):
+        store.set_setting(dial.LEVEL_KEY, "L2")
+        _three(store, execution_id="exec-1")
+        c = _classes(dial, store)["vendor-renewal"]
+        assert c["unprompted"] is False and c["earned_state"] == dial.STATE_ON_REQUEST
+        assert c["blocked_by"] == [dial.BLOCK_TOO_FEW_SOURCES]
+        assert c["evidence"]["count"] == 3 and c["evidence"]["sources"] == 1
+
+    def test_three_records_from_three_executions_graduate(self, dial, store):
+        store.set_setting(dial.LEVEL_KEY, "L2")
+        for i in range(3):
+            _decide(store, i=i, execution_id=f"exec-{i}")
+        c = _classes(dial, store)["vendor-renewal"]
+        assert c["unprompted"] is True and c["blocked_by"] == []
+        assert c["evidence"]["sources"] == 3
+
+    def test_person_written_records_each_count_as_their_own_source(self, dial, store):
+        store.set_setting(dial.LEVEL_KEY, "L2")
+        _decide(store, i=0, execution_id="exec-1")
+        _decide(store, i=1, execution_id="exec-1")
+        _decide(store, i=2)                       # the person, in the Workspace
+        c = _classes(dial, store)["vendor-renewal"]
+        assert c["evidence"]["count"] == 3 and c["evidence"]["sources"] == 2
+        assert c["blocked_by"] == [dial.BLOCK_TOO_FEW_SOURCES]
+        _decide(store, i=3)                       # a second person-written record
+        c = _classes(dial, store)["vendor-renewal"]
+        assert c["evidence"]["sources"] == 3 and c["unprompted"] is True
+
+    def test_the_reviewers_repro_an_invented_class_in_one_execution(self, dial, store):
+        """At L2, three `record()` calls inside one execution, on a class the
+        agent made up, read `unprompted: True` and the prompt said
+        "graduated — you may act without being asked"."""
+        from services import seat_decision_service as sd
+        store.set_setting(dial.LEVEL_KEY, "L2")
+        for i in range(3):
+            sd.record(store, agent_name=AGENT, seat_email=SEAT, decided_by_person=SEAT,
+                      payload=dict(outcome="approved", decided=f"wire the refund {i}",
+                                   alternatives=["ask first"], criterion="customer is always right",
+                                   reversal="never", review_by=FUTURE, ask_class="refunds-any-size"),
+                      source_execution_id="exec-same")
+        classes = dial.evaluate_seat(store, AGENT, SEAT, today=TODAY)
+        c = {x["ask_class"]: x for x in classes}["refunds-any-size"]
+        assert c["unprompted"] is False
+        stored = store.get_seat_ask_class_state(AGENT, SEAT, "refunds-any-size")
+        assert stored["state"] == dial.STATE_ON_REQUEST      # the hook did not persist a graduation
+        lines = dial.prompt_lines(classes)
+        assert "graduated — you may act without being asked" not in lines
+        assert dial.BLOCKER_TEXT[dial.BLOCK_TOO_FEW_SOURCES] in lines
 
 
 # --------------------------------------------------------------------------- #

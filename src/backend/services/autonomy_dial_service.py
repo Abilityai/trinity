@@ -41,7 +41,16 @@ THE EVIDENCE RULE, STATED
 
 A class is promoted when ALL of:
 
-1. **≥3 non-expired decision records** in the class (`STABLE_MIN_COUNT`);
+1. **≥3 non-expired decision records** in the class (`STABLE_MIN_COUNT`),
+   **from ≥3 distinct conversations**. Evidence is counted per conversation,
+   not per record, because the companion writes its own records: MCP
+   `record_decision` stores the seat as `decided_by_person` and its execution
+   as `source_execution_id`, so three `record()` calls inside ONE execution
+   would otherwise graduate a class the agent had just invented. Each distinct
+   non-null `source_execution_id` is one source; every person-written record
+   (the Workspace path — no execution) is its own source. Records are still
+   written freely; they just do not add up until they come from separate
+   conversations (`too_few_conversations`);
 2. **one normalized criterion** across them — the reusable judgment;
 3. **no reversals among those records**. Deliberately the WINDOW, not all
    history: `seat_decision_service.stats` counts reversals over every row ever,
@@ -127,13 +136,14 @@ RATING_WINDOW_DAYS = 30
 RATING_PREFIXES = ("workspace:", "operator:")
 #: What the rule version stamps on the evidence, so a stored verdict can be read
 #: against the rule that produced it rather than against today's.
-RULE_VERSION = "2026-09-23"
+RULE_VERSION = "2026-09-27"   # evidence counted per conversation, not per record
 
 # Named blockers — the vocabulary a person and a companion both read.
 BLOCK_LEVEL = "level_below_l2"
 BLOCK_AUTONOMY_OFF = "agent_autonomy_off"
 BLOCK_EVIDENCE_EXPIRED = "evidence_expired"
 BLOCK_TOO_FEW = "too_few_records"
+BLOCK_TOO_FEW_SOURCES = "too_few_conversations"
 BLOCK_CRITERIA = "criterion_not_stable"
 BLOCK_REVERSAL = "reversal_in_window"
 BLOCK_RATING = "negative_rating_in_window"
@@ -145,6 +155,7 @@ BLOCKER_TEXT = {
     BLOCK_AUTONOMY_OFF: "this agent's autonomy switch is off — the hard off, which the dial never overrides",
     BLOCK_EVIDENCE_EXPIRED: "the decisions this was promoted on have passed their review date",
     BLOCK_TOO_FEW: "fewer than three decisions on record for this kind of ask",
+    BLOCK_TOO_FEW_SOURCES: "the decisions for this kind of ask come from fewer than three separate conversations",
     BLOCK_CRITERIA: "the decisions did not apply one consistent criterion",
     BLOCK_REVERSAL: "a decision in this window was reversed",
     BLOCK_RATING: "this seat rated the agent down inside the rating window",
@@ -245,7 +256,7 @@ def class_evidence(rows: List[dict], ask_class: str, *, today: Optional[date] = 
     from services import seat_decision_service as sd
 
     day = today or _today()
-    window, reversals, criteria, ids = [], 0, [], []
+    window, reversals, criteria, ids, sources = [], 0, [], [], set()
     for r in rows:
         if (r.get("ask_class") or "") != ask_class:
             continue
@@ -264,6 +275,10 @@ def class_evidence(rows: List[dict], ask_class: str, *, today: Optional[date] = 
             continue
         window.append(r)
         ids.append(r["id"])
+        # One conversation is one source, however many records it wrote; a
+        # person-written record (no execution) is its own source.
+        sources.add(("execution", r["source_execution_id"]) if r.get("source_execution_id")
+                    else ("record", r["id"]))
         crit = sd.normalize_criterion(r.get("criterion") or "")
         if crit and crit not in criteria:
             criteria.append(crit)
@@ -271,6 +286,7 @@ def class_evidence(rows: List[dict], ask_class: str, *, today: Optional[date] = 
     return {
         "ask_class": ask_class,
         "count": len(window),
+        "sources": len(sources),
         "criteria": criteria,
         "reversals": reversals,
         "decision_ids": ids[:20],
@@ -293,8 +309,11 @@ def evaluate_class(evidence: Dict[str, Any], *, guard_state: str,
         blocked.append(BLOCK_GUARD)
     if evidence["count"] < STABLE_MIN_COUNT:
         blocked.append(BLOCK_TOO_FEW)
-    elif len(evidence["criteria"]) != 1:
-        blocked.append(BLOCK_CRITERIA)
+    else:
+        if evidence.get("sources", 0) < STABLE_MIN_COUNT:
+            blocked.append(BLOCK_TOO_FEW_SOURCES)
+        if len(evidence["criteria"]) != 1:
+            blocked.append(BLOCK_CRITERIA)
     if evidence["reversals"]:
         blocked.append(BLOCK_REVERSAL)
     if negative_rating:
@@ -306,7 +325,7 @@ def evaluate_class(evidence: Dict[str, Any], *, guard_state: str,
         "blocked_by": blocked,
         "evidence": full,
         "evidence_hash": _evidence_hash({k: full[k] for k in
-                                         ("count", "criteria", "reversals", "guard_metric",
+                                         ("count", "sources", "criteria", "reversals", "guard_metric",
                                           "negative_rating_at", "expires_at", "rule_version")}),
         "expires_at": evidence["expires_at"],
     }

@@ -730,8 +730,9 @@ validated `system_settings` key and written only through
 ceiling is what lets anything run unprompted, so it is a grant; the generic
 `/{key}` catch-all refuses the key, the ent#297 shape). **Below**: a state per
 (seat, ask class) in `seat_ask_class_state`, earned from the seat's decision
-record — ≥3 non-expired records, ONE normalized criterion, no reversals in the
-window — plus a clean rating history for that seat in the last 30 days.
+record — ≥3 non-expired records from ≥3 distinct conversations (each distinct
+`source_execution_id` is one; each person-written record is its own), ONE
+normalized criterion, no reversals in the window — plus a clean rating history for that seat in the last 30 days.
 Promotion is earned; there is no promote control. A person may HOLD a class
 (a refusal anyone may make for their own seat); only the agent's owner may
 RELEASE one (a grant).
