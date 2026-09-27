@@ -1,6 +1,19 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent706_sync_state_columns.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "git-sync"
+      ],
+      "description": "The four trinity-enterprise#706 columns on agent_sync_state (diverged_since, dirty_files, dirty_since, last_successful_push_at), both tracks (Invariant #9): the SQLite migration adds them to the pre-#706 table, runs twice as a no-op and backfills nothing; it is registered once in MIGRATIONS; schema.py DDL and the tables.py Core table carry them; the Alembic revision's id equals its filename, its down_revision is a real revision, and it ADD COLUMN IF NOT EXISTS / DROP COLUMN IF EXISTS each of the four. The upsert's three-way clock semantics (db_harness, SQLite + PG when TEST_POSTGRES_URL): the episode clocks default to KEEP across a partial upsert (and KEEP is the explicit spelling), None CLEARS them, and dirty_files = 0 is stored rather than dropped. KEEP is read from the live ops object's upsert.__globals__ (module-identity gotcha under sibling db.* eviction)."
+    },
+    {
       "file": "unit/test_ent706_sync_policy.py",
       "feature": "ent#706",
       "added": "2026-09-27",

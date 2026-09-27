@@ -4828,6 +4828,31 @@ def _migrate_auto_sync_enabled_backfill(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_sync_state_divergence(cursor, conn):
+    """Add the divergence / dirt episode columns to agent_sync_state (trinity-enterprise#706).
+
+    `diverged_since` / `dirty_since` are ISO-Z episode clocks the
+    SyncHealthService sets once and clears on a return to 0; `dirty_files` is
+    the porcelain change count the agent's status call already computed and
+    threw away; `last_successful_push_at` is the last push that landed. All
+    nullable with NO backfill: the clocks cannot be known retroactively, and
+    starting them at the first post-upgrade poll is the 24 h soak before any
+    divergence freeze can fire.
+    """
+    for column, sql_type in (
+        ("diverged_since", "TEXT"),
+        ("dirty_files", "INTEGER"),
+        ("dirty_since", "TEXT"),
+        ("last_successful_push_at", "TEXT"),
+    ):
+        _safe_add_column(
+            cursor,
+            "agent_sync_state",
+            column,
+            f"ALTER TABLE agent_sync_state ADD COLUMN {column} {sql_type}",
+        )
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4977,4 +5002,5 @@ MIGRATIONS = [
     ("execution_chain_depth", _migrate_execution_chain_depth),
     ("workspace_suggestion_feedback_table", _migrate_workspace_suggestion_feedback_table),
     ("telegram_group_context", _migrate_telegram_group_context),
+    ("agent_sync_state_divergence", _migrate_agent_sync_state_divergence),
 ]

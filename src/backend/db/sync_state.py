@@ -35,12 +35,32 @@ _COLUMNS = (
     "pack_count",  # #1595: packs from `git count-objects -v`
     "loose_objects",  # #1595: loose objects (gc-health signal)
     "maintenance_failures",  # #1595: consecutive failed maintenance attempts
+    "diverged_since",  # trinity-enterprise#706: divergence episode clock (ISO-Z)
+    "dirty_files",  # trinity-enterprise#706: porcelain change count
+    "dirty_since",  # trinity-enterprise#706: dirt episode clock (ISO-Z)
+    "last_successful_push_at",  # trinity-enterprise#706: last push that landed
     "last_check_at",
     "updated_at",
 )
 
 # Non-key columns updated on conflict (everything except the agent_name PK).
 _UPSERT_SET_COLUMNS = tuple(c for c in _COLUMNS if c != "agent_name")
+
+
+class _Keep:
+    """Sentinel: leave an episode clock as it is (trinity-enterprise#706).
+
+    `diverged_since` / `dirty_since` need THREE caller intents — set, clear,
+    unchanged — and `_merged()` below maps None to "unchanged", so None alone
+    cannot mean "clear". For those two columns None means clear and KEEP means
+    unchanged.
+    """
+
+    def __repr__(self) -> str:
+        return "KEEP"
+
+
+KEEP = _Keep()
 
 
 def _row_to_dict(row) -> Dict:
@@ -81,11 +101,19 @@ class SyncStateOperations:
         loose_objects: Optional[int] = None,
         maintenance_failures: Optional[int] = None,
         last_check_at: Optional[str] = None,
+        diverged_since=KEEP,
+        dirty_since=KEEP,
+        dirty_files: Optional[int] = None,
+        last_successful_push_at: Optional[str] = None,
     ) -> Dict:
         """Upsert a sync-state row.
 
         consecutive_failures is maintained internally: incremented on
         `failed`, reset on `success`, untouched on `never`.
+
+        trinity-enterprise#706: `diverged_since` / `dirty_since` take KEEP
+        (the default — leave as is), None (clear) or an ISO string (set).
+        `dirty_files` / `last_successful_push_at` follow the `_merged()` rule.
         """
         now = utc_now_iso()
         existing = self.get(agent_name)
@@ -102,6 +130,11 @@ class SyncStateOperations:
             if new_value is not None:
                 return new_value
             return existing.get(field) if existing else None
+
+        def _clock(field: str, new_value):
+            if new_value is KEEP:
+                return existing.get(field) if existing else None
+            return new_value
 
         row = {
             "agent_name": agent_name,
@@ -124,6 +157,11 @@ class SyncStateOperations:
             # 0 is a meaningful reset here (post-success), not "unset" — it
             # passes _merged as-is; only a true None falls back to prior.
             "maintenance_failures": _merged("maintenance_failures", maintenance_failures) or 0,
+            "diverged_since": _clock("diverged_since", diverged_since),  # ent#706
+            "dirty_files": _merged("dirty_files", dirty_files),  # ent#706
+            "dirty_since": _clock("dirty_since", dirty_since),  # ent#706
+            "last_successful_push_at": _merged(  # ent#706
+                "last_successful_push_at", last_successful_push_at),
             "last_check_at": last_check_at or now,
             "updated_at": now,
         }
