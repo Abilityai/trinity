@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent706_divergence_tracking.py",
+      "feature": "ent#706",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "reliability"
+      ],
+      "description": "The SyncHealthService poller keeps the trinity-enterprise#706 columns, driven through the REAL _poll_cycle on a real DB (db_harness) with only /api/git/status faked. diverged_since: set once on the first ahead/behind > 0 poll and unchanged across later polls with different counts; cleared at (0, 0) AND at (0, None) (no upstream, #2105); an uncomputable ahead neither starts nor clears it; a known behind with unknown ahead starts it. dirty_files/dirty_since from changes_count: set-once / clear at 0; garbage (str, negative, bool, > int4) keeps both prior values; dirt never starts the divergence clock. last_successful_push_at: the later of the heartbeat's own #3011 record and an operator Push (agent_git_config.last_sync_at), either direction; an agent image older than #3011 (key absent) falls back to a success cycle but not a failed one; a #3011 image that never pushed (key present, None) does not fall back; the agent value is validated (garbage, naive, future, non-str rejected); monotonic. An unreachable agent changes nothing. Plus the one-sync_diverged-item-per-episode cases (see the episode-item entry)."
+    },
+    {
       "file": "unit/test_ent706_sync_state_columns.py",
       "feature": "ent#706",
       "added": "2026-09-27",

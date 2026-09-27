@@ -52,7 +52,7 @@ from database import db
 from redis_breaker_util import get_breaker_redis
 from services import git_service
 from services.agent_client import AgentClient
-from utils.helpers import parse_iso_timestamp, utc_now_iso
+from utils.helpers import parse_iso_timestamp, to_utc_iso, utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +231,80 @@ def _coerce_lock_stuck(value):
     if all(v is None for v in coerced.values()):
         return None
     return {k: v for k, v in coerced.items() if v is not None}
+
+def _coerce_agent_timestamp(value) -> Optional[datetime]:
+    """An agent-authored ISO timestamp as aware UTC, or None (trinity-enterprise#706).
+
+    The `_coerce_lock_recovery` posture for a value that becomes a column: a
+    bounded string with an EXPLICIT offset (our writer always stamps one, so a
+    naive value did not come from us), parseable, and not in the future beyond
+    the same grace. A far-future value would otherwise win every `max()` below
+    forever. Never raises.
+    """
+    if not isinstance(value, str) or not (0 < len(value) <= 64):
+        return None
+    if not (value.endswith("Z") or _ISO_OFFSET_RE.search(value)):
+        return None
+    try:
+        parsed = parse_iso_timestamp(value)
+        now = datetime.now(timezone.utc)
+        if parsed > now + timedelta(seconds=_LOCK_RECOVERY_FUTURE_GRACE_SECONDS):
+            return None
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return parsed
+
+
+def _config_value(config, key: str):
+    """Read a git-config field from the model the poller gets, or a dict."""
+    if isinstance(config, dict):
+        return config.get(key)
+    return getattr(config, key, None)
+
+
+def _last_successful_push_at(sync_state: dict, config, prior: Optional[dict]) -> Optional[str]:
+    """The last push that landed, monotonic (trinity-enterprise#706).
+
+    The later of: the heartbeat's own record (`last_successful_push_at`, #3011);
+    an operator Push (`agent_git_config.last_sync_at`, stamped only on success);
+    and the value already stored. An agent image older than #3011 has no such
+    key at all, so its last `success` cycle stands in. A #3011 image that has
+    never pushed carries the key as None and does NOT fall back — a
+    success-status cycle there is not evidence that anything was pushed.
+    """
+    candidates = []
+    if "last_successful_push_at" in sync_state:
+        candidates.append(_coerce_agent_timestamp(sync_state.get("last_successful_push_at")))
+    elif sync_state.get("last_sync_status") == "success":
+        candidates.append(_coerce_agent_timestamp(sync_state.get("last_sync_at")))
+    operator_push = _config_value(config, "last_sync_at")
+    if isinstance(operator_push, datetime):
+        candidates.append(
+            operator_push if operator_push.tzinfo else operator_push.replace(tzinfo=timezone.utc)
+        )
+    stored = (prior or {}).get("last_successful_push_at")
+    if isinstance(stored, str):
+        try:
+            candidates.append(parse_iso_timestamp(stored))
+        except ValueError:
+            pass
+    valid = [c for c in candidates if c is not None]
+    return to_utc_iso(max(valid)) if valid else None
+
+
+def _episode_clock(prior_value, *, active: bool, known: bool, now: str):
+    """Set-once / clear / keep for `diverged_since` and `dirty_since` (#706).
+
+    Returns the value to store: the prior start while the episode continues, a
+    fresh `now` when one begins, None when it ends, and the prior value
+    untouched when the observation could not be computed.
+    """
+    if active:
+        return prior_value or now
+    if not known:
+        return prior_value
+    return None
+
 
 # WebSocket manager injected from main.py (optional, mirrors operator-queue pattern).
 _websocket_manager = None
@@ -438,6 +512,29 @@ class SyncHealthService:
             sync_state.get("maintenance_failures")
         )
 
+        # trinity-enterprise#706: the divergence and dirt episode clocks. The
+        # decision reads the RAW values, so an uncomputable count (None) is
+        # never mistaken for 0. `behind is None` with a known `ahead == 0` is
+        # "no upstream" (#2105) — nothing on origin to be behind — and clears.
+        # The prior value is passed explicitly for "keep" (no sentinel), so a
+        # set-once start survives any number of polls.
+        now_iso = utc_now_iso()
+        ahead_raw = _coerce_nonneg_int(payload.get("ahead_working"))
+        behind_raw = _coerce_nonneg_int(payload.get("behind_working"))
+        diverged_since = _episode_clock(
+            (prior or {}).get("diverged_since"),
+            active=bool(ahead_raw) or bool(behind_raw),
+            known=ahead_raw is not None,
+            now=now_iso,
+        )
+        dirty_files = _coerce_nonneg_int(payload.get("changes_count"))
+        dirty_since = _episode_clock(
+            (prior or {}).get("dirty_since"),
+            active=bool(dirty_files),
+            known=dirty_files is not None,
+            now=now_iso,
+        )
+
         updated = db.upsert_sync_state(
             agent_name,
             last_sync_at=last_sync_at,
@@ -454,7 +551,12 @@ class SyncHealthService:
             pack_count=pack_count,  # #1595
             loose_objects=loose_objects,  # #1595
             maintenance_failures=maintenance_failures,  # #1595
-            last_check_at=utc_now_iso(),
+            diverged_since=diverged_since,  # trinity-enterprise#706
+            dirty_files=dirty_files,  # #706: None (garbage/absent) keeps the prior
+            dirty_since=dirty_since,  # #706
+            last_successful_push_at=_last_successful_push_at(  # #706
+                sync_state, config, prior),
+            last_check_at=now_iso,
         )
 
         # Edge-triggered alert: only emit when we cross the threshold.
