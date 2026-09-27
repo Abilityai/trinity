@@ -332,6 +332,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   delete_subscription: { kind: "none", why: "a subscription name, not an agent" },
   // --- monitoring.ts ---
   get_fleet_health: { kind: "none", why: "no agent target" },
+  get_fleet_sync_audit: {
+    kind: "none",
+    why: "no agent target; the backend scopes the rows via accessible_agent_names (an agent key sees its owner's set, trinity-enterprise#707 D12)",
+  },
   get_agent_health: { kind: "baselined", owner: ENT629 },
   trigger_health_check: { kind: "baselined", owner: ENT629 },
   // --- nevermined.ts ---

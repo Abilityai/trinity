@@ -1,6 +1,19 @@
 {
   "test_files": [
     {
+      "file": "mcp-server/src/tools/monitoring.test.ts",
+      "feature": "ent#707",
+      "added": "2026-09-27",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit",
+        "git-sync",
+        "monitoring"
+      ],
+      "description": "The monitoring MCP tools carry sync health (trinity-enterprise#707); real tool execute() over a fake TrinityClient (requireApiKey=false seam), node:test. get_fleet_health passes each agent's sync block through verbatim, the fleet sync_summary, and the issues strings (where the red-sync recommendation lives) next to the kept issues_count; status is untouched; an agent with no git binding has sync: null as a present key; an older backend without the fields yields null, never undefined. get_fleet_sync_audit is registered in the monitoring group with no parameters, reads the audit once and returns it unchanged, and turns a backend failure into a structured {success:false} result; its TOOL_ACCESS_POLICY row is kind none, naming accessible_agent_names (decision D12)."
+    },
+    {
       "file": "unit/test_fleet_sync_audit.py",
       "feature": "#390, ent#707",
       "added": "2026-09-27",

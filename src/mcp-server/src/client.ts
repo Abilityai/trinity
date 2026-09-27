@@ -326,6 +326,32 @@ export function isDepthRefusal(value: unknown): value is DepthRefusal {
 /** Bound for #848 inline-auth control-plane calls (not chat). */
 const INLINE_AUTH_TIMEOUT_MS = Number(process.env.MCP_INLINE_AUTH_TIMEOUT_MS || 15000);
 
+/** One agent's git sync health on fleet health (trinity-enterprise#707). */
+export interface FleetAgentSync {
+  binding: "agent" | "deployment";
+  auto_sync_enabled: boolean;
+  ahead: number | null;
+  behind: number | null;
+  dirty_files: number | null;
+  last_successful_push_at: string | null;
+  divergence_age_s: number | null;
+  state: "green" | "yellow" | "red" | "unknown";
+  reason: string;
+  recommendation: string | null;
+  frozen: boolean;
+}
+
+/** Fleet sync totals over the caller's git-bound agents (trinity-enterprise#707). */
+export interface FleetSyncSummary {
+  git_bound: number;
+  diverged: number;
+  frozen: number;
+  auto_sync_off: number;
+  dirty: number;
+  red: number;
+  yellow: number;
+}
+
 export class TrinityClient {
   private baseUrl: string;
   private token?: string;
@@ -2825,9 +2851,24 @@ export class TrinityClient {
       runtime_available?: boolean;
       last_check_at?: string;
       issues: string[];
+      // trinity-enterprise#707: null when the agent has no git binding.
+      sync?: FleetAgentSync | null;
     }>;
+    sync_summary?: FleetSyncSummary | null;
   }> {
     return this.request("GET", "/api/monitoring/status");
+  }
+
+  /**
+   * Fleet git sync audit (#390, trinity-enterprise#707): per-agent sync state,
+   * the divergence columns and the policy's verdict. The backend scopes the
+   * rows to the caller's accessible agents (admins: all).
+   */
+  async getFleetSyncAudit(): Promise<{
+    agents: Array<Record<string, unknown>>;
+    summary: Record<string, number>;
+  }> {
+    return this.request("GET", "/api/fleet/sync-audit");
   }
 
   /**
