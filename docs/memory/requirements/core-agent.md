@@ -3577,7 +3577,7 @@ to localStorage in the clear.
   the person reads and holds/releases in Agent details (`PortalAgentAutonomy.vue`,
   `GET /api/enterprise/client-portal/agents/{name}/autonomy`, `…/autonomy/actions`,
   `…/autonomy/guard`); admins set the level in Settings.
-- **Storage**: `seat_ask_class_state` (both tracks; Alembic `0075` ← `0074`; cleanup
+- **Storage**: `seat_ask_class_state` (both tracks; Alembic `0080` ← `0079`; cleanup
   CASCADE) holds ONLY the earned half + the hold + the guard metric. The level is one
   validated `system_settings` key (`autonomy_dial_level:instance`), not a table.
 - **Not in scope**: per-agent or per-seat levels (the instance level is the ceiling in

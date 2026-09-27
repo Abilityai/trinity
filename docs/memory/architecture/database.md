@@ -616,8 +616,8 @@ CREATE TABLE seat_ask_class_state (
 );
 CREATE INDEX idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email);
 ```
-Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0075_seat_ask_class_state`
-(← `0074`); `AgentRef(..., Policy.CASCADE)`. The row holds only what was EARNED —
+Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0080_seat_ask_class_state`
+(← `0079`); `AgentRef(..., Policy.CASCADE)`. The row holds only what was EARNED —
 the instance level, the agent's autonomy switch and the clock are ANDed at read
 time (`services/autonomy_dial_service.live_verdict`), never materialised. The
 instance LEVEL is not a table at all: one validated `system_settings` key,
