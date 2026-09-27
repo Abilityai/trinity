@@ -2302,6 +2302,9 @@ def reset_to_main_preserve_state_impl(
     restored, _skipped = restore_from_tar(home_dir, tar_bytes, patterns)
 
     _git(["add", "-A"], home_dir)
+    # ent#708: this path commits AND force-pushes; a container-only settings
+    # file (from the tree or from the preserved snapshot) never reaches it.
+    _guard_container_only_settings(home_dir)
     commit_res = _git(
         ["commit", "-m", "Adopt main baseline, preserve state", "--allow-empty"],
         home_dir,

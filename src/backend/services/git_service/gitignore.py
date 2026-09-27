@@ -167,7 +167,7 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # The damage #2036 fixed was never the file, it was one CONTENT: absolute
     # `/opt/trinity/` hook paths. That content is now kept out of every platform
     # commit by a guard instead — `agent_server/routers/git.py::
-    # _guard_container_only_settings` (heartbeat + Push) and
+    # _guard_container_only_settings` (heartbeat, Push, reset) and
     # `CONTAINER_ONLY_SETTINGS_GUARD` below (initialize) — which also covers the
     # legacy copies `startup.sh`'s exact-match removal leaves on long-lived
     # volumes. `settings.local.json` is covered by the `*.local.json` rule below.

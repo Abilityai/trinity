@@ -7,7 +7,8 @@ included — commit normally. What #2036 actually fixed was one content: absolut
 `/opt/trinity/` hook paths, which brick any clone made outside the container.
 Every platform commit path now runs a guard after staging:
   - agent server: `routers/git.py::_guard_container_only_settings`
-    (heartbeat `_run_auto_sync_once` + operator Push `sync_to_github`)
+    (heartbeat `_run_auto_sync_once`, operator Push `sync_to_github`, and
+    `reset_to_main_preserve_state_impl` — the reset route + MCP tool)
   - backend:      `services/git_service/gitignore.py::CONTAINER_ONLY_SETTINGS_GUARD`
     (the shell twin, spliced into `initialize_git_in_container`)
 
@@ -204,6 +205,51 @@ class TestHeartbeatEndToEnd:
         assert (repo / SETTINGS).read_text() == HARMFUL
 
 
+class TestResetPreserveStateEndToEnd:
+    """`reset_to_main_preserve_state_impl` (reset route + MCP tool) stages with
+    `git add -A`, commits and force-pushes. The file-level ignore used to keep
+    the settings file out here too; the content guard must now do it."""
+
+    @pytest.fixture
+    def agent(self, tmp_path):
+        remote = tmp_path / "remote.git"
+        remote.mkdir()
+        _git(remote, "init", "-q", "--bare", "-b", "main")
+        repo = _repo(tmp_path, "agent")
+        _git(repo, "remote", "add", "origin", str(remote))
+        (repo / ".gitignore").write_text(".trinity/\n")
+        _commit(repo, "init")
+        _git(repo, "push", "-q", "-u", "origin", "main")
+        return repo, remote
+
+    def test_a_harmful_untracked_file_is_not_committed_or_pushed(self, agent):
+        repo, remote = agent
+        _write(repo, HARMFUL)
+
+        result = git_router.reset_to_main_preserve_state_impl(
+            repo, read_allowlist=lambda: [], skip_push=False)
+
+        assert "error" not in result, result
+        assert SETTINGS not in _git(repo, "ls-tree", "-r", "--name-only", "HEAD").stdout.split()
+        assert SETTINGS not in _git(remote, "ls-tree", "-r", "--name-only", "main").stdout.split()
+        assert (repo / SETTINGS).read_text() == HARMFUL
+
+    def test_a_preserved_harmful_copy_does_not_replace_the_clean_baseline(self, agent):
+        repo, remote = agent
+        _write(repo, CLEAN)
+        _commit(repo, "clean settings")
+        _git(repo, "push", "-q", "origin", "main")
+        _write(repo, HARMFUL)
+
+        result = git_router.reset_to_main_preserve_state_impl(
+            repo, read_allowlist=lambda: [SETTINGS], skip_push=False)
+
+        assert "error" not in result, result
+        assert _git(repo, "show", f"HEAD:{SETTINGS}").stdout == CLEAN
+        assert _git(remote, "show", f"main:{SETTINGS}").stdout == CLEAN
+        assert (repo / SETTINGS).read_text() == HARMFUL
+
+
 class TestWiring:
     """Push hardcodes /home/developer, so its wiring is pinned structurally; the
     behaviour it wires is the one TestTheRule executes."""
@@ -228,6 +274,20 @@ class TestWiring:
 
         guard = line_of(lambda c: getattr(c.func, "id", None) == "_guard_container_only_settings")
         assert line_of(is_git("add")) < guard < line_of(is_git("commit"))
+
+    def test_reset_preserve_state_guards_after_staging_and_before_commit(self):
+        calls = self._calls_in("reset_to_main_preserve_state_impl")
+
+        def git_verb(c):
+            return (getattr(c.func, "id", None) == "_git" and c.args
+                    and isinstance(c.args[0], ast.List) and c.args[0].elts
+                    and getattr(c.args[0].elts[0], "value", None))
+
+        add = min(c.lineno for c in calls if git_verb(c) == "add")
+        commit = min(c.lineno for c in calls if git_verb(c) == "commit")
+        guards = [c.lineno for c in calls
+                  if getattr(c.func, "id", None) == "_guard_container_only_settings"]
+        assert guards and add < min(guards) < commit
 
     def test_initialize_splices_the_guard_after_every_git_add(self):
         src = (_ROOT / "src/backend/services/git_service/provisioning.py").read_text()

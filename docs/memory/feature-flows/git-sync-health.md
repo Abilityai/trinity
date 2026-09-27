@@ -375,6 +375,7 @@ container. Every platform commit path now runs a guard after staging:
 |---|---|
 | heartbeat `_run_auto_sync_once` | `routers/git.py::_guard_container_only_settings` |
 | operator Push `sync_to_github` | same |
+| reset-to-main-preserve-state `reset_to_main_preserve_state_impl` (route + MCP tool) | same |
 | `initialize_git_in_container` (backend) | `gitignore.CONTAINER_ONLY_SETTINGS_GUARD` (shell twin, same rule) |
 
 If the index copy registers `/opt/trinity/`, the guard restores a clean HEAD copy
