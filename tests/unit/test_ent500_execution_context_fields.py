@@ -152,6 +152,31 @@ def test_a_provider_that_omits_consent_renders_the_restrictive_clause(quiet_db):
     )
 
 
+def test_a_provider_answering_string_false_renders_the_restrictive_clause(quiet_db):
+    """R1 (ent#500 PR3 review): the seam used to coerce consent with ``bool()``,
+    and ``bool("false")`` is ``True`` — so a provider saying "false" as a
+    string rendered "proactive contact permitted". Only a real bool counts; a
+    string is unresolved and fails closed through the [I1] path."""
+    ap.register_provider(
+        _Provider(
+            answer={
+                "primary_user_display": "Q. Okonkwo-Varga",
+                "role_id": "finance-controller",
+                "proactive_consent": "false",
+            }
+        )
+    )
+    out = compose_system_prompt(
+        ExecutionContext(agent_name="ops-companion", triggered_by="chat")
+    )
+    line = [ln for ln in _lines(out) if "Primary human" in ln][0]
+    assert line == (
+        "- **Primary human**: Q. Okonkwo-Varga (role: finance-controller)"
+        + _NOT_PERMITTED
+    )
+    assert "proactive contact permitted" not in out
+
+
 def test_stakeholders_render_as_a_joined_list():
     block = build_execution_context(
         ExecutionContext(

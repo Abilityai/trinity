@@ -83,7 +83,11 @@ not raise — it iterates into single characters and renders
 `Stakeholders: A, .,  , S, m, i, t, h`. Wrong, not absent, and therefore
 invisible. `a2a_gate.py` carries the same check for the same reason. A malformed
 field is dropped and the rest of the answer is kept; a malformed *answer*
-degrades to `None`; both log a WARNING.
+degrades to `None`; both log a WARNING. `proactive_consent` is held to a real
+`bool`, never coerced: `bool("false")` is `True`, so coercion turned a provider's
+string "false" into "proactive contact permitted". A non-bool is dropped like
+any malformed field, the consent is unresolved, and the renderer states the
+restrictive clause (R1, ent#500 PR3; `test_a_non_bool_consent_is_unresolved`).
 
 **Unknown keys are dropped.** The answer is projected onto a fixed key tuple, so
 a provider cannot add a field that reaches the prompt without a change here.
@@ -245,6 +249,7 @@ mattered.
 | Provider raises | `None` + WARNING; the FULL block, platform prompt included, still renders |
 | Provider answers a non-mapping | `None` + WARNING |
 | Provider answers a malformed field | that field dropped, the rest kept, + WARNING |
+| Provider answers a non-bool consent (e.g. `"false"`) | consent dropped as unresolved + WARNING; the line renders the restrictive clause |
 | Outside audience | `None` (the provider's own gate) |
 | `include_execution_context=False` | the whole block is absent, provider never called |
 
@@ -258,12 +263,15 @@ code** — "there is a test" and "the test would have caught it" are different
 claims, and only the second one is worth writing down.
 
 - `tests/unit/test_ent500_assignment_provider.py` — the three degrade paths,
-  last-wins registration, `clear_provider`, unknown-key dropping, and a static
+  last-wins registration, `clear_provider`, unknown-key dropping, a non-bool
+  consent left unresolved rather than coerced (R1), and a static
   assert that the seam file is in `enterprise-docs-guard.yml`'s hardcoded
   `SEAM_FILES` **and** in both `paths:` filters.
 - `tests/unit/test_ent500_execution_context_fields.py` — rendering, ordering,
   bounds, the resolve-exactly-once property, the pre-filled-caller `replace`
-  guard, and a raising provider still yielding the full block.
+  guard, a raising provider still yielding the full block, and a provider
+  answering consent `"false"` rendering the restrictive clause (R1, verified
+  RED against the `bool()` coercion).
 - `tests/unit/test_ent500_public_turn_no_pii.py` — audience suppression in both
   directions, fail-closed on an unknown label, no email-shaped key, and the
   outside-facing routers' trigger labels.

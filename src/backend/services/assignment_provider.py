@@ -136,7 +136,19 @@ def _validated(answer: Any, agent_name: str) -> Optional[Dict[str, Any]]:
                 continue
             out[key] = [str(v) for v in value]
         elif key == "proactive_consent":
-            out[key] = bool(value)
+            # A permission statement: only a real bool counts. ``bool("false")``
+            # is True, so coercion turned "not permitted" into "permitted".
+            # Anything else is unresolved, and the renderer fails closed on it.
+            if not isinstance(value, bool):
+                logger.warning(
+                    "[assignment_provider] provider returned %s for "
+                    "'proactive_consent' (expected bool/None); treating as "
+                    "unresolved for %s",
+                    type(value).__name__,
+                    agent_name,
+                )
+                continue
+            out[key] = value
         else:
             if not isinstance(value, str):
                 logger.warning(
