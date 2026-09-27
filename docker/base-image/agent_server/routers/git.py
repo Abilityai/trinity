@@ -755,23 +755,62 @@ def _maybe_run_git_maintenance(home_dir: Path, stats: Dict) -> Optional[str]:
 
 # ent#708: the ONE Claude Code settings file whose content (not its name) makes
 # it unfit for the repo. `.claude/settings.json` is the agent's project settings
-# and may be committed — unless it registers the container's absolute
-# `/opt/trinity/` hook paths, which brick any clone made outside the container
-# (#2036: a PreToolUse hook whose script is missing exits 2 = "block"). The base
-# image stopped baking such a copy in ent#345, but a legacy one survives on
-# volumes whose copy does not byte-match the managed file, and an agent can
-# write one. Mirrored for the backend's initialize path by
-# `services/git_service/gitignore.py::CONTAINER_ONLY_SETTINGS_GUARD` — same rule.
+# and may be committed — unless its content is container-only or secret:
+#   - it registers the container's absolute `/opt/trinity/` hook paths, which
+#     brick any clone made outside the container (#2036: a PreToolUse hook whose
+#     script is missing exits 2 = "block"). The base image stopped baking such a
+#     copy in ent#345, but a legacy one survives on volumes whose copy does not
+#     byte-match the managed file, and an agent can write one;
+#   - it carries a credential-bearing key. HOME is the repo root (#1703), so
+#     this is ALSO Claude Code's user settings file, and these top-level keys
+#     hold a credential or name the command that produces one (Claude Code
+#     settings reference): `env` (environment variables, e.g. an API key),
+#     `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `gcpAuthRefresh`,
+#     `otelHeadersHelper`. A present-but-empty value is not a credential;
+#   - it is not a JSON object, so it cannot be cleared of either (fail closed).
+# Mirrored for the backend's initialize path by
+# `services/git_service/gitignore.py::CONTAINER_ONLY_SETTINGS_GUARD` — same rule,
+# parity-tested against `_CREDENTIAL_SETTINGS_KEYS`.
 _CONTAINER_ONLY_SETTINGS = ".claude/settings.json"
 _CONTAINER_ONLY_MARKER = "/opt/trinity/"
+_CREDENTIAL_SETTINGS_KEYS = (
+    "env",
+    "apiKeyHelper",
+    "awsAuthRefresh",
+    "awsCredentialExport",
+    "gcpAuthRefresh",
+    "otelHeadersHelper",
+)
+
+
+def _settings_refusal_reason(content: str) -> Optional[str]:
+    """Why this settings content must not be committed, or None when it may.
+    The reason names keys, never values — it goes to the log."""
+    if _CONTAINER_ONLY_MARKER in content:
+        return (
+            f"it registers container-only {_CONTAINER_ONLY_MARKER} hook paths, "
+            "which would break any clone made outside the container"
+        )
+    try:
+        data = json.loads(content)
+    except ValueError:
+        return "it is not valid JSON, so it cannot be checked for credentials"
+    if not isinstance(data, dict):
+        return "it is not a JSON object, so it cannot be checked for credentials"
+    keys = [k for k in _CREDENTIAL_SETTINGS_KEYS if data.get(k)]
+    if keys:
+        return f"it carries credential-bearing key(s): {', '.join(keys)}"
+    return None
 
 
 def _guard_container_only_settings(home_dir: Path) -> Optional[str]:
-    """Keep a container-only `.claude/settings.json` out of the next commit.
+    """Keep a container-only or credential-bearing `.claude/settings.json` out
+    of the next commit.
 
-    Runs after staging. When the INDEX copy registers `/opt/trinity/` paths:
-    restore the HEAD copy if HEAD holds a clean one, else untrack it (which also
-    heals a harmful copy committed before #2036 — the commit records the
+    Runs after staging. When the INDEX copy is refused by
+    `_settings_refusal_reason` (container paths or credential-bearing keys):
+    restore the HEAD copy if HEAD holds an acceptable one, else untrack it
+    (which also heals a harmful copy already committed — the commit records the
     deletion). The working-tree file is never touched: the running agent keeps
     whatever it registers. Returns what it did ("restored" / "untracked"), or
     None when there was nothing to keep out.
@@ -781,10 +820,13 @@ def _guard_container_only_settings(home_dir: Path) -> Optional[str]:
         return res.stdout if res.returncode == 0 else None
 
     staged = _blob(f":{_CONTAINER_ONLY_SETTINGS}")
-    if staged is None or _CONTAINER_ONLY_MARKER not in staged:
+    if staged is None:
+        return None
+    reason = _settings_refusal_reason(staged)
+    if reason is None:
         return None
     head = _blob(f"HEAD:{_CONTAINER_ONLY_SETTINGS}")
-    if head is not None and _CONTAINER_ONLY_MARKER not in head:
+    if head is not None and _settings_refusal_reason(head) is None:
         run_registered(
             ["git", "reset", "-q", "--", _CONTAINER_ONLY_SETTINGS],
             cwd=str(home_dir), timeout=10, check=True,
@@ -797,9 +839,8 @@ def _guard_container_only_settings(home_dir: Path) -> Optional[str]:
         )
         action = "untracked"
     logger.warning(
-        "git: kept %s out of the commit (%s) — it registers container-only "
-        "%s hook paths, which would break any clone made outside the container",
-        _CONTAINER_ONLY_SETTINGS, action, _CONTAINER_ONLY_MARKER,
+        "git: kept %s out of the commit (%s) — %s",
+        _CONTAINER_ONLY_SETTINGS, action, reason,
     )
     return action
 
@@ -1809,8 +1850,8 @@ async def sync_to_github(request: GitSyncRequest):
             if add_result.returncode != 0:
                 raise HTTPException(status_code=500, detail=f"Git add failed: {add_result.stderr}")
 
-        # ent#708: whichever way it was staged, a container-only settings file
-        # never reaches the remote.
+        # ent#708: whichever way it was staged, a settings file carrying
+        # container paths or credential-bearing keys never reaches the remote.
         _guard_container_only_settings(home_dir)
 
         # Check if there's anything to commit
@@ -2302,8 +2343,9 @@ def reset_to_main_preserve_state_impl(
     restored, _skipped = restore_from_tar(home_dir, tar_bytes, patterns)
 
     _git(["add", "-A"], home_dir)
-    # ent#708: this path commits AND force-pushes; a container-only settings
-    # file (from the tree or from the preserved snapshot) never reaches it.
+    # ent#708: this path commits AND force-pushes; a settings file carrying
+    # container paths or credential-bearing keys (from the tree or the
+    # preserved snapshot) never reaches it.
     _guard_container_only_settings(home_dir)
     commit_res = _git(
         ["commit", "-m", "Adopt main baseline, preserve state", "--allow-empty"],

@@ -378,8 +378,19 @@ container. Every platform commit path now runs a guard after staging:
 | reset-to-main-preserve-state `reset_to_main_preserve_state_impl` (route + MCP tool) | same |
 | `initialize_git_in_container` (backend) | `gitignore.CONTAINER_ONLY_SETTINGS_GUARD` (shell twin, same rule) |
 
-If the index copy registers `/opt/trinity/`, the guard restores a clean HEAD copy
-when one exists, and otherwise untracks the file. A harmful copy committed before
+If the index copy registers container paths or credential-bearing keys, the
+guard restores a clean HEAD copy when one exists, and otherwise untracks the
+file. Container paths are absolute `/opt/trinity/`. Credential-bearing keys
+matter because `HOME` is the repo root (#1703), so this file is also Claude
+Code's **user** settings: a non-empty top-level `env`, `apiKeyHelper`,
+`awsAuthRefresh`, `awsCredentialExport`, `gcpAuthRefresh` or `otelHeadersHelper`
+(the keys the Claude Code settings reference documents as holding a credential
+or naming the command that produces one) is refused, and so is content that is
+not a JSON object, which cannot be checked (fail closed). The log line names the
+reason and the keys, never a value. The platform-written plugin config
+(`extraKnownMarketplaces`, `enabledPlugins`) commits normally. The shell twin
+runs the same predicate with the container's `python3`, keys passed as argv
+(parity-tested). A harmful copy committed before
 #2036 is therefore deleted from the remote on the next commit. The working-tree
 file is never touched. This also covers the legacy copies that `startup.sh`'s
 exact-match removal (ent#345) leaves on long-lived volumes. The heartbeat decides

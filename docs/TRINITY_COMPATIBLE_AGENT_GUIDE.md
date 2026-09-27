@@ -232,9 +232,10 @@ __pycache__/
 .claude/shell-snapshots/
 .claude/plugins/
 # .claude/settings.json is NOT ignored: it is your project settings and may be
-# committed (ent#708). Trinity keeps it out of a commit only when it registers
-# container-only /opt/trinity/ hook paths, which would brick a clone made outside
-# the container (#2036) — the file stays on disk either way.
+# committed (ent#708). Trinity keeps it out of a commit only when it carries
+# container paths (/opt/trinity/ hooks, which brick a clone made outside the
+# container, #2036) or credential-bearing keys (env, apiKeyHelper, awsAuthRefresh,
+# awsCredentialExport, gcpAuthRefresh, otelHeadersHelper) — on disk either way.
 .claude/remote-settings.json
 .claude/policy-limits.json
 .claude/backups/

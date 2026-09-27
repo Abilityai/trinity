@@ -576,8 +576,8 @@
   one lost it on its first Push and then failed its own compatibility contract — and
   **`.claude/settings.json`**, whose negation was the escape hatch #2036's own
   rationale offered (since trinity-enterprise#708 no negation is needed: the file
-  is no longer a canonical ignore, and only a copy registering `/opt/trinity/`
-  hook paths is kept out of a commit). `#1703` (repo root ≡ `$HOME`) retires this whole layer
+  is no longer a canonical ignore, and only a copy carrying container paths or
+  credential-bearing keys is kept out of a commit). `#1703` (repo root ≡ `$HOME`) retires this whole layer
   structurally; until then this is the correctness fix, designed as the steady state
   because #1703 is P3, unassigned and a decision issue first.
 - **Key Features**:

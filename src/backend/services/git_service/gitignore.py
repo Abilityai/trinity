@@ -71,13 +71,41 @@ _TRINITY_AUTHORED_PATHS: Tuple[str, ...] = (
 # (the agent server ships as its own image and cannot import this module), for
 # the backend-driven commit in `provisioning.initialize_git_in_container`. Runs
 # after staging: when the INDEX copy of `.claude/settings.json` registers
-# container-only `/opt/trinity/` hook paths, restore a clean HEAD copy if there
-# is one, else untrack it. The working-tree file is never touched. Written with
-# no quotes at all — it is spliced into `bash -c "cd <dir> && <cmd>"`.
+# container-only `/opt/trinity/` paths or carries a credential-bearing key
+# (HOME is the repo root, so it is also Claude Code's user settings file), or is
+# not a JSON object, restore an acceptable HEAD copy if there is one, else
+# untrack it. The working-tree file is never touched.
+#
+# ONE rule, two homes. A key check cannot be expressed robustly in grep (a key
+# name can appear inside a hook command or a nested object), so the checker is
+# the SAME predicate as `agent_server/routers/git.py::_settings_refusal_reason`,
+# run by the container's own python3: exit 0 = may commit, anything else
+# (refused, unparseable, python3 missing) = keep it out — fail closed. The
+# marker and the key list are passed as argv so the program needs no string
+# literals: the whole constant is spliced into `bash -c "cd <dir> && <cmd>"` and
+# docker-py `shlex.split`s it, so it must carry no double quotes, `$`, backslash
+# or backtick. `_CREDENTIAL_SETTINGS_KEYS` below must equal the agent server's
+# tuple of the same name (parity-tested in test_ent708_settings_json_guard.py).
+_CREDENTIAL_SETTINGS_KEYS: Tuple[str, ...] = (
+    "env",
+    "apiKeyHelper",
+    "awsAuthRefresh",
+    "awsCredentialExport",
+    "gcpAuthRefresh",
+    "otelHeadersHelper",
+)
+_SETTINGS_CHECK = (
+    "python3 -c 'import sys,json;t=sys.stdin.read();a=sys.argv;d=json.loads(t);"
+    "sys.exit(int(a[1] in t or not isinstance(d,dict) "
+    "or any(d.get(k) for k in a[2:])))' /opt/trinity/ "
+    + " ".join(_CREDENTIAL_SETTINGS_KEYS)
+    + " 2>/dev/null"
+)
 CONTAINER_ONLY_SETTINGS_GUARD = (
-    "if git show :.claude/settings.json 2>/dev/null | grep -qF /opt/trinity/; then "
-    "if git show HEAD:.claude/settings.json >/dev/null 2>&1 "
-    "&& ! git show HEAD:.claude/settings.json | grep -qF /opt/trinity/; "
+    "if git cat-file -e :.claude/settings.json 2>/dev/null "
+    "&& ! git show :.claude/settings.json | " + _SETTINGS_CHECK + "; then "
+    "if git cat-file -e HEAD:.claude/settings.json 2>/dev/null "
+    "&& git show HEAD:.claude/settings.json | " + _SETTINGS_CHECK + "; "
     "then git reset -q -- .claude/settings.json; "
     "else git rm -q --cached -- .claude/settings.json; fi; fi"
 )
@@ -165,8 +193,9 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # file-level rule silently dropped them (the marketplace `add-git-sync` hooks
     # vanished from every deployed agent until the skill learned to negate it).
     # The damage #2036 fixed was never the file, it was one CONTENT: absolute
-    # `/opt/trinity/` hook paths. That content is now kept out of every platform
-    # commit by a guard instead — `agent_server/routers/git.py::
+    # `/opt/trinity/` hook paths. Container paths or credential-bearing keys
+    # (HOME is the repo root, so this is also the USER settings file) are now
+    # kept out of every platform commit by a guard instead — `agent_server/routers/git.py::
     # _guard_container_only_settings` (heartbeat, Push, reset) and
     # `CONTAINER_ONLY_SETTINGS_GUARD` below (initialize) — which also covers the
     # legacy copies `startup.sh`'s exact-match removal leaves on long-lived
