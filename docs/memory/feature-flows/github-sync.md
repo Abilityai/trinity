@@ -1559,7 +1559,7 @@ Working - credential-free remotes + git credential helper (trinity-enterprise#61
 |-----------|------|--------------|
 | **Upstream** | [Template Processing](template-processing.md) | GitHub templates trigger git sync setup |
 | **Upstream** | [Agent Lifecycle](agent-lifecycle.md) | Agent creation enables git sync |
-| **Downstream** | [Git Sync Health](git-sync-health.md) | Auto-sync heartbeat + observability on top of this flow (#389, #390) |
+| **Downstream** | [Git Sync Health](git-sync-health.md) | Auto-sync heartbeat + observability on top of this flow (#389, #390); since ent#706 "healthy" means the agent and its repository agree (divergence age), and the schedule freeze keys on it for work agents |
 | **Downstream** | Content generation | Large files go to `content/` folder |
 | **Related** | [Async Docker Operations](async-docker-operations.md) | Git commands use async docker exec (DOCKER-001) |
 
@@ -1569,6 +1569,7 @@ Working - credential-free remotes + git credential helper (trinity-enterprise#61
 
 | Date | Changes |
 |------|---------|
+| 2026-09-27 | trinity-enterprise#706 (journey impact): the sync-health dot and the schedule freeze change their definition of "failing". A work agent diverged from origin for more than 24 h is now red and, when its owner opted in, has its schedules paused, not only one whose pushes failed 3 times; the dot renders a backend-owned state and reason. Details: [git-sync-health.md](git-sync-health.md) §2b, §5. |
 | 2026-09-22 | #2957: git status reads porcelain -z; first unstaged path no longer loses its first character; rename path = new path + additive orig_path; quoted paths returned raw; decoded with `errors="backslashreplace"` so a non-UTF-8 filename (raw under `-z`) cannot 500 the status. |
 | 2026-09-13 | ent#615: remote URLs carry no credential; the `trinity` git credential helper resolves it per operation; conditional restart rewrite + fleet remediation sweep. |
 | 2026-09-13 | **The status read stops taking the index lock** (#2742): `git --no-optional-locks status --porcelain` on the `/api/git/status` read path only — the auto-sync commit path and the `sync`/`pull` bodies keep the plain, index-refreshing form because they are lock-serialized and proceed to stage/commit. The three shared helpers `_compute_ahead_behind` / `_get_pull_branch` / `_persist_last_remote_sha` move to `run_registered`, which also sweep-registers their children on the **locked** `sync_to_github` / `pull_from_github` / 409 paths (intended, and pinned by a test). `remote_url` is now unconditionally redacted — the old shape special-cased `@github.com` and returned any other remote's URL verbatim, tokens included. Full reasoning: [git-sync-health.md](git-sync-health.md). |

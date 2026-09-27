@@ -81,7 +81,9 @@ All clear operations are scoped to agents you can access, affect all operators o
 
 For agents with GitHub sync enabled, the Sync Health Service polls every 60 seconds by default (`SYNC_HEALTH_POLL_INTERVAL_SECONDS`) and writes `sync_failing` queue entries when an agent's `consecutive_failures` hits 3. These appear in the Needs Response tab alongside agent-emitted items, so a broken git remote, expired PAT, or upstream divergence surfaces in the same place operators already watch.
 
-Per-agent sync state (last sync at, last error, ahead/behind counts on `main` and the working branch) is also visible on the agent header dot and at `GET /api/agents/{name}/git/sync-state`.
+When an agent's schedules are paused because it has been out of step with its repository for more than 24 hours, one **Agent diverged from GitHub — schedules paused** (`sync_diverged`) entry appears per episode, with the ahead/behind counts and a suggested fix. It stays until you clear it; if the agent drifts out of step again later, that is a new entry. See [GitHub Sync → Pausing schedules](../integrations/github-sync.md#pausing-schedules-when-sync-is-unhealthy).
+
+Per-agent sync state (last sync at, last error, ahead/behind counts on `main` and the working branch, uncommitted-file count, last successful push, and the computed state with its reason) is also visible on the agent header dot and at `GET /api/agents/{name}/git/sync-state`.
 
 ## For Agents
 

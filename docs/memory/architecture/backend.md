@@ -171,6 +171,8 @@
 - `heartbeat_service.py` - Agent push-heartbeat liveness layer — see [Heartbeat Liveness](reliability.md#heartbeat-liveness-reliability-004-307)
 - `operator_queue_service.py` - Operating Room sync with agent containers (OPS-001); the agent-authored ingestion boundary enforces the per-agent depth/rate/size caps + reserved-id guard + leader lock (#1632)
 - `sync_health_service.py` - Git sync health polling — see [Git Sync Health](agent-lifecycle.md#git-sync-health-389390)
+- `sync_freeze_policy.py` - The one sync-health rule (state / reason / recommendation / freeze), stdlib leaf, vendored byte-identically to `src/scheduler/` (ent#706) — see [Git Sync Health](agent-lifecycle.md#git-sync-health-389390)
+- `sync_health_view.py` - `sync_view(row, config)`: the backend's single call into the policy, used by the poller and every sync-health read (ent#706)
 - `canary_service.py` - Orchestration-invariant watcher — see [Canary Harness](reliability.md#canary-invariant-harness-canary-001-411)
 - `compatibility/` - Agent compatibility validation package (spec/collector/static_checks/ai_checks/fixes) — see [Agent Compatibility Validation](agent-lifecycle.md#agent-compatibility-validation-668)
 
