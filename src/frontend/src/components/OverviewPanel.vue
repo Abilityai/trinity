@@ -16,6 +16,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import axios from 'axios'
 import { parseUTC } from '@/utils/timestamps'
 import { BUCKET_COLORS } from '@/utils/executionBuckets'
+import { formatSyncSummary, syncChip, syncTextClass } from '@/utils/syncSummary'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 import { useAgentsStore } from '../stores/agents'
@@ -64,7 +65,11 @@ const info = ref(null)
 const live = ref(null) // { running_count, queued_count }
 const notifCount = ref(0)
 const opQueuePending = ref(0)
-const syncFailures = ref(0)
+// trinity-enterprise#707: the whole `/git/sync-state` payload (the backend's
+// numbers + verdict), not just the failure count.
+const syncState = ref(null)
+// D13: the attention count keeps counting failed syncs, not red divergence.
+const syncFailures = computed(() => syncState.value?.consecutive_failures || 0)
 const health = ref(null) // AgentHealthDetail
 const healthTrend = ref(null) // { dates, uptime, latency }
 const schedulesCount = ref(null)
@@ -76,6 +81,15 @@ const recent = ref([])
 const attentionCount = computed(
   () => (notifCount.value || 0) + (opQueuePending.value || 0) + (syncFailures.value || 0)
 )
+
+// --- sync line (trinity-enterprise#707) ---
+// `—` until the backend has an observation (and after a failed read, which
+// keeps whatever was on screen): never `ok` for an agent nobody has measured.
+const syncText = computed(() => formatSyncSummary(syncState.value, Date.now()) ?? '—')
+const syncTitle = computed(
+  () => syncChip(syncState.value, Date.now())?.title ?? 'Sync status unknown'
+)
+const syncClass = computed(() => syncTextClass(syncState.value))
 
 // --- formatters ---
 function fmtDuration(ms) {
@@ -222,7 +236,7 @@ async function loadSidecars() {
   if (stats.status === 'fulfilled') live.value = stats.value.data
   if (notif.status === 'fulfilled') notifCount.value = notif.value.data?.pending_count || 0
   if (opq.status === 'fulfilled') opQueuePending.value = opq.value.data?.count || 0
-  if (sync.status === 'fulfilled') syncFailures.value = sync.value.data?.consecutive_failures || 0
+  if (sync.status === 'fulfilled') syncState.value = sync.value.data || null
   if (hDetail.status === 'fulfilled') health.value = hDetail.value.data
   if (hHist.status === 'fulfilled') healthTrend.value = bucketHealth(hHist.value.data?.checks || [])
   if (scheds.status === 'fulfilled') schedulesCount.value = (scheds.value.data || []).length
@@ -520,8 +534,8 @@ onMounted(() => {
         <button v-if="agent.can_share" class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600" @click="emit('navigate-tab', 'sharing')">
           {{ (agent.shares && agent.shares.length) || 0 }} shares
         </button>
-        <span class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">
-          Sync: <span :class="syncFailures > 0 ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-700 dark:text-status-success-400'">{{ syncFailures > 0 ? `${syncFailures} failing` : 'ok' }}</span>
+        <span data-testid="overview-sync" :title="syncTitle" class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 tabular-nums">
+          Sync: <span data-testid="overview-sync-value" :class="syncClass">{{ syncText }}</span>
         </span>
       </div>
     </div>

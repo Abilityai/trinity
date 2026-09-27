@@ -197,6 +197,7 @@ import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
 import { agentNameParts, agentNameTooltip } from '../utils/agentName'
 import { pressureBadge, isSubscriptionFunded } from '../utils/subscriptionPressure'
+import { syncChip } from '../utils/syncSummary'
 import RunningStateToggle from './RunningStateToggle.vue'
 import AutonomyToggle from './AutonomyToggle.vue'
 import ScanlineReveal from './ScanlineReveal.vue'
@@ -339,10 +340,13 @@ const chips = computed(() => {
       title: 'Executing now',
     })
   }
-  const sh = gridStore.syncHealth[name.value]
-  if (sh && sh.last_sync_status === 'failed' && sh.consecutive_failures > 0) {
-    out.push({ kind: 'warn', icon: '⟳', text: `sync failing ×${sh.consecutive_failures}`, title: sh.last_error_summary || 'Git sync failing' })
-  }
+  // trinity-enterprise#707: ONE sync chip — the backend's state as the kind,
+  // the numbers as the text, reason + recommendation on hover (never the raw
+  // git error). It replaces `sync failing ×N` and `git ✓`, so the strip does
+  // not grow. A problem (red/yellow) sits here with the other problems; a calm
+  // green fact goes last, where `git ✓` was.
+  const sync = syncChip(gridStore.syncHealth[name.value], props.now || Date.now())
+  if (sync && sync.kind !== 'calm') out.push(sync)
   // #471: subscription-pressure chip (one shared predicate — utils/subscriptionPressure.js)
   const sp = pressureBadge(gridStore.subscriptionPressure[name.value])
   if (sp) {
@@ -374,9 +378,7 @@ const chips = computed(() => {
   } else {
     out.push({ kind: 'calm', text: 'no schedules' })
   }
-  if (sh && sh.auto_sync_enabled && sh.last_sync_status === 'success') {
-    out.push({ kind: 'calm', text: 'git ✓' })
-  }
+  if (sync && sync.kind === 'calm') out.push(sync)
   return out
 })
 
