@@ -4702,7 +4702,7 @@ def _migrate_workspace_suggestion_feedback_table(cursor, conn):
     `surface` column, so the post-action next-step tier shares this one
     dismissal model rather than growing a second table. Additive only.
 
-    Mirrored by the Alembic revision 0075_workspace_suggestion_feedback.
+    Mirrored by the Alembic revision 0078_workspace_suggestion_feedback.
     """
     cursor.execute(
         """
