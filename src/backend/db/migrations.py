@@ -4183,7 +4183,7 @@ def _migrate_execution_chain_depth(cursor, conn):
     `inter_agent_max_chain_depth`. Nullable with no default, so existing rows
     are roots and no backfill is needed.
 
-    Mirrored by the Alembic revision 0073_execution_chain_depth.
+    Mirrored by the Alembic revision 0077_execution_chain_depth.
     """
     _safe_add_column(
         cursor,

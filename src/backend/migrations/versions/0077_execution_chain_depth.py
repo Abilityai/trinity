@@ -7,14 +7,14 @@ are roots and nothing is backfilled.
 
 Mirrors the SQLite ``execution_chain_depth`` migration.
 
-Revision ID: 0073_execution_chain_depth
-Revises: 0072_agent_capability_grants
+Revision ID: 0077_execution_chain_depth
+Revises: 0076_operator_queue_ask_object
 """
 from alembic import op
 
 
-revision = "0073_execution_chain_depth"
-down_revision = "0072_agent_capability_grants"
+revision = "0077_execution_chain_depth"
+down_revision = "0076_operator_queue_ask_object"
 branch_labels = None
 depends_on = None
 
