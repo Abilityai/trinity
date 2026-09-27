@@ -293,6 +293,8 @@ TABLES = {
             -- never widens what the agent may read or write. Validated against
             -- the agent's own canvases at the boundary that stamps it.
             open_canvas_id TEXT,
+            -- #2806: agent-to-agent hops from a non-agent root. NULL = root (0).
+            chain_depth INTEGER,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,

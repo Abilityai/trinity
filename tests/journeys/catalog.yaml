@@ -181,8 +181,9 @@ journeys:
     # P-01/P-02: the permission edge and the MCP gate that consults it;
     # AC-01: every call leaves an activity ("I can see what they said");
     # L-03: a deleted callee cascades; IA-01..03: the recorded call had an
-    # edge, a fan-out batch is bounded, a stopped callee fails fast (#2337).
-    invariants: [P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03]
+    # edge, a fan-out batch is bounded, a stopped callee fails fast (#2337);
+    # IA-04: a chain past the depth limit is refused before it runs (#2806).
+    invariants: [P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03, IA-04]
 
   - id: J11
     issue: 2565
