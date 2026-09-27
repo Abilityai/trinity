@@ -1063,3 +1063,115 @@ class TestRound2AcknowledgementReachesTheRow:
         real_db.set_operator_queue_sync_state(uid, "closed_by_filer", "acknowledged", "2026-09-24T09:00:00Z")
         answer_ask(uid, email, False, "yes", None, acknowledge_divergence=True)
         assert real_db.get_operator_queue_item(uid)["divergence_acknowledged_at"]
+
+
+# ===========================================================================
+# #3024 — `stale_id` is a GENUINE re-use, never the entry awaiting its flip.
+#   The reconcile (step 2) runs before the write-back (step 4), so in the cycle
+#   right after the platform ends a row the agent's file still holds the
+#   ORIGINAL pending entry — the one this cycle's write-back is about to flip.
+#   Before #3024 every ask the platform ended read "Re-used id" and nothing
+#   cleared it. The rows here sit in BOTH the sync index and the write-back set,
+#   as they do in production (the earlier harness only ever filled one of them).
+# ===========================================================================
+
+def _term(rid="req-1", status="cancelled", **over):
+    """A terminal row as the sync INDEX carries it."""
+    t = {"id": f"uuid-{rid}", "status": status, "sync_state": None,
+         "delivery_state": None, "delivery_detail": None}
+    t.update(over)
+    return t
+
+
+class TestStaleIdIsOnlyAGenuineReuse:
+    @pytest.mark.parametrize("status", ["cancelled", "expired"])
+    @pytest.mark.parametrize("delivery_state, delivery_detail", [
+        (None, None),                                  # the cycle right after the ending
+        (DELIVERY_UNDELIVERED, "agent_not_running"),   # the agent was stopped when it ended
+        (DELIVERY_UNDELIVERED, "file_missing"),        # the file was unreadable last time
+    ])
+    def test_the_original_entry_awaiting_its_flip_is_not_a_reused_id(
+            self, monkeypatch, status, delivery_state, delivery_detail):
+        db = _fake_db(
+            terminal={"req-1": _term(status=status, delivery_state=delivery_state,
+                                     delivery_detail=delivery_detail)},
+            terminal_items=[_row(status=status, sync_state=None, delivery_state=delivery_state,
+                                 delivery_detail=delivery_detail)],
+        )
+        client = _client(_file(_entry()))
+        svc, audit = _wire(monkeypatch, db, client)
+        asyncio.run(svc._sync_agent("a"))
+        assert not [c for c in _sync_calls(db) if c[0] == SYNC_STALE_ID]
+        assert "diverged" not in _audit_actions(audit)
+        # ...and the same cycle's write-back still delivers the ending into it.
+        written = json.loads(client.write_file.call_args.args[1])
+        assert written["requests"][0]["status"] == status
+        assert ("uuid-req-1", DELIVERY_DELIVERED, None) in _delivery_calls(db)
+
+    @pytest.mark.parametrize("term", [
+        pytest.param(_term(delivery_state=DELIVERY_DELIVERED), id="flip-already-delivered"),
+        pytest.param(_term(status="expired", delivery_state=DELIVERY_UNDELIVERED,
+                           delivery_detail="entry_missing"), id="entry-was-missing"),
+        pytest.param(_term(status="acknowledged", delivery_state=DELIVERY_DELIVERED), id="acknowledged"),
+    ])
+    def test_a_pending_entry_the_write_back_will_not_flip_is_a_reused_id(self, monkeypatch, term):
+        db = _fake_db(terminal={"req-1": term})
+        svc, _ = _wire(monkeypatch, db, _client(_file(_entry())))
+        asyncio.run(svc._sync_agent("a"))
+        db.create_operator_queue_item.assert_not_called()
+        assert (SYNC_STALE_ID, term["status"]) in _sync_calls(db)
+
+    @pytest.mark.parametrize("status", ["cancelled", "expired"])
+    def test_a_row_misflagged_since_2915_heals_once_its_entry_reads_the_ending(self, monkeypatch, status):
+        db = _fake_db(terminal={"req-1": _term(status=status, sync_state=SYNC_STALE_ID,
+                                               delivery_state=DELIVERY_DELIVERED)})
+        svc, audit = _wire(monkeypatch, db, _client(_file(_entry(status=status))))
+        asyncio.run(svc._sync_agent("a"))
+        assert (SYNC_CONFIRMED, None) in _sync_calls(db)
+        assert "reconciled" in _audit_actions(audit)
+
+    def test_a_genuine_reuse_flag_is_not_cleared_while_its_entry_is_pending(self, monkeypatch):
+        db = _fake_db(terminal={"req-1": _term(sync_state=SYNC_STALE_ID, delivery_state=DELIVERY_DELIVERED)})
+        svc, _ = _wire(monkeypatch, db, _client(_file(_entry())))
+        asyncio.run(svc._sync_agent("a"))
+        assert (SYNC_CONFIRMED, None) not in _sync_calls(db)
+
+    def test_an_entry_the_agent_closed_differently_is_not_healed(self, monkeypatch):
+        """Only the row's OWN ending heals a flag: an entry the agent set to some
+        other status is not the platform's flip having landed."""
+        db = _fake_db(terminal={"req-1": _term(sync_state=SYNC_STALE_ID, delivery_state=DELIVERY_DELIVERED)})
+        svc, _ = _wire(monkeypatch, db, _client(_file(_entry(status="acknowledged"))))
+        asyncio.run(svc._sync_agent("a"))
+        assert (SYNC_CONFIRMED, None) not in _sync_calls(db)
+
+    def test_the_awaiting_flip_rule_is_the_write_back_selection(self, real_db):
+        """One rule, two spellings: the reconcile's `awaits_terminal_flip` (Python)
+        must pick exactly the rows `get_terminal_items_for_agent` (SQL) hands the
+        write-back, read through the real sync index — so the index must carry the
+        delivery columns the rule reads."""
+        from db.engine import get_engine
+        from db.tables import operator_queue
+        from sqlalchemy import update
+        agent = "agent-3024-parity"
+        cases = [
+            ("cancelled", None, None), ("cancelled", "undelivered", "agent_not_running"),
+            ("cancelled", "undelivered", "file_missing"), ("cancelled", "undelivered", "entry_missing"),
+            ("cancelled", "delivered", None), ("cancelled", "not_applicable", "platform_minted"),
+            ("expired", None, None), ("expired", "delivered", None),
+            ("acknowledged", "delivered", None), ("acknowledged", None, None),
+        ]
+        seeded = {}
+        for n, (status, state, detail) in enumerate(cases):
+            uid = real_db.create_operator_queue_item(agent, {
+                "id": f"p-{n}", "type": "approval", "status": "pending", "priority": "high",
+                "title": "t", "question": "q", "options": ["a", "b"], "context": {},
+                "created_at": "2026-09-01T10:00:00Z"})
+            with get_engine().begin() as conn:
+                conn.execute(update(operator_queue).where(operator_queue.c.id == uid)
+                             .values(status=status, delivery_state=state, delivery_detail=detail))
+            seeded[uid] = (status, state, detail)
+        fetched = {r["id"] for r in real_db.get_operator_queue_terminal_for_agent(agent)}
+        index = {t["id"]: t for t in real_db.get_operator_queue_sync_index_for_agent(agent)["terminal"].values()}
+        assert fetched, "the write-back selection picked nothing — the probe proves nothing"
+        for uid, case in seeded.items():
+            assert oqs.awaits_terminal_flip(index[uid]) is (uid in fetched), case
