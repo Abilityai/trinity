@@ -201,7 +201,7 @@ class TestStatusReadIsLockFree:
         thing a future edit would silently change."""
         git_mod._compute_git_status(status_home)
 
-        assert ["git", "--no-optional-locks", "status", "--porcelain"] in recorded_argvs
+        assert ["git", "--no-optional-locks", "status", "--porcelain", "-z"] in recorded_argvs
         assert ["git", "status", "--porcelain"] not in recorded_argvs, (
             "the unflagged status argv is what takes .git/index.lock"
         )
@@ -260,7 +260,7 @@ class TestStatusReadIsLockFree:
             return sightings["n"]
 
         plain = _sample(["git", "status", "--porcelain"])
-        flagged = _sample(["git", "--no-optional-locks", "status", "--porcelain"])
+        flagged = _sample(["git", "--no-optional-locks", "status", "--porcelain", "-z"])
 
         assert plain > 0, (
             "control lost its teeth: the plain argv was never observed holding "
@@ -1151,7 +1151,7 @@ class TestACommitSurvivesAConcurrentPoll:
         (repo / "agent-work.txt").write_text("the agent's own turn")
 
         frozen = self._freeze_status_holding_the_lock(
-            repo, ["git", "--no-optional-locks", "status", "--porcelain"], attempts=4
+            repo, ["git", "--no-optional-locks", "status", "--porcelain", "-z"], attempts=4
         )
         try:
             assert frozen is None, (

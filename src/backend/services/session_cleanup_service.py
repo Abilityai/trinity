@@ -17,19 +17,22 @@ Two paths feed the cleanup:
 2. **Periodic sweep** (every 6h, default) that diffs the on-disk JSONL set
    against the keep set: every resume handle currently stored for that agent,
    on an active ``agent_sessions`` row, on an ``enterprise_portal_sessions``
-   (Workspace) thread (ent#358), **or** on an open room's
-   ``enterprise_room_participants`` row (#2610). All three surfaces resume, so
-   all three are live. JSONLs older than the age guard whose UUID is in none of
-   them are deleted. Catches dropped synchronous reaps, externally-modified
+   (Workspace) thread (ent#358), on an open room's
+   ``enterprise_room_participants`` row (#2610), **or** the agent's own
+   ``/api/chat`` session (#2958). That last id lives in agent memory, not the
+   DB, so the agent publishes it to ``CHAT_SESSION_MARKER_PATH`` and the sweep
+   reads it over docker exec (bounded, as ``developer``). All four surfaces
+   resume, so all four are live. JSONLs older than the age guard whose UUID is
+   in none of them are deleted. Catches dropped synchronous reaps, externally-modified
    state, and any churn from fallback turns that orphaned a JSONL behind a
    fresh UUID.
 
    **Every surface that stores a ``--resume`` id must be unioned in here.** The
    omission is silent by construction — resuming keeps working until the sweep
    runs, and then the conversation is simply gone with no error anywhere. It
-   has now shipped twice (ent#358 for Workspace threads, #2610 for rooms), so
-   treat a new resume-capable surface as owing a keep-set accessor on the same
-   PR. Each source is read in its own try/except that ABORTS the sweep on
+   has now shipped three times (ent#358 for Workspace threads, #2610 for rooms,
+   #2958 for the agent's own chat), so treat a new resume-capable surface as
+   owing a keep-set accessor on the same PR. Each source is read in its own try/except that ABORTS the sweep on
    failure: skipping a cycle costs disk, reaping against a partial keep set
    costs users their conversations.
 
@@ -54,6 +57,7 @@ the agent terminal) — no new agent-server endpoint needed.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import shlex
@@ -74,6 +78,29 @@ _UUID_RE = re.compile(r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 # The directory name is the cwd path with `/` replaced by `-`.
 _AGENT_CWD = "/home/developer"
 _PROJECTS_DIR = "/home/developer/.claude/projects/-home-developer"
+
+# #2958: where the agent publishes its own /api/chat session id. Must equal the
+# agent server's `chat_session_marker.DEFAULT_MARKER_PATH`
+# (tests/unit/test_2958_marker_path_parity.py).
+CHAT_SESSION_MARKER_PATH = "/home/developer/.trinity/chat-session.json"
+_NO_CHAT_SESSION = "__NO_CHAT_SESSION__"
+# `execute_command_in_container` accepts a timeout it does not forward, so the
+# marker read bounds itself (a hung exec otherwise stalls the whole cycle).
+_CHAT_MARKER_READ_TIMEOUT_S = 10
+# `$` in `re.match` lets a trailing newline through; the marker reader uses
+# `fullmatch` so a junk id can never widen the keep set.
+_CHAT_SESSION_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
+)
+
+
+class ChatSessionMarkerError(Exception):
+    """The chat-session marker could not be read. Carries only the failure
+    KIND — never marker content, which is agent-writable (#2958)."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(kind)
+        self.kind = kind
 
 
 @dataclass
@@ -211,6 +238,45 @@ class SessionCleanupService:
             )
         return report
 
+    async def _chat_session_keep_id(self, container: str) -> Optional[str]:
+        """#2958: the agent's own /api/chat session id, or None if it has none.
+
+        The fourth keep-set source. The id lives in agent memory, so the agent
+        writes it to ``CHAT_SESSION_MARKER_PATH`` after each successful chat
+        turn. No marker (a fresh agent, a reset, an old image, a Codex/Gemini
+        runtime) is a normal None. Anything else that is not a clean UUID
+        RAISES, and the caller aborts that agent's sweep.
+
+        Bounded three ways: ``head -c 512`` caps the read, an in-container
+        ``timeout 5`` frees the exec thread, and ``asyncio.wait_for`` frees
+        this coroutine. Runs as ``developer``, never root.
+        """
+        path = shlex.quote(CHAT_SESSION_MARKER_PATH)
+        command = (
+            f"sh -c 'P={path}; if [ -f \"$P\" ]; then timeout 5 head -c 512 -- \"$P\"; "
+            f"else echo {_NO_CHAT_SESSION}; fi'"
+        )
+        try:
+            result = await asyncio.wait_for(
+                execute_command_in_container(container, command, timeout=10, user="developer"),
+                timeout=_CHAT_MARKER_READ_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            raise ChatSessionMarkerError("marker_timeout") from None
+        if result.get("exit_code") != 0:
+            raise ChatSessionMarkerError("marker_exec_failed")
+        output = (result.get("output") or "").strip()
+        if output == _NO_CHAT_SESSION:
+            return None
+        try:
+            data = json.loads(output)
+        except ValueError:
+            raise ChatSessionMarkerError("marker_invalid_json") from None
+        session_id = data.get("session_id") if isinstance(data, dict) else None
+        if not isinstance(session_id, str) or not _CHAT_SESSION_UUID_RE.fullmatch(session_id):
+            raise ChatSessionMarkerError("marker_bad_uuid")
+        return session_id
+
     async def _sweep_agent(self, agent_name: str) -> dict:
         """List on-disk JSONL UUIDs, diff against the keep set, reap."""
         per = {"found": 0, "kept_active": 0, "kept_too_young": 0, "deleted": 0, "errors": 0}
@@ -262,10 +328,30 @@ class SessionCleanupService:
             per["errors"] += 1
             return per
 
+        container = f"agent-{agent_name}"
+
+        # #2958: the FOURTH surface — the agent's own /api/chat session, which
+        # resumes by id since the chat stopped using `--continue`. It is not in
+        # any DB table, so it is read from the agent's marker file. Same
+        # fail-closed rule as the three sources above; the log names the
+        # failure kind only (marker content is agent-writable).
+        try:
+            chat_session_id = await self._chat_session_keep_id(container)
+        except Exception as e:
+            kind = e.kind if isinstance(e, ChatSessionMarkerError) else type(e).__name__
+            logger.warning(
+                "[SessionCleanup] agent=%s could not read the chat session marker "
+                "(%s) — skipping sweep rather than reaping against a partial set",
+                agent_name, kind,
+            )
+            per["errors"] += 1
+            return per
+        if chat_session_id:
+            keep_set.add(chat_session_id)
+
         # `find -printf '%f %T@\n'` lists "<filename> <mtime_epoch>" pairs.
         # mtime is what we want for the age guard — modification time, not
         # creation, so a recently-resumed session counts as fresh.
-        container = f"agent-{agent_name}"
         listing = await execute_command_in_container(
             container,
             f"sh -c 'find {shlex.quote(_PROJECTS_DIR)} -maxdepth 1 -type f -name \"*.jsonl\" "

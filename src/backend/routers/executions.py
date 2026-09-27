@@ -34,7 +34,9 @@ _VALID_STATUSES = {"running", "queued", "success", "failed", "error", "cancelled
 # this endpoint must be listed or its filter lies. `room` is ent#169, `a2a` is
 # ent#157 (inbound A2A tasks reach `execute_task`, so they land in this list),
 # `retry` is RETRY-001's second attempt at a failed scheduled run (#2845).
-_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop", "reminder", "room", "a2a", "operator_response", "retry"}
+# `operator_ending` is the wake for an ask that was cancelled or expired
+# (trinity-enterprise#611); `operator_response` is the answer's (ent#329).
+_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop", "reminder", "room", "a2a", "operator_response", "operator_ending", "retry"}
 _VALID_HOURS = {0, 1, 6, 24, 168, 720}  # 0 = all-time
 
 # ent#326. `hour`/`day` are gap-filled; `trigger`/`agent` are categorical and

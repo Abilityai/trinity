@@ -1724,6 +1724,11 @@ failed iteration and proceeds, bounded so a fully-broken agent still terminates.
   (both trinity-enterprise#442), and a schedule-form toggle.
 - **Flow**: `docs/memory/feature-flows/schedule-workspace-delivery.md`
 
+- **Readiness gate (trinity-enterprise#689)**: a cron fire of a seat-delivery schedule on a
+  companion (`x-role`) whose owner stamp is not `ready` is recorded as a `skipped` execution
+  with the reason and not dispatched — manual, webhook and retry runs are not gated, and every
+  ambiguity fires. See [core-agent.md §5.36](core-agent.md).
+
 ### 10.19 A schedule that names a user can write that user's memory (trinity-enterprise#637)
 - **Status**: ✅ Implemented (2026-09-21) — OSS-core, on the same line as §10.18 and MEM-001
 - **Requirement ID**: SCHEDULE_SEAT_MEMORY

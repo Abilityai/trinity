@@ -1406,6 +1406,36 @@ operator_queue = Table(
     # (every pre-ent#364 row). Validated at ingestion against the agent's
     # roster — never trusted from the agent-authored payload.
     Column("addressed_to_email", Text),
+    # #2915: what the poller last established about the agent's file entry, and
+    # whether the human's answer ever reached it. Written ONLY by the leader-
+    # locked sync loop, on change (rowcount is the edge). Nullable, no backfill:
+    # NULL renders as "not yet checked", never as confirmed.
+    Column("sync_state", Text),        # confirmed|changed|closed_by_filer|missing|stale_id|unconfirmed
+    Column("sync_detail", Text),       # closed vocabulary — never agent text
+    Column("sync_updated_at", Text),   # transition time
+    Column("last_confirmed_at", Text), # refreshed ≤ once/min per agent, batched
+    Column("delivery_state", Text),    # delivered|undelivered|not_applicable
+    Column("delivery_detail", Text),
+    Column("delivery_updated_at", Text),
+    Column("divergence_acknowledged_at", Text),
+    # trinity-enterprise#611: how the ask ended — written in the same
+    # compare-and-set UPDATE that flips `status`, so only the winning writer
+    # records an ending. Nullable, no backfill: a row that ended before the
+    # ledger reads from `status`.
+    Column("disposition", Text),         # answered|cancelled|expired
+    Column("disposed_at", Text),
+    Column("disposed_by", Text),         # person|timeout
+    Column("disposed_by_email", Text),   # NULL for timeout; withheld from agent principals
+    Column("disposition_reason", Text),  # the operator's optional cancel reason
+    Column("batch_id", Text),            # one uuid per bulk-cancel sweep
+    # trinity-enterprise#611: the agent-raised ask. Platform-owned — written only
+    # from keyword-only arguments, never from an agent's file entry.
+    Column("raised_by", Text),           # agent|gate (NULL: legacy row or platform alarm)
+    Column("channel", Text),             # file|mcp
+    Column("to_role", Text),
+    Column("resolved_to", Text),         # JSON list of person refs
+    Column("proposal", Text),            # JSON — the frozen action
+    Column("supersedes_expired", Text),  # the predecessor row's uuid
 )
 
 nevermined_agent_config = Table(

@@ -385,7 +385,7 @@ opened during a voice call also ends the call.
 | Agent-shared, I am the owner **in a platform session** | both, "Delete for everyone" offered | `db.revoke_agent_shared_file` (soft; the sweeper reclaims bytes) |
 
 **The matrix is session-type dependent, and the copy says so.**
-`PortalPrincipal` is `(email, is_platform)` and carries no role, so
+`PortalPrincipal` is `(email, is_platform, is_person)` and carries no role, so
 `include_owned` is `principal.is_platform` everywhere (ent#358). A **non-owner
 admin is a viewer** in the Workspace — stricter than the platform surface, and
 correct — and an **owner on a magic-link portal token gets the viewer

@@ -133,11 +133,14 @@ def effective_readiness(template_status: Any, stamp: Optional[dict]) -> dict:
     exists to make visible.
     """
     if stamp and stamp.get("status") in READINESS_STATES:
+        # ent#689: the rollout's one-time seed is not an owner's act. It says
+        # so, and carries no person — `changed_by` is a sentinel, not an email.
+        rollout = str(stamp.get("changed_by") or "").startswith("rollout:")
         return {
             "status": stamp["status"],
             "changed_at": stamp.get("changed_at"),
-            "changed_by": stamp.get("changed_by"),
-            "source": "owner",
+            "changed_by": None if rollout else stamp.get("changed_by"),
+            "source": "rollout" if rollout else "owner",
             "unstamped_ready": False,
         }
     claimed = (_text(template_status, 32) or "calibrating").lower()
@@ -282,6 +285,9 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool) -> 
         "seat": _text(xrole.get("seat"), 128),
         "objectives": [],
         "readiness": effective_readiness(xrole.get("status"), stamp),
+        # Platform viewers only: an external client can neither act on a held
+        # brief nor see the schedules it comes from (the flip is platform-only too).
+        "brief_held": is_platform and _brief_held(agent_name, stamp),
         "walkthrough": _walkthrough(agent_name, email, is_platform),
         "relationship": None,
         "can_flip_readiness": _is_owner(agent_name, email, is_platform),
@@ -323,6 +329,28 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool) -> 
             "metrics": rows,
         })
     return card
+
+
+def _brief_held(agent_name: str, stamp: Optional[dict]) -> bool:
+    """Whether a proactive brief is being held (ent#689): the agent has a live
+    seat-delivery schedule and its stamp is not `ready`. Reads the stamp the
+    gate reads, never the template. Fail-soft: an unreadable schedule list says
+    nothing rather than a claim about a pause."""
+    if stamp and stamp.get("status") == "ready":
+        return False
+    try:
+        # Autonomy off stops every schedule before readiness is asked; saying
+        # "paused until you mark it ready" then would promise a flip that
+        # starts nothing.
+        if not db.get_autonomy_enabled(agent_name):
+            return False
+        return any(
+            s.enabled and (s.deliver_to_workspace_email or "").strip()
+            for s in db.list_agent_schedules(agent_name)
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("role card: schedule read failed for %s: %s", agent_name, e)
+        return False
 
 
 def _readiness_stamp(agent_name: str) -> Optional[dict]:

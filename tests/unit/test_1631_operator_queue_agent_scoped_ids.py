@@ -140,9 +140,13 @@ def test_mark_acknowledged_is_agent_scoped():
     id_a = db.create_operator_queue_item("agent-f-1631", _item(req_id))
     id_g = db.create_operator_queue_item("agent-g-1631", _item(req_id))
 
-    # Move both to 'responded' so acknowledgement has something to flip.
+    # Move both to 'responded' so acknowledgement has something to flip — and
+    # record the answers as delivered: since #2915 (PR #2989 review) an agent-side
+    # `acknowledged` flips the row only when our answer reached its entry.
     db.respond_to_operator_queue_item(id_a, "approve", None, "1", "op@example.com")
     db.respond_to_operator_queue_item(id_g, "approve", None, "1", "op@example.com")
+    for uid in (id_a, id_g):
+        db.set_operator_queue_delivery_state(uid, "delivered", None, "2026-09-24T09:00:00Z")
 
     # agent-g acknowledges ITS id — only agent-g's row flips. The return is the
     # row's platform uuid (not req_id), which the WS event + frontend key on.

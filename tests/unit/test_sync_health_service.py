@@ -201,6 +201,45 @@ class TestOperatorQueueEmission:
             "last_error_summary", "")
 
     @pytest.mark.asyncio
+    async def test_a_refused_push_names_the_cause_and_the_fix(self, service, seed_agent):
+        """#2107: the observed agent failed 64 cycles on GitHub's own
+        `remote: Write access to repository not granted.` and got the same
+        "failed N times" item as a flake would."""
+        seed_agent("alpha")
+        payload = _status_payload(
+            status="failed", error="remote: Write access to repository not granted.")
+        with patch.object(service, "_fetch_git_status",
+                           AsyncMock(return_value=payload)):
+            for _ in range(3):
+                await service._poll_cycle()
+        from database import db
+        items = [i for i in db.list_operator_queue_items(agent_name="alpha")
+                 if i["type"] == "sync_failing"]
+        assert len(items) == 1
+        item = items[0]
+        ctx = item.get("context") or {}
+        assert item["title"] == "Git token can't push"
+        assert "not allowed to push" in item["question"]
+        assert "will not recover on its own" in item["question"]
+        assert ctx["cause"] == "push_denied"
+        assert "Contents: Read and write" in ctx["remediation"]
+        assert ctx["last_error_summary"] == "remote: Write access to repository not granted."
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_failure_keeps_the_generic_item(self, service, seed_agent):
+        seed_agent("alpha")
+        payload = _status_payload(status="failed", error="fatal: unable to access: Could not resolve host")
+        with patch.object(service, "_fetch_git_status",
+                           AsyncMock(return_value=payload)):
+            for _ in range(3):
+                await service._poll_cycle()
+        from database import db
+        item = [i for i in db.list_operator_queue_items(agent_name="alpha")
+                if i["type"] == "sync_failing"][0]
+        assert item["title"] == "Git sync failing"
+        assert "cause" not in (item.get("context") or {})
+
+    @pytest.mark.asyncio
     async def test_success_resets_counter_and_allows_future_emissions(
         self, service, seed_agent
     ):

@@ -62,9 +62,15 @@
           <BaseBadge :variant="readiness.status === 'ready' ? 'success' : 'warning'" dot>{{ readiness.status }}</BaseBadge>
           <span v-if="readiness.changed_at" class="text-gray-400">
             since <span :title="readiness.changed_at">{{ relative(readiness.changed_at) }}</span>
-            <template v-if="readiness.changed_by"> · by {{ readiness.changed_by }}</template>
+            <template v-if="readiness.source === 'rollout'"> · carried over when the readiness gate shipped</template>
+            <template v-else-if="readiness.changed_by"> · by {{ readiness.changed_by }}</template>
           </span>
         </div>
+        <!-- ent#689: the gate holds a calibrating companion's scheduled brief;
+             the card says so beside the control that releases it. -->
+        <p v-if="card.brief_held" class="mt-1 text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-brief-held">
+          Its scheduled brief is paused until {{ card.can_flip_readiness ? 'you mark' : 'its owner marks' }} it ready.
+        </p>
         <p v-if="readiness.unstamped_ready" class="mt-1 text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-unstamped">
           The agent's file says <code class="font-mono">ready</code>, but no owner has stamped it — only the owner's stamp counts.
         </p>

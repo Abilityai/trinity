@@ -40,7 +40,8 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 | `/api/agents/{name}/ssh-access` | POST | Generate SSH credentials |
 | `/api/agents/{name}/circuit-breaker` | GET/PUT | Circuit breaker state / per-agent enable-disable (owner-only) — see [Agent Configuration](../agents/agent-configuration.md) |
 | `/api/agents/{name}/circuit-breaker/reset` | POST | Reset both breakers to closed (admin-only) |
-| `/api/agents/{name}/operator-resume` | GET/PUT | Wake the agent when an operator answers (`{"enabled": true}`). GET for anyone with access; PUT is owner or admin, and an agent-scoped key gets `403` — see [Agent Configuration](../agents/agent-configuration.md#wake-on-operator-answer) |
+| `/api/agents/{name}/operator-resume` | GET/PUT | Wake the agent when an ask it raised ends — answered, cancelled or expired (`{"enabled": true}`). GET for anyone with access; PUT is owner or admin, and an agent-scoped key gets `403` — see [Agent Configuration](../agents/agent-configuration.md#wake-when-an-ask-ends) |
+| `/api/agents/{name}/operator-queue/{request_id}` | GET | The agent's own operator-queue item by the id it chose, with the agent's own key only — how it stands and how it ended (trinity-enterprise#611) |
 | `/api/agents/{name}/resources` | GET/PUT | Memory and CPU limits (applied on the next recreate) |
 | `/api/agents/{name}/capabilities` | GET/PUT | `full_capabilities` — Docker default capabilities (`apt-get` works) vs the restricted secure default — see [Agent Configuration](../agents/agent-configuration.md) |
 | `/api/agents/{name}/mcp-exposed` | GET/PUT | Publish the agent as its own `chat_with_<slug>` MCP tool — see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp) |

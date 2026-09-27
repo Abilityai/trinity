@@ -32,7 +32,7 @@
       v-for="ask in items"
       :key="ask.id"
       class="rounded-xl border px-3 py-2.5"
-      :class="ask.status === 'expired'
+      :class="isEnded(ask)
         ? 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40'
         : 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20'"
       :data-testid="`portal-ask-${ask.id}`"
@@ -40,21 +40,38 @@
     >
       <div class="flex items-start gap-2">
         <span class="mt-0.5 text-xs font-medium uppercase tracking-wide"
-              :class="ask.status === 'expired' ? 'text-gray-400' : 'text-amber-700 dark:text-amber-300'">
+              :class="isEnded(ask) ? 'text-gray-400' : 'text-amber-700 dark:text-amber-300'">
           {{ kindLabel(ask.kind) }}
         </span>
         <span v-if="showAgent" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{{ ask.agent_name }}</span>
+        <!-- #2915: coarse sync state / aging from the projection, same rule as the desktop.
+             trinity-enterprise#611: only while the ask is still waiting — once
+             it ended, the agent's copy is not something the person can act on. -->
+        <BaseBadge
+          v-if="!isEnded(ask) && queueSyncBadge(ask)"
+          :variant="queueSyncBadge(ask).variant"
+          dot
+          :title="queueSyncBadge(ask).title"
+          data-testid="queue-sync-badge"
+        >{{ queueSyncBadge(ask).label }}</BaseBadge>
       </div>
 
       <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">{{ ask.title }}</p>
       <p v-if="ask.question && ask.question !== ask.title"
          class="mt-0.5 text-sm text-gray-600 dark:text-gray-300 whitespace-pre-wrap">{{ ask.question }}</p>
 
-      <!-- Expired is RENDERED, never silently dropped: the retention sweep deletes
-           terminal rows, and an ask that simply vanishes reads as "answered" to the
-           person who did not answer it. -->
-      <p v-if="ask.status === 'expired'" class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-        {{ expiredLabel(ask.expires_at) }}
+      <!-- An ending is RENDERED, never silently dropped: an ask that simply
+           vanishes reads as "answered" to the person who did not answer it.
+           trinity-enterprise#611: answered / cancelled / expired, with a coarse
+           who (you / the operator / timeout) and when — never an operator's
+           email or the reason they gave. -->
+      <p
+        v-if="isEnded(ask)"
+        class="mt-2 text-xs text-gray-500 dark:text-gray-400"
+        :title="endedAtAbsolute(ask) || undefined"
+        data-testid="portal-ask-ending"
+      >
+        {{ endingLine(ask) }}
       </p>
 
       <!-- ent#429: the conversation this ask was raised against. Shown only when
@@ -70,7 +87,7 @@
         @click="emit('open-thread', { id: askThreadLink(ask, currentSessionId), agent_name: ask.agent_name })"
       >Open the conversation</button>
 
-      <template v-else>
+      <template v-else-if="!isEnded(ask)">
         <!-- #2375: controls come from the shared kind rule (queueResponseKind),
              so this surface cannot drift from desktop QueueCard and /m. An
              approval is select → optional note → explicit Send — never a
@@ -147,11 +164,17 @@
 
 <script setup>
 import { computed, reactive, ref, onBeforeUnmount } from 'vue'
+import BaseBadge from '../base/BaseBadge.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,
 } from './portalUtils'
 import { optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/operatorQueue'
+// #2915: the same home; a second line so the #2375 import pin above stays byte-exact.
+import { queueSyncBadge, respondRefusedAsDiverged, QUEUE_RESPONSE_DIVERGED } from '@/utils/operatorQueue'
+// trinity-enterprise#611: the one ending rule, a third line for the same reason.
+import { queueEnding, queueEndingText } from '@/utils/operatorQueue'
+import { formatLocalDateTime, formatRelativeTime } from '@/utils/timestamps'
 
 const props = defineProps({
   // Omit to render every ask addressed to this user (chat/global); pass a name to
@@ -163,6 +186,9 @@ const props = defineProps({
   // replaces the shared list the sidebar badge reads.
   agentNames: { type: Array, default: null },
   showAgent: { type: Boolean, default: false },
+  // trinity-enterprise#611: only what is still waiting — the Work tab's
+  // "Waiting on you". Every other rendering also shows asks that ended.
+  pendingOnly: { type: Boolean, default: false },
   // The thread on screen, when there is one. Only used to suppress a link that
   // would go where the reader already is (ent#429).
   currentSessionId: { type: String, default: null },
@@ -176,8 +202,9 @@ const drafts = reactive({})   // question: the typed answer (the DECISION)
 const picks = reactive({})    // approval: the selected option
 const notes = reactive({})    // approval: the optional free-text note
 const errors = reactive({})
+const diverged = reactive({})   // #2915: ask id → the person has seen the divergence notice
 
-const items = computed(() => {
+const allItems = computed(() => {
   if (props.agentName) return store.asksForAgent(props.agentName)
   if (Array.isArray(props.agentNames)) {
     const names = new Set(props.agentNames.filter(Boolean))
@@ -185,6 +212,23 @@ const items = computed(() => {
   }
   return store.asks
 })
+const items = computed(() => (
+  props.pendingOnly ? allItems.value.filter((a) => a.status === 'pending') : allItems.value
+))
+
+// trinity-enterprise#611 — how an ask ended, from the one rule.
+const isEnded = (ask) => ask.status !== 'pending'
+function endingLine(ask) {
+  const ending = queueEnding(ask)
+  // An expiry keeps its own sentence: the deadline is the fact a person reads.
+  if (!ending || ending.kind === 'expired') return expiredLabel(ask.expires_at)
+  const text = queueEndingText(ending)
+  return ending.when ? `${text} · ${formatRelativeTime(ending.when)}` : text
+}
+const endedAtAbsolute = (ask) => {
+  const when = queueEnding(ask)?.when
+  return when ? formatLocalDateTime(when) : ''
+}
 // ent#468: a confirmation keeps the component mounted after the last ask goes.
 // Gating on `items.length` alone unmounted the whole surface at the instant the
 // row was removed, which is the same instant the confirmation is created — so
@@ -240,7 +284,9 @@ async function submit(ask) {
   try {
     const answered = await store.answerAsk(ask.id, {
       response: body.response, responseText: body.response_text,
+      acknowledgeDivergence: !!diverged[ask.id],
     })
+    delete diverged[ask.id]
     // ent#468: the response was discarded here, so `resume_requested` and the
     // `answered` status were on the wire and read by nothing.
     showConfirmation(answerConfirmation(answered, ask.agent_name))
@@ -248,6 +294,15 @@ async function submit(ask) {
     delete picks[ask.id]
     delete notes[ask.id]
   } catch (err) {
+    if (respondRefusedAsDiverged(err)) {
+      // #2915: the agent changed or closed this ask after it was read. Show it,
+      // refresh the projection so the badge appears, and let the next send
+      // answer anyway.
+      diverged[ask.id] = true
+      errors[ask.id] = QUEUE_RESPONSE_DIVERGED
+      if (typeof store.fetchAsks === 'function') { try { await store.fetchAsks() } catch (_) { /* the notice stands */ } }
+      return
+    }
     // The backend's refusals are already written for a human ("This ask expired
     // before it was answered."), so surface them rather than replacing them with
     // a generic failure.

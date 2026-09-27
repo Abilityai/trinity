@@ -78,6 +78,10 @@ const KNOWN_TRIGGERS = new Set([
   'schedule', 'manual', 'agent', 'mcp', 'chat', 'session', 'public', 'webhook',
   'fan_out', 'loop', 'reminder', 'room', 'a2a', 'event', 'voip', 'voice',
   'self_task', 'self_chat', 'telegram', 'slack', 'whatsapp', 'paid', 'user',
+  // The operator-queue wakes (ent#329 answer, trinity-enterprise#611 cancel /
+  // expiry). Listed because the fallback pattern below caps a name at 16
+  // characters, which folded `operator_response` into 'other'.
+  'operator_response', 'operator_ending',
 ])
 
 /**

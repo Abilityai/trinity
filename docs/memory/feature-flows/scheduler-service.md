@@ -109,6 +109,7 @@ As a **platform administrator**, I want **scheduled tasks to execute exactly onc
 | `POLL_INTERVAL` | `10` | Seconds between DB polls for async task completion (SCHED-ASYNC-001) |
 | `DISPATCH_TIMEOUT` | `30` | HTTP deadline for the scheduler→backend `POST /api/internal/execute-task` round-trip (dispatch only; the async endpoint returns ~instantly). Reaching it means the backend did not respond — outcome is **UNKNOWN**, not "rejected" (#1022) |
 | `PRE_CHECK_TIMEOUT` | `70` | HTTP deadline for the scheduler→backend pre-check call (agent-side hook is 60s; 10s headroom). Fail-open (#1022) |
+| `READINESS_CHECK_TIMEOUT` | `5` | HTTP deadline for the scheduler→backend readiness verdict on a cron seat brief (trinity-enterprise#689; the backend bounds its template read at 3 s). Fail-open |
 | `MISFIRE_GRACE_TIME` | `3600` | Seconds after a missed trigger that APScheduler will still execute (Issue #145) |
 | `BACKEND_URL` | `http://backend:8000` | Backend API URL for process executions and task delegation |
 | `INTERNAL_API_SECRET` | _(empty)_ | Shared secret for backend internal API auth (C-003) |

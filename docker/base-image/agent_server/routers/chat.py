@@ -117,7 +117,8 @@ async def chat(request: ChatRequest):
             agent_state.session_total_output_tokens += metadata.output_tokens
             # Context window usage: metadata.input_tokens should contain the complete total
             # (from modelUsage.inputTokens which includes all turns and cached tokens)
-            # However, with --continue flag, Claude Code may sometimes report only new tokens
+            # However, on a resumed session Claude Code may sometimes report only new tokens
+            # (a fresh session resets the counter first — claude_code.py, #2958)
             # Fix: Context should monotonically increase during a session, so keep the max
             if metadata.input_tokens > agent_state.session_context_tokens:
                 agent_state.session_context_tokens = metadata.input_tokens
@@ -162,7 +163,8 @@ async def execute_task(request: ParallelTaskRequest):
 
     Unlike /api/chat, this endpoint:
     - Does NOT acquire execution lock (parallel allowed)
-    - Does NOT use --continue flag (stateless) by default
+    - Does NOT resume the chat's own session (stateless) by default — and
+      the chat never resumes a task's session either (#2958)
     - Each call is independent and can run concurrently
 
     Use this for:
@@ -190,7 +192,7 @@ async def execute_task(request: ParallelTaskRequest):
             content={"execution_id": request.execution_id, "status": "accepted"},
         )
 
-    # Execute via runtime adapter in headless mode (no lock, no --continue)
+    # Execute via runtime adapter in headless mode (no lock, no chat session)
     runtime = get_runtime()
     # #2433: register as ACCEPTED before anything can queue. The headless
     # executor's `Popen` + `registry.register()` run inside a pool thread, so a
@@ -384,7 +386,11 @@ async def set_model(request: ModelRequest):
 
 @router.delete("/api/chat/history")
 async def clear_chat_history():
-    """Clear conversation history and reset session"""
+    """Clear conversation history and reset session.
+
+    #2958: also forgets the chat's own session id and its keep-set marker. No
+    lock is taken (a turn may hold it for up to 30 min); a turn in flight across
+    the reset drops its capture via the generation counter instead."""
     agent_state.reset_session()
     return {
         "status": "cleared",

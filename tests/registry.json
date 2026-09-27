@@ -3366,9 +3366,9 @@
     },
     {
       "file": "mcp-server/src/access-wiring.test.ts",
-      "feature": "trinity-enterprise#628 / #2807 / #2952",
+      "feature": "trinity-enterprise#628 / #2807 / #2952 / trinity-enterprise#611",
       "added": "2026-09-16",
-      "updated": "2026-09-22",
+      "updated": "2026-09-25",
       "categories": [
         "mcp-server",
         "typescript",
@@ -3376,7 +3376,49 @@
         "access-control",
         "transport"
       ],
-      "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default)."
+      "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default). trinity-enterprise#611: a second suite drives get_my_ask over the same real transport against a stub that answers key validation by bearer and records every readback — an agent key is served its OWN agent and no other, a person's user-scoped key is refused before the backend is asked anything, and the orchestrator's system key reads as trinity-system."
+    },
+    {
+      "file": "unit/test_2915_operator_queue_sync_honesty.py",
+      "feature": "abilityai/trinity#2915",
+      "added": "2026-09-23",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "The operator-queue file sync tells the truth (Trinity 1.0 gate). The seven divergence fixtures from the field trace (rewritten entry → `changed` with the field names and the row untouched; agent-side `acknowledged` on a never-responded row → `closed_by_filer`; folded free-text status; pruned entry / missing file → `missing`; a reused id on a terminal row → `stale_id`, never a phantom admit), read-failure hysteresis (3 cycles; token never `str(e)`), no write-back over invalid JSON, the tri-state poll cycle (Docker unreadable sweeps nothing; expiry before the no-agents return; one thin broadcast per cycle), the write-back gate (deliver only into a matching pending entry; `entry_changed` / `conflict` / `http_<code>` recorded; pre-write re-read is what gets written with its sha as `if_match`; the aging receipt once at the crossing, never at ingest; platform alarms `not_applicable` and never flip-flopping), fingerprint stability, and the accessors on a real migrated SQLite (edge UPDATEs, sync index, delivery-bound terminal query, scoped sweep, header counts). Review round 2 (PR #2989): wrong-shape files are `unconfirmed:wrong_shape` and never written; an acknowledged divergence is delivered into the rewritten or agent-closed entry and `mark_acknowledged` needs a delivered answer; platform alarms are never `missing`; first entry wins on a duplicated id; the fingerprint covers type / priority / context / addressee; answers owed to a stopped agent are `undelivered:agent_not_running`; the terminal retry set skips `entry_missing` and goes oldest first; a file that vanished between the two reads is left alone. #3024: `stale_id` only for a pending entry the write-back will not flip — the original entry of a row the platform just cancelled or expired is not a re-use (all three awaiting-flip delivery states, with the flip still delivered the same cycle); a delivered flip, a missing entry and an acknowledged row are still re-uses; a pre-#3024 mis-flag heals to `confirmed` when its entry reads the row's own ending, a genuine flag does not; and the reconcile's `awaits_terminal_flip` is pinned to the SQL of `get_terminal_items_for_agent` on a real DB."
+    },
+    {
+      "file": "unit/test_2915_agent_server_files_if_match.py",
+      "feature": "abilityai/trinity#2915",
+      "added": "2026-09-23",
+      "categories": [
+        "agent",
+        "unit"
+      ],
+      "description": "The agent server's `PUT /api/files` is atomic (tmp + os.replace, no temp file left) and a compare-and-swap: `if_match` holds for the content that was read and refuses (412) after a concurrent change; absent `if_match` or a missing file always holds; a non-UTF-8 file is hashed as the download endpoint serves it (errors='replace'), so the caller's hash over the served text matches and a stale one does not. Loaded by path like test_1795; the handler is asserted to call the helpers it documents, and containment is resolved-path `is_relative_to` (a sibling prefix is 403)."
+    },
+    {
+      "file": "unit/test_ent611_ask_endings.py",
+      "feature": "trinity-enterprise#611",
+      "added": "2026-09-25",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "Ask endings (trinity-enterprise#611, PR A). Schema: all twelve new columns selectable on the migrated DB and on the item projection, the name-keyed SQLite migration (idempotent) and the Alembic 0076 revision (same tuple, parented on 0075_auto_sync_enabled_backfill). Ledger writers on real SQLite: respond stamps answered/person in the same CAS and refuses after the deadline without writing; cancel records the person and the reason, and a lost race is a `_status_conflict` that overwrites nothing; bulk stamps ONE batch_id on exactly the rows it flipped (a second sweep ends nothing); expiry returns the rows it ended with timeout as the author and is edge-triggered; expires_at stored ISO-Z (an out-of-range value kept verbatim, never a raising create) without a false #2915 divergence; platform columns only from keyword arguments (a hostile entry forges nothing); the readback by request_id survives Clear All and is agent-scoped; ended rows sort by ending time; facade signature parity. The person gate: JWT and user keys pass; agent, system, connector, portal_delegate, ops, unknown scopes and a scope-less principal get 403 person_required. The sink: CAS, then one audit row per transition (never the answer or the reason), ONE thin trigger (agent-keyed; count-only for a sweep; none for expiry), then observers with only the CAS winners; lost and late answers leave no trace; an observer failure never undoes the ending; the worker-thread (portal) path still announces. The wake: one turn per agent per event, trigger operator_ending, the rider verbatim, the reason framed as data, platform alarms / closed_by_filer rows / stopped agents skipped (audited), idempotency over disposition + sorted ids, opted-in agents only (one flag read per agent), the running check read off the event loop. The routes over TestClient: the person gate before existence, named 409s (expired, lost races incl. cancel), the cancel-reason bound, bulk batch_id, the route-level wake (pending A + already-cancelled B wakes for A only), the redacted self-readback (key set pinned on a row whose person fields are all non-null; one uniform 403 for any other name, for persons, and for the system key outside trinity-system), new person fields withheld from machine keys on get/list. The Workspace: status from the ending, the 7-day ended listing (read past the operator's Clear All), a coarse who that never carries an email or the reason, the answer through the sink and person-only (a system-scoped platform principal refused before the row is read; person-ness per principal kind). The poller: expiry through the sink announced by the cycle's one trigger (even when Docker is unreadable); file ingest stamped channel=file / raised_by=agent whatever the entry claims. The Execution Context 'Ended asks' line: own non-platform endings of the last day, newest first, bounded, no human text, fail-soft. Call-site mutations red: the answer CAS, the bulk wake argument, the platform-minted skip."
+    },
+    {
+      "file": "mcp-server/src/operator_queue.test.ts",
+      "feature": "#1101 / #1104 / trinity-enterprise#611",
+      "added": "2026-09-25",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "access-control"
+      ],
+      "description": "Operator-queue MCP tools: the #1101 agent-scope post-filter (pure), the #1104 respond gate and proxy (stub client), and trinity-enterprise#611 get_my_ask — identity from the key (resolveActingAgent), no agent-target parameter, the system key reads as trinity-system, user / connector / agent-less system keys refused before any backend call, backend refusals returned as structured errors, the description teaching the rider — plus the person-only wording on respond_to_operator_queue. node:test."
     },
     {
       "file": "unit/test_2845_retry_trigger_sets.py",
@@ -3413,6 +3455,78 @@
         "skills"
       ],
       "description": "Only designated agents may change an agent's skills — their own included (ent#596). The scope ALLOWLIST as a ten-row matrix (JWT / user / system pass unchanged; agent passes only with a live grant; connector, ops, portal_delegate and a scope invented tomorrow are refused; a principal with no mcp_scope fails closed); the composed dependency checks the capability BEFORE the owner fence, so a non-holder gets one uniform named 403 for an existing, nonexistent or foreign target and a holder gains no reach beyond its owner; the route table read off FastAPI's real dependant graph (every skill-changing route takes the fence; the grant routes exist and are not shadowed); a refused agent key changes nothing on any of the four routes through a real FastAPI app; the file-route side door (.claude/skills/** via PUT/DELETE/mkdir, including a delete of an ancestor) and that people and holders still edit skills there; grants over a real SQLite file (live-only via the agent_ownership join, idempotent who/when, soft-delete and recovery, orphan rows fail closed, unknown capability refused at the sink, no call permission written); the grant service (404 / system / ephemeral refusals, revoke needs no validation); the grant route refuses an admin's own MCP key and audits only real changes; attribution (the acting agent recorded, the system agent named, a bulk replace does not re-stamp kept names); both migration tracks executed; the CASCADE AgentRef. Eight mutations each red."
+    },
+    {
+      "file": "unit/test_ent689_readiness_gate.py",
+      "feature": "trinity-enterprise#689",
+      "added": "2026-09-24",
+      "categories": [
+        "backend",
+        "workspace",
+        "scheduling"
+      ],
+      "description": "Readiness gate on a companion's proactive brief (ent#689): the verdict (stamp ready fires, any other stamp holds, the unstamped companion — every install's case — holds, an unstamped non-companion fires), every fail-open case (stamp unreadable, Docker unreadable, container stopped, template slow/unreadable/unparsable), the internal endpoint's 404 and shape, the role card's rollout source and brief_held, and the one-time rollout seed on BOTH tracks against real SQLite (only live seat briefs, never over an existing stamp, idempotent)."
+    },
+    {
+      "file": "scheduler_tests/test_ent689_readiness_gate.py",
+      "feature": "trinity-enterprise#689",
+      "added": "2026-09-24",
+      "categories": [
+        "scheduler"
+      ],
+      "description": "The scheduler's readiness gate beside the #454 pre-check: a held cron seat brief is a skipped row with the reason plus the skipped event and is never dispatched; manual, webhook and non-seat schedules are not asked; anything but an explicit fire:false fires; every backend failure shape fails open."
+    },
+    {
+      "file": "unit/test_2991_start_skills_result.py",
+      "feature": "#2991",
+      "added": "2026-09-24",
+      "categories": [
+        "backend",
+        "api",
+        "skills"
+      ],
+      "description": "POST /api/agents/{name}/start returns skills_injection + skills_result (#2991): the real endpoint driven with the lifecycle stubbed — clean, conflict under a success status, failed/partial, no skills (stated skip), already running, absent (unknown, never missing); the projection carries names, statuses and codes only (an exception string, URL or path in a per-skill error is reduced to a code; unaddressable names dropped); inject_assigned_skills names conflicts. Mutations: whitelist reverted (6 red), raw result passed through (5 red), lifecycle drops conflicts (1 red)."
+    },
+    {
+      "file": "unit/test_git_status_dual_ahead_behind.py",
+      "feature": "#2105",
+      "added": "2026-09-25",
+      "categories": [
+        "agent-server",
+        "git"
+      ],
+      "description": "The git-status ahead/behind tuples over real repos (#389 P6, #2105): the working tuple is measured against origin/<current_branch> whatever the branch is named. Cases: a pushed asus/* branch far from main reports 0 unpushed; unpushed and peer commits on a non-trinity branch; a master repo with no main counts its unpushed commit and reports the main tuple as null, not 0; a never-pushed branch (trinity/* included) counts the commits no remote holds, with behind null. 5 of 12 red with the fix reverted."
+    },
+    {
+      "file": "unit/test_3011_autosync_rebase.py",
+      "feature": "#3011",
+      "added": "2026-09-25",
+      "categories": [
+        "agent-server",
+        "git"
+      ],
+      "description": "The auto-sync heartbeat reconciles before it pushes (#3011), over real repos with a foreign clone pushing underneath: a foreign commit is rebased over and pushed (linear, across repeated cycles, behind-only fast-forwards, a branch missing on the remote is created); a conflicting one aborts the rebase and records `diverged: rebase conflict on <branch>` with the repo untouched and the remote never overwritten; the post-rebase push carries a lease and a push racing it survives; a source-mode agent on the default branch (origin/HEAD, else main/master) refuses before committing, while fork-to-own (env or upstream remote), other branches and working-branch mode push; sync-state gains behind_after_fetch and last_successful_push_at; the operator sync_to_github path does not use the heartbeat reconcile. 8 of 16 red on the pre-fix cycle."
+    },
+    {
+      "file": "unit/test_3010_autosync_toggle.py",
+      "feature": "#3010",
+      "added": "2026-09-25",
+      "categories": [
+        "agent-server",
+        "git",
+        "migrations"
+      ],
+      "description": "The auto-sync toggle is authoritative and live (#3010): the agent loop reads the owner's flag every cycle through a real httpx.MockTransport (OFF skips the next cycle, ON runs it without a baked env, a flip between cycles is honoured, the read is GET on its own path with its own key, no repo → no call); fallbacks (404 'Git not configured' → off; 5xx / uniform 404 / 403 / connect error / timeout / non-JSON → the env); the loop starts whenever it can ask; /api/git/status reports the running value; the one-shot backfill on both tracks against real SQLite (live non-source ghosts only; source-mode, deleted, owner-disabled and /git/initialize-shaped rows untouched; idempotent). Recreate-after-OFF: test_ent109_git_env_seam.py; creation writes the flag iff the bake predicate: test_2069_gitignore_at_creation.py."
+    },
+    {
+      "file": "unit/test_2107_push_access_probe.py",
+      "feature": "#2107",
+      "added": "2026-09-25",
+      "categories": [
+        "backend",
+        "git"
+      ],
+      "description": "Git-sync write access is validated where GitHub enforces it (#2107): probe_push_access runs REAL `git push --dry-run` against a local fake smart-HTTP server — 403 + `Write access to repository not granted.` → denied with GitHub's line verbatim; a valid receive-pack advertisement → ok with nothing POSTed; 5xx / unreachable → transient; the PAT reaches the server as an Authorization header and is never on git's argv; is_push_denied over refusal vs non-refusal texts. Create-path cases (400 before any container, transient non-blocking, source mode not probed) in test_1484_create_agent_characterization.py; the named sync_failing item in test_sync_health_service.py. 20 of 23 red with the fix reverted."
     }
   ]
 }

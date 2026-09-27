@@ -3618,6 +3618,71 @@ def _migrate_operator_queue_addressed_to(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_queue_sync_state(cursor, conn):
+    """#2915 — the operator-queue file sync tells the truth.
+
+    Eight nullable columns record what the poller last established about the
+    agent's file entry (`sync_state` / `sync_detail` / `sync_updated_at` /
+    `last_confirmed_at`), whether the human's answer ever reached the agent
+    (`delivery_state` / `delivery_detail` / `delivery_updated_at`) and whether the
+    human answered a diverged item knowingly (`divergence_acknowledged_at`, which
+    lets the write-back deliver into the entry as it is now). No default and
+    no backfill on purpose: a NULL renders as "not yet checked" — the honest
+    state for every row the loop has not looked at since this landed — never as
+    confirmed. The row's own title/question/options/expires_at are the ingest
+    snapshot the fingerprint compares against, so nothing else is stored.
+    """
+    for column in (
+        "sync_state", "sync_detail", "sync_updated_at", "last_confirmed_at",
+        "delivery_state", "delivery_detail", "delivery_updated_at",
+        "divergence_acknowledged_at",
+    ):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for sync honesty (#2915)",
+        )
+    conn.commit()
+
+
+def _migrate_operator_queue_ask_object(cursor, conn):
+    """trinity-enterprise#611 — the ask object: how an ask ended, and who raised it.
+
+    Twelve nullable TEXT columns, one migration for everything #611 writes (two
+    stacked revisions would double the re-parent risk, #2068).
+
+    The endings ledger: `disposition` (answered | cancelled | expired),
+    `disposed_at`, `disposed_by` (person | timeout), `disposed_by_email`,
+    `disposition_reason` (the operator's optional cancel reason) and `batch_id`
+    (one uuid per bulk-cancel sweep) — each written in the same compare-and-set
+    UPDATE that flips `status`.
+
+    The agent-raised ask: `raised_by` (agent | gate), `channel` (file | mcp),
+    `to_role`, `resolved_to` (JSON list of person refs), `proposal` (JSON) and
+    `supersedes_expired` (the predecessor row's uuid). Written only from
+    keyword-only arguments, never from an agent's file entry.
+
+    No default and no backfill: a row that ended before the ledger keeps a NULL
+    disposition and reads from `status`, never from an invented ending time.
+    """
+    for column in (
+        "disposition", "disposed_at", "disposed_by", "disposed_by_email",
+        "disposition_reason", "batch_id",
+        "raised_by", "channel", "to_role", "resolved_to", "proposal",
+        "supersedes_expired",
+    ):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for the ask object (trinity-enterprise#611)",
+        )
+    conn.commit()
+
+
 def _migrate_channel_report_client(cursor, conn):
     """ent#457 review — WHICH client a portal channel context belongs to.
 
@@ -4628,6 +4693,69 @@ def _migrate_agent_capability_grants(cursor, conn):
     conn.commit()
 
 
+def _migrate_role_readiness_rollout_seed(cursor, conn):
+    """The readiness gate's rollout (trinity-enterprise#689), data only.
+
+    From this release a companion's cron seat brief runs only when its owner
+    stamp says `ready`. Every agent whose proactive brief fires TODAY — an
+    enabled, live, seat-delivery schedule on a live agent with autonomy on (a
+    schedule on an autonomy-off agent does not fire) — is stamped `ready`
+    here, at the value in force (#2085), so no install changes behaviour.
+    INSERT OR IGNORE: an existing stamp (an owner's `calibrating`) is never
+    overwritten. `changed_by` is the rollout sentinel the role card renders as
+    "carried over", not as a person. Runs once (tracked in schema_migrations).
+
+    Mirrored by the Alembic revision 0074_role_readiness_rollout_seed.
+    """
+    from utils.helpers import utc_now_iso
+
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO agent_role_readiness (agent_name, status, changed_at, changed_by)
+        SELECT DISTINCT s.agent_name, 'ready', ?, 'rollout:ent#689'
+        FROM agent_schedules s
+        JOIN agent_ownership o ON o.agent_name = s.agent_name
+        WHERE s.enabled = 1
+          AND s.deleted_at IS NULL
+          AND s.deliver_to_workspace_email IS NOT NULL
+          AND s.deliver_to_workspace_email != ''
+          AND o.deleted_at IS NULL
+          AND o.autonomy_enabled = 1
+        """,
+        (utc_now_iso(),),
+    )
+    conn.commit()
+
+
+def _migrate_auto_sync_enabled_backfill(cursor, conn):
+    """The auto-sync toggle becomes authoritative (#3010), data only.
+
+    From this release the agent's auto-sync loop obeys `agent_git_config.
+    auto_sync_enabled` alone; the baked `GIT_SYNC_AUTO` env no longer ORs it on.
+    The slice that auto-pushed on env with the DB flag at 0 — and that the DB
+    can identify — is live ghost agents: creation baked the env for them but
+    skipped the DB write (`and not config.ephemeral`). Set their flag so no
+    ghost that auto-pushes today silently stops. Non-source-mode only: a
+    tokenless ghost is always source-mode (ent#123), so `source_mode = 0`
+    implies the PAT the creation predicate required. Runs once (tracked in
+    schema_migrations); an owner's later OFF is then the only writer.
+
+    Mirrored by the Alembic revision 0075_auto_sync_enabled_backfill.
+    """
+    cursor.execute(
+        """
+        UPDATE agent_git_config SET auto_sync_enabled = 1
+        WHERE COALESCE(auto_sync_enabled, 0) = 0
+          AND COALESCE(source_mode, 0) = 0
+          AND agent_name IN (
+              SELECT agent_name FROM agent_ownership
+              WHERE is_ephemeral = 1 AND deleted_at IS NULL
+          )
+        """
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4770,5 +4898,9 @@ MIGRATIONS = [
     ("metric_points_table", _migrate_metric_points_table),
     ("seat_decisions_table", _migrate_seat_decisions_table),
     ("agent_capability_grants", _migrate_agent_capability_grants),
+    ("operator_queue_sync_state", _migrate_operator_queue_sync_state),
+    ("role_readiness_rollout_seed", _migrate_role_readiness_rollout_seed),
+    ("auto_sync_enabled_backfill", _migrate_auto_sync_enabled_backfill),
+    ("operator_queue_ask_object", _migrate_operator_queue_ask_object),
     ("execution_chain_depth", _migrate_execution_chain_depth),
 ]

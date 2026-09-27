@@ -3665,8 +3665,11 @@ class DatabaseManager:
     # Operator Queue (delegated to db/operator_queue.py) - OPS-001
     # =========================================================================
 
-    def create_operator_queue_item(self, agent_name, item):
-        return self._operator_queue_ops.create_item(agent_name, item)
+    def create_operator_queue_item(self, agent_name, item, *, channel=None, raised_by=None):
+        # trinity-enterprise#611: provenance is keyword-only — never from `item`.
+        return self._operator_queue_ops.create_item(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )
 
     def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
         # #1142: retention sweep for terminal operator-queue rows.
@@ -3677,20 +3680,44 @@ class DatabaseManager:
     def get_operator_queue_item(self, item_id):
         return self._operator_queue_ops.get_item(item_id)
 
+    def get_operator_queue_item_for_agent_by_request_id(self, agent_name, request_id):
+        # trinity-enterprise#611: the agent's own readback — ignores Clear All.
+        return self._operator_queue_ops.get_item_for_agent_by_request_id(agent_name, request_id)
+
+    def list_recent_operator_queue_endings(self, agent_name, since, limit,
+                                           exclude_request_id_prefixes=None):
+        # trinity-enterprise#611: ids + endings for the Execution Context line.
+        return self._operator_queue_ops.list_recent_endings_for_agent(
+            agent_name, since, limit,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
+        )
+
     def list_operator_queue_items(self, **kwargs):
         return self._operator_queue_ops.list_items(**kwargs)
 
     def respond_to_operator_queue_item(self, item_id, response, response_text,
-                                        responded_by_id, responded_by_email):
+                                        responded_by_id, responded_by_email,
+                                        divergence_acknowledged=False):
         return self._operator_queue_ops.respond_to_item(
-            item_id, response, response_text, responded_by_id, responded_by_email
+            item_id, response, response_text, responded_by_id, responded_by_email,
+            divergence_acknowledged=divergence_acknowledged,
         )
 
-    def cancel_operator_queue_item(self, item_id):
-        return self._operator_queue_ops.cancel_item(item_id)
+    def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None):
+        # trinity-enterprise#611: CAS + endings ledger; a lost race carries
+        # `_status_conflict` (the mirror of respond).
+        return self._operator_queue_ops.cancel_item(
+            item_id, disposed_by_email=disposed_by_email, reason=reason,
+        )
 
-    def bulk_cancel_operator_queue_items(self, ids, accessible_agent_names=None):
-        return self._operator_queue_ops.bulk_cancel_items(ids, accessible_agent_names)
+    def bulk_cancel_operator_queue_items(self, ids, accessible_agent_names=None, *,
+                                         disposed_by_email, reason=None):
+        # trinity-enterprise#611: returns {"batch_id", "rows"} — the rows THIS
+        # sweep ended, never the ids it was asked to end.
+        return self._operator_queue_ops.bulk_cancel_items(
+            ids, accessible_agent_names,
+            disposed_by_email=disposed_by_email, reason=reason,
+        )
 
     def clear_resolved_operator_queue_items(self, agent_name=None,
                                             accessible_agent_names=None):
@@ -3698,16 +3725,47 @@ class DatabaseManager:
             agent_name, accessible_agent_names
         )
 
-    def get_operator_queue_terminal_for_agent(self, agent_name, since_hours=168):
+    def get_operator_queue_terminal_for_agent(self, agent_name, limit=200):
         return self._operator_queue_ops.get_terminal_items_for_agent(
-            agent_name, since_hours
+            agent_name, limit
         )
+
+    # #2915 — sync honesty (leader-locked poller writers + the header counts)
+    def get_operator_queue_sync_index_for_agent(self, agent_name):
+        return self._operator_queue_ops.get_sync_index_for_agent(agent_name)
+
+    def set_operator_queue_sync_state(self, item_id, state, detail, now):
+        return self._operator_queue_ops.set_sync_state(item_id, state, detail, now)
+
+    def refresh_operator_queue_last_confirmed(self, agent_name, now, older_than):
+        return self._operator_queue_ops.refresh_last_confirmed(agent_name, now, older_than)
+
+    def set_operator_queue_delivery_state(self, item_id, state, detail, now):
+        return self._operator_queue_ops.set_delivery_state(item_id, state, detail, now)
+
+    def mark_operator_queue_unconfirmed(self, detail, now, agent_name=None, exclude_agents=None,
+                                        exclude_request_id_prefixes=None):
+        return self._operator_queue_ops.mark_unconfirmed(
+            detail, now, agent_name=agent_name, exclude_agents=exclude_agents,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
+        )
+
+    def mark_operator_queue_undelivered_for_stopped_agents(self, now, *, running_agents,
+                                                           exclude_request_id_prefixes=None):
+        return self._operator_queue_ops.mark_undelivered_for_stopped_agents(
+            now, running_agents=running_agents,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
+        )
+
+    def count_operator_queue_flags(self, accessible_agent_names=None):
+        return self._operator_queue_ops.count_flags(accessible_agent_names)
 
     def mark_operator_queue_acknowledged(self, agent_name, item_id):
         # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
         return self._operator_queue_ops.mark_acknowledged(agent_name, item_id)
 
     def mark_operator_queue_expired(self):
+        # trinity-enterprise#611: returns the rows this sweep ended (was a count).
         return self._operator_queue_ops.mark_expired()
 
     def get_operator_queue_stats(self, **kwargs):
