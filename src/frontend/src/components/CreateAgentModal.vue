@@ -565,9 +565,11 @@ const createAgent = async () => {
     // unmounts us on `created`, so the validation step never renders there).
     emit('created', agent)
     // trinity-enterprise#15: github-sourced creates (github-custom any intent,
-    // or a featured fork template) swap to the post-create validation step
-    // instead of auto-closing. Skippable — Close is always available there.
-    const githubSourced = form.template === 'github-custom' || isForkToOwn.value
+    // or a GitHub template from the list, fork-to-own included) swap to the
+    // post-create validation step instead of auto-closing. Skippable — Close
+    // is always available there. trinity-enterprise#704: a list template is
+    // the path most likely to come back pull-only, so it must reach the notice.
+    const githubSourced = form.template === 'github-custom' || selectedTemplate.value?.source === 'github'
     if (githubSourced) {
       postCreate.value = {
         name: agent?.name || form.name,

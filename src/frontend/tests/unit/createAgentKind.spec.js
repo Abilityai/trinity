@@ -112,6 +112,28 @@ describe('the create flow asks what the repository is', () => {
     expect(step.exists()).toBe(true)
     expect(step.props('gitMode')).toEqual(gitMode)
   })
+
+  it('hands git_mode to the post-create step for a GitHub template picked from the list', async () => {
+    // The path the kind picker is shown on, and the one most likely to fall
+    // back to pull-only: the modal must not close before the notice renders.
+    const gitMode = { kind: 'agent', source_mode: true, reason: 'no GitHub token: pull-only' }
+    createAgent.mockResolvedValue({ name: 'my-agent', git_mode: gitMode })
+    const wrapper = await mountModal()
+    await pickTemplate(wrapper, 'Helper')
+    await submit(wrapper)
+    const step = wrapper.findComponent('[data-testid="validation-step"]')
+    expect(step.exists()).toBe(true)
+    expect(step.props('gitMode')).toEqual(gitMode)
+    expect(wrapper.emitted('close')).toBeUndefined()
+  })
+
+  it('still closes straight away for a local template', async () => {
+    const wrapper = await mountModal()
+    await pickTemplate(wrapper, 'Scout')
+    await submit(wrapper)
+    expect(wrapper.find('[data-testid="validation-step"]').exists()).toBe(false)
+    expect(wrapper.emitted('close')).toHaveLength(1)
+  })
 })
 
 describe('GitModeNotice', () => {
