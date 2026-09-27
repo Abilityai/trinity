@@ -745,6 +745,9 @@ class PortalAutonomyDial(BaseModel):
     can_release: bool = False
     classes: list[PortalAskClassState] = Field(default_factory=list)
     other_seats: list[PortalAskClassState] = Field(default_factory=list)
+    #: blocker code -> the sentence the companion's prompt also uses
+    #: (`autonomy_dial_service.BLOCKER_TEXT`), so the panel never words it differently.
+    blocker_text: dict[str, str] = Field(default_factory=dict)
 
 
 class PortalAutonomyAction(BaseModel):

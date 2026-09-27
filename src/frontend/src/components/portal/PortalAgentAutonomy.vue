@@ -118,23 +118,14 @@ const mine = computed(() => store.autonomyAgent === props.agentName)
 const page = computed(() => (mine.value ? store.autonomy : null))
 const actionError = computed(() => (mine.value ? store.autonomyActionError : null))
 
-/** The server sends the vocabulary AND the sentence for each blocker, so the
- *  panel and the companion say the same words. An unknown code is shown raw
- *  rather than swallowed. */
+/** The server sends the sentence for every blocker code (`blocker_text`, from
+ *  the same `BLOCKER_TEXT` the companion's prompt reads), so the panel and the
+ *  companion say the same words. There is deliberately no local copy of those
+ *  sentences — a copy is what drifted. Only a code the server sent no sentence
+ *  for falls back, to the code itself made readable, never swallowed. */
 function blockerText(code) {
-  return (page.value && page.value.blocker_text && page.value.blocker_text[code]) || FALLBACK[code] || code
-}
-
-const FALLBACK = {
-  level_below_l2: 'the instance dial is below L2, so nothing runs unprompted anywhere',
-  agent_autonomy_off: "this agent's autonomy switch is off",
-  evidence_expired: 'the decisions this was promoted on have passed their review date',
-  too_few_records: 'fewer than three decisions on record for this kind of ask',
-  criterion_not_stable: 'the decisions did not apply one consistent criterion',
-  reversal_in_window: 'a decision in this window was reversed',
-  negative_rating_in_window: 'this seat rated the agent down inside the rating window',
-  guard_metric_capped: "this class moves a metric another role holds",
-  held_by_operator: 'an operator is holding this class on-request',
+  const text = page.value && page.value.blocker_text && page.value.blocker_text[code]
+  return text || String(code).replace(/_/g, ' ')
 }
 
 function act(c, action) {

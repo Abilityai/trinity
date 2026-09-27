@@ -76,6 +76,9 @@ def page(agent_name: str, email: str, *, is_platform: bool) -> dict:
         "can_hold": True,
         "can_release": owner,
         **summary,
+        # The sentence for every blocker code, from the one vocabulary the
+        # companion's prompt also reads — so the panel never says it differently.
+        "blocker_text": dict(dial.BLOCKER_TEXT),
         "classes": [{**c, "seat": me, "writable": True} for c in summary["classes"]],
         "other_seats": sorted(others, key=lambda r: (r["seat"], r["ask_class"])),
     }
@@ -92,11 +95,32 @@ def _target_seat(agent_name: str, email: str, is_platform: bool,
     return target, owner
 
 
+def _valid_ask_class(ask_class: str) -> str:
+    """The same slug vocabulary a decision record's `ask_class` is validated
+    against (`seat_decision_service._SLUG_RE`) — anything else cannot name a
+    class, so it is refused before it can reach a write."""
+    if not isinstance(ask_class, str) or not svc._SLUG_RE.match(ask_class):
+        raise AutonomyRefused("invalid_ask_class",
+                              "ask_class must be a lowercase slug (a-z, 0-9, '-', '_'; up to 64).", 422)
+    return ask_class
+
+
+def _require_class(agent_name: str, seat: str, ask_class: str) -> None:
+    """A class exists for a seat only while that seat has decisions in it.
+    Checked BEFORE any write: a hold or guard on an unknown class used to
+    upsert a row and then answer 404 — a persisted write reported as "not
+    found", and a way to mint rows for arbitrary strings."""
+    rows = db.list_seat_decisions(agent_name, seat, limit=svc.MAX_ROWS_PER_SEAT)
+    if not any((r.get("ask_class") or "") == ask_class for r in rows):
+        raise AutonomyRefused("class_not_found", "No such ask class for this seat.", 404)
+
+
 def act(agent_name: str, email: str, *, is_platform: bool, ask_class: str,
         action: str, seat: Optional[str] = None) -> dict:
     """hold / release one ask class."""
     if action not in HOLD_ACTIONS:
         raise AutonomyRefused("unknown_action", f"action must be one of {', '.join(HOLD_ACTIONS)}", 422)
+    _valid_ask_class(ask_class)
     target, owner = _target_seat(agent_name, email, is_platform, seat)
     if action == "release" and not owner:
         raise AutonomyRefused(
@@ -104,6 +128,7 @@ def act(agent_name: str, email: str, *, is_platform: bool, ask_class: str,
             "Only the agent's owner can let a class run unprompted again — holding is "
             "a refusal anyone may make, releasing is a grant.",
         )
+    _require_class(agent_name, target, ask_class)
     db.set_seat_ask_class_hold(agent_name=agent_name, seat_email=target,
                                ask_class=ask_class, held=(action == "hold"), by=_me(email))
     # The hold is a conjunct of the earned verdict, so recompute it here — this
@@ -119,10 +144,12 @@ def set_guard(agent_name: str, email: str, *, is_platform: bool, ask_class: str,
     if guard_metric not in dial.GUARD_STATES:
         raise AutonomyRefused("unknown_guard_state",
                               f"guard_metric must be one of {', '.join(dial.GUARD_STATES)}", 422)
+    _valid_ask_class(ask_class)
     target, owner = _target_seat(agent_name, email, is_platform, seat)
     if not owner:
         raise AutonomyRefused("guard_owner_only",
                               "Only the agent's owner records whether a class moves another role's metric.")
+    _require_class(agent_name, target, ask_class)
     db.set_seat_ask_class_guard(agent_name=agent_name, seat_email=target,
                                 ask_class=ask_class, guard_metric=guard_metric)
     dial.evaluate_seat(db, agent_name, target, persist=True)

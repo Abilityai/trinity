@@ -47,12 +47,19 @@ const AGENT = 'sales-companion'
 const URL = `/api/enterprise/client-portal/agents/${AGENT}/autonomy`
 const ME = 'gary@example.com'
 
+// Verbatim `autonomy_dial_service.BLOCKER_TEXT` — what `page()` in
+// client_portal/autonomy.py actually sends (pinned server-side by
+// test_the_panel_carries_the_services_blocker_sentences).
 const BLOCKER_TEXT = {
   level_below_l2: 'the instance dial is below L2, so nothing runs unprompted anywhere',
-  agent_autonomy_off: "this agent's autonomy switch is off — the hard off",
+  agent_autonomy_off: "this agent's autonomy switch is off — the hard off, which the dial never overrides",
+  evidence_expired: 'the decisions this was promoted on have passed their review date',
   too_few_records: 'fewer than three decisions on record for this kind of ask',
+  too_few_conversations: 'the decisions for this kind of ask come from fewer than three separate conversations',
+  criterion_not_stable: 'the decisions did not apply one consistent criterion',
   reversal_in_window: 'a decision in this window was reversed',
   negative_rating_in_window: 'this seat rated the agent down inside the rating window',
+  guard_metric_capped: 'this class moves a metric another role holds — it can never graduate on this evidence alone',
   held_by_operator: 'an operator is holding this class on-request',
 }
 
@@ -71,7 +78,7 @@ function page(over = {}) {
     agent_name: AGENT, my_seat: ME, level: 'L2',
     level_label: 'Delegated classes — unprompted on graduated ask classes; guard-capped',
     ceiling_allows_unprompted: true, agent_autonomy_enabled: true,
-    rating_window_days: 30, rule_version: '2026-09-23',
+    rating_window_days: 30, rule_version: '2026-09-27',
     can_hold: true, can_release: false,
     classes: [klass()], other_seats: [], blocker_text: BLOCKER_TEXT,
     ...over,
@@ -113,6 +120,31 @@ describe('PortalAgentAutonomy (mounted)', () => {
     expect(blockers).toContain('fewer than three decisions')
     expect(blockers).toContain('was reversed')
     expect(blockers).toContain('rated the agent down')
+  })
+
+  it('uses the server sentence where it differs from any wording the panel might hold', async () => {
+    const w = await mountWith(page({
+      agent_autonomy_enabled: false,
+      classes: [klass({
+        state: 'on_request', unprompted: false, guard_metric: 'capped',
+        blocked_by: ['agent_autonomy_off', 'guard_metric_capped', 'too_few_conversations'],
+      })],
+    }))
+    const blockers = w.get('[data-testid="portal-autonomy-blockers-vendor-renewal"]').text()
+    expect(blockers).toContain(BLOCKER_TEXT.agent_autonomy_off)
+    expect(blockers).toContain(BLOCKER_TEXT.guard_metric_capped)
+    expect(blockers).toContain(BLOCKER_TEXT.too_few_conversations)
+  })
+
+  it('a code the server sent no sentence for is shown readable, not from a stale local copy', async () => {
+    const w = await mountWith(page({
+      blocker_text: {},
+      classes: [klass({ state: 'on_request', unprompted: false, guard_metric: 'capped',
+                        blocked_by: ['guard_metric_capped'] })],
+    }))
+    const blockers = w.get('[data-testid="portal-autonomy-blockers-vendor-renewal"]').text()
+    expect(blockers).toContain('guard metric capped')
+    expect(blockers).not.toContain('moves a metric another role holds')
   })
 
   it('separates "not earned" from "earned but the dial is down"', async () => {

@@ -511,6 +511,47 @@ class TestPortalGates:
         assert out["class"]["guard_metric"] == "capped" and out["class"]["unprompted"] is False
 
 
+    def test_a_hold_on_a_class_with_no_decisions_is_404_and_writes_nothing(self, portal, store):
+        """The write used to land BEFORE the existence check, so the 404 was
+        answered over a persisted row — and a roster member could mint rows for
+        any string on their own seat."""
+        _three(store)
+        with pytest.raises(portal.AutonomyRefused) as e:
+            portal.act(AGENT, SEAT, is_platform=False, ask_class="no-such-class", action="hold")
+        assert e.value.status_code == 404 and e.value.code == "class_not_found"
+        assert store.get_seat_ask_class_state(AGENT, SEAT, "no-such-class") is None
+        assert {r["ask_class"] for r in store.list_seat_ask_class_states(AGENT, SEAT)} == {"vendor-renewal"}
+
+    def test_a_guard_on_a_class_with_no_decisions_is_404_and_writes_nothing(self, portal, store):
+        _three(store)
+        with pytest.raises(portal.AutonomyRefused) as e:
+            portal.set_guard(AGENT, OWNER, is_platform=True, ask_class="no-such-class",
+                             guard_metric="capped", seat=SEAT)
+        assert e.value.status_code == 404
+        assert store.get_seat_ask_class_state(AGENT, SEAT, "no-such-class") is None
+
+    @pytest.mark.parametrize("bad", ["Vendor Renewal", "../x", "", "-lead", "x" * 65, "a/b"])
+    def test_a_malformed_ask_class_is_refused_before_any_write(self, portal, store, bad):
+        _three(store)
+        with pytest.raises(portal.AutonomyRefused) as e:
+            portal.act(AGENT, SEAT, is_platform=False, ask_class=bad, action="hold")
+        assert e.value.status_code == 422 and e.value.code == "invalid_ask_class"
+        assert {r["ask_class"] for r in store.list_seat_ask_class_states(AGENT, SEAT)} == {"vendor-renewal"}
+
+    def test_the_panel_carries_the_services_blocker_sentences(self, portal, store):
+        """The panel and the companion must say the same words. The page used
+        to omit `blocker_text`, so the Vue component fell back to a local copy
+        that disagreed for `agent_autonomy_off` / `guard_metric_capped`."""
+        from client_portal.models import PortalAutonomyDial
+        _three(store)
+        page = portal.page(AGENT, SEAT, is_platform=False)
+        wire = PortalAutonomyDial.model_validate(page).model_dump()
+        assert wire["blocker_text"] == portal.dial.BLOCKER_TEXT
+        assert wire["blocker_text"]["guard_metric_capped"] == portal.dial.BLOCKER_TEXT[portal.dial.BLOCK_GUARD]
+        assert wire["blocker_text"]["too_few_conversations"] == \
+            portal.dial.BLOCKER_TEXT[portal.dial.BLOCK_TOO_FEW_SOURCES]
+
+
 # --------------------------------------------------------------------------- #
 # 6. The consumer — the companion is TOLD, or the verdict is a surface nobody reads
 # --------------------------------------------------------------------------- #
