@@ -341,3 +341,43 @@ def test_the_id_prefix_is_platform_reserved():
     from services.operator_queue_service import _RESERVED_ID_PREFIXES
 
     assert "sync-diverged-" in _RESERVED_ID_PREFIXES
+
+
+# --------------------------------------------------------------------------
+# /review follow-up: a KEPT clock keeps the counts that started it
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_unknown_tuple_keeps_the_counts_with_the_clock(service, seed_agent, db):
+    """The working tuple could not be computed (a git timeout: the agent sends
+    `ahead_working: None, behind_working: None`), so the episode clock is kept.
+    The counts must be kept WITH it. `_coerce_counter` turns the unknown into
+    0, so before this fix the row read `diverged_since` = 25 h ago next to 0/0:
+    the freeze fired with the self-contradicting reason "diverged 0 behind /
+    0 ahead" and the episode's one operator-queue item carried ahead 0 /
+    behind 0. Non-ambient values (7 ahead, 31 behind)."""
+    seed_agent()
+    await _poll(service, _payload(ahead=7, behind=31))
+    _age_the_episode(hours=25)
+    await _poll(service, _payload(ahead=None, behind=None))
+
+    row = db.get_sync_state("alpha")
+    assert row["diverged_since"] is not None
+    assert (row["ahead_working"], row["behind_working"]) == (7, 31)
+
+    items = _diverged_items(db)
+    assert len(items) == 1
+    assert "diverged 31 behind / 7 ahead" in items[0]["question"]
+    ctx = items[0].get("context") or {}
+    assert (ctx["ahead"], ctx["behind"]) == (7, 31)
+
+
+@pytest.mark.asyncio
+async def test_unknown_tuple_without_an_episode_still_reads_zero(service, seed_agent, db):
+    """Control arm: with no episode to keep, an unknown tuple is stored as
+    before (#2827's default 0) — the keep is scoped to a kept clock."""
+    seed_agent()
+    await _poll(service, _payload(ahead=None, behind=None))
+    row = db.get_sync_state("alpha")
+    assert row["diverged_since"] is None
+    assert (row["ahead_working"], row["behind_working"]) == (0, 0)

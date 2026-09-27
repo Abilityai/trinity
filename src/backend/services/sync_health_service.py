@@ -539,6 +539,13 @@ class SyncHealthService:
             known=ahead_raw is not None,
             now=now_iso,
         )
+        # A clock KEPT because the tuple was uncomputable keeps the counts that
+        # started it: `_coerce_counter` reads the unknown as 0, which would sit
+        # next to a live `diverged_since` and freeze with "0 behind / 0 ahead".
+        # None is `upsert`'s "keep the prior value" (#706 /review).
+        keep_working_counts = (
+            ahead_raw is None and not behind_raw and diverged_since is not None
+        )
         dirty_files = _coerce_nonneg_int(payload.get("changes_count"))
         dirty_since = _episode_clock(
             (prior or {}).get("dirty_since"),
@@ -557,8 +564,12 @@ class SyncHealthService:
             # #2827: coerced like their siblings — these four went in raw.
             ahead_main=_coerce_counter(payload, "ahead_main", "ahead"),
             behind_main=_coerce_counter(payload, "behind_main", "behind"),
-            ahead_working=_coerce_counter(payload, "ahead_working"),
-            behind_working=_coerce_counter(payload, "behind_working"),
+            ahead_working=(
+                None if keep_working_counts
+                else _coerce_counter(payload, "ahead_working")),
+            behind_working=(
+                None if keep_working_counts
+                else _coerce_counter(payload, "behind_working")),
             git_dir_bytes=git_dir_bytes,  # #1596 bloat observability
             pack_count=pack_count,  # #1595
             loose_objects=loose_objects,  # #1595

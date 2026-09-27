@@ -534,6 +534,9 @@ backend stores `null` as 0 (`sync_health_service._coerce_counter`).
 **The working tuple is the divergence basis (ent#706).** `diverged_since` is
 decided from the RAW `ahead_working` / `behind_working` payload values, before
 that 0-coercion, so an uncomputable count never starts or clears the clock.
+When the clock is kept that way, the stored `ahead_working` / `behind_working`
+are kept too rather than coerced to 0, so a kept episode never reads
+"diverged 0 behind / 0 ahead" in its reason or its operator-queue item.
 
 Legacy `ahead` / `behind` in the response alias the main tuple so older
 clients keep working.
