@@ -86,6 +86,8 @@ services:
       # Mirrors docker-compose.yml — without this line the .env knob is inert in
       # prod (the #1039 packaging-gap class).
       - SLACK_SOCKET_CONNECTION_COUNT=${SLACK_SOCKET_CONNECTION_COUNT:-2}
+      - TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES=${TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES:-}  # ent#600
+      - TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS=${TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS:-}  # ent#600
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
       - CREDENTIAL_ENCRYPTION_KEY_SECONDARY=${CREDENTIAL_ENCRYPTION_KEY_SECONDARY:-}  # #267 rotation fallback
       # Agent auth master (#1159) - backend derives each agent's in-container

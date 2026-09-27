@@ -422,9 +422,11 @@ ChannelMessageRouter.handle_message()
     |  - Session key is per CHAT ({bot_id}:group:{chat_id}[:topic:{thread}]) — ent#600; DMs stay per user
     |  - Context = sender identity (+ [Replying to X: "…"] quote) + bounded attributed history block
     |    from the group session (newest 40 within 24h, [NO_REPLY] rows skipped, lines clamped) + text.
-    |    Per-group `context_enabled` off ⇒ the pre-ent#600 fresh prompt. DM history can never appear:
+    |    Per-group `context_enabled` off ⇒ the fresh prompt AND nothing recorded (no user row at
+    |    step 7, no rows at step 11, no observed rows, no broadcasts). DM history can never appear:
     |    a DM session carries a different key.
-    |  - The tagged user turn is persisted BEFORE execution (stored order = what the group saw)
+    |  - The tagged user turn is persisted BEFORE execution (stored order = what the group saw);
+    |    every group write prunes the session to 500 rows each time its count crosses a multiple of 50
     |  - Execute via TaskExecutionService
     v
 Response Check (Issue #349 — observe mode):
@@ -475,7 +477,7 @@ The trigger rules above decide when the agent *speaks*; this decides what it *kn
 
 **Store** — the group's own `public_chat_sessions` row, keyed per chat by `TelegramAdapter.get_session_identifier` (`{bot_id}:group:{chat_id}`, plus `:topic:{message_thread_id}` in forum supergroups). Before ent#600 the key was per *sender* even in a group, which is why group turns ran with fresh context (#1649 pinned that as a known limitation and asked for this re-decision). DMs keep `{bot_id}:{sender}:{chat}`, so DM history structurally cannot reach a group reply — the reason for the old fresh-context rule still holds. MEM-001 memory stays excluded for groups (router: `verified_email and not is_group`), so a shared session cannot feed one user's durable memory (learnings 2026-07-04).
 
-**Observe path** (`ChannelMessageRouter._record_observed_message`, step 0): for `metadata.observe_only` messages — resolve the agent (auto-creates the group config), `adapter.note_untagged_seen` (stamps `last_untagged_seen_at`), then record only if `adapter.group_context_enabled` and, under `group_auth_mode=any_verified`, the group is unlocked. Persists `role=user` with `sender_label` (#903), prunes the session to `STORE_CAP` (500) rows every `PRUNE_EVERY` (50) inserts. Never raises. Bare `/commands` are skipped; the transport also refuses to *execute* them (`_process_update` gates the command branch on `observe_only`) — otherwise `/reset` from any member would have started firing un-tagged the moment parse_message stopped returning None.
+**Observe path** (`ChannelMessageRouter._record_observed_message`, step 0): for `metadata.observe_only` messages — resolve the agent (auto-creates the group config), `adapter.note_untagged_seen` (stamps `last_untagged_seen_at`), then record only if `adapter.group_context_enabled` and, under `group_auth_mode=any_verified`, the group is unlocked. Persists `role=user` with `sender_label` (#903), prunes the session to `STORE_CAP` (500) rows each time its count crosses a `PRUNE_EVERY` (50) boundary (`_prune_group_session_if_due`, shared with the tagged-turn path so `all`/`observe` groups are bounded too). Never raises. Bare `/commands` are skipped; the transport also refuses to *execute* them (`_process_update` gates the command branch on `observe_only`) — otherwise `/reset` from any member would have started firing un-tagged the moment parse_message stopped returning None.
 
 **Turn context** (router step 7, groups): `_format_group_sender` (identity + `reply_quote_line` — the zero-config slice that works with Privacy Mode on) + `_group_history_block` + the text. The block is rendered by `services/telegram_group_context.format_group_history`: newest `MAX_MESSAGES` (40, env `TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES`) within `MAX_AGE_HOURS` (24, env `TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS`), `[NO_REPLY]` assistant rows dropped (over-fetched 2× so they don't eat the window), each line collapsed to one line and clamped to 500 chars, labels clamped/de-bracketed, assistant lines prefixed `[agent]`, the two delimiters stripped from content. Observed history is untrusted third-party input — every member can put text in front of the agent without addressing it. The tagged user turn is persisted at step 7 (before execution) and step 11 skips it (`_user_turn_persisted`), so a message posted during a long run sorts after the one it answers, and a failed run keeps the tagged message in memory.
 
@@ -535,7 +537,7 @@ The `TelegramChannelPanel.vue` component shows group configurations when the bot
 - Trigger mode radio buttons (mention-only / all messages)
 - Welcome message toggle with text input (`{name}` placeholder)
 - Remove button per group (deactivates, doesn't delete)
-- Context status badge + hint per group (`BaseBadge`: Sees all messages / Tagged messages only / Not confirmed yet / Context off — ent#600) and a **Group context** checkbox (`context_enabled`); Verify reloads the groups so a Privacy Mode change shows in place
+- Context status badge + hint per group (`BaseBadge`: Sees all messages / Tagged messages only / Not confirmed yet / Context off — ent#600) and a **Group context** toggle (`BaseToggle`, `context_enabled`; switching it off also deletes the group's recorded history via `channel_history.purge_telegram_group_history`); Verify reloads the groups so a Privacy Mode change shows in place
 
 ### Group Authentication Mode (group_auth_mode)
 
@@ -1098,7 +1100,7 @@ rendering). Telegram-side surface added here:
   per-group consent for completion reports (default ALLOW for existing and new
   groups; opt-out mute). DMs need no flag — a chat link is
   consent-by-construction.
-- **Toggle**: per-group **"Completion reports"** checkbox in
+- **Toggle**: per-group **"Completion reports"** toggle (`BaseToggle` since ent#600) in
   `TelegramChannelPanel.vue` (via the existing `updateGroup` PUT). The
   `allow_proactive` arm of `PUT /api/agents/{name}/telegram/groups/{id}` is
   human-only (`reject_agent_principal`); `trigger_mode`/welcome arms stay

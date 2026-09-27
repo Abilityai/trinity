@@ -2869,6 +2869,14 @@ class DatabaseManager:
     def clear_public_chat_session(self, session_id: str):
         return self._public_chat_ops.clear_session(session_id)
 
+    def clear_public_chat_sessions_by_identifier(
+        self, agent_name: str, channel: str, session_identifier: str,
+    ) -> int:
+        # ent#600: a Telegram group's sessions (the chat + its forum topics).
+        return self._public_chat_ops.clear_sessions_by_identifier(
+            agent_name, channel, session_identifier,
+        )
+
     def build_public_chat_context(self, session_id: str, new_message: str, max_turns: int = 10):
         return self._public_chat_ops.build_context_prompt(session_id, new_message, max_turns)
 

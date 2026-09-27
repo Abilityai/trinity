@@ -108,6 +108,15 @@ def _join_caller_prompts(*parts: Optional[str]) -> Optional[str]:
 # Group chat sender formatting (Issue #349)
 # ---------------------------------------------------------------------------
 
+def _session_count(session) -> int:
+    """Lifetime ``message_count`` of a session row (model or mapping)."""
+    count = (
+        session.message_count if hasattr(session, "message_count")
+        else session.get("message_count", 0)
+    )
+    return count if isinstance(count, int) else 0
+
+
 def _format_group_sender(message: NormalizedMessage) -> str:
     """
     Format sender identity for group chat context.
@@ -431,21 +440,27 @@ class ChannelMessageRouter:
                 agent_name, adapter.get_session_identifier(message), channel
             )
             session_id = session.id if hasattr(session, "id") else session["id"]
-            count = (
-                session.message_count if hasattr(session, "message_count")
-                else session.get("message_count", 0)
-            ) or 0
             db.add_public_chat_message(
                 session_id, "user", message.text,
                 sender_label=_sender_label(message),
             )
-            # Bound the store on a cadence, not per insert (one DELETE per
-            # PRUNE_EVERY messages keeps a firehose group cheap).
-            if (count + 1) % PRUNE_EVERY == 0:
-                db.prune_public_chat_session(session_id, STORE_CAP)
+            self._prune_group_session_if_due(session_id, _session_count(session), added=1)
             logger.debug(f"[ROUTER:{channel}] observed group message recorded (session={session_id})")
         except Exception as e:  # noqa: BLE001 — observation must never surface as an error
             logger.warning(f"[ROUTER:{channel}] observed-message record failed (non-fatal): {e}")
+
+    @staticmethod
+    def _prune_group_session_if_due(session_id: str, count_before: int, *, added: int) -> None:
+        """Bound a group session to ``STORE_CAP`` rows (ent#600).
+
+        Every group write path calls this — observed messages, tagged turns,
+        and ``all``/``observe``-mode turns alike — so no trigger mode grows a
+        session without limit. One DELETE each time the lifetime count crosses
+        a ``PRUNE_EVERY`` boundary keeps a firehose group cheap; a turn adds
+        two rows, so the check is a crossing, not a modulo on one value.
+        """
+        if count_before // PRUNE_EVERY != (count_before + added) // PRUNE_EVERY:
+            db.prune_public_chat_session(session_id, STORE_CAP)
 
     @staticmethod
     def _group_history_block(session_id: str, agent_name: str) -> str:
@@ -562,25 +577,34 @@ class ChannelMessageRouter:
             # agent's replies/broadcasts — so a tagged turn is answered in
             # context. Bounded (newest N within a rolling window), rendered as
             # a delimited reference block, and off per group when the owner
-            # says so (then this is exactly the pre-ent#600 fresh prompt).
+            # says so.
             sender_context = _format_group_sender(message)
             history = ""
-            if await adapter.group_context_enabled(message, agent_name):
+            context_on = await adapter.group_context_enabled(message, agent_name)
+            if context_on:
                 history = self._group_history_block(session_id, agent_name)
             context_prompt = "\n\n".join(
                 part for part in (sender_context, history, message.text) if part
             )
-            # Persist the tagged user turn NOW, after the history read and before
-            # execution: observed messages that arrive during a long run must
-            # sort after it (stored order = what the group saw), and a failed
-            # run must not erase the message from the group's memory. Step 11
-            # skips the user insert for this turn.
-            db.add_public_chat_message(
-                session_id, "user", message.text,
-                sender_email=verified_email,
-                sender_label=_sender_label(message),
-            )
-            message.metadata["_user_turn_persisted"] = True
+            if context_on:
+                # Persist the tagged user turn NOW, after the history read and
+                # before execution: observed messages that arrive during a long
+                # run must sort after it (stored order = what the group saw),
+                # and a failed run must not erase the message from the group's
+                # memory. Step 11 skips the user insert for this turn.
+                db.add_public_chat_message(
+                    session_id, "user", message.text,
+                    sender_email=verified_email,
+                    sender_label=_sender_label(message),
+                )
+                message.metadata["_user_turn_persisted"] = True
+                self._prune_group_session_if_due(session_id, _session_count(session), added=2)
+            else:
+                # Context OFF ⇒ nothing about this group is recorded: not the
+                # tagged turn, not the reply (step 11), not observed messages
+                # (step 0), not broadcasts. The prompt is the pre-ent#600 fresh
+                # one (sender identity + reply quote + the message).
+                message.metadata["_group_unrecorded"] = True
         else:
             context_prompt = db.build_public_chat_context(session_id, message.text)
             # #350: prepend channel + sender identity for channel (non-DM)
@@ -935,23 +959,25 @@ class ChannelMessageRouter:
         # summarization) + a display label (attributed history replay for
         # multi-participant threads); the assistant turn is labelled by agent.
         logger.debug(f"[ROUTER:{channel}] Step 11 - persisting messages")
-        if not message.metadata.get("_user_turn_persisted"):
-            # (group turns persisted their user row at step 7 — ent#600)
+        # ent#600: a group with context off records nothing (step 7).
+        if not message.metadata.get("_group_unrecorded"):
+            if not message.metadata.get("_user_turn_persisted"):
+                # (group turns persisted their user row at step 7 — ent#600)
+                db.add_public_chat_message(
+                    session_id, "user", message.text,
+                    sender_email=verified_email,
+                    sender_label=_sender_label(message),
+                )
+            # #903: stamp the assistant turn only for single-participant sessions
+            # so the sender-filtered MEM-001 summarizer keeps assistant replies in
+            # that user's memory (DMs + web) but never folds a shared-thread reply
+            # into one participant's memory. See _assistant_sender_email for the
+            # per-channel signal handling.
             db.add_public_chat_message(
-                session_id, "user", message.text,
-                sender_email=verified_email,
-                sender_label=_sender_label(message),
+                session_id, "assistant", response_text, cost=result.cost,
+                sender_email=_assistant_sender_email(message, verified_email),
+                sender_label=agent_name,
             )
-        # #903: stamp the assistant turn only for single-participant sessions so
-        # the sender-filtered MEM-001 summarizer keeps assistant replies in that
-        # user's memory (DMs + web) but never folds a shared-thread reply into
-        # one participant's memory. See _assistant_sender_email for the per-
-        # channel signal handling.
-        db.add_public_chat_message(
-            session_id, "assistant", response_text, cost=result.cost,
-            sender_email=_assistant_sender_email(message, verified_email),
-            sender_label=agent_name,
-        )
 
         # 11a. MEM-001 (#895): mirror the web path — increment per-user count
         # and fire-and-forget the conversation summarizer every 5 messages.

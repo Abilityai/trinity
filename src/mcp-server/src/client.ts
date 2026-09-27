@@ -3137,6 +3137,11 @@ export class TrinityClient {
     is_active: boolean;
     created_at: string;
     updated_at: string;
+    // ent#600: group conversation context (TelegramGroupConfigResponse)
+    context_enabled: boolean;
+    context_status: "all_messages" | "tagged_only" | "unconfirmed" | "off";
+    context_hint: string | null;
+    last_untagged_seen_at: string | null;
   }>> {
     return this.request(
       "GET",

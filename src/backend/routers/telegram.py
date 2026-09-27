@@ -417,6 +417,14 @@ async def update_telegram_group(
     if not updated:
         raise HTTPException(status_code=404, detail="Group config not found")
 
+    # ent#600: context OFF means nothing about this group is kept — delete what
+    # was recorded before the switch, so re-enabling never replays it. On every
+    # OFF write (idempotent), so a failed purge is retried by switching off again.
+    if config.context_enabled is False:
+        channel_history.purge_telegram_group_history(
+            agent_name, bot_id=binding.get("bot_id", ""), chat_id=updated["chat_id"],
+        )
+
     # ent#600: return the same shape as the listing so a toggle flips the
     # status in place ("off" ⇄ the evidence-based state). A dict, as before —
     # ent#265's tests (and any caller) subscript the result.
@@ -538,17 +546,19 @@ async def send_telegram_group_message(
             # the missing piece exists since ent#600 (`get_session_identifier`
             # has a group branch), so the key derived below IS the session a
             # participant's reply reads — `sender_id` is passed for the
-            # signature only and no longer shapes the key.
-            channel_history.persist_outbound_group_message(
-                agent_name=agent_name,
-                channel="telegram",
-                session_identifier=channel_history.session_key_for_telegram_group(
-                    bot_id=binding.get("bot_id", ""),
-                    sender_id=agent_name,   # synthetic: the agent is the speaker
-                    chat_id=chat_id,
-                ),
-                text=request.message,
-            )
+            # signature only and no longer shapes the key. A group whose
+            # context is off records nothing, broadcasts included (ent#600).
+            if target_group.get("context_enabled", True) is not False:
+                channel_history.persist_outbound_group_message(
+                    agent_name=agent_name,
+                    channel="telegram",
+                    session_identifier=channel_history.session_key_for_telegram_group(
+                        bot_id=binding.get("bot_id", ""),
+                        sender_id=agent_name,   # synthetic: the agent is the speaker
+                        chat_id=chat_id,
+                    ),
+                    text=request.message,
+                )
 
             return {
                 "ok": True,

@@ -131,6 +131,12 @@ def reply_quote_line(raw_message: Optional[dict], bot_id: str) -> Optional[str]:
     if str(author.get("id", "")) == str(bot_id) or author.get("is_bot"):
         return None
     text = quoted.get("text") or quoted.get("caption") or ""
+    # The quoted text is another member's words, rendered OUTSIDE the history
+    # block — neutralise it the same way: no block delimiters, no brackets (so
+    # it cannot spell a `[From: …]` / `[agent]` line or close this one), and no
+    # double quotes (so it cannot close the quote and continue as prose).
+    text = text.replace(HISTORY_OPEN, "").replace(HISTORY_CLOSE, "")
+    text = text.replace("[", "(").replace("]", ")").replace('"', "'")
     text = _one_line(text, QUOTE_CLAMP)
     if not text:
         return None

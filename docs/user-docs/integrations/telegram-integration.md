@@ -176,7 +176,7 @@ Notes:
 - Context is per group (and per topic in forum supergroups). Nothing from private chats or other groups is ever used in a group reply.
 - The bot only ever remembers messages delivered while it is present — Telegram gives bots no history, so there is no backfill.
 - `/reset@yourbot` in a group clears that group's remembered conversation for everyone. A bare `/reset` without the suffix does nothing in mention-only mode.
-- Turn **Group context** off per group when a room should not be remembered at all (a legal or HR channel, say). Tagged turns then see only the tagged message, as before.
+- Turn **Group context** off per group when a room should not be remembered at all (a legal or HR channel, say). Tagged turns then see only the tagged message, and nothing said in the group — including the agent's own replies — is stored. Switching it off also deletes what was already remembered, so switching it back on starts from a clean slate.
 
 **If "all messages" mode doesn't work:**
 1. Verify Privacy Mode is disabled in BotFather (`/setprivacy` -> Disable)

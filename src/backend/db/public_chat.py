@@ -18,7 +18,7 @@ import secrets
 from datetime import datetime
 from typing import Optional, List
 
-from sqlalchemy import select, insert, update, delete, and_
+from sqlalchemy import select, insert, update, delete, and_, or_
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
@@ -313,6 +313,44 @@ class PublicChatOperations:
                         public_chat_messages.c.session_id == session_id,
                         public_chat_messages.c.id.not_in(newest),
                     )
+                )
+            )
+            return result.rowcount or 0
+
+    def clear_sessions_by_identifier(
+        self, link_id: str, identifier_type: str, session_identifier: str,
+    ) -> int:
+        """Delete every session (and its messages) keyed ``session_identifier``
+        or ``session_identifier:topic:<n>`` for one agent/channel (ent#600).
+
+        A Telegram group's conversation lives in one session per chat, plus one
+        per forum topic; turning the group's context off deletes all of them.
+        Returns the number of sessions deleted.
+        """
+        ids = select(public_chat_sessions.c.id).where(
+            and_(
+                public_chat_sessions.c.link_id == link_id,
+                public_chat_sessions.c.identifier_type == identifier_type,
+                or_(
+                    public_chat_sessions.c.session_identifier == session_identifier,
+                    public_chat_sessions.c.session_identifier.startswith(
+                        f"{session_identifier}:topic:", autoescape=True
+                    ),
+                ),
+            )
+        )
+        with get_engine().begin() as conn:
+            session_ids = [r[0] for r in conn.execute(ids).all()]
+            if not session_ids:
+                return 0
+            conn.execute(
+                delete(public_chat_messages).where(
+                    public_chat_messages.c.session_id.in_(session_ids)
+                )
+            )
+            result = conn.execute(
+                delete(public_chat_sessions).where(
+                    public_chat_sessions.c.id.in_(session_ids)
                 )
             )
             return result.rowcount or 0

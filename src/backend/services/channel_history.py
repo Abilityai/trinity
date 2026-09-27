@@ -50,6 +50,19 @@ def session_key_for_telegram_group(bot_id: str, sender_id: str, chat_id: str) ->
     )
 
 
+def purge_telegram_group_history(agent_name: str, bot_id: str, chat_id: str) -> int:
+    """Delete everything recorded for one Telegram group (ent#600).
+
+    Called when the owner turns the group's context off: "off" means nothing
+    about the group is kept, so what was recorded before the switch goes too —
+    and turning it back on starts from an empty history rather than replaying
+    whatever was still inside the window. Covers the chat's session and every
+    forum-topic session under it. Returns the number of sessions deleted.
+    """
+    base = session_key_for_telegram_group(bot_id=bot_id, sender_id="", chat_id=chat_id)
+    return db.clear_public_chat_sessions_by_identifier(agent_name, "telegram", base)
+
+
 def session_key_for_slack_channel(team_id: str, channel_id: str, thread_ts: str) -> str:
     """Session key for a Slack channel message, via the adapter itself.
 

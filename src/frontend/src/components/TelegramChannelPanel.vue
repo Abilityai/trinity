@@ -118,14 +118,23 @@
               </button>
             </div>
 
-            <!-- Group context status (ent#600) — honest state + the next action.
-                 Evidence-based on the backend: "sees all messages" only once an
-                 un-tagged message has actually reached the bot in this group. -->
-            <div class="flex items-start gap-2 mb-2">
-              <BaseBadge :variant="contextBadgeVariant(group)" dot class="mt-0.5 shrink-0">
-                {{ contextBadgeLabel(group) }}
-              </BaseBadge>
-              <p class="text-xs text-gray-500 dark:text-gray-400">{{ group.context_hint }}</p>
+            <!-- Group context (ent#600) — per-group switch (default on), honest
+                 state, and the next action. Evidence-based on the backend: "sees
+                 all messages" only once an un-tagged message has actually reached
+                 the bot in this group. The hint text comes from the backend and
+                 also says what the switch does in each state. -->
+            <div class="mb-2">
+              <div class="flex items-center gap-3 flex-wrap">
+                <BaseToggle
+                  :model-value="group.context_enabled"
+                  label="Group context"
+                  @update:model-value="v => updateGroup(group, { context_enabled: v })"
+                />
+                <BaseBadge :variant="contextBadgeVariant(group)" dot>
+                  {{ contextBadgeLabel(group) }}
+                </BaseBadge>
+              </div>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ group.context_hint }}</p>
             </div>
 
             <!-- Trigger Mode -->
@@ -193,35 +202,18 @@
                  what the flag governs today (D2/F2); rename if the proactive
                  group-send coherence gate ships later. -->
             <div class="mt-2">
-              <label class="flex items-center gap-1.5 cursor-pointer text-xs">
-                <input
-                  type="checkbox"
-                  :checked="group.allow_proactive"
-                  @change="updateGroup(group, { allow_proactive: !group.allow_proactive })"
-                  class="rounded text-action-primary-600 focus:ring-action-primary-500"
-                />
-                <span class="text-gray-600 dark:text-gray-400">Completion reports</span>
-              </label>
-              <p class="mt-0.5 text-xs text-gray-400">
+              <!-- BaseToggle (instant-apply), matching the Group context switch
+                   above; also pays the raw-gray ratchet back for ent#600. -->
+              <BaseToggle
+                :model-value="group.allow_proactive"
+                label="Completion reports"
+                @update:model-value="v => updateGroup(group, { allow_proactive: v })"
+              />
+              <p class="mt-0.5 pl-[46px] text-xs text-gray-400">
                 Posts a completion notice for delegated or background tasks started from this group.
               </p>
             </div>
 
-            <!-- Group context (ent#600) — per-group opt-out; default on. -->
-            <div class="mt-2">
-              <label class="flex items-center gap-1.5 cursor-pointer text-xs">
-                <input
-                  type="checkbox"
-                  :checked="group.context_enabled"
-                  @change="updateGroup(group, { context_enabled: !group.context_enabled })"
-                  class="rounded text-action-primary-600 focus:ring-action-primary-500"
-                />
-                <span class="text-gray-600 dark:text-gray-400">Group context</span>
-              </label>
-              <p class="mt-0.5 text-xs text-gray-400">
-                Remembers the group's recent conversation so a tagged reply answers in context. Off: a tagged turn sees only the tagged message.
-              </p>
-            </div>
           </div>
         </div>
       </div>
@@ -281,6 +273,7 @@ import { ref, onMounted, watch } from 'vue'
 import api from '../api'
 import VoiceChannelToggle from './VoiceChannelToggle.vue'
 import BaseBadge from './base/BaseBadge.vue'
+import BaseToggle from './base/BaseToggle.vue'
 
 // ent#600: one badge per context state; the hint text comes from the backend
 // so the "next action" wording lives in one place.

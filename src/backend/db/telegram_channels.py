@@ -211,6 +211,20 @@ class TelegramChannelOperations:
         )
         with get_engine().begin() as conn:
             result = conn.execute(stmt)
+            if value is False:
+                # Telegram now says Privacy Mode is ON: the per-group "an
+                # un-tagged message reached us" evidence predates that, so it
+                # no longer proves anything. Clear it — a group where the bot
+                # is admin (sees everything regardless) re-proves itself on
+                # its next un-tagged message.
+                binding_ids = select(telegram_bindings.c.id).where(
+                    telegram_bindings.c.agent_name == agent_name
+                )
+                conn.execute(
+                    update(telegram_group_configs)
+                    .where(telegram_group_configs.c.binding_id.in_(binding_ids))
+                    .values(last_untagged_seen_at=None)
+                )
         return (result.rowcount or 0) > 0
 
     def update_last_update_id(self, agent_name: str, update_id: int) -> None:
