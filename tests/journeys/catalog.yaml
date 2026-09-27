@@ -244,3 +244,21 @@ journeys:
     # No catalog invariant covers "a surface computed per viewer stays behind
     # the platform door" yet — an empty list, not an invented id.
     invariants: []
+
+  - id: J14
+    # ent#600 — minted as J12 on its branch; J12 went to the declared metrics
+    # and J13 to the suggestions while it waited, so this is J14.
+    # The first messenger/channel journey. Lives in the private tracker, so the
+    # reference is fully qualified — a bare number would name the wrong repo.
+    issue: "abilityai/trinity-enterprise#600"
+    promise: "I can tag the agent in our group chat and it already knows what we've been talking about."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    # Telegram gives bots no history and no un-tagged messages under Privacy
+    # Mode, so the harness needs a bot with Privacy Mode off in a real group —
+    # nothing in the invariant catalog covers a channel adapter yet.
+    invariants: []

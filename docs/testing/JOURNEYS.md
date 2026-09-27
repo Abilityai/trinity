@@ -24,8 +24,9 @@ coverage debt is queryable rather than rediscovered.
 | **J11** | A companion's brief reaches me where I already work, without me asking. | user | local | live-stack | **no** | `tests/journeys/test_j11_brief_delivery_journey.py` | E-01, E-05, L-03 | #2565 |
 | **J12** | My agent's own declaration of what it measures is what Trinity actually knows about it. | user | local | live-stack | **no** | `tests/journeys/test_j12_declared_metrics_journey.py` | L-02, L-03 | #477, #478, #479, #666 |
 | **J13** | My agent tells me what I can do with it and what is waiting on me — and only things that are true. | user | local | live-stack | **no** | `tests/journeys/test_j13_suggestions_journey.py` | — | #465 |
+| **J14** | I can tag the agent in our group chat and it already knows what we've been talking about. | user | local | live-stack | **no** | — | — | abilityai/trinity-enterprise#600 |
 
-**0 of 13 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
+**0 of 14 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
 
 ## Variants
 
