@@ -45,7 +45,7 @@
       <!-- Waiting on you -->
       <section v-if="asks.length" data-testid="portal-work-waiting">
         <h3 :class="OVERLINE">Waiting on you</h3>
-        <PortalAsks :agent-names="participants" :show-agent="participants.length > 1" :current-session-id="chatId" @open-thread="(t) => $emit('open-thread', t)" />
+        <PortalAsks :agent-names="participants" pending-only :show-agent="participants.length > 1" :current-session-id="chatId" @open-thread="(t) => $emit('open-thread', t)" />
       </section>
 
       <!-- Empty: teaches the next action (principle 16). -->

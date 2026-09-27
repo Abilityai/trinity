@@ -474,7 +474,7 @@ class TestDoors:
     def test_platform_viewer_reads_and_admin_flag_travels(self, client):
         from client_portal.portal_auth import PortalPrincipal
         c, principal, calls = client
-        principal["value"] = PortalPrincipal("a@example.com", True, True)
+        principal["value"] = PortalPrincipal("a@example.com", True, is_admin=True)
         assert c.get(f"/api/enterprise/client-portal/agents/{AGENT}/suggestions").status_code == 200
         assert calls == [("get", AGENT, "a@example.com", True)]
 
@@ -519,7 +519,7 @@ def test_table_is_a_cascade_agent_ref():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("role,scope,expected", [("admin", None, True), ("admin", "ops", False), ("user", None, False)])
 async def test_the_platform_door_stamps_is_admin_on_the_principal(monkeypatch, role, scope, expected):
-    """Executes the wiring line itself (`PortalPrincipal(email, True, _is_admin_principal(user))`),
+    """Executes the wiring line itself (`PortalPrincipal(email, True, is_person_principal(user), _is_admin_principal(user))`),
     not only the helper: a platform principal carries `is_admin`, and a portal token never does."""
     from types import SimpleNamespace
     from client_portal import portal_auth as pa

@@ -93,6 +93,12 @@ class ModelEntry:
     recommended: bool
     workspace: bool = False
     workspace_tier: str = ""
+    # #3012: the oldest Claude Code that accepts this id. An older CLI refuses it
+    # with `[claude-code:unrecognized_model]` before any token is spent.
+    # tests/unit/test_3012_claude_code_pin.py fails when this exceeds the
+    # base image's pinned `CLAUDE_CODE_VERSION`, so adding a model that needs a
+    # newer CLI forces the pin bump into the same PR. Empty = no known minimum.
+    min_claude_code: str = ""
 
 
 # The ordered catalog. Order is preserved into the picker and the admin dropdown.
@@ -116,6 +122,7 @@ MODEL_CATALOG: tuple[ModelEntry, ...] = (
         False,
         workspace=True,
         workspace_tier="Most capable",
+        min_claude_code="2.1.280",
     ),
     # The prior point release in the SAME tier — still served and still
     # selectable, so it keeps public-channel and admin-default. It loses only the

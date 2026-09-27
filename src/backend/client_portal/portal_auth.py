@@ -28,6 +28,7 @@ from dependencies import (
     oauth2_scheme,
     decode_portal_session,
     get_current_user,
+    is_person_principal,
     portal_session_needs_rotation,
     reject_agent_principal,
     renew_portal_session,
@@ -90,6 +91,11 @@ class PortalPrincipal(NamedTuple):
     """
     email: str
     is_platform: bool
+    # trinity-enterprise#611: may this principal END an ask? A portal session is
+    # a verified person. A platform principal is one only when
+    # `is_person_principal` holds: a system-scoped key keeps its read breadth
+    # here (#2198) but is not a person, and an answer is recorded as a person's.
+    is_person: bool = True
     #: trinity-enterprise#465 — whether the platform principal is an instance
     #: admin, for ONE decision: who sees a suggestion that deep-links to agent
     #: configuration. Everywhere else a non-owner admin stays a viewer in the
@@ -176,7 +182,7 @@ async def get_portal_principal(
     # show what that client sees, and an operator whose OWN email is blocked has
     # been blocked as a client — the block is on the identity, not on the route.
     _reject_if_blocked(email)
-    return PortalPrincipal(email, True, _is_admin_principal(user))
+    return PortalPrincipal(email, True, is_person_principal(user), _is_admin_principal(user))
 
 
 async def get_portal_identity(

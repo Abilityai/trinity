@@ -96,15 +96,17 @@ describe('one list, three renderings', () => {
     expect(store.asks).toHaveLength(2)                   // inline / global
   })
 
-  it('answering removes the row, so every surface clears with no second call', async () => {
+  it('answering clears the badge everywhere with no second call; the row stays, now answered', async () => {
     portalHttp.get.mockResolvedValueOnce({ data: [ask('a1'), ask('a2')] })
     await store.fetchAsks()
 
-    portalHttp.post.mockResolvedValueOnce({ data: { ...ask('a1'), status: 'responded' } })
+    portalHttp.post.mockResolvedValueOnce({ data: { ...ask('a1'), status: 'answered', ended_by: 'you' } })
     await store.answerAsk('a1', { response: 'yes' })
 
     expect(store.askCount).toBe(1)
-    expect(store.asksForAgent('scout').map((a) => a.id)).toEqual(['a2'])
+    // trinity-enterprise#611: an ended ask stays listed (7 days) so the person
+    // sees how it ended — replaced by the server's projection, never patched.
+    expect(store.asksForAgent('scout').map((a) => [a.id, a.status])).toEqual([['a1', 'answered'], ['a2', 'pending']])
     expect(portalHttp.get).toHaveBeenCalledTimes(1)      // no refetch needed
   })
 
@@ -127,7 +129,7 @@ describe('one list, three renderings', () => {
     await store.fetchAsks('scout')
 
     const [, config] = portalHttp.get.mock.calls[0]
-    expect(config.params).toEqual({ agent_name: 'scout' })
+    expect(config.params).toEqual({ agent_name: 'scout', include_ended: true })   // trinity-enterprise#611
   })
 })
 

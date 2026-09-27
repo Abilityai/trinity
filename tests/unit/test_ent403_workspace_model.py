@@ -656,8 +656,8 @@ def test_the_generic_failure_is_unchanged_when_no_model_was_chosen(svc, monkeypa
 def test_a_usage_limit_never_blames_the_model(svc, monkeypatch, code):
     """THE regression guard on the tempting version of this feature.
 
-    There is no "this model is unavailable" code in the #2320 ladder
-    (`_PULL_ERROR_CODES` has no model member), and AUTH/BILLING merge into ONE
+    The one model code in the #2320 ladder is #3012's MODEL_UNSUPPORTED (the
+    runtime refused the model), which is its own branch; AUTH/BILLING merge into ONE
     "reached its usage limit" answer with a true and specific cause. Rewording
     that branch whenever a model was chosen would tell a person their model
     choice broke a turn that an exhausted subscription broke — and would send
