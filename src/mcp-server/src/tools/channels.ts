@@ -101,6 +101,9 @@ export function createChannelTools(
                 chat_title: g.chat_title || "Unnamed Group",
                 chat_type: g.chat_type,
                 trigger_mode: g.trigger_mode,
+                // ent#600: whether tagged turns see the group's recent conversation
+                // (all_messages / tagged_only / unconfirmed / off)
+                context_status: g.context_status,
               }));
 
             return JSON.stringify({

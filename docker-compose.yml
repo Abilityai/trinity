@@ -290,6 +290,9 @@ services:
       - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
       # Socket Mode concurrent WebSocket count (#244); clamped to [1,10], default 2
       - SLACK_SOCKET_CONNECTION_COUNT=${SLACK_SOCKET_CONNECTION_COUNT:-2}
+      # Telegram group context bounds (ent#600); empty = code defaults (40 / 24h)
+      - TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES=${TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES:-}
+      - TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS=${TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS:-}
       # SSH access host override
       - SSH_HOST=${SSH_HOST:-}
       # Host telemetry (/api/telemetry) — container-stats cache freshness (s) and

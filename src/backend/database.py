@@ -2883,11 +2883,27 @@ class DatabaseManager:
     def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
         return self._public_chat_ops.get_session_messages(session_id, limit, sender_email=sender_email)
 
-    def get_recent_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
-        return self._public_chat_ops.get_recent_messages(session_id, limit, sender_email=sender_email)
+    def get_recent_public_chat_messages(
+        self, session_id: str, limit: int = 20, sender_email: str = None, since: str = None,
+    ):
+        return self._public_chat_ops.get_recent_messages(
+            session_id, limit, sender_email=sender_email, since=since,
+        )
+
+    def prune_public_chat_session(self, session_id: str, keep: int) -> int:
+        # ent#600: bound a Telegram group session that records every visible message.
+        return self._public_chat_ops.prune_session(session_id, keep)
 
     def clear_public_chat_session(self, session_id: str):
         return self._public_chat_ops.clear_session(session_id)
+
+    def clear_public_chat_sessions_by_identifier(
+        self, agent_name: str, channel: str, session_identifier: str,
+    ) -> int:
+        # ent#600: a Telegram group's sessions (the chat + its forum topics).
+        return self._public_chat_ops.clear_sessions_by_identifier(
+            agent_name, channel, session_identifier,
+        )
 
     def build_public_chat_context(self, session_id: str, new_message: str, max_turns: int = 10):
         return self._public_chat_ops.build_context_prompt(session_id, new_message, max_turns)
@@ -3476,6 +3492,14 @@ class DatabaseManager:
         # ent#264: per-binding in-progress indicator toggle (default ON).
         return self._telegram_channel_ops.set_progress_indicator_enabled(agent_name, enabled)
 
+    def set_telegram_can_read_all_group_messages(self, agent_name, value):
+        # ent#600: Telegram's getMe.can_read_all_group_messages (None = not reported).
+        return self._telegram_channel_ops.set_can_read_all_group_messages(agent_name, value)
+
+    def touch_telegram_group_untagged_seen(self, binding_id, chat_id):
+        # ent#600: an un-tagged message reached the bot in this group.
+        return self._telegram_channel_ops.touch_group_untagged_seen(binding_id, chat_id)
+
     def get_all_telegram_bindings(self):
         return self._telegram_channel_ops.get_all_bindings()
 
@@ -3525,7 +3549,7 @@ class DatabaseManager:
 
     def update_telegram_group_config(
         self, group_config_id, trigger_mode=None, welcome_enabled=None,
-        welcome_text=None, allow_proactive=None,
+        welcome_text=None, allow_proactive=None, context_enabled=None,
     ):
         # Keyword passthrough (ent#265 / eng M3): a positional append here risks a
         # silent allow_proactive→welcome_text swap if the ops signature ever moves.
@@ -3535,6 +3559,7 @@ class DatabaseManager:
             welcome_enabled=welcome_enabled,
             welcome_text=welcome_text,
             allow_proactive=allow_proactive,
+            context_enabled=context_enabled,   # ent#600: group-context opt-out
         )
 
     def deactivate_telegram_group_config(self, binding_id, chat_id):

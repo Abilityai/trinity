@@ -31,6 +31,15 @@ from services.platform_prompt_service import (
 )
 from services.settings_service import settings_service
 from services.task_execution_service import get_task_execution_service
+from services.telegram_group_context import (  # ent#600
+    MAX_AGE_HOURS,
+    MAX_MESSAGES,
+    PRUNE_EVERY,
+    STORE_CAP,
+    format_group_history,
+    reply_quote_line,
+)
+from utils.helpers import iso_cutoff
 from services.docker_utils import container_exec_run
 from services.telegram_media import process_voice
 from services.upload_service import process_file_uploads, format_file_size
@@ -99,6 +108,15 @@ def _join_caller_prompts(*parts: Optional[str]) -> Optional[str]:
 # Group chat sender formatting (Issue #349)
 # ---------------------------------------------------------------------------
 
+def _session_count(session) -> int:
+    """Lifetime ``message_count`` of a session row (model or mapping)."""
+    count = (
+        session.message_count if hasattr(session, "message_count")
+        else session.get("message_count", 0)
+    )
+    return count if isinstance(count, int) else 0
+
+
 def _format_group_sender(message: NormalizedMessage) -> str:
     """
     Format sender identity for group chat context.
@@ -133,6 +151,13 @@ def _format_group_sender(message: NormalizedMessage) -> str:
     else:
         # Fallback to sender_id if no identity info available
         parts.append(f"[From: User #{message.sender_id}]")
+
+    # ent#600: a tagged reply to someone else's message carries the quoted
+    # text — Telegram delivers it with every reply, Privacy Mode or not, so
+    # this slice needs no BotFather setup.
+    quote = reply_quote_line(raw_message, message.metadata.get("bot_id", ""))
+    if quote:
+        parts.append(quote)
 
     return "\n".join(parts)
 
@@ -376,6 +401,78 @@ def _sanitize_filename(name: str, file_id: str, used_names: set) -> str:
 class ChannelMessageRouter:
     """Channel-agnostic message dispatcher."""
 
+    # ------------------------------------------------------------------ #
+    # ent#600: group conversation context
+    # ------------------------------------------------------------------ #
+
+    async def _record_observed_message(
+        self, adapter: ChannelAdapter, message: NormalizedMessage, channel: str
+    ) -> None:
+        """Persist an un-tagged group message as attributed context — never
+        execute it (ent#600).
+
+        Runs before every gate of the turn pipeline on purpose: observation is
+        one small write, not compute, so the per-user turn rate limit would
+        only punch silent holes in the context. The two gates that DO apply
+        are the ones that decide whether this group's words may be stored at
+        all — the per-group toggle and ``group_auth_mode=any_verified`` (a
+        locked group records nothing, exactly as it gets no reply). The
+        evidence that an un-tagged message arrived is noted regardless.
+
+        Bare commands are not conversation and are skipped. Never raises: the
+        transport already returned 200 to Telegram and nothing user-visible
+        depends on this write.
+        """
+        try:
+            if message.text.strip().startswith("/"):
+                return
+            agent_name = await adapter.get_agent_name(message)
+            if not agent_name:
+                return
+            await adapter.note_untagged_seen(message, agent_name)
+            if not await adapter.group_context_enabled(message, agent_name):
+                return
+            policy = db.get_access_policy(agent_name) or {}
+            if policy.get("group_auth_mode", "none") == "any_verified":
+                if not await adapter.is_group_verified(message, agent_name):
+                    return
+            session = db.get_or_create_public_chat_session(
+                agent_name, adapter.get_session_identifier(message), channel
+            )
+            session_id = session.id if hasattr(session, "id") else session["id"]
+            db.add_public_chat_message(
+                session_id, "user", message.text,
+                sender_label=_sender_label(message),
+            )
+            self._prune_group_session_if_due(session_id, _session_count(session), added=1)
+            logger.debug(f"[ROUTER:{channel}] observed group message recorded (session={session_id})")
+        except Exception as e:  # noqa: BLE001 — observation must never surface as an error
+            logger.warning(f"[ROUTER:{channel}] observed-message record failed (non-fatal): {e}")
+
+    @staticmethod
+    def _prune_group_session_if_due(session_id: str, count_before: int, *, added: int) -> None:
+        """Bound a group session to ``STORE_CAP`` rows (ent#600).
+
+        Every group write path calls this — observed messages, tagged turns,
+        and ``all``/``observe``-mode turns alike — so no trigger mode grows a
+        session without limit. One DELETE each time the lifetime count crosses
+        a ``PRUNE_EVERY`` boundary keeps a firehose group cheap; a turn adds
+        two rows, so the check is a crossing, not a modulo on one value.
+        """
+        if count_before // PRUNE_EVERY != (count_before + added) // PRUNE_EVERY:
+            db.prune_public_chat_session(session_id, STORE_CAP)
+
+    @staticmethod
+    def _group_history_block(session_id: str, agent_name: str) -> str:
+        """Bounded, attributed, delimited history for a group turn (ent#600).
+        Over-fetches so ``[NO_REPLY]`` rows don't eat the window."""
+        rows = db.get_recent_public_chat_messages(
+            session_id,
+            limit=MAX_MESSAGES * 2,
+            since=iso_cutoff(MAX_AGE_HOURS),
+        )
+        return format_group_history(rows, agent_name, limit=MAX_MESSAGES)
+
     async def handle_message(self, adapter: ChannelAdapter, message: NormalizedMessage) -> None:
         """Process an incoming message through the full pipeline."""
         try:
@@ -387,11 +484,27 @@ class ChannelMessageRouter:
         channel = adapter.channel_type
         logger.info(f"[ROUTER:{channel}] START: sender={message.sender_id}, channel={message.channel_id}")
 
+        # 0. ent#600: an observed group message is RECORDED as context and
+        # never executed — no rate-limit charge, no typing, no reaction, no
+        # reply. Everything below this line is the turn pipeline.
+        if message.metadata.get("observe_only"):
+            await self._record_observed_message(adapter, message, channel)
+            return
+
         # 1–2. Resolve agent + bot token (None ⇒ abort).
         resolved = await self._resolve_agent_and_token(adapter, message, channel)
         if resolved is None:
             return
         agent_name, bot_token = resolved
+
+        # 2-. ent#600: an executed un-tagged turn (all / observe modes) is the
+        # same proof as an observed one that the bot sees this group's
+        # un-tagged messages. Best-effort bookkeeping — never blocks the turn.
+        if message.metadata.get("untagged"):
+            try:
+                await adapter.note_untagged_seen(message, agent_name)
+            except Exception as e:
+                logger.debug(f"[ROUTER:{channel}] note_untagged_seen failed (non-fatal): {e}")
 
         # 2a. Enrich with async-fetched sender/channel identity (#350). No-op on
         # channels whose event already carries identity (Telegram); Slack fills
@@ -459,8 +572,39 @@ class ChannelMessageRouter:
         # leaking prior private conversation context into public group replies.
         # Issue #349: Include sender identity in group messages so agent knows who is speaking.
         if is_group:
+            # ent#600: the group session (keyed per chat) holds the group's own
+            # attributed conversation — observed messages, tagged turns and the
+            # agent's replies/broadcasts — so a tagged turn is answered in
+            # context. Bounded (newest N within a rolling window), rendered as
+            # a delimited reference block, and off per group when the owner
+            # says so.
             sender_context = _format_group_sender(message)
-            context_prompt = f"{sender_context}\n\n{message.text}"
+            history = ""
+            context_on = await adapter.group_context_enabled(message, agent_name)
+            if context_on:
+                history = self._group_history_block(session_id, agent_name)
+            context_prompt = "\n\n".join(
+                part for part in (sender_context, history, message.text) if part
+            )
+            if context_on:
+                # Persist the tagged user turn NOW, after the history read and
+                # before execution: observed messages that arrive during a long
+                # run must sort after it (stored order = what the group saw),
+                # and a failed run must not erase the message from the group's
+                # memory. Step 11 skips the user insert for this turn.
+                db.add_public_chat_message(
+                    session_id, "user", message.text,
+                    sender_email=verified_email,
+                    sender_label=_sender_label(message),
+                )
+                message.metadata["_user_turn_persisted"] = True
+                self._prune_group_session_if_due(session_id, _session_count(session), added=2)
+            else:
+                # Context OFF ⇒ nothing about this group is recorded: not the
+                # tagged turn, not the reply (step 11), not observed messages
+                # (step 0), not broadcasts. The prompt is the pre-ent#600 fresh
+                # one (sender identity + reply quote + the message).
+                message.metadata["_group_unrecorded"] = True
         else:
             context_prompt = db.build_public_chat_context(session_id, message.text)
             # #350: prepend channel + sender identity for channel (non-DM)
@@ -815,21 +959,25 @@ class ChannelMessageRouter:
         # summarization) + a display label (attributed history replay for
         # multi-participant threads); the assistant turn is labelled by agent.
         logger.debug(f"[ROUTER:{channel}] Step 11 - persisting messages")
-        db.add_public_chat_message(
-            session_id, "user", message.text,
-            sender_email=verified_email,
-            sender_label=_sender_label(message),
-        )
-        # #903: stamp the assistant turn only for single-participant sessions so
-        # the sender-filtered MEM-001 summarizer keeps assistant replies in that
-        # user's memory (DMs + web) but never folds a shared-thread reply into
-        # one participant's memory. See _assistant_sender_email for the per-
-        # channel signal handling.
-        db.add_public_chat_message(
-            session_id, "assistant", response_text, cost=result.cost,
-            sender_email=_assistant_sender_email(message, verified_email),
-            sender_label=agent_name,
-        )
+        # ent#600: a group with context off records nothing (step 7).
+        if not message.metadata.get("_group_unrecorded"):
+            if not message.metadata.get("_user_turn_persisted"):
+                # (group turns persisted their user row at step 7 — ent#600)
+                db.add_public_chat_message(
+                    session_id, "user", message.text,
+                    sender_email=verified_email,
+                    sender_label=_sender_label(message),
+                )
+            # #903: stamp the assistant turn only for single-participant sessions
+            # so the sender-filtered MEM-001 summarizer keeps assistant replies in
+            # that user's memory (DMs + web) but never folds a shared-thread reply
+            # into one participant's memory. See _assistant_sender_email for the
+            # per-channel signal handling.
+            db.add_public_chat_message(
+                session_id, "assistant", response_text, cost=result.cost,
+                sender_email=_assistant_sender_email(message, verified_email),
+                sender_label=agent_name,
+            )
 
         # 11a. MEM-001 (#895): mirror the web path — increment per-user count
         # and fire-and-forget the conversation summarizer every 5 messages.
