@@ -65,3 +65,4 @@ def test_scheduler_threshold_is_imported_not_redefined():
         for alias in node.names
     }
     assert "SYNC_FAILURE_FREEZE_THRESHOLD" in imported
+    assert "classify" in imported  # the gate decides with the same function

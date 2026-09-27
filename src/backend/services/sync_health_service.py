@@ -52,6 +52,7 @@ from database import db
 from redis_breaker_util import get_breaker_redis
 from services import git_service
 from services import sync_freeze_policy
+from services.sync_health_view import sync_view
 from services.agent_client import AgentClient
 from utils.helpers import parse_iso_timestamp, to_utc_iso, utc_now_iso
 
@@ -296,19 +297,6 @@ def _last_successful_push_at(sync_state: dict, config, prior: Optional[dict]) ->
             pass
     valid = [c for c in candidates if c is not None]
     return to_utc_iso(max(valid)) if valid else None
-
-
-def _policy_config(config) -> dict:
-    """The `agent_git_config` flags `sync_freeze_policy.classify` reads."""
-    return {
-        key: _config_value(config, key)
-        for key in (
-            "source_mode",
-            "auto_sync_enabled",
-            "freeze_schedules_if_sync_failing",
-            "created_at",
-        )
-    }
 
 
 def _episode_clock(prior_value, *, active: bool, known: bool, now: str):
@@ -591,11 +579,7 @@ class SyncHealthService:
         # trinity-enterprise#706: a divergence freeze is in force → one
         # sync_diverged item for the episode. Rule 2 (sync_failing) already
         # has its own item above, so only the divergence cause raises this.
-        verdict = sync_freeze_policy.classify(
-            updated,
-            _policy_config(config),
-            push_denied=git_service.is_push_denied(updated.get("last_error_summary") or ""),
-        )
+        verdict = sync_view(updated, config)
         if verdict["freeze_cause"] == "divergence":
             self._emit_sync_diverged_alert(agent_name, updated, verdict)
 
