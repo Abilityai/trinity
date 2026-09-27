@@ -1829,6 +1829,7 @@ class DatabaseManager:
         source_channel_agent: str = None,
         source_channel_client: str = None,
         open_canvas_id: str = None,
+        chain_depth: int = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -1851,7 +1852,12 @@ class DatabaseManager:
             source_channel_agent=source_channel_agent,
             source_channel_client=source_channel_client,
             open_canvas_id=open_canvas_id,
+            chain_depth=chain_depth,
         )
+
+    def get_max_running_chain_depth(self, agent_name: str) -> int:
+        """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
+        return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
     def create_schedule_execution(
         self,
