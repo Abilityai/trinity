@@ -50,7 +50,10 @@ def _load_isolated(name: str, relpath: str):
     return mod
 
 
-_RS = _load_isolated("retention_settings_isolated", "routers/settings.py")
+# #1028: `routers/settings.py` is now the package `routers/settings/`. This
+# isolated load points at the module that owns the handler under test —
+# the split moved the code, not its behaviour.
+_RS = _load_isolated("retention_settings_isolated", "routers/settings/retention.py")
 get_retention_status = _RS.get_retention_status
 
 pytestmark = pytest.mark.unit
@@ -139,12 +142,24 @@ def _call_retention(
     )
     db.count_soft_deleted_agents_past_retention.return_value = agent_purge_count
     db.count_soft_deleted_schedules_past_retention.return_value = schedule_purge_count
+    # trinity-enterprise#478: a real int. A bare MagicMock is uninterpretable to
+    # the guard, which fail-closes and lands the metrics sweep in
+    # `blocked_sweeps` — noise in every assertion in this file.
+    db.count_metric_points_candidates.return_value = 0
     ent = MagicMock()
     ent.is_entitled.return_value = entitled
 
     full_env = {"LOG_RETENTION_DAYS": "5", "AUDIT_LOG_RETENTION_DAYS": "365"}
     full_env.update(env or {})
+    # trinity-enterprise#478 moved the window reader to
+    # `settings_service.resolve_ops_setting`, which binds `settings_service.db`,
+    # not `routers.settings.retention.db`. Both are patched: the route still
+    # reads `db` directly elsewhere, and without the second the ops windows
+    # would come from the real install's `system_settings`.
+    import services.settings_service as _SS
+
     with patch.object(_RS, "db", db), \
+         patch.object(_SS, "db", db), \
          patch.object(_ENT, "entitlement_service", ent), \
          patch.object(_RG, "is_acknowledged", return_value=acked), \
          patch.dict("os.environ", full_env, clear=False):

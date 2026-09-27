@@ -7,6 +7,8 @@ description: Professional content writer that creates reports, proposals, and cl
 type: content-agent
 priority: 20
 
+avatar_prompt: A meticulous writer with rolled shirtsleeves and ink-stained fingers, fountain pen in hand at a desk stacked with drafts and bound reports, focused thoughtful expression, soft window light
+
 capabilities:
   - report-writing
   - proposal-creation

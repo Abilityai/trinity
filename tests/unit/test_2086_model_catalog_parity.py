@@ -159,6 +159,69 @@ def test_opus_5_is_present_and_selectable_end_to_end():
     ), "PUT /api/agents/{name}/public-channel-model would still 422 claude-opus-5"
 
 
+# --- fable-5.1 selectable end-to-end (#2726, the headline AC) ---------------
+
+
+def test_fable_5_1_is_present_and_selectable_end_to_end():
+    """#2726: the current Fable tier must be selectable everywhere the catalog feeds.
+
+    Undated id (AC 4) — never a date-suffixed variant. The 422->200 assertion is
+    the one that actually bites: PUBLIC_CHANNEL_MODELS is a *validation* set, so a
+    missing model is rejected by the API, not merely absent from a dropdown.
+    """
+    model_catalog = _catalog()
+    by_id = {m.id: m for m in model_catalog.MODEL_CATALOG}
+    assert "claude-fable-5-1" in by_id, "claude-fable-5-1 missing from the catalog"
+    entry = by_id["claude-fable-5-1"]
+    assert entry.public_channel and entry.admin_default_selectable
+    assert not entry.recommended, "AC 7: the platform default does NOT move"
+    from services.settings_service import is_valid_public_channel_model
+
+    assert is_valid_public_channel_model(
+        "claude-fable-5-1"
+    ), "PUT /api/agents/{name}/public-channel-model would still 422 claude-fable-5-1"
+
+
+def test_at_most_one_latest_marker_per_family_and_fable_is_5_1():
+    """#2726 AC 2, as a GENERAL invariant rather than a one-off id check.
+
+    The bug this ticket fixes is precisely "two entries in one tier both claim
+    (latest)" — Fable 5 kept the marker after Fable 5.1 shipped. Asserting the
+    *rule* catches the same mistake on the next refresh, in any family; the
+    single pinned id below is the AC-specific half on top of it.
+    """
+    import re
+
+    model_catalog = _catalog()
+    latest_by_family: dict[str, str] = {}
+    for m in model_catalog.MODEL_CATALOG:
+        if "(latest)" not in m.note:
+            continue
+        fam = re.match(r"claude-([a-z]+)-", m.id)
+        assert fam, f"unparseable model id: {m.id}"
+        family = fam.group(1)
+        assert family not in latest_by_family, (
+            f"two '(latest)' markers in the {family} tier: "
+            f"{latest_by_family[family]} and {m.id} — only the current "
+            "generation carries it (#2726)"
+        )
+        latest_by_family[family] = m.id
+
+    by_id = {m.id: m for m in model_catalog.MODEL_CATALOG}
+    assert (
+        "(latest)" in by_id["claude-fable-5-1"].note
+    ), "AC 2: Claude Fable 5.1 must carry the '(latest)' marker in its tier"
+    assert (
+        "(latest)" not in by_id["claude-fable-5"].note
+    ), "AC 2: Claude Fable 5 is no longer the latest in its tier (#2726)"
+    assert latest_by_family.get("fable") == "claude-fable-5-1", (
+        "the Fable tier's '(latest)' marker must sit on claude-fable-5-1. This "
+        "pin is DELIBERATELY brittle: when the next Fable ships you MUST "
+        "consciously edit this line — that is the point, not an inconvenience "
+        "(the test_ent243 `_MINIMAL_PREFIXES` idiom)."
+    )
+
+
 # --- Per-flag assertions (independent flags, NOT a subset lattice) ----------
 
 
@@ -174,23 +237,39 @@ def test_per_model_flags():
     )
 
     # Legacy picker-only: neither public-channel nor admin-default.
-    for legacy in ("claude-opus-4-5-20251101", "claude-sonnet-4-5-20250929"):
+    legacy_ids = ("claude-opus-4-5-20251101", "claude-sonnet-4-5-20250929")
+    for legacy in legacy_ids:
         assert not by_id[legacy].public_channel
         assert not by_id[legacy].admin_default_selectable
 
-    # Claude-5 family + prior Opus generation: both flags True (the #1660 lists).
-    for current in (
+    # Claude-5 / 5.1 families + prior Opus generation: both flags True (#1660 lists).
+    current = (
+        "claude-opus-5-5",
         "claude-opus-5",
+        "claude-fable-5-1",
         "claude-fable-5",
         "claude-sonnet-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
-    ):
-        assert by_id[current].public_channel, f"{current} must be public-channel"
+    )
+    for model_id in current:
+        assert by_id[model_id].public_channel, f"{model_id} must be public-channel"
         assert by_id[
-            current
-        ].admin_default_selectable, f"{current} must be admin-default"
+            model_id
+        ].admin_default_selectable, f"{model_id} must be admin-default"
+
+    # Guard the guard (#2726): every catalog id must fall in one of the groups
+    # above, or a future entry is silently unchecked by this test. Before #2726
+    # this named 9 of the catalog's 10 entries — `claude-sonnet-4-6` sat in no
+    # group — so an 11th could be added and go entirely unasserted while green.
+    from services.settings_service import PLATFORM_DEFAULT_MODEL_VALUE
+
+    checked = {haiku.id, *legacy_ids, *current} | {PLATFORM_DEFAULT_MODEL_VALUE}
+    assert checked == set(by_id), (
+        f"models not covered by any flag group: {sorted(set(by_id) - checked)} — "
+        "add each to the group that states its intended policy"
+    )
 
 
 def test_derived_sets_are_subsets_of_the_picker():
@@ -270,3 +349,71 @@ def test_every_workspace_model_carries_a_plain_language_tier():
         "two options leading with the same words are not a choice — the reason "
         "`workspace_tier` exists instead of reusing `note`"
     )
+
+
+# --- opus-5.5 selectable end-to-end (#2987, the headline AC) ---------------
+
+
+def test_opus_5_5_is_present_and_selectable_end_to_end():
+    """The four surfaces #2987 names, and the one that fails LOUDLY.
+
+    Three of the four degrade quietly when the catalog is stale — the picker,
+    the admin dropdown and the Workspace composer just don't list the model.
+    The fourth is a *validation* set, so `PUT /api/agents/{name}/public-channel-model`
+    answers 422 and an owner cannot select it even by API. That asymmetry is why
+    this asserts the gate, not only the membership.
+    """
+    model_catalog = _catalog()
+    by_id = {m.id: m for m in model_catalog.MODEL_CATALOG}
+    assert "claude-opus-5-5" in by_id, "claude-opus-5-5 missing from the catalog"
+    entry = by_id["claude-opus-5-5"]
+    assert entry.label == "Claude Opus 5.5"
+    assert entry.public_channel and entry.admin_default_selectable
+    # 422 → 200: the #894 validation gate must accept it.
+    from services.settings_service import is_valid_public_channel_model
+
+    assert is_valid_public_channel_model(
+        "claude-opus-5-5"
+    ), "PUT /api/agents/{name}/public-channel-model would still 422 claude-opus-5-5"
+    # The Workspace composer's closed allow-list (ent#403) — the security gate on
+    # `PortalChatRequest.model`, so membership here is what makes it selectable.
+    assert "claude-opus-5-5" in model_catalog.WORKSPACE_MODELS
+    assert entry.workspace_tier == "Most capable"
+
+
+def test_the_latest_marker_names_exactly_one_opus_and_it_is_5_5():
+    """`(latest)` is a CLAIM about the lineup, and a stale one misleads the
+
+    operator the picker is written for. Two entries carrying it is the drift this
+    asserts against — #2987 shipped because Opus 5 still said "(latest)" after
+    5.5 existed.
+    """
+    model_catalog = _catalog()
+    opus_latest = [
+        m for m in model_catalog.MODEL_CATALOG
+        if m.id.startswith("claude-opus-5") and "(latest)" in m.note
+    ]
+    assert [m.id for m in opus_latest] == ["claude-opus-5-5"], (
+        "exactly one Opus entry may claim (latest), and it must be the current "
+        f"tier — found {[m.id for m in opus_latest]}"
+    )
+    # …and the prior point release keeps every selectable dimension. It is still
+    # served; demoting its flags would remove a working option, not fix a label.
+    prior = {m.id: m for m in model_catalog.MODEL_CATALOG}["claude-opus-5"]
+    assert prior.public_channel and prior.admin_default_selectable
+    assert not prior.workspace, (
+        "the Workspace 'Most capable' tier is ONE option — two entries claiming "
+        "it would render a duplicate primary label"
+    )
+
+
+def test_the_workspace_tiers_are_unique():
+    """Each Workspace tier is one option in a client-facing dropdown.
+
+    The source asserts a tier is non-empty, never that it is unique — so moving a
+    tier between entries (what #2987 does) could leave both carrying it and the
+    composer would show "Most capable" twice with no error anywhere.
+    """
+    model_catalog = _catalog()
+    tiers = [m.workspace_tier for m in model_catalog.MODEL_CATALOG if m.workspace]
+    assert len(tiers) == len(set(tiers)), f"duplicate Workspace tier: {tiers}"

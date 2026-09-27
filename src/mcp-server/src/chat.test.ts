@@ -59,6 +59,36 @@ function makeTool(pullEnabled: boolean, calls: Recorded[]) {
   return tools.chatWithAgent;
 }
 
+/**
+ * #2661: same seam, but `task()` answers with the gateway-timeout receipt
+ * instead of a completed ChatResponse — the shape the sync parallel branch
+ * must surface rather than swallow.
+ */
+function makeReceiptTool(calls: Recorded[]) {
+  const fake: Partial<TrinityClient> = {
+    getBaseUrl: () => "http://localhost:8000",
+    isAgentPermitted: async () => true,
+    getAgentAccessInfo: async () => ({ owner: "u1", is_shared: true }) as any,
+    task: async (
+      name: string,
+      _message: string,
+      options?: any,
+      _sourceAgent?: string,
+      _mcpKeyInfo?: any,
+      idempotencyKey?: string,
+    ) => {
+      calls.push({ method: "task", idempotencyKey, options });
+      return {
+        status: "queued_timeout",
+        agent: name,
+        execution_id: "ex_receipt",
+        message: "MCP-server timeout — poll get_execution_result(...)",
+      } as any;
+    },
+  };
+  return createChatTools(fake as unknown as TrinityClient, false, false).chatWithAgent;
+}
+
 const agentSession = (agentName: string) => ({
   session: { scope: "agent", agentName, userId: "u1", keyId: "k1", keyName: "kn" } as any,
 });
@@ -160,5 +190,49 @@ describe("#946 D8 dispatch-mode idempotency key", () => {
       onCalls[0].idempotencyKey,
       "scope=user never pull-routes, so its key must be identical across flag states",
     );
+  });
+});
+
+describe("#2661 chat_with_agent surfaces the receipt on the PARALLEL branch", () => {
+  let calls: Recorded[];
+  beforeEach(() => {
+    calls = [];
+  });
+
+  it("returns the queued_timeout receipt verbatim to the caller", async () => {
+    const tool = makeReceiptTool(calls);
+    const out = await run(
+      tool,
+      { agent_name: "target", message: "long job", parallel: true },
+      userSession(),
+    );
+    // The whole point of the fix: the caller gets an execution_id to poll,
+    // not a bare `fetch failed`.
+    assert.equal(out.status, "queued_timeout");
+    assert.equal(out.execution_id, "ex_receipt");
+    assert.equal(out.agent, "target");
+    assert.equal(calls[0].method, "task");
+  });
+
+  it("passes the receipt through for an agent→agent parallel call too", async () => {
+    const tool = makeReceiptTool(calls);
+    const out = await run(
+      tool,
+      { agent_name: "target", message: "long job", parallel: true },
+      agentSession("caller"),
+    );
+    assert.equal(out.status, "queued_timeout");
+    assert.equal(out.execution_id, "ex_receipt");
+  });
+
+  it("sync parallel mode is what carries the receipt (async already returns its own id)", async () => {
+    const tool = makeReceiptTool(calls);
+    await run(
+      tool,
+      { agent_name: "target", message: "long job", parallel: true },
+      userSession(),
+    );
+    // async_mode falsy on the sync branch — the branch #2661 bounds.
+    assert.ok(!calls[0].options?.async_mode);
   });
 });

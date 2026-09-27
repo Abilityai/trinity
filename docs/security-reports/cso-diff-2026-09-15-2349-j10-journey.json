@@ -1,0 +1,116 @@
+{
+  "version": "1.1",
+  "date": "2026-09-15",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/2349-j10-agent-calls-agent",
+  "issue": "abilityai/trinity#2349",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "new_endpoints": [],
+    "changed_endpoints": [],
+    "new_db_reads": [],
+    "new_redis_keys": [],
+    "new_prompt_surfaces": [],
+    "widened_prompt_surfaces": [],
+    "dev_server_config_changes": [],
+    "new_dev_scripts": [],
+    "new_test_files": [
+      "tests/journeys/test_j10_agent_calls_agent_journey.py"
+    ],
+    "code_hunks": [
+      "tests/journeys/conftest.py (test tier only): create_agent_and_wait lifted out of journey_agent; agent_mcp_key reads ONE variable (TRINITY_MCP_API_KEY) from the caller's container env through the Docker SDK, looked up by the trinity.agent-name label, and never logs it; McpSession is a ~40-line httpx JSON-RPC client whose __repr__ omits headers; permission-edge, executions, activities helpers; a module-scoped two-agent fixture provisioned concurrently",
+      "tests/journeys/catalog.yaml (J10: tier journey-smoke, harness path; no status field)",
+      "tests/registry.json (one text-inserted entry)"
+    ],
+    "doc_files": [
+      "docs/testing/JOURNEYS.md (regenerated)",
+      "docs/testing/orchestration-invariant-catalog.md (IA-03: the A2A 409 claim removed, A2A half marked unverified)",
+      "docs/memory/feature-flows/agent-to-agent-collaboration.md (new Testing section)",
+      "docs/memory/feature-flows/agent-permissions.md",
+      "docs/memory/feature-flows/fan-out.md",
+      "docs/memory/feature-flows/run-agent-loop.md",
+      "docs/memory/learnings.md (two entries)"
+    ],
+    "private_submodule": ".claude pointer moved in the working tree only (DEBT_INBOX.md: two deferral entries, pushed to trinity-dev main as 81ee365); NOT staged in this PR"
+  },
+  "findings": [],
+  "appendix": [
+    {
+      "id": "A1",
+      "scope": "PRE-EXISTING product behaviour, surfaced by the harness (not introduced by the diff); tracked privately",
+      "status": "VERIFIED live 2026-09-15 (--runxfail: run_agent_loop from agent A on sibling B with no permission edge answered success=true and a loop_id; the loop ran on B) and independently by two review subagents against src/mcp-server/src/tools/loops.ts:35-46,186-230 and src/backend/routers/loops.py:174-245",
+      "severity": "HIGH",
+      "confidence": 10,
+      "category": "A01 broken access control / MCP tool permission boundary (P-02)",
+      "summary": "run_agent_loop honours a caller-supplied agent_name and never calls checkAgentAccess; the backend loop route gates on owner-equivalence and stamps source_agent_name from the agent key. Any holder of an agent-scoped key can start a bounded loop on any same-owner agent without an edge, and the rows violate IA-01's own signal. Same class as the per-endpoint admin gate that took five occurrences (#1890): a per-tool gate is discipline, not a mechanism.",
+      "exploit": "1) obtain agent A's TRINITY_MCP_API_KEY (A is compromised, or an operator can exec into its container); 2) call run_agent_loop(agent_name=B, message=..., max_runs=N) through the MCP server; 3) B runs N iterations of attacker-chosen instructions, spending B's budget, with every row attributed to A.",
+      "disposition": "tracked as abilityai/trinity-enterprise#628 (one-line fix at the MCP layer + audit of sibling agent-targeting tools); carried in the harness as a strict xfail worded as the promise"
+    },
+    {
+      "id": "A2",
+      "scope": "PRE-EXISTING documented design (architecture.md Invariant #8), surfaced by the harness; ruling requested privately",
+      "status": "VERIFIED live 2026-09-15 (agent key with no edge: 200 on GET /api/agents/{sibling}, 422 body-validation on POST .../chat and .../fan-out, i.e. access already passed)",
+      "severity": "MEDIUM",
+      "confidence": 10,
+      "category": "A01 / trust boundary placement",
+      "summary": "agent_permissions is enforced only in the MCP server; an agent-scoped key used raw against the backend resolves to its owner carrying the owner's role, so /chat, /task, /fan-out, /loops and inbound A2A admit any same-owner sibling. Agents receive TRINITY_BACKEND_URL, so the path is reachable from inside a container.",
+      "exploit": "with agent A's key, POST /api/agents/{B}/chat directly, bypassing checkAgentAccess entirely.",
+      "disposition": "tracked as abilityai/trinity-enterprise#629 (ruling: design or gap); by the #2349 plan-gate decision the public harness carries no reproducer, only a docstring stating where the boundary lives"
+    },
+    {
+      "id": "A3",
+      "scope": "PRE-EXISTING, surfaced by the harness; tracked publicly",
+      "status": "VERIFIED live 2026-09-15 (--runxfail: the audit row for a refused chat_with_agent reads {tool: chat_with_agent, success: true})",
+      "severity": "MEDIUM",
+      "confidence": 10,
+      "category": "A09 security logging failure",
+      "summary": "withAudit decides success by throw/no-throw and the checkAgentAccess deny path returns a JSON string, so every refused agent-to-agent call is audited as a successful tool call; an operator reading the audit log cannot distinguish refusals from permitted calls.",
+      "exploit": "an agent probing which siblings it may reach leaves an audit trail indistinguishable from legitimate use.",
+      "disposition": "tracked as abilityai/trinity#2807; strict xfail in the harness"
+    },
+    {
+      "id": "A4",
+      "scope": "PRE-EXISTING, surfaced by the harness; tracked publicly (LLM cost amplification — the one exception to the DoS exclusion)",
+      "status": "VERIFIED by code reading (no depth/hop/chain marker on chat_with_agent, /chat or /task; agent_call_limiter.py header acknowledges chains 'can deadlock' and surfaces it as a 503 within an hour; rooms have ROOM_MAX_CHAIN_DEPTH=8, chat has none); deliberately NOT reproduced live",
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "category": "LLM cost amplification / runaway inter-agent recursion",
+      "summary": "two mutually permitted agents can bounce a call back and forth with nothing that recognises the chain; the only bounds are per-hop timeouts and capacity parks, whose overflow goes to the durable backlog rather than being refused.",
+      "exploit": "a playbook (or a prompt-injected instruction) tells A to ask B to ask A ...; each hop is a billed model turn until timeouts and parks exhaust it.",
+      "disposition": "tracked as abilityai/trinity#2806 with the flip condition for the harness's skeleton strict xfail"
+    }
+  ],
+  "supply_chain_summary": {
+    "python_deps_changed": false,
+    "node_deps_changed": false,
+    "lockfiles_changed": false,
+    "note": "no dependency, workflow, Dockerfile, compose, webhook, integration or LLM-surface files changed on the branch; the harness uses docker and httpx, both already declared in tests/requirements-test.txt; the only skill-tree change is the DEBT_INBOX.md append in the private submodule (not staged)"
+  },
+  "filter_stats": {
+    "candidates": 9,
+    "reported": 0,
+    "refuted_or_appendix": 9,
+    "detail": [
+      "1x an agent-scoped secret read through the Docker socket in test code (conftest.py agent_mcp_key) — test tier only (hard exclusion #8); extracts exactly TRINITY_MCP_API_KEY from the env blob (which also carries the provider key and PATs), never returns the blob, never logs the value; the tier already requires the stack's Docker host — cleared",
+      "1x the key lives in httpx headers — McpSession.__repr__ and McpToolResult.__repr__ omit headers; failure messages quote response bodies and statuses only; poll_until observations are names/statuses/execution bodies; every session run log was grepped for the key prefix: 0 hits — cleared",
+      "1x except Exception around the Docker SDK call — re-raised as an AssertionError naming the exception type and the requirement, never swallowed — cleared",
+      "1x fixed message strings sent to ephemeral agents ('You should never receive this' + uuid) — user-message position (FP rule #11) — cleared",
+      "1x admin JWT reading /api/audit-log from the harness — the route's require_admin gate is unchanged; test-side only — cleared",
+      "1x the loop-gate gap is described in a PUBLIC file (the xfail reason) while its issue is private — accepted at the #2349 plan gate: the agent-key owner-equivalence mechanism is already public (architecture.md Invariant #8), the fix is one line, and the AC prescribes an xfail per finding; recorded, not reported",
+      "1x enterprise-docs guard PCRE replayed over every edited doc and the new test file: 0 hits — cleared",
+      "1x absolute host paths / real emails / secret-shaped strings in the diff: 0 — cleared",
+      "1x tests/journeys runs on every PR from the PR's own tree (journey-smoke.yml): the new harness adds no secret use and no new privilege on the runner (docker compose already runs there) — cleared"
+    ]
+  },
+  "totals": { "critical": 0, "high": 0, "medium": 0, "low": 0 },
+  "trend": {
+    "prior": "docs/security-reports/cso-diff-2026-09-13-2339-testing-docs.json",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0,
+    "direction": "flat",
+    "note": "0 findings introduced, as in the prior eight diff audits; four PRE-EXISTING product findings surfaced by the harness are tracked (A1 abilityai/trinity-enterprise#628 HIGH, A2 abilityai/trinity-enterprise#629 MEDIUM, A3 abilityai/trinity#2807 MEDIUM, A4 abilityai/trinity#2806 MEDIUM). A1 is the same 'per-endpoint gate' class as the ent#293/#1890 admin-gate story and the 2026-09-12 appendix's ent#614 header-trust item"
+  }
+}

@@ -1,0 +1,126 @@
+{
+  "version": "1.1",
+  "date": "2026-09-15",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/628-loop-permission-gate",
+  "issue": "abilityai/trinity-enterprise#628",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "changed_files": 18,
+    "new_endpoints": 0,
+    "new_mcp_tools": 0,
+    "mcp_tools_regated": [
+      "run_agent_loop (enforce, registration wrapper)",
+      "get_loop_status (in-tool resolve\u2192gate)",
+      "stop_loop (in-tool resolve\u2192gate\u2192act)"
+    ],
+    "shared_gate_consumers": [
+      "chat_with_agent",
+      "fan_out",
+      "chat_with_<slug> (dynamic)",
+      "run_agent_loop"
+    ],
+    "registration_seam": "server.ts::addToolWithAudit runs policyFor for every tool; 130-row TOOL_ACCESS_POLICY (1 enforce, 31 in-tool, 53 baselined, 45 none)",
+    "ci": "mcp-server-test.yml +1 offline boot-smoke step",
+    "docker_compose": "unchanged",
+    "dependencies": "unchanged"
+  },
+  "findings": [],
+  "appendix": [
+    {
+      "id": "A1",
+      "severity": "HIGH",
+      "confidence": 9,
+      "status": "PRE-EXISTING, TRACKED",
+      "category": "Broken Access Control (A01)",
+      "title": "Backend REST routes are owner-equivalent for an agent-scoped key; 53 MCP tools carry a `baselined` policy row for the same reason",
+      "where": "src/backend/dependencies.py (get_current_user resolves an agent key to its owner carrying the owner's role \u2014 Invariant #8); src/mcp-server/src/access.ts TOOL_ACCESS_POLICY rows marked `baselined` (36 \u2192 abilityai/trinity-enterprise#629, 11 admin/human-only at the backend, 3 reminders self-gate, 3 connector-scope)",
+      "exploit": "Agent A (or anyone who can exec into its container) uses its injected TRINITY_MCP_API_KEY raw against POST /api/agents/{B}/loops, or through any `baselined` tool \u2014 including delete_agent, start_agent, stop_agent, set_agent_github_pat, export_agent_data, call_user, get_agent_auth \u2014 on a same-owner sibling B with no agent_permissions edge.",
+      "impact": "Same-owner blast radius; the MCP tool-surface gate closed by this PR does not hold one hop down.",
+      "note": "Not introduced by this diff. The diff makes the exposure explicit and enumerable (the table) and routes it to abilityai/trinity-enterprise#629 by operator decision (2026-09-15 plan gate); the destructive subset is named there as the reason to raise priority. A communicate edge is not a manage permission, so the rows are a ruling, not a row flip.",
+      "tracking": "abilityai/trinity-enterprise#629"
+    },
+    {
+      "id": "A2",
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "PRE-EXISTING, TRACKED",
+      "category": "Security Logging (A09)",
+      "title": "A returned denial is audited as a successful tool call; the loop-id tools' rows carry no target",
+      "where": "src/mcp-server/src/audit.ts:169-178 (success = no throw), :56-69 (resolveTargetId reads agent_name|agent|name only)",
+      "exploit": "An operator reading the SEC-001 audit log cannot see that agent A was refused a loop, status read or stop on B; for the loop-id pair the row has no target_id at all.",
+      "impact": "Audit blind spot on refusals (the compensating control reviewers assume exists).",
+      "note": "Class tracked as abilityai/trinity#2807 (J10 strict xfail). This diff adds get_loop_status/stop_loop to the class and states so on ent#628; the fix belongs to #2807 for every gate at once.",
+      "tracking": "abilityai/trinity#2807"
+    },
+    {
+      "id": "A3",
+      "severity": "LOW",
+      "confidence": 8,
+      "status": "DESIGN LIMIT, DOCUMENTED",
+      "category": "Guard coverage",
+      "title": "The `none` shape check does not treat `name` as an agent-target parameter",
+      "where": "src/mcp-server/src/access.ts AGENT_TARGET_PARAMS (agent_name|agent|target_agent|source_agent) and the comment explaining why `name` is excluded",
+      "exploit": "A future agents.ts tool keyed on `name` and mistakenly given a `none:` row would pass the shape check. It still cannot register without a human-written row, and the row must state a `why`.",
+      "impact": "Residual human-error window on one module's naming convention; no live tool affected (all `name`-keyed agent tools carry explicit baselined/in-tool rows).",
+      "note": "Not a vulnerability introduced by the diff; recorded so the limitation is not mistaken for coverage.",
+      "tracking": "none (documented in code)"
+    }
+  ],
+  "supply_chain_summary": {
+    "python": "n/a (no backend change)",
+    "node": "lockfile unchanged; npm audit --omit=dev: 1 moderate pre-existing (hono <=4.13.4, fix available)",
+    "install_scripts": "no dependency delta"
+  },
+  "filter_stats": {
+    "candidates": 15,
+    "reported": 0,
+    "refuted_or_appendix": 15,
+    "detail": [
+      "1x chat.ts now denies every scope other than user/agent/system before its user branch \u2014 could a live scope be locked out? Refuted: OPERATOR_SCOPES = {user, agent, system}; every caller of checkAgentAccess/runAgentChat (grep, non-test) is an operatorOnly tool or a module-local copy; connector/anonymous/portal_delegate/ops sessions never reach it. Zero behaviour change, and it CLOSES a fail-open (an agent key with no agent name fell into the same-owner rule) \u2014 cleared",
+      "1x run_agent_loop's refusal echoes the caller-supplied agent_name back to the caller \u2014 the caller's own input in its own result (FP rule #11 analog); no cross-tenant channel \u2014 cleared",
+      "1x get_loop_status fetches the loop before the gate denies (backend runs _build_status_response) \u2014 nothing is returned; server-side cost only (hard exclusion #1) \u2014 cleared, stated in run-agent-loop.md",
+      "1x stop_loop resolve\u2192gate\u2192POST window \u2014 a revocation landing inside one round trip lets a just-revoked caller send a graceful stop it could have sent a moment earlier (hard exclusion #6) \u2014 cleared",
+      "1x loop-id denial could name the loop's agent \u2014 PREVENTED: compound uniform reason, payload withheld; J10 asserts the agent name is absent from the refusal \u2014 the fix, not a finding",
+      "1x new CI step in mcp-server-test.yml \u2014 no ${{ github.event.* }} interpolation, no secrets, imports the built module offline; trigger stays pull_request (not _target) \u2014 cleared",
+      "1x secret patterns over the diff (AWS/OpenAI/GitHub/Slack/trinity_mcp_/assignment shapes): 0; no .env tracked; no inline CI secrets \u2014 cleared",
+      "1x enterprise-docs guard PCRE replayed over all 18 changed files with a PCRE-capable engine (python re; BSD grep -P is unavailable and a first pass silently errored): 0 hits \u2014 cleared",
+      "1x supply chain: package.json/package-lock.json unchanged; npm audit --omit=dev reports one PRE-EXISTING moderate (hono <=4.13.4, fix available, transitive) \u2014 not introduced; a dependabot bump owns it \u2014 cleared",
+      "1x resolveClient moved verbatim to access.ts \u2014 per-request client carries the caller's own key; no key in any log line or envelope (denial logs carry names only) \u2014 cleared",
+      "1x dynamic chat_with_<slug> tools declare `in-tool` \u2014 the claim is pinned by dynamic-agents.test.ts (403 propagation) \u2014 cleared",
+      "3x pre-existing tracked items (ent#629 owner-equivalence + 53 baselined tools; #2807 audit-of-denials; the `none`/`name` guard limit) \u2014 appendix A1\u2013A3"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior": "docs/security-reports/cso-diff-2026-09-15-2349-j10-journey.json",
+    "resolved": 1,
+    "persistent": 3,
+    "new": 0,
+    "direction": "improving",
+    "note": "0 findings introduced (ninth consecutive clean diff audit). RESOLVED: prior appendix A1 (abilityai/trinity-enterprise#628 HIGH \u2014 run_agent_loop skipped the permission gate) \u2014 closed by this diff with a registration-time mechanism and asserted live (J10 flipped, 3/3). PERSISTENT: ent#629 owner-equivalence (now enumerable as 53 baselined rows), #2807 audit-of-denials (extended by two loop-id tools, stated), #2806 chain-depth (untouched). The chat gate's unnamed-agent-key fail-open (S-F9/E2 at the plan gate) was closed in passing \u2014 an allowlist over scope, zero change for live scopes."
+  }
+}

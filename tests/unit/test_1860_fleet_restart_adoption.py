@@ -71,6 +71,8 @@ _START_RECREATED = {
     "recreate_reason": "image_drift",
     "credentials_injection": "success",
     "skills_injection": "success",
+    # #2991: a conflict keeps `success` — the fleet entry must still name it.
+    "skills_result": {"status": "success", "conflicts": ["backlog"]},
 }
 
 
@@ -82,20 +84,31 @@ def ops(monkeypatch):
     gate is exercised for real. Callers pass ``_human_caller()``.
     """
     import routers.ops as mod
+    # #1028: the restart orchestration lives in services/fleet_ops_service now;
+    # the route keeps only its auth gate and a thin delegate. Collaborator
+    # patches land on the service module — the one whose bindings the moved
+    # body actually reads — while the gate patch stays on the router.
+    import services.fleet_ops_service as svc
 
     monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None)
-    monkeypatch.setattr(mod, "db", MagicMock())
-    mod.db.get_agent_owner.return_value = {"is_system": False}
-    mod.db.get_agent_ephemeral_info.return_value = None
-    monkeypatch.setattr(mod, "list_all_agents_fast", lambda: [_Agent("a1")])
-    monkeypatch.setattr(mod, "get_agent_container", lambda name: _Container())
+    monkeypatch.setattr(svc, "db", MagicMock())
+    svc.db.get_agent_owner.return_value = {"is_system": False}
+    svc.db.get_agent_ephemeral_info.return_value = None
+    monkeypatch.setattr(svc, "list_all_agents_fast", lambda: [_Agent("a1")])
+    monkeypatch.setattr(svc, "get_agent_container", lambda name: _Container())
     monkeypatch.setattr(
-        mod, "restart_agent_internal", AsyncMock(return_value=dict(_START_OK))
+        svc, "restart_agent_internal", AsyncMock(return_value=dict(_START_OK))
     )
-    monkeypatch.setattr(mod, "platform_audit_service", MagicMock(log=AsyncMock()))
-    monkeypatch.setattr(mod, "get_breaker_redis", lambda: None)  # lock fail-open
-    monkeypatch.setattr(mod, "invalidate_context_stats_cache", MagicMock())
-    return mod
+    monkeypatch.setattr(svc, "platform_audit_service", MagicMock(log=AsyncMock()))
+    monkeypatch.setattr(svc, "get_breaker_redis", lambda: None)  # lock fail-open
+    monkeypatch.setattr(svc, "invalidate_context_stats_cache", MagicMock())
+    # The fixture hands back the SERVICE module — that is where every
+    # collaborator mock lives now — with the route entry point attached, so
+    # `ops.restart_fleet(...)` still drives the real gate + delegate while
+    # `ops.restart_agent_internal` / `ops.db` read the mocks that the moved
+    # body actually consults.
+    svc.restart_fleet = mod.restart_fleet
+    return svc
 
 
 def _call(mod, caller=None, **query):
@@ -141,6 +154,7 @@ def test_drift_recreate_is_surfaced_per_agent_and_in_summary(ops, monkeypatch):
         assert entry["recreate_reason"] == "image_drift"
         assert entry["credentials_injection"] == "success"
         assert entry["skills_injection"] == "success"
+        assert entry["skills_conflicts"] == ["backlog"]            # #2991
     assert [c.args for c in ops.restart_agent_internal.await_args_list] == [
         ("a1",), ("a2",),
     ]

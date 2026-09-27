@@ -39,12 +39,16 @@ _TRIGGER_BUCKETS = {
     "telegram": "Channels", "slack": "Channels", "whatsapp": "Channels",
     "public": "Public", "paid": "Public",
     "schedule": "Scheduled", "webhook": "Scheduled",
+    "retry": "Scheduled",  # #2845: RETRY-001's next attempt at a scheduled run
     "loop": "Loops",  # #1150: first-class bucket so loop bursts don't read as cron load
     "reminder": "Reminders",  # #1296: agent self-direction, not operator cron
     # ent#329: an operator answer waking a parked agent. Bucketed with the
     # queue it came from rather than with cron: it is human-initiated and its
     # spend is driven by how often operators answer, not by a schedule.
     "operator_response": "Operator queue",
+    # trinity-enterprise#611: the same wake for an ask that was cancelled or
+    # expired instead of answered — same queue, same human-driven spend shape.
+    "operator_ending": "Operator queue",
     # ent#220: a room turn is an agent woken by an @mention in a shared room.
     # It was unmapped, so every one landed in `Other` — the catch-all that is
     # supposed to mean "a trigger nobody has classified yet", quietly turned

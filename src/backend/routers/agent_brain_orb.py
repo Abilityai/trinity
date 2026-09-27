@@ -21,7 +21,6 @@ import logging
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 
-from config import GEMINI_API_KEY
 from database import db
 from dependencies import AuthorizedAgentByName, CurrentUser, OwnedAgentByName
 from services import brain_orb_postprocess, brain_orb_voice_service, idempotency_service, rate_limiter
@@ -29,6 +28,7 @@ from services import brain_orb_postprocess, brain_orb_voice_service, idempotency
 # opt-in → OFF. Imported as module-level names so tests can monkeypatch the
 # gate seam (`monkeypatch.setattr(bo, "is_brain_orb_enabled", ...)`).
 from services.settings_service import (
+    get_gemini_api_key,  # ent#582: Settings → env, same seam as the flags
     is_brain_orb_enabled,
     is_brain_orb_voice_enabled,
     is_brain_orb_write_enabled,
@@ -165,7 +165,7 @@ async def post_brain_orb_voice_token(agent_name: AuthorizedAgentByName, current_
     # Live sessions on the platform key while the feature is disabled.
     if not (is_brain_orb_enabled() and is_brain_orb_voice_enabled()):
         raise HTTPException(status_code=404, detail="Brain Orb voice is not enabled")
-    if not GEMINI_API_KEY:
+    if not get_gemini_api_key():
         raise HTTPException(status_code=503, detail="Voice is not configured")
     rate_limiter.enforce(
         f"brain_orb_voice_token:{current_user.id}:{agent_name}",

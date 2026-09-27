@@ -1,5 +1,17 @@
 // Types for Trinity API responses
 
+/** #2991: `POST /api/agents/{name}/start` — skill delivery rides the response. */
+export interface StartAgentResult {
+  message: string;
+  skills_injection?: string;
+  skills_result?: {
+    status: string;
+    reason?: string | null;
+    conflicts?: string[];
+    skills?: Record<string, { status: string; code?: string; warnings?: string[] }>;
+  };
+}
+
 export interface Agent {
   name: string;
   status: string;
@@ -137,6 +149,32 @@ export interface AgentAccessCheckResult {
   reason?: string;       // Denial reason if not allowed
 }
 
+/**
+ * #2807: the outcome a tool RETURNED rather than threw, stamped on the
+ * per-call tool context by `access.ts::accessDenied` and read by the audit
+ * wrapper after `execute` — the same seam #905 uses for `requestId`. `denied`
+ * is the only kind today; a returned non-denial failure is the registered
+ * follow-up and adds a kind here, not a second field.
+ */
+export interface ToolOutcome {
+  kind: "denied";
+  /** What the AUDIT row records — by default the reason the caller was given. */
+  reason: string;
+}
+
+/**
+ * The backend's `LoopStatusResponse` (routers/loops.py), as far as the MCP
+ * layer relies on it. `agent_name` is the field the loop-id tools gate on
+ * (ent#628): a loop is addressed by id, so the agent it belongs to is only
+ * known after the resolve. Everything else is passed through untouched.
+ */
+export interface LoopStatus {
+  loop_id: string;
+  agent_name: string;
+  status: string;
+  [key: string]: unknown;
+}
+
 // Agent Template Info Types
 
 export interface AgentCommand {
@@ -205,6 +243,12 @@ export interface Schedule {
   timeout_seconds: number;
   allowed_tools?: string[];
   model?: string;
+  // Validation configuration (VALIDATE-001). The backend has returned these
+  // on every read since the feature landed; they were missing from the write
+  // surface only. #2759
+  validation_enabled?: boolean;
+  validation_prompt?: string;
+  validation_timeout_seconds?: number;
   // ent#498: deliver this schedule's output into that person's Workspace
   // conversation with the agent. Absent = no delivery.
   deliver_to_workspace_email?: string;
@@ -223,6 +267,10 @@ export interface ScheduleCreate {
   // RETRY-001: Retry configuration
   max_retries?: number;
   retry_delay_seconds?: number;
+  // VALIDATE-001: Post-execution validation configuration
+  validation_enabled?: boolean;
+  validation_prompt?: string;
+  validation_timeout_seconds?: number;
   // ent#498: deliver this schedule's output into that person's Workspace
   // conversation with the agent. Absent = no delivery.
   deliver_to_workspace_email?: string;
@@ -241,6 +289,10 @@ export interface ScheduleUpdate {
   // RETRY-001: Retry configuration
   max_retries?: number;
   retry_delay_seconds?: number;
+  // VALIDATE-001: Post-execution validation configuration
+  validation_enabled?: boolean;
+  validation_prompt?: string;
+  validation_timeout_seconds?: number;
   // ent#498: `null` CLEARS the delivery target (the handler uses exclude_unset,
   // so omitting keeps it) — hence nullable here and not merely optional.
   deliver_to_workspace_email?: string | null;
@@ -268,16 +320,92 @@ export interface ScheduleExecution {
   execution_log?: string;
   model_used?: string;
   claude_session_id?: string;
+  // #2958: JSON array of auto-compaction events ({trigger, pre_tokens,
+  // post_tokens, duration_ms, timestamp}); null when the turn did not compact.
+  compact_metadata?: string | null;
   source_agent_name?: string;
   source_user_email?: string;
   // AUDIT-001: MCP key origin tracking — used by #914 chat-timeout
   // recovery to scope the executions lookup to the calling key.
   source_mcp_key_id?: string;
   source_mcp_key_name?: string;
+  // FANOUT-001: the batch this subtask belongs to. Written on every row of a
+  // fan-out at dispatch, which is what makes #2670's gateway-timeout receipt
+  // resolvable — one id shared by N rows, so finding ANY row finds the batch.
+  fan_out_id?: string;
   // RETRY-001: Retry tracking
   attempt_number?: number;
   retry_of_execution_id?: string;
   retry_scheduled_at?: string;
+}
+
+/** The aggregated result a completed `POST /fan-out` returns. */
+export interface FanOutDispatchResult {
+  fan_out_id: string;
+  status: string;
+  total: number;
+  completed: number;
+  failed: number;
+  results: Array<{
+    id: string;
+    status: string;
+    response?: string;
+    error?: string;
+    error_code?: string;
+    execution_id?: string;
+    cost?: number;
+    context_used?: number;
+    duration_ms?: number;
+  }>;
+}
+
+/**
+ * #2670: what a `fan_out` call answers with when the MCP server aborts its own
+ * fetch before the gateway does. The batch keeps running; this is what to poll.
+ *
+ * `fan_out_id` rather than `execution_id` — the #914/#2661 receipts name one
+ * row, and a batch is N rows sharing one id, so the aggregate is the only thing
+ * a single id can honestly point at.
+ */
+export interface FanOutTimeoutReceipt {
+  status: "fan_out_timeout";
+  agent: string;
+  fan_out_id: string;
+  /** The subtask rows found at abort time. May be a SUBSET — a slot-starved
+   *  subtask has no row yet — so it is evidence, never a manifest. */
+  execution_ids: string[];
+  task_count: number;
+  message: string;
+}
+
+/** #2670: one fan-out batch read back from its execution rows. */
+export interface FanOutBatchStatus {
+  agent_name: string;
+  fan_out_id: string;
+  /** `running` while any subtask can still change; then `completed` | `partial` | `failed`. */
+  status: string;
+  total: number;
+  completed: number;
+  failed: number;
+  running: number;
+  results: Array<{
+    execution_id: string;
+    /** The caller's own task id (#2524); absent on rows written before it was persisted. */
+    task_id?: string;
+    /** The EXECUTION status verbatim (`queued`/`running`/`success`/…), not the
+     * dispatch response's two-value `completed`/`failed` pair — a live batch has
+     * to distinguish "waiting for a slot" from "running". */
+    status: string;
+    message?: string;
+    response?: string;
+    error?: string;
+    cost?: number;
+    context_used?: number;
+    duration_ms?: number;
+    model_used?: string;
+    started_at?: string;
+    completed_at?: string;
+  }>;
 }
 
 // Execution Query Types (MCP-007)
@@ -369,6 +497,43 @@ export interface OperatorQueueItem {
   responded_by_email?: string | null;
   responded_at?: string | null;
   acknowledged_at?: string | null;
+  // trinity-enterprise#611 — how the ask ended (NULL on a row that ended before
+  // the ledger: read `status`). `disposed_by_email` is withheld from agent keys.
+  disposition?: string | null;        // answered | cancelled | expired
+  disposed_at?: string | null;
+  disposed_by?: string | null;        // person | timeout
+  disposition_reason?: string | null; // the operator's optional cancel reason
+}
+
+/**
+ * An agent's own ask, read back by the request_id it chose
+ * (GET /api/agents/{name}/operator-queue/{request_id}, trinity-enterprise#611).
+ * A redacted projection: never a person's email.
+ */
+export interface OperatorQueueAskReadback {
+  id: string;
+  request_id: string;
+  agent_name: string;
+  type: string;
+  priority: string;
+  status: string;
+  title: string;
+  question: string;
+  options?: unknown;
+  created_at: string;
+  expires_at?: string | null;
+  response?: string | null;
+  response_text?: string | null;
+  responded_at?: string | null;
+  disposition?: string | null;
+  disposed_at?: string | null;
+  disposed_by?: string | null;
+  disposition_reason?: string | null;
+  raised_by?: string | null;
+  channel?: string | null;
+  to_role?: string | null;
+  proposal?: unknown;
+  supersedes_expired?: string | null;
 }
 
 export interface OperatorQueueListResponse {
@@ -448,4 +613,51 @@ export interface ReportSummary {
   period_start?: string | null;
   period_end?: string | null;
   created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Execution search (enterprise `execution_search`, abilityai/trinity-enterprise#653)
+// ---------------------------------------------------------------------------
+
+export type ExecutionSearchField = "message" | "response" | "error";
+
+export type ExecutionSearchMode = "substring" | "regex";
+
+export interface ExecutionSearchParams {
+  query: string;
+  mode?: ExecutionSearchMode;
+  agents?: string[];
+  fields?: ExecutionSearchField[];
+  status?: string;
+  triggered_by?: string;
+  hours?: number;
+  limit?: number;
+  offset?: number;
+  context?: number;
+}
+
+export interface ExecutionSearchMatch {
+  field: ExecutionSearchField;
+  excerpt: string;
+}
+
+export interface ExecutionSearchHit {
+  id: string;
+  agent_name: string;
+  status: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+  triggered_by: string | null;
+  message: string;
+  matches: ExecutionSearchMatch[];
+}
+
+export interface ExecutionSearchResult {
+  query: string;
+  mode: ExecutionSearchMode;
+  fields: ExecutionSearchField[];
+  hours: number;
+  count: number;
+  hits: ExecutionSearchHit[];
 }

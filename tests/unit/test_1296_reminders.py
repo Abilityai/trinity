@@ -598,6 +598,42 @@ def test_router_user_scoped_owner_created():
     assert isinstance(result, Reminder)
 
 
+def test_router_agent_key_without_header_records_its_own_origin():
+    """ent#614: the MCP client sends no X-Source-Agent on set_reminder, so the origin
+    column must come from the VALIDATED key — a header-only helper would have wiped it
+    for every agent-created reminder (the engineering-review finding)."""
+    _load()
+    from database import db
+    from models import ReminderCreate
+    a = _agent()
+    result = _create(a, _user(agent_name=a), ReminderCreate(message="own", delay_seconds=300))
+    assert db.get_reminder(a, result.id)["source_agent_name"] == a
+
+
+def test_router_human_with_source_header_is_refused():
+    """ent#614: a non-agent principal naming a source agent is a 403, never trusted."""
+    _load()
+    from fastapi import HTTPException
+    from models import ReminderCreate
+    a = _agent()
+    with pytest.raises(HTTPException) as exc:
+        _create(a, _user(agent_name=None), ReminderCreate(message="own", delay_seconds=300), src="agent-x")
+    assert exc.value.status_code == 403
+
+
+def test_router_agent_key_naming_another_agent_is_refused():
+    """ent#614: the resolve call must not sit behind `current_user.agent_name or …` —
+    that short-circuit would silently IGNORE a mismatched header for an agent
+    principal instead of refusing it."""
+    _load()
+    from fastapi import HTTPException
+    from models import ReminderCreate
+    a = _agent()
+    with pytest.raises(HTTPException) as exc:
+        _create(a, _user(agent_name=a), ReminderCreate(message="own", delay_seconds=300), src="agent-x")
+    assert exc.value.status_code == 403
+
+
 def test_router_idempotent_dup_replays():
     _load()
     from models import ReminderCreate

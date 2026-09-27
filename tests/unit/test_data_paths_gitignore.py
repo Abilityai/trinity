@@ -23,6 +23,9 @@ from unittest.mock import Mock
 
 import pytest
 
+# #1028: gitignore-owned names read as data by these tests.
+from services.git_service import gitignore as gs_gitignore
+
 _project_root = Path(__file__).resolve().parents[2]
 _backend_path = str(_project_root / "src" / "backend")
 if _backend_path not in sys.path:
@@ -47,6 +50,10 @@ _STUBBED_MODULE_NAMES = [
 def _restore_sys_modules():
     """Snapshot sys.modules before each test and restore after."""
     saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    # #2859: the git_service package and every submodule are restored as ONE set —
+    # a parent restored without its children is exactly the half-state that breaks
+    # `git_service.<sub>` reads in the next file (13 failures in test_ent615).
+    saved_git = {k: v for k, v in sys.modules.items() if k.startswith("services.git_service")}
     try:
         yield
     finally:
@@ -55,6 +62,9 @@ def _restore_sys_modules():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = value
+        for key in [k for k in list(sys.modules) if k.startswith("services.git_service")]:
+            del sys.modules[key]
+        sys.modules.update(saved_git)
 
 
 def _load_git_service():
@@ -75,14 +85,23 @@ def _load_git_service():
     sys.modules["database"].AgentGitConfig = Mock
     sys.modules["database"].GitSyncResult = Mock
 
-    sys.modules.pop("services.git_service", None)
-    import services.git_service as gs
+    # #1028 made git_service a package. Evicting only the parent leaves its
+    # submodules cached, so the re-imported package never re-binds
+    # `.token_scrub` / `.conflicts` / ... and every later `git_service.<sub>`
+    # attribute read in another test file fails (the red-dev leak, M1 of the
+    # 0.9.5 work order). Evict the whole family so the package re-imports whole.
+    for key in [k for k in list(sys.modules) if k.startswith("services.git_service")]:
+        del sys.modules[key]
+    # #1028: git_service is a package; the alias names the module that
+    # owns the functions under test, so patches land where the code looks.
+    import services.git_service.trinity_files as gs
+    from services.git_service import gitignore as gs_gitignore
     return gs
 
 
 def _run_append(tmp_path: Path, patterns: list[str]) -> str:
     gs = _load_git_service()
-    cmd = gs._build_gitignore_append_command(str(tmp_path), patterns)
+    cmd = gs_gitignore._build_gitignore_append_command(str(tmp_path), patterns)
     result = subprocess.run(
         cmd, shell=True, capture_output=True, text=True, timeout=10
     )

@@ -187,6 +187,8 @@ AGENT_REFS: List[AgentRef] = [
     # keyed on a purged share id would be orphaned forever with nothing left
     # to join it back to.
     AgentRef("portal_file_dismissals",       "agent_name",        Policy.CASCADE),
+    # ent#465 — Workspace suggestion accept/dismiss rows name the agent.
+    AgentRef("workspace_suggestion_feedback", "agent_name",       Policy.CASCADE),
 
     # --- Public links and chained tables -----------------------------------
     # Order: chained tables before agent_public_links so the link rows
@@ -195,11 +197,20 @@ AGENT_REFS: List[AgentRef] = [
     # agent_public_links.id, not agent_name — we delete them via JOIN.
     AgentRef("agent_public_links",           "agent_name",        Policy.CASCADE),
     AgentRef("public_user_memory",           "agent_name",        Policy.CASCADE),
+    AgentRef("public_user_memory_writes",    "agent_name",        Policy.CASCADE),  # ent#637
+    AgentRef("agent_role_readiness",         "agent_name",        Policy.CASCADE),  # ent#527
+    AgentRef("seat_decisions",               "agent_name",        Policy.CASCADE),  # ent#638
 
     # --- Per-agent config ---------------------------------------------------
     AgentRef("agent_git_config",             "agent_name",        Policy.CASCADE),
     AgentRef("agent_sync_state",             "agent_name",        Policy.CASCADE),
     AgentRef("agent_skills",                 "agent_name",        Policy.CASCADE),
+    # ent#596: `agent_skills.assigned_by_agent` (the agent that MADE the
+    # assignment) is audit-only initiator provenance and intentionally NOT
+    # registered — the `source_agent_name` precedent above. A renamed actor
+    # keeps its historical name on the rows it wrote; the parity-test regex
+    # does not match the column, which is that same distinction.
+    AgentRef("agent_capability_grants",      "agent_name",        Policy.CASCADE),  # ent#596
     AgentRef("agent_tags",                   "agent_name",        Policy.CASCADE),
     # #668 — latest compatibility snapshot (transient/recomputable): wipe on
     # delete, re-key on rename via this registry.
@@ -215,6 +226,20 @@ AGENT_REFS: List[AgentRef] = [
     # tenant's reports (cross-tenant disclosure).
     AgentRef("agent_reports",                "agent_name",        Policy.CASCADE),
     AgentRef("agent_evaluations",            "agent_name",        Policy.CASCADE),
+    # ent#477 — the declared metric registry. CASCADE on both halves: a purge
+    # must not leave definitions addressed to a name that is gone (ent#478
+    # validates incoming points against them, so a stale row would ACCEPT
+    # points for a reused agent name), and a rename must carry them or the
+    # agent's next reconcile mints a second full set under the new name while
+    # the old set stays visible to the definitions read.
+    AgentRef("metric_definitions",           "agent_name",        Policy.CASCADE),
+    # ent#478 — the recorded points those definitions interpret. CASCADE for
+    # the same two reasons, plus one this table makes sharper: the point
+    # identity hash is `sha256(metric \0 ts \0 dims)` and deliberately
+    # EXCLUDES `agent_name`, so re-keying a rename is lossless — the same
+    # observation keeps the same key under the new name and cannot collide
+    # with itself.
+    AgentRef("metric_points",                "agent_name",        Policy.CASCADE),
     # ent#438 — the agent canvas is agent-authored output on the same footing
     # as a report: CASCADE so a purge wipes it and a rename re-keys it. The
     # rename half is load-bearing rather than tidy — `agent_name` is half the
@@ -222,6 +247,12 @@ AGENT_REFS: List[AgentRef] = [
     # a name nothing resolves, and the agent's next write would silently mint a
     # SECOND canvas under the new name while the old one stayed visible.
     AgentRef("agent_canvases",               "agent_name",        Policy.CASCADE),
+
+    # ent#554 — share links for those canvases. CASCADE for the same reason the
+    # canvas itself does: a rename must carry the links (a shared URL that dies
+    # because the agent was renamed is a broken promise to whoever holds it),
+    # and a purge must not leave a live token addressing a canvas that is gone.
+    AgentRef("agent_canvas_shares",          "agent_name",        Policy.CASCADE),
 
     # Per-agent MCP connector config (ent#46, OSS-core #118). The scoped
     # connector KEY is an mcp_api_keys row (scope='connector') already covered

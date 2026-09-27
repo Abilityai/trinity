@@ -14,7 +14,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 
 from database import db
-from dependencies import get_authorized_agent, get_current_user, assert_agent_access
+from dependencies import get_authorized_agent, get_current_user, assert_agent_access, resolve_source_agent
 from models import (
     LoopRunResponse,
     LoopStatusResponse,
@@ -202,6 +202,16 @@ async def start_loop(
                 ),
             )
 
+    # ent#614: resolve the header unconditionally — an `or` short-circuit would
+    # skip the check for an agent principal and silently IGNORE a mismatched
+    # header, which is the failure mode this fix exists to end. Then prefer the
+    # VALIDATED key: the MCP client sends no header on this path, so an
+    # agent-started loop used to record NULL here.
+    _resolved_source = resolve_source_agent(
+        current_user, x_source_agent, endpoint=f"/api/agents/{name}/loops"
+    )
+    _source_agent = current_user.agent_name or _resolved_source
+
     service = get_loop_service()
     loop_row = await service.start_loop(
         agent_name=name,
@@ -219,7 +229,7 @@ async def start_loop(
         allowed_tools=payload.allowed_tools,
         started_by_user_id=current_user.id,
         started_by_user_email=current_user.email,
-        source_agent_name=x_source_agent,
+        source_agent_name=_source_agent,
         # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
         source_mcp_key_name=getattr(current_user, "mcp_key_name", None),

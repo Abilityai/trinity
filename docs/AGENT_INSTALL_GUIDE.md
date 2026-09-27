@@ -131,17 +131,22 @@ Reproduce (don't just dump logs) a card like this, filling in the real values fr
   Log in: admin / <ADMIN_PASSWORD>    ← save this now; it's in .env and I won't show it again
 
   Next:
-    1. Finish the first‑run setup wizard in the UI (admin email + email whitelist).
+    1. Open the UI — first‑run setup asks you to connect Claude (a subscription
+       token or an Anthropic API key). Bind a sign‑in email under Settings → General
+       if you'd rather log in by email than as 'admin'.
     2. In Claude Code, install the agent toolkit:
          /plugin marketplace add abilityai/abilities
          /plugin install trinity@abilityai
        then run  /trinity:onboard  to build & connect your first agent.
     3. Or in the UI: Create Agent → pick a template.
+
+  ⭐ If this was easy, star the repo — it's how other people find Trinity:
+     https://github.com/abilityai/trinity
 ```
 
 - **The admin password:** if the installer generated one, it's the line the summary labels *auto‑generated*. Show it to the user verbatim and tell them to store it.
 - **Model API key:** if the install output warned that no model key is set, **ask the user for one now** (Anthropic API key, Claude subscription token, or Google API key), add it to `.env` (`ANTHROPIC_API_KEY=...`), and re‑run `./scripts/deploy/start.sh`. Explain: their agents can't run until this is set.
-- **First‑run setup wizard:** the first time they open the UI, Trinity asks for an admin email and whitelist. Walk them through it if they're unsure.
+- **First‑run setup:** the first time they open the UI, Trinity asks them to connect Claude (subscription token or API key) — the one required step. GitHub, email‑provider and Gemini keys are optional and live under **Settings → Integrations** later. Walk them through it if they're unsure.
 
 ---
 

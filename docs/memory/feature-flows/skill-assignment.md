@@ -6,6 +6,7 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-09-11 | **#2703** — assignment now DELIVERS. `POST` (both branches) and `PUT` (added names) call `skill_service.deliver_assigned` and return a `delivery` block beside the existing keys; `PUT` is symmetric (added injected, dropped removed). Every listing change — assign, unassign, replace, manual Sync, background completion, fleet sweep — fires the thin `agent_skills_changed` WS trigger, and the Skills tab's Save note / the Library control say what happened instead of "Saved. Sync now, or…". Full flow in [skill-injection.md](skill-injection.md) → *Delivery on assign*. |
 | 2026-08-12 | **ent#384** — the Library page gained a fleet-wide **read** of who holds each skill (`GET /api/skills/assignments`, access-scoped + human-only; see [library-page.md](library-page.md)). Assignment itself is unchanged and still lives here: this per-agent tab and the REST/MCP surfaces remain the only WRITERS (ent#182 — one skill model). The Library's assign/unassign controls were split to ent#386, so if you are adding them, reuse `POST`/`DELETE /api/agents/{name}/skills/{skill}` rather than adding a skill-keyed writer — a second write path is a second place for the owner gate to drift. Note the two surfaces have DIFFERENT scopes: the ent#384 read is owned ∪ shared, while these writes are owner-or-admin, so a shared agent can appear as a holder that the same caller may not modify. |
 | 2026-01-25 | Initial documentation of skill assignment feature flow |
 

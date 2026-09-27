@@ -109,8 +109,17 @@
         </div>
 
         <!-- The body: the rail's own scroll axis. Exactly ONE tab's content is
-             mounted, and only a tab from `tabs` can be `active`. -->
-        <div v-if="active" class="flex-1 min-h-0 overflow-y-auto p-4" data-testid="portal-rail-body">
+             mounted, and only a tab from `tabs` can be `active`. `rail-scroll`
+             is the ent#608 scrollbar chrome (the <style> below): thin, hidden
+             at rest, revealed on hover / focus-within / while scrolling, never
+             reflowing. -->
+        <div
+          v-if="active"
+          class="flex-1 min-h-0 overflow-y-auto p-4 rail-scroll"
+          :class="{ 'is-scrolling': scrolling }"
+          data-testid="portal-rail-body"
+          @scroll.passive="onBodyScroll"
+        >
           <slot
             :name="`tab-${active.id}`"
             :tab="active"
@@ -164,7 +173,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onBeforeUnmount } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
 import OverflowTabs from '../OverflowTabs.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
@@ -236,7 +245,24 @@ function onKeydown(e) {
   if (e.key === 'Escape' && props.sheet) emit('close')
 }
 onMounted(() => { if (props.sheet) window.addEventListener('keydown', onKeydown) })
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  clearTimeout(scrollTimer)
+})
+
+// ent#608 — the thumb also shows WHILE the body scrolls, for ~800ms after the
+// last scroll event. CSS alone cannot reveal on wheel-without-hover, and on a
+// Mac in "show scroll bars: automatically" mode the platform never reveals an
+// overlay bar on hover at all — its bar shows during scrolling only, and with
+// the rest colour transparent it would show nothing, ever. A class flip only:
+// the colour is the one thing the reveal changes (see the <style> below).
+const scrolling = ref(false)
+let scrollTimer = null
+function onBodyScroll() {
+  scrolling.value = true
+  clearTimeout(scrollTimer)
+  scrollTimer = setTimeout(() => { scrolling.value = false }, 800)
+}
 
 // ---- ink ----------------------------------------------------------------------
 // Design pass values: collapsed 48px (`w-12`), open 384px (`w-96`), 36px
@@ -286,3 +312,79 @@ function iconPath(tabId) {
   return ICONS[tab && tab.icon] || ICONS.bolt
 }
 </script>
+
+<style scoped>
+/*
+ * ent#608 — the rail body's scrollbar: thinner, invisible at rest, revealed
+ * while the pointer is over the scroll region, focus is inside it, or the
+ * body is scrolling (`is-scrolling`, set by `onBodyScroll` above).
+ *
+ * The overlay-scrollbar convention (editor panels, chat sidebars): the
+ * affordance is hidden, the capability is not — wheel, trackpad, touch and
+ * focus-into-view all work at rest (the #1789 bar). Reveal changes the
+ * thumb's COLOUR only. Never `display`, `width`, `scrollbar-width` or
+ * `overflow` — any of those reflows the whole tab body on hover, which is
+ * the anti-pattern the issue excludes. The thin bar keeps its gutter in
+ * classic-scrollbar mode by design; it is the rest-state visibility that
+ * changes, not the geometry, so content wraps identically hovered or not.
+ *
+ * Two engines, one look. Chromium (≥121) and Firefox read the standard
+ * `scrollbar-width` / `scrollbar-color` pair — and once either is set,
+ * Chromium ignores every `::-webkit-scrollbar*` rule on the element, so the
+ * standard pair is the primary path. The WebKit block is Safari's, and is
+ * kept visually identical: a ~6px rounded thumb on a transparent track.
+ *
+ * Thumb ink is the design-system tertiary (gray-500 light / gray-400 dark —
+ * the dark ink ladder), slightly stronger under the pointer. theme() resolves
+ * at build (there is no global token var layer — the ScanlineReveal
+ * precedent), hence the explicit `.dark` override. The below-`sm` sheet is
+ * the same component, but touch platforms already overlay their scrollbars
+ * natively; the rule is `sm:`-and-up only so the sheet stays native.
+ */
+@media (min-width: 640px) {
+  .rail-scroll {
+    --rail-thumb: theme('colors.gray.500 / 0.55');
+    --rail-thumb-strong: theme('colors.gray.500 / 0.85');
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+    transition: scrollbar-color 0.15s ease;
+  }
+  .dark .rail-scroll {
+    --rail-thumb: theme('colors.gray.400 / 0.5');
+    --rail-thumb-strong: theme('colors.gray.400 / 0.8');
+  }
+  .rail-scroll:hover,
+  .rail-scroll:focus-within,
+  .rail-scroll.is-scrolling {
+    scrollbar-color: var(--rail-thumb) transparent;
+  }
+
+  /* WebKit — same rest/hover states, fixed width so nothing reflows. */
+  .rail-scroll::-webkit-scrollbar {
+    width: 6px;
+  }
+  .rail-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .rail-scroll::-webkit-scrollbar-thumb {
+    background-color: transparent;
+    border-radius: 9999px;
+    transition: background-color 0.15s ease;
+  }
+  .rail-scroll:hover::-webkit-scrollbar-thumb,
+  .rail-scroll:focus-within::-webkit-scrollbar-thumb,
+  .rail-scroll.is-scrolling::-webkit-scrollbar-thumb {
+    background-color: var(--rail-thumb);
+  }
+  .rail-scroll:hover::-webkit-scrollbar-thumb:hover {
+    background-color: var(--rail-thumb-strong);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail-scroll,
+  .rail-scroll::-webkit-scrollbar-thumb {
+    transition: none;
+  }
+}
+</style>

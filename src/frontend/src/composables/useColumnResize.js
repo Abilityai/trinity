@@ -14,6 +14,7 @@
  * the messages is done by narrowing a neighbour, and that is the AC.
  */
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { safeStorage } from '@/utils/safeStorage'
 
 // Defaults are today's classes, so an install that has never dragged anything
 // renders byte-identically to before: `w-72` sidebar, `w-96` rail.
@@ -201,13 +202,6 @@ export function writeStored(storage, userKey, widths) {
   }
 }
 
-function safeStorage() {
-  try {
-    return typeof window !== 'undefined' ? window.localStorage : null
-  } catch {
-    return null
-  }
-}
 
 /**
  * @param {object} opts

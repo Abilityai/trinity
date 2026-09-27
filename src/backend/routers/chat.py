@@ -12,9 +12,16 @@ from datetime import datetime
 from typing import NoReturn, Optional
 
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, TaskExecutionStatus
-from dependencies import get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin
+from dependencies import (
+    get_current_user,
+    get_authorized_agent,
+    get_owned_agent,
+    assert_owns_or_admin,
+    resolve_source_agent,
+)
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
+from services.model_catalog import InvalidModelError, validate_dispatch_model
 from services.capacity_manager import (
     CapacityFull,
     CircuitOpen,
@@ -22,7 +29,13 @@ from services.capacity_manager import (
 )
 from services import dispatch_admission_service
 from services import chat_execution_service
-from services.chat_signals import ChatAdmissionReplay, ChatDispatchError
+from services.chat_signals import (
+    ChatAdmissionReplay,
+    ChatDispatchError,
+    InterAgentDepthExceeded,
+)
+from services.chat_execution_service import ERROR_CODE_HEADER
+from services.execution_envelope import TaskExecutionErrorCode
 from database import db
 from utils.helpers import utc_now_iso
 
@@ -121,6 +134,22 @@ def _raise_circuit_open_503(agent_name: str, execution_id, exc: CircuitOpen) -> 
     )
 
 
+def _raise_depth_exceeded_403(exc: InterAgentDepthExceeded) -> NoReturn:
+    """Map a chain-depth refusal to its named 403 (#2806).
+
+    403, not 429 (the MCP client reads that as "busy, retry") and not 422
+    (invalid input on these routes). Safe as a 403 only because the
+    `get_authorized_agent` dependency has already answered the uniform 404, so
+    this can never disclose whether a target exists (Invariant #8). The named
+    body and header are what tell it apart from an access denial.
+    """
+    raise HTTPException(
+        status_code=403,
+        detail=exc.detail(),
+        headers={ERROR_CODE_HEADER: exc.detail()["error"]},
+    )
+
+
 @router.post("/{name}/chat")
 async def chat_with_agent(
     request: ChatMessageRequest,
@@ -143,15 +172,34 @@ async def chat_with_agent(
     in the capacity meter.
 
     Headers:
-    - X-Source-Agent: Set when one agent calls another (agent-to-agent)
+    - X-Source-Agent: Set when one agent calls another (agent-to-agent). Honoured
+      only for an agent-scoped key naming its own agent or the event loopback
+      (ent#614, `dependencies.resolve_source_agent`); any other principal → 403.
     - X-Via-MCP: Set for all MCP calls (both user and agent-scoped)
     """
+    # ent#614: resolve the raw X-Source-Agent header BEFORE anything reads it —
+    # the admission audit row, the capacity source, triggered_by, the
+    # collaboration activity/broadcast and the execution row all consume the
+    # value below. Rebinding makes the raw header unreachable past this line.
+    x_source_agent = resolve_source_agent(
+        current_user, x_source_agent, endpoint=f"/api/agents/{name}/chat"
+    )
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     if container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
+
+    # #2796: shape-check the caller-supplied model BEFORE the admission gate —
+    # `admit_chat_request` begins the idempotency claim, and a request refused
+    # after that point would burn the key (the RD11 upload-path quirk this
+    # deliberately does not repeat). Normalised in place so the execution row
+    # and the dispatch payload cannot disagree about the value.
+    try:
+        request.model = validate_dispatch_model(request.model)
+    except InvalidModelError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     # Admission gate (#1026 slice 1): idempotency (#525) + dispatch breaker
     # (#526) + capacity acquire (#428) live in dispatch_admission_service now
@@ -169,6 +217,8 @@ async def chat_with_agent(
             x_via_mcp=x_via_mcp,
             idempotency_key=idempotency_key,
         )
+    except InterAgentDepthExceeded as e:
+        _raise_depth_exceeded_403(e)
     except CircuitOpen as e:
         _raise_circuit_open_503(name, None, e)
     except EphemeralBudgetExhausted as e:
@@ -182,7 +232,12 @@ async def chat_with_agent(
                 "queue_length": e.depth or 0,
                 "retry_after": 30,
                 "message": f"Agent '{name}' is busy. Please try again later."
-            }
+            },
+            # #2919: an admission refusal is self-describing (the same 1:1
+            # header shape the ChatDispatchError branch below maps).
+            headers=chat_execution_service._error_code_headers(
+                TaskExecutionErrorCode.CAPACITY
+            ),
         )
     if isinstance(admission, ChatAdmissionReplay):
         if admission.in_flight:
@@ -221,6 +276,7 @@ async def chat_with_agent(
         chat_execution_id=chat_execution_id,
         capacity_result=capacity_result,
         queue_result=queue_result,
+        chain_depth=admission.chain_depth,
     )
     execution = ctx.execution
     task_execution_id = ctx.task_execution_id
@@ -298,6 +354,12 @@ async def execute_parallel_task(
     Note: Does NOT update conversation history or session state.
     Executions are saved to the database for history tracking.
     """
+    # ent#614: resolve the raw X-Source-Agent header first (rebind — see
+    # chat_with_agent). `derive_source_and_trigger`'s SELF-EXEC-001 check stays
+    # as belt-and-braces; it can no longer fire for a resolved value.
+    x_source_agent = resolve_source_agent(
+        current_user, x_source_agent, endpoint=f"/api/agents/{name}/task"
+    )
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -329,6 +391,8 @@ async def execute_parallel_task(
     # against their own user id; an agent-scoped key resolves to its owner and is
     # checked against the owner's id; admin bypasses (mirrors the Session tab). No
     # legitimate agent-to-agent path carries a resume id, so gating them costs nothing.
+    # (ent#614: `resolve_source_agent` at the top of this handler now refuses a
+    # human's header outright, so the value never reaches here — the keying stays.)
     #
     # Ownership is the real guard, so NO id-shape check is needed: a value that
     # matches a real row's claude_session_id is a system-generated id (a Claude
@@ -345,6 +409,15 @@ async def execute_parallel_task(
             name, rid, current_user.id
         ):
             raise HTTPException(status_code=404, detail="Session not found.")
+
+    # #2796: same gate as /chat, and it has to be here too — this is the route
+    # the Chat tab actually posts to, and its `model` reaches the runtime as a
+    # `--model` argv element by the same path. Normalised in place, exactly like
+    # the timeout below.
+    try:
+        request.model = validate_dispatch_model(request.model)
+    except InvalidModelError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     # #1068 (demotion PR 1): normalize the deprecated per-task timeout override once
     # here — in place, so every downstream site (acquire, execute_task, backlog
@@ -374,6 +447,8 @@ async def execute_parallel_task(
             x_event_trigger=x_event_trigger,
             x_internal_secret=x_internal_secret,
         )
+    except InterAgentDepthExceeded as e:
+        _raise_depth_exceeded_403(e)
     except ChatDispatchError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
     if isinstance(result, ChatAdmissionReplay):

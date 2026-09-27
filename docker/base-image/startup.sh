@@ -88,18 +88,70 @@ if [ -n "${GITHUB_PAT}" ]; then
     export GITHUB_TOKEN="${GITHUB_PAT}"
 fi
 
-# === Stale git lock reap (#1595) ===
+# === Stale git lock reap (#1595, announced #2742) ===
 # A SIGKILLed git process (orphan-sweep kill, container recreation mid-op)
 # leaves lock litter that silently wedges every later git op — a stale
 # index.lock froze agents for 12 days producing fake $0 successes. At
 # container start no git process is running, so any lock under .git is
 # definitionally stale.
+#
+# #2742: container start is the ONLY context in which "no process holds this
+# lock" is provable for free (the PID namespace is empty), which is why the
+# repair lives here and NOT in the running container — an unlink from a live
+# container races git's own rename-by-path and can promote another git's
+# in-flight file onto .git/index, a permanent 0-byte-index wedge that nothing
+# in Trinity clears. What was missing was only the OBSERVABLE half: this block
+# was `rm -f`, silent whether or not it removed anything, so the one moment the
+# platform reliably heals a wedge produced no evidence that it had. It now
+# tests-then-removes, says what it cleared (Vector captures the line), and drops
+# a marker the agent server folds into sync-state.last_lock_recovery.
 if [ -d /home/developer/.git ]; then
-    rm -f /home/developer/.git/index.lock \
-          /home/developer/.git/gc.pid \
-          /home/developer/.git/objects/maintenance.lock 2>/dev/null || true
-    find /home/developer/.git/refs /home/developer/.git/logs \
-        -name "*.lock" -type f -delete 2>/dev/null || true
+    TRINITY_REAPED_LOCKS=""
+    for _lock in /home/developer/.git/index.lock \
+                 /home/developer/.git/gc.pid \
+                 /home/developer/.git/objects/maintenance.lock; do
+        if [ -e "${_lock}" ]; then
+            rm -f "${_lock}" 2>/dev/null || true
+            echo "[startup] reaped stale git lock at container start: ${_lock}"
+            TRINITY_REAPED_LOCKS="${TRINITY_REAPED_LOCKS}${TRINITY_REAPED_LOCKS:+,}$(basename "${_lock}")"
+        fi
+    done
+
+    # Linked worktrees and submodules keep their own index under
+    # .git/worktrees/<name>/ and .git/modules/<name>/ (#2742). A lock there is
+    # reached by neither the ref/reflog find below nor the per-cycle reaper, so
+    # before this a submodule wedge survived every restart.
+    for _sub in /home/developer/.git/modules /home/developer/.git/worktrees; do
+        if [ -d "${_sub}" ]; then
+            _sub_locks=$(find "${_sub}" -name "index.lock" -type f 2>/dev/null | wc -l | tr -d ' ')
+            if [ "${_sub_locks:-0}" -gt 0 ]; then
+                find "${_sub}" -name "index.lock" -type f -delete 2>/dev/null || true
+                echo "[startup] reaped ${_sub_locks} stale index.lock under ${_sub}"
+                TRINITY_REAPED_LOCKS="${TRINITY_REAPED_LOCKS}${TRINITY_REAPED_LOCKS:+,}index.lock"
+            fi
+        fi
+    done
+
+    _ref_locks=$(find /home/developer/.git/refs /home/developer/.git/logs \
+        -name "*.lock" -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${_ref_locks:-0}" -gt 0 ]; then
+        find /home/developer/.git/refs /home/developer/.git/logs \
+            -name "*.lock" -type f -delete 2>/dev/null || true
+        echo "[startup] reaped ${_ref_locks} stale ref/reflog lock(s) at container start"
+    fi
+
+    # The marker is what carries the event off this container. The agent server
+    # folds it into sync-state.last_lock_recovery on the next status read, the
+    # backend poller logs it once, and an operator can finally see that a wedge
+    # existed and was cleared — instead of a silent `rm -f` and an agent whose
+    # commits mysteriously started working again.
+    if [ -n "${TRINITY_REAPED_LOCKS}" ]; then
+        mkdir -p /home/developer/.trinity 2>/dev/null || true
+        printf '{"at": "%s", "locks": "%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TRINITY_REAPED_LOCKS}" \
+            > /home/developer/.trinity/lock-recovery.json 2>/dev/null || true
+        echo "[startup] recorded git lock recovery: ${TRINITY_REAPED_LOCKS}"
+    fi
 fi
 
 # Initialize from GitHub repository if specified.
@@ -121,19 +173,72 @@ if [ -n "${GITHUB_REPO}" ]; then
     GIT_BASE_URL="${GIT_BASE_URL%/}"
     GIT_HOST_PATH="${GIT_BASE_URL#*://}"
     GIT_SCHEME="${GIT_BASE_URL%%://*}"
-    if [ -n "${GITHUB_PAT}" ]; then
-        CLONE_URL="${GIT_SCHEME}://oauth2:${GITHUB_PAT}@${GIT_HOST_PATH}/${GITHUB_REPO}.git"
-    else
-        CLONE_URL="${GIT_SCHEME}://${GIT_HOST_PATH}/${GITHUB_REPO}.git"
-    fi
+    # ent#615: ONE form, and it carries no credential. The PAT-bearing userinfo
+    # branch that used to sit here is what put the platform token in
+    # `.git/config` on the workspace volume and — because git expands the
+    # stored URL into `git-remote-https`'s argv — in the process table on every
+    # fetch and push, from where `ps` -> the orphan sweep's reaped-cmdline log
+    # -> Vector -> the logs API carried it into another agent's context.
+    # The credential now arrives per operation from the `trinity` credential
+    # helper, which git speaks to over stdin (see
+    # /usr/local/bin/git-credential-trinity).
+    CLONE_URL="${GIT_SCHEME}://${GIT_HOST_PATH}/${GITHUB_REPO}.git"
+    GIT_HOSTPORT="${GIT_HOST_PATH%%/*}"
+
+    # Does anything resolve a credential for our origin? EXIT CODE only:
+    # `git credential fill` PRINTS the credential on stdout, and this script's
+    # output is the container log.
+    credential_resolves() {
+        [ -x /usr/local/bin/git-credential-trinity ] || return 1
+        printf 'protocol=%s\nhost=%s\n\n' "${GIT_SCHEME}" "${GIT_HOSTPORT}" \
+            | git credential fill >/dev/null 2>&1
+    }
+
+    # ent#615/CRIT-2: NEVER strip a credential we have not already replaced.
+    #
+    # This rewrite used to be unconditional, which was safe only while the
+    # replacement URL also carried a token. It no longer does, and one class of
+    # agent has its ONLY credential inside that URL: `POST /{agent}/git/initialize`
+    # writes an `agent_git_config` row and pushes with the resolved — often
+    # global — platform PAT, but bakes no git env, persists no per-agent row and
+    # writes no `.env`. For that agent an unconditional rewrite is not a scrub,
+    # it is destruction of its last credential, at container start, before any
+    # backend sweep could harvest it.
+    retemplate_origin() {
+        _current=$(git remote get-url origin 2>/dev/null || echo "")
+        case "${_current}" in
+            *://*@*)
+                if [ -n "${GITHUB_PAT}" ] || credential_resolves; then
+                    git remote set-url origin "${CLONE_URL}"
+                else
+                    echo "TRINITY_GIT_CREDENTIAL_PRESERVED: origin carries the only credential this agent has - leaving the URL in place (ent#615)"
+                fi
+                ;;
+            *)
+                # No userinfo to lose: always safe, and this is the ent#123
+                # tokenless path unchanged.
+                git remote set-url origin "${CLONE_URL}" 2>/dev/null || \
+                    git remote add origin "${CLONE_URL}" 2>/dev/null || true
+                ;;
+        esac
+    }
 
     # ent#123: tokenless agents are pull-only. Blackhole the push URL so ANY
     # in-container `git push` (Claude turns, gh, skills) fails immediately
     # with a self-describing error instead of a cryptic anonymous-auth
     # failure an LLM will retry-loop on. With a PAT, clear any leftover
     # blackhole so a token added later restores pushes.
+    # ent#615 widened the gate from `GITHUB_PAT` to "a credential resolves".
+    # Deliberate and narrow: `credential_resolves` is true for exactly the
+    # sources the helper reads — `.env`, baked env, and the ent#615 harvest
+    # file, which only ever exists for an agent whose own remote URL already
+    # carried a push credential. An ent#123 tokenless agent resolves nothing
+    # and stays blackholed, which is the behaviour this function exists for.
+    # Writing `GITHUB_PAT` itself would have been a GRANT (startup.sh exports
+    # it as GH_TOKEN/GITHUB_TOKEN, authenticating the whole `gh` CLI and REST
+    # API) — which is why the harvest does not.
     configure_push_remote() {
-        if [ -n "${GITHUB_PAT}" ]; then
+        if [ -n "${GITHUB_PAT}" ] || credential_resolves; then
             git config --unset remote.origin.pushurl 2>/dev/null || true
         else
             git remote set-url --push origin \
@@ -154,13 +259,11 @@ if [ -n "${GITHUB_REPO}" ]; then
             cd /home/developer || exit 1
             CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
             echo "Current branch: ${CURRENT_BRANCH} (preserved from previous run)"
-            # Update remote URL with the current credentials (PAT may have
-            # rotated since last start). ent#123: unconditional — with no PAT
-            # the rewrite installs the credential-less URL, scrubbing a stale
-            # embedded token (the live-injected-PAT case is covered by the
-            # workspace .env fallback above, so a working credential is never
-            # clobbered).
-            git remote set-url origin "${CLONE_URL}"
+            # ent#615: conditional, per `retemplate_origin` above. A stale
+            # embedded token IS scrubbed on every restart — but only once
+            # something else can authenticate, so an agent whose origin URL is
+            # its only credential is never stranded.
+            retemplate_origin
             configure_push_remote
             # trinity-enterprise#93: keep the credential-less upstream remote
             # (template source) in place across restarts — self-healing if it
@@ -256,9 +359,10 @@ if [ -n "${GITHUB_REPO}" ]; then
                 echo "Working branch '${GIT_WORKING_BRANCH}' ready"
             fi
 
-            # Store git remote URL (with credentials when a PAT exists;
-            # credential-less + blackholed push for tokenless agents, ent#123)
-            git remote set-url origin "${CLONE_URL}"
+            # Store the git remote URL. ent#615: credential-less for every
+            # agent; blackholed push for tokenless ones (ent#123). A fresh
+            # clone has no userinfo to lose, so this is a no-op rewrite.
+            retemplate_origin
             configure_push_remote
 
             # trinity-enterprise#93: fork-to-own agents track the template

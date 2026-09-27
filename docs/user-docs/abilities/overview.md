@@ -38,13 +38,15 @@ claude plugin install create-agent@abilityai
 
 ## Available Plugins
 
-| Plugin | Skills | Purpose | Key Skills |
-|--------|--------|---------|------------|
-| [create-agent](create-agent-plugin.md) | 14 | Agent creation wizards | `/create-agent:prospector`, `/create-agent:custom` |
-| [agent-dev](agent-dev-plugin.md) | 25 | Extend existing agents, and work fleet-wide | `/agent-dev:create-playbook`, `/agent-dev:add-memory`, `/agent-dev:add-orchestrator`, `/agent-dev:add-canon`, `/agent-dev:agent-fleet-analysis` |
-| [trinity](trinity-plugin.md) | 7 | Deploy to and operate on Trinity | `/trinity:start-here`, `/trinity:connect`, `/trinity:onboard`, `/trinity:sync`, `/trinity:loop` |
-| [dev-methodology](dev-methodology-plugin.md) | 24 | Development workflow | `/dev-methodology:implement`, `/dev-methodology:validate-pr` |
-| [utilities](utilities-plugin.md) | 7 | Ops and productivity | `/utilities:safe-deploy`, `/utilities:docker-ops` |
+| Plugin | Version | Skills | Purpose | Key Skills |
+|--------|---------|--------|---------|------------|
+| [create-agent](create-agent-plugin.md) | 2.0.0 | 6 | Agent creation — interview-driven, any domain | `/create-agent:custom`, `/create-agent:review` |
+| [agent-dev](agent-dev-plugin.md) | 1.16.1 | 30 | Extend existing agents, and work fleet-wide | `/agent-dev:create-playbook`, `/agent-dev:add-memory`, `/agent-dev:add-project-management`, `/agent-dev:add-orchestrator`, `/agent-dev:add-canon`, `/agent-dev:agent-fleet-analysis` |
+| [trinity](trinity-plugin.md) | 2.9.0 | 7 | Deploy to and operate on Trinity | `/trinity:start-here`, `/trinity:connect`, `/trinity:onboard`, `/trinity:sync`, `/trinity:loop` |
+| [dev-methodology](dev-methodology-plugin.md) | 1.2.1 | 24 | Development workflow | `/dev-methodology:implement`, `/dev-methodology:validate-pr` |
+| [utilities](utilities-plugin.md) | 1.2.2 | 7 | Ops and productivity | `/utilities:safe-deploy`, `/utilities:docker-ops` |
+
+The standalone `add-project-management` plugin is deprecated — it is a pointer stub that installs nothing. Its skill lives in agent-dev: `/agent-dev:add-project-management`. Existing installs of the old name keep working for one release — switch, then uninstall it.
 
 ## The Agent Development Workflow
 
@@ -57,9 +59,9 @@ Abilities supports a four-step workflow:
                          /agent-dev:add-backlog                                     /create-agent:adjust
 ```
 
-**Scaffold** — Use a wizard like `/create-agent:prospector` or `/create-agent:custom` to get a fully configured agent.
+**Scaffold** — Run `/create-agent:custom` to get a fully configured agent for any domain (`/create-agent:website` scaffolds a site with no agent).
 
-**Develop** — Use `/agent-dev:create-playbook` to add capabilities, `/agent-dev:add-memory` for persistence.
+**Develop** — Use `/agent-dev:create-playbook` to add capabilities, `/agent-dev:add-memory` for persistence, and `/agent-dev:add-backlog` (the agent's own dev backlog) or `/agent-dev:add-project-management` (cross-actor projects) for task management.
 
 **Deploy** — Run `/trinity:connect` once to authenticate, push the agent's repo, then `/trinity:onboard` per agent — Trinity clones the repo and tracks the branch. An agent that is already deployed from a bare repo can be onboarded *in place* by running `/trinity:onboard` inside it.
 
@@ -67,7 +69,7 @@ Abilities supports a four-step workflow:
 
 ## What Wizard-Created Agents Include
 
-Every agent created with the wizards includes:
+Every agent created with `/create-agent:custom` includes:
 
 - **CLAUDE.md** — Identity and behavioral instructions
 - **Initial skills** — 2-4 playbooks based on agent purpose

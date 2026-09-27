@@ -25,11 +25,11 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 ## MCP Layer
 
 ### Tool registration
-- `src/mcp-server/src/server.ts:218` — `createLoopTools(client, requireApiKey)`
+- `src/mcp-server/src/server.ts` — `createLoopTools(client, requireApiKey)` in the tool-group list; registration runs every tool through `policyFor` (`src/mcp-server/src/access.ts`), which refuses a tool with no `TOOL_ACCESS_POLICY` row and wraps `enforce` rows in `withAgentAccess` before `withAudit`
 
 ### Tool definitions
 - `src/mcp-server/src/tools/loops.ts`
-- Permission model identical to `chat_with_agent`: owner/admin/shared on the agent, or explicit `agent_permissions` for agent-scoped MCP keys. Backend enforces — MCP tools surface a cleaner message for unscoped keys.
+- Permission model (trinity-enterprise#628 — verified, not assumed). Agent-scoped keys: `{self} ∪ permitted`, the same `agent_permissions` edge `chat_with_agent` enforces, decided at the MCP layer by `checkAgentEdge` (`src/mcp-server/src/access.ts`). `run_agent_loop` is gated at registration (its `TOOL_ACCESS_POLICY` row is `enforce:{param:"agent_name"}`), before the tool runs; a refusal is the chat reason verbatim, returned as `{success:false, error:"Access denied", reason, caller, target}`. `get_loop_status` / `stop_loop` are addressed by loop id, so they resolve the loop (`GET /api/loops/{id}`), gate on its `agent_name`, and on denial withhold the payload behind a compound uniform `Loop '<id>' not found or not accessible` (+ a `hint` for a revoked initiator) — naming the agent would tell the caller whose loop that is. `stop_loop` resolves BEFORE the POST; a failed resolve sends no stop and names the escape hatch. User-scoped keys pass through: the backend decides by role and per-user grant (owner/admin/shared), which this layer cannot see. **This is a tool-surface gate, not a capability boundary**: the REST routes resolve an agent key to its owner carrying the owner's role (Invariant #8), so `POST /api/agents/{sibling}/loops` from inside a container is not gated — trinity-enterprise#629 owns that question.
 - `run_agent_loop` accepts `message`, `max_runs` (1–100, required), optional `stop_signal`, `delay_seconds` (0–3600), `timeout_per_run` (10–7200), `max_duration_seconds` (1–604800 = 7d; optional wall-clock deadline, #1156), `max_cost_usd` (`>0`; optional per-loop USD budget, #1155), `no_progress_threshold` (int ≥0, `0` disables, default 3, `1` rejected via zod `.refine` mirroring the backend validator — doom-loop detection, #1157), `model`, `allowed_tools`. `agent_name` is required for user-scoped keys and defaults to the bound agent for agent-scoped keys.
 
 ### Client methods
@@ -129,6 +129,8 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 ## Testing
 **Prerequisites**: backend running; an agent the caller can access.
 
+**Automated**: journey J10 (`tests/journeys/test_j10_agent_calls_agent_journey.py`, #2349) starts a loop through the MCP `run_agent_loop` tool with an agent-scoped key (`max_runs=3`, `on_failure="continue"`, `no_progress_threshold=0`) and reads `stop_reason="max_runs_reached"`, `runs_completed=3` back from `GET /api/loops/{loop_id}`; `test_without_permission_an_agent_cannot_start_a_loop_on_another` asserts the refusal without an edge, and `test_without_permission_an_agent_cannot_read_or_stop_a_loop_on_another` asserts that a loop-id read/stop is refused after the edge is removed without naming the loop's agent, while the owner can still stop it (trinity-enterprise#628). Unit: `src/mcp-server/src/tools/loops.test.ts` drives all three tools through the real policy row and wrapper with a fake client and asserts the side-effecting call never happens on a denial; `src/mcp-server/src/access.test.ts` boots `createServer` against the real `TOOL_ACCESS_POLICY` (every tool has a row, every row names a tool).
+
 **Test Steps**:
 1. `POST /api/agents/{name}/loops` with `{"message": "step {{run}}", "max_runs": 3}` — returns 202 + `loop_id`.
 2. `GET /api/loops/{loop_id}` immediately — `status="running"` or `"queued"`.
@@ -142,7 +144,7 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 - `max_runs=101` → 422.
 - `max_duration_seconds` below the effective per-run timeout → 400; start a loop with a tight `max_duration_seconds` and verify it stops `stopped` / `deadline_exceeded` before `max_runs`.
 - `max_cost_usd=0` or negative → 422 (Pydantic `gt=0`); start a loop with a tiny `max_cost_usd` on a non-free model and verify it stops `stopped` / `budget_exhausted` before `max_runs`, with the panel showing spend / budget.
-- Loop on a non-accessible agent → 403.
+- Loop on a non-accessible agent: REST answers a uniform **404** (`get_authorized_agent`, #186); over MCP an agent key without an edge gets HTTP 200 with `{success:false, error:"Access denied", reason:"Permission denied: Agent '<A>' is not permitted to communicate with '<B>'…"}`; a loop-id read/stop after the edge is gone gets `{success:false, error:"Access denied", reason:"Loop '<id>' not found or not accessible", hint}`. Both refusals are audited as refusals (`success: false`, `denied: true`; the admin-only row carries the internal, agent-naming reason) — #2807.
 - Stop on already-completed loop → `{"status": "already_done"}`.
 - Backend restart mid-loop → next `GET /api/loops/{loop_id}` shows `status="interrupted"`.
 

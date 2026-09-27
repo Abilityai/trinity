@@ -1,0 +1,109 @@
+{
+  "version": "1.1",
+  "date": "2026-09-25",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": "8/10",
+  "branch": "feature/ent611-ask-object -> dev",
+  "issue": "abilityai/trinity-enterprise#611 (PR A of 2)",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 1,
+    "new_endpoint_detail": "GET /api/agents/{name}/operator-queue/{request_id} (self-readback, get_self_acting_agent)",
+    "changed_endpoints": "respond / cancel / bulk-cancel person-gated; cancel reason (<=500); bulk-cancel returns batch_id; Workspace asks list include_ended; Workspace answer person-gated (this audit)",
+    "new_tools": 1,
+    "new_tool_detail": "get_my_ask (self-acting, no agent parameter)",
+    "websocket": "+1 thin event (operator_queue_cancelled); operator_queue_responded thinned to {id, agent_name}",
+    "docker": "unchanged",
+    "dependencies": "unchanged",
+    "ci": "unchanged",
+    "migrations": 1,
+    "migration_detail": "12 nullable TEXT columns on operator_queue; both tracks; Alembic 0075 on 0074, single head"
+  },
+  "findings": [],
+  "fixed_during_audit": [
+    {
+      "id": "F1",
+      "severity": "MEDIUM",
+      "confidence": "8/10",
+      "status": "VERIFIED (independent verifier) — FIXED",
+      "category": "broken access control (person-only ending bypass)",
+      "title": "a system-scoped key could end an ask through the Workspace answer route, recorded as disposed_by='person'",
+      "file": "src/backend/client_portal/asks/router.py (answer_ask) + src/backend/client_portal/portal_auth.py (get_portal_principal)",
+      "exploit": "admin has an email and an ask is addressed to it: a prompt-injected trinity-system with its system key answers (approves) it via POST /api/enterprise/client-portal/asks/{id}/answer; the ledger and audit record a person",
+      "fix": "PortalPrincipal.is_person (True for a portal session; is_person_principal(user) on the platform path); the answer route refuses a non-person with the shared 403 person_required before reading the row; #2198 read breadth unchanged",
+      "tests": "tests/unit/test_ent611_ask_endings.py::TestWorkspaceAnswerIsPersonOnly"
+    }
+  ],
+  "appendix": [
+    "expiry wake is an uncapped agent-driven self-trigger — verifier PARTIAL (no worse than existing uncapped self-scheduling; max_parallel_tasks bounds both; opt-in) — demoted below the gate, registered as debt:2026-09-25-ent611-expiry-wake-uncapped-self-trigger",
+    "one pre-existing item outside this diff was referred to the private tracker"
+  ],
+  "supply_chain_summary": {
+    "python": "unchanged",
+    "node": "unchanged"
+  },
+  "filter_stats": {
+    "candidates": 10,
+    "verified": 1,
+    "partial_demoted": 1,
+    "refuted": 6,
+    "registered_residual": 1,
+    "out_of_scope_referred": 1,
+    "detail": [
+      "F1 system key ends an ask via the Workspace answer — VERIFIED MEDIUM, fixed in-branch",
+      "expiry wake uncapped self-trigger — PARTIAL, demoted, registered as debt",
+      "operator cancel reason into the agent's wake turn — refuted (author is a person with access; framed as data; <=500)",
+      "agent titles / request ids in the wake turn and Execution Context — refuted (the agent's own text; ids charset-limited)",
+      "self-readback enumeration — refuted (identity-first uniform 403; 404 only on the caller's own ids)",
+      "file entry forging channel/raised_by/ledger — refuted (keyword-only; hostile-entry test)",
+      "WS payload disclosure — refuted (thin {id, agent_name}; the old respond broadcast carried the answer and an email)",
+      "Workspace projection disclosure — refuted (coarse ended_by; never an email or the reason)",
+      "pre-existing person emails on queue reads to machine keys — registered residual (debt)",
+      "one pre-existing item outside this diff — referred privately"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "mutations": {
+    "applied": 7,
+    "red": 7,
+    "detail": [
+      "F1: Workspace answer refusal removed -> 1 red",
+      "F1: get_portal_principal never computes is_person -> 1 red",
+      "PR battery: answer CAS loser reaches the wake -> red",
+      "PR battery: bulk cancel hands observers the requested rows -> red",
+      "PR battery: wake drops the platform-alarm skip -> red",
+      "PR battery: get_my_ask uses a fixed agent -> red",
+      "PR battery: ent#467 allowlist entry removed -> red"
+    ]
+  },
+  "trend": {
+    "prior": "cso-diff-2026-09-24-ent689-readiness-gate",
+    "prior_findings": 0,
+    "this_findings": 0,
+    "found_and_fixed": 1,
+    "demoted_registered": 1,
+    "direction": "stable"
+  }
+}

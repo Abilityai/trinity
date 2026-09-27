@@ -311,13 +311,42 @@ def scan_skills_directory(skills_dir: Path) -> List[SkillInfo]:
         content = skill_md.read_text(encoding='utf-8')
         frontmatter = parse_yaml_frontmatter(content)
 
-        name = frontmatter.get('name', entry.name)
-        description = frontmatter.get('description') or extract_description_from_body(content)
+        # Each field is normalized on its own (#2850); a bad field drops to
+        # None and is warned once — the other fields survive.
+        name = _field(skill_md, 'name', ..., _coerce_optional_str) or entry.name
+        description = _field(skill_md, 'description', ..., _coerce_optional_str)
+        allowed_tools = _field(skill_md, 'allowed-tools', ..., normalize_allowed_tools)
+        argument_hint = _field(skill_md, 'argument-hint', ..., _coerce_argument_hint)
         # ... build SkillInfo ...
         skills.append(skill)
 
     return skills
 ```
+
+**Frontmatter normalization (#2850).** Fields are coerced one at a time, so the
+`SkillInfo` constructor cannot raise on frontmatter content; the outer `except`
+is a last resort for an unreadable file only. Before #2850 a single field
+Pydantic rejected — a comma-separated `allowed-tools`, the form Claude Code
+documents and the marketplace wizards scaffold — sent the whole record through
+that fallback with only its directory name, so every such skill rendered
+"No description available" in the Playbooks tab, the `/` popup and the chat
+empty state, and the warning re-fired on every request.
+
+| Field | Accepted forms | Result |
+|-------|----------------|--------|
+| `allowed-tools` | `Read, Bash, Bash(git:*)` (Claude Code's canonical string) or `[Read, Bash]` (YAML list) | Both yield the same `List[str]`. The string is split on commas at group nesting depth 0 by a linear scan — `Bash(npm run lint, npm test)` stays one entry. Groups `()[]{}` are tracked, quotes are not (an apostrophe in shell text like `Bash(echo it's)` must not drop the field). Absent / empty → `null` (unrestricted). A bool (`yes`, also as a list item), a mapping, a number, or an unbalanced group → field skipped. **Display metadata only** — nothing enforces this list; run restrictions come from schedule / loop / task config. |
+| `description`, `automation` | string; YAML 1.1 scalars (`2026-01-01`, `42`, `yes`) become their string form | a list or mapping → field skipped |
+| `argument-hint` | string; `[file]` / `[a, b]` (Claude Code's documented idiom parses as a YAML list) is restored to the bracketed string; `[]` → `null` | nested collection → field skipped |
+| `user-invocable` | bool or `"true"/"yes"/"1"` string | unchanged |
+
+A skipped field is logged at WARNING **once** per `(file, field, value)` — the
+module-level `_SKIPPED_FIELD_WARNED` ledger — then at DEBUG; a value that is
+fixed and later re-broken is reported again. `path` falls back to the absolute
+path when the file is outside `/home/developer` instead of raising.
+
+The scanner ships in the **agent base image**: an existing instance sees the fix
+only after `./scripts/deploy/build-base-image.sh` and an agent recreate (the
+#2213 release-note trap).
 
 ---
 
@@ -347,6 +376,8 @@ def scan_skills_directory(skills_dir: Path) -> List[SkillInfo]:
 | Connection failed | 503 | "Could not connect to agent" | `agents.py:548` |
 | Agent error | varies | "Agent returned error: {text}" | `agents.py:542` |
 | Skill not invocable | N/A | Button disabled in UI | `PlaybooksPanel.vue:101` |
+| Malformed frontmatter field | N/A | That field is `null`, the rest of the record is kept; one WARNING per (file, field, value) | `skills.py::_field` / `_report_skipped_field` (#2850) |
+| Unreadable `SKILL.md` | N/A | Name-only record (directory name), one WARNING | `skills.py::scan_skills_directory` last-resort `except` |
 
 ---
 
@@ -471,6 +502,13 @@ cd tests && source .venv/bin/activate && pytest test_playbooks.py -v
 
 **Note**: Agent-requiring tests will skip gracefully if the agent base image hasn't been rebuilt with `skills.py` router.
 
+**Scanner unit tests** (no container): `tests/unit/test_2850_skill_allowed_tools_forms.py`
+runs the real `scan_skills_directory` against `tmp_path` fixtures via the
+`agent_server` namespace shim in `tests/unit/conftest.py` — string vs list
+`allowed-tools` parity (including `Bash(git:*)`), the `normalize_allowed_tools`
+table, one-bad-field-keeps-the-rest, bracket-form argument hints, YAML 1.1
+scalars, and warn-once across repeated scans.
+
 ---
 
 ## Related Flows
@@ -488,5 +526,6 @@ cd tests && source .venv/bin/activate && pytest test_playbooks.py -v
 
 | Date | Changes |
 |------|---------|
+| 2026-09-16 | #2850: per-field frontmatter normalization — comma-separated `allowed-tools` accepted, one bad field no longer nulls the record, warn-once; scanner unit tests |
 | 2026-02-27 | Added Testing section with test_playbooks.py coverage |
 | 2026-02-27 | Initial implementation (PLAYBOOK-001) - Full vertical slice documentation |

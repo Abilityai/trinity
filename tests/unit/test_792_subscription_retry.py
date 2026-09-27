@@ -268,20 +268,33 @@ def test_678_interplay_both_retries_fire():
 
 
 def test_retry_timeout_bounded():
-    """The post-switch retry timeout is capped (≤ _AUTO_RETRY_MAX_TIMEOUT_S and
-    > 0) against the remaining budget, not flat +_AUTO_RETRY_MAX_TIMEOUT_S
-    (Codex #9)."""
-    from services.task_execution_service import _AUTO_RETRY_MAX_TIMEOUT_S
+    """The post-switch retry timeout is bounded by the turn's REMAINING budget,
+    not flat +budget on top of it (Codex #9).
 
+    RE-ANCHORED by #2789. This asserted `<= _AUTO_RETRY_MAX_TIMEOUT_S` while
+    running at `timeout_seconds=300`, where that ceiling and the remaining
+    budget are numerically the same — so it passed for the wrong reason and
+    pinned the bug in place: the reader-race ceiling was silently clamping
+    every SUB-003 retry, and at any larger timeout it is the ceiling, not the
+    remaining budget, that binds. The bound asserted here is now the one that
+    is actually load-bearing — first attempt + retry may not exceed what the
+    operator configured — stated against the turn's own numbers so it cannot
+    agree with the ceiling by coincidence again.
+    """
     _result, ctx = _run(
         responses=[_resp_429(), _resp_200()],
         switch_result={"switched": True, "new_subscription": "sub-b"},
         timeout_seconds=300,
     )
 
+    from services.task_execution_service import _AGENT_HTTP_SLACK_S
+
     assert ctx.agent_call_count == 2
     retry_timeout = ctx.timeouts[1]
-    assert 0 < retry_timeout <= _AUTO_RETRY_MAX_TIMEOUT_S
+    # `execute_task` dispatches with `timeout_seconds + _AGENT_HTTP_SLACK_S`;
+    # the retry gets whatever of that is left after the first attempt. The
+    # constant, not a literal 10 — the PR replaced that literal everywhere else.
+    assert 0 < retry_timeout <= 300 + _AGENT_HTTP_SLACK_S
 
 
 def test_non_switch_failure_no_retry():

@@ -14,11 +14,11 @@ Connect agents to Slack workspaces. Supports DMs, @mentions in channels, multi-a
 
 ### Platform Setup (Admin -- Settings Page)
 
-1. Go to **Settings > Slack** section.
-2. Enter your Slack App Token (`xapp-...`) for Socket Mode.
-3. Click **Connect** to start the Socket Mode transport.
-4. Click **Install to Workspace** to perform platform-level OAuth and obtain a bot token.
-5. The connection status badge shows connected or disconnected.
+1. Create a Slack app at [api.slack.com/apps](https://api.slack.com/apps). Give it the bot token scopes `im:history`, `im:read`, `im:write`, `chat:write`, `chat:write.customize`, `users:read.email`, `app_mentions:read`, `channels:read`, `channels:manage` and `reactions:write`; subscribe it to the `message.im` and `app_mention` events; enable **Socket Mode** and create an app-level token with `connections:write`; and add `https://your-domain.com/api/public/slack/oauth/callback` as an OAuth redirect URL. The same checklist is shown inline in Settings.
+2. Go to **Settings → Integrations** and find the **Slack Integration** section.
+3. Under **OAuth Credentials**, enter the app's **Client ID**, **Client Secret** and **Signing Secret** and click **Save Credentials**. The client secret, signing secret and app token are stored encrypted at rest (see [Credential Management](../credentials/credential-management.md#platform-level-credentials)).
+4. Under **Transport Connection**, paste the app-level token (`xapp-...`) and click **Connect** to start the Socket Mode transport. The badge shows **Socket Mode**, **Webhook** or **Disconnected**.
+5. Click **Install to Workspace** (**Reinstall to Workspace** once a workspace is connected) to complete the platform-level OAuth and obtain the bot token. Then bind agents to channels from each agent's Sharing tab.
 
 ### Per-Agent Channel Binding (Agent Sharing Tab)
 
@@ -114,7 +114,7 @@ Message body cap: 4,000 characters. Read or update the caps via `GET /api/settin
 | Execution timeout | 120 seconds |
 | Allowed tools | WebSearch, WebFetch |
 
-Rate limit and timeout values are configurable via settings (`channel_rate_limit_max`, `channel_rate_limit_window`).
+Rate limit and tool values are configurable via settings (`channel_rate_limit_max`, `channel_rate_limit_window`, `channel_allowed_tools`); `Read` is added automatically when the message carries readable files.
 
 ## For Agents
 

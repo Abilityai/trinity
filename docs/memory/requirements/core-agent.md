@@ -134,7 +134,7 @@
 - **Second-order effect on the Trinity repo itself**: a `.gitignore` inside `config/agent-templates/<name>/` also governs **this** repository's view of that directory. A future template author adding `<name>/content/sample.md`, `<name>/notes.log`, `<name>/data.db` or a `*.local.md` file will find `git add` silently skipping it. Use `git add -f`, or (better) don't ship files matching the canonical list from a template. Verified at introduction: no tracked or untracked file under `config/agent-templates/` became newly ignored.
 - **Shipping committed `.trinity/` hooks**: the canonical list excludes `.trinity/` wholesale. A template that ships a *committed* `.trinity/` hook (a `pre-check`, #454; Brain-Orb hooks, trinity-enterprise#76) must instead use the `.trinity/*` + `!.trinity/<dir>/` form — `S-005` accepts the star form for exactly this reason. No bundled template needs this today.
 - **Enforcement**: `tests/unit/test_1908_bundled_template_gitignore.py`, run in the `backend-unit-test` per-PR workflow. It is both the guard and the **regenerator** (`python tests/unit/test_1908_bundled_template_gitignore.py --regenerate`), so a new `_GITIGNORE_PATTERNS` entry is a one-command change however many templates are guarded. The guard evaluates the real `static_checks.run_static` (never a re-implementation of the rules), names its coverage in a `GUARDED_TEMPLATES` constant, fails if a **new visible** template is added outside that set, and applies one universal assertion (`G-001`) to **every** bundled directory, hidden included.
-- **Known gap**: `T-004`/`T-005` (`resources.cpu`/`resources.memory` in `template.yaml`) still fail for the three starters, so those report 2 HARD findings rather than 0 (the 11 `dd-*` reach 0 — they already pin `resources`). Pinning `resources` in a bundled template is an existing catalog convention, but it *overrides* the admin's fleet-wide default (RES-001, `PUT /api/settings/agent-defaults/resources`) — so whether the default starters should pin or inherit is a **product decision**, and arguably these two checks should `skip` rather than `fail` when a template deliberately inherits. Tracked as a follow-up; the guard waives exactly those two ids and fails if the waiver goes stale.
+- **Resource declaration is optional, and the checks say so (#2899)**: `T-004`/`T-005` PASS on an absent `resources` block — the agent inherits the admin's fleet-wide default (RES-001), which is what all three starters and `local:default` rely on, and a template-level block would override both that default and the values a manifest or API caller asked for. A DECLARED value is validated by the create path's own `normalize_cpu`/`normalize_memory`, so the check can never call a deployable template must-fix nor pass a value creation rejects (T-005's old regex accepted `512m`, which `normalize_memory` 400s). A non-mapping `resources:` fails T-004 and skips T-005 — one malformed block, one finding. The guard's `_KNOWN_FAILING_CHECKS` waiver is consequently EMPTY: every visible bundled template now passes every HARD static check, with nothing exempt. The same value sets are enforced on the admin default itself — the dedicated `PUT /api/settings/agent-defaults/resources` validates, and the generic `PUT /api/settings/{key}` catch-all now refuses `agent_default_cpu`/`agent_default_memory`, because an unvalidated default is read at create time and 400s every agent that relies on it (`tests/unit/test_2899_resource_defaults_blocklist.py`).
 - **Not retroactive**: `startup.sh` copies `/template` only when `/home/developer/.trinity-initialized` is absent, so agents already created keep their existing `.gitignore`. They are served by the per-agent auto-fix (`POST /api/agents/{name}/compatibility/fix`) and the sync-time merge.
 
 ### 4.1.2 Deploy-Local Integrity Contract (#2060)
@@ -368,7 +368,9 @@
   - The JSONL reaper keep-set is the **union** of `agent_sessions` and
     `enterprise_portal_sessions` cached UUIDs. Without the union the 6h sweep
     deletes live Workspace JSONLs one hour after they are written, and continuity
-    breaks with no error anywhere
+    breaks with no error anywhere. Open rooms (#2610) and the agent's own
+    `/api/chat` session, read from its marker file (#2958, §5.38), are the third
+    and fourth sources
   - `?tab=session` and legacy session deep links redirect to
     `/workspace?agent=<name>`, query-preserving, and deliberately **same-tab**
     (a URL rewrite of an in-flight navigation, not an entry point); the two
@@ -852,6 +854,8 @@ is existing output gaining an audience.
 - **FR-7 — Files**: file scoping is unchanged in this pass, as the issue directs — the
   per-agent inbox boundary stays where it is (it is where the last two portal security
   bugs lived). Shared files therefore keep listing per agent and are not yet addressable.
+  *(Closed by trinity-enterprise#549: a shared file now has an addressee — see
+  `content-files.md` §13.10.)*
 - **FR-8 — Ratings deferred**: AC #6 asks deliverable cards to carry the rating
   affordance from trinity-enterprise#366, which is not built. The card is the surface it
   will attach to; nothing here pre-empts its shape.
@@ -1180,14 +1184,35 @@ already holds.
   unaddressed report stays operator-only. The audience is a validated column,
   never a key inside `blocks`, for the ent#364 reason: `blocks` is agent-authored
   and a prompt-injected agent must not be able to decide who reads it.
-- **FR-5 — Staleness is derived, not a clock** (AC 7): the canvas always renders
-  `updated_at`, and is marked **may be out of date** when the agent has had a
-  terminal execution *after* the canvas was last written — i.e. it did work and
-  did not refresh this surface. An arbitrary age threshold was rejected: a canvas
-  has no inherent freshness expectation, so a clock would either cry wolf on a
-  monthly report or stay silent on a minute-by-minute one, whereas "the agent has
-  run since" is a fact about *this* canvas. `updated_by_execution_id` records
-  which run wrote it, so the claim is checkable.
+- **FR-5 — Freshness is two facts, never a verdict** (AC 7, rewritten by #2734):
+  the canvas header renders **two facts, both unconditional** — when the canvas
+  was last written (`updated_at`) and when the agent last finished a run
+  (`agent_last_run_at`, from the same one-per-agent `last_completed_execution_at`
+  read) — and Trinity derives **no verdict** from them:
+  `Updated 2h ago · agent last ran 40m ago`. An arbitrary age threshold was
+  rejected: a canvas has no inherent freshness expectation, so a clock would
+  either cry wolf on a monthly report or stay silent on a minute-by-minute one,
+  whereas "the agent has run since" is a fact about *this* canvas. The same
+  argument retires the derived verdict one step further: *"the agent has run
+  since"* could not know what a given canvas is for either, and it fired on the
+  **writing run's own output** — a run completes *after* it writes, and the
+  evidence that would exclude it (`updated_by_execution_id`) is optional and
+  absent on most live canvases — so the mark contradicted the timestamp beside
+  it (*"Updated just now"* next to *"may be out of date"*) and taught the reader
+  to ignore it. Two facts measured against one clock cannot contradict each
+  other, and the reader draws the conclusion the heuristic could not.
+  `updated_by_execution_id` still records which run wrote a canvas, so the
+  provenance stays checkable (#2577 consumes it).
+  **The second fact is omissible and is never narrated**: `agent_last_run_at` is
+  null both when the agent has never finished a run and when that read failed,
+  and the payload cannot tell those apart — so the header *omits* the fact
+  rather than saying "has not run yet", because narrating a read failure as an
+  absence claim is the design-system contract's stale-banner rule read at field
+  scope. The derived `stale` boolean stays on the payload, computed exactly as
+  before, and the header renders nothing from it — retained unchanged rather
+  than endorsed,
+  because it keeps the derivation recoverable and removing it would change an
+  agent-visible MCP response shape.
 - **FR-6 — Writes are self-gated, bounded, and provenance-stamped**: the write
   routes take `AuthorizedAgentByName` **plus** the #918 self-check
   (`current_user.agent_name == name` for an agent-scoped key), so a sibling agent
@@ -1209,9 +1234,14 @@ already holds.
   be the §5.11 blank-panel defect.
 - **Cascade + retention**: `agent_canvases` is registered in `AGENT_REFS`
   (CASCADE) so rename re-keys and the #834 hard purge wipes it — CI-blocking via
-  `test_agent_cleanup_parity`. Deliberately **no** retention window: a canvas is
-  bounded by construction (one row per `(agent, canvas_id)`, replaced on write),
-  unlike the append-only tables `RETENTION_OPS_KEYS` governs.
+  `test_agent_cleanup_parity`. Deliberately **no** retention window — but not
+  for the reason first recorded here. ent#438 wrote "bounded by construction
+  (one row per `(agent, canvas_id)`, replaced on write)", which bounds rows
+  *per canvas* while `canvas_id` is agent-chosen, so the *count* was unbounded;
+  the axis was missed, not decided. The bound is now a **per-agent cap** that
+  refuses and never evicts (FR-20, trinity-enterprise#553), and
+  `agent_canvases` stays out of `RETENTION_OPS_KEYS` for a stated reason:
+  deleting a person's surfaces on a timer is the #1638 failure direction.
 - **Migrations**: dual-track — `db/migrations.py::agent_canvases_table` + Alembic
   `0050_agent_canvases`. The #536 widening changes no DDL (ids and kinds live
   in the `blocks` JSON), so it carries no migration.
@@ -1339,6 +1369,79 @@ well, and the agent never touches CSS.
   requested. Tailwind utilities remain reachable from chat/report markdown
   (the class allowlist is canvas-only here) — follow-up issue.
 
+**Canvas lifecycle — delete, pin, search and a stated bound (trinity-enterprise#553, 2026-09-11)**
+— an agent that uses its canvas as intended accumulates dozens: one per report,
+per topic, per run. Before this the Workspace could only ever *add* to that
+pile: no delete on the client-portal surface at all, one ordering, and nothing
+bounding the table. OSS-core (Workspace rule above). Flow:
+[agent-canvas.md → Lifecycle](../feature-flows/agent-canvas.md#lifecycle--removing-pinning-and-living-with-a-lot-of-them-ent553).
+
+- **FR-18 — Deleting is owner-or-admin, and a non-owner sees no control** (AC
+  1, 2): the answer ent#548 gives for files. Both surfaces resolve it through
+  `db.can_user_share_agent` — the *same* predicate `dependencies.assert_agent_owner`
+  uses — so Agent Detail and the Workspace cannot disagree about who owns an
+  agent; the Workspace learns it from `PortalAgentCard.can_manage_canvases`,
+  the portal's only capability channel (#2128), which **fails closed** (an
+  external client, and any card predating the field, gets a read-only panel).
+  This *narrowed* the platform DELETE route, which accepted any user with
+  agent access; safe because no UI called it. A canvas is one shared surface
+  with no per-user copy, so there is no "hide it from my list" middle ground
+  to offer. Agents keep clearing their own (`clear_canvas`, the #918
+  self-gate). Every human delete and pin — operator *and* Workspace — writes an
+  audit row under the acting **user** (ids and counts only, G-04); the
+  Workspace rows are attributed through the resolved `users` row, never
+  email-only, because `_resolve_actor` derives `actor_type` from the user and
+  an email-only call lands as `system`/`trinity-system`.
+- **FR-19 — Bulk delete names its count and reports what existed** (AC 3):
+  `POST .../canvas/bulk-delete` on both surfaces — a POST, not a body-carrying
+  DELETE (bodies on DELETE are permitted-but-unreliable and this one is not
+  optional) — declared above the parameterized routes (Invariant #4). One
+  confirmation naming the count; the result lists the ids that *existed*, not
+  the ids requested, so "3 of 5 removed" is sayable. Deliberately **not** an
+  MCP tool (an agent's bulk-delete is `clear_canvas` per id).
+- **FR-20 — A stated per-agent cap that refuses and never evicts** (AC 6):
+  `CANVAS_MAX_PER_AGENT` (default 100; env-tunable, wired into all three
+  compose files + `.env.example` — an unwired lever is the #1039/#1056 class)
+  is checked **inside `upsert_canvas`'s INSERT branch, in the same transaction
+  as the INSERT**, so it is not a check-then-act race. Updating is never
+  refused (the check is on INSERT only — a cap that froze updates would punish
+  exactly the well-behaved agent that reuses ids); at the cap the agent gets a
+  named **409** telling it to retire one. The ceiling reaches the client as
+  `canvas_max_per_agent` on `GET /api/settings/feature-flags` (a constant, so
+  the flag surface where non-boolean UI values already live — no new route,
+  and `List[CanvasSummary]` stays a bare array for the MCP tool), and
+  `CanvasPanel` warns *before* the refusal (`canvasHeadroom`), since the
+  person who can act on the bound is not the one who receives the 409. `0` =
+  "not told", renders nothing, so an older backend behaves as before.
+- **FR-21 — Pin is the reader's decision, never the agent's** (AC 5):
+  `agent_canvases.pinned` (dual-track: `agent_canvases_pinned` + Alembic
+  `0059_agent_canvases_pinned`, NOT NULL DEFAULT 0, no backfill) is written
+  only by the human pin route (owner-or-admin, audited) and is absent from
+  every agent-facing tool, pinned by a test. `audience` is the agent's decision
+  about who may *read*; `pinned` is the reader's about what they see *first*,
+  and an agent that could pin itself to the top would defeat the ordering. A
+  pin survives the agent rewriting the canvas. Order is pinned-first then
+  newest-updated, in the SQL **and** in `canvasUtils.sortCanvases` — the client
+  re-derives it because an optimistic pin or delete mutates the list in place.
+- **FR-22 — Living with many** (AC 4): `CanvasPanel.vue`, shared by Agent
+  Detail and the Workspace rail (one rendering layer, ent#475): search over
+  title and id once the list passes six, a height-bounded scrolling strip so a
+  long list does not cost the rail its other tabs, and an opt-in Manage mode
+  (age, stale mark, pin toggle, delete, bulk bar). Decidable rules are pure in
+  `canvasUtils.js` (`sortCanvases`, `filterCanvases`, `selectionState`,
+  `bulkDeletePrompt`, `bulkDeleteOutcome`, `canvasHeadroom`,
+  `canvasSelectorVisible`, `canvasAutoSelect`, `canvasSearchVisible`) —
+  vitest runs `environment: 'node'`, so a rule inside the SFC is one no test
+  can reach; `canvasPanelSelectorGate.spec.js` slices the SFC's gate
+  expressions out and **runs** them. Two rules exist because a search is
+  state the list can change under: with a query typed, a single hit still
+  shows its chip and becomes the selection (the old `visible > 1` gate hid it
+  with the previous canvas still on screen), and the search box **outlives a
+  shrink below the threshold** while a query is active — `query` has exactly
+  one writer, the box's `v-model`, so a count-gated box unmounting after a
+  delete (or the agent's own `clear_canvas` plus a rail refresh) left the
+  panel filtering on text nobody could see or clear.
+
 ### 5.19 Workspace conversation rail — the shell (trinity-enterprise#474, slice 1 of #472)
 
 - **Status**: ✅ Implemented (shell) · **ID**: `WORKSPACE_RAIL_SHELL`
@@ -1399,6 +1502,30 @@ well, and the agent never touches CSS.
 - **AC-8 — the empty state teaches**: "Nothing running right now" + **See what
   you can ask** — scrolls to the briefing hints when they are on screen, else
   opens the agent page's "what it can do".
+- **AC-9 — the body's scrollbar is thin and hidden at rest
+  (trinity-enterprise#608)**: the rail's one scroll axis wears the
+  overlay-scrollbar convention of editor panels — a ~6px rounded thumb on a
+  transparent track, invisible until the pointer is over the scroll region,
+  focus is inside it, or the body is scrolling (`:hover` / `:focus-within` /
+  an `is-scrolling` class held ~800ms past the last `scroll` event), fading
+  rather than popping. The scroll arm is not optional on macOS: in the default
+  "show scroll bars: automatically" mode the platform never reveals an overlay
+  bar on hover, only during scrolling — and with the rest colour transparent
+  it would otherwise show nothing, ever.
+  Reveal changes the thumb's colour ONLY — never `display`, `width`,
+  `scrollbar-width` or `overflow` — so content wraps byte-identically hovered
+  or not; the thin bar keeps its gutter in classic-scrollbar mode by design.
+  The affordance is hidden, the capability is not (wheel, trackpad, touch and
+  focus-into-view all work at rest — the #1789 bar). Both engines, one look:
+  the standard `scrollbar-width: thin` + `scrollbar-color` pair (Firefox,
+  Chromium ≥121, where it also disables the `::-webkit-scrollbar` rules) and the
+  WebKit pseudo-elements for Safari. The thumb is the tertiary ink of each
+  theme (gray-500 light / gray-400 dark) at reduced alpha, stronger under the
+  pointer; `sm:`-and-up only, so the mobile sheet keeps its native overlay
+  bars. Scoped to `PortalRail.vue` — the global `.dark ::-webkit-scrollbar`
+  rule in `style.css` is untouched; the sidebar list and the conversation
+  transcript are a follow-up once the feel is confirmed. Gated on a human feel
+  check on the running instance before the PR.
 - **Not in this slice (recorded on the issue)**: the Work tab's content
   (#457), re-homing Loops / Canvas / Files (#472's second child), the sidebar /
   thread tab strip / top band / Agent-details panel / drop target of the
@@ -1774,6 +1901,19 @@ well, and the agent never touches CSS.
 - **Description**: Agents communicate via Trinity MCP with agent-scoped API keys
 - **Flow**: `docs/memory/feature-flows/agent-to-agent-collaboration.md`
 
+#### 9.1.1 Chain-depth guard (#2806)
+- **Status**: ✅ Implemented (2026-09-22)
+- **Problem**: nothing marked an agent-to-agent call as part of a chain, so two agents allowed to call each other could bounce a call A→B→A→B… until an incidental limit (per-hop timeout, parallel slots, the agent-call limiter's deadlock timeout) happened to stop it. Rooms had a cap (`ROOM_MAX_CHAIN_DEPTH = 8`); chat had none.
+- **Depth semantics**: every execution row carries `schedule_executions.chain_depth` (INTEGER, NULL read as 0). A call made by a **non-agent principal** (human JWT, user-scoped key, connector, portal delegate, event loopback) is a root: its child row is depth 0 and stored NULL. A call made by an **agent principal** (an agent-scoped key, keyed on `current_user.agent_name`; a `scope=system` key counts as caller `trinity-system`) stamps its child `1 + MAX(chain_depth)` over the **calling agent's `status='running'` rows** (0 when it has none). The raw `X-Source-Agent` header and the model-typed `parent_execution_id` play no part, so an agent cannot strip the guard by omitting either. Taking the max fails toward over-refusal, never under-refusal.
+- **Limit**: ops setting `inter_agent_max_chain_depth`, **default 8, validated 1–32**, resolved `system_settings` row → env `INTER_AGENT_MAX_CHAIN_DEPTH` → default, and changed with `PUT /api/settings/ops/config` (API + env only; no Settings UI field). A child at depth ≤ max runs; **max + 1 is the first refused**. The floor of 1 means no value can refuse a direct agent→agent call. The value is read per call and clamped to [1, 32] on use; an unreadable or non-integer stored value falls back to 8 with a warning and never fails the dispatch.
+- **Covered paths**: `POST /api/agents/{name}/chat` (MCP `chat_with_agent` sequential and every `chat_with_<slug>` tool), `POST /api/agents/{name}/task` (parallel, self-task and the #946 pull-routed sequential path), `POST /api/agents/{name}/fan-out`, and raw REST on those three routes with an agent-scoped key. Fan-out subtasks carry the depth captured at request time.
+- **Refusal contract**: HTTP **403**, `detail = {"error": "inter_agent_depth_exceeded", "depth", "max_depth", "caller", "target", "message"}`, header `X-Trinity-Error-Code: inter_agent_depth_exceeded`. The check runs **after** the uniform-404 target-access dependency (so it never discloses whether a target exists, Invariant #8) and **before** the idempotency claim, capacity acquire and row insert (Invariant #18), so a refused hop burns no key, holds no slot, starts no model work and **creates no execution row**. The message tells the calling model not to retry or re-route.
+- **Recording**: a platform audit row (`event_type=execution`, `event_action=inter_agent_depth_exceeded`) and an `agent_collaboration` activity on the **caller**, opened and closed FAILED with the code. Both are best-effort; the refusal is raised whether or not they are written.
+- **MCP**: `chat_with_agent` (all branches) and `fan_out` return a structured `{"status": "inter_agent_depth_exceeded", "retryable": false, ...}` result instead of throwing `API error (403)` (see `requirements/mcp.md`).
+- **Named residuals** (the guarantee holds for a call made with an agent-scoped credential while the calling agent has a running execution): **(a)** a non-agent credential held by an agent (a hand-pasted user-scoped key, detected by #1854) resolves to the human owner and counts as a root; **(b)** agent-key calls with no running row (a web-terminal session, a spawned background process, an orphan after its row went terminal) count as depth 1, or max+1 over any other running rows. An exact parent link needs a platform-injected execution id (#2392).
+- **Deferred**: loops (`run_agent_loop`), schedule trigger (`trigger_schedule`) and agent-emitted events each start a new root at depth 0 and so do not inherit depth yet — follow-up #2973. A2A cross-instance chains are the peer's to bound.
+- **Tests**: `tests/unit/test_2806_inter_agent_depth.py`; keyed end-to-end `tests/journeys/test_j10_agent_calls_agent_journey.py::test_two_agents_cannot_bounce_a_call_between_each_other_forever`; invariant IA-04 in `docs/testing/orchestration-invariant-catalog.md`.
+
 ### 9.2 Agent Permissions
 - **Status**: ✅ Implemented (2025-12-10, Updated 2026-02-19)
 - **Description**: Explicit permission model controlling which agents can call which
@@ -1821,7 +1961,7 @@ well, and the agent never touches CSS.
 - **Status**: ✅ Implemented (2026-07-30)
 - **Description**: Third dashboard mode **List** (Timeline / Grid / List) that replaces the standalone Agents page — the dashboard is the single canonical fleet surface. The Agents page's row list (three responsive layouts, per-row toggles, bulk tag ops, filters, empty states) is extracted into `components/AgentListPanel.vue`, mounted through the existing view-mode machinery (`VIEW_MODES` + `localStorage['trinity-dashboard-view']` — selection persists per user like the other modes). `views/Agents.vue` is deleted.
 - **Key Features**:
-  - **Full Agents-page parity** (28-item inventory audited, zero silent losses): name search (slug + display label, #1642) and status filter live in the List toolbar under NEW persisted keys `trinity-dashboard-list-filter-name` / `-status` (a clean break — the old page-scoped `trinity-agents-filter-*` keys are no longer read); sort dropdown bound to `agentsStore.sortBy` with the comparator extracted to `utils/agentSort.js` (system rows pinned first; `success_desc` gains a no-data-to-bottom tiebreak); row checkboxes + sticky bulk toolbar with bulk Add/Remove Tag; avatar-half-out rows with SYSTEM/GHOST/Shared badges in the name cell and the subscription-pressure badge plus a **non-default-runtime** badge on the row's secondary line beside the slug, activity + sync-health dots, success-rate bar, exec/schedule stats, CapacityMeter (#2358 — at `lg` the header and every row are items of ONE CSS grid (subgrid), so columns resolve in one sizing context, and the label leads with the slug following as selectable secondary text per §1.3.1 FR-4); filtered-empty ("No matching agents" + Clear all) and chassis-level true-empty ("Get started" → onboarding wizard) states; toast feedback.
+  - **Full Agents-page parity** (28-item inventory audited, zero silent losses): name search (slug + display label, #1642) and status filter live in the List toolbar under NEW persisted keys `trinity-dashboard-list-filter-name` / `-status` (a clean break — the old page-scoped `trinity-agents-filter-*` keys are no longer read); sort dropdown bound to `agentsStore.sortBy` with the comparator extracted to `utils/agentSort.js` (system rows pinned first; `success_desc` gains a no-data-to-bottom tiebreak); row checkboxes + sticky bulk toolbar with bulk Add/Remove Tag; avatar-half-out rows with SYSTEM/GHOST/Shared badges in the name cell and the subscription-pressure badge plus a **non-default-runtime** badge on the row's secondary line beside the slug, activity + sync-health dots, success-rate bar, exec/schedule stats, CapacityMeter (#2358 — at `lg` the header and every row are items of ONE CSS grid (subgrid), so columns resolve in one sizing context, and the label leads with the slug following as selectable secondary text per §1.3.1 FR-4); filtered-empty ("No matching agents" + Clear all) and chassis-level true-empty ("Get started" → the chassis Create Agent modal since ent#581) states; toast feedback.
   - **Filters migrated to chassis controls**: the page's single-tag dropdown and owner dropdown are superseded by the dashboard's existing quick-tag filter (multi-tag, server-side, counts) and owner filter, which apply to all three views; the List's Clear-all clears both layers (local name/status + chassis tags/owner via a `clear-chassis-filters` emit). The "X/Y" badge counts Y as the full fleet.
   - **Create Agent moved to the chassis header** — available in all three modes (previously the Agents page was the only persistent create surface); modal close refreshes the fleet.
   - **System-row Run guard adopted from the grid**: the List hides the Run toggle on system rows (the grid tile already refused it); stopping the system agent remains available on its Agent Detail page.
@@ -1835,7 +1975,7 @@ well, and the agent never touches CSS.
 - **Status**: ✅ Implemented (2026-07-31)
 - **Description**: Hotkey-activated, non-intrusive live type-to-filter across all three dashboard modes (Timeline / Grid / List). Press `/` anywhere on the Dashboard (outside editable fields and modals) → a small floating filter pill appears over the pane area; typing filters agents live in whichever view is active. An accelerator, not a takeover: **nothing is persisted** — a reload always starts unfiltered, and navigating away clears the query (Dashboard unmount). Purely client-side over the already-loaded fleet list; **zero backend changes**.
 - **Key Features**:
-  - **Activation**: `/` on a Dashboard-scoped document keydown listener. Guards, in order: `defaultPrevented`/`repeat` → non-`/` key (layout-produced — de-DE Shift+7 works; `shiftKey` NOT excluded) → Ctrl/Meta/Alt chords → IME composition (`isComposing`) → editable targets (INPUT / TEXTAREA / SELECT / `isContentEditable`) → open modals (onboarding wizard, System View editor, Create Agent modal). Then `preventDefault` (blocks Firefox quick-find) + open pill + focus input.
+  - **Activation**: `/` on a Dashboard-scoped document keydown listener. Guards, in order: `defaultPrevented`/`repeat` → non-`/` key (layout-produced — de-DE Shift+7 works; `shiftKey` NOT excluded) → Ctrl/Meta/Alt chords → IME composition (`isComposing`) → editable targets (INPUT / TEXTAREA / SELECT / `isContentEditable`) → open modals (first-run overlay, System View editor, Create Agent modal). Then `preventDefault` (blocks Firefox quick-find) + open pill + focus input.
   - **Predicate**: case-insensitive substring over slug AND display label via `agentDisplayName()` (#1642 house rule, §1.3.1 FR-3) — typing `TOM` finds an agent labelled TOM whose slug is `tom-marketing-ops`. Layered inside the store `visibleAgents` seam (`stores/network.js`): `ownerFilteredAgents` (tag ∘ owner) → `visibleAgents` (∘ query), so Grid + List filter with zero pane rewiring; the Timeline joins by switching its `:agents` prop from raw `agents` to `visibleAgents` (rows, communication arrows, and schedule markers all derive from the prop). Description/tags matching is a recorded follow-up.
   - **Node invariant**: every `convertAgentsToNodes` call site reads the **pre-query** `ownerFilteredAgents` — a transient query must never degrade timeline-row node enrichment (system-first sort, purple treatment) after Esc. (The 30s refresh poll previously rebuilt nodes from the RAW list, ignoring even the owner filter — fixed to the same pre-query collection.)
   - **Honest state (pill)**: floating pill anchored to the non-scrolling chassis column, rendered whenever open OR a query is applied (an applied-but-hidden filter is the dishonest state this prevents). Live **"X of Y match"** count (X = post-query, Y = the set the view would show without the query but with tag/owner filters; secondary per-view filters — timeline "Active only", List panel name/status — may prune rendered rows below X by design: the pill claims *matching*, not *rendering*). Esc hint + × button; wrapper `role="search"`, input stays `type="text"`.
@@ -1883,12 +2023,12 @@ well, and the agent never touches CSS.
 ### 9.14 Dashboard View-Mode Shortcut + Pinned Switcher (#2536)
 - **Status**: ✅ Implemented (2026-09-06)
 - **Description**: The Timeline / Grid / List switcher renders at a mode- and fetch-independent position — it is the LAST child of the right-anchored header controls cluster, and nothing conditional may be appended after it — and `v` cycles the modes in the switcher's visual order (Timeline → Grid → List → Timeline). Frontend only; **zero backend changes**.
-- **Activation**: `v` on the same Dashboard-scoped document keydown listener as `/` (`V` without Shift — i.e. Caps Lock — also fires; `Shift+V` is inert by design, reserved). Guards shared, in order: `defaultPrevented`/`repeat` → non-hotkey key (layout-produced via `e.key`; `shiftKey` NOT excluded for `/`, excluded for `v`) → Ctrl/Meta/Alt chords → IME composition → editable targets (INPUT / TEXTAREA / SELECT / `isContentEditable`) → open modals (onboarding wizard, System View editor, Create Agent modal). One document listener for both keys; armed at mount above every `await` (design-system principle 23, `mountListenerOrdering.spec.js`).
+- **Activation**: `v` on the same Dashboard-scoped document keydown listener as `/` (`V` without Shift — i.e. Caps Lock — also fires; `Shift+V` is inert by design, reserved). Guards shared, in order: `defaultPrevented`/`repeat` → non-hotkey key (layout-produced via `e.key`; `shiftKey` NOT excluded for `/`, excluded for `v`) → Ctrl/Meta/Alt chords → IME composition → editable targets (INPUT / TEXTAREA / SELECT / `isContentEditable`) → open modals (first-run overlay, System View editor, Create Agent modal). One document listener for both keys; armed at mount above every `await` (design-system principle 23, `mountListenerOrdering.spec.js`).
 - **Cycle order = visual order = default**: one exported constant `VIEW_MODES = ['timeline','grid','list']` in `utils/viewModes.js` (a zero-import leaf, the #2199 `gridStorageKeys` shape) feeds the store whitelist, the switcher `v-for`, `nextViewMode()`, and the e2e specs; index 0 is the degrade default. An unknown mode wraps to `timeline`.
 - **Persistence**: the hotkey calls `setViewMode(mode)` (default `persist: true`), so `localStorage['trinity-dashboard-view']` and the active button stay in sync; the `?view=` deep-link path (`persist: false`, §9.9) is untouched.
 - **Discoverability**: the switcher wrapper carries `title="Switch view (press v to cycle)"` — the same pattern as the filter button's `title="Filter agents (press /)"`. No `aria-label` on the mode buttons (their accessible names `timeline` / `grid` / `list` are contract for five e2e specs).
 - **Layout invariant**: the switcher's bounding box is identical in all three modes, with and without the history spinner (pinned by `tests/unit/viewModeStructure.spec.js` — last element child, the required CI gate — and `e2e/dashboard-mode-switcher.spec.js`). Tidy up / Reset sit immediately to the switcher's left (the grid tools stay beside the Grid button); the spinner stays a `v-if` (its replacement is #1921's remit).
-- **Known gaps (recorded; the same exposure `/` has today and the same as a mouse click on the switcher)**: guard 5 covers the three chassis modals (onboarding wizard, System View editor, Create Agent) but not the NavBar Build Info modal (no `role=dialog`), FleetGrid's Tiles menu / New-department popover / assign mode, or the List panel's bulk-tag popovers — with focus on a button inside one of those, `v` switches the pane and an in-progress grid org interaction is discarded, exactly as clicking a mode button would. Widening guard 5 to pane-internal state would couple the chassis handler to `FleetGrid` internals; deliberately not done. **WCAG 2.1.4 (Character Key Shortcuts)**: `/` and `v` are single-character shortcuts with no remap/disable control (speech-input users can trigger them); the mitigation path is one "Keyboard shortcuts" toggle on a Settings surface covering both keys — filed under #1430, not built here (a Settings surface is a product decision).
+- **Known gaps (recorded; the same exposure `/` has today and the same as a mouse click on the switcher)**: guard 5 covers the three chassis modals (first-run overlay, System View editor, Create Agent) but not the NavBar Build Info modal (no `role=dialog`), FleetGrid's Tiles menu / New-department popover / assign mode, or the List panel's bulk-tag popovers — with focus on a button inside one of those, `v` switches the pane and an in-progress grid org interaction is discarded, exactly as clicking a mode button would. Widening guard 5 to pane-internal state would couple the chassis handler to `FleetGrid` internals; deliberately not done. **WCAG 2.1.4 (Character Key Shortcuts)**: `/` and `v` are single-character shortcuts with no remap/disable control (speech-input users can trigger them); the mitigation path is one "Keyboard shortcuts" toggle on a Settings surface covering both keys — filed under #1430, not built here (a Settings surface is a product decision).
 - **Out of scope / follow-ups**: `1`/`2`/`3` direct jumps — a ≈3-line extension of the dispatch map; the honest cost of cycle-only is the transit (Timeline → List is `v v`, and the first press mounts `FleetGrid`, whose mount starts the grid batch poll, before the second press unmounts it — a wasted `refreshBatchData()` round); for that follow-up note that AZERTY's top-row digits are Shift-produced, so a digit binding must not exclude `shiftKey`. Reverse cycle on `Shift+V` (the chord is reserved). Layout-independent `e.code` matching (`e.key` matching means the physical V key on a non-Latin layout will not match — the same trade-off as `/`). `role="group" aria-label="View mode" aria-keyshortcuts="v"` on the wrapper and `aria-pressed` on the mode buttons — both change what assistive-tech users perceive, so they are listed for #1430 rather than defaulted (neither renames the buttons). Removing the bespoke header spinner (#1921). Narrow-width chrome overlap (#1754 — collapse this cluster from the LEFT; the switcher is last for stability and must be the last to go).
 - **Flow**: folded into `dashboard-grid-view.md`, `dashboard-timeline-view.md`, `dashboard-list-view.md` (the ent#261 precedent — no standalone flow doc).
 
@@ -2690,9 +2830,11 @@ to localStorage in the clear.
   interpolation, **capped at 256 KB with the cap stated in the UI** ("Showing the
   first 256 KB of 1.1 MB · Download the full file"); an image over 10 MB shows
   the card instead of fetching. Bytes are fetched **whole and sliced
-  client-side, with no `Range` header** — `main.py`'s CORS `allow_headers` does
-  not list `Range`, so a ranged preview dies silently on any deployment whose
-  portal base URL differs from the API's origin, and slicing also keeps preview
+  client-side, with no `Range` header** — a share preview is fetched same-origin
+  (#2733: `sharePreviewPath` slices the path from `/api/files/` and drops
+  whatever origin `portal_base_url` resolved to), so `main.py`'s missing `Range`
+  in CORS `allow_headers` no longer reaches it; the whole-blob read stays
+  because the cap is applied by client-side slicing, which also keeps preview
   off the download-counter path entirely.
 - **AC-5 — delete (ent#548)**, backend-enforced with the UI mirroring it off the
   roster payload (#2128):
@@ -2734,9 +2876,11 @@ to localStorage in the clear.
   previous session (this also avoids a one-time false-dot burst on deploy). A
   preview no longer inflates the owner's `download_count` — a ranged prefix read
   is still audited, marked `ranged_prefix: true`, but does not bump the counter.
-  Every rostered client of an agent already sees every active share of that
-  agent; a dismissal is a preference, not authorization (follow-up with the
-  audience model, ent#484/#489).
+  A dismissal is a preference, not authorization. When this shipped every
+  rostered client of an agent saw every active share of that agent;
+  trinity-enterprise#549 gave a share an addressee (`content-files.md` §13.10),
+  so the tab lists the viewer's own files and a dismissal is a preference over
+  those.
 - **Flow**: `docs/memory/feature-flows/workspace-rail.md` (Slice 3),
   `file-sharing-outbound.md`
 
@@ -2887,3 +3031,470 @@ to localStorage in the clear.
 - **Tests**: `tests/unit/test_ent403_workspace_model.py`;
   `src/frontend/tests/unit/portalModelChoice.spec.js`.
 - **Flow**: `docs/memory/feature-flows/workspace-model-choice.md`
+### 5.33 Workspace — theme switch, light / dark / system (trinity-enterprise#625)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_THEME_SWITCH`
+- **Description**: The Workspace is styled for both themes and follows the global
+  `useThemeStore` (`stores/theme.js` toggles the root `dark` class from the
+  `trinity-theme` key), but its only control was the NavBar's appearance menu,
+  and the Workspace deliberately has no NavBar. A platform user who picked light
+  mode could not change it from the Workspace; an external client (no platform
+  session, no stored preference) got the OS answer and could not change it at
+  all. A **theme switch** now sits at the top right of the central column.
+- **AC-1 — placement**: the switch is the LAST control in the conversation header
+  and the room header (`PortalConversation.vue` / `PortalRoom.vue`), via a
+  `#header-end` slot the shell (`views/Portal.vue`) fills with
+  `PortalThemeSwitch` — present for a new chat, a thread, a room and the agent
+  landing (one branch since ent#523); the stage skeleton heads the branch chain
+  and gets none.
+- **AC-2 — one store**: the switch reads and writes `useThemeStore` — the same
+  `setTheme('light'|'dark'|'system')` the NavBar calls, the same `trinity-theme`
+  key. No portal-local key, no second store: a choice made here is what the
+  platform UI shows next, and vice versa.
+- **AC-3 — honest default**: with nothing stored the choice is `system` and the
+  trigger shows the RESOLVED state ("System · dark"); the trigger's icon follows
+  the resolved theme, never the choice (`utils/themeSwitch.js`).
+- **AC-4 — no session dependency**: `PortalThemeSwitch.vue` imports the theme
+  store only (pinned: never `stores/auth`, `agents` or `clientPortal`), so an
+  external client gets it.
+- **AC-5 — layout stability**: switching flips only the root class; the control
+  lives in a slot with no `:key`, so scroll, composer draft and the active thread
+  are untouched. The popover is absolutely positioned to the header's right
+  edge, so opening it widens nothing; below `sm` the label folds and the trigger
+  is icon-only, so it does not collide with the title band.
+- **AC-6 — both themes, tokens only**: the new files carry zero raw non-gray
+  palette classes and stay off the raw-colour baseline (the guard holds them to
+  zero); the NavBar's inline picker is REPLACED by the shared primitive, so its
+  baseline entry shrinks (35 → 23 non-gray) and is re-frozen exactly, scoped to
+  that one entry.
+- **AC-7 — keyboard + a11y**: the trigger carries `aria-label="Theme: <label>"`,
+  `aria-haspopup`/`aria-expanded`; the options are a `radiogroup` of
+  `role="radio"` buttons with `aria-checked` (the current choice is announced),
+  roving tabindex and arrow-key selection; Esc and click-outside close and
+  focus returns to the trigger.
+- **AC-8 — executed test**: `tests/unit/portalThemeSwitch.spec.js` MOUNTS the
+  component (`@vue/test-utils`, per-file `// @vitest-environment jsdom` — the
+  suite's first mounted component test; `vitest.config.js` gains the Vue
+  plugin) and drives it: renders "System · dark" from an empty store, opens to
+  three checked/unchecked radios, a click calls `setTheme('dark')`, writes the
+  shared key, flips the root class, closes and re-labels the trigger; a NavBar
+  choice is reflected here. Four mutations (click never reaches the store, label
+  hides the resolved state, Esc ignored, `aria-checked` frozen) each go red.
+- **Shared primitive**: `components/base/ThemeChoice.vue` (+ `ThemeIcon.vue`)
+  is the ONE light/dark/system picker, consumed by the NavBar's user menu and
+  the Workspace switch, so the two cannot drift.
+- **Flow**: `docs/memory/feature-flows/dark-mode-theme.md`
+### 5.34 Workspace Work card — the activity line, and the chat scrolls to the card on your own send (trinity-enterprise#620)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_WORK_ACTIVITY_LINE`
+- **Description**: While an agent works, the Work card (in the chat and in the
+  rail's Work tab) says **what it is doing right now** in one short line —
+  "Reading `.../routers/agents.py`", "Running `pytest tests/unit …`",
+  "Searching for `"sync_health"`", "Fetching docs.example.com",
+  "Using github", "Delegating to scout: Map the Work card", "Thinking" — for
+  the chat's own turn AND for delegated, scheduled and room runs. The line is
+  one row of fixed height that slides up when it changes. When the person's
+  own message starts work, the transcript scrolls so the live card is in view.
+- **Why it was invisible**: the card had a "current step" slot fed by the
+  ent#286 stream, but the handler matched `evt.type === 'tool_use'` — a shape
+  the raw stream-json frames never carry (`type:'assistant'`,
+  `message.content[].type`) — so only the backend-injected `error` ever
+  labelled; and no run other than the chat's own had any live path at all.
+- **AC-1 — one vocabulary**: `src/frontend/src/utils/workActivity.js`
+  composes the line from two facts, `tool` (the agent's display name:
+  `Read`, `Bash`, `mcp:trinity`, `Task:explore`, null between tools) and
+  `summary` (the agent's bounded input summary, never the raw input). The
+  operator Chat tab (`execution-status.js`) and Agent Detail
+  (`useSessionActivity`) compose from it too — three vocabularies became one.
+  The stream path summarises client-side with a port of the agent server's
+  `get_input_summary`, held to parity by `tests/fixtures/tool_input_summary.json`
+  (asserted by pytest and vitest).
+- **AC-2 — fixed row, slide, no re-animation**: `PortalWorkCard.vue` reserves a
+  `h-4 overflow-hidden` row for the card's whole live life; a keyed
+  `<Transition>` slides the new line up over the old (a swap under
+  `prefers-reduced-motion`); `createActivityLineQueue` keys the row on the
+  TEXT, so an identical line never re-keys; text truncates with an ellipsis.
+- **AC-3 — every live card, honest silence**: the agent server tracks the
+  active tool **per execution** (`session_activity.by_execution`, keyed by the
+  backend execution id at both live parse sites and the Codex parser) and the
+  5 s heartbeat carries `executions: [{execution_id, tool, summary, since}]`
+  for the process registry's running set. The Work read folds it onto a live,
+  non-stale row of a rostered agent as `WorkItem.activity`; a cheap sibling
+  read `GET …/work/activity?agents=` (Redis only) is polled every 2.5 s while a
+  card is live. No beat, an old image, a stale row, an off-roster agent → no
+  line, never an invented one; the existing three-state steps rule is untouched.
+- **AC-4 — no flicker, never stuck**: minimum display 700 ms per line, a burst
+  collapses to its latest member, a quiet run keeps its last line with the
+  clock moving; a heartbeat-fed line older than 30 s (server `age_seconds` +
+  time since the read) is dropped, the beat itself expires in 15 s, and a
+  finished run leaves the heartbeat by construction (registry intersection).
+- **AC-5 — scroll on your own send only**: after `deliver()` flips `sending`,
+  one `nextTick` + `pinToBottom()` **guarded by `following`** — an incoming
+  message while the reader is scrolled up never moves the transcript (#2624).
+- **AC-6 — disclosure**: the line never rides the unfiltered `/ws`; both reads
+  are roster-scoped (set membership, off-roster dropped), the summary passes
+  the SAME `sanitize_text` + bound as titles, a delegation to an off-roster
+  agent reads "another agent", and the heartbeat model bounds the payload
+  (≤20 entries, summary ≤120, tool ≤64, id shape-checked, extra keys refused).
+  `execution_log`, `tool_calls`, `response` stay out of the payload.
+- **AC-7 — both themes, reduced motion**: gray ink ladder only; the slide is
+  `transition: none` under `prefers-reduced-motion: reduce`.
+- **AC-8 — terminal unchanged**: the row renders only while `isLive`; the
+  queue is cleared at terminal and the ent#525 verdict rendering is untouched.
+- **Tests**: `tests/unit/test_ent620_agent_activity.py` (per-execution slot,
+  the heartbeat builder, pruning, bounds, fail-open), `test_ent620_work_activity.py`
+  (model bounds/refusals, the read, the fold's gates, sanitiser + mask, age
+  ceiling, the `/activity` route's 404/422/rate limit, the projection still
+  excludes the log), `test_ent620_summary_parity.py`;
+  `src/frontend/tests/unit/workActivity.spec.js` (vocabulary, the real frame
+  shape, parity, queue rules, resolver, placement guards). Mutations: eight,
+  each red.
+- **Flow**: `docs/memory/feature-flows/workspace-work.md`
+### 5.35 Workspace drafts — unsent input survives switching, with a Draft indicator (trinity-enterprise#657)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_DRAFTS`
+- **Description**: Text typed into the message field of an agent chat or a room
+  used to be lost the moment the person switched to another agent, chat tab or
+  room — the conversation and room stages remount on every switch
+  (`Portal.vue` keys `PortalConversation` on `convKey` and `PortalRoom` on the
+  room id) and the composer's `input` lived with the stage. A **draft** — the
+  unsent, non-whitespace text of ONE conversation (a thread, an unsaved new
+  chat with an agent, or a room) — now outlives the switch, comes back exactly
+  as left, and is marked wherever that conversation is listed.
+- **AC-1 — per conversation, never bleeding**: drafts are keyed
+  `thread:<session id>` / `new:<agent>` / `room:<room id>` (the shell's own
+  `chatKey` scheme); an A → B → A round trip, a room → agent → room round trip
+  and a switch between two chat tabs of one agent each restore the text they
+  left; two conversations hold two different drafts at once.
+- **AC-2 — restored exactly, cursor in the field**: the text comes back
+  byte-for-byte, the composer grows to fit, and on a fine pointer the caret is
+  placed at its end (a phone is not focused on arrival — the soft keyboard
+  would cover the transcript; #2579's New chat focus is an explicit gesture,
+  this is not).
+- **AC-3 — the Draft mark**: the quiet word "Draft"
+  (`components/base/DraftMark.vue`, gray tertiary ink, mono-caps overline,
+  never a pill) on the agent row (any listed thread of that agent with a
+  draft, or its unsaved new chat), on the chat tab (`OverflowTabs`' optional
+  per-tab `hasDraft` field — inline, More menu and the mirror row that
+  measures widths), on the thread/room row and on a search-result row. The
+  word, not a glyph: on these exact surfaces the pencil is already the rename
+  affordance (`PortalEditableTitle`), the dot is the tab strip's activity
+  signal and the star is the per-viewer pin — two facts sharing one shape is
+  the failure principle 24 names. A room
+  draft marks the room row only — the room row is always listed, so it is the
+  draft's own door; it does not light its participants' agent rows. A drafted
+  agent is lifted above the sidebar's "N more" collapse the way an asked one
+  is, so "visible without opening it" holds.
+- **AC-4 — the unsaved new chat stays reachable**: a `new:<agent>` draft lists
+  the provisional "New chat" tab even while another chat is open, carrying the
+  mark; selecting it opens a new chat with that agent and restores the text.
+- **AC-5 — the composer IS the draft**: the store is written through from the
+  composer on every change, so sending (which empties the field) clears the
+  draft and the mark in the same tick, clearing the field clears it, and every
+  path that hands text BACK to the composer — a cancelled turn, a failed
+  escalation, a room send that failed, a room post that failed after the room
+  opened — makes it a draft again, honestly. A failed 1:1 turn keeps its red
+  row + Retry and puts nothing in the composer, so a sent message never
+  reappears as a draft. Whitespace-only text is never a draft.
+- **AC-6 — reload survival, per person, per browser**: drafts persist in
+  `localStorage['trinity-workspace-drafts:<client_email>']` — the principal's
+  email as the roster reports it for both audiences (`get_roster` →
+  `client_email`), which is known before any row or composer renders; two
+  people on one browser never read each other's bucket; an identity change
+  in-tab swaps the map, never merges. Explicit sign-out (`signOutEverywhere`)
+  removes the bucket BEFORE the identity is cleared — drafts are content, and
+  the portal token is removed at the same moment; a session expiry keeps it.
+- **AC-7 — no setting, on by default; graceful degradation**: with storage
+  unavailable (private mode, blocked site data, quota) drafts still survive
+  switches for the session and only reload survival is lost, silently. An
+  entry over 64 000 characters is kept for the session only (its storage entry
+  is removed) — never a truncated restore, never a multi-megabyte write per
+  keystroke. At most 100 drafts per person (oldest evicted).
+- **AC-8 — two Workspace tabs**: persistence is key-granular (read-merge-write
+  of one key) and a `storage` event re-reads the bucket, so a keystroke in tab
+  B never erases tab A's drafts and a send in tab A clears the mark in tab B.
+  The same conversation edited in both tabs: last write per key wins (stated
+  residual).
+- **AC-9 — Reset (ent#523)**: resetting Main moves the archived thread's draft
+  onto the new Main — the reset archives the history, not what the person was
+  typing.
+- **Tests**: `src/frontend/tests/unit/portalDrafts.spec.js` (pure rules +
+  the store, incl. two stores over one storage), `portalComposerDraft.spec.js`
+  (jsdom: the composable on live refs; `PortalChatTabs`, `PortalChatRow` and
+  `OverflowTabs` mounted), `portalChatTabsAndTitles.spec.js` (tab model),
+  `workspaceSession.spec.js` (sign-out clears / expiry keeps),
+  `e2e/workspace-drafts.spec.js` (`@smoke`, hermetic: both composers through
+  the real shell). Mutations named in the PR.
+- **Out of scope** (issue): attached-but-unsent files across a switch
+  (session-only — the chips carry upload state and inbox ids), server-side
+  drafts synced across devices.
+- **Flow**: `docs/memory/feature-flows/workspace-drafts.md`
+
+### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
+- **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
+- **Requirement ID**: WORKSPACE_ROLE_CARD
+- **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness)
+- **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
+  Agent details show a **Role** card: the role it fills, the objectives it owns or
+  supports with each metric's latest value, target and freshness, the viewer's
+  relationship to it, and its **readiness** state. Framework §8's "organisation UI
+  over the canon" shrunk to one agent: **files are truth, this is a projection.**
+- **Files are truth, read through the platform, never a second store.** Everything the
+  card shows about the role comes from the agent's own container on each read
+  (`client_portal/role_card.py`, via the agent client — the same door the Files tab
+  uses): `template.yaml → x-role: {role, status, seat?}` (written by the
+  `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
+  `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
+  (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
+  agent); metric values from the agent's `metrics.json` through its own
+  `/api/metrics` (`last_updated` is the freshness stamp). Nothing is cached or
+  copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
+  card at all (the panel is unchanged, AC 5); a role file that cannot be read or
+  parsed → the card says so (`role.error`), never an empty role; a stopped agent
+  → "the agent is stopped; the card reads its files when it runs".
+- **Freshness is honest, never optimistic (quality bar #4).** A metric is `stale`
+  when its value is missing, when `metrics.json` carries no `last_updated`, or when
+  that stamp is older than the framework's 30-day staleness bound (§3.5); a stale
+  metric renders as stale beside its last value and age, never as current. A
+  per-metric cadence is the business-metrics workstream's to declare; until then
+  the bound is the one rule the framework already states.
+- **Readiness is a platform record, and only the agent owner writes it (#663,
+  ruled 2026-09-20).** `x-role.status` in `template.yaml` is agent-writable, so it
+  cannot be the thing that says a companion is `ready`. `agent_role_readiness`
+  (`agent_name` PK, `status`, `changed_at`, `changed_by`; dual-track — SQLite
+  `agent_role_readiness_table` + Alembic `0067_agent_role_readiness`; CASCADE in
+  `AGENT_REFS`) is the owner's stamp. The effective state is the platform record
+  when one exists, else the template's `calibrating`; a template that says `ready`
+  **without** an owner stamp is shown as `calibrating` with a note that no owner
+  has stamped it — `status: ready` is valid only with an owner stamp (#663 DoD 3).
+  `POST …/role/readiness {status}` is gated on the platform's **owner of the agent
+  record** (`db.get_owned_roster(email)` — creator/infra owner, not an assignment
+  kind, R8/R11): anyone else gets a named 403 (`readiness_owner_only`), the agent
+  never can (portal-token principals are not owners; the route is on the
+  platform-authenticated door). The card shows the state, the date it changed and
+  who flipped it. The flip **records**; it does not switch schedules on — turning
+  the brief schedule on at `ready` stays the operator's act until the wizard owns
+  it (#511).
+- **Walkthrough progress while calibrating** (§7.2 step 8–9): the card shows the
+  viewer's own asks with this agent — user turns in their Main chat, capped at the
+  ten the three-strikes test asks for — and how many of the agent's replies they
+  rated down (ent#366). A proxy for the ten-ask walkthrough, labelled as the
+  viewer's own count, never a fleet number.
+- **Your relationship**: rendered from ent#500's assignment when it lands; until
+  then the line states "no assignment recorded" rather than being blank (AC 3).
+- **Not this issue**: editing the canon from the card (files are truth — edit the
+  file), the organisation view (ent#502), enabling schedules on the flip.
+- **Flow**: `docs/memory/feature-flows/workspace-role-card.md`
+
+- **Readiness gates the proactive brief (trinity-enterprise#689 — the enforcement half of
+  #663)**: a companion's **cron-fired** seat brief (a schedule with
+  `deliver_to_workspace_email`, ent#498) runs only when the agent's owner stamp says
+  `ready`. An unstamped agent that declares `x-role` is held; an agent without `x-role` is
+  not a companion and is never gated. Manual runs, webhooks, retries and schedules that do
+  not deliver to a seat are untouched. The gate sits in the scheduler just ahead of the
+  #454 pre-check skip gate (so a held brief never runs the agent's hook) and asks the backend (`GET /api/internal/agents/{name}/brief-readiness`)
+  for the verdict: a held brief is a `skipped` execution whose reason names the fix
+  ("Held: … runs once its owner marks it ready"), a `schedule_execution_skipped` event, and
+  advanced run times — never a failure, a retry or an alert. **Every ambiguity fails open
+  and is logged** (verdict call failed, container not running, Docker or template.yaml
+  unreadable within 3 s). The template is read only to learn whether the agent is a
+  companion; `x-role.status` is agent-writable and is never trusted (#663). Honest limit: an
+  *unstamped* companion can take itself out of scope (drop `x-role`, or stall the read into
+  fail-open); an owner's stamp is the one thing it cannot touch.
+  - **Rollout (ruled 2026-09-24, amended from option 1 at plan review)**: a one-time,
+    database-only seed on both migration tracks stamps `ready` (`changed_by =
+    rollout:ent#689`) for every live agent with autonomy on and an enabled, non-deleted
+    seat-delivery schedule at deploy — the brief that fires today is the value in force
+    (#2085; with autonomy off it does not fire, so it is not grandfathered), so no install
+    changes behaviour. Insert-if-absent: an existing stamp is never overwritten (an agent
+    already stamped `calibrating` is held from deploy on).
+  - **The card says so**: a rollout stamp reads "carried over when the readiness gate
+    shipped", never "by <owner>"; when a seat-delivery schedule exists and readiness is not
+    `ready`, the card adds "its scheduled brief is paused until you mark it ready" — for
+    platform viewers only, and not when autonomy is off (the autonomy gate stops it first).
+
+### 5.37 Workspace — the seat-level decision record: why a thing was approved, deferred or killed (trinity-enterprise#638)
+- **Status**: ✅ Implemented (2026-09-22). OSS-core (Workspace).
+- **Requirement ID**: WORKSPACE_SEAT_DECISIONS
+- **GitHub Issue**: abilityai/trinity-enterprise#638 (ruling R25; the evidence base for #641)
+- **Description**: The approve / defer / kill judgments a role companion and its
+  human make every week are recorded as a platform primitive owned by the **seat**
+  (agent × person — the ent#637 memory scope). A record is lintable, not prose:
+  `outcome` (approved | deferred | killed) · what was `decided` · the `alternatives`
+  that were live · the `criterion` that discriminated (the reusable part) · who
+  decided (role + person) · `decided_at` and `review_by` · what would `reverse` it ·
+  `notes` (the only free prose) · `ask_class` (slug) · `cites`.
+- **Refusals are receipts** (`services/seat_decision_service.validate_record`): prose
+  where a field belongs (over 280 chars, a second paragraph, a missing field) →
+  422 `decision_prose_only` naming every failing field and its rule; no alternatives
+  → 422 `decision_is_a_note` ("keep it in the seat's memory"); a citation outside the
+  seat's own records → 422 `unknown_citation`. Nothing is stored on refusal.
+- **Direction is not a seat decision (R C3)**: the caller declares `scope`; a
+  `direction` record (pricing, positioning, roadmap) is kept as `routed` — visible,
+  expiring, excluded from the evidence — and the answer carries the canon-proposal
+  hint, so it neither evaporates nor pollutes the seat's record.
+- **It expires, correction supersedes, history stays**: `expired` = `review_by` before
+  today (UTC; equal is not expired), computed on read, never written; `reconfirm`
+  moves `review_by`; `supersede` inserts a new row chained by `supersedes_id` and flips
+  the old one in one CAS transaction; `close` / `reverse` are status flips (`reverse`
+  requires a one-line reason — the evidence). Any action on a non-active row is a
+  named 409 `decision_not_active`. Nothing is deleted.
+- **Evidence (AC 5)**: `reused` = records cited by a LATER record of the seat (a
+  superseding record does not implicitly cite its predecessor) — conversion, not
+  volume; per `ask_class`: the distinct normalized criteria, the reversals, and
+  `stable` (≥3 non-expired records, one criterion, no reversal) — shipped as #641's
+  input, documented as such, not its verdict.
+- **Two surfaces, one seat rule**: the companion records over MCP (`record_decision` /
+  `list_seat_decisions` → `POST/GET /api/agents/{name}/decisions`; the seat is resolved
+  from `execution_id` exactly as `write_user_memory` does, never supplied;
+  `Idempotency-Key` honoured, the tool derives one over the arguments; `decided_by_role`
+  from `assignment_provider.resolve_assignment` or the caller, never a container read;
+  **no email in the answer** — the decider is `seat` / `owner`). The person records,
+  corrects, reconfirms, closes and reverses in Agent details
+  (`GET/POST /api/enterprise/client-portal/agents/{name}/decisions`,
+  `POST …/decisions/{id}/actions`, `PortalAgentDecisions.vue`).
+- **Readers**: own seat always; the agent OWNER (`role_card._is_owner`) every seat,
+  writable; a stakeholder the assignment provider recognises through the optional seam
+  method `kinds_for(agent_name, reader_email) -> {kind, role_id}` every seat read-only
+  (per-agent in v1 — DEBT_INBOX 2026-09-22); no provider → own seat only. Writes: own
+  seat, or the owner on a named seat; a foreign id is the uniform 404.
+- **Read into context**: the seat's active decisions (criterion first, bounded) ride the
+  shared memory block on every turn — public link, channels, seat runs, Workspace — so
+  a criterion is reusable and `cites` can be non-zero.
+- **Storage**: `seat_decisions` (both tracks; Alembic `0071` ← `0070`; cleanup CASCADE);
+  JSON lists in TEXT; stats in Python; reads bounded (500 rows / seat, 50 seats). Field
+  names match the role pack's YAML (`record-decision`, #510) so the canon-folder copy is
+  a move (export deferred — DEBT_INBOX 2026-09-22).
+- **Not in scope**: the autonomy dial itself (#641); auto-recording an answered decision
+  REQUEST (#611 — `request_id` is the link, DEBT_INBOX 2026-09-22).
+- **Flow**: `docs/memory/feature-flows/workspace-seat-decisions.md`
+
+### 5.38 Chat continuity is the chat's own session (#2958)
+- **Status**: ✅ Implemented (2026-09-22). Claude runtime.
+- **Requirement ID**: CHAT_OWN_SESSION
+- **GitHub Issue**: abilityai/trinity#2958
+- **Problem**: a sequential chat turn (`POST /api/agents/{name}/chat`, which MCP
+  `chat_with_agent(parallel=false)` and CLI `trinity chat` use) ran `claude --continue`,
+  which resumes the newest JSONL in the shared project dir whoever wrote it. Every
+  `/api/task` with an effective timeout above 600 s persists its JSONL there (#678), so
+  the next chat silently continued a scheduled run's near-full context, paid an
+  auto-compaction first (one field case: 162 s of a 173 s execution) and could switch
+  models mid-session. The row said `success` with a large `duration_ms`, which callers
+  read as a degraded agent.
+- **AC1 — own session**: the chat records its session id after a **successful** turn
+  (`agent_state.chat_session_id`, UUID-validated) and resumes it with `--resume <id>`.
+  A failed turn never moves the id. `--continue` is gone from the chat path.
+  **Scope**: the session is per **agent**, shared by every caller of `/chat` on that
+  agent — true before this fix and unchanged by it. It is a **known limitation, not
+  intended behaviour** (a cross-user exposure, tracked separately).
+- **AC2 — model rule**: a different *effective* model (request model, else the agent's
+  `current_model`) starts a fresh session (`event=chat_session_model_change`). Cost:
+  MCP sequential and CLI callers lose context after a `PUT /api/agents/{name}/model`
+  (including the Agent Detail model dropdown). Alias vs full id counts as a change. The
+  Chat tab and MobileAdmin post `/task`, not `/chat`, so they are unaffected.
+- **Dead handle — one cold retry**: a resume turn that fails (not 429/503/504) whose
+  JSONL is **absent after the failure**, that ran no tool and was not cancelled, is
+  retried once cold with the same `execution_id` (re-registered pending first, so a
+  cancel in the gap is honoured) and logs `event=chat_resume_fallback`. Decided by the
+  filesystem, never by the CLI's error text. A failed resume is now a 502
+  (`Execution error: …`), not "returned empty response". **Residual**: a file that
+  exists but still cannot be resumed raises that 502 each turn until
+  `DELETE /api/chat/history` or a model change.
+- **Reset**: `DELETE /api/chat/history` clears the id and marker and bumps a generation
+  counter; a turn in flight across it discards its capture
+  (`event=chat_session_capture_discarded`). No lock (a turn may hold it 30 min).
+- **Cold start counters**: a fresh session resets `session_context_tokens` / cost /
+  output tokens, so it never reports the old session's context as `context_used`.
+- **Keep set**: the agent writes `~/.trinity/chat-session.json` atomically (mkstemp,
+  0600) after each successful turn; cleared on reset and at agent-server startup. The
+  JSONL reaper reads it over docker exec as `developer` (`head -c 512`, in-container
+  `timeout 5`, `asyncio.wait_for`) and unions it in; any unclean read aborts that
+  agent's sweep, and the log names the failure kind only. A failed write keeps the
+  in-memory id (the cold retry absorbs a later reap). Writer and reader paths are pinned
+  by a parity test; `TRINITY_CHAT_SESSION_FILE` overrides it for tests only.
+- **AC3 — attribution**: the agent reads compact events from the JSONL (off the event
+  loop, before the error checks); the backend writes `compact_metadata` on the chat
+  SUCCESS row and on the FAILED row from the #678 structured body, and the `/chat`
+  response's `execution.compaction` is `{events, trigger, pre_tokens, post_tokens,
+  duration_ms}` or null. **Partial**: 504 / 429 / plain-500 bodies carry no metadata,
+  so those failures stay unattributed (follow-up).
+- **AC4 — guidance**: `chat_with_agent` and `get_execution_result` descriptions name
+  the one-off compaction delay; `get_execution_result` returns `compact_metadata`.
+- **Known, not fixed here**: an idle limit on the chat session (it now lives until a
+  restart, reset or model change, and compacts on its own — attributed); per-caller
+  scoping; Continue-as-Chat on a chat row can resume the chat's id (explicit user
+  action); Gemini's bare `--resume` (Claude-only fix).
+- **No schema change** (the column exists on both tracks). No new endpoint.
+- **Tests**: `tests/unit/test_2958_chat_session_isolation.py` (a fake `claude` driving
+  the real chat and headless paths), `test_2958_chat_compact_metadata.py`,
+  `test_2958_session_cleanup_chat_marker.py`, `test_2958_marker_path_parity.py`,
+  `test_2610_resume_surface_parity.py`, `src/mcp-server/src/tools/executions.compact.test.ts`.
+
+### 5.39 Workspace — suggestions: what you can do with this agent, and what is waiting (trinity-enterprise#465)
+- **Status**: 🚧 In progress
+- **Requirement ID**: WORKSPACE_SUGGESTIONS
+- **GitHub Issue**: abilityai/trinity-enterprise#465 (1.0 story step 3, #649)
+- **Description**: A platform user who opens an agent in the Workspace sees a short list of
+  suggestions computed for **that user and that agent** — never a list identical for every
+  user. Each is an actionable object, not advice: **Accept** or **Dismiss**, both recorded.
+  Every item displays the signal it came from so the claim can be checked. When nothing
+  crosses a threshold the surface says so and is never padded to a fixed count.
+- **Two kinds (decision 15, option 1 — the engine-bay ruling)**: `invoke` items act inside
+  the Workspace — Accept **prefills** the composer (`/<playbook> `) or opens the section the
+  item names; nothing is ever sent on the person's behalf (the ent#138 prefill rule).
+  `configure` items (a schedule's health, autonomy) are read-only awareness whose Accept is a
+  **deep link** to the operator agent page (`/agents/<name>?tab=schedules`). Building agents
+  stays operator-side (§5.11 "it reports; it does not configure").
+- **Door, declared per class**: every v1 class is behind the **platform-authenticated door**
+  (ent#357). A verified-email portal token gets a uniform 404 on the read and the feedback
+  write — usage- and schedule-derived data must be unreachable from the external projection
+  (ent#78 auth-path invariant). `configure` classes additionally require **owner or admin**,
+  the same audience that may enable/disable a schedule (`OwnedAgent`). The Workspace
+  principal carries `is_admin` for this one decision only; everywhere else a non-owner admin
+  stays a viewer (ent#358).
+- **v1 classes** (order = display priority; at most 5 shown, `total` returned; UTC):
+  | Class | Kind | Emitted when | Signal shown |
+  |---|---|---|---|
+  | `asks` | invoke | ≥1 pending ask addressed to me on this agent | "N questions waiting on you" |
+  | `decisions_due` | invoke | ≥1 decision on my seat past `review_by` | "N decisions past their review date" |
+  | `schedule_failing:<id>` | configure | last ≥3 terminal runs failed (skipped/cancelled neither count nor break the streak) | "Failed K runs in a row, last <date>" |
+  | `autonomy_held` | configure | autonomy off and ≥1 enabled schedule or a pending reminder past `fire_at` | "N schedules won't run — autonomy is off" |
+  | `schedule_never_fired:<id>` | configure | enabled, autonomy on, never run, and the cron's first expected fire after creation is >1h past | "Enabled since <date>, has never run" |
+  | `schedule_disabled:<id>` | configure | disabled ≥7 days and it had run before | "Disabled since <date> — it used to run" |
+  | `dormant` | invoke | I have chatted here and my last message is ≥14 days old | "Your last conversation was <date>" |
+  | `unused_playbook:<name>` | invoke | an exposed playbook I have not started, at most 3 | "You haven't run /name yet" |
+  One agent-level `autonomy_held` item replaces per-schedule "held" items: autonomy is off by
+  default, so per-schedule items would fill every slot, and no timestamp records when it was
+  turned off — a "held N days" figure would be invented. Autonomy off suppresses
+  `schedule_never_fired`.
+- **Usage dimension (recorded decision)**: per-user — yes, keyed by the viewer's email.
+  Per-skill — **explicit slash invocations only**: `/<name>` at the start of the person's own
+  Workspace messages or of executions attributed to them (`source_user_email`), and a
+  playbook an enabled schedule already runs is never offered. A plain-language request for
+  the same work is not detected, which is why the copy says "haven't run /name" rather than
+  "never used". Reads existing rows only — no parallel tracking store.
+- **Capabilities**: the same briefing ladder as the hints and "What it can do" (ent#380) —
+  the ent#178 curated set slots into that seam when it lands. **Playbooks only**: template
+  use-case text is not offered, because whether someone has "used" a free-text example is
+  unverifiable. When the agent is not running or does not answer, capability items are
+  omitted and the response says capabilities are unavailable — never "nothing unused".
+  With no usage history the list is capability-only and says so.
+- **Dismissal**: per user + agent + suggestion, persisted. A dismissed item stays hidden
+  while its **state fingerprint** is unchanged — the identity of the state, never a count
+  (the first failure of a streak, the set of held schedules, the set of waiting asks), so a
+  failing schedule does not return with every additional failure but does return when a new
+  streak starts. Accept is recorded (usefulness) and does not hide an item: the signal clears
+  itself when the thing is done. Writes are bounded to items currently emitted for the
+  caller; the server computes the fingerprint.
+- **Placement**: the rail's **Info** tab carries the full list and the tab shows its count;
+  an empty chat shows the top 3 above "Things you can ask". Suggestions never arrive as
+  messages.
+- **Cost**: no LLM call. Per read: at most one bounded briefing fetch (cached 60s, skipped
+  for a stopped agent), a handful of indexed queries and one windowed executions query.
+  Rate-limited per viewer.
+- **Not in scope (follow-ups)**: a suggestion that consults another agent (2026-09-21
+  amendment → ent#698); suggestions derived from the current conversation (2026-09-22 →
+  ent#699); role, project
+  and objective-gap inputs (#500, #661, #477–#479) — each attaches as a new class without
+  changing the object; the Inbox placement (#610).
+- **Flow**: `docs/memory/feature-flows/workspace-suggestions.md`

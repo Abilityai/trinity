@@ -63,6 +63,9 @@ test.beforeAll(async ({ baseURL }) => {
   const agents = Array.isArray(body) ? body : body.agents || []
   const running = agents.filter((a) => a.status === 'running' && !a.is_system)
   if (TEST_AGENT && !running.some((a) => a.name === TEST_AGENT)) TEST_AGENT = ''
+  // Prefer the long-lived harness agent (#2080) over whatever is first: a
+  // transient pytest agent can be deleted mid-test when suites overlap (#2802).
+  if (!TEST_AGENT && running.some((a) => a.name === 'test-harness-agent')) TEST_AGENT = 'test-harness-agent'
   if (!TEST_AGENT && running.length) TEST_AGENT = running[0].name
 })
 

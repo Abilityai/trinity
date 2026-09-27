@@ -18,24 +18,22 @@
           </p>
         </div>
 
-        <!-- Tab strip (#302) -->
-        <div class="mb-6 border-b border-gray-200 dark:border-gray-700" role="tablist" aria-label="Settings sections">
-          <nav class="-mb-px flex space-x-6" aria-label="Tabs">
-            <button
-              v-for="tab in visibleTabs"
-              :key="tab.id"
-              role="tab"
-              :aria-selected="activeTab === tab.id"
-              :class="[
-                'whitespace-nowrap py-2 px-1 border-b-2 text-sm font-medium',
-                activeTab === tab.id
-                  ? 'border-action-primary-500 text-action-primary-600 dark:text-action-primary-400'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-200'
-              ]"
-              type="button"
-              @click="selectTab(tab.id)"
-            >{{ tab.label }}</button>
-          </nav>
+        <!-- Tab strip (#302, #1925). OverflowTabs measures and collapses what
+             does not fit into a counted "More" menu. The hand-rolled strip this
+             replaces was a plain flex row: below 7xl the ten tabs overflowed
+             silently, which #1862 mitigated by widening the page rather than
+             adopting the primitive.
+
+             `:model-value` + `@update:modelValue` rather than `v-model`, on
+             purpose — `selectTab` carries the valid-id guard, the same-tab
+             no-op and the `router.push` that keeps `?tab=` in step. v-model
+             would assign `activeTab` directly and skip all three. -->
+        <div class="mb-6">
+          <OverflowTabs
+            :tabs="visibleTabs"
+            :model-value="activeTab"
+            @update:modelValue="selectTab"
+          />
         </div>
 
         <!-- Loading State -->
@@ -74,6 +72,7 @@
 
           <!-- ent#279 — System Credential Vault (enterprise, gated by `credential_vault`) -->
           <CredentialVaultPanel v-if="activeTab === 'credential-vault'" />
+          <SkillRunnerPanel v-if="activeTab === 'skill-runner'" @navigate-tab="selectTab" />
 
           <!-- Retention Tab Content (#1039) -->
           <div v-if="activeTab === 'retention'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
@@ -182,6 +181,12 @@
                The panel fetches the gated enterprise endpoint itself. -->
           <ActivationFunnelPanel v-if="activeTab === 'activation'" />
 
+          <!-- ent#581 — Re-run setup: reopens the first-run overlay the same
+               way `?onboarding=1` does, so a skipped step is recoverable. -->
+          <div v-if="activeTab === 'general'" class="mb-6">
+            <FirstRunRerunPanel />
+          </div>
+
           <!-- ent#12 — Tier-2 opt-in usage sharing. OSS-core, default-off,
                reversible. Admin-only (General tab), visible in every edition. -->
           <div v-if="activeTab === 'general'" class="mb-6">
@@ -255,7 +260,7 @@
                   <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                   </svg>
-                  <span class="text-status-success-600 dark:text-status-success-400">Saved — you can now sign in with this email</span>
+                  <span class="text-status-success-700 dark:text-status-success-400">Saved — you can now sign in with this email</span>
                 </template>
                 <template v-else-if="adminEmailError">
                   <span class="text-status-danger-600 dark:text-status-danger-400">{{ adminEmailError }}</span>
@@ -264,7 +269,7 @@
                   <span class="text-gray-500 dark:text-gray-400">Current: {{ adminEmailCurrent }}</span>
                 </template>
                 <template v-else>
-                  <span class="text-state-autonomous-600 dark:text-state-autonomous-400">No email set — you currently sign in as <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code></span>
+                  <span class="text-state-autonomous-700 dark:text-state-autonomous-400">No email set — you currently sign in as <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code></span>
                 </template>
               </div>
             </div>
@@ -312,28 +317,58 @@
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
-                      <span class="text-status-success-600 dark:text-status-success-400">Saved</span>
+                      <span class="text-status-success-700 dark:text-status-success-400">Saved</span>
                     </template>
-                    <template v-else-if="publicUrlCurrent">
+                    <!-- #2691: a saved URL is a string an admin typed. On a
+                         provisioned install the tick waits until a request for
+                         that exact name has actually arrived here and a
+                         certificate was obtained for it — the same distinction
+                         the first-run step draws. Only the provisioned Caddyfile
+                         calls the gate that latches it, so everywhere else (own
+                         proxy, tunnel, tailnet) the wait would never end: those
+                         keep the plain saved tick. -->
+                    <template v-else-if="publicUrlCurrent && (sessionsStore.publicUrlReached || !sessionsStore.hardeningGuideEligible)">
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
-                      <span class="text-status-success-600 dark:text-status-success-400">
+                      <span class="text-status-success-700 dark:text-status-success-400">
                         {{ publicUrlCurrent }}
+                      </span>
+                    </template>
+                    <template v-else-if="publicUrlCurrent">
+                      <!-- Same icon box as every other branch, so the line does
+                           not shift when the latch flips. A clock, not the
+                           warning triangle the unconfigured branch uses: same
+                           token, different shape, different meaning — nothing
+                           is wrong here, it just has not happened yet. -->
+                      <svg class="h-4 w-4 text-state-autonomous-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                        {{ publicUrlCurrent }} — saved, waiting for the first visit to confirm it resolves here
                       </span>
                     </template>
                     <template v-else>
                       <svg class="h-4 w-4 text-state-autonomous-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                       </svg>
-                      <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                      <span class="text-state-autonomous-700 dark:text-state-autonomous-400">
                         Not configured — required for Telegram bots and public links
                       </span>
                     </template>
                   </div>
+                  <!-- #2691: the old text named three consumers out of a dozen
+                       and no side effect. The corrected list and the two shared
+                       lines live in `onboarding/hardeningGuide.js`, so this
+                       field and the first-run step cannot drift apart. -->
                   <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
                     The externally-accessible URL of this Trinity instance (e.g. <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">https://your-domain.com</code>).
-                    Used for Telegram webhooks, Slack OAuth callbacks, and shareable public links.
+                    {{ DOMAIN_BENEFIT }}
+                    It is the address Telegram, WhatsApp and VoIP call back on, the one Slack's
+                    OAuth returns to, and the base for every shareable public link, workspace
+                    link and file download — voice calls fail outright without it, and the rest
+                    fall back to an address nobody outside can use.
+                    {{ DOMAIN_PREREQUISITE }} {{ DOMAIN_SIDE_EFFECT }}
                   </p>
                 </div>
 
@@ -343,10 +378,15 @@
                     Default Model
                   </label>
                   <div class="mt-1 flex gap-2 items-center">
+                    <!-- #2197 — `min-w-0`. A flex item defaults to
+                         `min-width: auto`, and a <select>'s min-content width is
+                         its WIDEST OPTION ("Claude Opus 5 — Most capable Opus
+                         (latest) (recommended)", ~417px), so this control alone
+                         scrolled the Settings page body at 375px. -->
                     <select
                       v-model="platformDefaultModelValue"
                       :disabled="savingPlatformDefaultModel"
-                      class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                      class="block flex-1 min-w-0 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
                     >
                       <!-- Options derive from the single source of truth
                            (src/constants/modelCatalog.js, generated from
@@ -371,7 +411,7 @@
                       Save
                     </button>
                   </div>
-                  <div v-if="platformDefaultModelSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="platformDefaultModelSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -397,7 +437,7 @@
                       class="h-4 w-4 text-action-primary-600 border-gray-300 dark:border-gray-600 rounded focus:ring-action-primary-500 disabled:opacity-50"
                     />
                   </label>
-                  <div v-if="defaultAccessPolicySaveSuccess" class="mt-1 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="defaultAccessPolicySaveSuccess" class="mt-1 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -434,7 +474,7 @@
                       Save
                     </button>
                   </div>
-                  <div v-if="ceilingSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="ceilingSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -479,12 +519,12 @@
                       :disabled="savingProactive"
                       class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
                     >Save</button>
-                    <span v-if="proactiveSaveSuccess" class="inline-flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                    <span v-if="proactiveSaveSuccess" class="inline-flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                       <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
                       Saved
                     </span>
                   </div>
-                  <p v-for="w in proactiveWarnings" :key="w" class="mt-1 text-xs text-status-warning-600 dark:text-status-warning-400">⚠ {{ w }}</p>
+                  <p v-for="w in proactiveWarnings" :key="w" class="mt-1 text-xs text-status-warning-700 dark:text-status-warning-400">⚠ {{ w }}</p>
                   <p v-if="proactiveError" class="mt-1 text-sm text-status-danger-600 dark:text-status-danger-400">{{ proactiveError }}</p>
                 </div>
 
@@ -524,7 +564,7 @@
                       <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                         {{ flag.hint }}
                         <template v-if="flag.key === 'voice_enabled' && !brainOrbGeminiKey">
-                          <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                          <span class="text-state-autonomous-700 dark:text-state-autonomous-400">
                             GEMINI_API_KEY is not configured (env-only) — voice stays unavailable even when on.
                           </span>
                         </template>
@@ -537,7 +577,7 @@
                       </p>
                     </div>
                   </div>
-                  <div v-if="brainOrbSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="brainOrbSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -568,6 +608,22 @@
                         v-else
                         class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
                       >not set</span>
+                      <!-- #2695: "configured" is presence; this is whether the key can
+                           TRANSCRIBE. ElevenLabs permissions are per endpoint, so a key
+                           that speaks may still refuse speech-to-text — and then the
+                           Workspace mic is hidden, which this is the one place to see. -->
+                      <span
+                        v-if="sttCapability.tone !== 'none'"
+                        data-testid="elevenlabs-stt-capability"
+                        :data-tone="sttCapability.tone"
+                        class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium"
+                        :class="sttCapability.tone === 'ok'
+                          ? 'bg-status-success-100 text-status-success-800 dark:bg-status-success-900 dark:text-status-success-200'
+                          : sttCapability.tone === 'bad'
+                            ? 'bg-status-danger-100 text-status-danger-800 dark:bg-status-danger-900 dark:text-status-danger-200'
+                            : 'bg-status-warning-100 text-status-warning-800 dark:bg-status-warning-900 dark:text-status-warning-200'"
+                        :title="sttCapability.hint"
+                      >{{ sttCapability.label }}</span>
                     </label>
                     <div class="flex gap-2">
                       <input
@@ -591,6 +647,22 @@
                         class="px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
                       >Clear</button>
                     </div>
+                    <p
+                      v-if="sttCapability.tone === 'bad' || sttCapability.tone === 'unverified'"
+                      data-testid="elevenlabs-stt-hint"
+                      class="mt-1 text-xs"
+                      :class="sttCapability.tone === 'bad'
+                        ? 'text-status-danger-600 dark:text-status-danger-400'
+                        : 'text-status-warning-700 dark:text-status-warning-300'"
+                    >{{ sttCapability.hint }}</p>
+                    <!-- #2696: the operator half of a client's "voice input failed" —
+                         the client got a category sentence; the provider's status
+                         word lives only here, on the admin panel. -->
+                    <p
+                      v-if="sttLastFailure"
+                      data-testid="elevenlabs-stt-last-failure"
+                      class="mt-1 text-xs text-status-danger-600 dark:text-status-danger-400"
+                    >{{ sttLastFailure.text }}<span v-if="sttLastFailure.at"> — {{ new Date(sttLastFailure.at * 1000).toLocaleString() }}</span></p>
                   </div>
 
                   <!-- Default voice id -->
@@ -616,7 +688,7 @@
                     </p>
                   </div>
 
-                  <div v-if="elevenLabsSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                  <div v-if="elevenLabsSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-700 dark:text-status-success-400">
                     <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                     </svg>
@@ -714,7 +786,7 @@
                       <svg v-else class="h-4 w-4 text-status-danger-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                       </svg>
-                      <span :class="apiKeyTestResult ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
+                      <span :class="apiKeyTestResult ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
                         {{ apiKeyTestMessage }}
                       </span>
                     </template>
@@ -722,7 +794,7 @@
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
-                      <span class="text-status-success-600 dark:text-status-success-400">
+                      <span class="text-status-success-700 dark:text-status-success-400">
                         Configured
                         <span class="text-gray-500 dark:text-gray-400">
                           ({{ anthropicKeyStatus.source === 'settings' ? 'from settings' : 'from environment' }})
@@ -733,7 +805,7 @@
                       <svg class="h-4 w-4 text-state-autonomous-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                       </svg>
-                      <span class="text-state-autonomous-600 dark:text-state-autonomous-400">
+                      <span class="text-state-autonomous-700 dark:text-state-autonomous-400">
                         Not configured - required for agents
                       </span>
                     </template>
@@ -819,7 +891,7 @@
                       <svg v-else class="h-4 w-4 text-status-danger-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                       </svg>
-                      <span :class="githubPatTestResult ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
+                      <span :class="githubPatTestResult ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
                         {{ githubPatTestMessage }}
                       </span>
                     </template>
@@ -827,7 +899,7 @@
                       <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                       </svg>
-                      <span class="text-status-success-600 dark:text-status-success-400">
+                      <span class="text-status-success-700 dark:text-status-success-400">
                         Configured
                         <span class="text-gray-500 dark:text-gray-400">
                           ({{ githubPatStatus.source === 'settings' ? 'from settings' : 'from environment' }})
@@ -864,7 +936,7 @@
                       <div v-if="!githubPatPropagation.updated.length" class="text-status-danger-600 dark:text-status-danger-400">
                         PAT saved, but applied to <strong>0 of {{ githubPatPropagation.total_running }}</strong> running agent{{ githubPatPropagation.total_running === 1 ? '' : 's' }} — they keep using the previous token until restarted.
                       </div>
-                      <div v-else :class="githubPatPropagation.failed.length ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-status-success-600 dark:text-status-success-400'">
+                      <div v-else :class="githubPatPropagation.failed.length ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-status-success-700 dark:text-status-success-400'">
                         PAT updated and applied to {{ githubPatPropagation.updated.length }} of {{ githubPatPropagation.total_running }} running agent{{ githubPatPropagation.total_running === 1 ? '' : 's' }}.
                       </div>
                       <!-- The .env write only lands on the next restart; the
@@ -893,6 +965,11 @@
                     with <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">repo</code> scope.
                   </p>
                 </div>
+
+                <!-- ent#582: the email-provider and Gemini keys — the same field
+                     the first-run flow uses, so a key set there is managed here. -->
+                <PlatformKeyField provider="resend" class="mt-6" />
+                <PlatformKeyField provider="gemini" class="mt-6" />
               </div>
             </div>
           </div>
@@ -939,7 +1016,7 @@
                       class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white font-mono text-sm"
                     />
                   </div>
-                  <div v-if="slackSettings.client_id?.configured" class="mt-1 text-xs text-status-success-600 dark:text-status-success-400">
+                  <div v-if="slackSettings.client_id?.configured" class="mt-1 text-xs text-status-success-700 dark:text-status-success-400">
                     ✓ Configured ({{ slackSettings.client_id.source === 'settings' ? 'from settings' : 'from environment' }})
                   </div>
                 </div>
@@ -972,7 +1049,7 @@
                       </svg>
                     </button>
                   </div>
-                  <div v-if="slackSettings.client_secret?.configured" class="mt-1 text-xs text-status-success-600 dark:text-status-success-400">
+                  <div v-if="slackSettings.client_secret?.configured" class="mt-1 text-xs text-status-success-700 dark:text-status-success-400">
                     ✓ Configured ({{ slackSettings.client_secret.source === 'settings' ? 'from settings' : 'from environment' }})
                   </div>
                 </div>
@@ -1005,7 +1082,7 @@
                       </svg>
                     </button>
                   </div>
-                  <div v-if="slackSettings.signing_secret?.configured" class="mt-1 text-xs text-status-success-600 dark:text-status-success-400">
+                  <div v-if="slackSettings.signing_secret?.configured" class="mt-1 text-xs text-status-success-700 dark:text-status-success-400">
                     ✓ Configured ({{ slackSettings.signing_secret.source === 'settings' ? 'from settings' : 'from environment' }})
                   </div>
                 </div>
@@ -1035,7 +1112,7 @@
                     </svg>
                     Remove Credentials
                   </button>
-                  <span v-if="slackSaveSuccess" class="text-sm text-status-success-600 dark:text-status-success-400">
+                  <span v-if="slackSaveSuccess" class="text-sm text-status-success-700 dark:text-status-success-400">
                     ✓ Saved
                   </span>
                 </div>
@@ -1079,7 +1156,7 @@
                       </svg>
                     </button>
                   </div>
-                  <div v-if="slackTransportStatus.app_token_configured" class="mt-1 text-xs text-status-success-600 dark:text-status-success-400">
+                  <div v-if="slackTransportStatus.app_token_configured" class="mt-1 text-xs text-status-success-700 dark:text-status-success-400">
                     ✓ App token configured
                   </div>
                   <p class="mt-1 text-xs text-gray-400">
@@ -1102,7 +1179,7 @@
                     </svg>
                     {{ connectingSlack ? 'Connecting...' : 'Connect' }}
                   </button>
-                  <span v-if="slackTransportStatus.connected" class="text-sm text-status-success-600 dark:text-status-success-400">
+                  <span v-if="slackTransportStatus.connected" class="text-sm text-status-success-700 dark:text-status-success-400">
                     ✓ Socket Mode active
                   </span>
 
@@ -1118,7 +1195,7 @@
                     </svg>
                     {{ slackTransportStatus.workspaces.length > 0 ? 'Reinstall to Workspace' : 'Install to Workspace' }}
                   </button>
-                  <span v-if="slackInstallSuccess" class="text-sm text-status-success-600 dark:text-status-success-400">
+                  <span v-if="slackInstallSuccess" class="text-sm text-status-success-700 dark:text-status-success-400">
                     ✓ Workspace installed
                   </span>
                 </div>
@@ -1214,7 +1291,7 @@ Example:
                 <!-- Character Count -->
                 <div class="flex justify-between text-sm text-gray-500 dark:text-gray-400">
                   <span>{{ trinityPrompt.length }} characters</span>
-                  <span v-if="hasChanges" class="text-state-autonomous-600 dark:text-state-autonomous-400">Unsaved changes</span>
+                  <span v-if="hasChanges" class="text-state-autonomous-700 dark:text-state-autonomous-400">Unsaved changes</span>
                 </div>
 
                 <!-- Action Buttons -->
@@ -1465,7 +1542,7 @@ Example:
                     class="px-3 py-2 text-sm font-medium rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-50">Send invite</button>
                   <button type="button" @click="showInvite = false; inviteEmail = ''" :disabled="umBusy"
                     class="px-3 py-2 text-sm rounded-lg text-gray-600 dark:text-gray-300 hover:underline">Cancel</button>
-                  <span v-if="inviteMsg" class="text-xs" :class="inviteErr ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-600 dark:text-status-success-400'">{{ inviteMsg }}</span>
+                  <span v-if="inviteMsg" class="text-xs" :class="inviteErr ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-700 dark:text-status-success-400'">{{ inviteMsg }}</span>
                 </form>
               </div>
 
@@ -1531,7 +1608,7 @@ Example:
                           </span>
                           <button @click="openActivity(u)" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">Activity</button>
                           <template v-if="u.username !== currentUsername && u.username !== 'admin'">
-                            <button v-if="u.suspended_at" @click="reactivateUser(u)" :disabled="umBusy" class="text-status-success-600 dark:text-status-success-400 hover:underline disabled:opacity-50">Reactivate</button>
+                            <button v-if="u.suspended_at" @click="reactivateUser(u)" :disabled="umBusy" class="text-status-success-700 dark:text-status-success-400 hover:underline disabled:opacity-50">Reactivate</button>
                             <button v-else @click="suspendUser(u)" :disabled="umBusy" class="text-status-danger-600 dark:text-status-danger-400 hover:underline disabled:opacity-50">Deactivate</button>
                           </template>
                         </div>
@@ -1642,7 +1719,7 @@ Example:
               <p v-if="mcpUrlError" class="mt-2 text-sm text-status-danger-600 dark:text-status-danger-400">
                 {{ mcpUrlError }}
               </p>
-              <p v-if="mcpUrlSuccess" class="mt-2 text-sm text-status-success-600 dark:text-status-success-400">
+              <p v-if="mcpUrlSuccess" class="mt-2 text-sm text-status-success-700 dark:text-status-success-400">
                 {{ mcpUrlSuccess }}
               </p>
             </div>
@@ -1819,6 +1896,9 @@ Example:
                   />
                 </button>
               </div>
+              <!-- #2915: the operator-queue aging bound — its own component so
+                   this view's raw-colour count cannot move (the registry-panel precedent). -->
+              <OperatorQueueAgingSetting />
             </div>
           </div>
 
@@ -1838,7 +1918,7 @@ Example:
                   <label class="text-sm font-medium text-gray-700 dark:text-gray-300">Admin</label>
                   <p class="text-sm text-gray-500 dark:text-gray-400">Admins can always create unlimited agents</p>
                 </div>
-                <span class="text-sm font-medium text-status-success-600 dark:text-status-success-400">Unlimited</span>
+                <span class="text-sm font-medium text-status-success-700 dark:text-status-success-400">Unlimited</span>
               </div>
 
               <!-- Creator role -->
@@ -1913,6 +1993,13 @@ Example:
 
           <!-- Skills Library sources (ent#237) -->
           <SkillSourcesPanel v-if="activeTab === 'agents'" />
+
+          <!-- Skill managers (ent#596) — beside the sources panel, because the two
+               together are the skills-governance surface: where skills come
+               FROM, and which agents may change which skills an agent holds.
+               Every agent not granted here is refused, its own skills included,
+               so this is the only place an orchestrator's skill map is unblocked. -->
+          <SkillManagersPanel v-if="activeTab === 'agents'" />
 
           <!-- Skills Library automation (ent#236). Kept in Settings, NOT folded
                into SkillSourcesPanel: auto-sync and fleet re-inject are
@@ -2127,6 +2214,8 @@ import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
 import { readOpsBool, opsBoolValue } from '../utils/opsSettings'
+import OperatorQueueAgingSetting from '../components/settings/OperatorQueueAgingSetting.vue'
+import { describeSttCapability, describeSttLastFailure } from '../utils/sttCapability'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
@@ -2134,17 +2223,30 @@ import SubscriptionsPanel from '../components/settings/SubscriptionsPanel.vue'
 import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
+import SkillManagersPanel from '../components/SkillManagersPanel.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
+import OverflowTabs from '../components/OverflowTabs.vue'
 import CredentialVaultPanel from '../components/settings/CredentialVaultPanel.vue'
+import SkillRunnerPanel from '../components/settings/SkillRunnerPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
+import FirstRunRerunPanel from '../components/settings/FirstRunRerunPanel.vue'
 import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
 import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
+// #2691: one home for what the Public URL buys, what must be true first, and
+// what saving it re-points — shared with the first-run step so the explanation
+// does not depend on which surface the operator arrives through.
+import {
+  DOMAIN_BENEFIT,
+  DOMAIN_PREREQUISITE,
+  DOMAIN_SIDE_EFFECT,
+} from '../components/onboarding/hardeningGuide'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
+import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const router = useRouter()
@@ -2167,6 +2269,7 @@ const buildInfo = useBuildInfo()
 // because "do-marketplace" means nothing to an operator reading a panel.
 const INSTALL_SOURCE_LABELS = {
   'do-marketplace': 'DigitalOcean Marketplace',
+  'do-script': 'DigitalOcean (install script)',
   'vultr-marketplace': 'Vultr Marketplace',
   script: 'Install script',
   unknown: 'Not recorded',
@@ -2199,6 +2302,11 @@ const ALL_TABS = [
   { id: 'security',     label: 'Security',     adminOnly: false, requires: '2fa' },
   { id: 'sso',          label: 'SSO',          adminOnly: true,  requires: 'sso' },
   { id: 'credential-vault', label: 'Vault',    adminOnly: true,  requires: 'credential_vault' },
+  // ent#242 — the skill runner's operator half. `requires:` hides the tab
+  // outright when unentitled; the server gates every route regardless
+  // (`requires_entitlement("skill_runner")` + `require_human_admin`), so
+  // this is UX, not containment.
+  { id: 'skill-runner', label: 'Skill Runner', adminOnly: true,  requires: 'skill_runner' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
   { id: 'retention',    label: 'Retention',    adminOnly: true  },
   // ent#184 — local product-event activation funnel. Capture is OSS-core;
@@ -2550,7 +2658,18 @@ const elevenLabs = reactive({
   keySource: 'none',   // override | env | none
   apiKeyInput: '',
   defaultVoiceId: '',
+  // #2695: what the provider said when asked whether this key may transcribe —
+  // capable | refused | unknown | unconfigured, plus its own status word.
+  sttCapability: 'unconfigured',
+  sttDetail: null,
+  sttLastFailure: null,   // #2696: {category, provider_status, detail, at} | null
 })
+const sttLastFailure = computed(() => describeSttLastFailure(elevenLabs.sttLastFailure))
+const sttCapability = computed(() => describeSttCapability({
+  key_configured: elevenLabs.keyConfigured,
+  stt_capability: elevenLabs.sttCapability,
+  stt_detail: elevenLabs.sttDetail,
+}))
 const savingElevenLabs = ref(false)
 const elevenLabsSaveSuccess = ref(false)
 const elevenLabsError = ref('')
@@ -2896,8 +3015,16 @@ function removeGithubPat() {
 
 // Platform default model methods (#831)
 async function loadPlatformDefaultModel() {
+  // #2202 — read the RESOLVED value off the feature-flags payload the page
+  // already loads, not `GET /api/settings/platform_default_model`. That key is
+  // unwritten on any instance that never overrode the default, so the generic
+  // getter 404s — measured eight times per Settings load, on every tab. The
+  // flags payload carries the resolved value (row → code default), so this is
+  // also more correct: the control now shows what the platform will actually
+  // use rather than blank.
   try {
-    const value = await settingsStore.getSetting('platform_default_model')
+    await sessionsStore.loadFeatureFlags()
+    const value = sessionsStore.platformDefaultModel
     if (value) platformDefaultModelValue.value = value
   } catch {
     // non-critical; UI shows the code-default
@@ -3053,6 +3180,11 @@ function applyElevenLabsState(state) {
   elevenLabs.keyConfigured = !!state.key_configured
   elevenLabs.keySource = state.key_source || 'none'
   elevenLabs.defaultVoiceId = state.default_voice_id || ''
+  // An older backend sends no capability field: `undefined` reads as
+  // "unverified", never as "capable" — see describeSttCapability.
+  elevenLabs.sttCapability = state.stt_capability
+  elevenLabs.sttDetail = state.stt_detail ?? null
+  elevenLabs.sttLastFailure = state.stt_last_failure ?? null
 }
 
 async function loadElevenLabsSettings() {
@@ -3099,9 +3231,16 @@ async function saveElevenLabsDefaultVoice() {
 
 // Public URL methods
 async function loadPublicUrl() {
+  // #2202 — the dedicated route, because "not configured" is this setting's
+  // normal state. The generic `GET /api/settings/{key}` answers 404 for a key
+  // that was never written, so this call logged a failed request in the browser
+  // console on every visit to every Settings tab — and no JS handling can
+  // suppress that, which is why the fix is the route and not a try/catch.
   try {
-    const value = await settingsStore.getSetting('public_chat_url')
-    publicUrlCurrent.value = value || ''
+    const { data } = await axios.get('/api/settings/public-chat-url', {
+      headers: authStore.authHeader,
+    })
+    publicUrlCurrent.value = data?.value || ''
   } catch (e) {
     console.error('Failed to load public URL:', e)
   }

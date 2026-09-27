@@ -11,6 +11,7 @@ import pytest
 import time
 import uuid
 from testkit.api_client import TrinityApiClient
+from testkit.readiness import require_agent_answer
 from testkit.assertions import (
     assert_status,
     assert_status_in,
@@ -76,6 +77,7 @@ class TestExecutionFields:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_execution_has_required_fields(
         self,
         api_client: TrinityApiClient,
@@ -89,8 +91,7 @@ class TestExecutionFields:
             timeout=120.0
         )
 
-        if task_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(task_response, what="POST /task")
 
         assert_status(task_response, 200)
 
@@ -117,6 +118,7 @@ class TestExecutionFields:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_successful_execution_has_response(
         self,
         api_client: TrinityApiClient,
@@ -130,8 +132,7 @@ class TestExecutionFields:
             timeout=120.0
         )
 
-        if task_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(task_response, what="POST /task")
 
         assert_status(task_response, 200)
         time.sleep(2)
@@ -159,6 +160,7 @@ class TestTaskPersistence:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_task_appears_in_executions(
         self,
         api_client: TrinityApiClient,
@@ -182,8 +184,7 @@ class TestTaskPersistence:
             timeout=120.0
         )
 
-        if task_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(task_response, what="POST /task")
 
         assert_status(task_response, 200)
 
@@ -207,6 +208,7 @@ class TestTaskPersistence:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_task_has_manual_trigger(
         self,
         api_client: TrinityApiClient,
@@ -222,8 +224,7 @@ class TestTaskPersistence:
             timeout=120.0
         )
 
-        if task_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(task_response, what="POST /task")
 
         assert_status(task_response, 200)
         time.sleep(2)
@@ -243,6 +244,7 @@ class TestTaskPersistence:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_task_records_duration(
         self,
         api_client: TrinityApiClient,
@@ -255,8 +257,7 @@ class TestTaskPersistence:
             timeout=120.0
         )
 
-        if task_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(task_response, what="POST /task")
 
         assert_status(task_response, 200)
         time.sleep(2)
@@ -275,6 +276,7 @@ class TestTaskPersistence:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_task_records_cost(
         self,
         api_client: TrinityApiClient,
@@ -287,8 +289,7 @@ class TestTaskPersistence:
             timeout=120.0
         )
 
-        if task_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(task_response, what="POST /task")
 
         assert_status(task_response, 200)
         time.sleep(2)
@@ -306,16 +307,24 @@ class TestTaskPersistence:
 
 
 class TestAgentToAgentTask:
-    """Tests for agent-to-agent task execution via X-Source-Agent header."""
+    """ent#614: X-Source-Agent is honoured only for an agent-scoped key naming itself.
+
+    The two tests that used to live here asserted the DEFECT — a user token sending the
+    header was accepted and its execution recorded `triggered_by='agent'` — so a permitted
+    human could attribute their action to any agent in the SEC-001 audit log and forge a
+    collaboration edge. They are inverted, not deleted: the same request is now refused
+    with a named 403 before anything is dispatched.
+    """
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
-    def test_task_with_source_agent_header(
+    @pytest.mark.requires_model
+    def test_user_token_with_source_agent_header_is_refused(
         self,
         api_client: TrinityApiClient,
         created_agent
     ):
-        """Task with X-Source-Agent header is accepted."""
+        """A user token sending X-Source-Agent gets a 403 that names the rule."""
         response = api_client.post(
             f"/api/agents/{created_agent['name']}/task",
             json={"message": "Agent-to-agent test"},
@@ -323,20 +332,21 @@ class TestAgentToAgentTask:
             timeout=120.0
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /task")
 
-        # Should work - 200 or 202
-        assert_status_in(response, [200, 202])
+        assert_status(response, 403)
+        assert "agent-scoped" in response.text
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
-    def test_agent_task_has_agent_trigger(
+    @pytest.mark.requires_model
+    def test_user_token_cannot_produce_an_agent_triggered_execution(
         self,
         api_client: TrinityApiClient,
         created_agent
     ):
-        """Task with X-Source-Agent has triggered_by='agent'."""
+        """Nothing is dispatched for the refused request: no execution with that message
+        exists afterwards, so no row can read triggered_by='agent' for a human caller."""
         unique_id = uuid.uuid4().hex[:8]
         task_message = f"Agent trigger test {unique_id}"
 
@@ -347,24 +357,17 @@ class TestAgentToAgentTask:
             timeout=120.0
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(response, what="POST /task")
 
-        assert_status(response, 200)
+        assert_status(response, 403)
         time.sleep(2)
 
-        # Get executions
         exec_response = api_client.get(f"/api/agents/{created_agent['name']}/executions")
         assert_status(exec_response, 200)
         executions = exec_response.json()
 
-        # Find our task
         matching = [e for e in executions if task_message in e.get("message", "")]
-        assert len(matching) > 0, "Should find our task"
-
-        execution = matching[0]
-        assert execution.get("triggered_by") == "agent", \
-            f"Expected triggered_by='agent', got '{execution.get('triggered_by')}'"
+        assert matching == [], "A refused request must not leave an execution row"
 
 
 class TestExecutionOrdering:
@@ -372,6 +375,7 @@ class TestExecutionOrdering:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_executions_ordered_by_time_desc(
         self,
         api_client: TrinityApiClient,
@@ -385,8 +389,7 @@ class TestExecutionOrdering:
                 json={"message": f"Ordering test task {i}"},
                 timeout=120.0
             )
-            if task_response.status_code == 503:
-                pytest.skip("Agent server not ready")
+            require_agent_answer(task_response, what="POST /task")
             time.sleep(1)
 
         time.sleep(2)
@@ -479,6 +482,7 @@ class TestExecutionLog:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_get_execution_log_returns_log(
         self,
         api_client: TrinityApiClient,
@@ -492,8 +496,7 @@ class TestExecutionLog:
             timeout=120.0
         )
 
-        if task_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(task_response, what="POST /task")
 
         assert_status(task_response, 200)
         time.sleep(3)
@@ -527,6 +530,7 @@ class TestExecutionLog:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_execution_log_content_structure(
         self,
         api_client: TrinityApiClient,
@@ -540,8 +544,7 @@ class TestExecutionLog:
             timeout=120.0
         )
 
-        if task_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(task_response, what="POST /task")
 
         assert_status(task_response, 200)
         time.sleep(3)
@@ -624,6 +627,7 @@ class TestExecutionDetails:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_execution_detail_has_all_fields(
         self,
         api_client: TrinityApiClient,
@@ -637,8 +641,7 @@ class TestExecutionDetails:
             timeout=120.0
         )
 
-        if task_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(task_response, what="POST /task")
 
         assert_status(task_response, 200)
         time.sleep(3)
@@ -682,6 +685,7 @@ class TestExecutionDetails:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_execution_detail_cost_context_populated(
         self,
         api_client: TrinityApiClient,
@@ -695,8 +699,7 @@ class TestExecutionDetails:
             timeout=120.0
         )
 
-        if task_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(task_response, what="POST /task")
 
         assert_status(task_response, 200)
         time.sleep(3)

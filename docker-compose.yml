@@ -55,7 +55,6 @@ services:
       - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
       - WORKSPACE_VOICE_MAX_DURATION=${WORKSPACE_VOICE_MAX_DURATION:-1800}  # Workspace voice call cap, seconds (ent#534)
-      - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
       # Brain Orb (#58 static render / scope) + voice tile (#60, needs GEMINI_API_KEY).
       # Both default OFF; must reach the container or the flags stay false (config.py).
       - BRAIN_ORB_ENABLED=${BRAIN_ORB_ENABLED:-false}
@@ -99,6 +98,18 @@ services:
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Must reach the container or the .env lever is inert in prod (the #1039 packaging class).
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # trinity-enterprise#478 — metric write path. The two policy values are a
+      # bootstrap fallback; a Settings row wins over them.
+      - METRICS_RATE_LIMIT=${METRICS_RATE_LIMIT:-60}             # record_metrics calls per agent per 60s
+      - METRICS_RETENTION_DAYS=${METRICS_RETENTION_DAYS:-365}    # recorded point retention (0 = forever)
+      - METRICS_DAILY_POINT_CAP=${METRICS_DAILY_POINT_CAP:-100000}  # points per agent per UTC day (0 = unlimited)
+      - INTER_AGENT_MAX_CHAIN_DEPTH=${INTER_AGENT_MAX_CHAIN_DEPTH:-8}  # max agent-to-agent hops per call chain (#2806)
+      - METRICS_READ_RATE_LIMIT=${METRICS_READ_RATE_LIMIT:-240}   # GET /metrics reads per agent per 60s (tiles, dashboard binds, get_metrics)
+      - OBJECTIVES_READ_RATE_LIMIT=${OBJECTIVES_READ_RATE_LIMIT:-60}  # GET /objectives reads per agent per 60s (fans out into the agent container)
+      # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.
+      # The refusal names this number, so it must reach the container or the
+      # operator is told to raise a lever that is inert (the #1039 class).
+      - CANVAS_MAX_PER_AGENT=${CANVAS_MAX_PER_AGENT:-100}        # canvases per agent
       # Skills library lifecycle automation (ent#236). The reconcile cap is named in the
       # refusal alarm's own remediation text, so it must be tunable from .env or the
       # operator is told to raise a lever that never reaches the container.
@@ -214,6 +225,11 @@ services:
       - DB_BACKUP_HOUR=${DB_BACKUP_HOUR:-3}
       - DB_BACKUP_MINUTE=${DB_BACKUP_MINUTE:-30}
       - DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS=${DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS:-1800}
+      # Git sync-health poll cadence (#2742). Default UNCHANGED at 60s; the knob
+      # exists so an operator can cut the per-poll `git fetch` load on a large
+      # fleet. Read at call time in sync_health_service, so it must reach the
+      # container or the .env lever is inert (the #1056/#1039 packaging class).
+      - SYNC_HEALTH_POLL_INTERVAL_SECONDS=${SYNC_HEALTH_POLL_INTERVAL_SECONDS:-60}  # seconds between fleet sync-health polls
       - TRINITY_DB_PATH=/data/trinity.db
       # Configurable database backend (#300). Unset → SQLite at TRINITY_DB_PATH
       # (default). Set to a postgresql:// URL (with the postgres profile up) to
@@ -549,6 +565,10 @@ services:
       # a structured `queued_timeout` receipt instead of `fetch failed`.
       # Default 25000ms sits below the typical 30-60s MCP gateway ceiling.
       - MCP_CHAT_TIMEOUT_MS=${MCP_CHAT_TIMEOUT_MS:-25000}
+      # #2661 ceiling for the executions lookup that recovery runs AFTER the
+      # abort — whatever is left of the gateway ceiling is all it has, so it
+      # must fail fast rather than hang into the same `fetch failed`.
+      - MCP_RECOVERY_TIMEOUT_MS=${MCP_RECOVERY_TIMEOUT_MS:-5000}
       # MCP server authenticates to backend as ADMIN_USERNAME/ADMIN_PASSWORD.
       # Read directly from ADMIN_PASSWORD so devs do not have to set the same
       # secret twice (issue #692).
@@ -621,6 +641,7 @@ services:
       # #1022: scheduler→backend dispatch + pre-check deadlines (operator-tunable).
       - DISPATCH_TIMEOUT=${DISPATCH_TIMEOUT:-30}
       - PRE_CHECK_TIMEOUT=${PRE_CHECK_TIMEOUT:-70}
+      - READINESS_CHECK_TIMEOUT=${READINESS_CHECK_TIMEOUT:-5}
       - MISFIRE_GRACE_TIME=3600
       - PUBLISH_EVENTS=true
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}

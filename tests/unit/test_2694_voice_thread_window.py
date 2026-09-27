@@ -255,6 +255,24 @@ def test_platform_rows_since_last_reply_is_cursored_on_the_typed_reply(portal_db
     assert [r["voice_call_id"] for r in rows] == ["vs_3"] * 3
 
 
+def test_a_background_task_reply_is_not_the_cursor(portal_db):
+    """ent#551: a `run_task` the call ran lands as a typed pair carrying the
+    call's id, mid-call. Taking that reply as the cursor would erase the call's
+    earlier spoken rows from the next delta — the loss #2694 exists to prevent.
+    A real typed reply after the call still resets the cursor."""
+    from client_portal import db as pdb
+    from utils.helpers import utc_now_iso
+    _typed("user", "u0"); _typed("assistant", "a0")
+    _call("vs_1", 2)
+    for role, text in (("user", "count the files"), ("assistant", "sixty-four")):
+        pdb.add_portal_message(uuid.uuid4().hex, AGENT, ALICE, role, text, None, utc_now_iso(),
+                               session_id=THREAD, voice_call_id="vs_1")
+    rows = pdb.get_platform_rows_since_last_reply(AGENT, ALICE, THREAD)
+    assert [r["content"] for r in rows] == ["said vs_1 0", "said vs_1 1", "Voice call · 2 min"]
+    _typed("assistant", "a1")
+    assert pdb.get_platform_rows_since_last_reply(AGENT, ALICE, THREAD) == []
+
+
 def test_platform_rows_include_system_rows_and_exclude_typed_ones(portal_db):
     from client_portal import db as pdb
     from utils.helpers import utc_now_iso

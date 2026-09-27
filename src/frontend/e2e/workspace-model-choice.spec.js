@@ -44,6 +44,12 @@ async function workspace(page) {
   await page.route(`${API}/agents/${AGENT}/executions/*/stream`, r => r.fulfill({
     status: 200, contentType: 'text/event-stream', body: 'data: {"type":"stream_end"}\n\n',
   }))
+  // #2705: the rail column enters through a 300 ms width transition once the roster
+  // arrives (#2676) and everything left of it moves with it. Under reduced motion
+  // the product renders that entry instantly (`motion-reduce:transition-none` on the
+  // column in Portal.vue) — the idiom dashboard-grid-view and grid-tile-loading-motion
+  // already use. Per page, not in playwright.config.js: two specs test motion.
+  await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.goto(`/workspace/c/${SESSION}`)
   await expect(page.getByTestId('portal-model-picker')).toBeVisible()
   return state
@@ -71,13 +77,41 @@ for (const width of [375, 768, 1280]) {
 
     const input = page.locator('textarea')
     await input.fill('A readable message for the agent')
-    const field = await input.boundingBox()
     const formEl = input.locator('xpath=ancestor::form')
-    const form = await formEl.boundingBox()
     const pickerEl = page.getByTestId('portal-model-picker')
-    const picker = await pickerEl.boundingBox()
     const sendEl = page.getByRole('button', { name: 'Send', exact: true })
-    const send = await sendEl.boundingBox()
+    await expect(sendEl).toBeVisible()
+
+    // #2705: ONE read. Every assertion below is relative, so what matters is that all
+    // the boxes come from the same frame. Reading them one round-trip at a time let
+    // the rail column's entry land between two reads: `send.x` went stale, the
+    // Send-skip in the loop below missed Send itself, and "an icon button sits right
+    // of the picker" fired on Send's own right edge. The locators above still choose
+    // the elements; the geometry is taken inside the page in one go.
+    const { field, form, picker, send, buttons, chrome, overflow } = await page.evaluate(
+      ([inputEl, formNode, pickerNode, sendNode]) => {
+        const box = (el) => {
+          const r = el.getBoundingClientRect()
+          return { x: r.x, y: r.y, width: r.width, height: r.height }
+        }
+        const cs = getComputedStyle(pickerNode)
+        return {
+          field: box(inputEl),
+          form: box(formNode),
+          picker: box(pickerNode),
+          send: box(sendNode),
+          buttons: [...formNode.querySelectorAll('button')].map(box),
+          chrome: { border: cs.borderTopColor, background: cs.backgroundColor },
+          overflow: inputEl.scrollWidth - inputEl.clientWidth,
+        }
+      },
+      [
+        await input.elementHandle(),
+        await formEl.elementHandle(),
+        await pickerEl.elementHandle(),
+        await sendEl.elementHandle(),
+      ],
+    )
 
     // 1. The picker is INSIDE the shell, under the field, on Send's row, and
     //    immediately left of Send. Each of the three ways this has shipped or
@@ -88,10 +122,8 @@ for (const width of [375, 768, 1280]) {
     expect(picker.y + picker.height).toBeLessThanOrEqual(form.y + form.height)
     expect(picker.x + picker.width).toBeLessThanOrEqual(send.x)
     expect(Math.abs((picker.y + picker.height / 2) - (send.y + send.height / 2))).toBeLessThanOrEqual(2)
-    const buttons = await formEl.locator('button').all()
     expect(buttons.length).toBeGreaterThan(1)
-    for (const button of buttons) {
-      const box = await button.boundingBox()
+    for (const box of buttons) {
       if (box.x >= send.x) continue                       // Send itself
       expect(box.x + box.width, 'an icon button sits right of the picker').toBeLessThanOrEqual(picker.x)
     }
@@ -101,10 +133,6 @@ for (const width of [375, 768, 1280]) {
     //     source-matched: a class list proves the classes were written, not
     //     that they survived to the box (#2659). And it is the element that
     //     yields when the row runs out — at 375px it truncates; Send does not.
-    const chrome = await pickerEl.evaluate((el) => {
-      const cs = getComputedStyle(el)
-      return { border: cs.borderTopColor, background: cs.backgroundColor }
-    })
     const invisible = (c) => c === 'rgba(0, 0, 0, 0)' || c === 'transparent'
     expect(invisible(chrome.border)).toBe(true)
     expect(invisible(chrome.background)).toBe(true)
@@ -117,7 +145,7 @@ for (const width of [375, 768, 1280]) {
     //    scrollbar and any padding tweak short of putting a button back beside
     //    it: before #2662 this was 41% of the form at 375px.
     expect(field.width).toBeGreaterThanOrEqual(form.width * 0.9)
-    expect(await input.evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1)
+    expect(overflow).toBeLessThanOrEqual(1)
 
     // 3. Every action box keeps its 44px touch target (#2259) — the cheap way
     //    to fit a picker on the row would be to shrink these. The PICKER is one
@@ -126,8 +154,7 @@ for (const width of [375, 768, 1280]) {
     //    it — the loop below walks `<button>`s only, and the centre-alignment
     //    check in 1 passes for a short picker exactly as it does for a tall one.
     expect(picker.height).toBe(44)
-    for (const button of buttons) {
-      const action = await button.boundingBox()
+    for (const action of buttons) {
       expect(action.width).toBe(44)
       expect(action.height).toBe(44)
     }
@@ -141,7 +168,10 @@ for (const width of [375, 768, 1280]) {
     //    respects border-radius, so a point 4px in from the right edge and 4px
     //    down is OUTSIDE the 16px arc — the click falls through the shell and
     //    reads BODY against a perfectly working handler.
-    await page.mouse.click(form.x + form.width / 2, form.y + 4)
+    //    Clicked as an element action rather than at remembered coordinates:
+    //    Playwright waits for the shell's box to hold still across two frames
+    //    before it clicks, so the point is taken from where the shell IS (#2705).
+    await formEl.click({ position: { x: form.width / 2, y: 4 } })
     expect(await page.evaluate(() => document.activeElement?.tagName)).toBe('TEXTAREA')
 
     await expect(sendEl).toBeVisible()

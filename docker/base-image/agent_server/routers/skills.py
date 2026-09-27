@@ -25,6 +25,10 @@ class SkillInfo(BaseModel):
     path: str
     user_invocable: bool = True
     automation: Optional[str] = None  # autonomous, gated, manual, null
+    # Display metadata ONLY (#2850). Nothing enforces this list — the
+    # `allowed_tools` that actually restricts a run comes from schedule / loop /
+    # task config, never from skill frontmatter. Do not wire it into
+    # enforcement without a validation step of its own.
     allowed_tools: Optional[List[str]] = None
     argument_hint: Optional[str] = None
     has_schedule: bool = False  # Placeholder for future schedule integration
@@ -81,6 +85,153 @@ def parse_yaml_frontmatter(content: str) -> Dict[str, Any]:
         return {}
 
 
+class FieldSkipped(ValueError):
+    """A frontmatter field holds a value the record cannot represent.
+
+    Raised by the per-field normalizers below; the scanner catches it, drops
+    THAT field to ``None`` and warns once — every other parsed field survives.
+    Before #2850 the same situation raised out of the ``SkillInfo`` constructor
+    and the whole record fell back to a bare directory name.
+    """
+
+
+# Warn-once ledger for skipped fields, keyed (skill path, field, shown value).
+# `GET /api/skills` is polled by the Playbooks tab, the `/` typeahead and the
+# chat empty state, so a per-scan warning repeated on every request (#2850).
+# Keyed on the value too, so a field that is fixed and later re-broken is
+# reported again. Bounded by the number of malformed fields in the workspace.
+_SKIPPED_FIELD_WARNED: set = set()
+
+# Only the container HOME is stripped for display; a path outside it (a mount,
+# or a test tmp dir) falls back to the absolute path instead of raising.
+_HOME = Path('/home/developer')
+
+_GROUP_CLOSER = {'(': ')', '[': ']', '{': '}'}
+_GROUP_CLOSERS = frozenset(_GROUP_CLOSER.values())
+
+
+def _display_path(skill_md: Path) -> str:
+    try:
+        return str(skill_md.relative_to(_HOME))
+    except ValueError:
+        return str(skill_md)
+
+
+def _report_skipped_field(skill_md: Path, field: str, value: Any, reason: str) -> None:
+    shown = repr(value)[:120]
+    key = (str(skill_md), field, shown)
+    if key in _SKIPPED_FIELD_WARNED:
+        logger.debug("Skipping frontmatter field %r in %s again (%s)", field, skill_md, reason)
+        return
+    _SKIPPED_FIELD_WARNED.add(key)
+    logger.warning(
+        "Skipping frontmatter field %r in %s (%s): %s — the other fields are kept",
+        field, skill_md, reason, shown,
+    )
+
+
+def _split_tool_list(text: str) -> List[str]:
+    """Split a comma-separated tool spec on the commas at nesting depth 0.
+
+    Linear single-pass scan (no regex). `Bash(git *)` keeps its spaces and
+    `Bash(npm run lint, npm test)` stays one entry. Only groups are tracked,
+    not quotes: every comma that is part of a tool spec sits inside a group,
+    and tracking quotes made an apostrophe in shell text (`Bash(echo it's)`)
+    drop the whole field. An unbalanced group raises ``FieldSkipped`` rather
+    than silently merging the tail into one entry.
+    """
+    entries: List[str] = []
+    buf: List[str] = []
+    open_groups: List[str] = []  # expected closers, innermost last
+
+    for ch in text:
+        if ch in _GROUP_CLOSER:
+            open_groups.append(_GROUP_CLOSER[ch])
+            buf.append(ch)
+            continue
+        if ch in _GROUP_CLOSERS:
+            if not open_groups or open_groups[-1] != ch:
+                raise FieldSkipped(f"unbalanced {ch!r}")
+            open_groups.pop()
+            buf.append(ch)
+            continue
+        if ch == ',' and not open_groups:
+            entries.append(''.join(buf))
+            buf = []
+            continue
+        buf.append(ch)
+
+    if open_groups:
+        raise FieldSkipped(f"unbalanced group, expected {open_groups[-1]!r}")
+    entries.append(''.join(buf))
+    return [entry.strip() for entry in entries if entry.strip()]
+
+
+def normalize_allowed_tools(value: Any) -> Optional[List[str]]:
+    """Normalize the two accepted `allowed-tools` spellings to one list.
+
+    Claude Code's canonical form is the comma-separated string
+    (`allowed-tools: Read, Bash, Bash(git:*)`); a YAML list
+    (`allowed-tools: [Read, Bash]`) is accepted too. Both yield the same list.
+    Absent / empty → ``None`` (unrestricted). Anything else — a bool from YAML
+    1.1's `yes`, a mapping, a number — raises ``FieldSkipped``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        entries = _split_tool_list(value)
+    elif isinstance(value, list):
+        entries = []
+        for item in value:
+            if item is None:
+                continue
+            if isinstance(item, (list, dict, bool)):
+                # `[yes]` is a YAML 1.1 bool, not a tool named "True"
+                raise FieldSkipped(f"list entry is a {type(item).__name__}, not a tool name")
+            text = str(item).strip()
+            if text:
+                entries.append(text)
+    else:
+        raise FieldSkipped(
+            f"expected a comma-separated string or a list, got {type(value).__name__}"
+        )
+    return entries or None
+
+
+def _coerce_optional_str(value: Any) -> Optional[str]:
+    """Text field: a string passes; a YAML 1.1 scalar (bool, int, float, date)
+    becomes its string form; a collection cannot be text and is skipped."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, dict, set, tuple)):
+        raise FieldSkipped(f"expected text, got {type(value).__name__}")
+    return str(value)
+
+
+def _coerce_argument_hint(value: Any) -> Optional[str]:
+    """`argument-hint: [file]` is Claude Code's documented idiom, and unquoted
+    it parses as a YAML flow sequence. Restore the bracketed string rather
+    than dropping the hint."""
+    if isinstance(value, list):
+        if any(isinstance(item, (list, dict)) for item in value):
+            raise FieldSkipped("nested collection in argument hint")
+        items = [str(item) for item in value if item is not None]
+        if not items:
+            return None
+        return '[' + ', '.join(items) + ']'
+    return _coerce_optional_str(value)
+
+
+def _field(skill_md: Path, field: str, value: Any, normalize) -> Any:
+    try:
+        return normalize(value)
+    except FieldSkipped as e:
+        _report_skipped_field(skill_md, field, value, str(e))
+        return None
+
+
 def scan_skills_directory(skills_dir: Path) -> List[SkillInfo]:
     """
     Scan a skills directory for subdirectories containing SKILL.md files.
@@ -119,9 +270,11 @@ def scan_skills_directory(skills_dir: Path) -> List[SkillInfo]:
             content = skill_md.read_text(encoding='utf-8')
             frontmatter = parse_yaml_frontmatter(content)
 
-            # Extract skill info from frontmatter only
-            name = frontmatter.get('name', entry.name)
-            description = frontmatter.get('description')
+            # Each field is normalized on its own (#2850): a value the record
+            # cannot represent drops THAT field to None and is warned once,
+            # so the constructor below cannot raise on frontmatter content.
+            name = _field(skill_md, 'name', frontmatter.get('name'), _coerce_optional_str) or entry.name
+            description = _field(skill_md, 'description', frontmatter.get('description'), _coerce_optional_str)
 
             # Log if description is missing for debugging
             if not description:
@@ -137,22 +290,24 @@ def scan_skills_directory(skills_dir: Path) -> List[SkillInfo]:
             skill = SkillInfo(
                 name=name,
                 description=description,
-                path=str(skill_md.relative_to(Path('/home/developer'))),
+                path=_display_path(skill_md),
                 user_invocable=user_invocable,
-                automation=frontmatter.get('automation'),
-                allowed_tools=frontmatter.get('allowed-tools'),
-                argument_hint=frontmatter.get('argument-hint'),
+                automation=_field(skill_md, 'automation', frontmatter.get('automation'), _coerce_optional_str),
+                allowed_tools=_field(skill_md, 'allowed-tools', frontmatter.get('allowed-tools'), normalize_allowed_tools),
+                argument_hint=_field(skill_md, 'argument-hint', frontmatter.get('argument-hint'), _coerce_argument_hint),
                 has_schedule=False  # TODO: Check if schedule exists for this skill
             )
             skills.append(skill)
 
         except Exception as e:
+            # Last resort — an unreadable file, not a bad field (those are
+            # handled per field above and never reach here).
             logger.warning(f"Failed to parse skill at {skill_md}: {e}")
             # Still include the skill with minimal info
             skills.append(SkillInfo(
                 name=entry.name,
                 description=None,
-                path=str(skill_md.relative_to(Path('/home/developer'))),
+                path=_display_path(skill_md),
             ))
 
     return skills

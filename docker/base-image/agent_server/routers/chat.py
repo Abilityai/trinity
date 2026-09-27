@@ -17,9 +17,22 @@ from ..services.claude_code import get_execution_lock
 from ..services.runtime_adapter import get_runtime
 from ..services.process_registry import get_process_registry, PENDING_CHAT_TIMEOUT_SECONDS
 from ..services import result_callback
+from ..services import retained_results
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _retain_terminal(execution_id, envelope: dict) -> None:
+    """#2944: keep this turn's terminal where the backend watchdog can claim it
+    if the connection that was waiting for it is gone (a backend recreate
+    mid-turn). Same envelope shape as the #1083 result callback. Best-effort —
+    a retention failure never touches the response the caller is about to get.
+    A missing id (the `temp-…` fallback) has no backend row to claim; no-op."""
+    try:
+        retained_results.record(execution_id, envelope)
+    except Exception:  # noqa: BLE001
+        logger.debug("[#2944] retain failed for %r", execution_id, exc_info=True)
 
 
 @router.post("/api/chat")
@@ -71,10 +84,29 @@ async def chat(request: ChatRequest):
                     system_prompt=request.system_prompt,
                     execution_id=request.execution_id
                 )
+            except HTTPException as exc:
+                agent_state.record_task_finish(success=False)
+                # #2944: the failure terminal is retained too — a watchdog that
+                # finds it writes the REAL error instead of the orphan string.
+                _retain_terminal(
+                    request.execution_id,
+                    result_callback._envelope_from_http_exception(exc),
+                )
+                raise
             except BaseException:
                 agent_state.record_task_finish(success=False)
                 raise
             agent_state.record_task_finish(success=True)
+            # #2944: retained BEFORE the response is sent — the send is the part
+            # that can fail when the backend went away. `/api/chat` carries no
+            # top-level session_id; the persisted one rides `metadata`.
+            _retain_terminal(
+                request.execution_id,
+                result_callback._success_envelope(
+                    response_text, raw_messages, metadata,
+                    getattr(metadata, "session_id", None),
+                ),
+            )
 
             # Add assistant response to history
             agent_state.add_message("assistant", response_text)
@@ -85,7 +117,8 @@ async def chat(request: ChatRequest):
             agent_state.session_total_output_tokens += metadata.output_tokens
             # Context window usage: metadata.input_tokens should contain the complete total
             # (from modelUsage.inputTokens which includes all turns and cached tokens)
-            # However, with --continue flag, Claude Code may sometimes report only new tokens
+            # However, on a resumed session Claude Code may sometimes report only new tokens
+            # (a fresh session resets the counter first — claude_code.py, #2958)
             # Fix: Context should monotonically increase during a session, so keep the max
             if metadata.input_tokens > agent_state.session_context_tokens:
                 agent_state.session_context_tokens = metadata.input_tokens
@@ -130,7 +163,8 @@ async def execute_task(request: ParallelTaskRequest):
 
     Unlike /api/chat, this endpoint:
     - Does NOT acquire execution lock (parallel allowed)
-    - Does NOT use --continue flag (stateless) by default
+    - Does NOT resume the chat's own session (stateless) by default — and
+      the chat never resumes a task's session either (#2958)
     - Each call is independent and can run concurrently
 
     Use this for:
@@ -158,7 +192,7 @@ async def execute_task(request: ParallelTaskRequest):
             content={"execution_id": request.execution_id, "status": "accepted"},
         )
 
-    # Execute via runtime adapter in headless mode (no lock, no --continue)
+    # Execute via runtime adapter in headless mode (no lock, no chat session)
     runtime = get_runtime()
     # #2433: register as ACCEPTED before anything can queue. The headless
     # executor's `Popen` + `registry.register()` run inside a pool thread, so a
@@ -205,6 +239,13 @@ async def execute_task(request: ParallelTaskRequest):
         # #679 (F4): a cancel is neutral for the failure counter (never trips the
         # dispatch breaker); a genuine failure still increments it.
         agent_state.record_task_finish(success=None if is_cancel else False)
+        # #2944: retain the terminal the caller is about to receive — the
+        # failure as the callback would type it, or the cancel relabel.
+        failed_envelope = result_callback._envelope_from_http_exception(exc)
+        _retain_terminal(
+            request.execution_id,
+            result_callback._cancelled_override(failed_envelope) if is_cancel else failed_envelope,
+        )
         if is_cancel:
             logger.info(f"[Task] Task {request.execution_id} cancelled by user (status {exc.status_code})")
             return {
@@ -235,6 +276,16 @@ async def execute_task(request: ParallelTaskRequest):
         logger.info(f"[Task] Task {request.execution_id} cancelled by user")
     else:
         logger.info(f"[Task] Task {session_id} completed successfully")
+
+    # #2944: retained BEFORE the return — returning is the step that goes to a
+    # dead socket when the backend was recreated mid-turn (the reported $32 run).
+    success_envelope = result_callback._success_envelope(
+        response_text, raw_messages, metadata, session_id
+    )
+    _retain_terminal(
+        request.execution_id,
+        result_callback._cancelled_override(success_envelope) if cancelled else success_envelope,
+    )
 
     # raw_messages contains the full Claude Code JSON stream (init, assistant, user, result)
     # This is the complete execution transcript showing thinking, tool calls, and results
@@ -287,7 +338,7 @@ async def get_model():
             "model": agent_state.current_model,
             "runtime": runtime,
             "available_models": ["sonnet", "opus", "haiku", "fable"],
-            "note": "Claude model aliases (Anthropic API): sonnet (Sonnet 5), opus (Opus 4.8), haiku (Haiku 4.5), fable (Fable 5). Add [1m] suffix for the 1M extended-context beta (e.g. sonnet[1m])."
+            "note": "Claude model aliases (Anthropic API): each resolves to the current generation of its family — today sonnet (Sonnet 5), opus (Opus 5.5), haiku (Haiku 4.5), fable (Fable 5.1). Add [1m] suffix for the 1M extended-context beta (e.g. sonnet[1m])."
         }
 
 
@@ -316,7 +367,8 @@ async def set_model(request: ModelRequest):
             )
     else:
         # Claude Code validation
-        valid_aliases = ["sonnet", "opus", "haiku", "sonnet[1m]", "opus[1m]", "haiku[1m]"]
+        valid_aliases = ["sonnet", "opus", "haiku", "fable",
+                         "sonnet[1m]", "opus[1m]", "haiku[1m]", "fable[1m]"]
         if request.model in valid_aliases or request.model.startswith("claude-"):
             agent_state.current_model = request.model
             logger.info(f"Model changed to: {request.model}")
@@ -328,13 +380,17 @@ async def set_model(request: ModelRequest):
         else:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid Claude model: {request.model}. Use aliases (sonnet, opus, haiku) or full model names."
+                detail=f"Invalid Claude model: {request.model}. Use aliases (sonnet, opus, haiku, fable) or full model names."
             )
 
 
 @router.delete("/api/chat/history")
 async def clear_chat_history():
-    """Clear conversation history and reset session"""
+    """Clear conversation history and reset session.
+
+    #2958: also forgets the chat's own session id and its keep-set marker. No
+    lock is taken (a turn may hold it for up to 30 min); a turn in flight across
+    the reset drops its capture via the generation counter instead."""
     agent_state.reset_session()
     return {
         "status": "cleared",
@@ -418,6 +474,35 @@ async def get_execution_status(execution_id: str):
     if not status:
         raise HTTPException(status_code=404, detail="Execution not found")
     return status
+
+
+@router.get("/api/executions/{execution_id}/result")
+async def get_execution_retained_result(execution_id: str):
+    """#2944: the terminal this agent retained for a finished turn.
+
+    Read by the backend cleanup watchdog BEFORE it fails a `running` row it can
+    no longer find a dispatcher for — a backend recreate mid-turn destroys the
+    coroutine that was awaiting `/api/task` / `/api/chat`, and this is where the
+    result went instead of the dead socket.
+
+    Returns:
+        - 200: the #1083-shaped envelope (`status`, `response`, `error`,
+          `error_code`, `terminal_reason`, `metadata`, `execution_log`,
+          `session_id`) plus `retained_at` (ISO) and `truncated_log`.
+        - 404 `{"detail": {"code": "no_retained_result"}}` when nothing is
+          retained — for a malformed id too. The CODED body is how the backend
+          tells "asked, nothing there" from an older image's bare FastAPI
+          `{"detail": "Not Found"}` (no route at all), which it must keep
+          treating as the pre-#2944 orphan path.
+    """
+    record = retained_results.get(execution_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail={"code": "no_retained_result"})
+    return {
+        **record["envelope"],
+        "retained_at": record.get("retained_at_iso"),
+        "truncated_log": bool(record.get("truncated_log")),
+    }
 
 
 @router.get("/api/executions/{execution_id}/last-error")

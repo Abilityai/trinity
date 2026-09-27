@@ -377,9 +377,14 @@ class TestTerminalFanOut:
                 patch.object(eds, "emit_task_terminal_event", AsyncMock()),
                 patch.dict(
                     sys.modules,
-                    {"services.loop_service": MagicMock(
-                        advance_loop_on_terminal=_fake_advance
-                    )},
+                    {
+                        "services.loop_service": MagicMock(
+                            advance_loop_on_terminal=_fake_advance
+                        ),
+                        "services.fan_out_service": MagicMock(
+                            join_fan_out_on_terminal=AsyncMock()
+                        ),
+                    },
                 ),
             ):
                 eds.spawn_task_terminal_event(
@@ -404,9 +409,17 @@ class TestTerminalFanOut:
         async def _drive():
             with patch.dict(
                 sys.modules,
-                {"services.loop_service": MagicMock(advance_loop_on_terminal=_boom)},
+                {
+                    "services.loop_service": MagicMock(advance_loop_on_terminal=_boom),
+                    "services.fan_out_service": MagicMock(
+                        join_fan_out_on_terminal=AsyncMock()
+                    ),
+                },
             ):
-                await eds._advance_loop("exec_1")
+                # #2524 renamed the shim to `_terminal_side_effects` and folded
+                # the fan-out join in beside the loop advance; each consumer is
+                # guarded separately so one raising cannot skip the other.
+                await eds._terminal_side_effects("exec_1")
 
         asyncio.run(_drive())  # must not raise
 

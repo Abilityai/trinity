@@ -42,6 +42,19 @@ followed by a duplicate "Finished". Public links and x402 share `triggered_by:
 (`routers/public.py` writes `triggered_by` and `source_user_email` only), so
 they never reach this gate at all.
 
+A Workspace **room** turn is the other synchronous surface — `_wake_agent`
+posts the reply into the room itself — and since #2792 it DOES carry a
+destination (`source_channel_chat_id = room_id`). It is kept out of this leg by
+its channel value rather than by this set: the stamp is `config.ROOM_SOURCE_CHANNEL
+= "room"`, which has no entry in `_CHANNEL_RESOLVERS`, so `report_completion`
+returns at the "channel without a delivery leg" check for the turn **and** for
+every child that inherits the stamp — no session lookup, no log. Routing rooms
+through `"portal"` was rejected because `_resolve_portal` reads the chat id as
+a portal SESSION and the voice-reply route promises a speaker control rooms do
+not have. A room delivery leg, if wanted, is a deliberate `_resolve_room` entry
+in the map (`tests/unit/test_2792_room_work_chat_id.py` pins the absence with a
+spy over every existing resolver).
+
 ## Entry Points
 
 | Entry | Where | Notes |
@@ -383,3 +396,7 @@ vanished session writing nothing. Each was verified to fail against a mutant
   construction rather than by flag, delivery as a persisted assistant message
   with a paired `touch_portal_session`; `"public"` added to
   `INLINE_CHANNEL_TRIGGERS`
+- 2026-09-14 (#2792): room turns stamp `source_channel="room"` + the room id;
+  no resolver for the value, so rooms and their children stay out of this leg
+  by construction (not via `INLINE_CHANNEL_TRIGGERS`, which would cover the
+  parent only)

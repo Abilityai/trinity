@@ -255,9 +255,22 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
    * inline next to the control that caused it, and a rejected promise here
    * would surface as an unhandled rejection in the component.
    */
+  // #2703: the delivery report of the last assign, per skill — what the
+  // inline control renders ("delivered" / "applies on next start" / a named
+  // failure) instead of presenting assignment as silently complete.
+  const deliveries = ref({})
+  // The server awaits delivery for up to 20 s before answering `in_progress`;
+  // the axios default is 30 s — leave margin rather than race the budget.
+  const ASSIGN_TIMEOUT_MS = 45000
+
   async function assignSkill(skillName, agentName) {
     try {
-      await api.post(`/api/agents/${encodeURIComponent(agentName)}/skills/${encodeURIComponent(skillName)}`)
+      const { data } = await api.post(
+        `/api/agents/${encodeURIComponent(agentName)}/skills/${encodeURIComponent(skillName)}`,
+        {},
+        { timeout: ASSIGN_TIMEOUT_MS },
+      )
+      deliveries.value = { ...deliveries.value, [skillName]: { agent: agentName, report: data?.delivery ?? null } }
       const label = assignableAgents.value.find((a) => a.name === agentName)
       const next = [...(assignments.value[skillName] || [])]
       if (!next.some((a) => a.name === agentName)) {
@@ -276,6 +289,10 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
   async function unassignSkill(skillName, agentName) {
     try {
       await api.delete(`/api/agents/${encodeURIComponent(agentName)}/skills/${encodeURIComponent(skillName)}`)
+      // An unassign supersedes the last assign's note for this skill.
+      if (deliveries.value[skillName]) {
+        const map = { ...deliveries.value }; delete map[skillName]; deliveries.value = map
+      }
       const next = (assignments.value[skillName] || []).filter((a) => a.name !== agentName)
       // Drop the key entirely at zero: `agentsFor` treats a missing key and an
       // empty array identically, but the orphaned-assignments view keys off
@@ -297,5 +314,6 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
     emptyReason, orphanedAssignments,
     load, loadAssignments, agentsFor, sync,
     assignableFor, canModify, assignSkill, unassignSkill,
+    deliveries,
   }
 })

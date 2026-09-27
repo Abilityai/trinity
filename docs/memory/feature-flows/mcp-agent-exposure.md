@@ -77,7 +77,8 @@ No new agent-server route — this is a backend + MCP-server feature only.
 │     - unregister gone / re-slugged ; register new            │
 │   makeDedicatedChatTool() → execute delegates to runAgentChat │
 │     with agent_name BOUND (never from caller input)           │
-│   registerDynamicTool() → addToolWithAudit(tool, connectorDenied, agentName)│
+│   registerDynamicTool() → addToolWithAudit(tool, operatorOnly, agentName, policy)│
+│     policy = in-tool (runAgentChat gates the bound agent) — ent#628      │
 │     → server.addTool / removeTool fan list_changed to sessions │
 └────────────────────────────────────────────────────────────────┘
 ```
@@ -117,12 +118,12 @@ No new agent-server route — this is a backend + MCP-server feature only.
 ### MCP Server (TypeScript)
 
 - **`tools/chat.ts`** (refactor) — extracts two module-level helpers so the dedicated tools share ONE implementation with `chat_with_agent`:
-  - `resolveClient(baseClient, requireApiKey, authContext)` — per-request authed client.
+  - `resolveClient(baseClient, requireApiKey, authContext)` — per-request authed client (since ent#628 it lives in `src/access.ts`, imported by chat.ts, loops.ts and the registration-time gate in server.ts).
   - `runAgentChat(baseClient, requireApiKey, agentChatPullEnabled, agent_name, params, context)` — the shared `chat_with_agent` execution body. **No logic fork**: preserves the #946 pull-routing branch, self-task/parallel paths, idempotency route tokens, the #914 gateway-timeout receipt, sourceAgent collaboration tagging, and `checkAgentAccess` denial.
 - **`tools/dynamic-agents.ts`** (new):
   - `makeDedicatedChatTool(...)` — schema mirrors `chat_with_agent` minus `agent_name`; `execute` delegates to `runAgentChat` with the agent name **bound** (never caller input).
   - `startExposedToolsReconciler(opts)` — poll loop over `/api/internal/mcp-exposed-agents`. **Fail-open** (only mutate the tool set on a 200 with a valid `agents` array; any network/non-200/parse/shape error keeps the last-known set). **In-flight mutex** so the startup sync and interval tick can't race. Diffs desired vs current, applies the `builtinToolNames` collision guard, unregisters gone/re-slugged tools, registers new. Returns a handle (`syncOnce`/`stop`/`getCurrent`); `timer.unref()` so it doesn't keep the loop alive.
-- **`server.ts`** — `createServer` now returns dynamic-tool handles: a `builtinToolNames` set (final collision guard), `registerDynamicTool(tool, canAccess, auditTargetId)` / `unregisterDynamicTool(name)` (route ALL dynamic registration through `addToolWithAudit` so audit + `canAccess` wrapping is uniform; `removeTool` is public FastMCP 4.x and triggers `list_changed`), plus `agentChatPullEnabled`, `trinityApiUrl`, `connectorDenied`. `addToolWithAudit` gains an `auditTargetId` arg.
+- **`server.ts`** — `createServer` now returns dynamic-tool handles: a `builtinToolNames` set (final collision guard), `registerDynamicTool(tool, canAccess, auditTargetId, policy)` / `unregisterDynamicTool(name)` (route ALL dynamic registration through `addToolWithAudit` so audit + `canAccess` wrapping is uniform — and, since ent#628, so every tool passes `policyFor`: a dynamic tool has no `TOOL_ACCESS_POLICY` row, so it declares its `ToolAccessPolicy` as an argument; `removeTool` is public FastMCP 4.x and triggers `list_changed`), plus `agentChatPullEnabled`, `trinityApiUrl`, `connectorDenied`. `addToolWithAudit` gains an `auditTargetId` arg.
 - **`index.ts`** — starts the reconciler **after `server.start()`** (so post-start add/remove fan `list_changed` to live sessions). Skips with a warning when `INTERNAL_API_SECRET` is unset (the poll would 403).
 - **`audit.ts`** — `withAudit(toolName, execute, boundTargetId?)`: dedicated tools carry no `agent_name` param, so `targetId = resolveTargetId(params) ?? boundTargetId` keeps the audit row attributed to the bound agent.
 - **`types.ts`** — `Agent.mcp_exposed?: boolean`.

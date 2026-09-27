@@ -304,6 +304,11 @@ class ScheduleExecution(BaseModel):
     # executing agent.
     source_channel_agent: Optional[str] = None
     source_channel_client: Optional[str] = None
+    # ent#555 — the canvas the user had open for this turn. Context about what
+    # is being discussed; never authority over what may be read or written.
+    open_canvas_id: Optional[str] = None
+    # #2806 — agent-to-agent hops from a non-agent root (NULL/None = root).
+    chain_depth: Optional[int] = None
 
 
 # =========================================================================
@@ -720,6 +725,16 @@ class AgentSkill(BaseModel):
     # None = assigned before multi-source, or the source row is gone. Recorded
     # so a later cross-source swap under the same bare name is detectable.
     source_id: Optional[str] = None
+    # #2914: the durable verdict of the last injection that looked at this
+    # name. `conflict` = an agent-authored `.claude/skills/<name>/` blocks the
+    # library package (the agent's own copy is what runs); None = no standing
+    # conflict. Written and cleared by the inject path only.
+    delivery_status: Optional[str] = None
+    # ent#596 (Tandem R29): the agent that made the assignment, when the writer
+    # was an agent principal; None for a human. `assigned_by` stays the owner's
+    # username, so "the agent did it" is distinguishable from "the person did it".
+    assigned_by_agent: Optional[str] = None
+
 
 
 class SkillSource(BaseModel):
@@ -965,7 +980,7 @@ class SubscriptionUsageWindow(BaseModel):
 
 class HeadroomWindow(BaseModel):
     """One rolling-limit window from the anthropic-ratelimit-unified-* headers (#471)."""
-    utilization_pct: Optional[float] = None  # 0..100
+    utilization_pct: Optional[float] = None  # percent of the cap; past 100 on an overage plan (#2419)
     resets_at: Optional[str] = None          # ISO-Z
     status: Optional[str] = None             # provider's per-window status (e.g. "allowed")
 
@@ -1104,6 +1119,11 @@ class AgentHealthDetail(BaseModel):
     # #526: unified breaker block — {dispatch:{...}, transport:{...}, open: bool,
     # config:{enabled}}. Same shape as GET /api/agents/{name}/circuit-breaker.
     circuit_breaker: Optional[dict] = None
+    # ent#479: INFORMATIONAL declared-metric freshness — counts and names, no
+    # values. It never feeds `aggregate_status` or `issues`: a business metric
+    # going stale is the operator's news, not a platform health failure, and a
+    # store read failure leaves this `None` rather than failing the check.
+    metrics: Optional[dict] = None
 
 
 class AgentHealthSummary(BaseModel):

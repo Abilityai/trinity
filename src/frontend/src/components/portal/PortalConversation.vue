@@ -115,7 +115,7 @@
         >
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
           <span class="hidden md:inline">New chat</span>
-          <kbd class="hidden lg:inline text-[11px] font-mono text-gray-400 dark:text-gray-500">{{ newChatHotkey }}</kbd>
+          <kbd class="hidden lg:inline text-[11px] font-mono text-gray-500 dark:text-gray-400">{{ newChatHotkey }}</kbd>
         </button>
         <!-- ent#359 AC #4: star from the header too. Hidden until the thread
              exists — a chat with no id yet cannot be pinned, and rendering a
@@ -169,6 +169,10 @@
              apart doing different things (open a panel / pick a file). The
              rail strip still opens Files, and ent#524's drop-anywhere is
              untouched. -->
+        <!-- ent#625: the theme switch is the LAST control in the header, in a
+             slot the shell fills, so the conversation owns its header row and
+             the shell owns the control — the same seam the room's header has. -->
+        <slot name="header-end" />
       </div>
     </header>
 
@@ -190,7 +194,9 @@
       :active-id="currentSessionId"
       :disabled="voiceCallActive"
       :draft="newChat || bornHere"
+      :draft-keys="drafts.keys"
       @select="(t) => emit('open-thread', t)"
+      @new-chat="emit('new-chat')"
     />
 
     <!-- #2579: the shell's line under the strip (today: the admin-only notice
@@ -219,7 +225,7 @@
       <span class="min-w-0 truncate text-gray-700 dark:text-gray-200">
         {{ voiceCallActive ? voiceHeaderText : voiceEndNotice }}
       </span>
-      <span v-if="voiceCallActive" class="hidden sm:inline text-gray-400 dark:text-gray-500">· End the call to switch chats · Esc ends</span>
+      <span v-if="voiceCallActive" class="hidden sm:inline text-gray-500 dark:text-gray-400">· End the call to switch chats · Esc ends</span>
       <button
         v-if="voiceCallActive"
         type="button"
@@ -282,7 +288,7 @@
           <summary class="cursor-pointer select-none flex items-center gap-2 px-3 py-2 text-xs text-gray-600 dark:text-gray-300">
             <svg class="w-3.5 h-3.5 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
             <span class="font-medium">{{ item.label }}</span>
-            <span class="text-gray-400 dark:text-gray-500">· spoken</span>
+            <span :class="META_INK_CLASS">· spoken</span>
           </summary>
           <div class="px-3 pb-3 space-y-3">
             <div
@@ -315,6 +321,15 @@
               class="rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap"
               :class="item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
             >{{ item.message.content }}</div>
+            <!-- ent#551: a task the agent ran during a voice call lands as an
+                 ordinary turn (it was not spoken, so it is not in the block);
+                 the caption is the attribution. -->
+            <p
+              v-if="voiceTaskCaption(item.message)"
+              class="text-[11px]"
+              :class="META_INK_CLASS"
+              data-testid="portal-voice-task-caption"
+            >{{ voiceTaskCaption(item.message) }}</p>
             <p
               v-if="item.message.failed && item.message.error"
               class="text-xs text-status-danger-700 dark:text-status-danger-300 text-right max-w-[32ch]"
@@ -378,6 +393,7 @@
             :can-stop="canCancelTurn"
             :stopping="cancelling"
             show-open-in-work
+            reserve-live-rows
             @stop="cancelTurn"
             @open-work="emit('open-work')"
           />
@@ -435,7 +451,7 @@
     <!-- Composer -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-6 py-3">
       <div class="max-w-[var(--ws-message-max,64rem)] mx-auto">
-        <p v-if="offline" class="mb-2 text-xs text-status-warning-600 dark:text-status-warning-400 flex items-center gap-1.5">
+        <p v-if="offline" class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-400 flex items-center gap-1.5">
           <span class="w-1.5 h-1.5 rounded-full bg-status-warning-500"></span>
           You appear to be offline — messages will send once you're reconnected.
         </p>
@@ -612,6 +628,7 @@
                 @keydown="onComposerKeydown"
                 @click="onComposerCaret"
                 @select="onComposerCaret"
+                @paste="dropHandlers.onPaste"
               ></textarea>
             </div>
             <!-- ent#547: the call toggle stays LIVE while everything else goes
@@ -737,14 +754,18 @@ import { agentDisplayName } from '@/utils/agentName'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
-import { askAboutItPrefill, childrenForChat, itemById } from './portalWork'
+import { askAboutItPrefill, childrenForChat, itemById, previewTitle } from './portalWork'
+import { activityFromStreamEvent, resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
+import { useComposerDraft } from '@/composables/useComposerDraft'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { draftKeyFor, shouldFocusOnRestore } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
@@ -796,10 +817,13 @@ import {
   VOICE_UNAVAILABLE_FALLBACK,
   endedNotice,
   groupVoiceBlocks,
+  isMuteHotkey,
   startFailureReason,
+  threadChangeEndsCall,
   voiceEntryState,
   voiceHeaderLine,
   voicePreflight,
+  voiceTaskCaption,
 } from './portalVoiceMode'
 // ent#403: the model choice's rules, in their own pure module for the same
 // reason voice mode's are — nothing rendered is reachable from vitest here.
@@ -867,6 +891,8 @@ const store = useClientPortalStore()
 const agentAsks = computed(() => store.asksForAgent(props.agent.name))
 const messages = ref([])
 const currentSessionId = ref(props.sessionId)
+// ent#555 — the canvas the rail has open for THIS agent, or null.
+const openCanvasId = computed(() => store.openCanvasByAgent?.[props.agent?.name] || null)
 
 // #2579 — "this thread was born in THIS mounted conversation, and the list may
 // not know it yet". It bridges a real gap rather than duplicating
@@ -916,7 +942,22 @@ const historyTruncated = ref(false)
 // read as something the agent said. Dark meta text stops at gray-400 (the
 // contract's ink floor).
 const PLATFORM_LINE_CLASS = 'my-3 text-center text-xs text-gray-400 dark:text-gray-400'
+// Meta ink for a label beside a message (the block's "· spoken", a task's
+// "asked during a voice call"): tertiary in light, and gray-400 in dark — the
+// dark ink ladder's floor for meta text is gray-400, never gray-500.
+const META_INK_CLASS = 'text-gray-400 dark:text-gray-400'
 const input = ref('')
+// trinity-enterprise#657: the composer's text outlives this instance. The key
+// is the conversation's identity — the thread once known, the agent's unsaved
+// chat while `newChat`, nothing while a cold root is still resolving — and the
+// binding is write-through, so `send()` emptying the field IS the clear. A
+// stored draft lands in the (empty) composer here, at setup; growing and
+// focusing the field waits for `onMounted`, where the textarea exists.
+const drafts = usePortalDraftsStore()
+const draftKey = computed(() => draftKeyFor({
+  sessionId: currentSessionId.value, agentName: props.agent?.name, newChat: props.newChat,
+}))
+const { restored: draftRestored } = useComposerDraft({ key: draftKey, input })
 const sending = ref(false)
 // ent#523 — Reset, offered on Main only.
 const resetting = ref(false)
@@ -1003,16 +1044,26 @@ const liveCardItem = computed(() => {
     status: 'running',
     outcome: 'running',
     kind: 'turn',
-    title: pendingUserText.value || lastUserText(),
+    // The feed's own title shape, so its row lands without re-wrapping it (#2964).
+    title: previewTitle(pendingUserText.value || lastUserText()),
     chat_id: currentSessionId.value,
     steps: undefined,
     can_stop: false,
   }
 })
-// Two clocks, one rule: while the stream is live its last line is the step.
-const liveStepLine = computed(() => (
-  streaming.value && liveActivity.value.length ? liveActivity.value[liveActivity.value.length - 1] : null
-))
+// trinity-enterprise#620: the activity line — the stream's facts while this
+// turn streams (instant), else what the Work read folded onto the row (the
+// same heartbeat feed every other card uses). One vocabulary either way.
+// `elapsed` is read so the age check re-runs each second the card is live.
+const liveStepLine = computed(() => {
+  void elapsed.value
+  return resolveActivityText({
+    live: sending.value,
+    streamActivity: streaming.value ? liveStreamActivity.value : null,
+    activity: workStore.activityFor(liveCardItem.value),
+    nowMs: Date.now(),
+  })
+})
 // Delegated work this turn handed on — found by the CHAT, not the agent.
 const liveChildren = computed(() => childrenForChat(workStore.now, currentSessionId.value, activeExecutionId.value))
 // The durable verdict the terminal card renders from (#2320's record, or this
@@ -1037,7 +1088,7 @@ const terminalCardItem = computed(() => {
     status: outcome === 'cancelled' ? 'cancelled' : 'failed',
     outcome,
     kind: 'turn',
-    title: lastUserText(),
+    title: previewTitle(lastUserText()),
     chat_id: currentSessionId.value,
     error: outcome === 'cancelled' || outcome === 'lost' ? null : (msg || null),
     steps: null,
@@ -1083,6 +1134,7 @@ const {
   batchNotice,
   addFiles,
   clear: clearAttachments,
+  settled: attachmentsSettled,
   handlers: dropHandlers,
 } = usePortalFileDrop((file) => store.uploadDocument(props.agent.name, file))
 const offline = ref(typeof navigator !== 'undefined' && navigator.onLine === false)
@@ -1092,6 +1144,7 @@ const scrollEl = ref(null)
 // holding. The rule lives in the composable, shared with `PortalRoom` — the two
 // surfaces had two copies of the same unconditional `scrollTop = scrollHeight`.
 const {
+  following,
   unread: unreadBelow,
   showJumpToLatest,
   onScroll: onTranscriptScroll,
@@ -1210,7 +1263,7 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   // ent#525 (review E3): a reattached turn is still a turn the person may
   // stop — without the id, `canCancelTurn` stayed false after every reload.
   activeExecutionId.value = executionId || null
-  liveActivity.value = []
+  liveStreamActivity.value = null
   elapsed.value = 0
   clearInterval(elapsedTimer)
   elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
@@ -1257,7 +1310,7 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   finally {
     sending.value = false
     streaming.value = false
-    liveActivity.value = []
+    liveStreamActivity.value = null
     activeExecutionId.value = null
     clearInterval(elapsedTimer)
     // #2624: a reply settling is an ARRIVAL, not an intent — this turn was
@@ -1270,7 +1323,15 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
 watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   // ent#534: a route-driven thread change (browser back, a deep link) cannot
   // be refused the way a click can — the call ends first, its transcript kept.
-  if (voiceCallActive.value) await voice.stop()
+  // ent#551: unless the "change" is the call's own new thread being adopted —
+  // `startVoiceCall` creates the thread and adopts it BEFORE the call starts,
+  // and the shell's route replace lands here a moment later with that same id.
+  if (threadChangeEndsCall({
+    callActive: voiceCallActive.value,
+    agentChanged: props.agent.name !== oldName,
+    newSessionId: sid,
+    boundSessionId: voice.portalSessionId.value || currentSessionId.value,
+  })) await voice.stop()
   currentSessionId.value = sid
   resetTypeahead()
   // #2624: the outgoing thread's element is about to be replaced, so re-arm
@@ -1293,12 +1354,42 @@ watch(() => props.prefill, (v) => {
 })
 
 onMounted(async () => {
+  // #2794 follow-up: there is deliberately NO carry boundary here.
+  //
+  // The first version drew one — "files sent before this conversation opened
+  // belong to a previous visit" — and it was wrong twice over. Mounting is not
+  // evidence that anything was SENT: the rail is a SIBLING of the stage and
+  // survives every navigation, so the ordinary gesture is to attach from
+  // wherever you are and then open the chat you want to escalate from. That
+  // mount consumed the upload the person had just made, and the escalation
+  // carried nothing and said nothing (reproduced: upload to A from B's rail,
+  // open A, @mention — no carry, no notice). A thread switch or ⌘J remounts
+  // this component too, so the same gesture failed several ways.
+  //
+  // The two things that genuinely consume a pending upload are a message going
+  // out and an escalation taking it, and both mark it themselves. "A previous
+  // visit" is already covered twice over: the log is bounded by
+  // `CARRY_MAX_AGE_MS`, and it is plain Pinia state, so a page load starts it
+  // empty regardless.
   window.addEventListener('online', onNet)
   window.addEventListener('offline', onNet)
   document.addEventListener('click', onDocClick)
   document.addEventListener('keydown', onEscapeKeydown)
   window.addEventListener('resize', onViewportResize)
   if (props.prefill) input.value = props.prefill
+  // trinity-enterprise#657: a restored draft gets the caret at its end — on a
+  // fine pointer only (a phone would get the soft keyboard over the thread).
+  // After the prefill line on purpose: an explicit "Ask about it" replaces the
+  // composer today, and the write-through then makes IT the draft.
+  if (draftRestored && !props.prefill && shouldFocusOnRestore(typeof window !== 'undefined' ? window.matchMedia?.bind(window) : null)) {
+    nextTick(() => {
+      const el = textarea.value
+      if (!el || el.disabled) return
+      el.focus()
+      const end = el.value.length
+      try { el.setSelectionRange(end, end) } catch { /* not a text control */ }
+    })
+  }
   // ent#451: `newChat` also has to hold on FIRST paint — the picker mounts a
   // fresh conversation rather than updating one, so the watcher above never
   // runs for it.
@@ -1486,13 +1577,26 @@ function resetTypeahead() {
   dismissed.value = null
 }
 
+// #2703 — an external client's Workspace has no `/ws` (portal token; the
+// ticket mint is JWT-only), so the `agent_skills_changed` trigger never reaches
+// it. Opening the `/` popup is the moment the playbook list is about to be
+// read, so re-validate the active agent's briefing then — bounded to once a
+// minute per agent, stale-while-revalidate (the list on screen is never
+// blanked). On a platform session this is a cheap no-op most of the time,
+// since the WS trigger already refreshed the card.
+const TYPEAHEAD_REVALIDATE_MAX_AGE_MS = 60_000
+
 function refreshTypeahead(el) {
   if (!el) return
+  const wasOpen = !!typeaheadTrigger.value
   // Read the EVENT TARGET, never the v-model ref: reading the ref makes
   // correctness depend on Vue's internal listener ordering, which is true today
   // and an implementation detail.
   typeaheadTrigger.value = detectTypeaheadTrigger(el.value, el.selectionStart, el.selectionEnd)
   if (!typeaheadTrigger.value) activeIndex.value = -1
+  if (!wasOpen && typeaheadTrigger.value?.kind === '/' && props.agent?.name) {
+    void store.revalidateBriefing(props.agent.name, { maxAge: TYPEAHEAD_REVALIDATE_MAX_AGE_MS })
+  }
 }
 
 function onComposerInput(e) {
@@ -1614,7 +1718,9 @@ async function deliver(text) {
     try {
       started = await store.startPortalChat(props.agent.name, text, currentSessionId.value,
                                             { newThread: props.newChat && !currentSessionId.value,
-                                              model: chosenModel })
+                                              model: chosenModel,
+                                              // ent#555 — what the user is looking at.
+                                              openCanvasId: openCanvasId.value })
     } catch (dispatchErr) {
       // Nothing was created, so a retry is safe — but only retry when the
       // ROUTE is what failed. A 404/405 means an older backend without this
@@ -1630,7 +1736,10 @@ async function deliver(text) {
       console.debug('[workspace] streaming route unavailable, using sync send', dispatchErr)
       data = await store.sendPortalChat(props.agent.name, text, currentSessionId.value,
                                         { newThread: props.newChat && !currentSessionId.value,
-                                          model: chosenModel })
+                                          model: chosenModel,
+                                          // ent#555 — the fallback carries it too, or the
+                                          // context silently depends on streaming working.
+                                          openCanvasId: openCanvasId.value })
     }
 
     if (started) {
@@ -1648,7 +1757,7 @@ async function deliver(text) {
         adoptSession(started.session_id)
       }
       streaming.value = true
-      liveActivity.value = []
+      liveStreamActivity.value = null
       try {
         await store.streamPortalExecution(props.agent.name, started.execution_id, onStreamEvent)
       } catch (streamErr) {
@@ -1657,7 +1766,7 @@ async function deliver(text) {
         console.debug('[workspace] lost the stream, reading the result instead', streamErr)
       } finally {
         streaming.value = false
-        liveActivity.value = []
+        liveStreamActivity.value = null
       }
       data = await awaitPersistedReply(
         started.session_id || currentSessionId.value, baseline,
@@ -1735,6 +1844,9 @@ async function deliver(text) {
     // refresh on a conversation nobody is talking in.
     deliverableTick.value += 1
     clearAttachments()
+    // …and the rail's half of the same set (#2794 follow-up): this turn has
+    // gone out, so nothing sent before it is still pending.
+    store.markUploadsCarried(props.agent?.name)
     return true
   } catch (err) {
     return { error: deliveryFailureReason(err) }
@@ -1780,6 +1892,13 @@ function onEscapeKeydown(event) {
   if (shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })) {
     event.preventDefault()
     void endVoiceCall()
+    return
+  }
+  // ent#551 QA: M mutes and unmutes the mic during a call (the overlay's mute
+  // button says so). Same shared-rule shape as Escape, for the same reason.
+  if (isMuteHotkey(event, { callActive: voiceCallActive.value })) {
+    event.preventDefault()
+    voice.toggleMute()
     return
   }
   if (!shouldCancelOnEscape(event, {
@@ -1836,27 +1955,24 @@ async function cancelTurn() {
   }
 }
 
-// ent#286 — live turn state. `liveActivity` holds a short, human-readable trail
-// of what the agent is doing right now; it is transient and never persisted.
+// ent#286 — live turn state. `liveStreamActivity` holds the two facts the
+// agent's stream last established (`{tool, summary}`); transient, never
+// persisted. (trinity-enterprise#620 replaced the six-label trail: the
+// earlier handler matched `evt.type === 'tool_use'`, a shape the raw
+// stream-json frames never carry, so the card only ever said nothing.)
 const streaming = ref(false)
-const liveActivity = ref([])
+const liveStreamActivity = ref(null)
 // Bumped after each completed turn; `PortalDeliverables` watches it.
 const deliverableTick = ref(0)
-const LIVE_ACTIVITY_MAX = 6
 
-// One log entry from the agent's stream → at most one line of visible activity.
-// Deliberately conservative: the stream is Claude's raw log, so anything not
-// recognised is ignored rather than rendered as noise at a client.
+// One raw frame from the agent's stream → the facts the activity line is
+// composed from, or nothing. `activityFromStreamEvent` reads the real
+// shape (`message.content[].type === 'tool_use'`) and summarises the input
+// the way the agent's own tracker does; the card composes the words.
 function onStreamEvent(evt) {
   if (!evt || evt.type === 'stream_end') return
-  let label = null
-  if (evt.type === 'tool_use' || evt.tool_name) label = `Using ${evt.tool_name || 'a tool'}…`
-  else if (evt.type === 'thinking') label = 'Thinking…'
-  else if (evt.type === 'error') label = 'Hit a problem — recovering…'
-  if (!label) return
-  if (liveActivity.value[liveActivity.value.length - 1] === label) return  // don't stutter
-  liveActivity.value.push(label)
-  if (liveActivity.value.length > LIVE_ACTIVITY_MAX) liveActivity.value.shift()
+  const next = activityFromStreamEvent(evt)
+  if (next) liveStreamActivity.value = next
 }
 
 // The stream ends when the AGENT's execution ends, but the reply is persisted
@@ -1978,13 +2094,10 @@ async function awaitPersistedReply(sessionId, baseline, budgetSeconds,
 // reply must differ from (#2694: by identity, read from the same narrow rows
 // the poll reads, so the two can never disagree about the window).
 async function persistedReplyBaseline(sessionId) {
-  if (!sessionId) return replyBaseline([])
-  try {
-    const data = await store.fetchHistory(props.agent.name, sessionId, { limit: REPLY_POLL_ROWS })
-    return replyBaseline(data.messages)
-  } catch {
-    return replyBaseline([])
-  }
+  return readReplyBaseline(
+    (resolved) => store.fetchHistory(props.agent.name, resolved, { limit: REPLY_POLL_ROWS }),
+    sessionId,
+  )
 }
 
 // Mark a sent message as undelivered, THROUGH the reactive array.
@@ -2006,9 +2119,19 @@ function markFailed(index, content, error, { retryable = true } = {}) {
   row.retryable = retryable
 }
 
+// #2794: an escalation now AWAITS the in-flight uploads, so the composer is
+// clearable-and-emptied for as long as that takes — seconds, not a microtask.
+// Without a guard a second Enter in that window re-enters `send()`, clears the
+// new text, and emits a second escalation that `Portal.vue`'s own `escalating`
+// flag then drops on the floor: the message is gone with no error and no
+// composer to recover it from. Held here rather than reusing `sending`, which
+// means "a turn is running" and is read by the header, the Stop control and
+// the reattach poller.
+const escalatingNow = ref(false)
+
 async function send() {
   const text = input.value.trim()
-  if (!text || sending.value) return
+  if (!text || sending.value || escalatingNow.value) return
   // The composer is about to be cleared programmatically, which fires no input
   // event — so the popup and its Esc sentinel are cleared here rather than left
   // armed against a message that no longer exists.
@@ -2027,7 +2150,37 @@ async function send() {
     if (others.length) {
       input.value = ''
       autoGrowAfterUpdate()
-      emit('escalate-to-room', { agents: [props.agent.name, ...others], message: text })
+      // #2794: the attachments go WITH the message. Until now the event
+      // carried only text, so a file the person had watched a chip confirm
+      // reached the original agent and nobody else, and the room showed no
+      // trace of it — they believed both agents had it.
+      //
+      // Awaited first, because "never silently dropped" is the rule and this
+      // is the only moment at which waiting is still possible. Uploads are
+      // seconds; sending now and explaining afterwards asks the person to fix
+      // something whose state they can no longer see. `settled()` never
+      // rejects — a failed upload is recorded on its own chip, and the shell
+      // reports it from there.
+      escalatingNow.value = true
+      try {
+        await attachmentsSettled()
+        // NOT cleared: on success this component unmounts as the room opens and
+        // the chips go with it; on failure the shell hands the text back and the
+        // chips are still standing beside it, which is the recovery AC without
+        // any new plumbing. Handing over a COPY so a later gesture in this
+        // composer cannot mutate what the shell is carrying.
+        emit('escalate-to-room', {
+          agents: [props.agent.name, ...others],
+          message: text,
+          attachments: attachments.value.slice(),
+        })
+      } finally {
+        // Released even on the success path: the emit is synchronous and this
+        // component is not unmounted until the route change renders, so a flag
+        // left set would outlive a FAILED escalation and leave the composer
+        // the shell just restored permanently dead.
+        escalatingNow.value = false
+      }
       return
     }
   }
@@ -2065,6 +2218,18 @@ async function submitUserText(text) {
   const res = await deliver(text)
   return settleDelivery(index, text, res)
 }
+
+// trinity-enterprise#620 AC #5: when the person's OWN send starts work, the
+// live card mounts under their message — on a long thread that can be below
+// the fold of the pin above. Re-pin once the card is in the DOM, but only
+// while the reader is still following: an incoming message while they are
+// scrolled up must never move the transcript (#2624), and that rule holds
+// for the card too if they scrolled away between the send and the mount.
+watch(sending, async (isSending) => {
+  if (!isSending) return
+  await nextTick()
+  if (following.value) await pinToBottom()
+})
 
 // Both `deliver()` callers have to settle a turn the same way, so they share
 // one function rather than one of them carrying the rules. Review finding:
@@ -2405,6 +2570,7 @@ const voiceHeaderText = computed(() => voiceHeaderLine({
   toolName: voice.toolName.value,
   muted: voice.muted.value,
   error: voice.error.value,
+  backgroundTasks: voice.backgroundTasks.value,
 }))
 // The thread, with each voice call's rows folded into one block.
 const threadItems = computed(() => groupVoiceBlocks(messages.value))
@@ -2419,6 +2585,20 @@ watch([voiceCallActive, () => voice.voiceSessionId.value], ([on, sid]) => {
   emit('voice-call', { active: on, agentName: props.agent?.name, voiceSessionId: on ? sid : null })
 })
 watch(() => voice.panelVersion.value, (v) => emit('voice-panel', v))
+// ent#551: the thread is on screen for the whole call, so nothing that lands in
+// it during the call is unread — a spoken turn, or a background task's reply.
+// Without this the sidebar badge counted up while the person was talking to the
+// agent. The read cursor is advanced directly (no list refresh, no title-settle
+// cycle); the next chat-state fetch then reads zero. Debounced: turns land in
+// bursts.
+let voiceReadTimer = null
+watch([() => voice.transcriptEntries.value.length, () => voice.panelVersion.value], () => {
+  if (!voiceCallActive.value || !currentSessionId.value) return
+  clearTimeout(voiceReadTimer)
+  voiceReadTimer = setTimeout(() => {
+    if (voiceCallActive.value && currentSessionId.value) void store.markChatRead('thread', currentSessionId.value)
+  }, 800)
+})
 // The call ended — by End, by the cap, by the provider — and the bridge has
 // confirmed (or given up on) the write: reload the thread so the persisted
 // block replaces nothing local, and say why when it did not end by choice.
@@ -2483,7 +2663,9 @@ async function endVoiceCall() {
 // armed `?voice=1`. Both tokens are live — `focusComposer` gained its own
 // consumer in #2579 (`nextTick(focusComposer)` on a new chat) — so dropping
 // either is a break, not dead-code cleanup.
-defineExpose({ focusComposer, startVoiceCall })
+// ent#551 QA: the shell ends the call through this when the person confirms
+// leaving the stage — the one path that ends a call from outside this component.
+defineExpose({ focusComposer, startVoiceCall, endVoiceCall })
 
 // ent#474 — the rail's Work signal for a 1:1, DERIVED from the in-flight flag
 // on every change and never latched: it clears in the same `finally` that ends

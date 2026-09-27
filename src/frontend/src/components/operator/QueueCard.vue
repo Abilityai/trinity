@@ -22,7 +22,7 @@
               class="text-sm font-semibold text-gray-900 dark:text-white"
               :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))"
             >{{ item.agent_name }}</span>
-            <span class="text-xs text-gray-400 dark:text-gray-500">&middot;</span>
+            <span class="text-xs text-gray-500 dark:text-gray-400">&middot;</span>
             <span class="text-xs text-gray-400 dark:text-gray-400">{{ timeAgo(item.created_at) }}</span>
           </div>
 
@@ -36,6 +36,16 @@
             <span class="text-xs px-2 py-0.5 rounded-full" :class="typePill(item.type)">
               {{ queueTypeLabel(item.type) }}
             </span>
+            <!-- #2915: what the platform last established about the agent's own
+                 copy — ONE rule (utils/operatorQueue.js::queueSyncBadge), a
+                 primitive, silent when there is nothing to say. -->
+            <BaseBadge
+              v-if="syncBadge"
+              :variant="syncBadge.variant"
+              dot
+              :title="syncBadge.title"
+              data-testid="queue-sync-badge"
+            >{{ syncBadge.label }}</BaseBadge>
             <span
               v-if="item.priority === 'critical' || item.priority === 'high'"
               class="text-xs px-2 py-0.5 rounded-full"
@@ -50,7 +60,7 @@
         <button
           v-if="isExpanded"
           @click.stop="store.toggleExpand(item.id)"
-          class="flex-shrink-0 p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 rounded"
+          class="flex-shrink-0 p-1 text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded"
           aria-label="Collapse"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -94,6 +104,14 @@
         </div>
       </div>
 
+      <!-- #2915: the response was refused because the agent changed or closed
+           this item after the card was read. A verb outcome lives beside the
+           control (p18); the next Send answers anyway (the store carries the
+           acknowledgement). -->
+      <div v-if="diverged" class="px-4 pb-3">
+        <InlineError :message="store.QUEUE_RESPONSE_DIVERGED" data-testid="queue-diverged-notice" />
+      </div>
+
       <!-- Response area -->
       <div class="px-4 pb-4">
         <!-- Approval: option buttons -->
@@ -126,7 +144,7 @@
               class="px-5 py-2 rounded-lg text-sm font-medium text-white transition-colors"
               :class="selectedOption
                 ? 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
-                : 'bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'"
+                : 'bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'"
             >
               Send
             </button>
@@ -149,7 +167,7 @@
               class="px-5 py-2 rounded-lg text-sm font-medium text-white transition-colors"
               :class="responseText.trim()
                 ? 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
-                : 'bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'"
+                : 'bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'"
             >
               Send Answer
             </button>
@@ -176,8 +194,10 @@ import { renderMarkdown } from '../../utils/markdown'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
-import { queueTypeLabel, queueResponseKind } from '../../utils/operatorQueue'
+import { queueTypeLabel, queueResponseKind, queueSyncBadge } from '../../utils/operatorQueue'
 import AgentAvatar from '../AgentAvatar.vue'
+import BaseBadge from '../base/BaseBadge.vue'
+import InlineError from '../InlineError.vue'
 
 const props = defineProps({
   item: { type: Object, required: true }
@@ -193,6 +213,9 @@ const agentsStore = useAgentsStore()
 // queue at all — and a budgeted alert type whose items cannot be closed jams
 // its own pending cap permanently.
 const responseKind = computed(() => queueResponseKind(props.item))
+// #2915: sync/delivery/aging badge and the refused-response notice.
+const syncBadge = computed(() => queueSyncBadge(props.item))
+const diverged = computed(() => store.divergedItemId === props.item.id)
 
 const isExpanded = computed(() => store.expandedItemId === props.item.id)
 const agentAvatarUrl = computed(() => {

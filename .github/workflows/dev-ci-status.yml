@@ -1,0 +1,202 @@
+name: dev-ci-status
+
+# Tier 2 aggregator (#2945). One verdict per pushed dev SHA.
+#
+# The PR gate (Tier 1) is deliberately small and fast; the suites it no longer
+# waits for run here, on `dev`, after the merge. This workflow is what turns
+# "runs on dev" into a signal anyone can read: it waits for every Tier 2
+# workflow of the pushed SHA to finish, then
+#
+#   * writes ONE commit status, context `dev-ci`, on that SHA;
+#   * on all-green, moves the `dev-green` tag to it (the merge train's Phase 0a
+#     and `pick-task` resolve "last green dev" through
+#     `scripts/ci/dev-last-green.sh`, which reads the tag first and the status
+#     second);
+#   * on red, opens or updates ONE tracking issue and closes it on the next
+#     green — a red dev is an incident for whoever merges next, not a status
+#     nobody looks at (#2204: four days, thirty merges).
+#
+# Why a push-triggered poller rather than `workflow_run`: `workflow_run` fires
+# only from the DEFAULT branch's workflow file, so it would start working at
+# the next release cut and not before — the same trap P-20b records for
+# `schedule`. A `push:` trigger fires from dev immediately. The poll costs
+# runner minutes, which are free on a public repo.
+#
+# Superseded SHAs get NO verdict. A burst of merges cancels the intermediate
+# SHAs' Tier 2 runs (each Tier 2 workflow keys its concurrency on the ref), and
+# this workflow is cancelled the same way. A cancelled sibling run is therefore
+# "superseded", never "red" — the burst's tail SHA carries the verdict for all
+# of them, which is exactly what `dev-green` should point at.
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Evaluate this dev SHA (blank = the dev tip)'
+        required: false
+        type: string
+
+permissions:
+  contents: write     # move the dev-green tag
+  statuses: write     # the dev-ci commit status
+  actions: read       # read sibling workflow runs
+  issues: write       # upsert / close the red-dev tracking issue
+
+concurrency:
+  group: dev-ci-status
+  cancel-in-progress: true
+
+jobs:
+  status:
+    name: aggregate Tier 2 for the pushed SHA
+    runs-on: ubuntu-latest
+    # Deploy to Dev alone is a 5-minute settle window plus up to 25 minutes of
+    # SSH; the unit suite is ~10-20; e2e and journey-smoke ~8 each, in parallel.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          fetch-depth: 1
+          # Needed: the tag push below authenticates with GITHUB_TOKEN.
+          persist-credentials: true
+
+      - name: Wait for Tier 2
+        id: wait
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          # REQUIRED: unconditional on push to dev — a missing run is "not yet",
+          # never "not applicable", so the loop keeps waiting for it.
+          REQUIRED="backend-unit-test.yml journey-smoke.yml frontend-e2e.yml deploy-dev.yml secret-scan.yml codeql.yml"
+          # OPTIONAL: path-filtered — a run may legitimately not exist for this
+          # SHA; when one exists it must be green like any other.
+          OPTIONAL="backend-image-smoke.yml pg-migrations.yml frontend-build.yml schema-parity.yml container-security.yml build-without-submodule.yml mcp-server-test.yml helper-mcp-test.yml enterprise-docs-guard.yml requirements-structure-guard.yml"
+          deadline=$(( $(date +%s) + 65 * 60 ))
+          while :; do
+            pending=""; failed=""
+            for wf in $REQUIRED $OPTIONAL; do
+              runs=$(gh api "repos/$REPO/actions/workflows/$wf/runs?head_sha=$SHA&per_page=5" \
+                --jq '[.workflow_runs[] | select(.event=="push" or .event=="workflow_dispatch")] | map({status, conclusion})')
+              if [ "$(jq 'length' <<<"$runs")" = "0" ]; then
+                case " $REQUIRED " in *" $wf "*) pending="$pending $wf(not started)";; esac
+                continue
+              fi
+              # Newest run first — a re-run supersedes its predecessor's verdict.
+              st=$(jq -r '.[0].status' <<<"$runs")
+              c=$(jq -r '.[0].conclusion // ""' <<<"$runs")
+              if [ "$st" != "completed" ]; then pending="$pending $wf($st)"; continue; fi
+              case "$c" in
+                success|skipped|neutral) ;;
+                cancelled)
+                  # Superseded by a later push in the burst. No verdict for this
+                  # SHA; the tail SHA's run carries it.
+                  echo "verdict=superseded" >> "$GITHUB_OUTPUT"
+                  echo "::notice::$wf was cancelled for ${SHA:0:8} — superseded by a later push; no verdict written"
+                  exit 0 ;;
+                *) failed="$failed $wf($c)";;
+              esac
+            done
+            [ -z "$pending" ] && break
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "verdict=timeout" >> "$GITHUB_OUTPUT"
+              echo "detail=still pending after 65 min:$pending" >> "$GITHUB_OUTPUT"
+              echo "::error::Tier 2 did not complete for ${SHA:0:8} — pending:$pending"
+              exit 0
+            fi
+            echo "waiting on:$pending"
+            sleep 60
+          done
+          if [ -n "$failed" ]; then
+            echo "verdict=failure" >> "$GITHUB_OUTPUT"
+            echo "detail=red:$failed" >> "$GITHUB_OUTPUT"
+            echo "::error::Tier 2 red on ${SHA:0:8}:$failed"
+          else
+            echo "verdict=success" >> "$GITHUB_OUTPUT"
+            echo "detail=all Tier 2 workflows green" >> "$GITHUB_OUTPUT"
+            echo "Tier 2 green on ${SHA:0:8}"
+          fi
+
+      - name: Publish verdict as the dev-ci commit status
+        if: steps.wait.outputs.verdict == 'success' || steps.wait.outputs.verdict == 'failure' || steps.wait.outputs.verdict == 'timeout'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha || github.sha }}
+          VERDICT: ${{ steps.wait.outputs.verdict }}
+          DETAIL: ${{ steps.wait.outputs.detail }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          case "$VERDICT" in
+            success) state=success ;;
+            failure) state=failure ;;
+            *)       state=error ;;
+          esac
+          gh api -X POST "repos/$REPO/statuses/$SHA" \
+            -f state="$state" -f context=dev-ci -f target_url="$RUN_URL" \
+            -f description="$(printf '%s' "$DETAIL" | cut -c1-140)"
+          echo "dev-ci=$state on ${SHA:0:8}: $DETAIL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Move dev-green
+        if: steps.wait.outputs.verdict == 'success'
+        run: |
+          set -euo pipefail
+          git push --force origin "HEAD:refs/tags/dev-green"
+          echo "dev-green -> $(git rev-parse --short HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upsert the red-dev tracking issue
+        if: steps.wait.outputs.verdict == 'failure' || steps.wait.outputs.verdict == 'timeout'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha || github.sha }}
+          DETAIL: ${{ steps.wait.outputs.detail }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TITLE="dev-ci red: Tier 2 failed on dev"
+          # Every line of the heredoc sits at the block-scalar indent; YAML strips it.
+          body=$(cat <<EOF
+          **\`dev\` is red at \`${SHA:0:8}\`** — ${DETAIL}
+
+          Aggregated by [dev-ci-status](${RUN_URL}). Every squash commit on \`dev\` is one PR, so the culprit is one of the commits since the last \`dev-green\` tag:
+
+          \`\`\`bash
+          git fetch origin dev '+refs/tags/dev-green:refs/tags/dev-green'
+          git log --oneline dev-green..origin/dev
+          \`\`\`
+
+          Protocol (DEVELOPMENT_WORKFLOW.md → P-20c): re-run the failing job on each suspect commit, open a revert PR for the culprit, and do not start a merge train until this issue closes. It closes itself on the next green \`dev-ci\`.
+          EOF
+          )
+          existing=$(gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+            echo "updated red-dev issue #$existing" >> "$GITHUB_STEP_SUMMARY"
+          else
+            n=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$body" \
+              --label priority-p0 --label type-bug --label theme-reliability | grep -oE '[0-9]+$')
+            echo "opened red-dev issue #$n" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Close the red-dev issue on green
+        if: steps.wait.outputs.verdict == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          TITLE="dev-ci red: Tier 2 failed on dev"
+          gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" --json number --jq '.[].number' \
+            | while read -r n; do
+                [ -n "$n" ] || continue
+                gh issue close "$n" --repo "$REPO" --comment "Tier 2 green again at \`${SHA:0:8}\`; \`dev-green\` moved."
+                echo "closed red-dev issue #$n" >> "$GITHUB_STEP_SUMMARY"
+              done

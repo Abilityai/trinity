@@ -116,7 +116,19 @@ def client(monkeypatch):
     # `services.task_execution_service` directly does NOT reach the router. We
     # patch the names the router hoisted to its OWN module globals instead —
     # those resolve through routers.a2a's namespace (this exact `a2a` object).
+    #
+    # #2524: the seam moved from `get_task_execution_service` to
+    # `dispatch_and_await_terminal` — the sync edge adapter, which is
+    # `execute_task` plus a wait for the row's terminal when the dispatch comes
+    # back QUEUED (which is what a pull-pilot agent's dispatch does). The double
+    # forwards, so everything asserted about the kwargs reaching the shared
+    # execution path is unchanged.
+    async def _adapter(**kwargs):
+        kwargs.pop("wait_timeout", None)
+        return await _Svc().execute_task(**kwargs)
+
     monkeypatch.setattr(a2a, "get_task_execution_service", lambda: _Svc())
+    monkeypatch.setattr(a2a, "dispatch_and_await_terminal", _adapter)
 
     async def _terminate(agent, eid):
         state["terminated"] = (agent, eid)

@@ -128,7 +128,7 @@
         <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
           <div class="flex items-center space-x-3">
             <div class="flex-shrink-0 w-10 h-10 bg-status-success-100 dark:bg-status-success-900/50 rounded-lg flex items-center justify-center">
-              <svg class="w-5 h-5 text-status-success-600 dark:text-status-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg class="w-5 h-5 text-status-success-700 dark:text-status-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             </div>
@@ -198,7 +198,7 @@
           <div v-if="execution.source_mcp_key_name">
             <span class="text-gray-500 dark:text-gray-400">MCP Key:</span>
             <span class="ml-2 text-gray-900 dark:text-white font-medium">{{ execution.source_mcp_key_name }}</span>
-            <span v-if="execution.source_mcp_key_id" class="ml-1 text-xs text-gray-400 dark:text-gray-500 font-mono">({{ execution.source_mcp_key_id.substring(0, 8) }}...)</span>
+            <span v-if="execution.source_mcp_key_id" class="ml-1 text-xs text-gray-500 dark:text-gray-400 font-mono">({{ execution.source_mcp_key_id.substring(0, 8) }}...)</span>
           </div>
         </div>
       </div>
@@ -287,7 +287,7 @@
                 <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-status-success-400 opacity-75"></span>
                 <span class="relative inline-flex rounded-full h-2 w-2 bg-status-success-500"></span>
               </span>
-              <span class="text-xs text-status-success-600 dark:text-status-success-400 font-medium">Live</span>
+              <span class="text-xs text-status-success-700 dark:text-status-success-400 font-medium">Live</span>
             </div>
           </div>
           <div class="flex items-center space-x-3">
@@ -295,7 +295,7 @@
             <button
               v-if="isStreaming"
               @click="toggleAutoScroll"
-              :class="autoScroll ? 'text-action-primary-600 dark:text-action-primary-400' : 'text-gray-400 dark:text-gray-500'"
+              :class="autoScroll ? 'text-action-primary-600 dark:text-action-primary-400' : 'text-gray-500 dark:text-gray-400'"
               class="text-xs font-medium hover:underline"
               title="Toggle auto-scroll"
             >
@@ -333,7 +333,7 @@
                   <span>•</span>
                   <span>{{ entry.toolCount }} tools</span>
                 </div>
-                <div v-if="entry.mcpServers.length" class="text-gray-400 dark:text-gray-500">
+                <div v-if="entry.mcpServers.length" class="text-gray-500 dark:text-gray-400">
                   MCP: {{ entry.mcpServers.join(', ') }}
                 </div>
               </div>
@@ -354,7 +354,7 @@
               <!-- Tool Call -->
               <div v-else-if="entry.type === 'tool-call'" class="flex space-x-3">
                 <div class="flex-shrink-0 w-8 h-8 bg-state-autonomous-100 dark:bg-state-autonomous-900/50 rounded-full flex items-center justify-center">
-                  <svg class="w-4 h-4 text-state-autonomous-600 dark:text-state-autonomous-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg class="w-4 h-4 text-state-autonomous-700 dark:text-state-autonomous-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                   </svg>
@@ -370,7 +370,7 @@
               <!-- Tool Result -->
               <div v-else-if="entry.type === 'tool-result'" class="flex space-x-3">
                 <div class="flex-shrink-0 w-8 h-8 bg-status-success-100 dark:bg-status-success-900/50 rounded-full flex items-center justify-center">
-                  <svg class="w-4 h-4 text-status-success-600 dark:text-status-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg class="w-4 h-4 text-status-success-700 dark:text-status-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                 </div>
@@ -384,7 +384,7 @@
               <div v-else-if="entry.type === 'result'" class="bg-gray-100 dark:bg-gray-900 rounded-lg p-3 text-xs border-t-2 border-gray-300 dark:border-gray-600">
                 <div class="flex items-center justify-between text-gray-500 dark:text-gray-400">
                   <div class="flex items-center space-x-3">
-                    <span class="font-semibold text-status-success-600 dark:text-status-success-400">Completed</span>
+                    <span class="font-semibold text-status-success-700 dark:text-status-success-400">Completed</span>
                     <span>{{ entry.numTurns }} turns</span>
                   </div>
                   <div class="flex items-center space-x-3 font-mono">
@@ -462,8 +462,8 @@ const triggerIconColor = computed(() => {
   if (!execution.value) return 'text-gray-600 dark:text-gray-400'
   const trigger = execution.value.triggered_by
   if (trigger === 'schedule') return 'text-accent-purple-600 dark:text-accent-purple-400'
-  if (trigger === 'manual') return 'text-state-autonomous-600 dark:text-state-autonomous-400'
-  if (trigger === 'paid') return 'text-status-warning-600 dark:text-status-warning-400'
+  if (trigger === 'manual') return 'text-state-autonomous-700 dark:text-state-autonomous-400'
+  if (trigger === 'paid') return 'text-status-warning-700 dark:text-status-warning-400'
   if (trigger === 'public') return 'text-teal-600 dark:text-teal-400'
   return 'text-cyan-600 dark:text-cyan-400'
 })

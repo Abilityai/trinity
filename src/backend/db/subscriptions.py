@@ -357,6 +357,38 @@ class SubscriptionOperations:
         with get_engine().connect() as conn:
             return (conn.execute(stmt).scalar() or 0) > 0
 
+    def list_agents_awaiting_first_credential(self) -> List[str]:
+        """Agents the install's first Claude credential should reach (ent#582).
+
+        Live, durable (not ephemeral) agent rows with no subscription, platform
+        key mode on, and NO successful execution ever. A success proves the
+        agent authenticates some other way — its own `.env` key or a terminal
+        login, both invisible here while `use_platform_api_key` defaults on —
+        and a subscription would shadow that (#2114). DB rows, not containers,
+        so a Docker fault cannot empty the list.
+        """
+        succeeded = select(schedule_executions.c.id).where(
+            and_(
+                schedule_executions.c.agent_name == agent_ownership.c.agent_name,
+                schedule_executions.c.status == "success",
+            )
+        )
+        stmt = (
+            select(agent_ownership.c.agent_name)
+            .where(
+                and_(
+                    agent_ownership.c.deleted_at.is_(None),
+                    func.coalesce(agent_ownership.c.is_ephemeral, 0) == 0,
+                    agent_ownership.c.subscription_id.is_(None),
+                    func.coalesce(agent_ownership.c.use_platform_api_key, 1) == 1,
+                    ~succeeded.exists(),
+                )
+            )
+            .order_by(agent_ownership.c.agent_name)
+        )
+        with get_engine().connect() as conn:
+            return [row[0] for row in conn.execute(stmt)]
+
     def list_subscriptions_with_agents(self, owner_id: Optional[int] = None) -> List[SubscriptionWithAgents]:
         """
         List subscriptions with their assigned agents.
@@ -726,6 +758,41 @@ class SubscriptionOperations:
         if kinds is not None:
             conditions.append(subscription_rate_limit_events.c.failure_kind.in_(kinds))
         return conditions
+
+    def last_failure_at_by_subscription(
+        self, subscription_ids: Sequence[str], *, hours: int = 2
+    ) -> Dict[str, str]:
+        """Newest ``occurred_at`` per subscription inside the window, in ONE query.
+
+        The instant the #2638 readmission rule compares a provider reset time
+        against: a subscription the 2h skip-list excluded is usable again only
+        if the window it failed in has since rolled over, which is a question
+        about WHEN it failed, not merely THAT it did.
+
+        Kind-BLIND, deliberately — it is read beside
+        ``has_recent_subscription_failures``, whose caution about auth failures
+        it must not quietly narrow (#2352). Missing from the result means "no
+        failure in the window", which is the same thing that predicate answers
+        False for.
+        """
+        ids = [s for s in dict.fromkeys(subscription_ids) if s]
+        if not ids:
+            return {}
+        stmt = (
+            select(
+                subscription_rate_limit_events.c.subscription_id,
+                func.max(subscription_rate_limit_events.c.occurred_at).label("last_at"),
+            )
+            .where(
+                and_(
+                    subscription_rate_limit_events.c.subscription_id.in_(ids),
+                    *self._failure_event_window(hours=hours),
+                )
+            )
+            .group_by(subscription_rate_limit_events.c.subscription_id)
+        )
+        with get_engine().connect() as conn:
+            return {row[0]: row[1] for row in conn.execute(stmt) if row[1]}
 
     def rate_limited_subscription_ids(
         self, subscription_ids: Sequence[str]
@@ -1216,6 +1283,24 @@ class SubscriptionOperations:
         agents get moved onto subscriptions the platform just watched fail to
         authenticate. See #444 for what a forgetful candidate filter does.
         """
+        return [
+            sub for sub in self._list_all_alternatives(exclude_id=exclude_id)
+            if not self.has_recent_subscription_failures(sub.id)
+        ]
+
+    def _list_all_alternatives(
+        self, exclude_id: Optional[str] = None
+    ) -> List[SubscriptionCredential]:
+        """Every subscription except ``exclude_id``, in load-balance order —
+        the query half of ``_list_unfailed_subscriptions``, WITHOUT the failure
+        filter.
+
+        Split out (#2638) so the filter and its complement
+        (``list_recently_failed_alternatives``) are the same rows in the same
+        order, differing only by the predicate. Re-deriving the complement from
+        a second query is how two lists of "the other subscriptions" come to
+        disagree about which ones exist.
+        """
         agent_count = self._agent_count_subquery()
         stmt = (
             select(*self._subscription_select_columns(), agent_count)
@@ -1233,8 +1318,7 @@ class SubscriptionOperations:
         stmt = stmt.order_by(agent_count.asc(), subscription_credentials.c.name.asc())
         with get_engine().connect() as conn:
             rows = conn.execute(stmt).mappings().all()
-        subs = [self._row_to_subscription(row) for row in rows]
-        return [sub for sub in subs if not self.has_recent_subscription_failures(sub.id)]
+        return [self._row_to_subscription(row) for row in rows]
 
     def list_assignable_subscriptions(self) -> List[SubscriptionCredential]:
         """The new-agent auto-assign candidate list (#74): every subscription
@@ -1264,6 +1348,26 @@ class SubscriptionOperations:
         empty list means what `None` used to: no viable alternative.
         """
         return self._list_unfailed_subscriptions(exclude_id=current_subscription_id)
+
+    def list_recently_failed_alternatives(
+        self, current_subscription_id: str
+    ) -> List[SubscriptionCredential]:
+        """The COMPLEMENT of ``list_viable_alternative_subscriptions``: every
+        other subscription the 2h skip-list is currently excluding.
+
+        Not a second candidate list — a candidate list would make the skip-list
+        advisory, which is #444's ping-pong. These are the rows
+        ``services.subscription_auto_switch`` may READMIT, and only on positive
+        fresh evidence that the provider is serving them now or that the window
+        they failed in has since reset (#2638). No evidence, no readmission.
+
+        Same load-balance order as its complement, so a readmitted candidate
+        that reaches the fail-open path sorts the way every other candidate
+        would (it does not: readmission requires the ranker, which is the point).
+        """
+        every = self._list_all_alternatives(exclude_id=current_subscription_id)
+        viable = {s.id for s in self.list_viable_alternative_subscriptions(current_subscription_id)}
+        return [s for s in every if s.id not in viable]
 
     # =========================================================================
     # Usage Tracking (SUB-004: Per-subscription usage windows)

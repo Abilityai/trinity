@@ -313,6 +313,9 @@ class SkillsLibrarySyncService:
             if not skill_names:
                 return {"status": "skipped", "reason": "no_skills"}
             result = await skill_service.inject_skills(agent_name, skill_names, force=False)
+            # #2703: the sweep changes the listing — open surfaces refetch.
+            from services.skill_service import broadcast_skills_changed
+            await broadcast_skills_changed(agent_name)
             if not result.get("success"):
                 # Per-skill detail already rides the result map and the agent's
                 # own injection log; the fleet report keeps a bounded summary.

@@ -164,3 +164,182 @@ export function respondRefusedAsNotPending(err) {
   const status = err?.response?.status
   return status === 409 || status === 400 || status === 404
 }
+
+/**
+ * #2915 — what the platform last established about the agent's own copy of an
+ * item, as ONE badge rule every surface calls (QueueCard, ResolvedCard, /m,
+ * PortalAsks). Returns `null` when nothing needs saying (confirmed, not aging,
+ * delivered) so a healthy card stays quiet; otherwise `{ label, variant, title }`
+ * for a `BaseBadge` (variant is a BaseBadge variant, never a raw colour).
+ *
+ * Inputs are the fields the API already carries: `sync_state`, `sync_detail`,
+ * `last_confirmed_at`, `delivery_state`, `delivery_detail`, `aging`,
+ * `aged_since`. The portal projection carries a coarse `sync` instead of
+ * `sync_state`; both spellings are read.
+ */
+export const SYNC_BADGE_COPY = Object.freeze({
+  changed: 'Changed by the agent',
+  closed_by_filer: 'Closed by the agent',
+  closed: 'Closed by the agent',
+  missing: 'Gone from the agent',
+  stale_id: 'Re-used id',
+  unconfirmed: 'Unconfirmed',
+  undelivered: 'Answer not delivered',
+  aging: 'Waiting',
+})
+
+export function queueSyncBadge(item) {
+  if (!item || typeof item !== 'object') return null
+  const state = item.sync_state || item.sync
+  // Delivery outranks sync on an answered item: "your answer never landed" is
+  // the fact the operator needs first.
+  if (item.delivery_state === 'undelivered') {
+    return { label: SYNC_BADGE_COPY.undelivered, variant: 'danger', title: deliveryTitle(item) }
+  }
+  if (state === 'changed') {
+    return { label: SYNC_BADGE_COPY.changed, variant: 'warning', title: changedTitle(item.sync_detail) + since(item) }
+  }
+  if (state === 'closed_by_filer' || state === 'closed') {
+    return { label: SYNC_BADGE_COPY.closed_by_filer, variant: 'warning', title: 'The agent closed this on its side; it is still waiting for you here.' + since(item) }
+  }
+  if (state === 'missing') {
+    return { label: SYNC_BADGE_COPY.missing, variant: 'warning', title: 'The agent no longer carries this item in its queue file.' + since(item) }
+  }
+  if (state === 'stale_id') {
+    return { label: SYNC_BADGE_COPY.stale_id, variant: 'neutral', title: 'The agent re-used this id after the item was closed; the re-ask was not admitted.' }
+  }
+  if (state === 'unconfirmed') {
+    return { label: SYNC_BADGE_COPY.unconfirmed, variant: 'neutral', title: unconfirmedTitle(item) }
+  }
+  if (item.aging) {
+    return { label: SYNC_BADGE_COPY.aging, variant: 'warning', title: item.aged_since ? `Past the aging bound since ${item.aged_since}` : 'Past the aging bound' }
+  }
+  return null
+}
+
+function changedTitle(detail) {
+  const fields = typeof detail === 'string' && detail ? detail.split(',').join(', ') : 'content'
+  return `The agent rewrote this item since it was ingested (${fields}). You are reading the original.`
+}
+
+/** " Since <ts>." when the platform recorded when it established the state. */
+function since(item) {
+  return item.sync_updated_at ? ` Since ${item.sync_updated_at}.` : ''
+}
+
+function deliveryTitle(item) {
+  const tried = item.delivery_updated_at ? ` Last tried ${item.delivery_updated_at}.` : ''
+  const terminal = item.status === 'cancelled' || item.status === 'expired'
+  switch (item.delivery_detail) {
+    case 'entry_changed': return 'The agent rewrote the item after you answered; the answer was not delivered.'
+    case 'closed_by_filer': return 'The agent closed the item on its side; the answer was not delivered.'
+    case 'entry_missing':
+      // A cancellation whose entry the agent already dropped has nothing left
+      // to land on: recorded, never retried, and not an escalation.
+      return terminal
+        ? "The agent's queue file no longer carries this item, so the cancellation could not be written; the agent has already dropped it."
+        : `The item is gone from the agent's queue file; the answer is re-added when the file is readable.${tried}`
+    case 'file_missing': return `The agent has no queue file; retrying.${tried}`
+    case 'agent_not_running': return 'The agent is not running; the answer is delivered when it starts.'
+    case 'conflict': return `The agent was writing its file at the same moment; retrying.${tried}`
+    default: return `The write to the agent failed; retrying.${tried}`
+  }
+}
+
+function unconfirmedTitle(item) {
+  const why = {
+    agent_not_running: 'the agent is not running',
+    timeout: 'the agent did not answer in time',
+    unreachable: 'the agent could not be reached',
+    invalid_json: "the agent's queue file is not valid JSON",
+    wrong_shape: "the agent's queue file is not the expected shape",
+    oversize_file: "the agent's queue file is too large to read",
+  }[item.sync_detail] || 'the platform could not reconcile it'
+  const when = item.last_confirmed_at ? ` Last confirmed ${item.last_confirmed_at}.` : ' Never confirmed.'
+  return `Not confirmed with the agent: ${why}.${when}`
+}
+
+/** True when a respond/answer was refused with 409 `item_diverged` (#2915). */
+export function respondRefusedAsDiverged(err) {
+  const status = err?.response?.status
+  if (status !== 409) return false
+  const detail = err?.response?.data?.detail
+  const code = detail && typeof detail === 'object' ? detail.code : null
+  return code === 'item_diverged'
+}
+
+export const QUEUE_RESPONSE_DIVERGED =
+  'The agent changed this item after you opened it. Review it and send again to answer anyway.'
+
+/**
+ * trinity-enterprise#611 — how an item ENDED, as ONE rule every surface renders
+ * (ResolvedCard, the `/m` "Recently ended" strip, PortalAsks). `null` while the
+ * item is still pending.
+ *
+ * `{ kind, label, who, when }`:
+ *   - `kind` — `answered | cancelled | expired`: the ledger's `disposition`,
+ *     else the terminal status (a row that ended before the ledger). The
+ *     Workspace projection's own `status` (`answered`) reads the same way.
+ *   - `who` — the person, for the Operating Room (`disposed_by_email`, or a
+ *     legacy answer's `responded_by_email`); the Workspace projection's coarse
+ *     `ended_by` (`you` / `the operator`); `timeout` for an expiry; `null` when
+ *     the platform does not know.
+ *   - `when` — the ledger's `disposed_at`, the projection's `ended_at`, or a
+ *     legacy answer's `responded_at`. NEVER `created_at`: that is when the ask
+ *     was filed, and showing it as the ending time is the defect this replaces.
+ */
+export const ENDING_LABELS = Object.freeze({
+  answered: 'Answered',
+  cancelled: 'Cancelled',
+  expired: 'Expired',
+})
+
+function endingKind(item) {
+  const d = item.disposition
+  if (d === 'answered' || d === 'cancelled' || d === 'expired') return d
+  const s = item.status
+  if (s === 'responded' || s === 'acknowledged' || s === 'answered') return 'answered'
+  if (s === 'cancelled' || s === 'expired') return s
+  return null
+}
+
+export function queueEnding(item) {
+  if (!item || typeof item !== 'object') return null
+  const kind = endingKind(item)
+  if (!kind) return null
+  const when = item.disposed_at || item.ended_at || (kind === 'answered' ? item.responded_at : null) || null
+  let who = null
+  if (kind === 'expired') {
+    who = 'timeout'
+  } else if (item.ended_by === 'you') {
+    who = 'you'
+  } else if (item.ended_by === 'operator') {
+    who = 'the operator'
+  } else {
+    who = item.disposed_by_email || (kind === 'answered' ? item.responded_by_email : null) || null
+  }
+  return { kind, label: ENDING_LABELS[kind], who, when }
+}
+
+/** The ending in words: "Cancelled by op@…", "Answered by you",
+ *  "Expired — nobody answered in time", or the bare label when nobody is known. */
+export function queueEndingText(ending) {
+  if (!ending) return ''
+  if (ending.kind === 'expired') return `${ending.label} — nobody answered in time`
+  return ending.who ? `${ending.label} by ${ending.who}` : ending.label
+}
+
+/** What the resolved feed sorts by (#627 AC6): when the item ended; a legacy
+ *  answer's time; else — the only timestamp such a row has — when it was filed. */
+export function queueEndingSortTime(item) {
+  return (item && (item.disposed_at || item.responded_at || item.created_at)) || ''
+}
+
+/** Up to `max` items that ENDED, most recent ending first — the `/m` strip. */
+export function recentlyEnded(items, max = 5) {
+  if (!Array.isArray(items)) return []
+  return items
+    .filter((i) => queueEnding(i))
+    .sort((a, b) => String(queueEndingSortTime(b)).localeCompare(String(queueEndingSortTime(a))))
+    .slice(0, max)
+}

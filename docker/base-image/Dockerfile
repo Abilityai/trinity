@@ -159,9 +159,18 @@ RUN git config --system gc.auto 0 && \
 # `@google/gemini-cli` and `@openai/codex` below resolve their binaries through
 # the same optional-dependency mechanism and carry the same silent-failure risk,
 # and the Go tarball above is hardcoded to linux-amd64.
+#
+# Pinned, never `@latest` (#3012). Docker caches a RUN layer by its text, so
+# `@latest` is resolved once and then reused by every rebuild: an instance
+# rebuilt on 2026-09-24 still shipped 2.1.278, and `claude-opus-5-5` needs
+# >= 2.1.280. The ARG value is part of the layer's cache key, so bumping it is
+# what actually upgrades the CLI. `MODEL_CATALOG[*].min_claude_code`
+# (src/backend/services/model_catalog.py) must not exceed this value;
+# tests/unit/test_3012_claude_code_pin.py fails the build when it does.
+ARG CLAUDE_CODE_VERSION=2.1.281
 RUN set -eu; \
     npm install -g --include=optional --no-ignore-scripts --foreground-scripts \
-        @anthropic-ai/claude-code@latest; \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
     CC_DIR="$(npm root -g)/@anthropic-ai/claude-code"; \
     if ! claude --version >/dev/null 2>&1; then \
         echo "[base-image] claude did not run after npm install: the platform-native optionalDependency did not land. Re-installing it as a direct (non-optional) dependency."; \
@@ -342,6 +351,38 @@ RUN mkdir -p /tmp/secure && \
 # so it survives a plain stop+start but is wiped on recreate.
 RUN mkdir -p /var/lib/trinity && \
     chown developer:developer /var/lib/trinity
+
+# ent#615: the git credential helper. Trinity used to persist every agent's
+# remote as `<scheme>://oauth2:<PAT>@<host>/...`, which put the platform token
+# in `.git/config` on the workspace volume AND — because git expands the stored
+# URL into `git-remote-https`'s argv — in the container's process table on every
+# fetch/push, from where `ps` → the orphan sweep's reaped-cmdline log → Vector →
+# the logs API carried it into another agent's context (ent#292, rated P0, was
+# the last hop of that chain). Git speaks the credential protocol to a helper
+# over stdin/stdout, which never reaches argv and is never persisted.
+#
+# Registered as `trinity`, NOT as the filename: git prepends `git-credential-`
+# to any helper value that is not an absolute path, so `git-credential-trinity`
+# resolves to `git-credential-git-credential-trinity` and the helper never runs
+# — which, with token-free URLs, is a silent fleet-wide fetch/push outage.
+#
+# Registered UNSCOPED (no `credential.<base>.`) because `TRINITY_GIT_BASE_URL`
+# is a runtime value: a base baked at image-build time can only ever be
+# github.com, so a self-hosted install would get no helper at all. The helper
+# resolves the allowed origin itself, at request time, and refuses every other
+# host. `--replace-all` because `credential.helper` is multi-valued and helper
+# lists COMPOSE — a competing helper answering first masks everything.
+#
+# Root-owned by construction: `/usr/local/bin` and `/etc/gitconfig` are outside
+# the agent-writable home. That stops ACCIDENTAL rewrites — an errant `pip
+# install`, a template hook, a skill writing to `$HOME`. It is NOT a boundary
+# against a deliberate agent: `developer` holds `NOPASSWD:ALL` (see the
+# `usermod -aG sudo` above), so `sudo` reaches both paths. And it is not
+# confidentiality either — the agent can still read its own `GITHUB_PAT`. The
+# structural fix is trinity-enterprise#558 (AAuth).
+COPY --chown=root:root ./git-credential-trinity.sh /usr/local/bin/git-credential-trinity
+RUN chmod 0755 /usr/local/bin/git-credential-trinity && \
+    git config --system --replace-all credential.helper trinity
 
 USER developer
 

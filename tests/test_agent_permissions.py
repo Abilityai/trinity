@@ -75,7 +75,7 @@ class TestGetPermissions:
         for agent in data.get("available_agents", []):
             assert "name" in agent, f"Missing 'name' in agent: {agent}"
             assert "status" in agent, f"Missing 'status' in agent: {agent}"
-            assert "type" in agent, f"Missing 'type' in agent: {agent}"
+            # `type` was retired with the agent type taxonomy (#2104).
             assert "permitted" in agent, f"Missing 'permitted' in agent: {agent}"
             assert isinstance(agent["permitted"], bool)
 

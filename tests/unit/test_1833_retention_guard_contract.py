@@ -494,6 +494,10 @@ class _EndpointDb:
         self.settings = {
             "agent_soft_delete_retention_days": "180",
             "schedule_soft_delete_retention_days": "30",
+            # trinity-enterprise#478 — the endpoint's third ack-gated sweep.
+            # Without a row here the reader would fall through to the live
+            # install's settings, which is the seam this double exists to close.
+            "metrics_retention_days": "365",
         }
         self.queue_items = []
 
@@ -512,6 +516,12 @@ class _EndpointDb:
     def count_soft_deleted_schedules_past_retention(self, window, limit=None):
         return 0
 
+    def count_metric_points_candidates(self, window, limit=None):
+        # trinity-enterprise#478: a real int, never a MagicMock — the guard
+        # compares it to its floor and fail-closes on anything it cannot
+        # interpret, which would turn every assertion below into a refusal.
+        return 0
+
     def create_operator_queue_item(self, agent_name, item):
         self.queue_items.append((agent_name, item))
         return item["id"]
@@ -521,13 +531,24 @@ def _get_retention(monkeypatch, agent_count):
     import asyncio
 
     try:
-        from routers import settings as mod
+        # #1028: `routers/settings.py` is a package now. This names the module
+        # that owns the handler — the collaborators below are deliberately not
+        # re-exported on the package, so a stale patch raises instead of
+        # applying to a module nobody reads.
+        from routers.settings import retention as mod
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")
 
     double = _EndpointDb(agent_count)
     monkeypatch.setattr(mod, "db", double)
     monkeypatch.setattr(_RG, "db", double)
+    # trinity-enterprise#478 moved the window READER from `retention.db` to
+    # `settings_service.resolve_ops_setting`, which binds `settings_service.db`.
+    # Patching only the two above leaves the endpoint reading the real install's
+    # `system_settings` — the double would be silently bypassed.
+    import services.settings_service as _SS
+
+    monkeypatch.setattr(_SS, "db", double)
     return asyncio.run(mod.get_retention_status(current_user=_Admin()))
 
 

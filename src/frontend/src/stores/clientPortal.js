@@ -7,6 +7,7 @@
  * endpoints — 404 in OSS/unentitled builds, but the route guard
  * ent#356 moved the module into OSS core, so it ships in every build.
  */
+import { markRaw } from 'vue'
 import { defineStore } from 'pinia'
 import {
   collaborationRecency, normalizeRoomRow, WORKSPACE_ROOT } from '@/components/portal/portalUtils'
@@ -17,14 +18,46 @@ import {
   shouldRequestBriefing,
 } from '@/components/portal/portalBriefingState'
 import axios from 'axios'
+import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
 import { useAuthStore } from './auth'
+// A cycle by shape (that store reads this one's `clientEmail`), safe by use:
+// neither side touches the other at module evaluation, only inside actions.
+import { usePortalDraftsStore } from './portalDrafts'
+
+// --- carry-log bounds (#2794 follow-up) --------------------------------------
+//
+// Entries retain the `File` object, so the log is bounded three ways and the
+// tightest one wins. Age is the honest bound (a carry is a seconds-to-minutes
+// gesture); count and bytes exist so a pathological session cannot pin
+// hundreds of megabytes in memory waiting for an age-out that may never come.
+export const CARRY_MAX_AGE_MS = 15 * 60 * 1000
+export const CARRY_MAX_ENTRIES = 20
+export const CARRY_MAX_BYTES = 64 * 1024 * 1024
+
+/** Newest-last, within every bound. Pure — exported for the unit suite. */
+export function pruneCarryLog(entries, now = Date.now()) {
+  let kept = (Array.isArray(entries) ? entries : [])
+    .filter((e) => e && e.file && now - e.at <= CARRY_MAX_AGE_MS)
+  if (kept.length > CARRY_MAX_ENTRIES) kept = kept.slice(kept.length - CARRY_MAX_ENTRIES)
+  // Drop oldest until the retained bytes fit. A single file over the cap is
+  // kept regardless: the alternative is silently refusing to carry the one
+  // file the person actually cares about.
+  let bytes = kept.reduce((n, e) => n + (e.size || 0), 0)
+  while (kept.length > 1 && bytes > CARRY_MAX_BYTES) {
+    bytes -= kept[0].size || 0
+    kept = kept.slice(1)
+  }
+  return kept
+}
 // #2162: the page size for a windowed report read. A dependency-free leaf
 // shared with the operator reports store — never re-typed here, since the
 // backend already owns REPORT_ROWS_PAGE_DEFAULT and a third hand-written copy
 // is the shape that drifts while each side's tests pin its own version.
 import { REPORT_ROWS_PAGE as ROWS_PAGE } from '@/utils/reportPaging'
 
-const PORTAL_TOKEN_KEY = 'trinity.portalToken'
+// #2791: exported so the cross-tab listener and the shared 401 verdict can ask
+// whether a CLIENT session is live without re-deriving the key.
+export const PORTAL_TOKEN_KEY = 'trinity.portalToken'
 // #2261 — per-TAB, so an operator working in another tab is untouched by a
 // client's idle timeout (that is the whole reason expiry may not end the
 // platform session). sessionStorage, not localStorage: it must survive a
@@ -67,6 +100,10 @@ function writeSuppressed(on) {
 // `axios.defaults` and a suppressed session must carry no Authorization).
 export const portalHttp = axios.create()
 
+// ent#465 — the suggestions read is reused this long across the two
+// placements that mount it together (the Info tab and the empty chat).
+export const SUGGESTIONS_FRESH_MS = 60_000
+
 // #2261 — what to do when a workspace request 401s while the workspace session
 // IS the platform session (ent#357's operator case).
 //
@@ -84,11 +121,12 @@ export const portalHttp = axios.create()
 //
 // A callback rather than a router import: the store is imported BY the views the
 // router loads, so importing the router here is a cycle.
-let _onPlatformSessionLost = null
-
-export function setPlatformSessionLostHandler(fn) {
-  _onPlatformSessionLost = fn
-}
+// #2791: the per-module callback this file used to own is gone — the reaction is
+// registered once, on `utils/platformSession.js`, and reached from all three
+// transports. Kept as a thin re-export so an out-of-tree caller (or a test that
+// has not been updated) still resolves to the one handler rather than silently
+// registering a second.
+export { setPlatformUnauthorizedHandler as setPlatformSessionLostHandler }
 
 portalHttp.interceptors.request.use((config) => {
   // The store is the ONLY source of a workspace credential. Whatever arrived on
@@ -190,8 +228,17 @@ function installRotationInterceptor() {
       // token) must never reach it: their tab may well hold an operator's JWT,
       // and bouncing would destroy a session that did nothing wrong.
       if (error?.response?.status === 401) {
+        // #2791: the third 401 site now reports to the SAME handler as
+        // `api.js` and the global interceptor, which owns the verdict.
+        //
+        // `isPlatformSession` stays as the local gate, and it is not redundant
+        // with the shared verdict: it is the only thing that knows this tab's
+        // client session was SUPPRESSED (#2261's `platformFallbackSuppressed`),
+        // a state no amount of reading localStorage can reconstruct. The shared
+        // verdict then adds what this site could never see — whether the token
+        // that failed is still the stored one.
         try {
-          if (useClientPortalStore().isPlatformSession) _onPlatformSessionLost?.()
+          if (useClientPortalStore().isPlatformSession) notifyPlatformUnauthorized(error)
         } catch {
           // Pinia not active (module-scope request, or teardown): no session to
           // reason about, so there is nothing to bounce.
@@ -215,9 +262,16 @@ installRotationInterceptor()
 const briefingsInFlight = new Set()
 const briefingAttempts = new Map()
 let briefingsBatchInFlight = false
+// #2703: agents whose briefing changed WHILE a hydration for them was in
+// flight. `ensureBriefing`/`revalidateBriefing` return early on an in-flight
+// name; without this a WS trigger landing mid-hydration would be lost and the
+// stale answer would win. `hydrateBriefings` re-runs once for a dirty name.
+const briefingsDirty = new Set()
 
 export const useClientPortalStore = defineStore('clientPortal', {
   state: () => ({
+    // ent#555 — agent name → the canvas id the rail currently shows.
+    openCanvasByAgent: {},
     clientEmail: null,
     agents: [],
     loading: false,
@@ -317,6 +371,48 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // "loaded" must never mean "failed and returned nothing" (contract #15).
     reportsLoaded: false,
     reportsError: null,
+    // ent#637 — what this agent remembers about the viewer and the writes
+    // behind it. Same generation guard as reports: a response landing after an
+    // agent switch is discarded, never shown under the new agent's name.
+    memoryAgent: null,
+    _memoryGeneration: 0,
+    memory: null,            // {agent_name, notes, updated_at, writes: [...]}
+    memoryLoaded: false,     // set ONLY by a fetch that succeeded (contract #15)
+    memoryError: null,
+    memoryUndoError: null,   // the failed verb's home, next to the control (contract #18)
+    memoryUndoing: null,     // write id in flight
+    // ent#527 — the role card: a projection of the agent's own files, plus the
+    // owner's readiness stamp. Same generation guard as reports.
+    roleAgent: null,
+    _roleGeneration: 0,
+    role: null,              // PortalRoleCard, or {role: null} for an agent with none
+    roleLoaded: false,
+    roleError: null,
+    roleFlipError: null,
+    roleFlipping: false,
+    // ent#638 — the seat decision record: why things were approved, deferred
+    // or killed. Same generation guard; refusals (the grammar receipt) land
+    // next to the form, keyed by field.
+    decisionsAgent: null,
+    _decisionsGeneration: 0,
+    decisions: null,          // PortalSeatDecisions
+    decisionsLoaded: false,
+    decisionsError: null,
+    decisionError: null,      // {code, message, fields:{}} of the failed verb
+    decisionBusy: null,       // 'record' | decision id in flight
+    // ent#465 — suggestions for one viewer + one agent (platform door only).
+    // Same generation guard. Both placements (the Info tab and the empty chat)
+    // read this one slice, so a dismiss in one is gone from the other.
+    suggestionsAgent: null,
+    _suggestionsGeneration: 0,
+    suggestions: null,        // PortalSuggestions
+    suggestionsLoaded: false,
+    suggestionsError: null,
+    suggestionsFetchedAt: 0,
+    suggestionError: null,    // {key, message} of the failed dismiss
+    _suggestionsInFlight: null, // the running load, shared by both placements
+    _suggestionsLoadSeq: 0,     // only the LATEST load may write
+    _suggestionsDismissed: [],  // keys dismissed since the last load STARTED
     reportPayloads: {},
     // id -> {total, loaded}; present only for a payload the server actually
     // windowed, so a bounded document never renders a paging footer.
@@ -342,6 +438,26 @@ export const useClientPortalStore = defineStore('clientPortal', {
     //
     // The rail owner drains it (`usePortalRailFeeds`); nothing else reads it.
     pendingUploadNotes: {},
+
+    // --- Carry log (#2794 follow-up) ---
+    // Files uploaded to an agent that have NOT yet gone out with a message, so
+    // an escalation into a room can take them along.
+    //
+    // It lives on the store rather than in the composer because there are TWO
+    // upload surfaces and only one of them is the composer: the rail's Files
+    // panel (`PortalRailFiles.vue::uploadBatch`) sends straight to its "Send
+    // to" target and keeps no pending state at all. A user who attaches there
+    // and then @mentions a second agent got nothing carried and — because the
+    // composer had no attachments — not even a notice saying so. `uploadDocument`
+    // is the ONE funnel all three surfaces already share (#2582), so recording
+    // here is what makes the carry surface-agnostic.
+    //
+    // Bounded three ways because these entries retain the `File` itself:
+    // by count, by age, and by total retained bytes (see `noteUploadForCarry`).
+    uploadCarryLog: [],
+    // agent -> ms timestamp. Everything logged at or before it has already gone
+    // out with a message (or belongs to a previous visit) and is not carried.
+    uploadsCarriedAt: {},
   }),
 
   getters: {
@@ -540,6 +656,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // OTP form). The `wasPlatform` read must happen before either clear.
     async signOutEverywhere() {
       const wasPlatform = this.isPlatformSession
+      // trinity-enterprise#657: an explicit sign-out takes the person's unsent
+      // drafts with it — they are message text, and on a shared browser the
+      // portal token is removed at this same moment. BEFORE `signOut()`: that
+      // nulls `clientEmail`, which swaps the drafts store's identity to null,
+      // and a clear after it would remove nothing. Expiry (`endSession`) does
+      // not clear — it is not the person's act, and a draft is what they come
+      // back for.
+      usePortalDraftsStore().clearBucket()
       const authStore = useAuthStore()
       if (authStore.isAuthenticated) await authStore.logout()
       this.signOut()
@@ -554,13 +678,36 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // not "I don't know which". The backend cannot tell those apart from the
     // absence alone — which is why New chat used to land in the existing
     // conversation — and it ignores the flag when a session IS named.
+    /**
+     * ent#555 — which canvas the rail has open, per agent.
+     *
+     * Kept in the store rather than passed down because the two ends are in
+     * different subtrees: the selection happens in the rail's CanvasPanel and
+     * is needed by the composer in the conversation. Per-agent, so switching
+     * chats cannot carry one agent's selection into another's turn.
+     */
+    setOpenCanvas(agentName, canvasId) {
+      if (!agentName) return
+      this.openCanvasByAgent = { ...this.openCanvasByAgent, [agentName]: canvasId || null }
+    },
+
     // ent#403: `model` is the user's explicit pick, or null/'' to inherit. Sent
     // on BOTH turn actions — a field honoured by only one brings the bug back
     // exactly when streaming fails and this fallback runs.
-    async sendPortalChat(agentName, message, sessionId = null, { newThread = false, model = null } = {}) {
+    async sendPortalChat(agentName, message, sessionId = null,
+                    { newThread = false, openCanvasId = null, model = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat`,
-        { message, session_id: sessionId, new_thread: newThread, model: model || null },
+        {
+          message,
+          session_id: sessionId,
+          new_thread: newThread,
+          model: model || null,
+          // ent#555 — the canvas on screen, so "add a column to this" resolves.
+          // Server-validated: an id the caller cannot see is discarded there,
+          // so sending it is never a way to reach a canvas they could not open.
+          open_canvas_id: openCanvasId,
+        },
         { headers: this.authHeader }
       )
       return data
@@ -571,10 +718,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // `sendPortalChat` above is untouched — it stays the documented API surface
     // for headless clients (ent#83), and is still the fallback when streaming
     // is unavailable.
-    async startPortalChat(agentName, message, sessionId = null, { newThread = false, model = null } = {}) {
+    async startPortalChat(agentName, message, sessionId = null,
+                    { newThread = false, openCanvasId = null, model = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
-        { message, session_id: sessionId, new_thread: newThread, model: model || null },
+        {
+          message,
+          session_id: sessionId,
+          new_thread: newThread,
+          model: model || null,
+          // ent#555 — the canvas on screen, so "add a column to this" resolves.
+          // Server-validated: an id the caller cannot see is discarded there,
+          // so sending it is never a way to reach a canvas they could not open.
+          open_canvas_id: openCanvasId,
+        },
         { headers: this.authHeader }
       )
       return data   // {execution_id, session_id}
@@ -828,6 +985,318 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.reportRowMeta = {}
       this.reportErrors = {}
       this._reportInFlight = {}
+    },
+
+    // ---- ent#637: the viewer's memory with an agent ------------------------
+
+    resetAgentMemory(agentName = null) {
+      this._memoryGeneration += 1
+      this.memoryAgent = agentName
+      this.memory = null
+      this.memoryLoaded = false
+      this.memoryError = null
+      this.memoryUndoError = null
+      this.memoryUndoing = null
+    },
+
+    async loadAgentMemory(agentName) {
+      if (this.memoryAgent !== agentName) this.resetAgentMemory(agentName)
+      const gen = this._memoryGeneration
+      this.memoryError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/memory`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._memoryGeneration) return
+        this.memory = data
+        this.memoryLoaded = true
+      } catch {
+        if (gen !== this._memoryGeneration) return
+        this.memoryError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    /**
+     * Undo one write: the notes revert to what they were before it. The
+     * server decides what is undoable (latest, not already undone) and names
+     * a refusal (`not_latest` / `already_undone`) — rendered next to the
+     * control, never swallowed. On success the payload is re-read so the
+     * list and the notes come from the same read.
+     */
+    async undoMemoryWrite(agentName, writeId) {
+      const gen = this._memoryGeneration
+      this.memoryUndoError = null
+      this.memoryUndoing = writeId
+      try {
+        await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/memory/writes/${writeId}/undo`,
+          null, { headers: this.authHeader },
+        )
+        if (gen !== this._memoryGeneration) return true
+        await this.loadAgentMemory(agentName)
+        return true
+      } catch (e) {
+        if (gen !== this._memoryGeneration) return false
+        const d = e?.response?.data?.detail
+        this.memoryUndoError = (d && typeof d === 'object' && d.message)
+          || (typeof d === 'string' ? d : null)
+          || 'Could not undo that change. Try again.'
+        return false
+      } finally {
+        if (gen === this._memoryGeneration) this.memoryUndoing = null
+      }
+    },
+
+    // ---- ent#527: the role card ------------------------------------------
+
+    resetAgentRole(agentName = null) {
+      this._roleGeneration += 1
+      this.roleAgent = agentName
+      this.role = null
+      this.roleLoaded = false
+      this.roleError = null
+      this.roleFlipError = null
+      this.roleFlipping = false
+    },
+
+    async loadAgentRole(agentName) {
+      if (this.roleAgent !== agentName) this.resetAgentRole(agentName)
+      const gen = this._roleGeneration
+      this.roleError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/role`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._roleGeneration) return
+        this.role = data
+        this.roleLoaded = true
+      } catch {
+        if (gen !== this._roleGeneration) return
+        this.roleError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    /** The owner's flip (#663). A named refusal lands next to the control. */
+    async flipAgentReadiness(agentName, status) {
+      const gen = this._roleGeneration
+      this.roleFlipError = null
+      this.roleFlipping = true
+      try {
+        await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/role/readiness`,
+          { status }, { headers: this.authHeader },
+        )
+        if (gen !== this._roleGeneration) return true
+        await this.loadAgentRole(agentName)
+        return true
+      } catch (e) {
+        if (gen !== this._roleGeneration) return false
+        const d = e?.response?.data?.detail
+        this.roleFlipError = (d && typeof d === 'object' && d.message)
+          || (typeof d === 'string' ? d : null)
+          || 'Could not change readiness. Try again.'
+        return false
+      } finally {
+        if (gen === this._roleGeneration) this.roleFlipping = false
+      }
+    },
+
+    // ---- ent#465: suggestions ------------------------------------------
+
+    resetAgentSuggestions(agentName = null) {
+      this._suggestionsGeneration += 1
+      this.suggestionsAgent = agentName
+      this.suggestions = null
+      this.suggestionsLoaded = false
+      this.suggestionsError = null
+      this.suggestionsFetchedAt = 0
+      this.suggestionError = null
+      this._suggestionsInFlight = null
+      this._suggestionsDismissed = []
+    },
+
+    /**
+     * Load (or reuse, when fresh) this agent's suggestions. Two placements
+     * mount at once, so a fetch younger than `SUGGESTIONS_FRESH_MS` is reused
+     * rather than repeated; `force` bypasses it.
+     */
+    async loadAgentSuggestions(agentName, { force = false } = {}) {
+      if (this.suggestionsAgent !== agentName) this.resetAgentSuggestions(agentName)
+      if (!force && this.suggestionsLoaded && Date.now() - this.suggestionsFetchedAt < SUGGESTIONS_FRESH_MS) return
+      // Both placements mount together: the second caller joins the first
+      // request instead of sending (and making the agent answer) its own.
+      if (!force && this._suggestionsInFlight) return this._suggestionsInFlight
+      const gen = this._suggestionsGeneration
+      const seq = ++this._suggestionsLoadSeq
+      this.suggestionsError = null
+      this._suggestionsDismissed = []
+      // Superseded: an older load answering after a newer (forced) one must not
+      // overwrite it — same generation, so the agent guard alone cannot tell.
+      const stale = () => gen !== this._suggestionsGeneration || seq !== this._suggestionsLoadSeq
+      const run = (async () => {
+        try {
+          const { data } = await portalHttp.get(
+            `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions`,
+            { headers: this.authHeader },
+          )
+          if (stale()) return
+          // A dismiss that landed while this load was in flight must not come
+          // back with it (the server may have answered before the write).
+          const gone = new Set(this._suggestionsDismissed)
+          const list = (data.suggestions || []).filter((x) => !gone.has(x.key))
+          this.suggestions = { ...data, suggestions: list, total: Math.max(0, (data.total || 0) - ((data.suggestions || []).length - list.length)) }
+          this.suggestionsLoaded = true
+          this.suggestionsFetchedAt = Date.now()
+        } catch {
+          if (stale()) return
+          this.suggestionsError = "Couldn't load suggestions. Check your connection and try again."
+        } finally {
+          if (gen === this._suggestionsGeneration && this._suggestionsInFlight === run) this._suggestionsInFlight = null
+        }
+      })()
+      this._suggestionsInFlight = run
+      return run
+    },
+
+    /**
+     * Dismiss: hidden at once, restored with the error beside it if the write
+     * fails (design system p18 — a verb's failure sits next to its control).
+     */
+    async dismissSuggestion(agentName, key) {
+      const gen = this._suggestionsGeneration
+      const list = this.suggestions?.suggestions || []
+      const index = list.findIndex((s) => s.key === key)
+      const removed = index >= 0 ? list[index] : null
+      this.suggestionError = null
+      if (removed) {
+        this.suggestions = {
+          ...this.suggestions,
+          suggestions: list.filter((s) => s.key !== key),
+          total: Math.max(0, (this.suggestions.total || 0) - 1),
+        }
+      }
+      this._suggestionsDismissed = [...this._suggestionsDismissed, key]
+      try {
+        await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions/feedback`,
+          { key, action: 'dismiss' }, { headers: this.authHeader },
+        )
+        return true
+      } catch {
+        if (gen !== this._suggestionsGeneration) return false
+        this._suggestionsDismissed = this._suggestionsDismissed.filter((k) => k !== key)
+        // Put back only the item this dismiss removed, into whatever list is
+        // current now — never a snapshot that a newer load has replaced.
+        const now = this.suggestions?.suggestions || []
+        if (removed && !now.some((s) => s.key === key)) {
+          const next = now.slice()
+          next.splice(Math.min(index, next.length), 0, removed)
+          this.suggestions = { ...this.suggestions, suggestions: next, total: (this.suggestions.total || 0) + 1 }
+        }
+        this.suggestionError = { key, message: "Couldn't dismiss that. Try again." }
+        return false
+      }
+    },
+
+    /**
+     * Accept is recorded for usefulness only. The action itself (prefill, open,
+     * link) has already happened on the client, so a failed record is not the
+     * person's problem and is deliberately not surfaced.
+     */
+    async acceptSuggestion(agentName, key) {
+      try {
+        await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/suggestions/feedback`,
+          { key, action: 'accept' }, { headers: this.authHeader },
+        )
+      } catch { /* usefulness data only — see the docblock */ }
+    },
+
+    clearSuggestionError() { this.suggestionError = null },
+
+    // ---- ent#638: the seat decision record ------------------------------
+
+    resetAgentDecisions(agentName = null) {
+      this._decisionsGeneration += 1
+      this.decisionsAgent = agentName
+      this.decisions = null
+      this.decisionsLoaded = false
+      this.decisionsError = null
+      this.decisionError = null
+      this.decisionBusy = null
+    },
+
+    async loadAgentDecisions(agentName) {
+      if (this.decisionsAgent !== agentName) this.resetAgentDecisions(agentName)
+      const gen = this._decisionsGeneration
+      this.decisionsError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/decisions`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._decisionsGeneration) return
+        this.decisions = data
+        this.decisionsLoaded = true
+      } catch {
+        if (gen !== this._decisionsGeneration) return
+        this.decisionsError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    _decisionRefusal(e) {
+      const d = e?.response?.data?.detail
+      if (d && typeof d === 'object') {
+        return { code: d.code || null, message: d.message || 'The record was refused.',
+                 fields: (d.receipt && d.receipt.fields) || {} }
+      }
+      return { code: null, message: typeof d === 'string' ? d : 'The request failed. Try again.', fields: {} }
+    },
+
+    /** Record a decision for my seat. Returns the result or null on refusal. */
+    async recordSeatDecision(agentName, body) {
+      const gen = this._decisionsGeneration
+      this.decisionError = null
+      this.decisionBusy = 'record'
+      try {
+        const { data } = await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/decisions`,
+          body, { headers: this.authHeader },
+        )
+        if (gen !== this._decisionsGeneration) return data
+        await this.loadAgentDecisions(agentName)
+        return data
+      } catch (e) {
+        if (gen !== this._decisionsGeneration) return null
+        this.decisionError = this._decisionRefusal(e)
+        return null
+      } finally {
+        if (gen === this._decisionsGeneration) this.decisionBusy = null
+      }
+    },
+
+    /** close / reverse / reconfirm / supersede one of my decisions. */
+    async actOnSeatDecision(agentName, decisionId, body) {
+      const gen = this._decisionsGeneration
+      this.decisionError = null
+      this.decisionBusy = decisionId
+      try {
+        const { data } = await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/decisions/${decisionId}/actions`,
+          body, { headers: this.authHeader },
+        )
+        if (gen !== this._decisionsGeneration) return data
+        await this.loadAgentDecisions(agentName)
+        return data
+      } catch (e) {
+        if (gen !== this._decisionsGeneration) return null
+        this.decisionError = { ...this._decisionRefusal(e), decisionId }
+        return null
+      } finally {
+        if (gen === this._decisionsGeneration) this.decisionBusy = null
+      }
     },
 
     async loadAgentReports(agentName) {
@@ -1216,6 +1685,35 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // ent#553 — the lifecycle writes. Roster-scoped and owner-gated server
+    // side; the card's `can_manage_canvases` only decides whether the control
+    // is rendered, so these never need to guess at permission themselves.
+    async deleteAgentCanvas(agentName, canvasId) {
+      await portalHttp.delete(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/${encodeURIComponent(canvasId)}`,
+        { headers: this.authHeader }
+      )
+      return true
+    },
+
+    async bulkDeleteAgentCanvases(agentName, canvasIds) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/bulk-delete`,
+        { canvas_ids: canvasIds },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    async pinAgentCanvas(agentName, canvasId, pinned) {
+      await portalHttp.put(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/${encodeURIComponent(canvasId)}/pin`,
+        { pinned },
+        { headers: this.authHeader }
+      )
+      return true
+    },
+
     async fetchDocuments(agentName) {
       const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/documents`,
@@ -1286,7 +1784,49 @@ export const useClientPortalStore = defineStore('clientPortal', {
         { headers: this.authHeader }
       )
       this.noteUploadPending(agentName)
+      this.noteUploadForCarry(agentName, file)
       return data
+    },
+
+    /**
+     * Remember a successful upload so an escalation can carry it (#2794).
+     *
+     * Only ever called from `uploadDocument`, i.e. after the server took the
+     * file — a refused upload is not carryable and must not be logged.
+     */
+    noteUploadForCarry(agentName, file) {
+      if (!agentName || !file) return
+      const now = Date.now()
+      const entry = {
+        agent: agentName,
+        name: file.name,
+        size: Number(file.size) || 0,
+        // `markRaw` for the reason `usePortalFileDrop` gives: a proxied `File`
+        // fails deep inside `FormData.append`, where the cause is invisible.
+        file: markRaw(file),
+        at: now,
+      }
+      const next = this.uploadCarryLog.concat(entry)
+      this.uploadCarryLog = pruneCarryLog(next, now)
+    },
+
+    /**
+     * Everything logged for this agent up to now has been accounted for — it
+     * went out with a message, or the conversation was just opened. The
+     * composer's chips clear at exactly these moments; this is the same act for
+     * the surfaces that have no chips.
+     */
+    markUploadsCarried(agentName) {
+      if (!agentName) return
+      this.uploadsCarriedAt = { ...this.uploadsCarriedAt, [agentName]: Date.now() }
+    },
+
+    /** Files sent to `agentName` that have not gone out with a message yet. */
+    carryableUploadsFor(agentName) {
+      if (!agentName) return []
+      const since = this.uploadsCarriedAt[agentName] || 0
+      const fresh = pruneCarryLog(this.uploadCarryLog, Date.now())
+      return fresh.filter((e) => e.agent === agentName && e.at > since)
     },
 
     /** Mark one agent's inbox listing stale. Drained by the rail owner (#2582). */
@@ -1492,9 +2032,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async fetchAsks(agentName = null) {
       if (!this.isClientSignedIn) return []
       try {
+        // trinity-enterprise#611: the asks that ended in the last 7 days ride the
+        // same list, so a person sees how an ask ended instead of watching it
+        // vanish; `openAsks` (the badge) and the Work tab stay pending-only.
         const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
           headers: this.authHeader,
-          params: agentName ? { agent_name: agentName } : {},
+          params: agentName ? { agent_name: agentName, include_ended: true } : { include_ended: true },
         })
         this.asks = Array.isArray(data) ? data : []
         this.asksAvailable = true
@@ -1523,16 +2066,33 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
-    // Answer one ask. The row is removed from local state on success rather than
-    // patched: the server's answer is authoritative, and a client that keeps a
-    // stale "pending" copy would offer to answer it twice.
-    async answerAsk(askId, { response = null, responseText = null } = {}) {
+    // trinity-enterprise#620: the live activity lines alone — what each
+    // running execution of these agents is doing right now, from the agents'
+    // heartbeats. Polled every few seconds by the Work store ONLY while a
+    // card is live; the full `fetchWork` stays at its 12 s cadence.
+    async fetchWorkActivity(agentNames) {
+      const { data } = await portalHttp.get('/api/enterprise/client-portal/work/activity', {
+        headers: this.authHeader,
+        params: { agents: (agentNames || []).filter(Boolean).join(',') },
+      })
+      return data
+    },
+
+    // Answer one ask. On success the row is REPLACED by the server's projection
+    // of it — now `answered`, by you (trinity-enterprise#611: an ended ask stays
+    // listed) — never patched locally: the server's answer is authoritative, and
+    // a client that kept a stale "pending" copy would offer to answer it twice.
+    async answerAsk(askId, { response = null, responseText = null, acknowledgeDivergence = false } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/asks/${askId}/answer`,
-        { response, response_text: responseText },
+        // #2915: the key rides only when the person acknowledged — the body
+        // stays byte-identical to the #2375 shape for every other answer.
+        { response, response_text: responseText, ...(acknowledgeDivergence ? { acknowledge_divergence: true } : {}) },
         { headers: this.authHeader },
       )
-      this.asks = this.asks.filter((a) => a.id !== askId)
+      this.asks = data && data.id === askId
+        ? this.asks.map((a) => (a.id === askId ? data : a))
+        : this.asks.filter((a) => a.id !== askId)
       return data
     },
 
@@ -1681,7 +2241,42 @@ export const useClientPortalStore = defineStore('clientPortal', {
       } finally {
         if (requested) requested.forEach((n) => briefingsInFlight.delete(n))
         else briefingsBatchInFlight = false
+        // #2703: an invalidation that arrived mid-flight re-runs ONCE, so the
+        // listing the user sees is never the one fetched before the change.
+        const redo = (requested || this.agents.map((a) => a && a.name)).filter((n) => briefingsDirty.has(n))
+        redo.forEach((n) => briefingsDirty.delete(n))
+        if (redo.length) void this.revalidateBriefing(redo)
       }
+    },
+
+    /**
+     * Re-hydrate one agent's (or a few agents') briefing after its skill set
+     * changed (#2703) — stale-while-revalidate: the card keeps its hint cards
+     * and `/` entries until the new answer lands; `briefing_state` is NEVER
+     * flipped back to `pending`, because that re-enters the loading skeleton
+     * on a zone that has data (the p13 rule `mergeRosterBriefings` guards).
+     *
+     * Deliberately outside `shouldRequestBriefing`, whose job is the one-retry
+     * rule for a card that never hydrated; this is a card that did.
+     *
+     * `maxAge` (ms) bounds the call for the surfaces with no `/ws` — an
+     * external client's Workspace re-validates the active agent when the `/`
+     * popup opens, at most once per minute per agent.
+     */
+    async revalidateBriefing(names, { maxAge = 0 } = {}) {
+      const list = (Array.isArray(names) ? names : [names]).filter(Boolean)
+      const wanted = []
+      for (const name of list) {
+        const card = this.agents.find((a) => a && a.name === name)
+        if (!card) continue                               // not on this roster — nothing to show
+        if (maxAge > 0 && typeof card.briefing_hydrated_at === 'number'
+            && Date.now() - card.briefing_hydrated_at < maxAge) continue
+        if (briefingsInFlight.has(name)) { briefingsDirty.add(name); continue }
+        wanted.push(name)
+      }
+      if (!wanted.length) return
+      wanted.forEach((n) => briefingsInFlight.add(n))
+      await this.hydrateBriefings(wanted)
     },
 
     /**

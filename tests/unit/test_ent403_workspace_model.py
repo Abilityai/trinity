@@ -38,7 +38,15 @@ pytestmark = pytest.mark.unit
 AGENT = "scout"
 EMAIL = "bob@example.com"
 SESSION = "ps_1"
-OPUS = "claude-opus-5"
+# The curated "Most capable" Workspace model — READ from the catalog, not named.
+# The id behind that tier moves on every Opus release: #2987 moved it from
+# `claude-opus-5` to `claude-opus-5-5`, and the literal that stood here turned
+# `test_a_curated_model_is_accepted` red for a reason unrelated to anything this
+# file tests. Every use below means "a valid curated model", never a specific id.
+# `model_catalog` is a stdlib-only leaf (no DB at import), so this is safe here.
+from services.model_catalog import MODEL_CATALOG as _CATALOG  # noqa: E402
+
+OPUS = next(m.id for m in _CATALOG if m.workspace and m.workspace_tier == "Most capable")
 HAIKU = "claude-haiku-4-5-20251001"
 # public-channel-selectable but deliberately NOT workspace-selectable — the one
 # id that proves "the inherited value is not re-laundered through the composer's
@@ -648,8 +656,8 @@ def test_the_generic_failure_is_unchanged_when_no_model_was_chosen(svc, monkeypa
 def test_a_usage_limit_never_blames_the_model(svc, monkeypatch, code):
     """THE regression guard on the tempting version of this feature.
 
-    There is no "this model is unavailable" code in the #2320 ladder
-    (`_PULL_ERROR_CODES` has no model member), and AUTH/BILLING merge into ONE
+    The one model code in the #2320 ladder is #3012's MODEL_UNSUPPORTED (the
+    runtime refused the model), which is its own branch; AUTH/BILLING merge into ONE
     "reached its usage limit" answer with a true and specific cause. Rewording
     that branch whenever a model was chosen would tell a person their model
     choice broke a turn that an exhausted subscription broke — and would send
@@ -690,7 +698,10 @@ def _card(svc, *, is_platform=True, runtime="claude-code", override=None, ctx=No
     row = {"agent_name": AGENT, "public_channel_model": override}
     return svc._row_to_card(row, False, None, availability="ready",
                             is_platform=is_platform, runtime=runtime,
-                            model_context=ctx if ctx is not None else svc._model_context())
+                            model_context=ctx if ctx is not None else svc._model_context(),
+                            # #2695 — neutral, like the three above it. This file
+                            # is about the model control.
+                            stt_ready=True)
 
 
 def test_the_control_is_absent_for_a_client_portal_principal(svc):
@@ -776,7 +787,7 @@ def test_row_to_cards_capability_arguments_have_no_defaults(svc):
     import inspect
 
     params = inspect.signature(svc._row_to_card).parameters
-    for name in ("is_platform", "runtime", "model_context"):
+    for name in ("is_platform", "runtime", "model_context", "stt_ready"):
         assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, name
         assert params[name].default is inspect.Parameter.empty, name
 

@@ -99,6 +99,9 @@ class ScheduleExecutionsMixin:
             # Binding-agent for channel report-back (ent#265)
             source_channel_agent=row["source_channel_agent"] if "source_channel_agent" in row_keys else None,
             source_channel_client=row["source_channel_client"] if "source_channel_client" in row_keys else None,
+            open_canvas_id=row["open_canvas_id"] if "open_canvas_id" in row_keys else None,
+            # Inter-agent chain depth (#2806); NULL = root.
+            chain_depth=row["chain_depth"] if "chain_depth" in row_keys else None,
         )
 
     # =========================================================================
@@ -117,6 +120,7 @@ class ScheduleExecutionsMixin:
         source_mcp_key_name: str = None,
         model_used: str = None,
         fan_out_id: str = None,
+        fan_out_task_id: str = None,
         loop_id: str = None,
         subscription_id: str = None,
         source_channel: str = None,
@@ -124,6 +128,8 @@ class ScheduleExecutionsMixin:
         source_channel_thread: str = None,
         source_channel_agent: str = None,
         source_channel_client: str = None,
+        open_canvas_id: str = None,
+        chain_depth: Optional[int] = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
 
@@ -138,6 +144,9 @@ class ScheduleExecutionsMixin:
             source_mcp_key_name: MCP API key name (denormalized)
             model_used: Model used for this execution (MODEL-001)
             fan_out_id: Parent fan-out operation ID (FANOUT-001)
+            fan_out_task_id: The caller's own id for this subtask within the
+                batch (#2524). Persisted so the aggregate can be rebuilt from
+                the rows rather than from a dict in the dispatching process.
             loop_id: Parent loop ID (#740) — iterations of a sequential loop
             subscription_id: Subscription active at record time (SUB-004)
             source_channel_agent: Binding-agent for channel report-back (ent#265).
@@ -147,6 +156,9 @@ class ScheduleExecutionsMixin:
                 Set ONLY when channel context is inherited from a parent
                 execution; None for direct rows (reporter falls back to the
                 executing agent).
+            chain_depth: Agent-to-agent hops from a non-agent root (#2806).
+                Set only on the child row of an agent-principal call; None
+                (read as 0) on every root.
         """
         execution_id = self._generate_id()
         now = utc_now_iso()
@@ -168,6 +180,7 @@ class ScheduleExecutionsMixin:
                     source_mcp_key_name=source_mcp_key_name,
                     model_used=model_used,
                     fan_out_id=fan_out_id,
+                    fan_out_task_id=fan_out_task_id,
                     loop_id=loop_id,
                     subscription_id=subscription_id,
                     source_channel=source_channel,
@@ -175,6 +188,8 @@ class ScheduleExecutionsMixin:
                     source_channel_thread=source_channel_thread,
                     source_channel_agent=source_channel_agent,
                     source_channel_client=source_channel_client,
+                    open_canvas_id=open_canvas_id,
+                    chain_depth=chain_depth,
                 )
             )
 
@@ -200,7 +215,30 @@ class ScheduleExecutionsMixin:
                 source_channel_thread=source_channel_thread,
                 source_channel_agent=source_channel_agent,
                 source_channel_client=source_channel_client,
+                open_canvas_id=open_canvas_id,
+                chain_depth=chain_depth,
             )
+
+    def get_max_running_chain_depth(self, agent_name: str) -> int:
+        """Deepest `chain_depth` among `agent_name`'s RUNNING rows, 0 if none (#2806).
+
+        The chain-depth guard stamps a child `1 + this`. Only `running` rows
+        count: every row is inserted RUNNING, so a caller mid-turn is always
+        visible, while `queued` / `pending_retry` rows are not executing and so
+        cannot be the one making the call. NULL depths (roots) read as 0.
+        Taking the MAX means a caller cannot lower it while it has a running
+        execution — the guard fails toward over-refusal.
+        """
+        with get_engine().connect() as conn:
+            value = conn.execute(
+                select(func.max(schedule_executions.c.chain_depth)).where(
+                    and_(
+                        schedule_executions.c.agent_name == agent_name,
+                        schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                    )
+                )
+            ).scalar()
+        return int(value or 0)
 
     def create_schedule_execution(
         self,
@@ -690,6 +728,93 @@ class ScheduleExecutionsMixin:
                 rows.append(d)
             return rows
 
+    # ------------------------------------------------------------------
+    # Fan-out batch (#2524, #2670)
+    # ------------------------------------------------------------------
+
+    # A fan-out subtask is finished when its row leaves these. Mirrors
+    # `sync_waiter.TERMINAL_TASK_STATUSES` — `queued` (created, not yet
+    # dispatched, or waiting for a pull worker) and `pending_retry` are
+    # explicitly NOT terminal, which is the whole point: the batch must keep
+    # waiting through them.
+    _FAN_OUT_OPEN_STATUSES = (
+        TaskExecutionStatus.QUEUED,
+        TaskExecutionStatus.RUNNING,
+        TaskExecutionStatus.PENDING_RETRY,
+    )
+
+    def get_fan_out_executions(
+        self, agent_name: str, fan_out_id: str, limit: int = 200
+    ) -> List[dict]:
+        """Every execution row of one fan-out batch, oldest first (#2670).
+
+        The batch's rows are the ONLY durable record of a fan-out, which makes
+        this the read surface a gateway-timeout receipt can be resolved
+        against (#2670) and the source `FanOutService` rebuilds the sync
+        aggregate from (#2524) — and, unlike the idempotency snapshot, it
+        answers WHILE THE BATCH IS STILL RUNNING.
+
+        Scoped by `agent_name` as well as `fan_out_id`: the id is server-minted
+        and unguessable, but the route that exposes this is agent-gated, so the
+        query must not be able to return another agent's rows even if an id were
+        somehow reused.
+
+        Ordered by `started_at` ASC. That is creation order for a batch at
+        rest, but not a contract: a row that is re-queued or claimed by a pull
+        worker has `started_at` re-stamped. Callers match subtasks by
+        `fan_out_task_id` / `id`. `limit` is a belt (MAX_TASKS bounds a batch
+        at creation).
+        """
+        stmt = (
+            select(
+                schedule_executions.c.id,
+                schedule_executions.c.fan_out_task_id,
+                schedule_executions.c.status,
+                schedule_executions.c.started_at,
+                schedule_executions.c.completed_at,
+                schedule_executions.c.duration_ms,
+                schedule_executions.c.message,
+                schedule_executions.c.response,
+                schedule_executions.c.error,
+                schedule_executions.c.cost,
+                schedule_executions.c.context_used,
+                schedule_executions.c.model_used,
+            )
+            .where(schedule_executions.c.agent_name == agent_name)
+            .where(schedule_executions.c.fan_out_id == fan_out_id)
+            .order_by(schedule_executions.c.started_at.asc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            rows = []
+            for row in conn.execute(stmt).mappings():
+                d = dict(row)
+                # #1474: the scheduler is not the writer here, but normalise
+                # anyway so this surface can never serialize a naive timestamp.
+                d["started_at"] = _norm_ts(d.get("started_at"))
+                d["completed_at"] = _norm_ts(d.get("completed_at"))
+                rows.append(d)
+            return rows
+
+    def count_fan_out_open(self, fan_out_id: str) -> int:
+        """How many of a batch's rows have not reached a terminal (#2524).
+
+        Runs on every fan-out terminal, so it is a COUNT against the
+        `(fan_out_id, status)` index rather than a fetch of the whole batch.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(schedule_executions)
+            .where(
+                and_(
+                    schedule_executions.c.fan_out_id == fan_out_id,
+                    schedule_executions.c.status.in_(self._FAN_OUT_OPEN_STATUSES),
+                )
+            )
+        )
+        with get_engine().connect() as conn:
+            return int(conn.execute(stmt).scalar() or 0)
+
     def get_execution(self, execution_id: str) -> Optional[ScheduleExecution]:
         """Get a specific execution by ID."""
         stmt = select(schedule_executions).where(
@@ -752,6 +877,45 @@ class ScheduleExecutionsMixin:
                 d["completed_at"] = _norm_ts(d.get("completed_at"))
                 rows.append(d)
             return rows
+
+
+    def get_running_in_conversation(
+        self, agent_name: str, source_channel: str, chat_id: str,
+    ) -> List[ScheduleExecution]:
+        """THIS agent's RUNNING executions in one conversation (ent#549).
+
+        Behind `services/turn_audience.resolve_turn_audience`: an agent that
+        cites a finished execution of its own has proved which CONVERSATION a
+        side effect came from, never which person — the person is whoever the
+        turn running in that conversation now belongs to. Exactly one row is an
+        answer; none or several is "could not tell".
+
+        All three predicates are required, and an empty one returns nothing
+        rather than widening: `agent_name` is the authenticated caller (a chat
+        id alone would let one agent read another's turn — the #2433 rule that
+        a local lookup must bind every identifier the remote authority used
+        to), and the channel keeps a Telegram chat id from colliding with a
+        room id.
+
+        RUNNING only, unlike `get_running_for_chat`: a QUEUED row has no process
+        that could be making a tool call. `idx_executions_status` drives it, as
+        it does there — a handful of rows on any install.
+        """
+        if not (agent_name and source_channel and chat_id):
+            return []
+        stmt = (
+            select(schedule_executions)
+            .where(and_(
+                schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                schedule_executions.c.agent_name == agent_name,
+                schedule_executions.c.source_channel == source_channel,
+                schedule_executions.c.source_channel_chat_id == chat_id,
+            ))
+            .order_by(schedule_executions.c.started_at.desc())
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_schedule_execution(r) for r in rows]
 
     def stamp_execution_channel_context(
         self,

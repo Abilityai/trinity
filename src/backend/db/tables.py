@@ -17,7 +17,8 @@ performance index, and for `idx_agent_evaluations_rating_target` it would
 silently turn "one rating per person per thing" into "one row per click".
 """
 
-from sqlalchemy import Column, Float, ForeignKey, Index, MetaData, Table, Text, text
+from sqlalchemy import BigInteger, Column, Float, ForeignKey, Index, JSON, MetaData, PrimaryKeyConstraint, Table, Text, UniqueConstraint, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import Integer as _Integer
 from sqlalchemy.types import TypeDecorator
 
@@ -267,6 +268,11 @@ schedule_executions = Table(
     Column("queued_at", Text),
     Column("backlog_metadata", Text),
     Column("fan_out_id", Text),
+    # #2524: the CALLER's subtask id within a fan-out batch. The aggregate
+    # is a query over `fan_out_id` now, so the id the caller keyed its tasks
+    # by has to live on the row — it used to be a dict key in the service's
+    # process, which no async batch or status endpoint can reach.
+    Column("fan_out_task_id", Text),
     Column("retry_count", Integer),
     Column("loop_id", Text),
     Column("claim_token", Text),  # #1081 Phase 0 — dark pull-coordination columns
@@ -285,6 +291,10 @@ schedule_executions = Table(
     # ent#457 review: WHICH human the channel context belongs to. Only the
     # portal leg reads it today — see `_resolve_portal`'s recipient check.
     Column("source_channel_client", Text),
+    # ent#555 — the canvas the user had open for this turn (context, not authority).
+    Column("open_canvas_id", Text),
+    # #2806 — agent-to-agent hops from a non-agent root; NULL = root (0).
+    Column("chain_depth", Integer),
 )
 
 agent_loops = Table(
@@ -591,6 +601,24 @@ enterprise_room_messages = Table(
 )
 
 
+agent_canvas_shares = Table(
+    # ent#554 — one share link for one canvas. Separate from
+    # `agent_public_links` on purpose; see the DDL comment in db/schema.py.
+    "agent_canvas_shares",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("canvas_id", Text),
+    Column("token", Text),
+    Column("scope", Text),
+    Column("created_by", Text),
+    Column("created_at", Text),
+    Column("expires_at", Text),
+    Column("revoked_at", Text),
+    Column("last_viewed_at", Text),
+    Column("view_count", Integer),
+)
+
 agent_canvases = Table(
     # ent#438 — a durable, addressable surface an agent renders onto and
     # UPDATES. Composite PK (agent_name, canvas_id): the write is an upsert,
@@ -610,6 +638,8 @@ agent_canvases = Table(
     Column("updated_by_execution_id", Text),
     # ent#537 — starter layout by name; NULL = stacked.
     Column("template", Text),
+    # ent#553 — a human's pin, so the pile stays navigable. Never agent-written.
+    Column("pinned", Integer),
 )
 
 user_ui_preferences = Table(
@@ -749,12 +779,23 @@ agent_shared_files = Table(
     Column("consumed_at", Text),
     Column("download_count", Integer),
     Column("last_downloaded_at", Text),
+    # ent#549 — who the file is FOR. Decided by the platform from the turn the
+    # share came from (`services/turn_audience.py`), or named by the agent and
+    # checked against its roster. NULL email AND NULL channel = the owner only,
+    # which is also what every row from before these columns means.
+    Column("addressed_to_email", Text),
+    # The channel identity (`whatsapp:+…`, `telegram:<chat>`). DISPLAY ONLY — the
+    # owner's panel shows it; no reader ever filters on it.
+    Column("addressed_to_channel", Text),
+    # How the addressee was decided: turn | override | channel | none |
+    # ambiguous. NULL = a row that predates the column.
+    Column("audience_source", Text),
 )
 
 # #2582 / ent#548 — a Workspace viewer removes an agent-shared file from THEIR
-# list without revoking the share. `agent_shared_files` has no audience column,
-# so every rostered client already sees every active share of that agent; this
-# is the per-viewer preference layered over it.
+# list without revoking the share. Since ent#549 a file has an addressee, so
+# this is a preference over the viewer's OWN files; onward sharing (ent#633)
+# is what will make it a per-viewer layer over a shared row again.
 #
 # `agent_name` is load-bearing, not decoration: `agent_shared_files` is
 # registered CASCADE in `db/agent_cleanup.py`, so deleting an agent hard-deletes
@@ -768,6 +809,21 @@ portal_file_dismissals = Table(
     Column("file_id", Text, primary_key=True),
     Column("agent_name", Text),
     Column("dismissed_at", Text),
+)
+
+workspace_suggestion_feedback = Table(
+    "workspace_suggestion_feedback",
+    metadata,
+    Column("client_email", Text, primary_key=True),
+    Column("agent_name", Text, primary_key=True),
+    Column("suggestion_key", Text, primary_key=True),
+    Column("surface", Text),
+    Column("source", Text),
+    Column("dismissed_at", Text),
+    Column("dismissed_fingerprint", Text),
+    Column("accepted_at", Text),
+    Column("accept_count", Integer),
+    Column("updated_at", Text),
 )
 
 system_settings = Table(
@@ -858,6 +914,65 @@ public_user_memory = Table(
     Column("updated_at", Text),
 )
 
+# ent#637: write history for the agent_notes section — see the note in db/schema.py.
+public_user_memory_writes = Table(
+    "public_user_memory_writes",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("user_email", Text),
+    Column("execution_id", Text),
+    Column("triggered_by", Text),
+    Column("schedule_id", Text),
+    Column("previous_notes", Text),
+    Column("new_notes", Text),
+    Column("written_at", Text),
+    Column("undone_at", Text),
+    Column("undone_by", Text),
+)
+
+# ent#527 / #663: the agent owner's readiness stamp — see the note in db/schema.py.
+agent_role_readiness = Table(
+    "agent_role_readiness",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("status", Text),
+    Column("changed_at", Text),
+    Column("changed_by", Text),
+)
+
+# ent#638 (R25): the seat-level decision record — see the note in db/schema.py.
+seat_decisions = Table(
+    "seat_decisions",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("seat_email", Text),
+    Column("outcome", Text),
+    Column("decided", Text),
+    Column("alternatives", Text),
+    Column("criterion", Text),
+    Column("reversal", Text),
+    Column("decided_by_role", Text),
+    Column("decided_by_person", Text),
+    Column("decided_at", Text),
+    Column("review_by", Text),
+    Column("notes", Text),
+    Column("ask_class", Text),
+    Column("scope", Text),
+    Column("status", Text),
+    Column("supersedes_id", Text),
+    Column("cites", Text),
+    Column("request_id", Text),
+    Column("close_reason", Text),
+    Column("closed_at", Text),
+    Column("closed_by", Text),
+    Column("reconfirmed_at", Text),
+    Column("source_execution_id", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
+)
+
 agent_git_config = Table(
     "agent_git_config",
     metadata,
@@ -892,7 +1007,13 @@ agent_sync_state = Table(
     Column("behind_main", Integer),
     Column("ahead_working", Integer),
     Column("behind_working", Integer),
-    Column("git_dir_bytes", Integer),  # #1596: agent .git on-disk size
+    # #1596: agent .git on-disk size. BigInteger, not Integer (#2800): SQLAlchemy
+    # Integer is int4 on PostgreSQL (ceiling 2 GiB), and a byte count whose whole
+    # job is to observe bloat is exactly the value that exceeds it — a 44 GiB
+    # repo made every sync-state upsert raise NumericValueOutOfRange. SQLite is
+    # unaffected (its INTEGER is already 64-bit), which is why the default
+    # backend never showed it.
+    Column("git_dir_bytes", BigInteger),
     Column("pack_count", Integer),  # #1595: packs from `git count-objects -v`
     Column("loose_objects", Integer),  # #1595: loose objects (gc-health signal)
     Column("maintenance_failures", Integer),  # #1595: consecutive failed maintenance
@@ -911,6 +1032,26 @@ agent_skills = Table(
     # ent#237: which source this assignment resolved from. Recorded, not keyed
     # — see the agent_skills note in db/schema.py.
     Column("source_id", Text),
+    # #2914: `conflict` while an agent-authored dir of the same name blocks
+    # injection; NULL otherwise. See the agent_skills note in db/schema.py.
+    Column("delivery_status", Text),
+    # ent#596 (Tandem R29): the AGENT that made the assignment, when the writer
+    # was an agent principal; NULL for a human. `assigned_by` stays the owner's
+    # username — "the agent did it" must stay distinguishable from "the person
+    # did it". Audit column: KEEP on rename (the source_agent_name precedent).
+    Column("assigned_by_agent", Text),
+)
+
+
+# trinity-enterprise#596 — capabilities an instance admin grants to a named agent.
+# See the agent_capability_grants note in db/schema.py.
+agent_capability_grants = Table(
+    "agent_capability_grants",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("capability", Text, primary_key=True),
+    Column("granted_by", Text, nullable=False),
+    Column("granted_at", Text, nullable=False),
 )
 
 # ent#237: one row per git repo the skills library syncs from.
@@ -1285,6 +1426,36 @@ operator_queue = Table(
     # (every pre-ent#364 row). Validated at ingestion against the agent's
     # roster — never trusted from the agent-authored payload.
     Column("addressed_to_email", Text),
+    # #2915: what the poller last established about the agent's file entry, and
+    # whether the human's answer ever reached it. Written ONLY by the leader-
+    # locked sync loop, on change (rowcount is the edge). Nullable, no backfill:
+    # NULL renders as "not yet checked", never as confirmed.
+    Column("sync_state", Text),        # confirmed|changed|closed_by_filer|missing|stale_id|unconfirmed
+    Column("sync_detail", Text),       # closed vocabulary — never agent text
+    Column("sync_updated_at", Text),   # transition time
+    Column("last_confirmed_at", Text), # refreshed ≤ once/min per agent, batched
+    Column("delivery_state", Text),    # delivered|undelivered|not_applicable
+    Column("delivery_detail", Text),
+    Column("delivery_updated_at", Text),
+    Column("divergence_acknowledged_at", Text),
+    # trinity-enterprise#611: how the ask ended — written in the same
+    # compare-and-set UPDATE that flips `status`, so only the winning writer
+    # records an ending. Nullable, no backfill: a row that ended before the
+    # ledger reads from `status`.
+    Column("disposition", Text),         # answered|cancelled|expired
+    Column("disposed_at", Text),
+    Column("disposed_by", Text),         # person|timeout
+    Column("disposed_by_email", Text),   # NULL for timeout; withheld from agent principals
+    Column("disposition_reason", Text),  # the operator's optional cancel reason
+    Column("batch_id", Text),            # one uuid per bulk-cancel sweep
+    # trinity-enterprise#611: the agent-raised ask. Platform-owned — written only
+    # from keyword-only arguments, never from an agent's file entry.
+    Column("raised_by", Text),           # agent|gate (NULL: legacy row or platform alarm)
+    Column("channel", Text),             # file|mcp
+    Column("to_role", Text),
+    Column("resolved_to", Text),         # JSON list of person refs
+    Column("proposal", Text),            # JSON — the frozen action
+    Column("supersedes_expired", Text),  # the predecessor row's uuid
 )
 
 nevermined_agent_config = Table(
@@ -1421,4 +1592,76 @@ agent_compatibility_results = Table(
     Column("ai_ran_at", Text),
     Column("static_ran_at", Text),
     Column("updated_at", Text),
+)
+
+# Declared metric registry (trinity-enterprise#477) — one row per metric an
+# agent's `template.yaml metrics:` block declares.
+metric_definitions = Table(
+    "metric_definitions",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text, nullable=False),
+    Column("name", Text, nullable=False),
+    Column("type", Text, nullable=False),
+    Column("label", Text),
+    Column("description", Text),
+    Column("unit", Text),
+    Column("warning_threshold", Float),
+    Column("critical_threshold", Float),
+    Column("status_values_json", Text),
+    Column("cadence", Text),
+    Column("cadence_seconds", Integer),
+    Column("direction", Text),
+    Column("aggregation", Text),
+    Column("dimensions_json", Text),
+    Column("extensions_json", Text),
+    Column("definition_hash", Text),
+    Column("type_conflict", Text),
+    Column("status", Text),
+    Column("source", Text),
+    Column("first_declared_at", Text),
+    Column("last_synced_at", Text),
+    Column("retired_at", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
+    # ent#366 lesson — declared HERE, not only in schema.py/Alembic, because
+    # this one is not a performance index: it IS the "one definition per metric
+    # name per agent" rule, and `reconcile`'s `on_conflict_do_update` names it
+    # as its conflict target. `migrations/env.py` autogenerates against this
+    # MetaData, so a rule it does not know about is proposed for DROP by the
+    # first `--autogenerate` anyone runs — and accepting that would turn one
+    # reconcile into a second row per metric on every pull.
+    UniqueConstraint("agent_name", "name"),
+)
+
+# Recorded metric points (trinity-enterprise#478) — the append-only store the
+# `record_metrics` write path fills and ent#479 reads.
+metric_points = Table(
+    "metric_points",
+    metadata,
+    Column("agent_name", Text, nullable=False),
+    Column("metric", Text, nullable=False),
+    Column("ts", Text, nullable=False),
+    Column("idempotency_key", Text, nullable=False),
+    # Float renders FLOAT = float8 on PostgreSQL and REAL-affinity on SQLite,
+    # matching the DDL's DOUBLE PRECISION. `REAL` would be float4 on PG and
+    # would round 1234567.89 — the column that exists to observe a value is the
+    # one that must not lose it.
+    Column("value_numeric", Float),
+    Column("value_text", Text),
+    # `none_as_null=True` is load-bearing: without it a `None` binds as the
+    # four-character JSON text `null`, which is not the same as "no dims" on
+    # either dialect.
+    Column(
+        "dims",
+        JSON(none_as_null=True).with_variant(
+            JSONB(none_as_null=True), "postgresql"),
+    ),
+    Column("execution_id", Text),
+    Column("created_at", Text, nullable=False),
+    # The identity IS the primary key (no surrogate id): the insert's
+    # `on_conflict_do_nothing` names these columns, and keeping the eventual
+    # partition key (`agent_name`) inside the only unique constraint is what
+    # lets ent#80 partition by month without a table rebuild.
+    PrimaryKeyConstraint("agent_name", "ts", "idempotency_key"),
 )

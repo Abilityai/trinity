@@ -55,6 +55,15 @@ def _install_sanitizer_stub() -> None:
     sanitizer.sanitize_execution_log = lambda x: x
     sanitizer.sanitize_text = lambda x: x
     sanitizer.sanitize_dict = lambda x: x
+    sanitizer.sanitize_list = lambda x: x
+    sanitizer.sanitize_json_string = lambda x: x
+    sanitizer.scrub_secret = lambda text, secret: text
+    sanitizer.scrub_secret_and_urls = lambda text, secret: text
+    sanitizer.redact_url_userinfo = lambda text: text
+    # The real module has exported this constant since 2026-02; the stub
+    # lacked it, so `from utils.credential_sanitizer import REDACTION_PLACEHOLDER`
+    # inside the service under test raised ImportError for every test here (#2802).
+    sanitizer.REDACTION_PLACEHOLDER = "***REDACTED***"
     sys.modules["utils.credential_sanitizer"] = sanitizer
     return sanitizer
 

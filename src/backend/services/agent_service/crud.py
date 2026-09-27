@@ -4,6 +4,7 @@ Agent Service CRUD - Agent creation and deletion operations.
 Contains the core logic for creating and deleting agents.
 """
 import asyncio
+import io
 import os
 import re
 import json
@@ -42,6 +43,7 @@ from services.template_service import (
 )
 from services.template_schedules import normalize_declared_schedules
 from services.template_plugins import normalize_declared_plugins
+from services import metric_registry
 from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
@@ -344,6 +346,14 @@ class _TemplateResolution:
     # as `declared_schedules`, NOT folded into `template_data` (the `github:`
     # path never populates it). Empty dict = opt-in no-op.
     declared_plugins: dict = field(default_factory=dict)
+    # ent#477: NORMALIZED declared `metrics:`, fed by ALL THREE resolver
+    # branches — the same one-carrier-many-producers shape as
+    # `declared_schedules` / `declared_plugins`, and NOT folded into
+    # `template_data` for the same reason (the `github:` path never populates
+    # it). Empty list = this agent declares no metrics, which is a legitimate
+    # reconcile, not a no-op: a template that DROPPED its block retires the
+    # rows it used to declare.
+    declared_metrics: list = field(default_factory=list)
     # trinity-enterprise#15: staged backend-materialized snapshot for the
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
     # design — the container gets NO GitHub env, no git-config row, no PAT.
@@ -607,6 +617,26 @@ def _declared_plugins_for_snapshot(snapshot) -> dict:
         return {}
 
 
+def _declared_metrics_for_snapshot(snapshot) -> list:
+    """Normalized `metrics:` for a copy-intent agent, read from the STAGED tree
+    (ent#477) — twin of `_declared_schedules_for_snapshot`. Non-fatal: a
+    declaration the backend cannot read must never cost a creation."""
+    template_yaml = Path(snapshot.staging_dir) / "template.yaml"
+    if not template_yaml.is_file():
+        return []
+    try:
+        metadata = load_template_yaml(template_yaml.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            return []
+        return metric_registry.declared_metrics_from_template(metadata)
+    except Exception as e:  # noqa: BLE001 — metrics are advisory, never fatal
+        logger.warning(
+            "snapshot-import: could not read template.yaml metrics for %s: %s",
+            snapshot.source_repo, e,
+        )
+        return []
+
+
 def _gate_tokenless_request(
     config: AgentConfig, github_pat: str
 ) -> Optional[str]:
@@ -862,11 +892,21 @@ async def _apply_fork_to_own(
 
 
 async def _validate_github_access(
-    config: AgentConfig, github_repo_for_agent: str, github_pat_for_agent: Optional[str]
+    config: AgentConfig,
+    github_repo_for_agent: str,
+    github_pat_for_agent: Optional[str],
+    *,
+    will_push: bool = False,
 ) -> None:
     """#218: validate PAT access to the repo (and branch) before container create,
     so a bad token fails loud here instead of silently in startup.sh. Transient
     network errors are logged and NOT fatal (matches the monolith).
+
+    #2107: when the agent will auto-push (``will_push`` — the
+    ``_git_auto_sync_baked`` predicate), READ access is not enough. A token that
+    can clone but not push used to pass every check here and then fail each
+    15-minute sync for the agent's whole life; ``probe_push_access`` asks the
+    receive-pack side, and a refusal fails creation with a 400 naming the fix.
 
     ent#123 tokenless path: no PAT ⇒ probe over the git transport instead of
     REST (`probe_anonymous_repo_access` — same transport as the container's
@@ -949,6 +989,9 @@ async def _validate_github_access(
                     raise
                 except Exception as e:
                     logger.warning(f"Could not validate branch '{config.source_branch}': {e}")
+
+            if will_push:
+                await _validate_push_access(github_repo_for_agent, github_pat_for_agent)
     except HTTPException:
         raise
     except GitHubError as e:
@@ -959,6 +1002,33 @@ async def _validate_github_access(
     except Exception as e:
         # Log but don't block creation for transient network errors
         logger.warning(f"GitHub repo validation failed (non-blocking): {e}")
+
+
+async def _validate_push_access(github_repo: str, github_pat: str) -> None:
+    """#2107: refuse to create an auto-pushing agent whose token cannot push.
+    A transient probe failure is logged and does not block (the PAT path's
+    existing policy): it says nothing about the token."""
+    outcome, detail = await git_service.probe_push_access(github_repo, github_pat)
+    if outcome == "denied":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"The GitHub token can read '{github_repo}' but is not allowed to "
+                f"push to it ({detail or 'push refused'}). This agent saves its "
+                f"work to that repository automatically, so every sync would "
+                f"fail. Give the token write access — for a fine-grained token, "
+                f"Repository permissions → Contents: Read and write on "
+                f"'{github_repo}'; for a classic token, the `repo` scope — or "
+                f"create the agent in source mode (pull only)."
+            ),
+        )
+    if outcome != "ok":
+        logger.warning(
+            "[#2107] could not verify push access to %s (%s); creating anyway",
+            github_repo, outcome,
+        )
+    else:
+        logger.info("[#2107] validated push access to %s", github_repo)
 
 
 async def _reserve_git_instance(
@@ -1345,6 +1415,9 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
                 tr.declared_plugins = _declared_plugins_for_snapshot(
                     tr.copy_snapshot
                 )
+                tr.declared_metrics = _declared_metrics_for_snapshot(
+                    tr.copy_snapshot
+                )
                 return tr
 
             (
@@ -1370,6 +1443,9 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             tr.declared_plugins = normalize_declared_plugins(
                 source_metadata.get("plugins")
             )
+            tr.declared_metrics = metric_registry.declared_metrics_from_template(
+                source_metadata
+            )
             (
                 tr.github_repo_for_agent,
                 tr.github_pat_for_agent,
@@ -1389,7 +1465,12 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             # Validate PAT has access to the repository before creating container
             # This prevents silent clone failures in startup.sh (#218)
             await _validate_github_access(
-                config, tr.github_repo_for_agent, tr.github_pat_for_agent
+                config, tr.github_repo_for_agent, tr.github_pat_for_agent,
+                # #2107: the agents that will auto-push must be able to push.
+                will_push=git_service._git_auto_sync_baked(
+                    config, tr.github_repo_for_agent,
+                    tr.github_pat_for_agent, tr.fork_upstream_repo,
+                ),
             )
             tr.git_instance_id, tr.git_working_branch = await _reserve_git_instance(
                 config, current_user, tr.github_repo_for_agent
@@ -1403,6 +1484,9 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             )
             tr.declared_plugins = normalize_declared_plugins(
                 tr.template_data.get("plugins")
+            )
+            tr.declared_metrics = metric_registry.declared_metrics_from_template(
+                tr.template_data
             )
     return tr
 
@@ -1632,11 +1716,15 @@ def _apply_gemini_and_otel_env(config: AgentConfig, env_vars: dict) -> None:
     # Add Google API key if using Gemini runtime
     # Gemini CLI expects GEMINI_API_KEY environment variable
     if config.runtime == 'gemini-cli' or config.runtime == 'gemini':
-        google_api_key = os.getenv('GOOGLE_API_KEY', '')
+        # ent#582: the saved Settings key first, then GEMINI_API_KEY/GOOGLE_API_KEY
+        # env — the resolver every other Gemini reader uses. Lazy: the creation
+        # harnesses stub `services.*` selectively at load.
+        from services.settings_service import get_gemini_api_key
+        google_api_key = get_gemini_api_key()
         if google_api_key:
             env_vars['GEMINI_API_KEY'] = google_api_key  # Gemini CLI expects this name
         else:
-            logger.warning("Gemini runtime selected but GOOGLE_API_KEY not configured")
+            logger.warning("Gemini runtime selected but no Gemini key configured (Settings or GEMINI_API_KEY/GOOGLE_API_KEY)")
 
     # OpenTelemetry Configuration (enabled by default)
     # Claude Code has built-in OTel support - these vars enable metrics export
@@ -2060,6 +2148,55 @@ async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> Non
         }))
 
 
+_BUNDLED_AVATAR_NAMES = ("avatar.webp", "avatar.png")
+_BUNDLED_AVATAR_MAX_BYTES = 2 * 1024 * 1024
+_AVATAR_DIR = Path("/data/avatars")  # routers/avatar.py AVATAR_DIR
+
+
+def _install_bundled_avatar(config: AgentConfig) -> None:
+    """#2693: copy a `local:` template's bundled `avatar.webp`/`avatar.png` into
+    the avatar store, so an agent has a face with no Gemini key and no network.
+
+    Stored as a DEFAULT avatar (the caller writes `is_default_avatar=1`), so
+    Settings → Generate Default Avatars still overwrites it once a key exists.
+    Always re-encoded through `optimize_avatar`: the deploy-local root holds
+    user-uploaded templates, and a decode/re-encode is what keeps an arbitrary
+    file from being served verbatim on the unauthenticated avatar route."""
+    if not config.template or not config.template.startswith("local:"):
+        return
+    # Both paths come from request fields. `_resolve_local_template_dir` and
+    # agent-name validation already contain them, but CodeQL's
+    # `py/path-injection` can't follow those callees — so each final path is
+    # normalized and prefix-checked right here (the `routers/avatar.py
+    # _avatar_path` barrier), as plain strings with no Path rebuild after it.
+    template_roots = tuple(os.path.join(str(r.resolve()), "") for r in _LOCAL_TEMPLATE_ROOTS)
+    avatar_root = os.path.join(str(_AVATAR_DIR), "")
+    dest = os.path.normpath(os.path.join(avatar_root, f"{config.name}.webp"))
+    if not dest.startswith(avatar_root):
+        return
+    template_dir = str(_resolve_local_template_dir(config.template[6:]))
+    for filename in _BUNDLED_AVATAR_NAMES:
+        source = os.path.normpath(os.path.join(template_dir, filename))
+        if not source.startswith(template_roots):
+            return
+        if not os.path.isfile(source) or os.path.getsize(source) > _BUNDLED_AVATAR_MAX_BYTES:
+            continue
+        from PIL import Image
+        from utils.image_optimize import optimize_avatar
+
+        with open(source, "rb") as f:
+            data = f.read()
+        # A 2 MB PNG can still declare a gigapixel canvas; read the header only.
+        with Image.open(io.BytesIO(data)) as img:
+            if img.width * img.height > 4096 * 4096:
+                raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
+        os.makedirs(avatar_root, exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(optimize_avatar(data))
+        logger.info(f"[AVATAR-003] Installed bundled avatar from {config.template} for {config.name}")
+        return
+
+
 def _register_agent(
     config: AgentConfig,
     current_user: User,
@@ -2142,6 +2279,13 @@ def _register_agent(
     # durable-identity nicety a disposable agent never benefits from)
     _avatar_prompt = (template_data.get("avatar_prompt") if template_data else None) if not config.ephemeral else None
     if _avatar_prompt:
+        try:
+            # #2693: install the template's bundled image BEFORE the DB row, so
+            # `avatar_url` never points at a file that isn't there yet. A bad
+            # image must not cost the prompt seed — that is the regeneration path.
+            _install_bundled_avatar(config)
+        except Exception as e:
+            logger.warning(f"[AVATAR-003] Failed to install bundled avatar for {config.name}: {e}")
         try:
             db.set_default_avatar(config.name, _avatar_prompt, datetime.now(timezone.utc).isoformat())
             logger.info(f"[AVATAR-003] Seeded avatar prompt from template for {config.name}")
@@ -2248,11 +2392,13 @@ async def _materialize_agent_files(
     declared_schedules: Optional[list] = None,
     owner_username: str = "",
     declared_plugins: Optional[dict] = None,
+    declared_metrics: Optional[list] = None,
 ) -> None:
     """Materialize the S4 persistent-state allowlist (#383), the declared
     data_paths (#1169), the declared `plugins:` (#1704) and the declared
-    `schedules:` (trinity-enterprise#89) into the agent, then opt non-source-mode
-    GitHub agents into the auto-sync heartbeat (#389). All are non-fatal."""
+    `schedules:` (trinity-enterprise#89) into the agent, reconcile the declared
+    `metrics:` into the registry (ent#477), then opt non-source-mode GitHub
+    agents into the auto-sync heartbeat (#389). All are non-fatal."""
     # S4 (#383): Materialize persistent-state allowlist into the agent.
     # Runtime sync/reset paths read `.trinity/persistent-state.yaml`;
     # template.yaml is only read at creation (10-min cache), so this
@@ -2329,18 +2475,44 @@ async def _materialize_agent_files(
                 f"{config.name}: {e}"
             )
 
+    # ent#477: reconcile the template's declared `metrics:` into the registry.
+    # Unconditional on the declaration (unlike plugins/schedules above, which
+    # are gated on a non-empty one): an empty declaration is a legitimate
+    # reconcile — it is how a template that dropped its block retires the rows
+    # it used to declare — and at CREATE the agent has no rows, so the empty
+    # case costs one SELECT and writes nothing. Ghost-skipped for the ent#69
+    # reason: an ephemeral agent is deleted whole, and its rows would exist
+    # only to cascade. Non-fatal and inside the destructive rollback fence, so
+    # a raise here must never cost a successful creation.
+    if not config.ephemeral:
+        try:
+            metric_registry.reconcile_declared_metrics(
+                config.name, declared_metrics or [], source="create",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[ent#477] Failed to reconcile declared metrics for "
+                f"{config.name}: {e}"
+            )
+
     # #389 S1a: opt non-source-mode GitHub-template agents into the
     # auto-sync heartbeat by default. Source-mode agents stay opt-in
     # (auto-pushing to main would clobber protected branches) —
     # except fork-to-own agents (#93), which own their repo.
-    # trinity-enterprise#69: ghosts never auto-push — their workspace
-    # is throwaway by definition, so the 15-min sync heartbeat stays off.
     # ent#123: tokenless agents never auto-push (belt — see _apply_github_env).
-    if github_repo_for_agent and github_pat_for_agent and not config.ephemeral and (not config.source_mode or fork_upstream_repo):
+    # #3010: the DB flag is now the ONLY gate the agent's loop obeys, so it is
+    # written from the SAME predicate that bakes GIT_SYNC_AUTO — ghosts
+    # included, since the baked env has always auto-pushed them (the old
+    # `and not config.ephemeral` here only made env and DB disagree at birth).
+    if git_service._git_auto_sync_baked(
+        config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
+    ):
         try:
             db.set_git_auto_sync_enabled(config.name, True)
         except Exception as e:
-            logger.warning(
+            # Loud: with the DB authoritative, a lost write leaves this agent's
+            # auto-sync OFF until an owner toggles it on.
+            logger.error(
                 f"Failed to enable auto-sync for {config.name}: {e}"
             )
 
@@ -2352,9 +2524,9 @@ async def _materialize_agent_files(
     # list after startup.sh's FULL git setup (gated inside the merge on
     # agent-server /health readiness, which follows the clone+checkout at
     # startup.sh:517) and before the first auto-sync cycle. Fire-and-forget so it
-    # adds no creation latency; non-fatal. Gated on the SAME ENV predicate that
-    # bakes GIT_SYNC_AUTO (NOT the DB-flag block above, which excludes ghosts),
-    # so the merge covers exactly the auto-committing population.
+    # adds no creation latency; non-fatal. Gated on the SAME predicate that
+    # bakes GIT_SYNC_AUTO and writes the DB flag above (#3010), so the merge
+    # covers exactly the auto-committing population.
     if git_service._git_auto_sync_baked(
         config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
     ):
@@ -3194,6 +3366,7 @@ async def create_agent_internal(
                 tr.declared_schedules,
                 current_user.username,
                 tr.declared_plugins,
+                tr.declared_metrics,
             )
             return agent_status
         except Exception as e:

@@ -153,6 +153,12 @@ class TestCoerceNonnegInt:
         assert _coerce_nonneg_int(True) is None  # bool is an int subclass
         assert _coerce_nonneg_int(-1) is None
         assert _coerce_nonneg_int(2**63) is None
+        # #2827: the default ceiling is the int4 column's; the widened column
+        # opts into int8 explicitly.
+        assert _coerce_nonneg_int(2**31) is None
+        assert _coerce_nonneg_int(2**31 - 1) == 2**31 - 1
+        assert _coerce_nonneg_int(2**31, ceiling=2**63 - 1) == 2**31
+        assert _coerce_nonneg_int(2**63 - 1, ceiling=2**63 - 1) == 2**63 - 1
         assert _coerce_nonneg_int("1000000") is None
         assert _coerce_nonneg_int({"nested": 1}) is None
         assert _coerce_nonneg_int(3.5) is None
@@ -171,6 +177,62 @@ class TestCoerceNonnegInt:
         assert row["pack_count"] is None
         assert row["loose_objects"] is None
         assert row["maintenance_failures"] == 0
+
+    def test_every_column_is_bounded_by_its_own_postgres_type(self, service, seed_agent, tmp_db):
+        """#2827: the boundary's ceiling matches the COLUMN's. Seven of the eight
+        int columns are int4 on PostgreSQL; only `git_dir_bytes` was widened
+        (#2800). A value the boundary admits but the column cannot hold makes
+        the whole upsert raise `NumericValueOutOfRange` and the agent's sync
+        health goes dark — so `2**40` in `pack_count` must be rejected HERE
+        (stored as NULL / 0), while the same value in `git_dir_bytes` is fine.
+        The four ahead/behind counters used to go in entirely uncoerced.
+        """
+        from services.sync_health_service import INT4_MAX
+        seed_agent("alpha")
+        too_big = INT4_MAX + 1
+        payload = _payload(
+            git_dir_bytes=2**40,               # BIGINT: admitted
+            pack_count=too_big,                # int4: rejected → NULL
+            loose_objects=too_big,             # int4: rejected → NULL
+            maintenance_failures=too_big,      # int4: rejected → 0 (the column default)
+        )
+        payload.update(ahead_main=too_big, behind_main=too_big,
+                       ahead_working=too_big, behind_working="lots")
+        _sync_once(service, payload)
+        from database import db
+        row = db.get_sync_state("alpha")
+        assert row["git_dir_bytes"] == 2**40
+        assert row["pack_count"] is None and row["loose_objects"] is None
+        assert row["maintenance_failures"] == 0
+        assert (row["ahead_main"], row["behind_main"], row["ahead_working"], row["behind_working"]) == (0, 0, 0, 0)
+
+    def test_the_maximum_each_column_admits_is_stored(self, service, seed_agent, tmp_db):
+        """...and the ceiling is the bound, not a lower one: INT4_MAX itself lands."""
+        from services.sync_health_service import INT4_MAX, INT8_MAX
+        seed_agent("alpha")
+        payload = _payload(git_dir_bytes=INT8_MAX, pack_count=INT4_MAX,
+                           loose_objects=INT4_MAX, maintenance_failures=INT4_MAX)
+        payload.update(ahead_main=INT4_MAX, behind_main=INT4_MAX,
+                       ahead_working=INT4_MAX, behind_working=INT4_MAX)
+        _sync_once(service, payload)
+        from database import db
+        row = db.get_sync_state("alpha")
+        assert row["git_dir_bytes"] == INT8_MAX
+        assert row["pack_count"] == row["loose_objects"] == row["maintenance_failures"] == INT4_MAX
+        assert row["ahead_main"] == row["behind_main"] == row["ahead_working"] == row["behind_working"] == INT4_MAX
+
+    def test_the_legacy_ahead_key_is_coerced_too(self, service, seed_agent, tmp_db):
+        """`ahead`/`behind` are the pre-P6 names; `_coerce_counter` reads them
+        second and bounds them the same way."""
+        from services.sync_health_service import INT4_MAX
+        seed_agent("alpha")
+        payload = _payload()
+        del payload["ahead_main"], payload["behind_main"]
+        payload.update(ahead=7, behind=INT4_MAX + 1)
+        _sync_once(service, payload)
+        from database import db
+        row = db.get_sync_state("alpha")
+        assert (row["ahead_main"], row["behind_main"]) == (7, 0)
 
 
 # ---------------------------------------------------------------------------

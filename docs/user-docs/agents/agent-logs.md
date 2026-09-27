@@ -8,7 +8,7 @@ View container logs for debugging and real-time telemetry metrics in the agent h
 
 1. Open the agent detail page and click the **Logs** tab.
 2. A fixed-height scrollable container displays Docker container stdout/stderr.
-3. Logs auto-refresh with smart auto-scroll: new content scrolls to the bottom automatically, but scrolling stops if you scroll up manually.
+3. **Auto-refresh (10s)** is a toggle; a line-count selector sets how many lines are fetched, and a refresh button fetches on demand. Auto-scroll is smart: new content scrolls to the bottom automatically, but scrolling stops if you scroll up manually.
 4. API: `GET /api/agents/{name}/logs`
 5. MCP: `get_agent_logs(name)`
 

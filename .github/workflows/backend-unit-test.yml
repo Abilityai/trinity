@@ -1,12 +1,22 @@
 name: backend-unit-test
 
-# Per-PR unit-suite regression gate (issue #715).
+# Per-PR unit-suite regression gate (issue #715), Tier 1 of the tiered merge
+# path (#2945).
 #
-# Runs the backend unit suite under three pytest-randomly seeds against both
-# `base` (the PR's target branch tip) and `head` (the PR's merge commit), then
-# diffs the union of failing test IDs. Fails the check if `head` introduces
-# any new failing test ID that was not failing in `base` under any seed, or
-# if any pytest run produced no JUnit XML (fail-closed on infra failure).
+# On a pull request: runs the backend unit suite ONCE on `head` (the PR's merge
+# commit, seed 12345) and diffs its failing test IDs against a `base` JUnit.
+# The base JUnit is normally the artifact the push-side `absolute` job below
+# already produced for the PR's exact base SHA — base is plain `dev`, identical
+# for every PR off that SHA, and re-running it per PR was three of the six jobs
+# this workflow used to spend (median 21 min, max 42). Only when that artifact
+# is missing (the base SHA's push run was superseded mid-burst, or expired) does
+# `base-run` fall back to running the base seed inline. The diff fails the
+# check if `head` introduces a failing test ID absent from `base`, or if either
+# side produced no JUnit XML (fail-closed on infra failure).
+#
+# Random-order coverage across seeds is Tier 3: `dev-nightly.yml` runs the
+# 3-seed matrix on `dev` every night. It is deliberately NOT on the PR — that
+# is the explicit quality trade recorded on #2945.
 #
 # Issue #802: also runs on push to dev/main so baseline-style invariant checks
 # (lint-sys-modules) fire post-merge — catches the case where two PRs both
@@ -128,8 +138,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        side: [base, head]
-        seed: [12345, 67890, 99999]
+        side: [head]
+        seed: [12345]
 
     steps:
       - uses: actions/checkout@v7
@@ -171,12 +181,6 @@ jobs:
 
       - name: Diff-script self-test
         run: python "$HOME/.ci-tools/diff-pytest-failures.py" --self-test
-
-      - name: Switch to base branch tip (when side=base)
-        if: matrix.side == 'base'
-        run: |
-          git fetch --depth=1 origin "${{ github.base_ref || 'dev' }}"
-          git switch --detach FETCH_HEAD
 
       - name: Run unit suite
         # || true: pytest exits non-zero while ANY test fails, and the base side has
@@ -277,9 +281,115 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  baseline:
+    name: cached dev baseline
+    # #2945: the base side of the diff is the artifact the `absolute` job below
+    # uploaded when the PR's base SHA was itself pushed to dev. Keyed on the EXACT
+    # base SHA, never "the newest dev run": a baseline from a later dev would carry
+    # dev's own newer breakage and the diff would bill it to this PR — the false
+    # positive #715 built the base/head split to avoid.
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      found: ${{ steps.fetch.outputs.found }}
+    steps:
+      - name: Fetch cached base JUnit from the base SHA's push run
+        id: fetch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          # A red dev run still holds the CORRECT baseline (its failures are dev's,
+          # and the diff exists to subtract them). A cancelled run — superseded by
+          # the next push in a burst — uploaded nothing, so it is not selected and
+          # the fallback runs instead.
+          run_id=$(gh api "repos/$REPO/actions/workflows/backend-unit-test.yml/runs?event=push&branch=$BASE_REF&head_sha=$BASE_SHA&per_page=10" \
+            --jq '[.workflow_runs[] | select(.conclusion=="success" or .conclusion=="failure")] | .[0].id // empty')
+          if [ -z "$run_id" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no completed push run for base ${BASE_SHA:0:8} — running the base seed inline"
+            exit 0
+          fi
+          if ! gh run download "$run_id" --repo "$REPO" -n junit-push -D baseline || [ ! -s baseline/junit-push.xml ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::push run $run_id has no usable junit-push artifact — running the base seed inline"
+            exit 0
+          fi
+          mv baseline/junit-push.xml junit-base-cached.xml
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "baseline: push run $run_id for ${BASE_SHA:0:8}"
+
+      - name: Upload cached base JUnit
+        if: steps.fetch.outputs.found == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-base-cached
+          path: junit-base-cached.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  base-run:
+    name: pytest (base, inline fallback)
+    # Runs ONLY when no cached baseline exists for the exact base SHA. Same seed,
+    # same xdist layout as the head run, so the two JUnits are comparable.
+    needs: baseline
+    if: github.event_name != 'push' && needs.baseline.outputs.found != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: tests/requirements-test.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements-test.txt \
+            'pytest-randomly>=3.15.0' 'pytest-xdist>=3.5.0'
+
+      - name: Switch to base SHA
+        # The SHA the lookup missed, not the moving tip of the base branch.
+        run: |
+          git fetch --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          git switch --detach FETCH_HEAD
+
+      - name: Run unit suite
+        # Same flags as the head run above (see its comment block for why each one).
+        run: |
+          cd tests
+          python -m pytest unit/ -m "not slow" \
+            --timeout=300 --timeout-method=signal \
+            -n auto --dist loadfile \
+            -p randomly --randomly-seed=12345 \
+            --junit-xml="$GITHUB_WORKSPACE/junit-base-12345.xml" \
+            --tb=no -q || true
+
+      - name: Upload JUnit XML
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-base-12345
+          path: junit-base-12345.xml
+          if-no-files-found: error
+          retention-days: 14
+
   diff:
     name: regression diff
-    needs: test
+    needs: [test, baseline, base-run]
     # Mirror the `test` gate — diff is meaningless without base/head artifacts.
     if: always() && github.event_name != 'push'
     runs-on: ubuntu-latest
@@ -304,14 +414,19 @@ jobs:
           merge-multiple: true
 
       - name: Diff base vs head
+        # Fail CLOSED on a missing side. `always()` above means this step runs when
+        # `test` was cancelled, or when `baseline` and `base-run` both produced
+        # nothing; an empty --base list would make every head failure "new", and an
+        # empty --head list would make the diff vacuously green.
         run: |
+          set -euo pipefail
+          ls junit-base-*.xml >/dev/null 2>&1 \
+            || { echo "::error::no base JUnit arrived — neither the cached dev baseline nor the inline fallback produced one"; exit 1; }
+          ls junit-head-*.xml >/dev/null 2>&1 \
+            || { echo "::error::no head JUnit arrived — the head seed did not complete"; exit 1; }
           python scripts/ci/diff-pytest-failures.py \
-            --base junit-base-12345.xml \
-                   junit-base-67890.xml \
-                   junit-base-99999.xml \
-            --head junit-head-12345.xml \
-                   junit-head-67890.xml \
-                   junit-head-99999.xml \
+            --base junit-base-*.xml \
+            --head junit-head-*.xml \
             --out "$GITHUB_STEP_SUMMARY"
 
   absolute:
@@ -327,10 +442,11 @@ jobs:
     # This job asks the absolute question — "is the suite red at all?" — in the one
     # place the relative question cannot be asked.
     #
-    # ONE run, default ordering, not the 3-seed matrix: the seeds exist to catch
-    # order-dependent regressions between two commits, which stays a PR-side
-    # property. Tripling the cost of every push to dev buys nothing here, and this
-    # job is meant to be cheap enough that nobody is tempted to delete it.
+    # ONE run, not the 3-seed matrix — that is `dev-nightly.yml` (Tier 3). Since
+    # #2945 this run is ALSO the cached baseline every PR's regression diff reads
+    # (the `baseline` job above), so it runs with the same seed and the same xdist
+    # layout as the PR's head seed: a baseline produced under a different ordering
+    # would surface order-dependent failures as the PR's own regressions.
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     # Same suite, same runner variance, same reasoning as the matrix job above
@@ -351,7 +467,8 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r tests/requirements-test.txt
+          pip install -r tests/requirements-test.txt \
+            'pytest-randomly>=3.15.0' 'pytest-xdist>=3.5.0'
 
       - name: Checker self-test
         # Same precedent as the diff script's self-test: prove the gate works
@@ -366,6 +483,8 @@ jobs:
           cd tests
           python -m pytest unit/ -m "not slow" \
             --timeout=300 --timeout-method=signal \
+            -n auto --dist loadfile \
+            -p randomly --randomly-seed=12345 \
             --junit-xml="$GITHUB_WORKSPACE/junit-push.xml" \
             --tb=no -q || true
 

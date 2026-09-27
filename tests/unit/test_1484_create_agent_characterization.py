@@ -152,6 +152,17 @@ def _load_crud(monkeypatch, docker_available=True):
         return_value=("iid-1", "main"))
     git_service.materialize_persistent_state = AsyncMock()
     git_service.materialize_data_paths = AsyncMock()
+    # crud gates auto-sync (GIT_SYNC_AUTO) and the #2107 push probe on this
+    # predicate, so the mock must answer it (a bare MagicMock attribute is
+    # truthy for every agent).
+    # Same shape as services/git_service/gitignore_clone.py::_git_auto_sync_baked.
+    git_service._git_auto_sync_baked = MagicMock(
+        side_effect=lambda config, repo, pat, fork: (
+            bool(repo) and bool(pat) and (not config.source_mode or bool(fork))
+        )
+    )
+    # #2107: the push-access probe the create path runs for auto-pushing agents.
+    git_service.probe_push_access = AsyncMock(return_value=("ok", ""))
 
     settings_service = MagicMock()
     settings_service.get_anthropic_api_key = MagicMock(return_value="sk-ant-key")
@@ -513,6 +524,69 @@ async def test_case2_github_non_source_mode_enables_autosync(crud_env, monkeypat
     assert env["GIT_WORKING_BRANCH"] == "main"
     assert "GIT_SOURCE_MODE" not in env
     ctx["db"].set_git_auto_sync_enabled.assert_called_once_with("gh-legacy", True)
+
+
+@pytest.mark.asyncio
+async def test_2107_auto_pushing_agent_probes_push_access(crud_env, monkeypatch):
+    crud, ctx = crud_env
+    _script_github_template(ctx)
+    _patch_repo_validation(monkeypatch, crud)
+
+    await crud.create_agent_internal(
+        _github_config("gh-push", source_mode=False), _user(), None)
+
+    ctx["git_service"].probe_push_access.assert_awaited_once_with(
+        "Abilityai/cornelius", "platform-pat")
+
+
+@pytest.mark.asyncio
+async def test_2107_a_token_that_cannot_push_fails_creation_before_any_container(
+        crud_env, monkeypatch):
+    """#2107: the observed agent failed 64 syncs from the moment it was created.
+    A refused push now fails the create — broken before the agent ever ran."""
+    from fastapi import HTTPException
+
+    crud, ctx = crud_env
+    _script_github_template(ctx)
+    _patch_repo_validation(monkeypatch, crud)
+    ctx["git_service"].probe_push_access = AsyncMock(
+        return_value=("denied", "remote: Write access to repository not granted."))
+
+    with pytest.raises(HTTPException) as exc:
+        await crud.create_agent_internal(
+            _github_config("gh-ro", source_mode=False), _user(), None)
+
+    assert exc.value.status_code == 400
+    assert "can read 'Abilityai/cornelius' but is not allowed to push" in exc.value.detail
+    assert "Write access to repository not granted" in exc.value.detail
+    assert "Contents: Read and write" in exc.value.detail
+    assert not any(c.kwargs.get("detach")
+                   for c in ctx["docker_utils"].containers_run.call_args_list)
+    ctx["git_service"].reserve_and_generate_instance_id.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_2107_transient_probe_does_not_block(crud_env, monkeypatch):
+    crud, ctx = crud_env
+    _script_github_template(ctx)
+    _patch_repo_validation(monkeypatch, crud)
+    ctx["git_service"].probe_push_access = AsyncMock(return_value=("transient", "timed out"))
+
+    await crud.create_agent_internal(
+        _github_config("gh-flaky", source_mode=False), _user(), None)
+
+    assert _agent_run_kwargs(ctx)["environment"]["GIT_SYNC_AUTO"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_2107_pull_only_source_mode_is_not_probed(crud_env, monkeypatch):
+    crud, ctx = crud_env
+    _script_github_template(ctx)
+    _patch_repo_validation(monkeypatch, crud)
+
+    await crud.create_agent_internal(_github_config("gh-src"), _user(), None)
+
+    ctx["git_service"].probe_push_access.assert_not_awaited()
 
 
 # ===========================================================================
@@ -946,6 +1020,69 @@ async def test_case14_nonfatal_avatar_seed_failure(crud_env, monkeypatch, tmp_pa
         AgentConfig(name="nf-avatar", template="local:avtpl"), _user(), None)
     ctx["db"].set_default_avatar.assert_called_once()
     ctx["docker_utils"].containers_run.assert_awaited()
+
+
+def _png_bytes(size=64):
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (size, size), (40, 90, 160)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_2693_bundled_avatar_installed_as_default(crud_env, monkeypatch, tmp_path):
+    """#2693: a template's bundled avatar lands in the avatar store as WebP and the
+    row is still written as a DEFAULT avatar, so Generate Default Avatars can
+    overwrite it once a Gemini key exists."""
+    crud, ctx = crud_env
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
+    (tpl / "avatar.png").write_bytes(_png_bytes())
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    monkeypatch.setattr(crud, "_AVATAR_DIR", tmp_path / "avatars")
+
+    await crud.create_agent_internal(
+        AgentConfig(name="bundled-av", template="local:avtpl"), _user(), None)
+
+    installed = (tmp_path / "avatars" / "bundled-av.webp").read_bytes()
+    assert installed[:4] == b"RIFF" and installed[8:12] == b"WEBP"
+    ctx["db"].set_default_avatar.assert_called_once()
+    assert ctx["db"].set_default_avatar.call_args.args[:2] == ("bundled-av", "a wizard")
+
+
+@pytest.mark.asyncio
+async def test_2693_corrupt_bundled_avatar_keeps_prompt_seed(crud_env, monkeypatch, tmp_path):
+    crud, ctx = crud_env
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
+    (tpl / "avatar.webp").write_bytes(b"not an image")
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    monkeypatch.setattr(crud, "_AVATAR_DIR", tmp_path / "avatars")
+
+    await crud.create_agent_internal(
+        AgentConfig(name="bad-av", template="local:avtpl"), _user(), None)
+
+    assert not (tmp_path / "avatars" / "bad-av.webp").exists()
+    ctx["db"].set_default_avatar.assert_called_once()
+    ctx["docker_utils"].containers_run.assert_awaited()
+
+
+def test_2693_first_run_fleet_ships_bundled_avatars():
+    """AC4: every agent in the bundled first-run manifest carries both a bundled
+    image and the `avatar_prompt` that makes it installable + regenerable."""
+    import yaml
+    from PIL import Image
+    repo = Path(__file__).resolve().parents[2]
+    manifest = yaml.safe_load((repo / "config/manifests/default-system.yaml").read_text())
+    for spec in manifest["agents"].values():
+        tpl = repo / "config/agent-templates" / spec["template"].removeprefix("local:")
+        assert yaml.safe_load((tpl / "template.yaml").read_text()).get("avatar_prompt"), tpl
+        image = tpl / "avatar.webp"
+        assert image.stat().st_size <= 2 * 1024 * 1024, tpl
+        Image.open(image).verify()
 
 
 # ===========================================================================

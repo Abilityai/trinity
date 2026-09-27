@@ -33,6 +33,8 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied } from "../access.js";
+import type { DenyCallContext } from "../access.js";
 
 export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
   const getClient = (authContext?: McpAuthContext): TrinityClient => {
@@ -90,8 +92,8 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
     return { allowed: true };
   };
 
-  const denied = (reason?: string): string =>
-    JSON.stringify({ success: false, error: "Access denied", reason, not_authorized: true }, null, 2);
+  const denied = (context: DenyCallContext | undefined, reason?: string): string =>
+    accessDenied(context, { success: false, error: "Access denied", reason, not_authorized: true });
 
   return {
     // ========================================================================
@@ -108,7 +110,7 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
       execute: async (params: { agent_name: string }, context?: { session?: McpAuthContext }) => {
         const apiClient = getClient(context?.session);
         const access = await checkAgentAccess(apiClient, context?.session, params.agent_name);
-        if (!access.allowed) return denied(access.reason);
+        if (!access.allowed) return denied(context, access.reason);
         try {
           return ok({ config: await apiClient.getA2AConfig(params.agent_name) });
         } catch (e) {
@@ -234,7 +236,7 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
       execute: async (params: { agent_name: string }, context?: { session?: McpAuthContext }) => {
         const apiClient = getClient(context?.session);
         const access = await checkAgentAccess(apiClient, context?.session, params.agent_name);
-        if (!access.allowed) return denied(access.reason);
+        if (!access.allowed) return denied(context, access.reason);
         try {
           return ok({ endpoints: await apiClient.listA2AEndpoints(params.agent_name) });
         } catch (e) {

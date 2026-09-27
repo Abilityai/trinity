@@ -15,16 +15,27 @@
       <div class="relative flex flex-col flex-1 overflow-hidden">
         <!-- Compact Header -->
         <div class="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-2">
-          <div class="flex items-center justify-between">
+          <!-- #2197 — `flex-wrap` + `gap-y-2`: the last resort when the #1830
+               ladder has nothing left to give. Below ~700px the controls'
+               min-content exceeds the row on its own, and with the stats
+               cluster free to shrink to ZERO the line never wrapped — it
+               degenerated to a 0px-wide stats box whose (clipped, invisible)
+               children still sat under the controls' first button, and a
+               controls cluster running ~70px past the row's right edge. -->
+          <div class="flex flex-wrap items-center justify-between gap-y-2">
             <!-- Left: Stats — elastic (#1830). `flex-1 min-w-0` makes this the
                  only cluster that gives ground, and `container-type: inline-size`
                  (see .stats-cluster below) turns its leftover width into the
-                 query axis the progressive-hide ladder degrades against. -->
-            <div class="stats-cluster flex items-center min-w-0 flex-1 overflow-hidden">
+                 query axis the progressive-hide ladder degrades against.
+                 #2197 adds `min-w-[4.5rem]` — the ladder's own agents-only floor
+                 (~71px). Without a floor "elastic" means "collapses to nothing",
+                 so the pressure never reaches the controls and nothing wraps;
+                 the floor is what converts the overflow into a wrap. -->
+            <div class="stats-cluster flex items-center min-w-[4.5rem] flex-1 overflow-hidden">
               <div class="flex items-center space-x-3 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
                 <span class="flex items-center space-x-1">
                   <span class="w-1.5 h-1.5 rounded-full bg-status-success-500"></span>
-                  <span class="font-medium text-status-success-600 dark:text-status-success-400">{{ runningCount }}/{{ agents.length }}</span>
+                  <span class="font-medium text-status-success-700 dark:text-status-success-400">{{ runningCount }}/{{ agents.length }}</span>
                   <span>agents</span>
                 </span>
                 <!-- Working-now count (trinity-enterprise#47) -->
@@ -45,12 +56,22 @@
             </div>
 
             <!-- Right: Controls -->
-            <div class="flex items-center space-x-2 flex-shrink-0">
+            <!-- #2197 — `flex-wrap` + `gap-2`, and NO `flex-shrink-0`. The
+                 cluster's min-content is ~613px on an entitled build (mode
+                 toggles, two selects, Tidy up / Reset, Create Agent), which no
+                 container query can shrink, so pinned at its max-content it
+                 simply overflowed the row at 640px. Allowed to shrink, it wraps
+                 its own buttons onto a second line instead — `gap-2` rather than
+                 `space-x-2` because a wrapped `space-x` row mis-indents every
+                 line after the first. Single-row rendering above ~1024px is
+                 unchanged: flex only wraps once it must. -->
+            <div class="flex flex-wrap items-center gap-2 min-w-0">
               <!-- Create Agent (trinity-enterprise#260) — chassis-level so agent
                    creation is reachable from every mode, not just the List tab.
                    The label degrades to icon-only below `md` (pre-decided in the
-                   plan): the controls cluster is flex-shrink-0, and at 640px in
-                   grid mode the full label pushes the stats cluster below the
+                   plan): the controls cluster wraps rather than shrinks (#2197 dropped
+                   its flex-shrink-0), and at 640px in grid mode the full label
+                   would push the stats cluster below the
                    71px `agents-only` floor of the #1830 degrade ladder — the
                    stats-overflow spec's clip assertion would fire. -->
               <button
@@ -247,37 +268,6 @@
           </div>
         </div>
 
-        <!--
-          Onboarding stack (#2380). At most ONE card renders, ever — see the
-          `.onboarding-stack` rule below. Four independent surfaces landed here
-          from four issues, none aware of the others, and on a first login all
-          four can be true at once: ~520px of chrome above the product the
-          operator installed Trinity for, with four dismiss buttons. DOM order
-          IS priority order, highest first.
-        -->
-        <div class="onboarding-stack">
-        <!-- Instance hardening guide (#2380). FIRST in the stack on purpose: a
-             security-posture prompt outranks a getting-started nudge — a
-             marketplace droplet is answering the public internet right now,
-             whereas the cards below can wait a page load. Renders only on a
-             marketplace install that has not yet been given a domain. -->
-        <HardeningGuide />
-        <!-- First-run front desk (ent#319). Shows only on a seed-only install:
-             the fleet is running and none of it is the user's, which is the
-             exact case the wizard's auto-open cannot see since ent#124. -->
-        <FrontDeskPanel @make-one="openOnboarding" />
-        <!-- Getting-started checklist (ent#238). Renders nothing unless the
-             enterprise onboarding module is entitled AND the user still has an
-             undone step — never a gate, always dismissible. -->
-        <ActivationChecklist />
-        <!-- Finish setup (ent#437): ONE card for the post-login admin asks the
-             first-run wizard can no longer carry — the sign-in email prompt
-             (#2381, section 1) and the usage-sharing consent (ent#437, section 2).
-             One chassis rather than a fifth stacked nudge. Each section decides
-             its own visibility; the card renders nothing when none applies. -->
-        <FinishSetupCard />
-        </div>
-
     <!-- Timeline View (only visible in timeline mode) -->
     <template v-if="isTimelineMode">
       <!-- Loading skeleton (#1266): immediate feedback while fleet/timeline data loads -->
@@ -364,7 +354,7 @@
           <h3 class="text-sm font-medium text-gray-900 dark:text-gray-100">No agents yet</h3>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Launch your first agent in a couple of clicks.</p>
           <button
-            @click="openOnboarding"
+            @click="showCreateModal = true"
             class="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
           >
             Get started
@@ -412,7 +402,7 @@
           <h3 class="text-sm font-medium text-gray-900 dark:text-gray-100">No agents yet</h3>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Launch your first agent in a couple of clicks.</p>
           <button
-            @click="openOnboarding"
+            @click="showCreateModal = true"
             class="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
           >
             Get started
@@ -464,7 +454,7 @@
       class="absolute top-28 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 px-3 py-1.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-full shadow-lg"
       data-testid="filter-pill"
     >
-      <svg class="w-4 h-4 text-gray-400 dark:text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <svg class="w-4 h-4 text-gray-500 dark:text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
       </svg>
       <input
@@ -487,7 +477,7 @@
       <kbd class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-[10px] font-mono text-gray-500 dark:text-gray-400">Esc</kbd>
       <button
         @click="clearFilter"
-        class="p-0.5 rounded text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+        class="p-0.5 rounded text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
         aria-label="Clear filter"
         data-testid="filter-clear"
       >
@@ -513,13 +503,11 @@
       @saved="onViewSaved"
     />
 
-    <!-- First-run onboarding wizard (trinity-enterprise#52) -->
-    <OnboardingWizard
-      v-if="showOnboarding"
-      :claude-auth-configured="sessionsStore.claudeAuthConfigured"
-      @close="closeOnboarding"
-      @deployed="onAgentDeployed"
-    />
+    <!-- First-run overlay (ent#581): one blocking, teleported setup sequence
+         that replaced the inline card ladder and the ent#52 wizard. It decides
+         for itself when to open (`firstRunSteps.js`) and honours
+         `?onboarding=1`; `firstRunOpen` only lets this view's hotkeys stand down. -->
+    <FirstRunOverlay v-model:open="firstRunOpen" />
   </div>
 </template>
 
@@ -530,12 +518,7 @@ import ReplayTimeline from '@/components/ReplayTimeline.vue'
 import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
-import OnboardingWizard from '@/components/OnboardingWizard.vue'
-import HardeningGuide from '@/components/onboarding/HardeningGuide.vue'
-import FrontDeskPanel from '@/components/onboarding/FrontDeskPanel.vue'
-import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
-import FinishSetupCard from '@/components/onboarding/FinishSetupCard.vue'
-import { useSessionsStore } from '@/stores/sessions'
+import FirstRunOverlay from '@/components/onboarding/FirstRunOverlay.vue'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -551,7 +534,6 @@ import { useNotification } from '@/composables/useNotification'
 
 const networkStore = useNetworkStore()
 const systemViewsStore = useSystemViewsStore()
-const sessionsStore = useSessionsStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -568,46 +550,8 @@ watch(() => route.query.view, (view) => {
   router.replace({ query: rest }).catch(() => {})
 }, { immediate: true })
 
-// First-run onboarding (trinity-enterprise#52). Auto-opens once for a fresh
-// install with zero agents; dismissal is remembered so it never nags.
-const ONBOARDING_DISMISSED_KEY = 'trinity_onboarding_dismissed_v1'
-const showOnboarding = ref(false)
-function openOnboarding() {
-  showOnboarding.value = true
-}
-function closeOnboarding() {
-  showOnboarding.value = false
-  try { localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1') } catch { /* ignore */ }
-}
-function onAgentDeployed() {
-  // Agent was created via the wizard's real create modal. Keep the wizard open
-  // (it advances to the credential step on its own) and refresh the fleet so
-  // the new agent appears on the graph without a manual page reload — the
-  // WebSocket agent_created event can lag while the container spins up.
-  networkStore.fetchAgents()
-}
-function maybeAutoOpenOnboarding() {
-  if (showOnboarding.value) return
-  // Explicit ?onboarding=1 re-opens the wizard any time (re-run / QA preview),
-  // regardless of fleet size or prior dismissal.
-  if (route.query.onboarding === '1') {
-    showOnboarding.value = true
-    return
-  }
-  if (isFleetLoading.value) return
-  // Count only user-created agents — `trinity-system` exists on every install,
-  // so counting it would mean a fresh fleet is never "empty" and auto-open
-  // would never fire.
-  //
-  // ent#319: since ent#124 seeds a fleet on first run, this predicate is false
-  // on an out-of-the-box install and the wizard no longer auto-opens there.
-  // That case is now served by the front-desk panel (which shows only when
-  // something WAS seeded), so this stays exactly as it is: it still fires on a
-  // genuinely empty install, and the two surfaces never appear together.
-  if (agents.value.filter(a => !a.is_system).length > 0) return
-  if (localStorage.getItem(ONBOARDING_DISMISSED_KEY) === '1') return
-  showOnboarding.value = true
-}
+// First-run overlay (ent#581) is open — the hotkey guards below stand down.
+const firstRunOpen = ref(false)
 
 // System View Editor Modal State
 const isEditorOpen = ref(false)
@@ -806,7 +750,7 @@ function handleDashboardKeydown(e) {
     // .stop's before reaching here.
     if (!(filterOpen.value || filterActive.value)) return
     // Never race a modal's own Esc handling.
-    if (showOnboarding.value || isEditorOpen.value || showCreateModal.value) return
+    if (firstRunOpen.value || isEditorOpen.value || showCreateModal.value) return
     // Layered dismissal (strategy F5): an open tag dropdown consumes this
     // Esc; the filter survives — the second Esc clears.
     if (showTagDropdown.value) {
@@ -844,7 +788,7 @@ function handleDashboardKeydown(e) {
   const t = e.target
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
   // Guard 5: open modals.
-  if (showOnboarding.value || isEditorOpen.value || showCreateModal.value) return
+  if (firstRunOpen.value || isEditorOpen.value || showCreateModal.value) return
 
   e.preventDefault() // `/`: blocks Firefox quick-find. `v`: no browser default — harmless, kept uniform.
   action()
@@ -943,11 +887,6 @@ onMounted(async () => {
     networkStore.fetchSchedules(),
     fetchAvailableTags()
   ])
-
-  // First-run onboarding: load the Claude-auth flag (for the wizard's setup
-  // hint) and auto-open the wizard if this is a fresh, empty install.
-  sessionsStore.loadFeatureFlags().catch(() => {})
-  maybeAutoOpenOnboarding()
 
   // Connect WebSocket for real-time updates
   networkStore.connectWebSocket()
@@ -1127,26 +1066,6 @@ function handleClickOutside(event) {
 </script>
 
 <style scoped>
-/*
-  One onboarding card at a time (#2380).
-
-  Every card in the stack is `v-if`'d, so a card that has nothing to say leaves
-  no element behind — which makes "the first ELEMENT child" exactly "the
-  highest-priority card that currently wants to speak". Hiding the rest in CSS
-  keeps each card's visibility predicate where it already lives (its own store,
-  its own localStorage dismissal) instead of lifting four of them into this
-  view, and dismissing the top card reveals the next one for free.
-
-  The wrapper carries no margin of its own on purpose: with every card hidden
-  it collapses to a zero-height empty div rather than a phantom gap. Each card
-  owns `mt-3 mb-3`, so whichever one shows is spaced on both sides — the pane
-  below is a full-bleed surface with no top padding of its own.
-*/
-.onboarding-stack > * ~ * {
-  display: none;
-}
-
-
 /*
  * Stats bar progressive degrade (#1830).
  *

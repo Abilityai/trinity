@@ -90,11 +90,11 @@
         <div class="text-xs text-gray-500 dark:text-gray-400">Total Agents</div>
       </div>
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border-l-4 border-status-success-500">
-        <div class="text-3xl font-bold text-status-success-600 dark:text-status-success-400">{{ monitoringStore.summary.healthy }}</div>
+        <div class="text-3xl font-bold text-status-success-700 dark:text-status-success-400">{{ monitoringStore.summary.healthy }}</div>
         <div class="text-xs text-gray-500 dark:text-gray-400">Healthy</div>
       </div>
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border-l-4 border-status-warning-500">
-        <div class="text-3xl font-bold text-status-warning-600 dark:text-status-warning-400">{{ monitoringStore.summary.degraded }}</div>
+        <div class="text-3xl font-bold text-status-warning-700 dark:text-status-warning-400">{{ monitoringStore.summary.degraded }}</div>
         <div class="text-xs text-gray-500 dark:text-gray-400">Degraded</div>
       </div>
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border-l-4 border-status-danger-500">
@@ -425,8 +425,8 @@ function getStatusBgClass(status) {
 
 function getStatusTextClass(status) {
   switch (status) {
-    case 'healthy': return 'text-status-success-600 dark:text-status-success-400'
-    case 'degraded': return 'text-status-warning-600 dark:text-status-warning-400'
+    case 'healthy': return 'text-status-success-700 dark:text-status-success-400'
+    case 'degraded': return 'text-status-warning-700 dark:text-status-warning-400'
     case 'unhealthy': return 'text-status-danger-600 dark:text-status-danger-400'
     case 'critical': return 'text-status-danger-700 dark:text-status-danger-500'
     default: return 'text-gray-500 dark:text-gray-400'

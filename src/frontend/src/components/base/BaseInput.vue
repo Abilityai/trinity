@@ -89,6 +89,12 @@ const controlAttrs = computed(() => {
 const describedBy = computed(() => {
   if (props.error) return `${controlId.value}-error`
   if (props.help) return `${controlId.value}-help`
-  return undefined
+  // A composed layout that owns its own label may own its own help text too
+  // (the `label`/`help`-less shape this primitive documents). This binding is
+  // applied AFTER `v-bind="controlAttrs"`, so returning undefined here did not
+  // leave a caller's `aria-describedby` alone — it erased it, and the help
+  // paragraph silently stopped being announced. Hand the attr back rather than
+  // winning a merge the caller did not know it had entered.
+  return attrs['aria-describedby'] || undefined
 })
 </script>

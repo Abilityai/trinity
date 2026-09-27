@@ -124,49 +124,50 @@ class TestSelfTaskDetection:
 
 
 class TestSourceAgentHeaderValidation:
-    """Tests for security validation of X-Source-Agent header."""
+    """Security validation of the X-Source-Agent header — through the REAL helper.
+
+    Before ent#614 these three tests re-implemented the predicate inline and asserted
+    against their own copy, so `test_validation_skipped_for_user_scoped_keys` documented
+    the hole as intended behaviour while never touching product code. They now drive
+    `dependencies.resolve_source_agent`, the one gate every router routes the header
+    through (the full matrix is in test_ent614_source_agent_attribution.py).
+    """
+
+    @staticmethod
+    def _principal(agent_name):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            id=1, agent_name=agent_name, vouched_source_agent=None,
+            mcp_scope="agent" if agent_name else "user",
+        )
 
     def test_validation_passes_when_headers_match(self):
-        """Validation should pass when X-Source-Agent matches MCP key agent scope."""
-        x_source_agent = "agent-a"
-        current_user_agent_name = "agent-a"
+        """An agent-scoped key naming its own agent is honoured."""
+        from dependencies import resolve_source_agent
 
-        # Validation logic
-        should_reject = (
-            x_source_agent and
-            current_user_agent_name and
-            x_source_agent != current_user_agent_name
-        )
-
-        assert should_reject == False
+        assert resolve_source_agent(self._principal("agent-a"), "agent-a", endpoint="/t") == "agent-a"
 
     def test_validation_fails_when_headers_mismatch(self):
-        """Validation should fail when X-Source-Agent doesn't match MCP key agent scope."""
-        x_source_agent = "agent-a"
-        current_user_agent_name = "agent-b"
+        """An agent-scoped key naming a sibling is a 403 (SELF-EXEC-001)."""
+        from fastapi import HTTPException
+        from dependencies import resolve_source_agent
 
-        # Validation logic
-        should_reject = (
-            x_source_agent and
-            current_user_agent_name and
-            x_source_agent != current_user_agent_name
-        )
+        with pytest.raises(HTTPException) as ei:
+            resolve_source_agent(self._principal("agent-b"), "agent-a", endpoint="/t")
+        assert ei.value.status_code == 403
 
-        assert should_reject == True
+    def test_user_scoped_key_cannot_name_a_source_agent(self):
+        """Was `test_validation_skipped_for_user_scoped_keys`: a user-scoped key
+        (agent_name None) setting the header used to skip validation entirely — the
+        ent#614 defect. It is now refused with a 403 that names the rule."""
+        from fastapi import HTTPException
+        from dependencies import resolve_source_agent
 
-    def test_validation_skipped_for_user_scoped_keys(self):
-        """Validation should be skipped when MCP key is user-scoped (no agent_name)."""
-        x_source_agent = "agent-a"
-        current_user_agent_name = None  # User-scoped key
-
-        # Validation logic
-        should_reject = (
-            x_source_agent and
-            current_user_agent_name and
-            x_source_agent != current_user_agent_name
-        )
-
-        assert not should_reject  # None is falsy, so validation is skipped
+        with pytest.raises(HTTPException) as ei:
+            resolve_source_agent(self._principal(None), "agent-a", endpoint="/t")
+        assert ei.value.status_code == 403
+        assert "agent-scoped" in ei.value.detail
 
 
 class TestTriggeredByField:

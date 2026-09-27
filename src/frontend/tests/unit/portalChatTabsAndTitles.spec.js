@@ -324,19 +324,27 @@ describe('the strip is the primitive, and the editor has one home', () => {
       }
     })
 
-    it('the strip refuses to emit a tab with no thread behind it', () => {
+    it('the strip never hands the shell a threadless tab as a thread', () => {
       // The provisional tab's "select" would hand the shell a null, and
-      // openThread reads `is_room` off it.
+      // openThread reads `is_room` off it. trinity-enterprise#657 gave that
+      // branch a second outcome — an INACTIVE provisional tab is the listed
+      // unsaved-chat draft, so it emits `new-chat` — and the behaviour of
+      // both arms is executed in `portalComposerDraft.spec.js` against a real
+      // mount. What stays here is the pair of source facts that spec cannot
+      // see: the draft INTENT is a prop threaded into the pure rule (never
+      // inferred from "the active id is not in the list"), and the shell
+      // supplies it.
       const s2 = src('components/portal/PortalChatTabs.vue')
-      expect(s2).toMatch(/if \(!tab\?\.thread\) return/)
-      // The draft intent is a prop, threaded into the pure rule — never
-      // inferred from "the active id is not in the list".
+      expect(s2).not.toMatch(/emit\('select', tab\)/)          // always `tab.thread`
       expect(s2).toMatch(/draft: \{ type: Boolean, default: false \}/)
       expect(s2).toMatch(/activeId: props\.activeId, draft: props\.draft/)
       expect(src('components/portal/PortalConversation.vue')).toMatch(/:draft="newChat \|\| bornHere"/)
       // ...and the provisional tab renders ACTIVE. Without the fallback the
-      // strip appears with nothing selected, which is its own dead state.
-      expect(s2).toMatch(/:model-value="activeId \|\| \(draft \? NEW_CHAT_TAB_ID : null\)"/)
+      // strip appears with nothing selected, which is its own dead state —
+      // now resolved in one place (`current`) because the click handler has
+      // to compare against the SAME value the strip is bound to.
+      expect(s2).toMatch(/const current = computed\(\(\) => props\.activeId \|\| \(props\.draft \? NEW_CHAT_TAB_ID : null\)\)/)
+      expect(s2).toMatch(/:model-value="current"/)
     })
   })
   it('the three rename homes all mount PortalEditableTitle', () => {

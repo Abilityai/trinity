@@ -224,7 +224,7 @@ Driven directly by the token families — the badge variant *is* the token famil
 
 ### Modal shell & ConfirmDialog
 
-**One shell for every dialog.**
+**One shell for every dialog** — `components/base/BaseModal.vue` (#1923): overlay, Esc, focus trap, focus return and a **shared, ref-counted** scroll lock (`utils/focusTrap.js::bodyScrollLock` — modals nest, and a per-instance write to `body.style.overflow` unlocks the page when an inner dialog mounts or closes). The overlay carries `tabindex="-1"` so Esc still fires after a click on non-focusable text. The decidable rules live in `utils/focusTrap.js`; the wiring is proven by mounting the shell in `tests/unit/baseModal.spec.js` (per-file jsdom, #2918). Adopted so far by NavBar's and SystemViewEditor's dialogs; `ConfirmDialog` is the confirm recipe.
 **Recipe:** overlay gray-950 at 55% (`rgba(10,14,22,.55)`) · card — surface bg, 1px border, radius 10, shadow-lg, `max-width: 400px`, padding 20 · title 15.5/650 · body 13.5 secondary ink · actions right-aligned, 10px gap, **safe choice first** (left), destructive last.
 **Behavior:** Esc closes; click-outside closes; focus is trapped; **initial focus lands on the safe action, never the destructive one**. Destructive confirms restate the consequence: "This permanently removes the agent and its workspace. 3 schedules will be cancelled. This cannot be undone." (principle 19).
 
@@ -261,6 +261,17 @@ recoverable only by widening the window.
   `+Infinity`, so every tab is inline before the first measurement; a truncating label
   drops the button's min-content to padding, and flex's default shrink would squeeze the
   row for a frame while the `width: max-content` mirror still reports 160.
+
+**Per-tab fields.** A tab is `{ id, label, badge?, signal?, pinned?, hasDraft? }`.
+`badge` is the success pill, `signal` the rail's activity dot (`live` ringed /
+`updated` plain), `pinned` the bookmark before the label (ent#523's Main), and
+`hasDraft` (trinity-enterprise#657) the Draft mark after it. Three rules hold for
+every one of them, and each has already been broken once: it renders in the
+**mirror row** as well as the visible one (a glyph the visible row draws and the
+mirror does not is a tab measured narrower than it draws, i.e. a strip that
+overflows one tab too late); it enters the **re-measure key** (`tabsSignature`),
+or toggling it repacks nothing; and in the overflow-menu row it gets its **own**
+`v-if`, never another arm of the `badge`/`signal` chain (#2794's `v-else` lesson).
 
 ### Data table
 
@@ -376,8 +387,9 @@ skeletons by #2540 — a conversation is not a chart. Adopting a further CHART s
 ent#253 pass; adopting it on a page, list or thread is a violation, and
 `tests/unit/portalLoadingTreatment.spec.js` pins the importer set as an allowlist so a new
 non-chart adoption fails CI (the two pre-ruling holdovers, `LibrarySkillsSection` and
-`onboarding/FinishSetupCard`, are recorded on #1921's sweep and shrink that list as they
-convert).
+`onboarding/FinishSetupCard` — the latter since deleted, replaced by the ent#581 first-run
+overlay `onboarding/FirstRunOverlay.vue` — were swept to skeletons by #1921, so the
+holdover list is empty).
 
 `content-class` (#2163) is the consumer's hook on the primitive's OWN content wrapper —
 `.scan-content` is child-owned DOM and `:deep()` is forbidden here, so a zone whose
@@ -438,6 +450,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 6. Dimensions never oscillate as async data trickles in — size to the stable state.
 7. Panels flex to available width; no overlap at narrow widths; wide content scrolls in its own container, never the page.
 8. Scrolling is axis-locked — one axis at a time.
+29. **Recommendation, verified by eye: enabling something should not shove the rest of the panel (#954, #1563, #1939, #2640).** A user-driven state change — a toggle switched on, a checkbox that reveals dependent fields, a mode that swaps a column, a tab switch — deserves the same care as data arrival (principle 4), but this is guidance, not a hard rule: some reveals are genuinely better as an instant snap, and the judgement is the reviewer's. Preferred shapes, chosen by size: a **reserved footprint** for small dependents (the block already occupies its space, disabled or dimmed, and enabling fills it in place — the natural default for settings forms), or a **height/flex transition** for a whole section or column (150–300ms ease-out, `motion-reduce:transition-none`, via `<Transition>` or an animatable property such as `grid-template-rows` / `flex-grow`) rather than a bare `v-if` that lands the new layout in one paint. Aim for: the activated control stays under the pointer, new content opens below or beside its trigger rather than above it, and what the user was reading stays in view. A swap that must remount should let the leaving element finish before the entering one takes its width — a mid-transition third column is a worse jump than the one being fixed (#2647). **No scanner can see this** — it is confirmed only by a human toggling the control in the browser, in both themes, and watching what moves; record that you did in the PR.
 
 ### C. Density & progressive disclosure
 
@@ -465,7 +478,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 24. Identity is encoded in form as well as color — classes and states are distinguishable by shape or icon, never by hue alone.
 25. Meaningful errors everywhere: every failure surface says what happened, what it means, and what to do — in user vocabulary; stack traces and HTTP codes go behind a details disclosure, never the headline.
 26. Expectation setting: non-instant actions state what will happen and roughly how long; multi-step operations show staged progress; say where the result will appear.
-27. Post-action next steps: after a completed action, offer the natural next move via static per-flow sequencing. (An adaptive, system-wide suggestion tier is deliberately deferred.)
+27. Post-action next steps: after a completed action, offer the natural next move via static per-flow sequencing. (An adaptive, system-wide suggestion tier is deliberately deferred.) The per-agent, per-viewer suggestions list (ent#465, `PortalSuggestions.vue`) is not that tier — it is computed from state, not triggered by the action just taken — but it owns the dismissal model that tier should reuse (`workspace_suggestion_feedback.surface`).
 28. Unbounded data is contained: any surface that can render a large or unbounded set (tables, logs, activity streams, execution lists) gets a bounded viewport — max-height with internal scroll, pagination, or virtualization — and never grows the page itself without limit. Sticky headers stay visible while scrolling; the surface states the total ("412 executions · latest 50 shown") so what's beyond the fold is known, not hidden. Companion of 7 (horizontal) and 4 (stable footprint).
 
 ## 8. Do / don't — the shape of a violation
@@ -481,6 +494,7 @@ The recurring failure modes, in one place:
 | A scanline beam over a page, list or thread | A skeleton placeholder keyed on `hasLoaded` (§6, #2540) |
 | A "Loading…" line or an `animate-spin` on a page | The skeleton recipe (§6), keyed on a verdict |
 | Skeleton re-flash on a 30s poll | Stale-while-revalidate, in-place swap |
+| A toggle whose `v-if` pops a block open and shoves the form below it, unreviewed | Prefer a reserved footprint or a height transition; either way, a human toggles it and watches what moves (principle 29, a recommendation) |
 | Tabs wrapping to two rows | OverflowTabs with "+N more" |
 | A table that grows the page unbounded | Bounded viewport + sticky header + stated total |
 | Red border as the whole error | Named error + fix + example |
@@ -488,9 +502,10 @@ The recurring failure modes, in one place:
 
 ## 9. Enforcement
 
-Four layers keep the standard true:
+Five layers keep the standard true:
 
 1. **The token ratchet.** `src/frontend/scripts/check-design-tokens.mjs` (`npm run check:tokens`, wired into the frontend build workflow) validates token→palette aliasing and resolvable references, extended with a **raw-color ratchet**: a checked-in baseline (`raw-color-baseline.json`, per-file raw-palette counts) that **only shrinks**. CI fails when any file exceeds its baseline; migrating a file lowers its entry. New code starts at a baseline of zero raw colors — there is no legal way to add one.
 2. **The component reference page.** The living catalog renders every primitive and pattern from this document in both themes. It is re-rendered from the real primitives once they exist, so page, code, and doc cannot drift apart. When reviewing UI, compare against the page.
 3. **The review checklist.** Every frontend PR is checked against the builder contract's self-check (the condensed companion of this document); the validation playbook sweeps the frontend for the mechanically checkable principles — raw palette, hand-rolled primitives, off-scale spacing, unbounded surfaces — always reading rules from this document and the token file, never from a hardcoded copy. Findings are named and actionable: file, violation, suggested token or primitive.
 4. **The loading-gate ratchet (#1927).** `src/frontend/scripts/scan-loading-gates.mjs` counts, per `.vue` file, the bare `v-if`/`v-else-if` gates whose whole expression is a loading flag (`loading`, `loading.queue`, `executionsLoading`, …) — the p13/p14 violation class (#1634, #1926, #1927): such a gate swaps rendered data for a spinner on every background poll. `loading-gate-baseline.json` freezes today's per-file counts and `tests/unit/loadingGateRatchet.spec.js` (part of `npm run test:unit`) fails when any file's count grows, when a new file gains one, or when an entry is stale (a fixed file must lower its entry — `node scripts/scan-loading-gates.mjs src --baseline loading-gate-baseline.json`). The sanctioned shape is `utils/loadingState.js::viewState({ loading, hasLoaded, error, count })` → `loading | failed | empty | ready` + `stale`, with the stale-refresh banner (`InlineError retryable`, copy from `staleBannerMessage`) rendered as a **sibling before** the chain. Freeze, then pay down: the baseline is the sweep's worklist, not its permission slip.
+5. **The source-text ratchet (#2918).** `src/frontend/scripts/scan-source-text-specs.mjs` counts, per spec under `tests/unit/`, the source-text reads of `components/`/`views/` SFCs (a non-import `.vue` literal in a spec that calls `readFileSync`) — the class where a fleet-delete confirmation's `canRemove` (#2756) and a modal's Esc/focus-trap contract (#2778) shipped with regex-only coverage that an inverted predicate passes byte-identically, each justified by the false belief that this vitest cannot mount. `source-text-baseline.json` freezes today's per-spec counts and `tests/unit/sourceTextRatchet.spec.js` (part of `npm run test:unit`) fails when a spec's count grows, when a **new** spec reads SFC source without a `@source-text-pin: <reason>` marker in its docblock (the reviewable escape for an AST-shaped call-site guard or a parity table), or when an entry is stale. The failure message names the harness at the decision point — `// @vitest-environment jsdom` + `@vue/test-utils`, precedent `portalThemeSwitch.spec.js` — because the capability was never the gap; its discoverability was.

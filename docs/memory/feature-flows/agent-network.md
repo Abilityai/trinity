@@ -1049,7 +1049,8 @@ def get_all_permission_edges(self, accessible_agents: Optional[set] = None) -> L
 
 **Communication Event Flow**:
 1. Validate agent exists and is running (Lines 64-69)
-2. Check for `X-Source-Agent` header (Line 55)
+2. Resolve `X-Source-Agent` through `dependencies.resolve_source_agent` — honoured only
+   for an agent-scoped key naming itself or the event loopback; 403 otherwise (ent#614)
 3. Submit to execution queue (Lines 77-86)
 4. If agent source, activity is tracked for collaboration visualization
 5. Persist chat message to database via execution queue
@@ -1166,7 +1167,10 @@ CREATE TABLE agent_activities (
 }
 ```
 
-**Broadcast Trigger**: Any agent-to-agent chat request with `X-Source-Agent` header
+**Broadcast Trigger**: an agent-to-agent chat request whose `X-Source-Agent` header was
+**resolved** by `dependencies.resolve_source_agent` (ent#614) — an agent-scoped key
+naming its own agent, or the EVT-001 loopback's backend-vouched source. Any other
+principal sending the header gets a 403 and no broadcast.
 
 **Subscribers**: All connected WebSocket clients (all users viewing Agent Network)
 

@@ -9,7 +9,7 @@
       <div class="mt-0.5 flex items-center gap-1.5 text-xs">
         <template v-if="loading">
           <span class="inline-block shrink-0 w-2 h-2 rounded-full bg-gray-300 dark:bg-gray-600 animate-pulse"></span>
-          <span class="text-gray-400 dark:text-gray-500">Checking…</span>
+          <span class="text-gray-500 dark:text-gray-400">Checking…</span>
         </template>
         <template v-else-if="status.connected">
           <span
@@ -17,11 +17,11 @@
             :class="status.warn ? 'bg-status-warning-500' : 'bg-status-success-500'"
           ></span>
           <span class="min-w-0 truncate text-gray-600 dark:text-gray-300">{{ status.label || 'Connected' }}</span>
-          <span v-if="status.warn" class="shrink-0 text-status-warning-600 dark:text-status-warning-400">· setup needed</span>
+          <span v-if="status.warn" class="shrink-0 text-status-warning-700 dark:text-status-warning-400">· setup needed</span>
         </template>
         <template v-else>
           <span class="inline-block shrink-0 w-2 h-2 rounded-full bg-gray-300 dark:bg-gray-600"></span>
-          <span class="text-gray-400 dark:text-gray-500">Not connected</span>
+          <span class="text-gray-500 dark:text-gray-400">Not connected</span>
         </template>
       </div>
     </div>

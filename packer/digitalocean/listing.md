@@ -3,6 +3,7 @@
 Source text for the DigitalOcean Vendor Portal listing. Rule 11 of DigitalOcean's
 1-Click build standard asks for this in-repo, so the catalog page and the image
 are versioned together rather than the copy living only in the portal.
+`logo.png` (1024x1024, transparent) and `logo.svg` beside this file are the catalog logo uploaded to the portal — upload the PNG; some renderers size an SVG from `width`/`height` and show nothing without them.
 
 ---
 
@@ -65,27 +66,22 @@ running Droplet, never decreased.
 ### 1. Create the Droplet
 
 Choose a plan of at least 4 GB RAM (8 GB recommended) and create it. First boot
-takes about ninety seconds: it generates your admin password, obtains a
-certificate for the Droplet's IP, and starts Trinity.
+takes about ninety seconds: it obtains a certificate for the Droplet's IP and
+starts Trinity.
 
-### 2. Get your admin password
+### 2. Open it and create your admin account
 
-Your password is generated on first boot and printed in the login banner. How you
-reach that banner depends on the authentication you chose when creating the
-Droplet:
+Open `https://<your-droplet-ip>` in your browser. There is no password to look
+up and no terminal to open: Trinity asks you to create the admin account — your
+email, a password, and whether you want product updates — and you are in.
 
-- **If you chose a password**, open **Droplet → Console** in the DigitalOcean
-  control panel and log in as `root`. The Console is a browser terminal, so no
-  SSH client is needed.
-- **If you chose an SSH key**, DigitalOcean leaves the root account locked and the
-  Console cannot accept a login. Connect with your key instead:
-  `ssh root@your_droplet_public_ipv4`
-
-Either way the banner prints your Trinity password, the URL to open, and whether
-HTTPS came up. You can re-read it at any time with `cat /etc/trinity/admin-credentials`.
-
-To choose the password yourself instead, paste this into **Additional Options →
-Startup scripts** when creating the Droplet:
+**Do this as soon as the Droplet is up.** Until an admin account exists, whoever
+opens the address first creates it. The Droplet holds nothing at that point, so
+if a Droplet you have never opened shows you a login page instead, destroy it and
+create another. To close the window entirely, restrict port 443 to your own IP
+with a cloud firewall until you have signed in (leave port 80 open — the
+certificate is validated over it), or choose the password up front by pasting
+this into **Additional Options → Startup scripts** when creating the Droplet:
 
 ```yaml
 #cloud-config
@@ -96,12 +92,13 @@ write_files:
 ```
 
 It must be `#cloud-config` with `write_files`, not a shell script — a shell
-script runs too late in cloud-init to be seen.
+script runs too late in cloud-init to be seen. A Droplet created this way skips
+the create-your-account screen: sign in as `admin` with that password.
 
 ### 3. Sign in
 
-Open `https://<your-droplet-ip>`, sign in as `admin` with that password, and
-change it. The certificate is a real Let's Encrypt certificate issued for the IP
+From then on, open `https://<your-droplet-ip>` and sign in with the account you
+created. The certificate is a real Let's Encrypt certificate issued for the IP
 address, so there is no browser warning and nothing to accept.
 
 ### 4. Add a model credential and create your first agent
@@ -109,7 +106,8 @@ address, so there is no browser warning and nothing to accept.
 Trinity ships no model credentials — you supply your own. Add one in the
 browser, then create an agent from a template. The first-run guide walks through
 attaching a domain and serving it through a Cloudflare Tunnel when you are ready
-to move off the bare IP.
+to move off the bare IP, and the full walkthrough — including a private-network
+option — is at https://docs.ability.ai/getting-started/deploying/hardening.
 
 ## Managing Trinity
 
@@ -130,18 +128,27 @@ docker compose -f docker-compose.hosted.yml restart
 docker compose -f docker-compose.hosted.yml logs -f backend
 ```
 
-**Updating.** Pull the release you want and restart:
+**Updating.** The release is pinned in `.env`. Point it at the release you
+want, pull the matching tree, and restart:
 
 ```bash
 cd /opt/trinity
 sudo git fetch --tags && sudo git checkout <tag>
+sudo sed -i "s/^TRINITY_IMAGE_TAG=.*/TRINITY_IMAGE_TAG=<tag>/" .env
 sudo ./scripts/deploy/start.sh --hosted
 ```
 
+Both steps matter. The checkout updates the scripts and the compose file;
+`TRINITY_IMAGE_TAG` is what compose resolves every image from
+(`start.sh` reads it from the environment or `.env`, never from the checkout).
+Changing only one leaves the instance running one release's scripts against
+another's images, and it reports success either way. The version shown in the
+web interface reflects the images, so use it to confirm the upgrade landed.
+
 Database backups run nightly and before every migration, under
-`~/trinity-data/backups/`. They are on the same disk as the database, so they
-protect against corruption and mistakes, not against losing the Droplet — take
-Droplet snapshots as well.
+`/opt/trinity/trinity-data/backups/`. They are on the same disk as the database,
+so they protect against corruption and mistakes, not against losing the Droplet
+— take Droplet snapshots as well.
 
 ## Support
 

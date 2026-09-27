@@ -27,23 +27,19 @@ Or from the terminal: `claude plugin add abilityai/abilities`
 
 ## Path A: Creating a New Agent
 
-Start from scratch with a guided wizard.
+Start from scratch with the interview-driven wizard.
 
-### Step 1: Choose a wizard and run it
+### Step 1: Run the wizard
 
 ```bash
 /create-agent:create        # Shows all available wizards
 
-# Or jump directly to a specific wizard:
-/create-agent:prospector    # B2B sales research agent
-/create-agent:chief-of-staff # Executive assistant
-/create-agent:webmaster     # Website management
-/create-agent:recon         # Competitive intelligence
-/create-agent:ghostwriter   # Content writer
-/create-agent:custom        # Blank canvas (you define everything)
+# Or jump directly:
+/create-agent:custom        # Any agent, from an interview — role, skills, schedules, credentials, Trinity wiring
+/create-agent:website       # A website scaffold (no agent)
 ```
 
-Each wizard asks domain-specific questions and scaffolds a complete agent.
+The `custom` wizard asks about your domain and scaffolds a complete agent. It covers every shape the retired domain wizards used to — describe the role and the interview builds it.
 
 ### Step 2: Connect to Trinity (one-time)
 
@@ -84,7 +80,7 @@ Already have a Claude Code agent? Deploy it to Trinity.
 
 Checks your agent for Trinity compatibility, creates required files (`template.yaml`, `.env.example`, `.mcp.json.template`, `.gitignore`), and deploys — from the agent's GitHub repo by default, from local files as the fallback when there is no repo yet.
 
-**Already deployed it from a bare repo?** If you created the agent in Trinity straight from a repository that had no `template.yaml` — someone else's agent, or one you didn't want to adapt locally — run `/trinity:onboard` *inside* that agent — send it `/trinity:onboard in-place` as a chat message, or run it from the agent's terminal — and it takes the **Onboard in place** path. It writes the Trinity files, installs and declares the plugins, pushes the result back to the repo, reconciles schedules, and verifies with the platform's compatibility report. See [Onboarding a deployed agent in place](../abilities/trinity-plugin.md#onboarding-a-deployed-agent-in-place).
+**Already deployed it from a bare repo?** If you created the agent in Trinity straight from a repository that had no `template.yaml` — someone else's agent, or one you didn't want to adapt locally — run `/trinity:onboard` *inside* that agent — send it `/trinity:onboard in-place` as a chat message, or run it from the agent's terminal — and it takes the **Onboard in place** path. It writes the Trinity files, installs and declares the plugins, pushes the result back to the repo, reconciles schedules, and verifies with the platform's compatibility report. Nothing needs installing first: Trinity's agent image ships with the `trinity` plugin, so a bare repo can onboard itself. See [Onboarding a deployed agent in place](../abilities/trinity-plugin.md#onboarding-a-deployed-agent-in-place).
 
 ### Step 3: Review and improve (optional)
 
@@ -106,13 +102,16 @@ Add capabilities and keep your agent in sync.
 # Add a memory system
 /agent-dev:add-memory   # Choose: file-index, brain, json-state, workspace
 
-# Add GitHub Issues task management
-/agent-dev:add-backlog
+# Add GitHub Issues task management — pick the one that fits the work
+/agent-dev:add-backlog             # the agent's own dev backlog: /backlog, /claim, /autoplan, /commit, /close, /groom, /roadmap, /sprint, /work-loop
+/agent-dev:add-project-management  # cross-actor projects: /project-init, /project-task, /project-steward, /project-reconcile, /project-intake
 
 # Push changes to Trinity
 git push
 /trinity:sync          # advances the deployed agent; also reconciles schedules + plugins
 ```
+
+Both task-management installers copy standalone agent-dev runtime skills into `.claude/skills/`, and the same skills ship in Trinity's bundled community skills catalog (`trinity-skills` v0.2.0 and later) — so an agent that is already deployed can be given them by [assignment](../automation/skills-and-playbooks.md) from the Library page instead, with no local install and no push. `/project-init` creates the project standard itself on first run if the installer never ran.
 
 ## What Gets Created
 
@@ -129,8 +128,8 @@ Wizard-created agents include everything needed for Trinity:
 
 ## Next Steps
 
-- [create-agent Plugin](../abilities/create-agent-plugin.md) — All 14 creation wizards explained
-- [agent-dev Plugin](../abilities/agent-dev-plugin.md) — Skills, memory systems, backlog, planning
+- [create-agent Plugin](../abilities/create-agent-plugin.md) — The `custom` and `website` wizards, plus review, adjust, and clone
+- [agent-dev Plugin](../abilities/agent-dev-plugin.md) — Skills, memory systems, backlog, project management, planning
 - [trinity Plugin](../abilities/trinity-plugin.md) — Connect, onboard, deploy, sync workflows
 
 ## See Also

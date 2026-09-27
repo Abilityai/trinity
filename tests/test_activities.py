@@ -446,7 +446,10 @@ class TestTimelineForDashboard:
         # rather than a hand-maintained literal set, so this test doesn't drift every
         # time a trigger/channel value is added (webhook, telegram/slack/whatsapp, etc.).
         from db.schedules import _TRIGGER_BUCKETS
-        valid_triggers = set(_TRIGGER_BUCKETS) | {None}
+        # Plus the activity layer's own documented sources (activity_service:
+        # "user, schedule, agent, system"); "system" is written by the
+        # subscription auto-switch and is bucketed as Other on the Dashboard.
+        valid_triggers = set(_TRIGGER_BUCKETS) | {"user", "schedule", "agent", "system", None}
 
         for activity in activities:
             triggered_by = activity.get("triggered_by")

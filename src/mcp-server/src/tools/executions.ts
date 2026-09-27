@@ -8,6 +8,21 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied } from "../access.js";
+import { ApiError } from "../client.js";
+
+/**
+ * #2958: `compact_metadata` is stored as a JSON string. Parse it for the
+ * caller; a malformed value degrades to null rather than failing the read.
+ */
+function parseCompactMetadata(raw: string | null | undefined): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Create execution query tools with the given client
@@ -32,6 +47,10 @@ export function createExecutionTools(
     }
     return client;
   };
+
+  /** Scopes that may use `search_executions` (ent#653) — the system agent and
+   *  user-scoped (human/ops) keys. An allow-list, never a deny-check. */
+  const SEARCH_SCOPES: ReadonlySet<string> = new Set(["system", "user"]);
 
   /**
    * Check if agent-scoped key can access target agent for read operations.
@@ -100,10 +119,10 @@ export function createExecutionTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
         if (!accessCheck.allowed) {
           console.log(`[list_recent_executions] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const effectiveLimit = Math.min(Math.max(1, limit), 100);
@@ -133,6 +152,8 @@ export function createExecutionTools(
         "Get the full result of a specific execution including response text, cost, and status. " +
         "Use this to poll for results after chat_with_agent(async=true, parallel=true) returns an execution_id. " +
         "Optionally include the full execution transcript (tool calls, thinking, responses). " +
+        "A long `duration_ms` with a non-null `compact_metadata` is a one-off context auto-compaction " +
+        "(its trigger, pre/post tokens and duration), not a degraded agent. " +
         "Access control: agents can only view executions on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent that ran the execution"),
@@ -153,10 +174,10 @@ export function createExecutionTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
         if (!accessCheck.allowed) {
           console.log(`[get_execution_result] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const execution = await apiClient.getExecution(agent_name, execution_id);
@@ -178,6 +199,7 @@ export function createExecutionTools(
           context_used: execution.context_used || null,
           context_max: execution.context_max || null,
           model_used: execution.model_used || null,
+          compact_metadata: parseCompactMetadata(execution.compact_metadata),
         };
 
         if (include_log) {
@@ -191,6 +213,58 @@ export function createExecutionTools(
         }
 
         return JSON.stringify(result, null, 2);
+      },
+    },
+
+    // ========================================================================
+    // get_fan_out_result - Poll a fan-out batch (#2670)
+    // ========================================================================
+    getFanOutResult: {
+      name: "get_fan_out_result",
+      description:
+        "Get the aggregate status and per-task results of a fan-out batch. " +
+        "Use this to poll after fan_out returns {status: 'fan_out_timeout', fan_out_id} — " +
+        "the batch is still running and this is the only way to reach it. " +
+        "\n\n**Batch status:** `running` while any subtask can still change, then " +
+        "`completed` (all succeeded), `partial` (some did — fan-out is best-effort, so " +
+        "this is a normal outcome, not an error) or `failed` (none did). " +
+        "\n\n**Per-task status** is the execution status (`queued`, `running`, `success`, " +
+        "`failed`, …), so a subtask waiting for a slot is distinguishable from one that ran. " +
+        "\n\nAccess control: agents can only read batches on self or permitted agents. " +
+        "An unknown fan_out_id, one belonging to another agent, and a malformed one are " +
+        "the same 'not found'.",
+      parameters: z.object({
+        agent_name: z.string().describe("Name of the agent that ran the fan-out"),
+        fan_out_id: z
+          .string()
+          .describe("Batch ID (returned by fan_out, or carried on a fan_out_timeout receipt)"),
+      }),
+      execute: async (
+        { agent_name, fan_out_id }: { agent_name: string; fan_out_id: string },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        // Same gate as `get_execution_result` beside it: an agent-scoped key
+        // reaches `{self} ∪ permitted` and nothing else. The backend's own
+        // `get_authorized_agent` is the boundary; this is the MCP-layer
+        // narrowing an agent key needs on top of it (Invariant #13 / #1104).
+        const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
+        if (!accessCheck.allowed) {
+          console.log(`[get_fan_out_result] Access denied: ${accessCheck.reason}`);
+          return accessDenied(context, {
+            error: "Access denied",
+            reason: accessCheck.reason,
+          });
+        }
+
+        const batch = await apiClient.getFanOutResult(agent_name, fan_out_id);
+        console.log(
+          `[get_fan_out_result] ${agent_name}/${fan_out_id}: ${batch.status} ` +
+          `(${batch.completed}/${batch.total} done, ${batch.running} running)`
+        );
+        return JSON.stringify(batch, null, 2);
       },
     },
 
@@ -227,10 +301,10 @@ export function createExecutionTools(
           const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
           if (!accessCheck.allowed) {
             console.log(`[get_agent_activity_summary] Access denied: ${accessCheck.reason}`);
-            return JSON.stringify({
+            return accessDenied(context, {
               error: "Access denied",
               reason: accessCheck.reason,
-            }, null, 2);
+            });
           }
         }
 
@@ -270,6 +344,118 @@ export function createExecutionTools(
           by_type: byType,
           by_agent: agent_name ? undefined : byAgent,
         }, null, 2);
+      },
+    },
+
+    // ========================================================================
+    // search_executions - grep the execution corpus (enterprise, ent#653)
+    // ========================================================================
+    searchExecutions: {
+      name: "search_executions",
+      description:
+        "Search past executions across the agents you can access — a case-insensitive grep over the task " +
+        "prompt (message), the agent's response and the error text. mode=substring (default) matches the " +
+        "literal query; mode=regex matches a POSIX regular expression (PostgreSQL only; no inline flags — " +
+        "matching is already case-insensitive). Returns bounded excerpts around each match, never full " +
+        "bodies: use get_execution_result(agent_name, execution_id) for the full row. " +
+        "Requires the enterprise execution-search module; answers available=false where it is absent. " +
+        "Access: the system agent and user-scoped keys only — agent-scoped keys are refused.",
+      parameters: z.object({
+        query: z.string().min(1).max(200).describe("Substring to find (case-insensitive; % and _ are literal) — or, with mode=regex, a POSIX regular expression"),
+        mode: z
+          .enum(["substring", "regex"])
+          .optional()
+          .default("substring")
+          .describe("substring (literal) | regex (POSIX ARE, PostgreSQL only)"),
+        agents: z
+          .array(z.string())
+          .max(50)
+          .optional()
+          .describe("Scope to these agents (default: every agent you can access)"),
+        fields: z
+          .array(z.enum(["message", "response", "error"]))
+          .optional()
+          .describe("Which columns to search (default: message, response, error)"),
+        status: z.string().optional().describe("Filter by status: running, queued, success, failed, error, cancelled, skipped"),
+        triggered_by: z.string().optional().describe("Filter by trigger: schedule, manual, agent, mcp, chat, ..."),
+        // Mirrors the backend's `_VALID_HOURS` (routers/executions.py); the
+        // route 422s by name on anything else, so a drift here is loud, not silent.
+        hours: z
+          .union([z.literal(0), z.literal(1), z.literal(6), z.literal(24), z.literal(168), z.literal(720)])
+          .optional()
+          .default(24)
+          .describe("Window in hours (0 = all-time). Only these values are accepted"),
+        limit: z.number().int().min(1).max(100).optional().default(20),
+        offset: z.number().int().min(0).optional().default(0),
+        context: z.number().int().min(20).max(400).optional().default(120).describe("Excerpt radius in characters"),
+      }),
+      // ALLOW-LIST of the scopes that may see this tool (#848: never a deny-check —
+      // a null or unknown principal must fail closed). Agent-scoped sessions never
+      // have it advertised; the backend route refuses them regardless.
+      canAccess: (auth: any) => SEARCH_SCOPES.has(auth?.scope ?? ""),
+      execute: async (
+        params: {
+          query: string;
+          mode?: "substring" | "regex";
+          agents?: string[];
+          fields?: Array<"message" | "response" | "error">;
+          status?: string;
+          triggered_by?: string;
+          hours?: number;
+          limit?: number;
+          offset?: number;
+          context?: number;
+        },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const authContext = context?.session;
+        // Absent auth is only legitimate in dev mode (no API key required); a
+        // present scope must be on the allow-list.
+        const scope = authContext?.scope;
+        const permitted = scope === undefined ? !requireApiKey : SEARCH_SCOPES.has(scope);
+        if (!permitted) {
+          console.log(`[search_executions] Access denied: scope '${scope ?? "none"}' is not system/user`);
+          return accessDenied(context, {
+            error: "Access denied",
+            reason: "search_executions is available to the system agent and user-scoped keys only",
+          });
+        }
+
+        const apiClient = getClient(authContext);
+        try {
+          const result = await apiClient.searchExecutions({
+            query: params.query,
+            mode: params.mode ?? "substring",
+            agents: params.agents,
+            fields: params.fields,
+            status: params.status,
+            triggered_by: params.triggered_by,
+            hours: params.hours ?? 24,
+            limit: params.limit ?? 20,
+            offset: params.offset ?? 0,
+            context: params.context ?? 120,
+          });
+          // The query text is deliberately not logged — a user hunting for a leaked
+          // value would otherwise write it into the MCP server's log stream.
+          console.log(`[search_executions] ${result.count} hit(s) over ${result.hours}h (${result.mode}; ${result.fields.join(",")})`);
+          return JSON.stringify({ available: true, ...result }, null, 2);
+        } catch (e) {
+          // Honest, distinct status — an OSS build has no route (404) and an
+          // unentitled or refused call is a 403; neither is "no results".
+          if (e instanceof ApiError && (e.status === 404 || e.status === 403)) {
+            return JSON.stringify({
+              available: false,
+              count: 0,
+              hits: [],
+              message:
+                e.status === 404
+                  ? "Execution search is not available on this platform."
+                  : "Execution search is not enabled for this caller.",
+              detail: e.body,
+            }, null, 2);
+          }
+          throw e;
+        }
       },
     },
   };

@@ -166,6 +166,11 @@ def is_token_revoked(jti: Optional[str]) -> bool:
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+# ent#554 — the same scheme with `auto_error=False`, so a route can accept an
+# ANONYMOUS caller and decide for itself. Used by the canvas share view, where
+# a `public` link must render with no credential at all while an `authorized`
+# link needs to know who is asking.
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
 
 
 def hash_password(password: str) -> str:
@@ -283,6 +288,19 @@ def decode_mfa_challenge(token: str) -> Optional[dict]:
 # verification of a client whose email has a share). No new secret — same
 # SECRET_KEY/ALGORITHM, so a backend restart invalidates portal sessions too.
 PORTAL_SESSION_SCOPE = "portal_session"
+
+# ent#614 — scope claim on the JWT `event_dispatch_service._get_internal_token`
+# mints for the EVT-001 loopback (`POST /api/agents/{subscriber}/task`). Signed
+# with the backend-only SECRET_KEY, so — unlike `INTERNAL_API_SECRET`, which the
+# scheduler and the MCP server also hold — only the backend can produce one. The
+# token may carry a `source_agent` claim the backend derived from an
+# agent-originated event; `get_current_user` surfaces it as
+# `User.vouched_source_agent` (the identity `resolve_source_agent` checks the
+# loopback's `X-Source-Agent` header against) and fences the token to the one
+# route it exists for — before #614 it was an unrestricted five-minute admin
+# bearer.
+EVENT_LOOPBACK_SCOPE = "event_loopback"
+EVENT_LOOPBACK_ROUTE = re.compile(r"^/api/agents/[^/]+/task$")
 
 # RETIRED as a lifetime (ent#375). The session now slides: `_portal_session_policy()`
 # supplies an idle window and an absolute cap, and every consumer reads those.
@@ -627,6 +645,20 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         if payload.get("scope") == PORTAL_SESSION_SCOPE:
             raise credentials_exception
 
+        # ent#614 — the EVT-001 loopback token is single-purpose: it may reach
+        # ONLY `POST /api/agents/{subscriber}/task`. Fenced here at the auth
+        # entry point (the connector / portal_delegate pattern below) so a
+        # leaked loopback bearer is not a five-minute admin session.
+        loopback = payload.get("scope") == EVENT_LOOPBACK_SCOPE
+        if loopback and (
+            request.method.upper() != "POST"
+            or not EVENT_LOOPBACK_ROUTE.match(request.url.path)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Event-loopback tokens may only dispatch a subscriber task",
+            )
+
         # #187 — reject a token revoked via logout.
         if is_token_revoked(payload.get("jti")):
             raise credentials_exception
@@ -646,7 +678,10 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
             id=user["id"],
             username=user["username"],
             email=user.get("email"),
-            role=user["role"]
+            role=user["role"],
+            # ent#614: only a loopback token carries this, and only when the
+            # backend derived the source from an agent-originated event.
+            vouched_source_agent=(payload.get("source_agent") or None) if loopback else None,
         )
     except JWTError:
         # JWT failed, try MCP API key
@@ -765,6 +800,30 @@ _EPHEMERAL_ALLOWED_ROUTES = (
     ("GET", re.compile(r"^/api/agents/(?P<name>[^/]+)$")),
     ("GET", re.compile(r"^/api/agents/(?P<name>[^/]+)/info$")),
 )
+
+
+
+async def get_optional_user(
+    request: Request, token: str = Depends(oauth2_scheme_optional)
+) -> Optional[User]:
+    """The current user, or None when the caller presented no usable credential.
+
+    ent#554. Delegates to `get_current_user` rather than re-implementing any of
+    it: there is exactly one place that decides what a credential means, and a
+    second one that merely agreed today is how an auth bypass gets written.
+
+    A PRESENT-but-invalid credential also reads as None rather than 401. That is
+    right for the one caller — a `public` share link must render for a stranger,
+    including one whose session merely expired — and it is safe because every
+    route using this makes its own authorization decision afterwards. Do not
+    reach for it on a route that would otherwise have required auth.
+    """
+    if not token:
+        return None
+    try:
+        return await get_current_user(request, token)
+    except HTTPException:
+        return None
 
 
 def _enforce_ephemeral_key_fence(request: Request, agent_name: str) -> None:
@@ -1037,6 +1096,62 @@ def is_interactive_principal(current_user: User) -> bool:
     trap).
     """
     return getattr(current_user, "mcp_scope", "__missing__") is None
+
+
+# trinity-enterprise#611: the principals that may END an ask (answer, cancel,
+# bulk-cancel). The interactive human (JWT ⇒ `mcp_scope is None`) and the
+# human's own user-scoped MCP key. Everything else — agent, system, connector,
+# portal_delegate, ops, and whatever scope ships next — is refused.
+PERSON_SCOPES = frozenset({None, "user"})
+
+
+def is_person_principal(current_user: User) -> bool:
+    """Is this caller a PERSON — the only author an ask's ending may record?
+
+    The endings ledger records `disposed_by` as an enum of two, `person` or
+    `timeout` (trinity-enterprise#611). An agent-scoped key resolves to its OWNER
+    carrying the owner's role, so before this an agent could answer or cancel any
+    ask its owner could reach — its own approval included — and the row recorded
+    the owner. Recording that as `person` would make the ledger lie.
+
+    An ALLOWlist over `mcp_scope` for the same reason as
+    `is_interactive_principal`: the scope column is free text with no CHECK
+    constraint, so a denylist naming `agent` is open to the next scope that
+    ships. The identity fields are checked as well (belt-and-braces: a
+    user-scoped principal carrying an agent identity is not a person), and an
+    object with no `mcp_scope` at all fails CLOSED through the sentinel — never
+    `getattr(..., None)`, which would read an absent attribute as the JWT value
+    (the #2323 getattr-discriminator trap).
+    """
+    if getattr(current_user, "mcp_scope", "__missing__") not in PERSON_SCOPES:
+        return False
+    return not (
+        getattr(current_user, "agent_name", None)
+        or getattr(current_user, "connector_agent", None)
+        or getattr(current_user, "portal_delegate", False)
+    )
+
+
+# The refusal every door that ends an ask gives a caller that is not a person —
+# the operator routes below and the Workspace answer (client_portal/asks).
+PERSON_REQUIRED_DETAIL = {
+    "code": "person_required",
+    "message": (
+        "Only a person can answer or cancel an ask; agent- and "
+        "system-scoped keys cannot end one"
+    ),
+}
+
+
+def reject_non_person_principal(current_user: User) -> None:
+    """Refuse — with a named 403 — any caller that is not a person
+    (trinity-enterprise#611). Guards the three ways an ask ends by hand:
+    respond, cancel and bulk-cancel."""
+    if not is_person_principal(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=dict(PERSON_REQUIRED_DETAIL),
+        )
 
 
 def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
@@ -1397,6 +1512,46 @@ def get_authorized_agent(
     return name
 
 
+def get_self_acting_agent(
+    name: str = Path(..., description="Agent name from path"),
+    current_user: User = Depends(get_current_user),
+) -> str:
+    """The agent in the path, acting as ITSELF (trinity-enterprise#611).
+
+    For the routes whose record claims "an agent did this" or that return what an
+    agent may read only about itself — an agent reading back its own ask. The
+    identity comes from the KEY, never from a body or the path alone: an
+    agent-scoped key may act only as the agent it belongs to, the system key only
+    as `trinity-system`, and every other principal (a person, a user-scoped key,
+    a connector) is refused — a person reads the queue through the operator
+    routes.
+
+    Identity FIRST, as one uniform 403 for every name that is not the caller's,
+    existent or not, so the refusal discloses nothing (Invariant #8's
+    self-uniform rule). Only then the ordinary access check, with its uniform 404.
+    """
+    from db.agents import SYSTEM_AGENT_NAME
+
+    scope = getattr(current_user, "mcp_scope", "__missing__")
+    agent = getattr(current_user, "agent_name", None)
+    is_self = (
+        (scope == "agent" and bool(agent) and agent == name)
+        or (scope == "system" and not agent and name == SYSTEM_AGENT_NAME)
+    )
+    if not is_self:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "agent_identity_required",
+                "message": (
+                    "Only the agent itself can do this, with its own key; "
+                    "use the operator queue routes to read another agent's asks"
+                ),
+            },
+        )
+    return get_authorized_agent(name, current_user)
+
+
 def get_owned_agent(
     name: str = Path(..., description="Agent name from path"),
     current_user: User = Depends(get_current_user)
@@ -1481,6 +1636,156 @@ def get_owned_agent_by_name(
             detail="Agent not found"
         )
     return agent_name
+
+
+# ============================================================================
+# Agent capability gate (trinity-enterprise#596)
+# ============================================================================
+# An agent-scoped key resolves to its OWNER carrying the owner's role (Invariant
+# #8), so an owner fence alone lets any agent act on every sibling the owner
+# holds. A capability is the thing an instance admin grants to a NAMED agent to
+# close that: without the grant, the agent key is refused — on a sibling AND on
+# itself. `skills.manage` is the first (only designated agents may change an
+# agent's skills; since #2703 an assignment also writes the skill's executable
+# files into the target in the same call).
+#
+# ALLOWLIST, not a denylist (#2323): `mcp_scope` is free text, so the shape is
+# "these scopes pass, this one passes with a grant, everything else is
+# refused" — a future scope is refused until someone decides otherwise.
+#   * ADMIN_GATE_SCOPES ({None, user, system}) — humans (JWT / user key) and
+#     `trinity-system`: unchanged by the ruling.
+#   * `agent` — passes only while its agent holds the capability (a LIVE row).
+#   * everything else — connector, ops, portal_delegate, a scope invented
+#     tomorrow — refused. Ephemeral ("ghost") agents are scope `agent` and are
+#     fenced earlier, at auth, by `_enforce_ephemeral_key_fence`; the grant
+#     route also refuses to grant one.
+# The gate never reads `agent_permissions` and granting never writes it:
+# permission to CALL an agent and permission to change its skills are
+# independent in both directions (ruling 2026-09-17).
+# ============================================================================
+
+# The named refusal per capability: the machine-readable code an agent can branch
+# on, and a sentence that says what is missing and where it is granted.
+_CAPABILITY_REFUSALS = {
+    "skills.manage": (
+        "skill_management_not_permitted",
+        "This agent does not hold the skill-management permission, which changing "
+        "any agent's skills requires \u2014 its own included. An instance admin can "
+        "grant it in Settings \u2192 Agents \u2192 Skill managers.",
+    ),
+}
+
+
+def acting_agent_name(current_user) -> Optional[str]:
+    """The AGENT behind a request, for attribution (ent#596, Tandem R29).
+
+    `current_user.agent_name` is populated only for `scope == "agent"`, so the
+    system agent's writes would otherwise be indistinguishable from a human's —
+    the one distinction the attribution exists to keep. None for a human.
+    """
+    scope = getattr(current_user, "mcp_scope", None)
+    if scope == "agent":
+        return getattr(current_user, "agent_name", None) or None
+    if scope == "system":
+        from db.agents import SYSTEM_AGENT_NAME
+        return SYSTEM_AGENT_NAME
+    return None
+
+
+def capability_refusal(current_user, capability: str) -> Optional[tuple]:
+    """`None` when this principal may use `capability`; else `(code, message)`.
+
+    Pure apart from one DB read, so the whole scope matrix is testable without
+    a request. A principal with no `mcp_scope` at all fails CLOSED — the
+    `_SCOPE_ABSENT` sentinel, never `getattr(..., None)`, which would make an
+    absent attribute the privileged JWT value (the #2323 trap).
+    """
+    code, message = _CAPABILITY_REFUSALS.get(
+        capability, ("capability_not_permitted", f"This key may not use '{capability}'.")
+    )
+    scope = getattr(current_user, "mcp_scope", _SCOPE_ABSENT)
+    if scope is _SCOPE_ABSENT:
+        return code, "Principal carries no mcp_scope; cannot satisfy a capability gate."
+    if scope in ADMIN_GATE_SCOPES:
+        return None
+    if scope == "agent":
+        agent = getattr(current_user, "agent_name", None)
+        if agent and db.agent_has_capability(agent, capability):
+            return None
+        return code, message
+    return code, f"A '{scope}' key cannot do this: {message}"
+
+
+async def enforce_agent_capability(
+    request: Request, current_user: User, capability: str, *, target: Optional[str] = None,
+) -> None:
+    """Refuse with a named 403 — and an audit row — unless the principal may use
+    `capability`. The refused attempt of a prompt-injected agent is exactly the
+    event worth keeping, so a refusal is recorded, not only returned."""
+    refusal = capability_refusal(current_user, capability)
+    if refusal is None:
+        return
+    code, message = refusal
+    try:  # best-effort: an audit failure must never turn a 403 into a 500
+        from services.platform_audit_service import platform_audit_service, AuditEventType
+        # The refused ACTOR is the agent, not its owner. `platform_audit_service`
+        # ranks `actor_user` above `actor_agent_name`, so passing the principal
+        # would file a prompt-injected agent's attempt as the owner's own act —
+        # the exact "the agent did it" vs "the person did it" line (Tandem R29)
+        # this capability exists to keep. For an agent principal: the agent is
+        # the actor, the owner rides as `actor_email`, and the key is named
+        # explicitly (the service derives it from `actor_user` otherwise).
+        agent = getattr(current_user, "agent_name", None)
+        actor = {"actor_user": current_user} if not agent else {
+            "actor_agent_name": agent,
+            "actor_email": getattr(current_user, "email", None),
+            "mcp_key_id": getattr(current_user, "mcp_key_id", None),
+            "mcp_key_name": getattr(current_user, "mcp_key_name", None),
+            "mcp_scope": getattr(current_user, "mcp_scope", None),
+        }
+        await platform_audit_service.log(
+            event_type=AuditEventType.AUTHORIZATION,
+            event_action="capability_refused",
+            source="api",
+            **actor,
+            actor_ip=request.client.host if request.client else None,
+            target_type="agent",
+            target_id=target,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={"capability": capability, "code": code, "method": request.method},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("capability refusal audit failed for %s", capability)
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": code, "capability": capability, "message": message},
+    )
+
+
+async def get_skill_managed_agent_by_name(
+    request: Request,
+    agent_name: str = Path(..., description="Agent name from path"),
+    current_user: User = Depends(get_current_user),
+) -> str:
+    """The fence for every route that changes an agent's skills (ent#596).
+
+    The capability check runs FIRST, then the owner fence. The order is the
+    point: a non-holder gets one uniform 403 whether or not the target exists,
+    so the refusal is never an existence oracle (#186), and it always names the
+    missing permission. A holder then meets the unchanged owner fence — the grant
+    never widens reach beyond the owner's own agents.
+
+    A composed dependency rather than a first-line call in each handler: a
+    convention has no guard, and the next route added to `routers/skills.py`
+    would forget it. `tests/unit/test_ent596_skill_manager.py` asserts every
+    skill-changing route there depends on this.
+    """
+    from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+    await enforce_agent_capability(
+        request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
+    )
+    return get_owned_agent_by_name(agent_name=agent_name, current_user=current_user)
 
 
 # ============================================================================
@@ -1594,6 +1899,76 @@ def assert_owns(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
+def resolve_source_agent(
+    current_user: User, x_source_agent: Optional[str], *, endpoint: str
+) -> Optional[str]:
+    """ent#614 — the effective ``X-Source-Agent`` for this request, or ``None``.
+
+    The header is a raw client value. It is honoured ONLY when the principal
+    can prove it names itself:
+
+    * an **agent-scoped** key naming its own agent (``current_user.agent_name``
+      — the SELF-EXEC-001 rule that ``derive_source_and_trigger`` applied to
+      ``/task`` alone, while ``/chat`` and ``/fan-out`` applied nothing); or
+    * the **EVT-001 loopback** token, whose ``vouched_source_agent`` the
+      backend itself derived from an agent-originated event.
+
+    A mismatch under either is a 403 (the pre-existing SELF-EXEC-001 wording).
+    Every other principal — a JWT human, a user / system / ops / connector /
+    portal-delegate key, any scope a later PR invents — is refused with a
+    NAMED 403 rather than silently trusted or silently ignored. Trusted was the
+    defect: three audit sites recorded the header as the actor
+    (``actor_type='agent'``, the human dropped), the execution row read
+    ``triggered_by='agent'``, and an ``AGENT_COLLABORATION`` activity plus a
+    WebSocket edge were forged onto the named agent, which the caller may not
+    even be able to access. Ignored would be the next defect: a warning nobody
+    reads is how the next producer ships with attribution silently dropped; a
+    403 that names the rule is how it gets fixed.
+
+    Order is load-bearing: the falsy check runs BEFORE any ``getattr`` (bare
+    ``MagicMock`` / ``SimpleNamespace`` principals in older suites call handlers
+    with ``x_source_agent=None``), and the ``getattr`` default is ``None`` — the
+    UNPRIVILEGED direction (#2323): a principal carrying neither attribute is
+    "not an agent", never "trusted". The header stays an opt-in INTENT flag: an
+    agent key calling ``/task`` raw without it keeps today's ``mcp`` /
+    ``manual`` semantics rather than silently flipping to ``self_task``.
+
+    Every router that declares the header must route it through here —
+    ``tests/unit/test_ent614_source_agent_attribution.py`` walks the OSS tree
+    and fails a reader that forwards the raw value.
+    """
+    if not x_source_agent:
+        return None
+    identity = getattr(current_user, "agent_name", None) or getattr(
+        current_user, "vouched_source_agent", None
+    )
+    if identity:
+        if x_source_agent == identity:
+            return x_source_agent
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Source agent header '{x_source_agent}' doesn't match API key "
+                f"scope '{identity}'"
+            ),
+        )
+    logger.warning(
+        "[ent#614] %s: X-Source-Agent=%r refused — principal %s (mcp_scope=%r) "
+        "is not agent-scoped and cannot name a source agent",
+        endpoint,
+        x_source_agent[:64],
+        getattr(current_user, "id", None),
+        getattr(current_user, "mcp_scope", None),
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "X-Source-Agent is honoured only for an agent-scoped API key naming "
+            "its own agent (SELF-EXEC-001); drop the header to act as yourself"
+        ),
+    )
+
+
 # Type aliases for cleaner signatures
 # For routes using {name} path parameter (schedules, credentials, chat)
 AuthorizedAgent = Annotated[str, Depends(get_authorized_agent)]
@@ -1602,6 +1977,7 @@ OwnedAgent = Annotated[str, Depends(get_owned_agent)]
 # For routes using {agent_name} path parameter (agents, git, sharing, public_links)
 AuthorizedAgentByName = Annotated[str, Depends(get_authorized_agent_by_name)]
 OwnedAgentByName = Annotated[str, Depends(get_owned_agent_by_name)]
+SkillManagedAgentByName = Annotated[str, Depends(get_skill_managed_agent_by_name)]  # ent#596
 
 # Current user type alias
 CurrentUser = Annotated[User, Depends(get_current_user)]

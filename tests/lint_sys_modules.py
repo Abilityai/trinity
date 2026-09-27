@@ -18,6 +18,25 @@ Allowed patterns:
     violations grandfathered in at adoption time, Issue #762; new violations
     in baselined files are NOT permitted — only the existing line count is)
 
+Banned in EVERY test file, with no exemption and no baseline (a hard failure —
+the runner-killer class, trinity-enterprise#620 / #728):
+  - an UNGUARDED module-level eviction of a whole package — a top-level
+    `for ... in list(sys.modules): ... sys.modules.pop(...)` loop that is not
+    nested under an `if`. It re-registers the package under a fresh module
+    object, so any earlier-collected file that bound a function from the old
+    copy and later patches by dotted string patches the wrong copy. For
+    `agent_server` that meant test_drain_bounded.py ran the REAL drain, whose
+    cgroup orphan sweep SIGKILLed the CI runner on every shard and a
+    developer's desktop session. Nest the loop under the path guard
+    (precedent: tests/unit/test_git_status_dual_ahead_behind.py):
+
+        _existing = sys.modules.get("agent_server")
+        if _existing is None or not any(_real_path in p for p in
+                                        (getattr(_existing, "__path__", None) or [])):
+            for _mod in list(sys.modules): ...
+
+    and patch through the bound function's `__globals__` on the other side.
+
 Banned at any scope outside the allowlist (module level, function body, fixture
 body):
   - `sys.modules[key] = value`
@@ -64,6 +83,7 @@ class Finding(NamedTuple):
     lineno: int
     col: int
     message: str
+    hard: bool = False  # never baselined, never exempted — fails on sight
 
 
 def _is_allowlisted_file(path: Path) -> bool:
@@ -119,6 +139,67 @@ def _has_stubbed_module_names_helper(tree: ast.Module) -> bool:
     return has_names and has_fixture
 
 
+EVICTION_HINT = (
+    "an UNGUARDED module-level eviction loop over sys.modules re-registers a "
+    "package under a fresh module object; an earlier-collected file's dotted-"
+    "string monkeypatch then lands on the wrong copy and the REAL code runs "
+    "(for agent_server: the cgroup orphan sweep, which SIGKILLs the CI runner "
+    "and a developer's desktop session — trinity-enterprise#620 / #728). Nest "
+    "the loop under the `_existing`/`__path__` guard "
+    "(tests/unit/test_git_status_dual_ahead_behind.py) or drop it — "
+    "tests/unit/conftest.py already installs the real package path-guarded."
+)
+
+
+def _contains_sys_modules_pop(node: ast.AST) -> bool:
+    return any(
+        _is_sys_modules_attr_call(sub, {"pop"}) or (
+            isinstance(sub, ast.Delete)
+            and any(_is_sys_modules_subscript(t) for t in sub.targets)
+        )
+        for sub in ast.walk(node)
+    )
+
+
+def unguarded_evictions(tree: ast.Module) -> list[ast.For]:
+    """Top-level `for` loops (direct children of the module — NOT nested under
+    an `if`, a function or a `try`) whose body pops from `sys.modules`. These
+    are hard failures regardless of the snapshot/restore helper pair, which
+    only proves the file cleans up after ITSELF — the damage here is done to
+    a file collected earlier, at collection time, before any fixture runs."""
+    return [
+        node for node in tree.body
+        if isinstance(node, ast.For)
+        and _iterates_sys_modules(node.iter)
+        and _contains_sys_modules_pop(node)
+    ]
+
+
+def _iterates_sys_modules(it: ast.expr) -> bool:
+    """`sys.modules`, `list(sys.modules)`, `sys.modules.keys()`, `list(sys.modules.keys())`
+    — a SCAN of the registry (prefix-filtered eviction of a whole package),
+    as opposed to a loop over a fixed name list, which is the ordinary
+    snapshot/restore shape the helper pair already covers."""
+    if _is_sys_modules_expr(it):
+        return True
+    if isinstance(it, ast.Call):
+        f = it.func
+        if isinstance(f, ast.Name) and f.id in {"list", "tuple", "set", "sorted"} and it.args:
+            return _iterates_sys_modules(it.args[0])
+        if isinstance(f, ast.Attribute) and f.attr in {"keys", "items"} and _is_sys_modules_expr(f.value):
+            return True
+    return False
+
+
+def _is_sys_modules_expr(node: ast.expr) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "modules"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "sys"
+    )
+
+
 def _check_file(path: Path) -> list[Finding]:
     if _is_allowlisted_file(path):
         return []
@@ -133,11 +214,21 @@ def _check_file(path: Path) -> list[Finding]:
     except SyntaxError:
         return []
 
+    findings: list[Finding] = []
+    for loop in unguarded_evictions(tree):
+        findings.append(
+            Finding(
+                path=path,
+                lineno=loop.lineno,
+                col=loop.col_offset,
+                message=f"unguarded module-level sys.modules eviction loop: {EVICTION_HINT}",
+                hard=True,
+            )
+        )
+
     helper_exception = _has_stubbed_module_names_helper(tree)
     if helper_exception:
-        return []
-
-    findings: list[Finding] = []
+        return findings
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
@@ -262,7 +353,7 @@ def diff_against_baseline(
 
 def main(argv: list[str]) -> int:
     if "--regenerate-baseline" in argv:
-        findings = collect_findings()
+        findings = [f for f in collect_findings() if not f.hard]
         counter = findings_per_file(findings)
         write_baseline(counter)
         print(
@@ -272,6 +363,18 @@ def main(argv: list[str]) -> int:
         return 0
 
     findings = collect_findings()
+    hard = [f for f in findings if f.hard]
+    if hard:
+        for f in hard:
+            rel = f.path.relative_to(TESTS_ROOT.parent).as_posix()
+            print(f"{rel}:{f.lineno}:{f.col}: {f.message}")
+        print(
+            f"\nFAIL: {len(hard)} unguarded module-level sys.modules eviction(s). "
+            "This class is never baselined — it killed the CI runner and a "
+            "developer desktop session (trinity-enterprise#620)."
+        )
+        return 1
+    findings = [f for f in findings if not f.hard]
     current = findings_per_file(findings)
     baseline = load_baseline()
 

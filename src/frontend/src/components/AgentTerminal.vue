@@ -92,6 +92,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { readStoredToken } from '@/utils/platformSession'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -320,7 +321,7 @@ function connect() {
   terminal.write(`\x1b[33mConnecting to ${props.agentName}...\x1b[0m\r\n`)
 
   // Get token from localStorage
-  const token = localStorage.getItem('token')
+  const token = readStoredToken()
   if (!token) {
     errorMessage.value = 'Not authenticated. Please log in.'
     connectionStatus.value = 'disconnected'

@@ -40,6 +40,10 @@ def _card(*, tts_ready: bool, effective_voice: str | None):
             dict(ROW), tts_ready, "platform-default",
             is_platform=False, runtime="claude-code",
             model_context=portal_service._model_context(),
+            # #2695: this file pins the INDEPENDENCE of the two voice bits, so
+            # the capability verdict is held at its neutral value — the meaning
+            # the bit had when #2212 was written.
+            stt_ready=True,
         )
 
 
@@ -87,6 +91,7 @@ def test_card_bit_and_endpoint_gate_are_the_same_condition(key_available):
             dict(ROW), tts_service.is_available(),
             is_platform=False, runtime="claude-code",
             model_context=portal_service._model_context(),
+            stt_ready=True,  # #2695 — neutral, as above.
         )
         if key_available:
             # Past the gate: it fails later, at the provider call, not at the gate.

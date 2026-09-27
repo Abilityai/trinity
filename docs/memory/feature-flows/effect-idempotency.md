@@ -47,8 +47,22 @@ side-effect-bearing agents.
      **resolved, immutable** identity only — recipient + channel (+ provider
      account); **never the LLM-generated message body** (non-deterministic across
      a re-run → would defeat dedup). Per-sink args: share_file → filename +
-     content sha256; voip → resolved E.164 dial target + Twilio account;
+     content sha256 + audience (the addressee — the agent's `audience_email`
+     override, else the one the platform resolved from the turn; empty for an
+     owner-only share); voip → resolved E.164 dial target + Twilio account;
      nevermined → `agent_request_id` (covers amount/asset/payer/settlement-phase).
+   - **Why the addressee is in the share_file key** (trinity-enterprise#549): the
+     addressee is part of WHAT the effect is. Re-addressing the same file to a
+     second person in one turn must be a second share, not a replay — a key over
+     `{filename, content}` alone replays the first snapshot for the second call,
+     reporting success while the second person's row never exists. The args are
+     hashed into the key, and the replay snapshot is stored WITHOUT the
+     `addressed_to` echo, so `idempotency_keys` never holds an address: a replay
+     re-derives the echo from its own call, whose `audience_email` is part of the
+     key and therefore the same address by construction. The scope is unchanged (`effect:{execution_id}`): same
+     turn, same file, same addressee still replays the original signed URL. The
+     rule that decides the addressee lives in
+     [file-sharing-outbound.md](file-sharing-outbound.md) → *Who a file is for*.
    - `dedup_label` (agent-supplied, default ""): lets an agent intentionally send
      two distinct messages to the same recipient in one turn. Default empty →
      at-most-one effect per (recipient, channel, type) per turn.
@@ -94,7 +108,7 @@ side-effect-bearing agents.
 |------|---------------|-------|------------------|
 | Proactive message | `proactive_message_service.send_message` | `effect:{exec}` | `{recipient, channel}` |
 | VoIP call | `voip_service.place_outbound_call` | `effect:{exec}` | `{to (E.164), account}` |
-| Share file | `agent_shared_files_service.create_share` | `effect:{exec}` | `{filename, content sha256}` |
+| Share file | `agent_shared_files_service.create_share` | `effect:{exec}` | `{filename, content sha256, audience}` — audience is the addressee (override or resolved; empty for owner-only) |
 | Nevermined settle | `nevermined_payment_service.settle_payment_once` | `payment:{agent_request_id}` | `{phase, plan_id}` |
 
 Each service entry is reached from its router (`routers/messages.py`,
@@ -175,7 +189,9 @@ effect, not fail-open). Both are tracked as a **blocking dependency on Epic
 - Nevermined: retried settle same `agent_request_id` → ONE settle; failed settle
   → release + retry; distinct tokens → both; missing token → fail-open.
 - share_file: re-run same execution_id+filename → same URL replay; changed
-  content → new share.
+  content → new share; the same file re-addressed to a second person in the
+  same turn → a second share, while same turn + file + addressee still replays
+  (`tests/unit/test_ent549_file_audience.py`).
 - MCP: `send_message` forwards `execution_id` + `dedup_label` (undefined when
   omitted); `chat_with_agent` still sets a non-empty `mcp:` Idempotency-Key.
 
@@ -199,6 +215,10 @@ effect, not fail-open). Both are tracked as a **blocking dependency on Epic
 
 ## Change History
 
+- 2026-09-21 — trinity-enterprise#549: the share_file sink's identifying args
+  gained the addressee (`{filename, content sha256, audience}`), so re-addressing
+  a file within one turn is a second share rather than a replay. Scope unchanged
+  (`effect:{execution_id}`); no change to `idempotency_keys`.
 - 2026-07-04 — #1018: the paid x402 boundary (`routers/paid.py`) gained the #525
   trigger-idempotency layer (`derive_payment_key`, `upgrade_snapshot`), composing
   with the `payment:{agent_request_id}` settle effect guard. No schema change.

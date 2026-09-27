@@ -8,6 +8,7 @@ by the image build / live sync, not here.
 """
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -29,12 +30,57 @@ def _ops():
     return SyncStateOperations()
 
 
+# #2800: the 44 GiB round-trip below can only FAIL on PostgreSQL — SQLite's
+# INTEGER is 64-bit, PostgreSQL's is int4 (ceiling 2 GiB). `schema-parity.yml`
+# selects on this marker and runs it with TEST_POSTGRES_URL set, so the
+# [postgres] leg is a required gate instead of a leg nobody ever ran (it shipped
+# red for two months because the tier ran only `-m requires_postgres`).
+@pytest.mark.requires_postgres
 class TestGitDirBytesRoundTrip:
     def test_upsert_and_read_git_dir_bytes(self, db_backend):
         ops = _ops()
         ops.upsert("a1", last_sync_status="success", git_dir_bytes=47244640256)  # ~44 GiB
         row = ops.get("a1")
         assert row["git_dir_bytes"] == 47244640256
+
+    def test_every_int_column_round_trips_its_own_maximum(self, db_backend):
+        """#2827 AC: the maximum the boundary admits for each of the eight int
+        columns persists on BOTH backends. On PostgreSQL this is the proof
+        that boundary and column agree — INT4_MAX in an int4 column, INT8_MAX
+        in the one BIGINT — where a mismatch is `NumericValueOutOfRange`."""
+        from services.sync_health_service import INT4_MAX, INT8_MAX
+        ops = _ops()
+        ops.upsert(
+            "a2", last_sync_status="success",
+            git_dir_bytes=INT8_MAX,
+            pack_count=INT4_MAX, loose_objects=INT4_MAX, maintenance_failures=INT4_MAX,
+            ahead_main=INT4_MAX, behind_main=INT4_MAX,
+            ahead_working=INT4_MAX, behind_working=INT4_MAX,
+        )
+        row = ops.get("a2")
+        assert row["git_dir_bytes"] == INT8_MAX
+        for col in ("pack_count", "loose_objects", "maintenance_failures",
+                    "ahead_main", "behind_main", "ahead_working", "behind_working"):
+            assert row[col] == INT4_MAX, col
+
+    def test_git_dir_bytes_is_64_bit_on_postgres(self, db_backend):
+        """#2800: the declared type, not just one value that happened to fit.
+
+        The round-trip above proves a 44 GiB value persists; this proves WHY, so
+        a future `schema.py` edit that quietly reverts the column to INTEGER is
+        named by column type rather than by a NumericValueOutOfRange stack.
+        """
+        if db_backend != "postgres":
+            pytest.skip("declared-type assertion is PostgreSQL-only (SQLite INTEGER is already 64-bit)")
+        from sqlalchemy import text
+        from db.engine import get_engine
+
+        with get_engine().connect() as conn:
+            data_type = conn.execute(text(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_name = 'agent_sync_state' AND column_name = 'git_dir_bytes'"
+            )).scalar()
+        assert data_type == "bigint", f"git_dir_bytes is {data_type!r} on PostgreSQL — must be bigint (#2800)"
 
     def test_partial_update_preserves_git_dir_bytes(self, db_backend):
         ops = _ops()
@@ -66,3 +112,36 @@ class TestDefaultGitignoreConventions:
         from services.git_service import _GITIGNORE_PATTERNS
         for pat in (".env", ".mcp.json", "content/", "*.pem"):
             assert pat in _GITIGNORE_PATTERNS
+
+
+class TestGitDirBytesNeedsNoSqliteMigration:
+    """#2800 on the SQLite track is deliberately NOTHING.
+
+    INTEGER and BIGINT are the same 64-bit INTEGER affinity in SQLite, so an
+    upgraded file that still declares INTEGER stores the same values as a fresh
+    file declaring BIGINT. The first version of this fix shipped a rename-swap
+    rebuild of the live table at boot on the claim that the schema-parity suite
+    would otherwise go red — a negative control (registration removed) showed
+    it stays green, because both parity fixtures build from empty and never see
+    a pre-#2800 file. A boot-time DROP TABLE for a CI benefit that does not
+    exist is the wrong trade, so the migration was dropped and this pins that it
+    stays dropped for a REASON rather than being re-added by the next reader of
+    the Alembic revision's "mirrors" sentence.
+    """
+
+    def test_no_sqlite_migration_is_registered_for_the_widening(self):
+        src = (_BACKEND / "db" / "migrations.py").read_text(encoding="utf-8")
+        assert "agent_sync_state_git_dir_bytes_bigint" not in src.split("MIGRATIONS = [")[1], (
+            "a SQLite migration for #2800 was re-registered — read the note beside "
+            "_migrate_agent_sync_state_git_dir_bytes before keeping it"
+        )
+
+    def test_a_pre_2800_sqlite_file_stores_a_64_bit_value_unchanged(self):
+        """The property the dropped rebuild was NOT needed for: INTEGER affinity
+        already holds the value that overflows int4 on PostgreSQL."""
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE agent_sync_state (agent_name TEXT PRIMARY KEY, git_dir_bytes INTEGER, updated_at TEXT NOT NULL)")
+        big = 44 * 1024 ** 3   # the 44 GiB repo from the report; > 2**31
+        cur.execute("INSERT INTO agent_sync_state VALUES ('a', ?, 'now')", (big,))
+        assert cur.execute("SELECT git_dir_bytes FROM agent_sync_state").fetchone()[0] == big

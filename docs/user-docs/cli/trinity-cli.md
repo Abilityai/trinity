@@ -32,7 +32,7 @@ You'll be prompted for:
 2. **Email** — Your login email
 3. **Verification code** — 6-digit code sent to your email
 
-The CLI stores credentials in `~/.trinity/config.json` and auto-provisions an MCP API key.
+The CLI stores credentials in `~/.trinity/config.json` (mode 0600) and auto-provisions an MCP API key. Options: `--profile <name>` saves the instance under a named profile, and `--admin` logs in with the admin password instead of an email code.
 
 ### Multi-Instance Profiles
 
@@ -60,7 +60,10 @@ Profile resolution priority:
 Re-authenticate with an existing profile:
 
 ```bash
-trinity login
+trinity login                      # email code; --admin for the admin password
+trinity login --instance https://trinity.example.com --profile staging   # add or repoint a profile
+trinity status                     # which profile and instance you are on
+trinity logout                     # clear the current profile's stored credentials
 ```
 
 ## Commands
@@ -186,8 +189,8 @@ trinity schedules trigger other-agent daily-report
 
 ## Limitations
 
-- Phase 2 coverage: core agent, chat, health, skills, schedules, tags
-- Phase 3 (future): credentials, events, executions, systems, subscriptions
+- Covered today: agents, deploy, chat and history, logs, health, skills, schedules (list and trigger), tags, profiles.
+- Not yet in the CLI: credentials, events, executions, systems, subscriptions — use the [MCP server](../integrations/mcp-server.md) or the REST API for those.
 
 ## See Also
 

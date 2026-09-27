@@ -465,6 +465,19 @@ async def start_agent_internal(agent_name: str) -> dict:
     if read_only_data.get("enabled"):
         read_only_result = await inject_read_only_hooks(agent_name, read_only_data.get("config"))
 
+    # 4. #2069: creation-parity `.gitignore` merge — gated on the DB
+    #    auto_sync_enabled flag (the persisted owner intent the runtime honors).
+    if db.get_git_auto_sync_enabled(agent_name):
+        git_service.spawn_gitignore_merge_after_clone(agent_name)
+
+    # 5. ent#615: install the git credential helper and remove any embedded
+    #    credential from this agent's remotes. Same fire-and-forget shape, and
+    #    DELIBERATELY NOT behind #2069's gate — whether an agent auto-syncs has
+    #    nothing to do with whether its `.git/config` holds a token, and copying
+    #    that gate would silently skip every agent that does not. Idempotent,
+    #    and it refuses rather than stripping a credential it could not replace.
+    git_service.spawn_git_remote_token_scrub(agent_name)
+
     return {
         "message": f"Agent {agent_name} started",
         "credentials_injection": credentials_result.get("status", "unknown"),

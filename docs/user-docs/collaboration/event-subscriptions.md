@@ -6,7 +6,7 @@ Lightweight pub/sub system for inter-agent event pipelines. Agents emit named ev
 
 - **Event** -- A named occurrence emitted by an agent with a structured JSON payload. Stored in the `agent_events` table.
 - **Subscription** -- A rule that says "when agent X emits event type Y, send agent Z an async task with message template M". Stored in the `agent_event_subscriptions` table.
-- **Message Template** -- Supports `{{payload.field}}` interpolation. The subscriber's task message is built from the event payload.
+- **Message Template** -- The `target_message` of a subscription. Supports `{{payload.field}}` interpolation. The subscriber's task message is built from the event payload.
 - **Permission-Gated** -- Uses existing `agent_permissions`. The subscribing agent must have permission to call the source agent.
 
 ## How It Works
@@ -28,7 +28,7 @@ Trinity deterministically emits `agent.task.completed` and `agent.task.failed` a
 subscribe_to_event(
   source_agent="research-worker",
   event_type="agent.task.completed",
-  message_template="research-worker finished task {{payload.execution_id}} ({{payload.status}}): {{payload.summary_or_error}}"
+  target_message="research-worker finished task {{payload.execution_id}} ({{payload.status}}): {{payload.summary_or_error}}"
 )
 ```
 
@@ -62,6 +62,19 @@ Delivery is **best-effort**. The report-back task wakes a subscriber whose conta
 
 With **zero matching subscriptions**, nothing happens: no event row is written and no task is dispatched. There is **no new config, endpoint, or flag** -- task-completion events reuse the existing event-subscription tools below (`subscribe_to_event` / `list_event_subscriptions` / `delete_event_subscription`), passing `event_type="agent.task.completed"` or `"agent.task.failed"`.
 
+### Reporting back to the person who asked
+
+Subscriptions wake an *agent*. Independently of them, a job that started from a conversation and finished later — because the agent delegated it to another agent, or kicked off background work — reports its outcome back to the conversation it came from, success and failure alike. Four places can receive that report:
+
+| Where the job started | Where the outcome lands |
+|-----------------------|-------------------------|
+| A Slack channel or thread | A note in that channel/thread — see [Slack](../integrations/slack-integration.md#completion-report-back) |
+| A Telegram chat | A reply threaded to your message, from the bot you talked to — see [Telegram](../integrations/telegram-integration.md#completion-report-back) |
+| A [Workspace](../sharing-and-access/workspace.md) chat | A message from the agent in that chat. It is filed under the agent you were talking to and names the agent that did the work when that differs; it opens with **Finished** or **Didn't finish** and the status, so a failure never vanishes. The chat moves to the top of the sidebar as any new message would, and the report waits up to two minutes for a reply already in progress before landing |
+| A scheduled run addressed to someone | That person's **Main** chat — see [Scheduling](../automation/scheduling.md#delivering-a-runs-output-to-someones-workspace) |
+
+An ordinary turn that already answered inline is never reported a second time. Each finished job reports at most once, and a report is never sent to a conversation the work was not started from. The Workspace does not push the report while you watch: it is there on the next load or chat switch.
+
 ## For Agents
 
 ### MCP Tools
@@ -69,7 +82,7 @@ With **zero matching subscriptions**, nothing happens: no event row is written a
 | Tool | Description |
 |------|-------------|
 | `emit_event(event_type, payload)` | Emit a named event with data |
-| `subscribe_to_event(source_agent, event_type, message_template)` | Create a subscription |
+| `subscribe_to_event(source_agent, event_type, target_message)` | Create a subscription |
 | `list_event_subscriptions(agent_name)` | List subscriptions |
 | `delete_event_subscription(subscription_id)` | Remove a subscription |
 
@@ -91,3 +104,4 @@ With **zero matching subscriptions**, nothing happens: no event row is written a
 
 - [Agent Permissions](agent-permissions.md)
 - [Agent Network](agent-network.md)
+- [Executions](../operations/executions.md) — the run-level record a completion event describes

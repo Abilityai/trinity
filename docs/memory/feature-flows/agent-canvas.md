@@ -93,9 +93,250 @@ CREATE INDEX idx_agent_canvases_agent ON agent_canvases(agent_name, updated_at D
   would leave a renamed agent's canvas addressed to a name nothing resolves,
   and the agent's next write would silently mint a **second** canvas under the
   new name while the old one stayed visible.
-- **No retention window.** The table is bounded by the composite key — one row
-  per surface, replaced on write — unlike the append-only tables
-  `RETENTION_OPS_KEYS` governs. It is deliberately absent from that set.
+- **A per-agent CAP, not a retention window** (corrected by ent#553). ent#438
+  recorded "no retention window" on the grounds that the composite key bounds
+  the table — one row per surface, replaced on write. That bounds the rows *per
+  canvas*, not the *number of canvases*: `canvas_id` is agent-chosen, so an
+  agent writing one canvas per run grows the table without limit. The unbounded
+  axis was missed, not decided.
+
+  The bound is `CANVAS_MAX_PER_AGENT` (default 100, env-tunable), enforced
+  inside `upsert_canvas`'s insert branch — in the same transaction as the
+  INSERT, so it is not a check-then-act race. Two properties follow:
+  **updating an existing canvas is never refused** (a cap that froze updates
+  would punish the agent that reuses ids, which is the behaviour we want), and
+  the refusal is a named 409 telling the agent to retire one, never an
+  eviction. Deleting a person's surfaces on a timer is the #1638 failure
+  direction; the table therefore stays deliberately absent from
+  `RETENTION_OPS_KEYS`, now for a stated reason rather than a mistaken one.
+
+## The open canvas is shared context (ent#555)
+
+When a user with a canvas on screen says *"add a column to this"*, the agent
+acts on that canvas. Before this the turn carried the message and nothing about
+the surface around it, so the agent asked, guessed, or minted a new canvas
+beside the one being looked at.
+
+**The mechanism is a per-turn context field**, the same shape as the
+`source_channel*` columns beside it: `schedule_executions.open_canvas_id`,
+stamped at dispatch (dual-track: `execution_open_canvas` + Alembic `0060`).
+
+**It is CONTEXT, never AUTHORITY** — the boundary the whole design rests on.
+Two independent halves keep it there:
+
+| half | question it answers | what it cannot do |
+|---|---|---|
+| `client_portal.service.validated_open_canvas` | what may be *stamped* on a turn | grant anything — it only ever narrows a client-supplied id |
+| `canvas_service.effective_canvas_id` | what a tool *acts on* | widen reach — every read/write still passes the ownership and audience gates |
+
+The id is client-supplied, so it is validated at the boundary against the
+agent's **own** canvases and against what that caller can see: an operator-only
+canvas is invisible to an external client (otherwise the field is an existence
+oracle for canvases the agent keeps privately), and another agent's canvas is
+refused outright. Every failure degrades to "nothing open" — never an error,
+never a wider reach.
+
+**Precedence, stated once so all three tools agree:**
+
+    explicit canvas_id  >  the canvas the user has open  >  the default canvas
+
+`effective_canvas_id` returns *why* as well as *which*, because with nothing
+named the agent has to be able to say which canvas it wrote to — "I updated the
+canvas" is not good enough when there are eight and the user is looking at one
+(AC #7).
+
+**Two delivery paths, both required.** The MCP tools resolve a missing
+`canvas_id` through `GET /api/agents/{name}/canvas/context` (declared above
+`/{canvas_id}` — Invariant #4, since "context" is a valid id shape), and the
+turn prompt *names* the open canvas. Both are needed: the tool default handles
+a call that omits an id, but an agent must READ a canvas before editing it and
+cannot read what it cannot name. The prompt line rides the same prefix as the
+file manifest, so it is present on a **resumed** turn too — the open canvas
+changes between turns while the session's memory of it does not.
+
+**A canvas deleted mid-conversation resolves to nothing**, re-checked at read
+time rather than trusted from the stamp: ent#553 made deleting one click, and
+a surviving id would have the agent's next write CREATE a canvas under it,
+silently resurrecting something a person deleted.
+
+**Voice inherits it, by construction not by wiring.** The ent#440 conversation
+loop submits a spoken utterance through `submitUserText` → `deliver` — the same
+function a typed message takes — so the stamp is already on it; a second voice
+path would be a second thing to keep in sync. The `canvas` tools in
+`services/gemini_voice.py` are deliberately untouched: that is VOICE-001's
+ephemeral display panel, a different surface with no persisted id, and nothing
+about it is addressable by `canvas_id`.
+
+
+## Sharing and export (ent#554)
+
+A canvas can leave the Workspace two ways: a **share link** and a **PDF**.
+
+### The share link
+
+`agent_canvas_shares` — deliberately its OWN table, not a typed row in
+`agent_public_links`. That table has a `type` column that looks made for this,
+but **nothing in its read path filters on it**: `get_public_link_by_token`,
+`is_link_valid` and `routers/public.py::_validate_public_link` all resolve a
+token whatever its type. A canvas row there would therefore also be a working
+public-**chat** token — anyone sent a canvas could talk to the agent. (The same
+trap is already latent for `type='site'`, unexploited only because nothing
+creates those rows today; `db_models.py` says "currently only 'chat' is
+supported".) A separate table makes the isolation structural rather than
+dependent on every consumer remembering to check.
+
+**Two scopes, and the default is the narrow one.**
+
+| scope | reach | how it is enforced |
+|---|---|---|
+| `authorized` (default) | the people who could already see the canvas | the link is a DEEP link: the view requires a signed-in principal and re-checks `can_user_access_agent`. The link POINTS at a canvas; it never grants access to one. |
+| `public` | anyone holding the URL | an explicit, separate, audited choice; protected only by 256 bits of token entropy |
+
+Failing narrow is enforced in five independent places — the column default, the
+Pydantic default, `normalize_scope`'s fallback for an unrecognised value, the
+order of `SHARE_SCOPES`, and the radio the dialog preselects — because a link
+that reaches further than the sharer understood is the one failure this feature
+must not have. Creating a `public` link audits under its own action
+(`canvas_share_public`), so "who made this readable by anyone with the URL" is
+answerable without reading payloads; the token is never in the audit row (it IS
+the capability — the G-04 rule).
+
+**Minting, listing and revoking are human-only — `_gate_share`, never
+`_gate_human_removal`.** This is the grant-vs-use line (Invariant #8): the
+endpoint that *uses* a capability may be agent-callable, the one that *grants*
+one is not. It shipped the other way in the first cut — all three routes called
+`_gate_human_removal`, whose own docstring says it admits an agent-scoped key
+acting on its own agent (correct for `clear_canvas`, an agent tidying up after
+itself) — while `create_canvas_share`'s docstring claimed to be human-only. A
+prompt-injected agent could therefore `POST /api/agents/<self>/canvas/<id>/share
+{"scope": "public"}` with the `TRINITY_MCP_API_KEY` already in its container and
+publish its own canvas at an unauthenticated URL. Three things made that worse
+than it first reads: the share is **live rather than a snapshot**, so one link
+is a self-updating channel; the agent is the **only writer** of canvas blocks,
+so anything it can read it can copy in and publish; and **`audience` is not
+consulted on the share path**, so ent#438's fail-closed "a canvas reaches a
+client only because the agent said so" would not have applied. `list_canvas_shares`
+is gated identically because it returns the **token**, which is the capability
+itself.
+
+The shared predicate is `_gate_human_only`, which `_gate_pin` and `_gate_share`
+both delegate to. It is named after the rule it enforces rather than after a
+verb on purpose: `_gate_human_removal` is a correct gate with a name that
+describes one caller, and reaching for it by that name is precisely how the
+share routes acquired the wrong rule. The delete routes (`clear_canvas`,
+`bulk_delete_canvases`) deliberately keep `_gate_human_removal` — `clear_canvas`
+is a real MCP tool and an agent retiring its own surface is wanted behaviour —
+and `test_deleting_a_canvas_is_deliberately_still_agent_callable` guards that
+boundary in the other direction, because the first attempt at this fix swept
+both delete routes into the human-only gate with one over-broad replace.
+
+**A shared canvas is LIVE, and says so** (AC #3, operator ruling 2026-09-08).
+The link renders the canvas as it is now, carrying its `updated_at`, and the
+page states that it is not a copy taken at share time. This
+follows ent#438's model — a canvas is a surface an agent keeps *current* — and
+means a share stores nothing. The cost is that content can change after you
+share it; the mitigation is revocation, not freezing.
+
+**Revocation keeps the row.** `revoked_at` is stamped, never deleted, because a
+revoked link has to be able to SAY it was revoked (AC #2) and it cannot do that
+once the row is gone. The status vocabulary splits along disclosure: `revoked`
+and `expired` are returned only for a token that MATCHED a row — whoever holds
+such a link was already told the canvas exists — while an unknown token and a
+canvas deleted out from under a link both collapse into one `not_found`, so a
+stranger guessing tokens learns nothing from the difference. An unparseable
+`expires_at` reads as expired: a link whose lifetime cannot be read is one we
+cannot promise is live.
+
+### The PDF
+
+**Print-first**, per the issue's own guidance: a print stylesheet over the
+design kit plus the browser's own PDF. No headless-browser service to run, and
+— the deciding reason — no second renderer to keep in step with `CanvasBlock`.
+A server-side renderer was the stated fallback and was not needed: pagination
+(`break-inside: avoid` per block) and fidelity both come out of the same markup
+the screen uses.
+
+`components/canvas/CanvasDocument.vue` is the one printable form, rendered by
+both the shared-link page and every authenticated surface, so AC #7's "works
+identically from every canvas surface" is true by construction rather than by
+three surfaces agreeing. It carries the title, agent and generation date (AC
+#5), and forces the light rendering under `@media print` whatever theme the
+viewer is in. The controls are `print:hidden` — chrome is never part of the
+document — and when `window.print` is unavailable the button says so and the
+share link still works (AC #6).
+
+## Lifecycle — removing, pinning, and living with a lot of them (ent#553)
+
+An agent that uses its canvas as intended accumulates dozens: one per report,
+per topic, per run. Before ent#553 the Workspace could only ever *add* to that
+pile — there was no delete on the client-portal surface at all, and the only
+ordering was "newest updated".
+
+**Who may remove one.** Owner-or-admin for a human; an agent may still clear
+its *own* (`clear_canvas`, the #918 self-gate). This is the answer ent#548
+gives for files — the owner deletes the shared artifact — and it *narrowed* the
+platform DELETE route, which previously accepted any user with agent access.
+Safe to narrow because no UI called it, so no workflow depended on the wider
+gate. A canvas is one shared surface with no per-user copy, so a non-owner has
+no "remove it from my list only" middle ground to be offered: per AC #2 they
+see **no control at all** rather than one that fails. The Workspace learns this
+from `PortalAgentCard.can_manage_canvases`, the portal's only capability
+channel (#2128) — a portal principal cannot read `/api/settings/feature-flags`.
+Both surfaces resolve it through `db.can_user_share_agent`, the *same*
+predicate `dependencies.assert_agent_owner` uses, so Agent Detail and the
+Workspace cannot disagree about who owns an agent.
+
+**Bulk removal** is `POST .../canvas/bulk-delete` on both surfaces — a POST
+rather than a body-carrying DELETE, because bodies on DELETE are
+permitted-but-unreliable and this one is not optional. It reports the ids that
+*existed*, not the ids requested, so the UI can say "3 of 5 removed" honestly.
+Declared above the parameterized routes on both routers (Invariant #4).
+
+**Pinning** is `pinned` on `agent_canvases` (dual-track: `agent_canvases_pinned`
++ Alembic `0059_agent_canvases_pinned`, NOT NULL DEFAULT 0, no backfill). It is
+written *only* by the human-facing pin route and is deliberately absent from
+every agent-facing tool: `audience` is the agent's decision about who may read
+a canvas, `pinned` is the reader's decision about what they want to see first,
+and an agent that could pin itself to the top would defeat the ordering. A pin
+survives the agent rewriting the canvas. Ordering is pinned-first then
+newest-updated, in the SQL *and* in `canvasUtils.sortCanvases` — the client
+re-derives it because an optimistic pin or delete mutates the list in place and
+re-sorting only on refetch would leave a just-pinned canvas where it was.
+
+**Living with many** is `CanvasPanel.vue`, shared by Agent Detail and the
+Workspace rail (one rendering layer, as ent#475 established): search over title
+and id once the list passes six, a height-bounded scrolling strip so a long
+list does not cost the rail its other tabs, and a Manage mode giving each row
+its age, its stale mark, a pin toggle and a delete. Decidable rules live in
+`components/canvas/canvasUtils.js` (`sortCanvases`, `filterCanvases`,
+`selectionState`, `bulkDeletePrompt`, `bulkDeleteOutcome`, `canvasHeadroom`,
+`canvasSelectorVisible`, `canvasAutoSelect`, `canvasSearchVisible`), because
+vitest runs `environment: 'node'` with no mount harness — a rule inside the SFC
+is one no test can reach; `canvasPanelSelectorGate.spec.js` goes one step
+further and slices the SFC's own gate expressions out of the source to **run**
+them against the numbers each review ejection was proven with.
+
+**A search is state the list can change under** — two review-found defects of
+one class, both fixed by a pure rule rather than a template tweak. (1) The chip
+strip was gated on the *filtered* list (`visible.length > 1`), so a query
+narrowing to exactly one match hid the strip, the no-match line stayed hidden
+too, and the auto-select watcher — keyed off the *unfiltered* `props.canvases`
+— never selected the match: the user searched, hit one result, and the chips
+vanished with the previous canvas still on screen. `canvasSelectorVisible`
+shows any hit while a query is active and keeps the "no choice" collapse for
+the un-searched case; `canvasAutoSelect` makes the selection follow the
+matches. (2) `query` has exactly one writer, the search input's `v-model`, and
+that input was `v-if`'d on `count > threshold` alone — so seven canvases, type
+"Topic 3", delete the one match: six canvases, the box unmounts, `visible`
+keeps filtering on text nobody can see, the strip collapses, and the panel
+says *No canvas matches "Topic 3"* with no control left to clear it (also
+reachable with no operator action, via the agent's own `clear_canvas` plus a
+rail refresh). `canvasSearchVisible` keeps the box while a query is active
+regardless of the count — the typed intent survives the shrink and the
+no-match line keeps its one control; resetting `query` on the flip was
+rejected because it would erase a search the user was mid-way through because
+a sibling canvas went away.
+
 - Dual-track migration: `db/migrations.py::agent_canvases_table` +
   Alembic `0050_agent_canvases`. ent#536 changes **no DDL**: block ids and the
   new kinds live inside the `blocks` JSON, so there is no migration and no
@@ -436,25 +677,59 @@ same thing about the blanket case; this is the same objection surviving the
 narrowing. The agent widens explicitly, told exactly why — which keeps a real
 visibility change a decision someone makes rather than a default that happens.
 
-## Staleness — derived, not a clock (ent#438 AC 7)
+## Freshness — two facts, no verdict (ent#438 AC 7, #2734)
 
-`stale` is `last_completed_execution_at(agent) > canvas.updated_at` — the agent
-finished a run and did not refresh this surface.
+The header renders two facts and draws no conclusion from them:
+
+```
+Updated 2h ago · agent last ran 40m ago
+```
+
+`updated_at` is the canvas row's own write time. `agent_last_run_at` is
+`db.last_completed_execution_at(agent)` — when the agent last *finished* a run —
+attached by `canvas_service.decorate`, **once per agent, not once per canvas**,
+and normalised to Z-suffixed UTC there (the #1474 read-boundary rule) because a
+raw `MAX(completed_at)` is not one of the boundaries that pass was applied to,
+and this value is now *rendered* rather than only compared.
 
 An age threshold was rejected: a canvas has no inherent freshness expectation,
 so a clock either cries wolf on a monthly summary or stays silent on a
 minute-by-minute one. "The agent has run since" is a fact about *this* canvas,
 needs no configuration, and is checkable against `updated_by_execution_id`.
+#2734 carried that same argument one step further and retired the **derived
+verdict** as well: "the agent has run since" could not know what a given canvas
+is for either, and it fired on the writing run's own output — a run completes
+*after* it writes, and `updated_by_execution_id`, the only evidence that would
+exclude it, is optional and absent on most live canvases. So the mark
+contradicted the timestamp beside it and taught the reader to ignore it. Two
+facts measured against one clock cannot contradict each other.
 
 `db.last_completed_execution_at` is a `MAX` over the whole column rather than a
 bounded scan of recent rows, deliberately: a head full of `queued`/`running`
 rows would push the newest COMPLETED row out of a window and report a stale
 canvas as current — the failure this AC exists to prevent.
 
-**Fail-quiet is available here and only here.** Missing evidence reads as "not
-stale", because the mark is an *addition* to an always-rendered `updated_at`,
-never a replacement for it. Marking on no evidence would train the reader to
-ignore the mark. It is derived once per agent, not once per canvas.
+**Missing evidence omits the second fact; it is never narrated.**
+`agent_last_run_at` is null both when the agent has never finished a run and
+when the read failed (`decorate`'s `except` arm — logged, so an operator sees
+what a reader cannot), and the payload cannot tell those apart. Saying "the
+agent has not run yet" would turn *"we could not read it"* into a claim about
+the agent, which is the stale-banner rule of `design-system-contract.md` read at
+field scope. `canvasUtils.freshness()` therefore gates the second fact on
+`Date.parse`, not on truthiness — a truthy-but-unparseable value would otherwise
+render "agent last ran at an unknown time", a narrated non-fact.
+
+The derived `stale` boolean is still computed (`canvas_service.is_stale`,
+unchanged) and still ships on the payload; **the header renders nothing from
+it**. It is kept so the derivation stays recoverable, not because it is endorsed
+— it still counts the writing run as a run "since". Two other consumers on this
+base are stated rather than swept in: the Manage row's per-canvas pill
+(`CanvasPanel.vue`, ent#553) still reads the payload flag and still renders the
+word, and `SharedCanvas.vue`'s `v-if="fresh.stale"` (ent#554) is now inert,
+because `freshness()` no longer returns that key — so the share page shows the
+first fact only. Both arrived after this design was accepted; widening the
+second fact onto a sign-in-optional share link is a disclosure decision, not a
+rebase.
 
 ## Write path — one, for both writers (ent#536)
 
@@ -675,3 +950,4 @@ rail's Canvas tab outside a call still refreshes on its own triggers.
 | 2026-09-06 | claude | Conversation-side placement in the Workspace rail; `CanvasPanel` re-reads blocks when the selected canvas's `updated_at` moves (ent#475) |
 | 2026-09-07 | claude | The render bar (#2583): the canvas gallery e2e (17 canvases, Agent Detail + rail + voice column, both themes, measured), the flex-share call columns, per-block containers, the per-block error boundary, bounded table/timeline/diagram-error viewports, container-keyed KPI grid, long-token wrapping, `min(px, 100%)` inline widths, chart legend/flat-range/isolated-point/axis-spacing fixes, the stale-fetch guard on canvas switching, and the `<script setup>` module-state fix that made diagrams vanish |
 | 2026-09-07 | claude | One rich block vocabulary: `image` + `diagram` kinds, `chart` widened to six types on the metric series shape, rich fences in markdown, block ids + `patch_canvas`, the `main` default canvas, voice tools as block edits through the one write path with the write-side audience rule, `### Your Canvas` prompt guidance (ent#536) |
+| 2026-09-14 | claude | Freshness is two facts, never a verdict (#2734): the header renders `updated_at` and the new `agent_last_run_at` and derives nothing; the `may be out of date` badge and its note are deleted; `stale` stays computed and unrendered in the header |

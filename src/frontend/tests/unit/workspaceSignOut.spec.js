@@ -135,9 +135,15 @@ describe('auth.logout() clears the local session before the network revoke', () 
       seen = {
         stored: localStorage.getItem('token'),
         authed: auth.isAuthenticated,
-        // The revoke itself must still be able to carry the credential: it
-        // rides the axios DEFAULT header, deleted only after the call.
-        header: axios.defaults.headers.common['Authorization'],
+        // #2791: the revoke still carries the credential, by a new route. It
+        // used to ride the axios DEFAULT header (deleted after the call); that
+        // header is the second credential source this issue removed, so the
+        // token is now captured before the clear and passed EXPLICITLY.
+        //
+        // The property is unchanged and is the one worth pinning: #2258 clears
+        // local state BEFORE the revoke, so the revoke has to carry a
+        // credential storage no longer holds, or #187 silently stops revoking.
+        header: axios.post.mock.calls.at(-1)?.[2]?.headers?.Authorization,
       }
       const err = new Error('401'); err.response = { status: 401 }; throw err
     })

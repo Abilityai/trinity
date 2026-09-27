@@ -29,7 +29,8 @@ def _stub_genai():
     gtypes = types.ModuleType("google.genai.types")
 
     class _FunctionDeclaration:
-        def __init__(self, **kw): self.__dict__.update(kw)
+        # ent#551 — `behavior` defaults None like the real SDK's field.
+        def __init__(self, **kw): self.behavior = None; self.__dict__.update(kw)
 
     class _Schema:
         OBJECT = "OBJECT"
@@ -56,7 +57,20 @@ def _stub_genai():
         def __init__(self, **kw): self.__dict__.update(kw)
 
     class _FunctionResponse:
-        def __init__(self, **kw): self.__dict__.update(kw)
+        # ent#551 — `scheduling` defaults None like the real SDK's field.
+        def __init__(self, **kw): self.scheduling = None; self.__dict__.update(kw)
+
+    # ent#551 — the non-blocking function-calling enums the real SDK carries;
+    # the service reads them through getattr so their absence is also a
+    # supported shape.
+    class _Behavior:
+        BLOCKING = "BLOCKING"
+        NON_BLOCKING = "NON_BLOCKING"
+
+    class _FunctionResponseScheduling:
+        SILENT = "SILENT"
+        WHEN_IDLE = "WHEN_IDLE"
+        INTERRUPT = "INTERRUPT"
 
     # ent#534 — session-lifetime config the real SDK carries; the service reads
     # them through getattr so their absence is also a supported shape.
@@ -78,6 +92,8 @@ def _stub_genai():
     gtypes.PrebuiltVoiceConfig = _PrebuiltVoiceConfig
     gtypes.LiveConnectConfig = _LiveConnectConfig
     gtypes.FunctionResponse = _FunctionResponse
+    gtypes.Behavior = _Behavior
+    gtypes.FunctionResponseScheduling = _FunctionResponseScheduling
     gtypes.ContextWindowCompressionConfig = _ContextWindowCompressionConfig
     gtypes.SlidingWindow = _SlidingWindow
     gtypes.SessionResumptionConfig = _SessionResumptionConfig

@@ -16,7 +16,7 @@
  * function, so the destination can move to the ent#484/#486 working folder
  * without the gesture changing.
  */
-import { ref } from 'vue'
+import { markRaw, ref } from 'vue'
 
 // Mirrors the server's per-file ceiling (`MAX_UPLOAD_BYTES`, 25 MiB). Checked
 // client-side so a rejection names the file BEFORE 25 MiB crosses the wire; the
@@ -43,6 +43,45 @@ export function isFileDrag(dataTransfer) {
   // `types` is a DOMStringList in some browsers and an array in others; both
   // answer to `includes` via Array.from.
   return Array.from(types).includes('Files')
+}
+
+/**
+ * The files carried by a paste, or `[]` (#2794).
+ *
+ * Pasting a screenshot is how most people attach one — no file on disk, no
+ * Finder, just Cmd-Shift-4 and Cmd-V — and the Workspace composer simply ate it:
+ * there was no paste handler anywhere, on either chat surface, so the gesture
+ * did nothing and gave no reason. The reported session shows the cost: the
+ * client's file was named "Pasted image (3).png", i.e. they had already been
+ * driven out to a file manager to get it in at all.
+ *
+ * `clipboardData.files` is the answer where it exists; `items` is the fallback
+ * for the browsers that only populate that. Both are host objects, so both are
+ * normalised through `Array.from` rather than indexed.
+ */
+export function filesFromClipboard(clipboardData) {
+  if (!clipboardData) return []
+  const direct = Array.from(clipboardData.files || [])
+  if (direct.length) return direct
+  const items = Array.from(clipboardData.items || [])
+  return items
+    .filter((it) => it && it.kind === 'file')
+    .map((it) => (typeof it.getAsFile === 'function' ? it.getAsFile() : null))
+    .filter(Boolean)
+}
+
+/**
+ * Does this paste also carry text that the person expects to be typed?
+ *
+ * Copying out of a rich editor puts BOTH an image and its text on the clipboard,
+ * and swallowing the paste there would silently delete what they meant to paste.
+ * So the file is attached either way and the default is only suppressed when
+ * there is no text to lose — which is exactly the screenshot case.
+ */
+export function clipboardHasText(clipboardData) {
+  const types = clipboardData?.types
+  if (!types) return false
+  return Array.from(types).includes('text/plain')
 }
 
 /**
@@ -128,6 +167,9 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
   const batchNotice = ref('')
 
   let dragDepth = 0
+  // The in-flight batch, so a caller can ASK whether the gesture has landed
+  // (#2794). Without this the only way to know was to poll `entry.uploading`.
+  let inFlight = null
 
   // dragenter/dragleave fire for every child element the pointer crosses, so a
   // boolean toggled on leave flickers the affordance off while the pointer is
@@ -160,6 +202,20 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
   }
 
   /**
+   * Paste-to-attach (#2794). Same batch, same per-file outcome, same chips as a
+   * drop — a second path into `addFiles`, never a second implementation of it.
+   */
+  function onPaste(e) {
+    if (disabled()) return
+    const files = filesFromClipboard(e.clipboardData)
+    if (!files.length) return
+    // Suppress the default ONLY when nothing else is on the clipboard; see
+    // `clipboardHasText`. A paste that carries both still types its text.
+    if (!clipboardHasText(e.clipboardData)) e.preventDefault()
+    return addFiles(files)
+  }
+
+  /**
    * The batch. Every file gets an entry before any upload starts, so the person
    * sees the whole gesture land at once rather than watching it appear one file
    * at a time; each then resolves independently.
@@ -184,6 +240,17 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
         uploading: !rejection,
         error: rejection || '',
         done: false,
+        // #2794: the handle, kept so the SAME bytes can reach a SECOND
+        // destination without asking the person to pick the file again —
+        // which is what escalating a 1:1 into a room needs (the file has
+        // reached one agent's inbox; the room's other participants still need
+        // it, and a room-native drop is `one upload per participant`).
+        //
+        // `markRaw` is belt-and-braces: Vue's `reactive` already declines to
+        // proxy a `File` (it is not a plain object), but that is a fact about
+        // an internal type table rather than a promise, and a proxied `File`
+        // fails deep inside `FormData.append` where the cause is invisible.
+        file: markRaw(file),
       }
       entries.value.push(entry)
       return { file, entry, rejection }
@@ -193,15 +260,52 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
     // requests, and firing twenty at once is the surest way to trip it on a
     // gesture that would have succeeded spread over a second. A batch that does
     // trip it still reports per file, which is the AC.
-    for (const { file, entry, rejection } of mine) {
-      if (rejection) continue
+    //
+    // Chained onto whatever is already running rather than started beside it:
+    // two overlapping drops would otherwise interleave their requests, which is
+    // the burst the sequencing exists to avoid, and `settled()` could then
+    // resolve while the earlier batch was still going.
+    const run = Promise.resolve(inFlight).then(async () => {
+      for (const { file, entry, rejection } of mine) {
+        if (rejection) continue
+        try {
+          await upload(file)
+          entry.done = true
+        } catch (err) {
+          entry.error = uploadFailureReason(err)
+        } finally {
+          entry.uploading = false
+        }
+      }
+    })
+    inFlight = run
+    await run
+    // Only the LAST batch clears the marker; an earlier one finishing must not
+    // report a later one as settled.
+    if (inFlight === run) inFlight = null
+    return entries.value
+  }
+
+  /**
+   * Resolves once nothing is uploading (#2794).
+   *
+   * A send that happens while a chip is still spinning must not simply leave
+   * the file behind — "never silently dropped" is the rule. Waiting is the
+   * honest option and the cheap one: uploads are seconds, and the alternative
+   * (send now, tell them afterwards what did not make it) asks the person to
+   * fix something they cannot see the state of.
+   *
+   * Never rejects: a failed upload is recorded on its own entry, and a caller
+   * asking "has the gesture landed?" wants that answer, not an exception.
+   */
+  async function settled() {
+    // A batch can chain another onto itself, so loop rather than await once.
+    while (inFlight) {
       try {
-        await upload(file)
-        entry.done = true
-      } catch (err) {
-        entry.error = uploadFailureReason(err)
-      } finally {
-        entry.uploading = false
+        await inFlight
+      } catch {
+        // Per-file failures already live on their entries.
+        break
       }
     }
     return entries.value
@@ -223,8 +327,9 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
     entries,
     batchNotice,
     addFiles,
+    settled,
     clear,
     removeAt,
-    handlers: { onDragEnter, onDragOver, onDragLeave, onDrop },
+    handlers: { onDragEnter, onDragOver, onDragLeave, onDrop, onPaste },
   }
 }

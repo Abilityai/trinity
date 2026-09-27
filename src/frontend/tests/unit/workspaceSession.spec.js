@@ -17,6 +17,7 @@
  * who lands on a dead link has no way to report it.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { sessionLostVerdict } from '@/utils/platformSession'
 import { setActivePinia, createPinia } from 'pinia'
 
 // `vitest.config.js` runs unit tests in the NODE environment on purpose ("pure
@@ -105,6 +106,8 @@ import {
   useClientPortalStore, PLATFORM_LOGIN_ROUTE, portalHttp, setPlatformSessionLostHandler,
 } from '@/stores/clientPortal'
 import { __setAuthed, __logout } from '@/stores/auth'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { draftStorageKey } from '@/components/portal/portalDrafts'
 import {
   WORKSPACE_ROOT, signOutLabelFor, SIGN_OUT_LABEL_PLATFORM, SIGN_OUT_LABEL_CLIENT,
 } from '@/components/portal/portalUtils'
@@ -268,6 +271,41 @@ describe('signing out of the workspace signs out (#2258)', () => {
     expect(localStorage.getItem(PORTAL_TOKEN_KEY)).toBeNull()
   })
 
+  // trinity-enterprise#657: drafts are message text. An explicit sign-out takes
+  // the person's bucket with it — on a shared browser the portal token is
+  // removed at the same moment — and it has to happen BEFORE `signOut()` nulls
+  // `clientEmail`, or the drafts store's identity is already null and the
+  // clear removes nothing. Expiry keeps the bucket: a draft is what the person
+  // comes back for.
+  it('an explicit sign-out removes the person\'s drafts bucket from storage', async () => {
+    localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
+    setActivePinia(createPinia())
+    const store = useClientPortalStore()
+    store.clientEmail = 'ada@example.com'
+    const drafts = usePortalDraftsStore()
+    drafts.set('thread:1', 'unsent words')
+    const bucket = draftStorageKey('ada@example.com')
+    expect(localStorage.getItem(bucket)).not.toBeNull()
+
+    await store.signOutEverywhere()
+
+    expect(localStorage.getItem(bucket)).toBeNull()
+    expect(drafts.has('thread:1')).toBe(false)
+  })
+
+  it('an EXPIRED session keeps the drafts bucket — expiry is not the person\'s act', () => {
+    localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
+    setActivePinia(createPinia())
+    const store = useClientPortalStore()
+    store.clientEmail = 'ada@example.com'
+    usePortalDraftsStore().set('thread:1', 'unsent words')
+    const bucket = draftStorageKey('ada@example.com')
+
+    store.endSession({ expired: true, resumePath: '/workspace/c/abc' })
+
+    expect(localStorage.getItem(bucket)).not.toBeNull()
+  })
+
   it('an EXPIRED portal session does not end a platform session — expiry is not a sign-out', () => {
     // `endSession({expired})` is the 401 path, reached with no user act. It
     // must keep calling the plain state-clearing primitive, never the
@@ -417,37 +455,62 @@ describe('workspace availability state is not sticky (/review C1)', () => {
   })
 })
 
-describe('who gets bounced to /login on a 401 (/review I1)', () => {
-  // The guards live in api.js / main.js interceptors, which need `window`. The
-  // property under test is the PREDICATE, so assert it directly against the
-  // storage states it reads — the same expression both interceptors use.
-  const shouldBounce = (path, hasPlatformToken) => {
-    const onWorkspace = path.startsWith('/workspace') || path.startsWith('/portal')
-    return !onWorkspace || hasPlatformToken
-  }
+describe('who gets bounced to /login on a 401 (/review I1, rewritten for #2791)', () => {
+  // This block used to define its OWN `shouldBounce` helper — a hand-copied
+  // duplicate of the expression in `api.js` and `main.js`. That is why it stayed
+  // green while the two interceptors and `portalHttp` drifted into three
+  // different answers, and it would have stayed green through #2791 too: nothing
+  // under test imported it.
+  //
+  // It now asserts the REAL predicate, which is a pure function precisely so a
+  // node-env spec can reach it.
 
   it('an internal user whose platform session expired IS bounced', () => {
-    expect(shouldBounce('/workspace', true)).toBe(true)
+    expect(sessionLostVerdict({
+      failedToken: 'jwt', storedToken: 'jwt', path: '/workspace',
+    })).toBe('logout')
   })
 
   it('an external client on the workspace is NOT bounced to the operator login', () => {
-    expect(shouldBounce('/workspace', false)).toBe(false)
-    expect(shouldBounce('/workspace/c/abc', false)).toBe(false)
-    expect(shouldBounce('/portal', false)).toBe(false)   // legacy URL, mid-redirect
+    // #2791 widens this: it now holds for a client whose browser also carries a
+    // DEAD operator JWT, which is the case #2261 left open (AC #5). The old
+    // predicate keyed on the token merely EXISTING and bounced them.
+    for (const path of ['/workspace', '/workspace/c/abc', '/portal']) {
+      expect(sessionLostVerdict({ storedToken: null, path })).toBe('ignore')
+      expect(sessionLostVerdict({
+        failedToken: 'dead-operator-jwt', storedToken: 'dead-operator-jwt',
+        portalTokenPresent: true, path,
+      })).toBe('ignore')
+    }
   })
 
-  it('the verdict does not depend on the portal token, which signOut() races away', () => {
-    // The first 401 drops the portal token (fetchRoster -> signOut). A second,
-    // concurrent 401 must reach the same answer as the first — keying on the
-    // portal token made this flip and threw the client onto /login.
-    const before = shouldBounce('/workspace', false)   // portal token present
-    const after = shouldBounce('/workspace', false)    // portal token now gone
-    expect(after).toBe(before)
+  it('a client tab stays vetoed after its session expires', () => {
+    // The first 401 ends the client session (`endSession({expired})`: the
+    // portal token goes, `platformFallbackSuppressed` is set). The tab is
+    // still a client tab — main.js folds the suppression flag into
+    // `portalTokenPresent` — so the 5 s ticket retry's next 401 on the dead
+    // operator JWT must still `ignore`, not throw the client at the OTP form
+    // onto the operator login (#2258/#2261 class). The contrast case is what
+    // makes this fail: the same 401 with no client claim on the tab is `logout`.
+    const live = sessionLostVerdict({
+      failedToken: 'jwt', storedToken: 'jwt', portalTokenPresent: true, path: '/workspace',
+    })
+    const expired = sessionLostVerdict({
+      failedToken: 'jwt', storedToken: 'jwt', portalTokenPresent: true, path: '/workspace',
+    })
+    const operator = sessionLostVerdict({
+      failedToken: 'jwt', storedToken: 'jwt', portalTokenPresent: false, path: '/workspace',
+    })
+    expect(live).toBe('ignore')
+    expect(expired).toBe('ignore')
+    expect(operator).toBe('logout')
   })
 
   it('everywhere else keeps the normal bounce', () => {
-    expect(shouldBounce('/agents/scout', false)).toBe(true)
-    expect(shouldBounce('/', true)).toBe(true)
+    expect(sessionLostVerdict({ storedToken: null, path: '/agents/scout' })).toBe('logout')
+    expect(sessionLostVerdict({
+      failedToken: 'jwt', storedToken: 'jwt', path: '/',
+    })).toBe('logout')
   })
 })
 

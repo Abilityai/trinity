@@ -292,6 +292,11 @@ def get_platform_rows_since_last_reply(agent_name: str, client_email: str,
     erase a call from every later delta. A reply is the one thing the live
     session itself wrote, so "rows since the last reply" is exactly "rows it
     has not heard", and it stays true across a retry.
+
+    ent#551: a reply that carries a `voice_call_id` is a task the call ran in
+    the background — typed in form, but it landed mid-call, so it is NOT the
+    cursor. Taking it as one would erase the call's earlier spoken rows from
+    the next delta, which is the very loss #2694 exists to prevent.
     """
     base = "agent_name = :agent AND client_email = :email AND session_id = :session"
     params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id,
@@ -303,7 +308,8 @@ def get_platform_rows_since_last_reply(agent_name: str, client_email: str,
         f"SELECT {_MESSAGE_COLUMNS} FROM enterprise_portal_messages "
         f"WHERE {base} AND (source IS NOT NULL OR role = 'system') "
         f"AND created_at > COALESCE((SELECT MAX(created_at) FROM enterprise_portal_messages "
-        f"                            WHERE {base} AND role = 'assistant' AND {_TYPED}), '') "
+        f"                            WHERE {base} AND role = 'assistant' AND {_TYPED} "
+        f"                              AND voice_call_id IS NULL), '') "
         f"ORDER BY created_at DESC, id DESC LIMIT :lim"
     )
     with get_engine().connect() as conn:

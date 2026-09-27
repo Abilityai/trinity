@@ -465,15 +465,20 @@ class TestLegacyFallback:
         tar = _tar_bytes({"skills/x/SKILL.md": (b"---\nname: x\n---\nbody\n", 0o644)})
         members, _w, _t = pkg.filter_skill_archive(tar, "x", source_root="skills")
 
+        # #2914: the fallback writes the marker beside SKILL.md, so the dir is
+        # platform-managed on the next sync (never refused as agent-authored).
+        written = []
+
         class _Client:
             async def write_file(self, path, content):
-                assert path == ".claude/skills/x/SKILL.md"
+                written.append(path)
                 return {"success": True}
 
         svc = ss.SkillService()
         result = _run(svc._legacy_fallback(_Client(), "x", members, []))
         assert result["status"] == "fallback"
-        assert result["files_written"] == 1
+        assert result["files_written"] == 2
+        assert written == [".claude/skills/x/SKILL.md", ".claude/skills/x/.trinity-skill.json"]
 
 
 # =============================================================================
@@ -548,7 +553,9 @@ def service(sources_db, tmp_path, monkeypatch):
     svc = ss.SkillService()
     svc.library_root = tmp_path / "clones"
     svc.library_path = tmp_path / "clones"
-    monkeypatch.setattr(svc, "_authenticated_url", lambda url, pat: url, raising=False)
+    # ent#615: normalisation and the PAT decision are separate now; only the
+    # first has to be bypassed for a local fixture repo path.
+    monkeypatch.setattr(svc, "_normalized_url", lambda url: url, raising=False)
     return svc
 
 

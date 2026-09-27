@@ -32,7 +32,7 @@
         <!-- Header -->
         <div class="px-3 py-2 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
           <span class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Previous Sessions</span>
-          <span class="text-xs text-gray-400 dark:text-gray-500">Logged-in chats only</span>
+          <span class="text-xs text-gray-500 dark:text-gray-400">Logged-in chats only</span>
         </div>
 
         <!-- Loading state -->
@@ -46,7 +46,7 @@
         </div>
 
         <!-- Empty state -->
-        <div v-else-if="sessions.length === 0" class="px-3 py-4 text-center text-xs text-gray-400 dark:text-gray-500">
+        <div v-else-if="sessions.length === 0" class="px-3 py-4 text-center text-xs text-gray-500 dark:text-gray-400">
           No previous sessions found.
         </div>
 
@@ -60,7 +60,7 @@
           >
             <div class="flex items-center justify-between mb-0.5">
               <span class="text-xs font-medium text-gray-700 dark:text-gray-300">{{ formatDate(session.last_message_at) }}</span>
-              <span class="text-xs text-gray-400 dark:text-gray-500">{{ session.message_count }} msg{{ session.message_count !== 1 ? 's' : '' }}</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">{{ session.message_count }} msg{{ session.message_count !== 1 ? 's' : '' }}</span>
             </div>
             <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ session.preview || 'No preview' }}</p>
           </li>

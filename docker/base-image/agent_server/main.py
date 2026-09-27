@@ -28,6 +28,7 @@ from .routers import (
 )
 from .state import agent_state
 from .services.execution_env import arm_subscription_auth_guard
+from .services import chat_session_marker
 from .services.trinity_mcp import inject_trinity_mcp_if_configured
 from .auto_sync import schedule_auto_sync_if_enabled
 from .heartbeat import schedule_heartbeat
@@ -87,7 +88,16 @@ app.include_router(brain_orb_router)  # Brain Orb visualization data (#58)
 # not module-import-time, so tests control INITIAL_ENV before arming.
 arm_subscription_auth_guard()
 
-# #389 S1a: auto-sync heartbeat loop (gated by GIT_SYNC_AUTO env var).
+# #2958: the chat's own session id lives in memory and is gone after a restart,
+# so a leftover keep-set marker would only pin a JSONL nothing will resume.
+# `on_event`, like every sibling startup hook here: the image's FastAPI has no
+# `add_event_handler` (a module-import AttributeError, caught by the in-image smoke).
+@app.on_event("startup")
+def _clear_chat_session_marker() -> None:
+    chat_session_marker.clear()
+
+# #389 S1a: auto-sync heartbeat loop — each cycle gated on the owner's
+# auto_sync_enabled flag, read live; GIT_SYNC_AUTO is the fallback (#3010).
 schedule_auto_sync_if_enabled(app)
 
 # RELIABILITY-004 / #307: liveness heartbeat loop. Gated on TRINITY_BACKEND_URL

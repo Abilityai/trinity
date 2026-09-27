@@ -23,7 +23,6 @@ Security:
   HTTP details.
 """
 import asyncio
-import base64
 import logging
 import os
 import shutil
@@ -36,6 +35,7 @@ from fastapi import HTTPException
 
 from utils.credential_sanitizer import scrub_secret as _scrub_secret
 
+from services.git_credential_helper import git_auth_env as _shared_git_auth_env
 from services.github_service import GitHubService, GitHubError, OwnerType
 
 logger = logging.getLogger(__name__)
@@ -106,15 +106,14 @@ def _http_error(status_code: int, code: str, message: str) -> HTTPException:
 
 
 def _git_auth_env(pat: str) -> dict:
-    """Git auth as config-via-env: header never appears on the argv."""
-    if not pat:
-        return {}
-    b64 = base64.b64encode(f"x-access-token:{pat}".encode()).decode()
-    return {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "http.extraHeader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: basic {b64}",
-    }
+    """Git auth as config-via-env: header never appears on the argv.
+
+    Alias kept for this module's callers and its test. The body moved to
+    ``services.git_credential_helper.git_auth_env`` when ent#615 gave it two
+    more consumers (the ent#109 in-container rebind push and the skills-library
+    clone) — one authority, so the copies cannot drift.
+    """
+    return _shared_git_auth_env(pat)
 
 
 async def _run_git(args: list, timeout: float, auth_pat: str = "") -> tuple:

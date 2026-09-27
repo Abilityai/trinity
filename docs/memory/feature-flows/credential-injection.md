@@ -463,6 +463,32 @@ async def decrypt_and_inject(request: InternalDecryptInjectRequest):
 5. **Internal API**: `/api/internal/*` endpoints require `X-Internal-Secret` header (C-003, 2026-03-09)
 6. **No Secret Logging**: Credential values never logged, only file names and counts
 7. **Git Safety**: `.credentials.enc` is safe to commit - encrypted with platform key
+8. **`.env` is the git credential's FIRST rung (ent#615)**: git no longer
+   authenticates from the remote URL — the `trinity` credential helper resolves
+   `/home/developer/.env` → the container's baked `GITHUB_PAT` →
+   `/home/developer/.trinity/git-credential`, per operation, over stdin. So an
+   inject that writes `GITHUB_PAT` here takes effect on the **next git
+   operation**, not the next restart, which is what makes a no-restart
+   propagation (#1264) and a global rotation (#1967) work at all. Two
+   consequences for this flow:
+   - `github_pat_propagation_service` writing over `POST /credentials/inject`
+     stays **primary** — only the HTTP path runs `sync_process_env()` — but
+     `git_service.write_container_github_pat` now writes the same line over
+     `docker exec` as a belt, because `docker exec` works while the agent
+     server is wedged, restarting or OOM and this path raises.
+   - the ent#615 credential **harvest** deliberately does NOT write here. `.env`'s
+     `GITHUB_PAT` is exported by `startup.sh` as `GH_TOKEN`/`GITHUB_TOKEN`
+     (authenticating the whole `gh` CLI and REST API) and gates the ent#123
+     push blackhole, so writing that name for an agent that did not have it
+     would be a privilege **grant**. The harvest goes to
+     `.trinity/git-credential`, which nothing exports.
+9. **`.env` may not set loader/exec-redirecting names** (`execution_env.PROTECTED_KEYS`
+   + the ent#615 prefix rule): `PATH`, `LD_PRELOAD`, `NODE_OPTIONS`,
+   `GIT_SSH_COMMAND`, `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`,
+   `GIT_CONFIG_NOSYSTEM`, `GIT_ASKPASS`, `GIT_PROXY_COMMAND`, … — the file is
+   agent-writable and is re-read at every spawn, and `GIT_CONFIG_NOSYSTEM`
+   would disable `/etc/gitconfig`, which is where the credential helper and the
+   #1595 gc guards are registered.
 
 ---
 

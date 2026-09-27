@@ -31,7 +31,9 @@ from models import (
 from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services import heartbeat_service, idempotency_service, schedule_workspace_delivery
+from services import (
+    heartbeat_service, idempotency_service, schedule_seat_memory, schedule_workspace_delivery,
+)
 from services.runtime_secret_scrub import get_staged_values, scrub_text
 
 logger = logging.getLogger(__name__)
@@ -260,6 +262,24 @@ async def internal_agent_pre_check(agent_name: str):
         raise HTTPException(status_code=404, detail="Agent not found")
 
 
+@router.get("/agents/{agent_name}/brief-readiness")
+async def internal_agent_brief_readiness(agent_name: str):
+    """Whether a companion's cron seat brief may fire (trinity-enterprise#689).
+
+    Asked by the scheduler's readiness gate, beside the #454 pre-check, only for
+    a `triggered_by="schedule"` run that delivers to a Workspace seat. Thin
+    passthrough — the rule lives in `services/role_readiness_gate.py`. The
+    scheduler fails open on anything but a 200 with `fire: false`.
+    """
+    from services.role_readiness_gate import AgentNotFound, brief_readiness
+
+    try:
+        verdict = await brief_readiness(agent_name)
+    except AgentNotFound:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return {"agent_name": agent_name, "fire": verdict.fire, "reason": verdict.reason, "basis": verdict.basis}
+
+
 @router.get("/agents/{agent_name}/sync-health-status")
 async def internal_agent_sync_health(agent_name: str):
     """#389: lightweight read used by the dedicated scheduler before dispatching.
@@ -485,6 +505,12 @@ async def execute_task_internal(
     # whether the caller asked for async — and the async branch returns an
     # `accepted` ack the scheduler then polls, so refusing after it would leave a
     # row nobody ever fails.
+    # ent#637: a run addressed to one person runs AS that seat — its memory is
+    # read into the caller prompt (so the whole-blob write has something to
+    # read first) and `write_user_memory` accepts the run. Composed only after
+    # the ent#498 stamp landed, because the stamp is what the write boundary
+    # resolves the seat from; a refused address gets neither.
+    seat_system_prompt: Optional[str] = None
     if request.deliver_to_workspace_email:
         try:
             # Off the event loop: `resolve_and_stamp` makes 4–6 synchronous
@@ -514,11 +540,15 @@ async def execute_task_internal(
                 "message": refusal.detail,
                 "execution_id": request.execution_id,
             })
+        seat_system_prompt = await asyncio.to_thread(
+            schedule_seat_memory.build_seat_caller_prompt,
+            request.agent_name, request.deliver_to_workspace_email,
+        )
 
     if request.async_mode:
         # Fire-and-forget: spawn background task, return immediately
         asyncio.create_task(_execute_task_internal_background(
-            task_service, request
+            task_service, request, system_prompt=seat_system_prompt,
         ))
         accepted = {
             "status": "accepted",
@@ -542,6 +572,7 @@ async def execute_task_internal(
             execution_id=request.execution_id,
             schedule_context=_schedule_context_from(request),
             attempt=request.attempt,
+            system_prompt=seat_system_prompt,
         )
 
         result_payload = {
@@ -606,7 +637,9 @@ def _fail_execution_row(execution_id: Optional[str], error: str) -> None:
         logger.error("Failed to mark execution %s failed: %s", execution_id, db_err)
 
 
-async def _execute_task_internal_background(task_service, request: InternalTaskExecutionRequest):
+async def _execute_task_internal_background(
+    task_service, request: InternalTaskExecutionRequest, *, system_prompt: Optional[str] = None,
+):
     """
     Background coroutine for async task execution (SCHED-ASYNC-001).
 
@@ -625,6 +658,7 @@ async def _execute_task_internal_background(task_service, request: InternalTaskE
             execution_id=request.execution_id,
             schedule_context=_schedule_context_from(request),
             attempt=request.attempt,
+            system_prompt=system_prompt,   # ent#637: the seat's memory, or None
         )
         logger.info(
             f"Async task completed for {request.agent_name}: "

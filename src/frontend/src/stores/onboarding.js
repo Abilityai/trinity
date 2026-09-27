@@ -23,6 +23,7 @@ export const useOnboardingStore = defineStore('onboarding', {
   state: () => ({
     loaded: false,
     available: false,   // false on OSS/unentitled (404/403) — render nothing
+    absent: false,      // 404/403 seen: the surface won't appear this session
     loading: false,
     items: [],
     completedCount: 0,
@@ -52,7 +53,10 @@ export const useOnboardingStore = defineStore('onboarding', {
     },
 
     async fetchChecklist(force = false) {
-      if (this.loaded && !force) return
+      // Forcing re-reads fresh milestones, but an absent or unentitled surface
+      // does not change within a session: re-asking it only costs a request
+      // (and a console 404) per mount, sidebar expand and fleet-size change.
+      if (this.absent || (this.loaded && !force)) return
       this.loading = true
       try {
         const r = await api.get('/api/enterprise/onboarding/checklist')
@@ -62,7 +66,8 @@ export const useOnboardingStore = defineStore('onboarding', {
         // Anything else is a real failure, but the checklist is ambient guidance
         // — it must never surface an error banner over the app it decorates.
         this.available = false
-        if (![403, 404].includes(e?.response?.status)) {
+        this.absent = [403, 404].includes(e?.response?.status)
+        if (!this.absent) {
           console.warn('[onboarding] checklist unavailable:', e?.message || e)
         }
       } finally {

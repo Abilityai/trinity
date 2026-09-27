@@ -101,10 +101,13 @@ Save extracted data to: `/home/developer/shared-out/extractions/`
 
 ## Metrics Tracking
 
-Update `metrics.json` after each extraction:
-```json
-{
-  "decks_processed": 1,
-  "extraction_status": "idle"
-}
+Record your metrics with the `record_metrics` MCP tool after each extraction.
+It is the only write path — do **not** write a `metrics.json` file; nothing
+reads one any more.
+
+```
+record_metrics(points=[
+  {"metric": "decks_processed", "value": 1},
+  {"metric": "extraction_status", "value": "idle"},
+], execution_id="<from your Execution Context block>")
 ```

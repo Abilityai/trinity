@@ -55,6 +55,7 @@ def is_valid_public_channel_model(model: str) -> bool:
 # ImportError was swallowed by that seed's fail-safe contract — so the feature
 # no-opped on every boot with a fully green unit suite. Anything
 # `init_database()` reads belongs in config.py and is re-exported below.
+import config  # noqa: E402
 from config import (  # noqa: E402
     COMMUNITY_FRESH_INSTALL_SEED,  # noqa: F401  (re-export)
     COMMUNITY_RETENTION_FLOOR_DAYS,  # noqa: F401  (re-export)
@@ -79,15 +80,28 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "agent_soft_delete_retention_days": "Days to retain soft-deleted agents before hard-purge (default: 180, 0 = disabled, #834)",
     "schedule_soft_delete_retention_days": "Days to retain soft-deleted schedules before hard-purge (default: 30, 0 = disabled, #834)",
     "agent_reports_retention_days": "Days to retain agent_reports rows (default: 90, 0 = disabled, #918)",
+    "operator_queue_aging_hours": "Hours a pending operator-queue item may wait before it is marked as aging on the card and the filing agent receives a receipt (0 = disabled; default: 24, #2915)",
     "operator_queue_retention_days": "Days to retain terminal operator_queue rows (acknowledged/cancelled/expired; default: 90, 0 = disabled, #1142)",
     "agent_reminders_retention_days": "Days to retain terminal agent_reminders rows (fired/cancelled/failed; default: 90, 0 = disabled, #1296)",
     "subscription_headroom_retention_days": "Days to retain subscription headroom probe history used for utilization trends (default: 30, 0 = disabled, ent#433)",
     "subscription_failure_event_retention_days": "Days to retain subscription rate-limit/auth failure events (default: 30, 0 = disabled; was a hardcoded 24h sweep before ent#433)",
     "backup_retention_days": "Days to retain database-backup artifacts in /data/backups (default: 14, bounds 1-3650 — 0 is invalid; the newest 3 artifacts are always kept; disable backups via DB_BACKUP_ENABLED=false, #2216)",
+    "metrics_retention_days": "Days to retain recorded metric points (default: 365, bounds 0-3650; 0 disables the sweep and keeps them forever). Bootstrap via METRICS_RETENTION_DAYS until a value is saved here (trinity-enterprise#478)",
+    "metrics_daily_point_cap": "Maximum metric points one agent may record per UTC day (default: 100000, bounds 0-10000000; 0 is unlimited). Bootstrap via METRICS_DAILY_POINT_CAP until a value is saved here (trinity-enterprise#478)",
+    "inter_agent_max_chain_depth": "Maximum agent-to-agent hops in one call chain (default: 8, bounds 1-32). A hop past it is refused with 403 inter_agent_depth_exceeded before any model work. Bootstrap via INTER_AGENT_MAX_CHAIN_DEPTH until a value is saved here (#2806)",
 }
 
 
 # --- Remote template registry keys (TMPL-002, trinity-enterprise#14) -------
+# #2691: set the first time a real request arrives for the saved public URL and
+# a certificate is obtained for it (written by the on-demand-TLS gate in
+# `routers/public.py`, stored as `<iso>|<host>`). Never cleared: a change of host
+# makes the stamp stop matching on read (`is_public_url_reached`). It is the only
+# evidence this instance can hold that the name an operator typed actually
+# works — everything else here is what the instance ADVERTISES, not what was
+# observed.
+PUBLIC_URL_REACHED_KEY = "public_url_reached_at"
+
 TEMPLATE_REGISTRY_URL_KEY = "template_registry_url"
 TEMPLATE_REGISTRY_ENABLED_KEY = "template_registry_enabled"
 TEMPLATE_REGISTRY_GENERATION_KEY = "template_registry_generation"
@@ -144,6 +158,14 @@ class SettingsService:
 
     def _resolve_secret_setting(self, key: str, env_var: str) -> str:
         """Encrypted row → legacy cleartext row (migrated on sight) → env → ''."""
+        return self._stored_secret_setting(key) or os.getenv(env_var, '')
+
+    def _stored_secret_setting(self, key: str) -> str:
+        """The settings half of ``_resolve_secret_setting`` — no env leg.
+
+        Split out (ent#582) for the one resolver whose env fallback is not a
+        single variable: the Gemini key, which `config` coalesces from two.
+        """
         from services.secret_settings import (
             decrypt_secret_setting,
             encrypted_key_for,
@@ -152,14 +174,11 @@ class SettingsService:
 
         envelope = self.get_setting(encrypted_key_for(key))
         if envelope:
-            value = decrypt_secret_setting(key, envelope)
-            if value:
-                return value
-            # Unreadable envelope (wrong/rotated key, corrupt row). Fall through
-            # to env rather than raising — but do NOT fall through to the legacy
-            # row: a stale cleartext value silently outranking the current
-            # encrypted one is worse than being unconfigured.
-            return os.getenv(env_var, '')
+            # Unreadable envelope (wrong/rotated key, corrupt row) → '' so the
+            # caller falls through to env rather than raising — but NOT to the
+            # legacy row: a stale cleartext value silently outranking the
+            # current encrypted one is worse than being unconfigured.
+            return decrypt_secret_setting(key, envelope) or ''
 
         legacy = self.get_setting(key)
         if legacy and legacy.strip():
@@ -171,11 +190,11 @@ class SettingsService:
                 if decrypted:
                     self._migrate_legacy_secret_setting(key, decrypted)
                     return decrypted
-                return os.getenv(env_var, '')
+                return ''
             self._migrate_legacy_secret_setting(key, legacy)
             return legacy
 
-        return os.getenv(env_var, '')
+        return ''
 
     def _migrate_legacy_secret_setting(self, key: str, value: str) -> None:
         """Encrypt ``value`` onto the encrypted key and drop the cleartext row.
@@ -267,6 +286,56 @@ class SettingsService:
     def get_google_api_key(self) -> str:
         """Get Google API key: encrypted setting → legacy → env → ''."""
         return self._resolve_secret_setting('google_api_key', 'GOOGLE_API_KEY')
+
+    # =========================================================================
+    # Platform keys configurable from the first-run flow (trinity-enterprise#582)
+    # =========================================================================
+    #
+    # Resolved at CALL time, never frozen at import (the `get_elevenlabs_api_key`
+    # rule), so a key saved in the browser works without a restart and in every
+    # uvicorn worker.
+
+    def get_gemini_api_key(self) -> str:
+        """The platform Gemini key (voice, avatars, transcription).
+
+        Encrypted ``google_api_key`` setting → ``GEMINI_API_KEY`` →
+        ``GOOGLE_API_KEY`` env. The setting reuses the ent#435 ``google_api_key``
+        secret because the platform already treats a Google API key as its Gemini
+        key (``config.GEMINI_API_KEY`` coalesces the two env vars); the env leg
+        reads that coalesced value at call time.
+        """
+        import config
+        return self._stored_secret_setting('google_api_key') or config.GEMINI_API_KEY
+
+    def get_resend_api_key(self) -> str:
+        """Resend key: encrypted setting → legacy → ``RESEND_API_KEY`` env → ''."""
+        return self._resolve_secret_setting('resend_api_key', 'RESEND_API_KEY')
+
+    def get_email_provider(self) -> str:
+        """The provider email is sent through: a Resend key SAVED IN SETTINGS
+        selects Resend; otherwise ``EMAIL_PROVIDER`` env.
+
+        A fresh install copies ``.env.example`` (``EMAIL_PROVIDER=console``), so a
+        key the operator configured in the browser would otherwise be silently
+        ignored — a dead end with no terminal-free way out.
+        """
+        import config
+        if self.has_secret_setting('resend_api_key'):
+            return 'resend'
+        return (config.EMAIL_PROVIDER or 'console').lower()
+
+    _EMAIL_FROM_SETTING = 'email_from_address'
+
+    def get_email_from_address(self) -> str:
+        """Sender address: ``email_from_address`` setting → ``SMTP_FROM`` env."""
+        import config
+        return (self.get_setting(self._EMAIL_FROM_SETTING) or '').strip() or config.SMTP_FROM
+
+    def set_email_from_address(self, address: str) -> None:
+        db.set_setting(self._EMAIL_FROM_SETTING, address.strip())
+
+    def clear_email_from_address(self) -> bool:
+        return db.delete_setting(self._EMAIL_FROM_SETTING)
 
     # =========================================================================
     # ElevenLabs / outbound-voice (TTS) settings (trinity-enterprise#117)
@@ -397,33 +466,6 @@ class SettingsService:
         return True
 
     # =========================================================================
-    # Workspace feature flag (#860)
-    # =========================================================================
-
-    def is_workspace_enabled(self) -> bool:
-        """
-        Whether the Agent Workspace (voice + canvas) surface is exposed to users.
-
-        Resolves in this order:
-        1. system_settings row 'workspace_enabled' ("true"/"false")
-        2. WORKSPACE_ENABLED env var (only honored as "true"/"1"/"yes" to opt in)
-        3. Default: False (BETA — opt-in required)
-
-        Admins opt in by setting ``workspace_enabled=true`` in system_settings
-        or by exporting ``WORKSPACE_ENABLED=true``.
-
-        Note: workspace also requires voice to be available (VOICE_ENABLED +
-        GEMINI_API_KEY). The feature-flags endpoint combines both conditions.
-        """
-        stored = self.get_setting('workspace_enabled')
-        if stored is not None:
-            return str(stored).lower() in ("true", "1", "yes")
-        env_val = os.getenv('WORKSPACE_ENABLED', '').strip().lower()
-        if env_val in ("true", "1", "yes"):
-            return True
-        return False
-
-    # =========================================================================
     # Brain Orb feature flags (trinity-enterprise#58/#60/#61; admin-configurable #85)
     # =========================================================================
 
@@ -522,6 +564,64 @@ class SettingsService:
         from config import MARKETPLACE_INSTALL_SOURCES
 
         return self.get_install_source() in MARKETPLACE_INSTALL_SOURCES
+
+    def is_hardening_guide_eligible(self) -> bool:
+        """Whether the first-run hardening guide should be offered here (#2380).
+
+        A SEPARATE question from `is_marketplace_install`, not a rename of it.
+        The guide's subject is "you are on a public cloud VM reachable at a bare
+        IP with no domain" — true of a marketplace image AND of a droplet
+        installed by following the DigitalOcean deploy doc, which records
+        `do-script`. `marketplace_install` keeps answering only what it says.
+
+        Still resolved server-side, so the browser holds no second copy of which
+        provenances qualify (the ent#386 rule), and still gated on PROVENANCE
+        rather than TLS state: the managed fleet has no domain and no HTTPS
+        flag, so a posture-based gate would fire on every paying client forever.
+        """
+        from config import HARDENING_GUIDE_INSTALL_SOURCES
+
+        return self.get_install_source() in HARDENING_GUIDE_INSTALL_SOURCES
+
+    def is_public_url_reached(self) -> bool:
+        """Has the saved public URL ever actually served a request? (#2691)
+
+        The companion to `get_install_tls_posture`, and deliberately a different
+        KIND of statement. The posture describes what this instance advertises —
+        a string an admin typed, which nothing verifies. This describes something
+        that was observed: the web server in front asked whether it could obtain
+        a certificate for that exact name, which only happens when a real request
+        for it arrives here.
+
+        So the first-run step can say "saved" the moment it is saved, and claim
+        the domain is actually serving only once this is true. A domain typed
+        with a typo, or one whose DNS record was never created, never flips it.
+
+        The row records WHICH host was reached (`<iso>|<host>`), and this
+        compares it to the host configured right now. That comparison, rather
+        than clearing the row on save, is what makes a stale row harmless: a
+        restored backup, a direct edit or a writer that never learned to clear
+        leaves a row describing a name that no longer matches, and it reads as
+        not-reached instead of showing a tick over a domain nobody has visited.
+
+        Guarded like the posture read, and for the same reason: this feeds
+        `/api/settings/feature-flags`, where a raise zeroes every flag. Boolean
+        rather than the timestamp — that surface reaches every authenticated
+        principal, and the answer to "is my setup finished" is a yes or a no.
+        """
+        try:
+            from urllib.parse import urlsplit
+
+            from utils.url_validation import canonical_host
+
+            stamped = (db.get_setting_value(PUBLIC_URL_REACHED_KEY, "") or "").strip()
+            if not stamped:
+                return False
+            reached_host = stamped.rsplit("|", 1)[-1].strip().lower()
+            configured = canonical_host(urlsplit(self.get_public_chat_url() or "").hostname or "")
+            return bool(configured) and reached_host == configured
+        except Exception:
+            return False
 
     def get_install_tls_posture(self) -> str:
         """What this instance ADVERTISES itself as reachable at (#2380).
@@ -822,14 +922,38 @@ class SettingsService:
         _platform_model_cache_ts = now
         return _platform_model_cache
 
+    def resolve_ops_setting(self, key: str):
+        """`(value, source)` for one ops setting — the whole chain, once.
+
+        `system_settings` row -> environment variable (for the keys listed in
+        `config.ENV_BACKED_OPS_KEYS` only) -> code default. Every surface that
+        reports WHERE a value came from (`GET /api/settings/retention`, the
+        boot log, the definitions `policy` block) resolves through this rather
+        than re-deriving the chain, because a reader that skips a tier reports
+        a precedence the platform does not actually have (trinity-enterprise#478).
+
+        `source` is one of `db-row`, `env`, `default`.
+        """
+        row = self.get_setting(key, None)
+        if row is not None and row != "":
+            return (row, "db-row")
+        env_value = config.env_ops_value(key)
+        if env_value is not None:
+            return (env_value, "env")
+        return (OPS_SETTINGS_DEFAULTS.get(key, ""), "default")
+
     def get_ops_setting(self, key: str, as_type: type = str):
         """
         Get an ops setting with type conversion.
 
-        Uses defaults from OPS_SETTINGS_DEFAULTS if not set.
+        Resolves row -> env (env-backed keys only) -> OPS_SETTINGS_DEFAULTS
+        through `resolve_ops_setting`, so the env tier minted for ent#478's
+        knobs is honoured by every existing caller without each one growing its
+        own chain.
         """
-        default = OPS_SETTINGS_DEFAULTS.get(key, "")
-        value = self.get_setting(key, default)
+        value, _source = self.resolve_ops_setting(key)
+        if value == "":
+            value = OPS_SETTINGS_DEFAULTS.get(key, "")
 
         if as_type == int:
             return int(value)
@@ -912,6 +1036,11 @@ def resolve_github_pat(agent_name: Optional[str] = None,
 def get_google_api_key() -> str:
     """Get Google API key from settings, fallback to env var."""
     return settings_service.get_google_api_key()
+
+
+def get_gemini_api_key() -> str:
+    """Platform Gemini key, resolved per call (ent#582) — see the method."""
+    return settings_service.get_gemini_api_key()
 
 
 # Slack Integration Settings (SLACK-001)

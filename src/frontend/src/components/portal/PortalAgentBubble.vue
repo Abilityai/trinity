@@ -36,7 +36,7 @@
         v-if="feedback"
         class="text-[11px] self-center"
         :class="copiedOk
-          ? 'text-status-success-600 dark:text-status-success-400'
+          ? 'text-status-success-700 dark:text-status-success-400'
           : 'text-status-danger-600 dark:text-status-danger-400'"
         aria-live="polite"
       >{{ feedback.label }}</span>

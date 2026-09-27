@@ -17,7 +17,7 @@ from typing import Optional
 
 import httpx
 
-from config import GEMINI_API_KEY, GEMINI_TEXT_MODEL
+from config import GEMINI_TEXT_MODEL
 from services.image_generation_prompts import (
     USE_CASE_PROMPTS,
     VALID_ASPECT_RATIOS,
@@ -25,6 +25,14 @@ from services.image_generation_prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _gemini_key() -> str:
+    """The platform Gemini key, resolved per call (ent#582): a key saved in
+    Settings works without a restart. Lazy import keeps this module loadable
+    standalone (its unit tests stub `config` and replace this function)."""
+    from services.settings_service import get_gemini_api_key
+    return get_gemini_api_key()
 
 # Gemini API configuration (text model lives in config.py — env-overridable, #1130)
 GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image-preview"
@@ -95,7 +103,7 @@ class ImageGenerationService:
     @property
     def available(self) -> bool:
         """Whether the service has a configured API key."""
-        return bool(GEMINI_API_KEY)
+        return bool(_gemini_key())
 
     async def generate_image(
         self,
@@ -290,7 +298,7 @@ class ImageGenerationService:
         response = await self._http.post(
             url,
             json=_build_payload(disable_thinking=True),
-            headers={"x-goog-api-key": GEMINI_API_KEY},
+            headers={"x-goog-api-key": _gemini_key()},
             timeout=PROMPT_REFINEMENT_TIMEOUT,
         )
 
@@ -300,7 +308,7 @@ class ImageGenerationService:
             response = await self._http.post(
                 url,
                 json=_build_payload(disable_thinking=False),
-                headers={"x-goog-api-key": GEMINI_API_KEY},
+                headers={"x-goog-api-key": _gemini_key()},
                 timeout=PROMPT_REFINEMENT_TIMEOUT,
             )
 
@@ -366,7 +374,7 @@ class ImageGenerationService:
         response = await self._http.post(
             url,
             json=payload,
-            headers={"x-goog-api-key": GEMINI_API_KEY},
+            headers={"x-goog-api-key": _gemini_key()},
             timeout=IMAGE_GENERATION_TIMEOUT,
         )
 

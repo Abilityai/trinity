@@ -11,11 +11,26 @@
  * - Captures tool name, MCP auth context, timing, and success/failure
  */
 
-import type { McpAuthContext } from "./types.js";
+import type { McpAuthContext, ToolOutcome } from "./types.js";
+import { ApiError } from "./client.js";
 
-const TRINITY_API_URL =
-  process.env.TRINITY_API_URL || "http://localhost:8000";
-const INTERNAL_SECRET = process.env.INTERNAL_API_SECRET || "";
+/**
+ * Where audit rows go. Injected by `createServer` (#2807) so the server's
+ * backend URL is the single source of truth and a test can point the wrapper at
+ * a stub backend; the defaults are what this module read from the environment
+ * before injection existed, so a caller that never configures it is unchanged.
+ */
+interface AuditConfig {
+  apiUrl: string;
+  secret: string;
+}
+let auditConfig: AuditConfig = {
+  apiUrl: process.env.TRINITY_API_URL || "http://localhost:8000",
+  secret: process.env.INTERNAL_API_SECRET || "",
+};
+export function configureAudit(config: Partial<AuditConfig>): void {
+  auditConfig = { ...auditConfig, ...config };
+}
 
 interface AuditEntry {
   event_type: string;
@@ -46,6 +61,13 @@ interface AuditEntry {
 export interface ToolCallContext {
   session?: McpAuthContext;
   requestId?: string;
+  /**
+   * #2807: a RETURNED outcome. A deny site stamps it through
+   * `access.ts::accessDenied`; `withAudit` reads it after `execute`, because a
+   * denial the tool returns is not one it throws — without the stamp every
+   * refusal on the surface was audited as `success: true`.
+   */
+  outcome?: ToolOutcome;
 }
 
 /**
@@ -73,16 +95,16 @@ export function resolveTargetId(params: unknown): string | undefined {
  */
 async function postAudit(entry: AuditEntry): Promise<void> {
   try {
-    if (!INTERNAL_SECRET) {
+    if (!auditConfig.secret) {
       // No secret configured — skip silently (local dev without docker)
       return;
     }
 
-    const response = await fetch(`${TRINITY_API_URL}/api/internal/audit`, {
+    const response = await fetch(`${auditConfig.apiUrl}/api/internal/audit`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Internal-Secret": INTERNAL_SECRET,
+        "X-Internal-Secret": auditConfig.secret,
       },
       body: JSON.stringify(entry),
     });
@@ -108,7 +130,8 @@ export function logToolCall(
   success: boolean,
   errorMessage?: string,
   targetId?: string,
-  requestId?: string
+  requestId?: string,
+  denied?: boolean
 ): void {
   const details: Record<string, unknown> = {
     tool: toolName,
@@ -117,6 +140,10 @@ export function logToolCall(
   };
   if (errorMessage) {
     details.error = errorMessage;
+  }
+  // #2807: a refused call is distinguishable from a crashed one.
+  if (denied) {
+    details.denied = true;
   }
 
   // #905: target_id (the agent the tool acted on, resolved from params) and
@@ -162,21 +189,41 @@ export function withAudit<T>(
 ): (params: T, context?: ToolCallContext) => Promise<string> {
   return async (params: T, context?: ToolCallContext) => {
     const start = Date.now();
-    const authContext = context?.session;
+    // #2807: hand `execute` a defined object, so a returned outcome always has
+    // somewhere to land (FastMCP always passes one; a direct call may not).
+    const ctx: ToolCallContext = context ?? {};
+    const authContext = ctx.session;
     // #846: dedicated chat_with_<slug> tools carry no `agent_name` param — the
     // target agent is bound into the tool at registration. Fall back to that
     // bound id so the audit row still attributes the action to the right agent.
     const targetId = resolveTargetId(params) ?? boundTargetId;
 
     try {
-      const result = await execute(params, context);
-      // Read requestId AFTER execute: a tool (e.g. git.ts) stamps it on the
-      // shared context object so this row carries the same id it forwarded.
-      logToolCall(toolName, authContext, Date.now() - start, true, undefined, targetId, context?.requestId);
+      const result = await execute(params, ctx);
+      // Read requestId AND outcome AFTER execute: a tool (e.g. git.ts) stamps
+      // the former on the shared context object so this row carries the same
+      // id it forwarded; a deny site stamps the latter (access.ts::accessDenied)
+      // because a RETURNED denial is not a thrown one — without the stamp the
+      // wrapper labelled every refusal on the surface `success: true` (#2807).
+      const outcome = ctx.outcome;
+      logToolCall(
+        toolName,
+        authContext,
+        Date.now() - start,
+        outcome === undefined,
+        outcome?.reason,
+        targetId,
+        ctx.requestId,
+        outcome?.kind === "denied"
+      );
       return result;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      logToolCall(toolName, authContext, Date.now() - start, false, msg, targetId, context?.requestId);
+      // A backend 403 surfaced as a throw is a refusal too: `denied` means
+      // "refused for authorization", by the MCP gate or by the backend.
+      const denied =
+        ctx.outcome?.kind === "denied" || (error instanceof ApiError && error.status === 403);
+      logToolCall(toolName, authContext, Date.now() - start, false, msg, targetId, ctx.requestId, denied);
       throw error;
     }
   };

@@ -20,7 +20,9 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { assistantRow, replyBaseline, replyFromHistory } from '@/components/portal/portalUtils'
+import * as portalUtils from '@/components/portal/portalUtils'
+
+const { assistantRow, replyBaseline, replyFromHistory } = portalUtils
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
 const CONV = read('../../src/components/portal/PortalConversation.vue')
@@ -153,6 +155,28 @@ describe('#2580 — replyFromHistory reads the row the server wrote', () => {
     const local = [{ role: 'assistant', content: 'prev', id: 'm0', source: null, voiceCallId: null },
                    { role: 'assistant', content: 'aloud', id: 'v1', source: 'voice', voiceCallId: 'c' }]
     expect(replyBaseline(local).id).toBe('m0')
+  })
+})
+
+describe('Workspace reply baseline follows the server-resolved thread', () => {
+  it('keeps Main’s previous reply when dispatch begins without a session id', async () => {
+    const previous = {
+      id: 'm-previous', role: 'assistant', content: 'the prior answer', cost: null,
+      created_at: '2026-09-11T16:00:00.000000Z', source: null, voice_call_id: null,
+    }
+    const fetchHistory = async (sessionId) => {
+      expect(sessionId).toBeNull()
+      return {
+        sessionId: 'main-session', messages: [previous],
+        inFlightExecutionId: null, inFlightWaitBudgetSeconds: null,
+        lastTurnOutcome: null, truncated: false,
+      }
+    }
+
+    const baseline = await portalUtils.readReplyBaseline?.(fetchHistory, null)
+
+    expect(baseline).toEqual({ id: 'm-previous', count: 1 })
+    expect(replyFromHistory([previous], baseline)).toBeNull()
   })
 })
 

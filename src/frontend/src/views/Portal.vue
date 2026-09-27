@@ -260,7 +260,9 @@
           :starred="isStarred('room', activeRoomIdFromRoute)"
           :prefill="prefill"
           :rename="renameRoom"
+          :carry-notice="activeRoomCarryNotice"
           @open-menu="mobileNav = true"
+          @dismiss-carry-notice="roomCarryNotice = null"
           @rooms-changed="refreshThreads"
           @toggle-star="toggleStar"
           @participants-changed="onRoomParticipants"
@@ -269,6 +271,9 @@
         >
           <template #rail-strip>
             <PortalRailStrip v-if="railVisible" :tabs="railTabs" :signals="railSignals" @open="railSheetOpen = true" />
+          </template>
+          <template #header-end>
+            <PortalThemeSwitch />
           </template>
         </PortalRoom>
 
@@ -396,10 +401,32 @@
             </div>
           </template>
           <template #empty>
-            <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />
+            <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook">
+              <!-- ent#465: the top 3 suggestions for you and this agent, between
+                   its identity and its hints — platform sessions, 1:1 only;
+                   renders nothing when there is nothing to suggest. -->
+              <template #before-hints>
+                <PortalSuggestions
+                  v-if="store.isPlatformSession && activeAgent && !activeRoomIdFromRoute"
+                  compact
+                  :agent-name="activeAgent.name"
+                  :limit="3"
+                  @use-playbook="usePlaybook"
+                  @open-section="openSuggestionSection"
+                  @open-chat="focusConversationComposer"
+                />
+              </template>
+            </PortalBriefing>
           </template>
           <template #rail-strip>
             <PortalRailStrip v-if="railVisible" :tabs="railTabs" :signals="railSignals" @open="railSheetOpen = true" />
+          </template>
+          <!-- ent#625: one switch, one store (`useThemeStore`), in every stage
+               state that renders the column — new chat, thread and agent
+               landing are all this branch since ent#523; the room above has
+               its own fill. The skeleton heads the chain and gets none. -->
+          <template #header-end>
+            <PortalThemeSwitch />
           </template>
         </PortalConversation>
 
@@ -552,18 +579,34 @@
            is conserved at every frame — so the hazard is gone by construction
            rather than held off by a flag, and the two motions now overlap
            instead of running back to back. -->
+      <!-- #2711 (review): the LEAVE is animated only when the column actually
+           held a rail. A reservation that turns out to be wrong — an empty or
+           failed roster, where the rail never arrives — must be given back in
+           one frame, not slid away over 300ms, or the fix hands back the very
+           shift it removes. Measured before this: `reserved(48) → 22 → 3 → none`
+           on a rosterless load. The ENTER keeps its transition: it only ever
+           runs for the voice-canvas swap (#2676), since a reserved column is
+           present from the first frame and never enters. -->
       <Transition
-        enter-active-class="transition-[width] duration-300 ease-out overflow-hidden motion-reduce:transition-none motion-reduce:duration-0"
-        leave-active-class="transition-[width] duration-300 ease-out overflow-hidden motion-reduce:transition-none motion-reduce:duration-0"
+        :enter-active-class="RAIL_MOTION"
+        :leave-active-class="railEverHeldRail ? RAIL_MOTION : ''"
         enter-from-class="!w-0"
-        leave-to-class="!w-0"
+        :leave-to-class="railEverHeldRail ? '!w-0' : ''"
       >
       <div
-        v-if="railHasColumn"
+        v-if="railHasColumn || railColumnReserved"
         class="hidden sm:flex shrink-0 min-h-0 w-[var(--ws-rail,24rem)]"
         data-testid="ws-rail-column"
+        :data-reserved="railColumnReserved && !railHasColumn ? 'true' : undefined"
       >
+      <!-- #2711: the column exists while the stage loads, EMPTY. Its width is
+           the persisted one, known synchronously, so the conversation column
+           lands on the footprint it will keep instead of losing the rail's width
+           the moment the roster arrives. The rail itself still waits for a ready
+           stage — `railHasColumn` is unchanged — because its tabs need the
+           roster; what is reserved is space, not content. -->
       <PortalRail
+        v-if="railHasColumn"
         :tabs="railTabs"
         :active-tab="railState.tab"
         :open="railState.open"
@@ -600,6 +643,8 @@
             :threads="threads"
             @open-thread="openThread"
             @use-playbook="usePlaybook"
+            @open-rail-tab="openRailOn"
+            @focus-composer="focusConversationComposer"
           />
         </template>
       </PortalRail>
@@ -648,9 +693,23 @@
           :threads="threads"
           @open-thread="(t) => { railSheetOpen = false; openThread(t) }"
           @use-playbook="(text) => { railSheetOpen = false; usePlaybook(text) }"
+          @open-rail-tab="openRailOn"
+          @focus-composer="() => { railSheetOpen = false; focusConversationComposer() }"
         />
       </template>
     </PortalRail>
+
+    <!-- ent#551 QA: leaving the stage mid-call asks; End call itself never does -->
+    <ConfirmDialog
+      v-model:visible="leaveCall.open"
+      :title="leaveCallText.title"
+      :message="leaveCallText.message"
+      :confirm-text="leaveCallText.confirmText"
+      :cancel-text="leaveCallText.cancelText"
+      :variant="leaveCallText.variant"
+      @confirm="onLeaveCallConfirm"
+      @cancel="onLeaveCallCancel"
+    />
 
     <!-- ent#361: picking who is in a chat is an explicit act now -->
     <PortalAgentPicker
@@ -670,6 +729,9 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { threadKey } from '@/components/portal/portalDrafts'
+import { safeStorage } from '@/utils/safeStorage'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalBrand from '@/components/portal/PortalBrand.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
@@ -681,14 +743,20 @@ import PortalRailFiles from '@/components/portal/PortalRailFiles.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
+import {
+  partitionAttachments, fanOutPlan, carriedNotice, noticeIsProblem, mergeCarrySources,
+} from '@/components/portal/portalAttachments'
 import PortalAgentBand from '@/components/portal/PortalAgentBand.vue'
 import PortalAgentDetails from '@/components/portal/PortalAgentDetails.vue'
+import PortalSuggestions from '@/components/portal/PortalSuggestions.vue'
 import ColumnResizeHandle from '@/components/ColumnResizeHandle.vue'
 import { useColumnResize } from '@/composables/useColumnResize'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
+import PortalThemeSwitch from '@/components/portal/PortalThemeSwitch.vue'
 import PortalRail from '@/components/portal/PortalRail.vue'
 import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
 import PortalVoiceCanvas from '@/components/portal/PortalVoiceCanvas.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { usePortalRailFeeds } from '@/composables/usePortalRailFeeds'
 import {
   RAIL_TABS,
@@ -697,6 +765,7 @@ import {
   railOpenPlan,
   emptySignal,
   loadRailState,
+  railColumnReservedFor,
   railParticipantsFor,
   railVisibleFor,
   saveRailState,
@@ -716,11 +785,20 @@ import {
 // the count. See `utils/tabTitle.js` for why neither writes `document.title`.
 import { setUnreadCount, clearUnreadCount } from '@/utils/tabTitle'
 import {
-  VOICE_QUERY_KEY, voiceAutoStart, voiceAutoStartArmed, disarmVoiceAutoStart,
+  VOICE_QUERY_KEY,
+  voiceAutoStart,
+  voiceAutoStartArmed,
+  disarmVoiceAutoStart,
+  leaveCallCopy,
 } from '@/components/portal/portalVoiceMode'
 
 const store = useClientPortalStore()
 const authStore = useAuthStore()
+// trinity-enterprise#657. Declared with its siblings rather than beside its
+// first reader (`decorate`, ~900 lines down): `onMainReset` reads it too, and a
+// `const` used above its declaration is a TDZ crash the moment any caller
+// becomes synchronous with setup.
+const drafts = usePortalDraftsStore()
 
 // #2261 — shown only when this tab suppressed the platform fallback (a client
 // session expired here) AND a platform session actually exists to continue as.
@@ -860,6 +938,30 @@ const railSheetOpen = ref(false)
 // changes end the call gracefully inside the conversation instead.
 const voiceCall = ref({ active: false, agentName: null, voiceSessionId: null })
 const voicePanelVersion = ref(0)
+// ent#551 QA: every exit from the stage other than End call ASKS first. A rail
+// click on the very agent being talked to pushed a route, the conversation
+// remounted, and its unmount ended the call — silently. `guardLeaveCall(run)`
+// answers true when it took the action over: the dialog holds it, End-and-leave
+// ends the call through the conversation's own `endVoiceCall` and then runs it,
+// Stay drops it. Every navigation entry routes through this one guard so a new
+// exit cannot forget to.
+const leaveCall = ref({ open: false, run: null })
+const leaveCallText = computed(() => leaveCallCopy(voiceCall.value.agentName || ''))
+function guardLeaveCall(run) {
+  if (!voiceCall.value.active) return false
+  leaveCall.value = { open: true, run }
+  return true
+}
+async function onLeaveCallConfirm() {
+  const run = leaveCall.value.run
+  leaveCall.value = { open: false, run: null }
+  await conversationRef.value?.endVoiceCall?.()
+  // The conversation's watcher clears this on the next flush; clear it now so
+  // the action below sees the call as over rather than re-arming the dialog.
+  voiceCall.value = { active: false, agentName: null, voiceSessionId: null }
+  if (typeof run === 'function') run()
+}
+function onLeaveCallCancel() { leaveCall.value = { open: false, run: null } }
 
 // #2559 — the Talk door. `?voice=1` asks for the call to start on landing, and
 // the ask is honoured only when it was armed IN THE APP (see `portalVoiceMode`).
@@ -970,9 +1072,41 @@ const railVisible = computed(() => railVisibleFor({
 // carries `v-if="tabs.length"` — with the width now on a wrapper this view
 // owns, a tabless rail would otherwise leave a full-width empty column behind.
 // Reading the same list the component does keeps the two from disagreeing.
+// #2711 — the column is held open while the stage loads, so the conversation
+// column lands on the footprint it keeps. The rule is pure (`portalRail.js`)
+// and deliberately narrower than `railVisible`: see its docblock for why a room
+// route is excluded. `voiceCanvasHasColumn` still wins — the canvas and the rail
+// are never both in the row.
+// One definition of the rail column's motion, so the enter and the (conditional)
+// leave cannot drift apart.
+const RAIL_MOTION = 'transition-[width] duration-300 ease-out overflow-hidden '
+  + 'motion-reduce:transition-none motion-reduce:duration-0'
+
+const railColumnReserved = computed(() => Boolean(
+  railColumnReservedFor({
+    agentPage: activeAgentPageName.value,
+    stageState: stage.value.state,
+    roomId: activeRoomIdFromRoute.value,
+  }) && !voiceCanvasHasColumn.value
+))
+
 const railHasColumn = computed(() => Boolean(
   railVisible.value && railTabs.value.length && !voiceCanvasHasColumn.value
 ))
+
+// #2711 (review): has this column ever actually held the rail? A reservation
+// that is handed back without ever becoming a rail was a guess that did not pay
+// off, and giving it back instantly is strictly better than animating it away.
+// Reset per route, because the answer is about THIS stage: navigating from a
+// conversation to an empty roster must not inherit the conversation's verdict.
+const railEverHeldRail = ref(false)
+watch(railHasColumn, (has) => { if (has) railEverHeldRail.value = true })
+// `route.fullPath`, not `route.value.fullPath`: `useRoute()` returns a REACTIVE
+// OBJECT, not a ref. The `.value` spelling threw on every Workspace load —
+// Vue routes a watch-getter error to its error handler rather than aborting
+// setup, so the page still rendered and the e2e still passed while this
+// watcher was dead. Every other route read in this file is the plain form.
+watch(() => route.fullPath, () => { railEverHeldRail.value = railHasColumn.value })
 // ent#475: the ONE owner of what the Loops / Canvas / Files tabs read. It
 // feeds `portalLoops` and `portalRailFeeds` off the same door gate and
 // participant list the rail renders from — nothing is fetched for a tab this
@@ -994,7 +1128,26 @@ const rail = usePortalRailFeeds({
 })
 // ent#525: the Work signal is store-derived now — the owner merges the
 // conversation's emit into the feed's running rows BY EXECUTION ID.
-const railSignals = computed(() => ({ ...rail.signals.value }))
+// ent#465: Info's dot — suggestions waiting for you on the agent on screen.
+// Read only when the store slice belongs to that agent (the #2162 rule).
+const infoSignal = computed(() => {
+  const name = activeAgent.value?.name
+  if (!name || !store.isPlatformSession || store.suggestionsAgent !== name) return null
+  const n = store.suggestions?.total || 0
+  return n > 0 ? { updated: true, note: n === 1 ? '1 suggestion' : `${n} suggestions` } : null
+})
+// Loaded by the shell, not only by the bodies that render it: the dot exists
+// for the person mid-conversation with the rail collapsed, where neither the
+// empty chat nor the Info tab is mounted. Reused for 60 s across placements.
+watch(
+  () => (store.isPlatformSession && !activeRoomIdFromRoute.value ? activeAgent.value?.name : null),
+  (name) => { if (name) store.loadAgentSuggestions(name) },
+  { immediate: true },
+)
+const railSignals = computed(() => ({
+  ...rail.signals.value,
+  ...(infoSignal.value ? { info: infoSignal.value } : {}),
+}))
 
 function setRailOpen(open) { railState.value = { ...railState.value, open } }
 function setRailTab(tab) { railState.value = { ...railState.value, tab } }
@@ -1029,6 +1182,15 @@ function askForCanvas() {
 function askAboutIt(text) {
   railSheetOpen.value = false
   usePlaybook(text)
+}
+// ent#465: a suggestion's Accept. Asks are answered in Work's "Waiting on
+// you"; decisions live in the Info tab. `open_chat` puts the caret in the
+// composer — never a send.
+function openSuggestionSection(name) {
+  openRailOn(name === 'asks' ? 'work' : 'info')
+}
+function focusConversationComposer() {
+  conversationRef.value?.focusComposer?.()
 }
 function onRoomParticipants(list) { roomParticipants.value = Array.isArray(list) ? list : [] }
 
@@ -1071,10 +1233,8 @@ function seeHints() {
 
 // localStorage can throw on access (private mode, blocked site data); the rail
 // then runs session-only, which `loadRailState`/`saveRailState` already treat
-// as the default.
-function safeStorage() {
-  try { return typeof localStorage !== 'undefined' ? localStorage : null } catch { return null }
-}
+// as the default. `safeStorage` is the shared util (trinity-enterprise#657
+// made it the third consumer).
 
 // #2163 — hydrate the ACTIVE agent's briefing, driven from HERE rather than
 // from `PortalBriefing`'s mount. `PortalBriefing` renders only in the
@@ -1103,6 +1263,7 @@ const pickerBusy = ref(false)
 const startingNewChat = ref(false)
 
 function newChat() {
+  if (guardLeaveCall(() => newChat())) return   // ent#551: ask, then leave
   pickerOpen.value = true
 }
 
@@ -1184,22 +1345,100 @@ const pickerError = ref(null)
 // created-but-unreachable room does not.
 const escalating = ref(false)
 
-async function onEscalateToRoom({ agents, message } = {}) {
+// #2794 — what the room says about the files that came with the escalated
+// message, scoped to the room it belongs to so it cannot follow the reader
+// into a different conversation. Held by the SHELL and not by the room:
+// the carry happens while the room is still mounting, and a notice owned by a
+// component that does not exist yet has nowhere to live.
+const roomCarryNotice = ref(null)
+const activeRoomCarryNotice = computed(() => (
+  roomCarryNotice.value && roomCarryNotice.value.roomId === activeRoomIdFromRoute.value
+    ? roomCarryNotice.value
+    : null
+))
+
+async function onEscalateToRoom({ agents, message, attachments = [] } = {}) {
   if (escalating.value || !agents?.length) return
   escalating.value = true
+  roomCarryNotice.value = null
   try {
     const room = await store.createRoom(agents, `Chat with ${agents.join(', ')}`)
     const roomId = room.id || room.room_id
     await refreshThreads()
     openRoom(roomId)
+
+    // #2794 — the attachments travel with the message.
+    //
+    // BEFORE the post, never after: the message is what wakes the mentioned
+    // agent, and a turn that starts before the file is in that agent's inbox
+    // cannot see the thing it was asked about. The order is the feature.
+    //
+    // The fan-out rule is the ROOM's own (`PortalRoom.vue`: one upload per
+    // participant), applied to the participants that do not already have the
+    // file — the origin agent received it when the chip was drawn, and sending
+    // it again would put two copies in one inbox.
+    // Both upload surfaces, not just the composer: the rail's Files panel sends
+    // straight to its target and holds no pending state, so a file attached
+    // there was invisible to the escalation — no carry and no notice. The
+    // carry log is the store's record of uploads that have not yet gone out
+    // with a message; the composer's own entries win a tie.
+    const { carried, dropped } = partitionAttachments(
+      mergeCarrySources(attachments, store.carryableUploadsFor(agents[0])),
+    )
+    const plan = fanOutPlan(carried, { origin: agents[0], participants: agents })
+    // Read OFF the plan rather than re-derived from `agents`: the plan already
+    // excludes the origin agent and collapses a duplicate mention, and two
+    // places deciding who the recipients are is how the notice ends up naming
+    // somebody the fan-out never wrote to.
+    const recipients = plan.length ? plan[0].agents : []
+    const failures = []
+    for (const item of plan) {
+      const missed = []
+      for (const name of item.agents) {
+        // Sequential and per-agent: the per-email upload limiter counts
+        // requests (ent#287), and one refused participant is reported as
+        // itself rather than failing the whole carry — the same per-file,
+        // per-destination honesty a room-native drop already has.
+        try {
+          await store.uploadDocument(name, item.file)
+        } catch {
+          missed.push(name)
+        }
+      }
+      if (missed.length) failures.push({ name: item.name, agents: missed })
+    }
+
+    // Consumed: these have now gone out with a message, so a LATER escalation
+    // in this conversation must not carry them a second time. Same moment the
+    // composer clears its chips.
+    store.markUploadsCarried(agents[0])
+
+    const notice = carriedNotice({ carried, dropped, failures, recipients })
+    if (notice) {
+      roomCarryNotice.value = { roomId, text: notice, problem: noticeIsProblem({ dropped, failures }) }
+    }
+
     if (message) {
       try {
         await store.postRoomMessage(roomId, message)
-      } catch { /* the room is open in front of them; retyping recovers */ }
+      } catch {
+        // trinity-enterprise#657: the room is open in front of them, but the
+        // 1:1's `send()` already emptied the composer, so without this the
+        // words were simply gone. Handed back through `prefill` — the outer
+        // catch's own mechanism — because `openRoom` above has already
+        // mounted the room, whose setup-time restore has passed; its `prefill`
+        // watcher puts the text in the field, and the write-through then keeps
+        // it as the room's draft. Cleared first so the same text re-triggers.
+        prefill.value = ''
+        await nextTick()
+        prefill.value = message
+      }
     }
   } catch (err) {
     // Escalation failed, so the user is still in the 1:1 with an emptied
-    // composer. Give the text back rather than losing what they typed.
+    // composer. Give the text back rather than losing what they typed — and
+    // the attachment chips are still standing beside it, because the
+    // conversation deliberately does not clear them on escalate (#2794).
     prefill.value = ''
     await nextTick()
     prefill.value = message || ''
@@ -1244,6 +1483,7 @@ const STAGE_ACTION = 'mt-3 text-sm text-action-primary-600 hover:underline'
 
 function openRoom(roomId) {
   if (!roomId) return
+  if (guardLeaveCall(() => openRoom(roomId))) return   // ent#551: ask, then leave
   unreachableAgent.value = null
   markRead('room', roomId)
   activeRoomId.value = roomId
@@ -1271,6 +1511,9 @@ function openRoom(roomId) {
 // at every instant instead of pointing at a chat we have not resolved.
 function openAgentPage(name) {
   if (!name) return
+  // ent#551 QA: the rail's agent row. It pushed a route with no guard, so the
+  // conversation remounted and the call ended without a word.
+  if (guardLeaveCall(() => openAgentPage(name))) return
   unreachableAgent.value = null
   pendingSession.value = null
   startingNewChat.value = false
@@ -1385,13 +1628,17 @@ async function onMainReset(result) {
   if (!result?.archived_session_id) return
   const id = result.main_session_id
   if (!id) return
+  // trinity-enterprise#657: Reset archives the history, not what the person
+  // was typing — a draft left on the archived tab would invite them to carry
+  // on in an archived chat. Moved before the remount so the new Main restores it.
+  drafts.move(threadKey(result.archived_session_id), threadKey(id))
   pendingSession.value = id
   convGen.value++
   router.push(`/workspace/c/${id}`)
 }
 
 function newChatWithAgent(name) {
-  if (voiceCall.value.active) return   // ent#534: end the call to switch chats
+  if (guardLeaveCall(() => newChatWithAgent(name))) return   // ent#534/ent#551: ask, then leave
   unreachableAgent.value = null
   activeAgentName.value = name
   // ent#451: this function has always MEANT a fresh chat — it clears
@@ -1413,7 +1660,7 @@ function newChatWithAgent(name) {
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
-  if (voiceCall.value.active) return   // ent#534: end the call to switch chats
+  if (guardLeaveCall(() => openThread(t))) return   // ent#534/ent#551: ask, then leave
   unreachableAgent.value = null
   // Opening an existing thread is the opposite intent; clear it so a later
   // send does not still ask for a fresh one.
@@ -1466,12 +1713,18 @@ const sidebarThreads = computed(() => threads.value.filter(
   (t) => !(t.is_main && !t.last_message_at),
 ))
 
+// trinity-enterprise#657: `hasDraft` rides the same projection as the star and
+// the unread count — the drafts store's keys are the shell's `chatKey`s, so a
+// later server-side draft would swap only the source. Re-stamped when the key
+// SET changes (a draft appearing or disappearing), never per keystroke.
 function decorate(list) {
+  const draftKeys = drafts.keys
   return list.map((t) => {
     const s = chatState.value[chatKey(t)]
-    return { ...t, starred: !!s?.starred, unread: Number(s?.unread) || 0 }
+    return { ...t, starred: !!s?.starred, unread: Number(s?.unread) || 0, hasDraft: draftKeys.has(chatKey(t)) }
   })
 }
+watch(() => drafts.keys, () => { threads.value = decorate(threads.value) })
 
 async function refreshThreads() {
   // #2198: both halves are caught. `fetchAllSessions` already returns its last
@@ -1671,7 +1924,11 @@ function renameRoom(roomId, title) {
 function onGlobalKeydown(e) {
   if (!isNewChatHotkey(e)) return
   if (!store.isClientSignedIn) return
-  if (voiceCall.value.active) return   // ent#534: the call owns the stage
+  if (voiceCall.value.active) {        // ent#534/ent#551: the call owns the stage — ask first
+    e.preventDefault()
+    guardLeaveCall(() => onGlobalKeydown(e))
+    return
+  }
   e.preventDefault()
   const name = activeAgentPageName.value
     || (!activeRoomIdFromRoute.value && !unreachableAgent.value ? activeAgent.value?.name : null)

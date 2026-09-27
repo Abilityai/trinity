@@ -1,0 +1,3 @@
+# Screenshot evidence is local-only: the repo is public and PNGs of a live instance may carry names, emails and ids.
+# Reports reference evidence/<run>/<file>.png; the files live on the machine that ran the sweep.
+evidence/

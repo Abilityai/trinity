@@ -63,6 +63,14 @@ class DashboardHistoryOperations:
                     if widget_type not in ("metric", "progress", "status"):
                         continue
 
+                    # ent#479: a widget BOUND to a declared metric already has
+                    # a real time series behind it (`metric_points`). Snapshotting
+                    # it would make this table a second source of truth for the
+                    # same number — and the two would disagree the moment the
+                    # dashboard poll and the recording cadence drift apart.
+                    if widget.get("metric"):
+                        continue
+
                     # Generate widget key: use explicit id if provided, else position-based
                     widget_key = widget.get("id") or f"s{section_idx}_w{widget_idx}"
                     widget_label = widget.get("label", "")

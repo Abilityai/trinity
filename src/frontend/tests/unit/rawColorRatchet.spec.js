@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
-import { scanRawColors, baselineKey } from '../../scripts/scan-raw-colors.mjs'
+import { scanRawColors, baselineKey, countHardcodedColors } from '../../scripts/scan-raw-colors.mjs'
 
 /**
  * #2605 — raw-colour RATCHET, actually enforced.
@@ -144,5 +144,54 @@ describe('the docs describe what is actually enforced (#2605)', () => {
     for (const doc of ['CLAUDE.md', 'docs/memory/design-system-contract.md']) {
       expect(read(doc), doc).toContain('rawColorRatchet.spec.js')
     }
+  })
+})
+
+
+/**
+ * #2718 — what counts as a hardcoded colour.
+ *
+ * `#190` is a valid three-digit hex and also what an issue reference looks like
+ * in rendered copy, so the scanner counted `(ent#184)` and `>#847</a>` as
+ * colours. Nine such phantoms sat in the baseline, and the ratchet above turned
+ * them load-bearing: adding a second reference to a file grew its entry and
+ * failed the build for prose.
+ *
+ * The rule is positional, because no lexical one can separate the two: code is
+ * scanned, rendered copy is not. Tags, attribute values and `{{ }}`
+ * interpolations stay in; the text between them does not.
+ */
+describe('scanner: a hardcoded colour, and not an issue number (#2718)', () => {
+  const count = (source) => countHardcodedColors(source)
+
+  it('does not count an issue reference in copy', () => {
+    expect(count('<template>\n  <p>Opt-in per agent (#526).</p>\n</template>')).toBe(0)
+    expect(count('<template>\n  <p>quality (ent#184)</p>\n</template>')).toBe(0)
+    expect(count('<template>\n  <a href="https://example.test/issues/847">#847</a>\n</template>')).toBe(0)
+  })
+
+  it('does not count an issue reference glued to a word inside an attribute', () => {
+    expect(count('<template>\n  <p title="quality (ent#206)">x</p>\n</template>')).toBe(0)
+  })
+
+  it('does not count an HTML entity', () => {
+    expect(count('<template>\n  <p>a&#160;b</p>\n</template>')).toBe(0)
+  })
+
+  it('still counts a hex literal in an attribute, a style block and an arbitrary class', () => {
+    expect(count('<template>\n  <div style="color:#1a2b3c">x</div>\n</template>')).toBe(1)
+    expect(count('<template>\n  <div class="bg-[#1e1e1e]">x</div>\n</template>')).toBe(1)
+    expect(count('<style>\n.a { border: 1px solid #374151; color: #fff }\n</style>')).toBe(2)
+    expect(count('<style>\n.a { background: rgba(0, 0, 0, .5) }\n</style>')).toBe(1)
+  })
+
+  it('still counts a hex behind an attribute holding a > character', () => {
+    // The tag scan is quote aware: `v-if="a > b"` must not end the tag early and
+    // take the stroke colour after it with the copy.
+    expect(count('<template>\n  <path v-if="nowX >= 0" stroke="#10b981" />\n</template>')).toBe(1)
+  })
+
+  it('still counts a hex inside an interpolation, which is an expression', () => {
+    expect(count("<template>\n  <p>{{ ok ? '#10b981' : '#ef4444' }}</p>\n</template>")).toBe(2)
   })
 })

@@ -52,6 +52,7 @@ from services.docker_service import get_agent_container
 from services import agent_call_limiter
 from services.agent_call_limiter import BackendAgentCallBudgetExhausted
 from services.model_context import DEFAULT_CONTEXT_WINDOW
+from services.execution_envelope import TaskExecutionErrorCode
 from services.task_execution_service import (
     _compute_context_used,
     agent_post_with_retry,
@@ -141,6 +142,7 @@ async def prepare_chat_execution(
     chat_execution_id: str,
     capacity_result: object,
     queue_result: str,
+    chain_depth: Optional[int] = None,
 ) -> ChatExecutionContext:
     """Execution setup for chat_with_agent (#1026 slice 2).
 
@@ -188,6 +190,8 @@ async def prepare_chat_execution(
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
         source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
         subscription_id=_exec_subscription_id,
+        # #2806: from admission — None for a non-agent principal (a root).
+        chain_depth=chain_depth,
     )
     task_execution_id = task_execution.id if task_execution else None
     idempotency_service.attach_execution(idem, task_execution_id)
@@ -334,6 +338,30 @@ def build_chat_payload(
     return payload
 
 
+def _compact_metadata_json(metadata) -> Optional[str]:
+    """#2958: the agent's compact events as the `compact_metadata` column
+    value (same shape the task path writes), or None when nothing compacted."""
+    events = (metadata or {}).get("compact_events") or []
+    return json.dumps(events) if events else None
+
+
+def _compaction_summary(metadata) -> Optional[dict]:
+    """#2958 AC3: a one-glance compaction summary for the `/chat` response, so
+    a synchronous caller can tell a one-off auto-compaction from a degraded
+    agent without a second call. None when the turn did not compact."""
+    events = [e for e in ((metadata or {}).get("compact_events") or []) if isinstance(e, dict)]
+    if not events:
+        return None
+    durations = [e["duration_ms"] for e in events if isinstance(e.get("duration_ms"), (int, float))]
+    return {
+        "events": len(events),
+        "trigger": events[0].get("trigger"),
+        "pre_tokens": events[0].get("pre_tokens"),
+        "post_tokens": events[-1].get("post_tokens"),
+        "duration_ms": sum(durations) if durations else None,
+    }
+
+
 async def _finalize_chat_success(
     *,
     name,
@@ -457,6 +485,9 @@ async def _finalize_chat_success(
             tool_calls=tool_calls_json,
             execution_log=execution_log_json,
             claude_session_id=real_session_id,
+            # #2958 AC3: a chat turn that auto-compacted is attributed on the
+            # row, as the task path already does (the column is on both tracks).
+            compact_metadata=_compact_metadata_json(metadata),
         )
 
     # Add execution metadata to response
@@ -465,6 +496,8 @@ async def _finalize_chat_success(
         "task_execution_id": task_execution_id,  # Database ID (permanent)
         "queue_status": queue_result,
         "was_queued": is_queued,
+        # #2958 AC3: None, or {events, trigger, pre_tokens, post_tokens, duration_ms}.
+        "compaction": _compaction_summary(metadata),
     }
 
     # RELIABILITY-006 (#525): store the result so a duplicate Idempotency-Key
@@ -569,6 +602,60 @@ def _parse_agent_http_error(e, name: str):
     return error_msg, agent_status_code, partial_metadata
 
 
+# #2889: the machine-readable class of a sync dispatch failure, as an ADDITIVE
+# response header. The body of a sync /chat|/task 503 is prose reconstructed
+# from the agent's own error text, so every consumer that needed to tell
+# "agent server not reachable" from "the turn ran and failed on the credential"
+# re-derived it by substring — the live test tiers ran ~40 such sites and
+# laundered an exhausted credit balance into an "agent not ready" skip. The
+# backend already computes `TaskExecutionErrorCode` for the immediate /task
+# path (`TaskExecutionResult.error_code`) and drops it at `_map_task_failure`;
+# the /chat path holds the same input (`agent_status_code`) and applies the
+# same rule task_execution_service does (agent 503 → AUTH, 429 → BILLING, no
+# agent response at all → NETWORK). A header, not a body change: the detail
+# stays a string on every path that emits one today, so nothing parsing it
+# breaks, and a dict-bodied path (the auto-switch shapes) carries it the same
+# way.
+ERROR_CODE_HEADER = "X-Trinity-Error-Code"
+
+
+def _error_code_headers(code, extra: Optional[dict] = None) -> Optional[dict]:
+    """Headers dict carrying ``X-Trinity-Error-Code`` for a known code, else
+    ``extra`` unchanged (``None`` when there is nothing to send).
+
+    Accepts the enum member or its string value; anything else (a stub, ``None``)
+    contributes no header — a wrong value is worse than an absent one, since the
+    reader treats an absent header as "classify from the body".
+    """
+    value = getattr(code, "value", code)
+    if not isinstance(value, str) or not value:
+        return extra
+    headers = dict(extra or {})
+    headers[ERROR_CODE_HEADER] = value
+    return headers
+
+
+def _classify_agent_http_failure(
+    agent_status_code, error_msg: str = ""
+) -> TaskExecutionErrorCode:
+    """The /chat path's twin of task_execution_service's producer-side rule:
+    Claude Code refused the model → MODEL_UNSUPPORTED (#3012, any status — an
+    older agent image answers it 503), the agent answered 503 → AUTH,
+    429 → BILLING, never answered → NETWORK, any other agent status →
+    AGENT_ERROR."""
+    from services.failure_classifier import is_model_rejection
+
+    if agent_status_code is None:
+        return TaskExecutionErrorCode.NETWORK
+    if is_model_rejection(error_msg):
+        return TaskExecutionErrorCode.MODEL_UNSUPPORTED
+    if agent_status_code == 503:
+        return TaskExecutionErrorCode.AUTH
+    if agent_status_code == 429:
+        return TaskExecutionErrorCode.BILLING
+    return TaskExecutionErrorCode.AGENT_ERROR
+
+
 async def _apply_sub003_autoswitch(name: str, error_msg: str, agent_status_code):
     """SUB-003 (#441): auto-switch on rate-limit (429) OR auth-class failures.
     ALWAYS raises: ChatDispatchError (switch/plain) OR the HTTPException that
@@ -578,6 +665,15 @@ async def _apply_sub003_autoswitch(name: str, error_msg: str, agent_status_code)
         handle_subscription_failure,
         is_auth_failure,
     )
+
+    code = _classify_agent_http_failure(agent_status_code, error_msg)
+    code_headers = _error_code_headers(code)
+
+    # #3012: no subscription can fix a model the CLI refuses — switching would
+    # walk the agent through every seat onto the platform API key. Surface the
+    # runtime's own sentence as a 400, the status the agent itself answers.
+    if code.value == TaskExecutionErrorCode.MODEL_UNSUPPORTED.value:
+        raise ChatDispatchError(400, error_msg, headers=code_headers)
 
     if agent_status_code == 429:
         try:
@@ -603,8 +699,9 @@ async def _apply_sub003_autoswitch(name: str, error_msg: str, agent_status_code)
                     ),
                     "retry_after": 15,
                 },
+                headers=code_headers,
             )
-        raise ChatDispatchError(429, error_msg)
+        raise ChatDispatchError(429, error_msg, headers=code_headers)
 
     if agent_status_code == 503 or is_auth_failure(error_msg):
         try:
@@ -630,10 +727,15 @@ async def _apply_sub003_autoswitch(name: str, error_msg: str, agent_status_code)
                     ),
                     "retry_after": 15,
                 },
+                headers=code_headers,
             )
-        raise ChatDispatchError(503, f"Failed to communicate with agent: {error_msg}")
+        raise ChatDispatchError(
+            503, f"Failed to communicate with agent: {error_msg}", headers=code_headers
+        )
 
-    raise ChatDispatchError(503, f"Failed to communicate with agent: {error_msg}")
+    raise ChatDispatchError(
+        503, f"Failed to communicate with agent: {error_msg}", headers=code_headers
+    )
 
 
 async def _finalize_http_failure(
@@ -689,6 +791,9 @@ async def _finalize_http_failure(
             cost=salvage_cost,
             context_used=salvage_context,
             context_max=salvage_context_max,
+            # #2958: the #678 structured body carries the turn's compact events
+            # (504/429/plain-500 bodies carry no metadata — a known gap).
+            compact_metadata=_compact_metadata_json(partial_metadata),
         )
 
     if collaboration_activity_id:
@@ -1225,7 +1330,14 @@ def derive_source_and_trigger(
 ) -> "_TaskDerivation":
     """SELF-EXEC-001 spoof guard (403), self-task detection, triggered_by
     derivation, and the #1578 reserved-event tag (internal-secret gated, C-003).
-    HTTP-free — the spoof guard raises ChatDispatchError(403)."""
+    HTTP-free — the spoof guard raises ChatDispatchError(403).
+
+    ent#614: the router now resolves ``x_source_agent`` through
+    ``dependencies.resolve_source_agent`` before this runs, so the value here is
+    an agent key's own name, the event loopback's vouched name, or None — and a
+    non-agent principal's header was already refused with a 403. The guard
+    below is kept as belt-and-braces for a caller that bypasses the router
+    (the same shape as ``reject_agent_principal`` under ``require_admin``)."""
     # SELF-EXEC-001: verify X-Source-Agent matches the MCP key's agent scope.
     if x_source_agent and current_user.agent_name:
         if x_source_agent != current_user.agent_name:
@@ -1310,6 +1422,7 @@ async def create_task_execution_and_activities(
     triggered_by,
     is_self_task,
     idem,
+    chain_depth=None,
 ):
     """Create the execution record (#95/#96), attach the idempotency claim, and
     track the collaboration / self-task activity (mirrors the /chat pattern).
@@ -1350,6 +1463,8 @@ async def create_task_execution_and_activities(
         source_channel_thread=src_thread,
         source_channel_agent=src_channel_agent,
         source_channel_client=src_channel_client,
+        # #2806: stamped once here; a backlog-queued row keeps it when drained.
+        chain_depth=chain_depth,
     )
     execution_id = execution.id if execution else None
     idempotency_service.attach_execution(idem, execution_id)
@@ -1536,6 +1651,7 @@ async def _acquire_task_capacity(
                 f"Agent '{name}' is at capacity ({max_parallel_tasks} parallel tasks) "
                 f"and its backlog is full. Try again later."
             ),
+            headers=_error_code_headers(TaskExecutionErrorCode.CAPACITY),  # #2919
         )
     except CircuitOpen as e:
         # #526: dispatch breaker open — raised before the queue_persistent enqueue.
@@ -1552,20 +1668,63 @@ async def _acquire_task_capacity(
     return cap_result, effective_timeout
 
 
-def _map_task_failure(name, result):
+# #2661: the statuses a sync backlog long-poll may reconstruct a result from
+# (the ones a row cannot leave). `TaskExecutionStatus` is a str-Enum, so the
+# stored string `db.get_execution` returns compares equal to the member.
+_SYNC_BACKLOG_TERMINAL = (
+    TaskExecutionStatus.SUCCESS,
+    TaskExecutionStatus.FAILED,
+    TaskExecutionStatus.CANCELLED,
+    TaskExecutionStatus.SKIPPED,
+)
+
+
+def _map_task_failure(name, result, *, idem):
     """Shared /task failure translation (#679): a non-success terminal maps to
-    429 (at-capacity) / 504 (timed out) / 503. Raises ChatDispatchError."""
+    429 (at-capacity) / 504 (timed out) / 503. Raises ChatDispatchError.
+
+    #2661: releases the idempotency claim before raising. Both sync branches
+    call this AFTER `begin()` and BEFORE `complete()`, and nothing else covered
+    the raising path — so every failed/cancelled/timed-out sync `/task` left its
+    claim `in_flight` for the full 24h TTL. The user-visible effect was the
+    inverse of what idempotency is for: a legitimate retry of the same message
+    answered 409 for a day against a task that had died minutes earlier, while
+    the ONLY way to get through was to reword the message — which derives a
+    different key and dispatches a genuine duplicate.
+
+    `idem` is keyword-only and REQUIRED, not defaulted: a default would let a
+    third call site be added later that silently reintroduces the wedge, and the
+    wedge is invisible until someone retries a full day later.
+    """
     if result.status in ("failed", "cancelled"):
+        idempotency_service.fail(idem)
+        # #2889: the immediate path's result carries the producer-side code;
+        # the backlog-reconstruct path builds its result from the row and has
+        # none — the header is absent there, except on the at-capacity branch
+        # below, where `capacity` (#2919) fills the absent code.
+        code_headers = _error_code_headers(getattr(result, "error_code", None))
         if "at capacity" in (result.error or ""):
+            # #2919: the capacity rejection carries no code, so `capacity`
+            # fills the ABSENT one. A code the result already carries is the
+            # producer's structured verdict on a turn that ran (e.g. #2638
+            # `billing`) and wins over this substring match on its prose.
             raise ChatDispatchError(
-                429, f"Agent '{name}' is at capacity. Try again later."
+                429, f"Agent '{name}' is at capacity. Try again later.",
+                headers=code_headers or _error_code_headers(TaskExecutionErrorCode.CAPACITY),
             )
         elif "timed out" in (result.error or ""):
-            raise ChatDispatchError(504, result.error)
+            raise ChatDispatchError(504, result.error, headers=code_headers)
+        elif getattr(getattr(result, "error_code", None), "value", None) == (
+            TaskExecutionErrorCode.MODEL_UNSUPPORTED.value
+        ):
+            # #3012: same 400 as the /chat path — a refused model is not an
+            # unavailable agent, and a caller must not wait-and-retry it.
+            raise ChatDispatchError(400, result.error, headers=code_headers)
         else:
             raise ChatDispatchError(
                 503,
                 result.error or "Failed to execute task. The agent may be unavailable.",
+                headers=code_headers,
             )
 
 
@@ -1678,15 +1837,15 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
     )
     try:
         wait_payload = await wait_for_sync_terminal(execution_id, timeout=sync_wait_cap)
+        timed_out = False
     except asyncio.TimeoutError:
-        raise ChatDispatchError(
-            504,
-            (
-                f"Sync task on agent '{name}' did not complete within "
-                f"{sync_wait_cap}s. Execution {execution_id} may still be "
-                f"running; poll GET /api/agents/{name}/executions/{execution_id}."
-            ),
-        )
+        # #2661: do NOT raise here. The wait can miss a terminal that landed
+        # (a lost wakeup, or one that lands inside the cap's last tick), so the
+        # row is the authority — read it below and only 504 when it is still
+        # non-terminal. Raising straight from this except was one of the two
+        # exits that left the idempotency claim `in_flight` for its 24h TTL.
+        wait_payload = None
+        timed_out = True
 
     if wait_payload is not None and wait_payload.get("result") is not None:
         result = wait_payload["result"]
@@ -1694,9 +1853,38 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
     else:
         row = db.get_execution(execution_id)
         if row is None:
+            # Nothing is running under this key that anyone can find, so a
+            # retry must be allowed to dispatch afresh (#2661) — release, the
+            # same verdict `_map_task_failure` gives a failed row.
+            idempotency_service.fail(idem)
             raise ChatDispatchError(
                 503, f"Execution {execution_id} disappeared while waiting"
             )
+        if timed_out and row.status not in _SYNC_BACKLOG_TERMINAL:
+            # Still queued/running past the long-poll cap. The claim must NOT
+            # be released — a retry would dispatch a second execution beside
+            # the live one, which is the duplicate idempotency exists to stop.
+            # Nor may it stay `in_flight`: nothing downstream completes it, so
+            # a retry after the row terminates would still answer 409 for a
+            # day (the #2661 wedge). Complete it with a RECEIPT — the same
+            # shape the async paths store (`_queued_payload`) and the same
+            # `queued_timeout` vocabulary the MCP client speaks — so a replay
+            # returns 200 + the execution to poll, and the row stays the
+            # single source of truth for the outcome.
+            receipt = {
+                "status": "queued_timeout",
+                "execution_id": execution_id,
+                "task_execution_id": execution_id,
+                "agent_name": name,
+                "message": (
+                    f"Sync task on agent '{name}' did not complete within "
+                    f"{sync_wait_cap}s. Execution {execution_id} may still be "
+                    f"running; poll GET /api/agents/{name}/executions/{execution_id}."
+                ),
+                "async_mode": True,
+            }
+            idempotency_service.complete(idem, execution_id, receipt)
+            raise ChatDispatchError(504, receipt["message"])
         from services.task_execution_service import TaskExecutionResult
 
         result = TaskExecutionResult(
@@ -1717,7 +1905,7 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
         )
         sync_chat_session_id = None
 
-    _map_task_failure(name, result)
+    _map_task_failure(name, result, idem=idem)
 
     sync_response_data = result.raw_response or {}
     if sync_chat_session_id:
@@ -1776,7 +1964,7 @@ async def _dispatch_sync_immediate(
             error=result.error if result.status == TaskExecutionStatus.FAILED else None,
         )
 
-    _map_task_failure(name, result)
+    _map_task_failure(name, result, idem=idem)
 
     response_data = result.raw_response
 
@@ -1882,6 +2070,16 @@ async def dispatch_parallel_task(
         current_user=current_user,
     )
 
+    # #2806: chain-depth guard — keyed on the principal, ahead of the claim,
+    # the uploads, the row and the capacity acquire, so a refused hop leaves
+    # nothing behind. Raises InterAgentDepthExceeded (the router maps it).
+    chain_depth = await dispatch_admission_service.enforce_inter_agent_depth(
+        current_user=current_user,
+        target=name,
+        endpoint=f"/api/agents/{name}/task",
+        x_via_mcp=x_via_mcp,
+    )
+
     # RELIABILITY-006 (#525): idempotency begin/replay (shared with /chat, RD2).
     idem, replay = dispatch_admission_service.begin_task_idempotency(
         name=name,
@@ -1919,6 +2117,7 @@ async def dispatch_parallel_task(
         triggered_by=derivation.triggered_by,
         is_self_task=derivation.is_self_task,
         idem=idem,
+        chain_depth=chain_depth,
     )
 
     if request.async_mode:
@@ -2164,6 +2363,16 @@ async def terminate_execution(
     cancel that lands after the row is already terminal loses and leaves the
     real terminal alone.
     """
+    # ent#551 QA: two voice-dispatched turns were cancelled ~3 s after their
+    # call ended and nothing in the log said by whom — uvicorn access logging
+    # is off, and this path logged only its outcome. Name the requester here,
+    # once, for every arm.
+    logger.info(
+        "[Terminate] requested for %s on '%s' by %s%s",
+        task_execution_id or execution_id, name, actor_kind,
+        f" (user {getattr(current_user, 'username', None) or getattr(current_user, 'id', '?')})" if current_user else "",
+    )
+
     # Agent scope for the DB half, checked ONCE for every arm. The route proves
     # `name`; `task_execution_id` is caller-supplied (a query param on the
     # operator route) and is the id the CANCELLED CAS and the activity close

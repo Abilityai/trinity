@@ -15,7 +15,8 @@ Tables are organized by feature area:
 - Shared Files (outbound): agent_shared_files
 - Settings: system_settings
 - Public Links: agent_public_links, public_link_verifications, public_link_usage
-- Public Chat: public_chat_sessions, public_chat_messages, public_user_memory
+- Public Chat: public_chat_sessions, public_chat_messages, public_user_memory, public_user_memory_writes
+- Tandem: agent_role_readiness, seat_decisions
 - Git: agent_git_config
 - Skills: agent_skills
 - Tags: agent_tags
@@ -275,6 +276,7 @@ TABLES = {
             queued_at TEXT,
             backlog_metadata TEXT,
             fan_out_id TEXT,
+            fan_out_task_id TEXT,
             retry_count INTEGER DEFAULT 0,
             loop_id TEXT,
             claim_token TEXT,
@@ -286,6 +288,13 @@ TABLES = {
             source_channel_thread TEXT,
             source_channel_agent TEXT,
             source_channel_client TEXT,
+            -- ent#555: which canvas the user had OPEN when they sent this turn.
+            -- Context, never authority — it says what is being discussed and
+            -- never widens what the agent may read or write. Validated against
+            -- the agent's own canvases at the boundary that stamps it.
+            open_canvas_id TEXT,
+            -- #2806: agent-to-agent hops from a non-agent root. NULL = root (0).
+            chain_depth INTEGER,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -528,6 +537,11 @@ TABLES = {
             -- 'brief' | 'status-board'); NULL = stacked blocks. A property of
             -- the surface, like `audience`; a block's `slot` lives in `blocks`.
             template TEXT,
+            -- ent#553: pinned canvases sort above the rest so the default one
+            -- and the ones in daily use stay reachable as the pile grows. A
+            -- HUMAN's ordering preference, not the agent's — the write path
+            -- never sets it, so an agent cannot pin itself to the top.
+            pinned INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (agent_name, canvas_id)
         )
     """,
@@ -868,6 +882,9 @@ TABLES = {
             consumed_at TEXT,
             download_count INTEGER DEFAULT 0,
             last_downloaded_at TEXT,
+            addressed_to_email TEXT,
+            addressed_to_channel TEXT,
+            audience_source TEXT,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
                 ON DELETE CASCADE ON UPDATE CASCADE
         )
@@ -875,9 +892,9 @@ TABLES = {
 
     # #2582 / ent#548 — per-viewer dismissal of an agent-shared file.
     #
-    # `agent_shared_files` carries no audience, so `portal_documents` lists every
-    # active share of an agent to every rostered client. "Remove it from MY list"
-    # therefore needs its own storage: the one generic per-user preference store
+    # A file has ONE addressee (ent#549), so "remove it from MY list" is a
+    # preference over the viewer's own files. It still needs its own storage:
+    # the one generic per-user preference store
     # (`user_ui_preferences`) is FK'd to `users.id`, and a Workspace client has no
     # user row. No `enterprise_` prefix — that prefix on the portal tables is
     # retained history, not a convention to extend.
@@ -897,6 +914,28 @@ TABLES = {
         )
     """,
 
+    # trinity-enterprise#465 — accept/dismiss of a Workspace suggestion, per
+    # viewer + agent + suggestion. Generic name + `surface` so the post-action
+    # next-step tier (OP-5) shares one dismissal model instead of growing a
+    # second table. `dismissed_fingerprint` is the STATE the viewer dismissed;
+    # the item returns when the state changes. `agent_name` makes the row follow
+    # the agent's lifecycle (`AGENT_REFS`, CASCADE).
+    "workspace_suggestion_feedback": """
+        CREATE TABLE IF NOT EXISTS workspace_suggestion_feedback (
+            client_email TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            suggestion_key TEXT NOT NULL,
+            surface TEXT NOT NULL DEFAULT 'agent',
+            source TEXT,
+            dismissed_at TEXT,
+            dismissed_fingerprint TEXT,
+            accepted_at TEXT,
+            accept_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (client_email, agent_name, suggestion_key)
+        )
+    """,
+
     # -------------------------------------------------------------------------
     # Settings Tables
     # -------------------------------------------------------------------------
@@ -911,6 +950,40 @@ TABLES = {
     # -------------------------------------------------------------------------
     # Public Links Tables
     # -------------------------------------------------------------------------
+    # ent#554 — a share link for ONE canvas.
+    #
+    # Deliberately NOT a row in `agent_public_links`, even though that table has
+    # a `type` column that looks made for this. Nothing filters on it:
+    # `get_public_link_by_token` / `is_link_valid` / `routers/public.py::
+    # _validate_public_link` all resolve a token whatever its type, so a canvas
+    # row added there would ALSO be a working public-chat token — the exact
+    # silent widening this feature's AC forbids. A separate table means a canvas
+    # token cannot resolve on a chat route at all, by construction rather than
+    # by every consumer remembering to check.
+    "agent_canvas_shares": """
+        CREATE TABLE IF NOT EXISTS agent_canvas_shares (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            canvas_id TEXT NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            -- 'authorized' (default) = the people who could already see this
+            -- canvas; opening it requires signing in and the server re-checks
+            -- access. 'public' = anyone holding the URL, an explicit separate
+            -- choice. Default is the narrow one: a share must never widen the
+            -- ent#438 audience model by accident.
+            scope TEXT NOT NULL DEFAULT 'authorized',
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT,
+            -- Set, never deleted: a revoked link must be able to SAY it was
+            -- revoked rather than 404 blankly, which it cannot do if the row
+            -- is gone.
+            revoked_at TEXT,
+            last_viewed_at TEXT,
+            view_count INTEGER NOT NULL DEFAULT 0
+        )
+    """,
+
     "agent_public_links": """
         CREATE TABLE IF NOT EXISTS agent_public_links (
             id TEXT PRIMARY KEY,
@@ -1001,6 +1074,82 @@ TABLES = {
         )
     """,
 
+    # ent#527 / #663: a companion's readiness (`calibrating` | `ready`) is the
+    # AGENT OWNER's stamp, kept platform-side because `template.yaml`'s
+    # `x-role.status` is agent-writable and the rule is that the agent never
+    # flips itself. One row per agent: the current state, when, and who.
+    "agent_role_readiness": """
+        CREATE TABLE IF NOT EXISTS agent_role_readiness (
+            agent_name TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            changed_at TEXT NOT NULL,
+            changed_by TEXT NOT NULL
+        )
+    """,
+
+    # ent#638 (R25): the seat-level decision record — why a thing was approved,
+    # deferred or killed, by whom, on which criterion, and what would reverse
+    # it. Lintable fields only (`notes` is the one prose field); a decision
+    # with no alternatives is refused as a note. `expired` is never stored —
+    # it is computed on read from `review_by`; correction supersedes (a new
+    # row with `supersedes_id`), so history stays. `alternatives` / `cites` are
+    # JSON documents in TEXT (the tables.py convention — no JSON type on
+    # either engine). One home for the seat: `agent_name` × `seat_email`
+    # (lower-cased), the ent#637 memory scope.
+    "seat_decisions": """
+        CREATE TABLE IF NOT EXISTS seat_decisions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            seat_email TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            decided TEXT NOT NULL,
+            alternatives TEXT NOT NULL,
+            criterion TEXT NOT NULL,
+            reversal TEXT NOT NULL,
+            decided_by_role TEXT,
+            decided_by_person TEXT NOT NULL,
+            decided_at TEXT NOT NULL,
+            review_by TEXT NOT NULL,
+            notes TEXT,
+            ask_class TEXT,
+            scope TEXT NOT NULL DEFAULT 'seat',
+            status TEXT NOT NULL DEFAULT 'active',
+            supersedes_id TEXT,
+            cites TEXT NOT NULL DEFAULT '[]',
+            request_id TEXT,
+            close_reason TEXT,
+            closed_at TEXT,
+            closed_by TEXT,
+            reconfirmed_at TEXT,
+            source_execution_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """,
+
+    # ent#637: every agent-notes write through `POST /api/agents/{name}/user-memory`
+    # records the state before and after, who triggered it (the execution's
+    # `triggered_by`; `schedule` when a seat run wrote it) and the schedule, so
+    # the person can see that a scheduled run touched their memory and undo it.
+    # ent#419's "write history with rollback" layer, built here because that AC
+    # needed it. Not keyed to `public_user_memory.id`: the memory row is created
+    # on demand and may be re-created; `(agent_name, user_email)` is the identity.
+    "public_user_memory_writes": """
+        CREATE TABLE IF NOT EXISTS public_user_memory_writes (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_email TEXT NOT NULL,
+            execution_id TEXT,
+            triggered_by TEXT NOT NULL,
+            schedule_id TEXT,
+            previous_notes TEXT NOT NULL DEFAULT '',
+            new_notes TEXT NOT NULL DEFAULT '',
+            written_at TEXT NOT NULL,
+            undone_at TEXT,
+            undone_by TEXT
+        )
+    """,
+
     # -------------------------------------------------------------------------
     # Git Tables
     # -------------------------------------------------------------------------
@@ -1041,7 +1190,7 @@ TABLES = {
             behind_main INTEGER DEFAULT 0,
             ahead_working INTEGER DEFAULT 0,
             behind_working INTEGER DEFAULT 0,
-            git_dir_bytes INTEGER,
+            git_dir_bytes BIGINT,  -- #2800: int8 on PG; INTEGER affinity on SQLite
             pack_count INTEGER,
             loose_objects INTEGER,
             maintenance_failures INTEGER DEFAULT 0,
@@ -1062,7 +1211,24 @@ TABLES = {
             assigned_by TEXT NOT NULL,
             assigned_at TEXT NOT NULL,
             source_id TEXT,
+            delivery_status TEXT,
+            assigned_by_agent TEXT,
             UNIQUE(agent_name, skill_name)
+        )
+    """,
+    # trinity-enterprise#596 — capabilities an instance admin grants to a named
+    # agent. `skills.manage` is the first: only a holder may change an agent's
+    # skills (its own included). A row, not a column on agent_ownership, so who
+    # granted it and when is answerable and later capabilities (ent#590, ent#341)
+    # share the seam. `agent_name` is a CASCADE AgentRef (rename re-keys it,
+    # delete removes it).
+    "agent_capability_grants": """
+        CREATE TABLE IF NOT EXISTS agent_capability_grants (
+            agent_name TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, capability)
         )
     """,
 
@@ -1078,6 +1244,15 @@ TABLES = {
     # resolved from so a silent cross-source swap is detectable; it is
     # deliberately NOT part of the key, which would permit two rows that
     # cannot both exist on disk.
+    #
+    # #2914: `delivery_status` is the durable per-assignment verdict of the
+    # LAST injection that looked at this name — today only `conflict` (the
+    # agent's `.claude/skills/<name>/` is agent-authored, so the platform
+    # refused to write into it) or NULL (no standing conflict). Written by the
+    # inject path, cleared by the inject path once the name lands; the Skills
+    # tab reads it from the assignment row, because the per-injection result
+    # map is session-scoped and an operator who never sees it must still see
+    # the conflict.
     "skill_sources": """
         CREATE TABLE IF NOT EXISTS skill_sources (
             id TEXT PRIMARY KEY,
@@ -1512,6 +1687,26 @@ TABLES = {
             acknowledged_at TEXT,
             cleared_at TEXT,
             addressed_to_email TEXT,
+            sync_state TEXT,
+            sync_detail TEXT,
+            sync_updated_at TEXT,
+            last_confirmed_at TEXT,
+            delivery_state TEXT,
+            delivery_detail TEXT,
+            delivery_updated_at TEXT,
+            divergence_acknowledged_at TEXT,
+            disposition TEXT,
+            disposed_at TEXT,
+            disposed_by TEXT,
+            disposed_by_email TEXT,
+            disposition_reason TEXT,
+            batch_id TEXT,
+            raised_by TEXT,
+            channel TEXT,
+            to_role TEXT,
+            resolved_to TEXT,
+            proposal TEXT,
+            supersedes_expired TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,
@@ -1687,6 +1882,80 @@ TABLES = {
             updated_at TEXT NOT NULL
         )
     """,
+
+    # -------------------------------------------------------------------------
+    # Declared metric registry (trinity-enterprise#477)
+    # -------------------------------------------------------------------------
+    # One row per metric an agent's `template.yaml metrics:` block declares,
+    # reconciled on create / git pull / reset / sync-pull_first / container
+    # start / explicit refresh. The template is the ONLY writer — there is no
+    # operator edit surface — which is what makes an update-in-place reconcile
+    # safe here where the ent#89 schedules materializer had to be skip-by-name.
+    #
+    # Rows are never deleted by reconcile, only RETIRED (`status`), so ent#478's
+    # `metric_points` keep a definition to be interpreted against after the
+    # author removes a metric from the template.
+    #
+    # `type_conflict` is the honest-status column for a REFUSED type change: the
+    # stored `type` never changes shape under a by-name point store, so a
+    # re-declared type is recorded here and surfaced by the definitions read
+    # rather than silently applied or silently dropped.
+    #
+    # No CHECK constraints: `test_1819_rename_cascade_parity` seeds a
+    # placeholder row per AGENT_REFS table from NOT NULL introspection, and a
+    # `CHECK (type IN …)` would break that seed. The enums are enforced by
+    # `services/template_metrics.py`, the one writer's one parser.
+    "metric_definitions": """
+        CREATE TABLE IF NOT EXISTS metric_definitions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL,
+            label TEXT,
+            description TEXT,
+            unit TEXT,
+            warning_threshold REAL,
+            critical_threshold REAL,
+            status_values_json TEXT,
+            cadence TEXT,
+            cadence_seconds INTEGER,
+            direction TEXT NOT NULL DEFAULT 'neutral',
+            aggregation TEXT NOT NULL DEFAULT 'last',
+            dimensions_json TEXT,
+            extensions_json TEXT,
+            definition_hash TEXT,
+            type_conflict TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            source TEXT,
+            first_declared_at TEXT,
+            last_synced_at TEXT,
+            retired_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(agent_name, name)
+        )
+    """,
+    # Recorded metric points (trinity-enterprise#478) — the append-only store
+    # `record_metrics` writes. No surrogate id: the PK IS the identity
+    # `(agent_name, ts, idempotency_key)`, which keeps the partition key inside
+    # the only unique constraint for the month-partitioning ent#80 wants later.
+    # `dims` carries the `/* pg:JSONB */` marker: SQLite reads it as a comment
+    # and reports TEXT, `to_postgres_table_ddl` rewrites the column to JSONB, so
+    # fresh PG, upgraded PG and SQLite all converge without an ALTER.
+    "metric_points": """
+        CREATE TABLE IF NOT EXISTS metric_points (
+            agent_name TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            value_numeric DOUBLE PRECISION,
+            value_text TEXT,
+            dims TEXT /* pg:JSONB */,
+            execution_id TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, ts, idempotency_key)
+        )
+    """,
 }
 
 # =============================================================================
@@ -1727,6 +1996,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_executions_status ON schedule_executions(status)",
     # PERF-001: Composite index for Tasks list queries
     "CREATE INDEX IF NOT EXISTS idx_executions_agent_started ON schedule_executions(agent_name, started_at DESC)",
+    # ent#653: the ADMIN path of every fleet read (`agent_names=None`) has no
+    # agent filter, so the composite above never applies and `ORDER BY
+    # started_at DESC LIMIT n` was a full scan + sort. The trigram indexes the
+    # execution search rides are PostgreSQL-only and live in Alembic
+    # `0064_executions_search_indexes`; this one is portable.
+    "CREATE INDEX IF NOT EXISTS idx_executions_started_at ON schedule_executions(started_at DESC)",
     # VALIDATE-001: Business status for validation results
     "CREATE INDEX IF NOT EXISTS idx_executions_business_status ON schedule_executions(business_status)",
     "CREATE INDEX IF NOT EXISTS idx_executions_validates ON schedule_executions(validates_execution_id)",
@@ -1788,6 +2063,9 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_agent ON agent_reports(agent_name, created_at DESC)",
     # ent#438 — the agent-page read is "this agent's canvases, newest first".
     "CREATE INDEX IF NOT EXISTS idx_agent_canvases_agent ON agent_canvases(agent_name, updated_at DESC)",
+    # ent#554 — the token lookup is the hot path (every view of a shared link).
+    "CREATE INDEX IF NOT EXISTS idx_canvas_shares_token ON agent_canvas_shares(token)",
+    "CREATE INDEX IF NOT EXISTS idx_canvas_shares_canvas ON agent_canvas_shares(agent_name, canvas_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_agent ON agent_evaluations(agent_name, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_execution ON agent_evaluations(execution_id)",
     # ent#366 — one rating per person per thing. The UNIQUE is what makes
@@ -1830,6 +2108,10 @@ INDEXES = [
     # this one is for the sweeper, which purges by the share id.
     "CREATE INDEX IF NOT EXISTS idx_portal_file_dismissals_file "
     "ON portal_file_dismissals(file_id)",
+    # ent#465 — the PK leads with `client_email` (the read); this one serves the
+    # per-agent cascade delete.
+    "CREATE INDEX IF NOT EXISTS idx_workspace_suggestion_feedback_agent "
+    "ON workspace_suggestion_feedback(agent_name)",
 
     # Public links indexes
     "CREATE INDEX IF NOT EXISTS idx_public_links_token ON agent_public_links(token)",
@@ -1848,6 +2130,8 @@ INDEXES = [
     # Agent skills indexes
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_skill ON agent_skills(skill_name)",
+    # ent#596: "which agents hold capability X" is the grant list's one read.
+    "CREATE INDEX IF NOT EXISTS idx_agent_capability_grants_cap ON agent_capability_grants(capability)",
     # ent#237: resolution order for the custom-wins precedence merge.
     "CREATE INDEX IF NOT EXISTS idx_skill_sources_resolution "
     "ON skill_sources(priority, created_at) WHERE enabled = 1",
@@ -1867,6 +2151,11 @@ INDEXES = [
 
     # Public user memory indexes (MEM-001)
     "CREATE INDEX IF NOT EXISTS idx_public_user_memory_lookup ON public_user_memory(agent_name, user_email)",
+    "CREATE INDEX IF NOT EXISTS idx_public_user_memory_writes_lookup ON public_user_memory_writes(agent_name, user_email, written_at)",
+
+    # Seat decisions (ent#638)
+    "CREATE INDEX IF NOT EXISTS idx_seat_decisions_seat ON seat_decisions(agent_name, seat_email, status)",
+    "CREATE INDEX IF NOT EXISTS idx_seat_decisions_review ON seat_decisions(agent_name, review_by)",
 
     # System views indexes
     "CREATE INDEX IF NOT EXISTS idx_system_views_owner ON system_views(owner_id)",
@@ -1923,6 +2212,20 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target_type, target_id, timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_mcp_key ON audit_log(mcp_key_id, timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_request ON audit_log(request_id)",
+
+    # Declared metric registry indexes (trinity-enterprise#477) — the one read
+    # the definitions API makes. UNIQUE(agent_name, name) is declared inline in
+    # the DDL and is the JOIN KEY ent#478 validates points against.
+    "CREATE INDEX IF NOT EXISTS idx_metric_definitions_agent_status "
+    "ON metric_definitions(agent_name, status)",
+    # Reads (ent#479): one agent's one series, newest first.
+    "CREATE INDEX IF NOT EXISTS idx_metric_points_agent_metric_ts "
+    "ON metric_points(agent_name, metric, ts DESC)",
+    # The retention sweep's count + ts-range prune.
+    "CREATE INDEX IF NOT EXISTS idx_metric_points_ts ON metric_points(ts)",
+    # The per-agent daily write cap counts on created_at, not ts.
+    "CREATE INDEX IF NOT EXISTS idx_metric_points_agent_created "
+    "ON metric_points(agent_name, created_at)",
 
     # Canary violations indexes (CANARY-001 / Issue #411 — Phase 1)
     "CREATE INDEX IF NOT EXISTS idx_canary_violations_invariant ON canary_violations(invariant_id, snapshot_time DESC)",
@@ -1983,6 +2286,10 @@ INDEXES = [
 
     # Execution fan-out / backlog / retry partial indexes
     "CREATE INDEX IF NOT EXISTS idx_executions_fan_out ON schedule_executions(fan_out_id)",
+    # #2524: the join counts non-terminal rows for one batch on every fan-out
+    # terminal; the single-column index above cannot serve that without
+    # reading every row of the batch.
+    "CREATE INDEX IF NOT EXISTS idx_executions_fan_out_status ON schedule_executions(fan_out_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_executions_queued "
     "ON schedule_executions(agent_name, queued_at) "
     "WHERE status = 'queued'",
@@ -2160,6 +2467,14 @@ _PG_TABLE_SUBS = [
      "DEFAULT (to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS'))"),
     (_re.compile(r"DEFAULT\s+CURRENT_TIMESTAMP", _re.IGNORECASE),
      "DEFAULT (to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS'))"),
+    # Per-column dialect override (trinity-enterprise#478). `col TEXT /* pg:X */`
+    # is a plain TEXT column with a comment on SQLite and column type X on
+    # PostgreSQL. It exists so `metric_points.dims` can be the JSONB the frozen
+    # schema names without an `ALTER ... USING` that would have to be repeated
+    # on the fresh-PG path (`0001_baseline`) and the upgrade path separately.
+    # Declared LAST so it cannot eat a marker another rule needs to see.
+    (_re.compile(r"\bTEXT\s*/\*\s*pg:(\w+)\s*\*/", _re.IGNORECASE),
+     r"\1"),
 ]
 
 

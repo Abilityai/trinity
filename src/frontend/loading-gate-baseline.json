@@ -1,6 +1,6 @@
 {
-  "generated": "2026-09-07",
-  "commit": null,
+  "generated": "2026-09-13",
+  "commit": "08719bf1b8b0c2ba49995b15ad4c4d8feefab780",
   "rule": "per-file counts of bare v-if/v-else-if loading gates may only shrink; see scripts/scan-loading-gates.mjs",
   "files": {
     "src/frontend/src/components/A2aPanel.vue": 1,

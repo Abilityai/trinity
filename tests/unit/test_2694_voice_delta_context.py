@@ -430,21 +430,62 @@ class _FakeRedis:
 
 
 def test_the_live_call_marker_is_set_cleared_and_fails_open(monkeypatch):
+    """The primitives, now that the marker is an OWNED LEASE (#2700): the value
+    is the call's own `voice_session_id`, a release deletes only its own lease,
+    the pre-#2700 `"1"` is releasable by anyone, and the read is still
+    fail-OPEN. The real constants are pinned here because the bridge tests
+    (`test_voice_auth.py::TestWorkspaceLiveCallMarker`) import them from a fake
+    module and cannot."""
     from client_portal import voice as pv
     import redis_breaker_util
     fake = _FakeRedis()
     monkeypatch.setattr(redis_breaker_util, "get_breaker_redis", lambda: fake)
+
+    assert (pv.VOICE_MARKER_LEASE_SECONDS, pv.VOICE_MARKER_TICK_SECONDS,
+            pv.VOICE_MARKER_SLACK_SECONDS) == (60, 15.0, 120)
+    # the `agent_call_limiter` ratio and its reason: a BGSAVE-class stall must
+    # not expire a LIVE bridge's lease
+    assert pv.VOICE_MARKER_LEASE_SECONDS >= 4 * pv.VOICE_MARKER_TICK_SECONDS
+
+    # `owner` is keyword-only and REQUIRED on both — a future call site must not
+    # be able to write a lease without saying whose it is
+    with pytest.raises(TypeError):
+        pv.mark_voice_call_active(SESSION, 60)
+    with pytest.raises(TypeError):
+        pv.clear_voice_call_active(SESSION)
+
     assert pv.voice_call_active(SESSION) is False
-    pv.mark_voice_call_active(SESSION, 1920)
+    pv.mark_voice_call_active(SESSION, pv.VOICE_MARKER_LEASE_SECONDS, owner="vs_1")
     assert pv.voice_call_active(SESSION) is True
-    assert fake.store[pv._voice_active_key(SESSION)][1] == 1920      # the cap is the backstop
-    pv.clear_voice_call_active(SESSION)
+    assert fake.store[pv._voice_active_key(SESSION)] == ("vs_1", 60)   # the lease names its owner
+
+    # a release from a DIFFERENT call must not free a live thread: a reload or a
+    # second tab arms a new lease over the same (per-thread) key, and an
+    # unconditional delete would re-enter #2694 through #2700's own fix
+    pv.clear_voice_call_active(SESSION, owner="vs_2")
+    assert pv.voice_call_active(SESSION) is True
+    pv.clear_voice_call_active(SESSION, owner="vs_1")
     assert pv.voice_call_active(SESSION) is False
-    pv.clear_voice_call_active(None)                                   # a non-portal call: no-op
+    pv.clear_voice_call_active(None, owner="vs_1")                     # a non-portal call: no-op
+    pv.clear_voice_call_active(SESSION, owner="vs_1")                  # already gone: no-op
+
+    # a marker left by the pre-#2700 `/start` holds "1" — unowned, so any
+    # release frees it and a marker stranded across the deploy is not immortal
+    fake.store[pv._voice_active_key(SESSION)] = ("1", 1920)
+    pv.clear_voice_call_active(SESSION, owner="vs_9")
+    assert pv.voice_call_active(SESSION) is False
+
+    # a client without `decode_responses` hands back bytes
+    fake.store[pv._voice_active_key(SESSION)] = (b"vs_1", 60)
+    pv.clear_voice_call_active(SESSION, owner="vs_1")
+    assert pv.voice_call_active(SESSION) is False
+
     # fail-OPEN: no Redis, or a Redis that raises, means "no call" — a typed
     # turn must never be silenced by an outage
     monkeypatch.setattr(redis_breaker_util, "get_breaker_redis", lambda: None)
     assert pv.voice_call_active(SESSION) is False
+    pv.mark_voice_call_active(SESSION, 60, owner="vs_1")                # and neither write raises
+    pv.clear_voice_call_active(SESSION, owner="vs_1")
 
     class _Boom:
         def get(self, k):
@@ -452,6 +493,43 @@ def test_the_live_call_marker_is_set_cleared_and_fails_open(monkeypatch):
 
     monkeypatch.setattr(redis_breaker_util, "get_breaker_redis", lambda: _Boom())
     assert pv.voice_call_active(SESSION) is False
+    pv.clear_voice_call_active(SESSION, owner="vs_1")                   # a raise never escapes
+
+
+def test_the_renewer_holds_the_lease_and_stops_at_the_calls_own_cap(monkeypatch):
+    """#2700: a plain timer, because both event-driven shapes expire a lease
+    under a LIVE call — re-arming on each spoken turn kills a quiet call (the
+    person listening to a long answer), re-arming on inbound audio frames kills
+    a MUTED one (the client skips `ws.send` while muted).
+
+    And it is BOUNDED at the call's own cap plus slack: unbounded, a bridge
+    whose peer died half-open would renew forever and hold the thread past even
+    the old cap-sized TTL — the fix would be a regression in exactly the
+    pathological case."""
+    from client_portal import voice as pv
+    marks = []
+
+    def _mark(sid, ttl, *, owner):
+        marks.append((sid, ttl, owner))
+        if len(marks) > 10:
+            raise AssertionError("the renewer never stopped — the max_seconds bound is gone")
+
+    monkeypatch.setattr(pv, "mark_voice_call_active", _mark)
+    monkeypatch.setattr(pv, "VOICE_MARKER_TICK_SECONDS", 0.001)
+    _run(pv.renew_voice_call_marker(SESSION, owner="vs_1", max_seconds=0.004))
+    assert marks == [(SESSION, pv.VOICE_MARKER_LEASE_SECONDS, "vs_1")] * 4
+
+    # a cancelled renewer stops quietly — it dies with the bridge that owns it
+    async def _cancel_mid_flight():
+        task = asyncio.create_task(
+            pv.renew_voice_call_marker(SESSION, owner="vs_1", max_seconds=3600))
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return task
+
+    task = _run(_cancel_mid_flight())
+    assert task.done()
 
 
 def test_a_typed_turn_is_refused_while_a_call_is_on(portal, monkeypatch):
@@ -477,10 +555,16 @@ def test_both_turn_entries_refuse_before_any_row_exists():
         assert src.index("_refuse_turn_during_voice_call(") < src.index(creates), fn.__name__
 
 
-def test_start_workspace_voice_marks_the_thread_live_for_the_cap_plus_slack(monkeypatch):
-    """The call side sets the marker once the provider session exists, sized
-    to the cap plus slack; and with nothing in flight the start goes through
-    (the in-flight read is fail-open)."""
+def test_start_workspace_voice_does_not_arm_the_thread_before_a_socket_exists(monkeypatch):
+    """#2700: the start no longer marks the thread at all. Every path able to
+    clear the marker lives downstream of an audio socket that may never open —
+    and so does the cap watchdog that would end the session — so arming here
+    stranded a ~32-minute `409 voice_call_active` on every typed turn in the
+    thread whenever the socket failed to connect.
+
+    The other half: the bridge arms its own lease at connect
+    (`test_voice_auth.py::TestWorkspaceLiveCallMarker`). With nothing in flight
+    the start still goes through (the in-flight read is fail-open)."""
     import client_portal.voice as pv
     import client_portal.service as svc
     import config
@@ -501,26 +585,119 @@ def test_start_workspace_voice_marks_the_thread_live_for_the_cap_plus_slack(monk
     import database
     monkeypatch.setattr(database.db, "get_voice_name", lambda agent: "Kore", raising=False)
     marks = []
-    monkeypatch.setattr(pv, "mark_voice_call_active", lambda sid, ttl: marks.append((sid, ttl)))
+    # `owner=None` by default so a RESTORED pre-#2700 two-arg call is recorded
+    # rather than raising — the assertion below is what must bite, not a TypeError
+    monkeypatch.setattr(pv, "mark_voice_call_active",
+                        lambda sid, ttl, *, owner=None: marks.append((sid, ttl, owner)))
     out = _run(pv.start_workspace_voice(agent_name=AGENT, email=ALICE, is_platform=True,
                                         portal_session_id=SESSION, user_id=1, user_label="alice"))
     assert out["voice_session_id"] == "vs_new"
-    assert marks == [(SESSION, 1800 + 120)]
+    assert out["max_duration_seconds"] == 1800      # the start itself still works
+    assert marks == []
 
 
-def test_the_bridge_clears_the_marker_when_the_call_closes():
-    """The bridge's `finally` — the one place a Workspace call is closed —
-    clears the marker beside the label write, so the thread takes typed turns
-    again the moment the transcript is complete."""
+def test_the_bridge_resolves_the_real_marker_helpers():
+    """Replaces #2694's 600-char proximity grep around `persist_voice_call_end(`,
+    which could not see the `if ended:` nesting that IS this bug — a bridge that
+    armed the marker and then got `None` back from `end_session` re-stranded it.
+
+    What survives here is only what a source read can honestly assert: that the
+    REAL modules resolve each other (every bridge test in
+    `test_voice_auth.py::TestWorkspaceLiveCallMarker` runs against a FAKE
+    `client_portal.voice`, so nothing else checks this), and that the release is
+    keyed on the bridge's own pre-`try` local rather than on `ended`. The
+    behaviour — armed at connect, released on every exit, owner-matched — is
+    pinned there, not here."""
     import inspect
+    from client_portal import voice as pv
+    for name in ("mark_voice_call_active", "clear_voice_call_active", "renew_voice_call_marker"):
+        assert callable(getattr(pv, name)), name
+    for name in ("VOICE_MARKER_LEASE_SECONDS", "VOICE_MARKER_TICK_SECONDS",
+                 "VOICE_MARKER_SLACK_SECONDS"):
+        assert isinstance(getattr(pv, name), (int, float)), name
+
     from routers import voice as bridge
-    src = inspect.getsource(bridge)
-    at = src.index("persist_voice_call_end(")
-    assert "clear_voice_call_active(" in src[at:at + 600]
-    # ...and the REST `/stop` — a stop that lands before the socket closes
-    # hands the bridge's `finally` None, so it must clear the marker itself.
+    src = inspect.getsource(bridge.voice_websocket)
+    # the marker names are imported BEFORE the `try`: an import inside the
+    # `finally` is itself a path that can skip the release
+    imports_at = src.index("from client_portal.voice import (")
+    assert "clear_voice_call_active" in src[imports_at:src.index(")", imports_at)]
+    assert imports_at < src.index("mark_voice_call_active(portal_session_id")
+    assert imports_at < src.index("\n    finally:")
+    # the release is keyed on the local, not on the session `end_session` returned
+    assert "clear_voice_call_active(portal_session_id, owner=voice_session_id)" in src
+    assert "clear_voice_call_active(getattr(ended" not in src
+    # ordering inside the `finally`: the renewer is cancelled BEFORE anything
+    # that can await (so no renewal can re-arm after the release), and the
+    # release is behind the whole close-out (so a zombie stream cannot write
+    # spoken rows into a thread that has already reopened)
+    fin = src[src.index("\n    finally:"):]
+    assert fin.index("marker_renew_task.cancel()") < fin.index("await voice_service.end_session")
+    assert fin.index("clear_voice_call_active(portal_session_id") > fin.index("await websocket.close()")
+    # ...and the REST `/stop` still releases, owner-matched (an API-only path:
+    # the Workspace UI passes `restStop: false` and never calls it).
     stop = inspect.getsource(bridge.voice_stop)
-    assert "clear_voice_call_active(" in stop
+    assert "clear_voice_call_active(" in stop and "owner=" in stop
+
+
+def test_a_start_whose_socket_never_opens_leaves_the_thread_writable(portal, monkeypatch):
+    """#2700 AC-2, the orphan shape end to end: start a call, never open the
+    socket, then type into the same thread. Before the fix the start armed a
+    cap-sized marker whose only closers live downstream of that socket, so every
+    typed turn in the thread was refused 409 for ~32 minutes.
+
+    The REAL `mark_voice_call_active` runs against a fake Redis here on purpose
+    — a recorder stub would swallow the write and let this pass even with the
+    `/start` arm restored. `fake.store == {}` is the assertion that bites.
+
+    This test cannot see a BRIDGE that forgot to arm; that is
+    `test_voice_auth.py::TestWorkspaceLiveCallMarker::test_the_bridge_arms_a_lease_at_connect_and_releases_it_on_close`."""
+    svc, state = portal
+    import client_portal.voice as pv
+    import client_portal.db as portal_db
+    import config
+    import redis_breaker_util
+    from unittest.mock import AsyncMock
+
+    fake = _FakeRedis()
+    monkeypatch.setattr(redis_breaker_util, "get_breaker_redis", lambda: fake)
+
+    gemini_voice = sys.modules.get("services.gemini_voice") or __import__("services.gemini_voice", fromlist=["x"])
+    voice_prompt_service = (sys.modules.get("services.voice_prompt_service")
+                            or __import__("services.voice_prompt_service", fromlist=["x"]))
+    monkeypatch.setattr(config, "VOICE_ENABLED", True)
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "k")
+    monkeypatch.setattr(config, "WORKSPACE_VOICE_MAX_DURATION", 1800)
+    # ONE session-row stub that satisfies both the `portal` fixture's consumers
+    # (`title`) and the start path's (`id`) — two competing stub sets on
+    # `get_portal_session` would otherwise fight.
+    monkeypatch.setattr(portal_db, "get_portal_session", lambda *a, **kw: {"id": SESSION, "title": "t"})
+    monkeypatch.setattr(voice_prompt_service, "get_voice_system_prompt", AsyncMock(return_value="You are Scribe."))
+    monkeypatch.setattr(gemini_voice.voice_service, "create_session",
+                        AsyncMock(return_value=types.SimpleNamespace(session_id="vs_new")))
+    import database
+    monkeypatch.setattr(database.db, "get_voice_name", lambda agent: "Kore", raising=False)
+
+    out = _run(pv.start_workspace_voice(agent_name=AGENT, email=ALICE, is_platform=True,
+                                        portal_session_id=SESSION, user_id=1, user_label="alice"))
+    # the start itself still succeeds — this cannot pass by the start breaking
+    assert out["voice_session_id"] == "vs_new" and out["max_duration_seconds"] == 1800
+    # ...and nothing was armed: no socket exists yet, so nothing could release it
+    assert fake.store == {}
+
+    # the thread is writable: the turn genuinely dispatches, it does not merely
+    # fail to throw
+    state.cached = CACHED
+    _run(svc.portal_chat(AGENT, "meanwhile, a typed turn", ALICE, session_id=SESSION))
+    assert state.recorder.calls
+
+    # positive control, same test: arm the lease the way the bridge now does and
+    # the same turn is refused again — the guard still works, it is only the
+    # orphan that is gone
+    pv.mark_voice_call_active(SESSION, pv.VOICE_MARKER_LEASE_SECONDS, owner="vs_new")
+    with pytest.raises(svc.ClientPortalError) as ei:
+        _run(svc.portal_chat(AGENT, "and now", ALICE, session_id=SESSION))
+    assert ei.value.status_code == 409 and ei.value.category == "voice_call_active"
 
 
 def test_the_inflight_gate_runs_after_the_uniform_404_not_before(monkeypatch):

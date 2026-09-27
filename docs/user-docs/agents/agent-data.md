@@ -61,7 +61,7 @@ All endpoints are owner/admin only. A per-agent operation lock serialises export
 Status codes:
 
 - `409` — export of a stopped agent (no running container), or a concurrent export/import on the same agent.
-- `413` — the data exceeds the export size cap (`AGENT_DATA_EXPORT_MAX_BYTES`); for `?format=base64`, the response directs you to the streaming download instead.
+- `413` — the data exceeds the export size cap (`AGENT_DATA_EXPORT_MAX_BYTES`, default 5 GB). `?format=base64` has its own, smaller inline cap (`AGENT_DATA_INLINE_MAX_BYTES`, default 10 MB); above it the response directs you to the streaming download instead.
 
 See [Backend API Docs](http://localhost:8000/docs) for full request/response schemas.
 

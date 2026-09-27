@@ -82,8 +82,12 @@ class PortalAgentCard(BaseModel):
     avatar_url: Optional[str] = None
     shared_at: Optional[str] = None
     voice_available: bool = False    # #78: portal voice (ElevenLabs key + agent voice set)
-    # #2212 — whether the platform can TRANSCRIBE, i.e. exactly the `/stt` gate:
-    # an ElevenLabs key resolves. Deliberately a SEPARATE bit from
+    # #2212 — whether the platform can TRANSCRIBE, i.e. exactly the `/stt` gate.
+    # #2695: that gate is no longer key PRESENCE alone — it is the key resolving
+    # AND the capability verdict not being `refused`, because ElevenLabs
+    # permissions are per endpoint and a key with Text-to-Speech but no
+    # Speech-to-Text rendered a mic that failed on every press. Deliberately a
+    # SEPARATE bit from
     # `voice_available`: output additionally needs an effective voice to speak
     # WITH, input does not, so collapsing the two would either hide a working mic
     # or render a dead one. Fails CLOSED for the same reason `voice_available`
@@ -92,6 +96,16 @@ class PortalAgentCard(BaseModel):
     # which answers with real statuses and real messages) over the browser Web
     # Speech API, and to drop the mic entirely when neither path can work.
     stt_available: bool = False
+    # ent#553 — may THIS caller delete or pin this agent's canvases (owner or
+    # admin, platform sessions only). Per-agent, unlike the instance-level
+    # capability bits above, because ownership is.
+    #
+    # Fails CLOSED like its siblings, and for the same reason stated at
+    # `voice_available`: the bug being guarded is showing a control that then
+    # refuses. AC #2 asks that a user who may not delete never sees the
+    # affordance, so this is the field that decides it. UX, not containment —
+    # the routes re-check with the same predicate.
+    can_manage_canvases: bool = False
     # #138 briefing — ships with the roster at sign-in so the new-chat screen
     # renders with zero extra fetches. Best-effort live data (a stopped/slow
     # agent yields None/[]). `playbooks` is the hint-card set (ent#380): the
@@ -311,6 +325,13 @@ class PortalChatRequest(BaseModel):
     # conversation. Ignored when `session_id` names a thread: the id is a fact,
     # this is an intent. Defaults False so no existing caller changes behaviour.
     new_thread: bool = False
+    # ent#555 — which canvas the client has open on screen, so "add a column to
+    # this" resolves without asking. Client-supplied and therefore VALIDATED
+    # server-side against the agent's own visible canvases; an unrecognised
+    # value degrades to "nothing open" rather than erroring. Optional, so every
+    # existing caller (and the headless integration surface ent#83 documents)
+    # is unaffected.
+    open_canvas_id: Optional[str] = Field(None, max_length=64)
     # ent#403 — the model this turn should run on. THREE states, preserving the
     # #894 shape rather than collapsing it to two: a curated id = an explicit
     # choice; `None`/`""`/whitespace = INHERIT (the agent's `public_channel_model`,
@@ -487,6 +508,211 @@ class PortalAgentHeader(BaseModel):
     # Same fail-open default and rationale as `PortalAgentCard.availability`.
     availability: Literal["ready", "stopped", "unavailable", "unknown"] = "unknown"
     last_active: Optional[str] = None
+
+
+class PortalMemoryWrite(BaseModel):
+    """ent#637 — one change to the notes an agent keeps about the viewer.
+
+    `schedule_name` is the bounded label the agent page already uses; `kind`
+    says who wrote it in the viewer's vocabulary — `scheduled_run` for a seat
+    run, `conversation` for anything the viewer was present for. `notes` is the
+    text the write left; `previous_notes` is what undo restores. `undoable` is
+    computed server-side (latest, not already undone), so the client never
+    guesses which button to show."""
+    id: str
+    kind: Literal["scheduled_run", "conversation"]
+    execution_id: Optional[str] = None
+    schedule_name: Optional[str] = None
+    written_at: str
+    undone_at: Optional[str] = None
+    undoable: bool = False
+    notes: str = ""
+    previous_notes: str = ""
+
+
+class PortalAgentMemory(BaseModel):
+    """ent#637 — what this agent remembers about the viewer, and what changed it.
+
+    Only the viewer's own memory ever leaves through here (keyed on the
+    principal's email inside the accessor); `writes` is newest-first and bounded."""
+    agent_name: str
+    notes: str = ""
+    updated_at: Optional[str] = None
+    writes: list[PortalMemoryWrite] = Field(default_factory=list)
+
+
+class PortalMemoryUndo(BaseModel):
+    """ent#637 — what Undo did: the notes as they now stand."""
+    write_id: str
+    notes: str = ""
+class PortalRoleReadiness(BaseModel):
+    """ent#527 / #663 — the effective readiness state. `source` says whether an
+    owner's stamp or the template's word produced it; `unstamped_ready` flags a
+    template that claims `ready` with no owner stamp."""
+    status: Literal["calibrating", "ready"]
+    changed_at: Optional[str] = None
+    changed_by: Optional[str] = None
+    # ent#689: `rollout` — the one-time seed at the readiness gate's rollout,
+    # not an owner's act (`changed_by` is then None, never a person).
+    source: Literal["owner", "template", "rollout"]
+    unstamped_ready: bool = False
+
+
+class PortalRoleMetric(BaseModel):
+    name: str
+    direction: Optional[str] = None
+    target: Optional[float | int | str] = None
+    by: Optional[str] = None
+    value: Optional[float | int | str] = None
+    as_of: Optional[str] = None
+    stale: bool = True
+
+
+class PortalRoleObjective(BaseModel):
+    id: str
+    statement: Optional[str] = None
+    horizon: Optional[str] = None
+    status: Optional[str] = None
+    owned: bool = False
+    metrics: list[PortalRoleMetric] = Field(default_factory=list)
+
+
+class PortalRoleInfo(BaseModel):
+    id: Optional[str] = None
+    title: Optional[str] = None
+    mission: Optional[str] = None
+    status: Optional[str] = None
+    review_by: Optional[str] = None
+    stale: bool = False
+    path: Optional[str] = None
+    # role_file_not_found | role_file_unreadable | role_file_invalid |
+    # role_id_invalid | canon_path_invalid — the card SAYS the file failed.
+    error: Optional[str] = None
+
+
+class PortalRoleWalkthrough(BaseModel):
+    asks: int = 0
+    target: int = 10
+    rated_down: int = 0
+    unavailable: bool = False
+
+
+class PortalRoleCard(BaseModel):
+    """ent#527 — the role card, a projection of the agent's own files.
+    `role` is None when the agent carries no `x-role` (no card is rendered)."""
+    agent_name: str
+    role: Optional[PortalRoleInfo] = None
+    seat: Optional[str] = None
+    objectives: list[PortalRoleObjective] = Field(default_factory=list)
+    readiness: Optional[PortalRoleReadiness] = None
+    walkthrough: Optional[PortalRoleWalkthrough] = None
+    # ent#500's assignment kind, when it lands; None renders as "no assignment recorded".
+    relationship: Optional[str] = None
+    can_flip_readiness: bool = False
+    # ent#689: a live seat-delivery schedule is being held because readiness is
+    # not `ready` — the card says "its scheduled brief is paused".
+    brief_held: bool = False
+    # agent_stopped | agent_unreachable — the files live in the container.
+    unavailable: Optional[str] = None
+
+
+class PortalRoleReadinessFlip(BaseModel):
+    status: Literal["calibrating", "ready"]
+
+
+class PortalDecisionBy(BaseModel):
+    role: Optional[str] = None
+    person: Optional[str] = None
+
+
+class PortalSeatDecision(BaseModel):
+    """ent#638 — one seat decision as the Workspace sees it. `status` is the
+    EFFECTIVE state (`expired` is computed from `review_by`, never stored);
+    `writable` says whether this principal may act on it."""
+    id: str
+    seat: str
+    outcome: Literal["approved", "deferred", "killed"]
+    decided: str
+    alternatives: list[str] = Field(default_factory=list)
+    criterion: str
+    reversal: str
+    decided_by: PortalDecisionBy
+    decided_at: str
+    review_by: str
+    notes: Optional[str] = None
+    ask_class: Optional[str] = None
+    scope: Literal["seat", "direction"] = "seat"
+    status: Literal["active", "expired", "superseded", "closed", "reversed", "routed"]
+    supersedes_id: Optional[str] = None
+    cites: list[str] = Field(default_factory=list)
+    request_id: Optional[str] = None
+    close_reason: Optional[str] = None
+    closed_at: Optional[str] = None
+    closed_by: Optional[str] = None
+    reconfirmed_at: Optional[str] = None
+    writable: bool = False
+
+
+class PortalDecisionClassEvidence(BaseModel):
+    ask_class: str
+    count: int
+    criteria: list[str] = Field(default_factory=list)
+    reversals: int = 0
+    expired: int = 0
+    stable: bool = False
+
+
+class PortalDecisionStats(BaseModel):
+    """ent#638 — conversion, not volume: `reused` = records a LATER record
+    cited; per ask class the evidence the autonomy dial (#641) reads."""
+    recorded: int = 0
+    reused: int = 0
+    reuse_rate: float = 0.0
+    reversed: int = 0
+    ask_classes: list[PortalDecisionClassEvidence] = Field(default_factory=list)
+
+
+class PortalSeatDecisions(BaseModel):
+    """ent#638 — the seats this principal may read on the agent, their
+    decisions (newest first, history included and marked), the stats of the
+    principal's OWN seat, and which seat is theirs."""
+    agent_name: str
+    my_seat: str
+    seats: list[str] = Field(default_factory=list)
+    decisions: list[PortalSeatDecision] = Field(default_factory=list)
+    stats: PortalDecisionStats = Field(default_factory=PortalDecisionStats)
+    can_record: bool = True
+
+
+class PortalSeatDecisionRecord(BaseModel):
+    """The person records a decision for their own seat (or the owner for a
+    named seat). Grammar is checked by the service, which answers a receipt."""
+    outcome: str = Field(..., max_length=16)
+    decided: str = Field(..., max_length=2000)
+    alternatives: list[str] = Field(default_factory=list, max_length=32)
+    criterion: str = Field(..., max_length=2000)
+    reversal: str = Field(..., max_length=2000)
+    review_by: str = Field(..., max_length=32)
+    scope: str = Field("seat", max_length=16)
+    notes: Optional[str] = Field(None, max_length=4000)
+    ask_class: Optional[str] = Field(None, max_length=128)
+    decided_by_role: Optional[str] = Field(None, max_length=128)
+    cites: list[str] = Field(default_factory=list, max_length=32)
+    request_id: Optional[str] = Field(None, max_length=200)
+    seat: Optional[str] = Field(None, max_length=254)   # owner only; default = own seat
+
+
+class PortalSeatDecisionAction(BaseModel):
+    """close / reverse / reconfirm / supersede an active decision."""
+    action: Literal["close", "reverse", "reconfirm", "supersede"]
+    reason: Optional[str] = Field(None, max_length=2000)
+    review_by: Optional[str] = Field(None, max_length=32)
+    fields: Optional[dict] = None
+
+
+class PortalSeatDecisionResult(BaseModel):
+    decision: PortalSeatDecision
+    hint: Optional[str] = None
 
 
 class PortalAgentPage(BaseModel):

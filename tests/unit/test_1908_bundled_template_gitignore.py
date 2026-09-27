@@ -80,7 +80,11 @@ from services.compatibility.collector import (  # noqa: E402
     _MAX_SKILL_FILES,
 )
 from services.compatibility.static_checks import run_static  # noqa: E402
-from services.git_service import (  # noqa: E402
+# #1028: `services/git_service.py` is a package and deliberately re-exports no
+# private collaborator — a name mirrored on both the package and its owning
+# module gives one constant two homes and a patch can land on the wrong one.
+# These all belong to `gitignore`, so the import names it.
+from services.git_service.gitignore import (  # noqa: E402
     _GITIGNORE_BLOCK_BEGIN,
     _GITIGNORE_BLOCK_END,
     _GITIGNORE_FLOOR_BEGIN,
@@ -150,15 +154,12 @@ ALLOWED_NON_CANONICAL: tuple[str, ...] = ()
 # HARD static checks that these templates still fail after this change, with the
 # reason. Check-level, not template-level: it cannot hide a whole template, and
 # `test_known_failing_checks_are_not_stale` fails the day it stops being true.
-_KNOWN_FAILING_CHECKS = {
-    # `resources.cpu` / `resources.memory` absent from the starters'
-    # `template.yaml`. A template-level `resources` block OVERRIDES the admin's
-    # fleet-wide default (RES-001), so whether the default starters should pin
-    # or inherit is a product decision, not a hygiene fix — filed as a
-    # follow-up, deliberately not fixed here. The 11 `dd-*` already pin both.
-    "T-004",
-    "T-005",
-}
+_KNOWN_FAILING_CHECKS: set[str] = set()
+# EMPTY since #2899, and the mechanism stays for the next one. The product
+# decision this waiver was parked on — pin `resources` in the starters, or
+# inherit the admin's fleet-wide default (RES-001) — was settled as INHERIT, so
+# T-004/T-005 no longer fail an absent block and the guard below now covers
+# every HARD static check with nothing exempt.
 
 # HARD static checks that legitimately return "skipped" on their own
 # precondition, with the exact reason. A precondition skip is NOT a finding —

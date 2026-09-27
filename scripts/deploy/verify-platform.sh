@@ -102,7 +102,12 @@ echo "5. Checking configuration..."
 if [ -f .env ]; then
     echo -e "${GREEN}✓ .env file exists${NC}"
     # Check critical vars are set
+    # ent#580: a marketplace droplet leaves ADMIN_PASSWORD blank on purpose —
+    # its admin is created in the browser, so blank is not a misconfiguration.
+    admin_in_browser=0
+    grep -qE '^ADMIN_PASSWORD_SOURCE=browser$' .env 2>/dev/null && admin_in_browser=1
     for var in SECRET_KEY CREDENTIAL_ENCRYPTION_KEY ADMIN_PASSWORD; do
+        [ "$var" = "ADMIN_PASSWORD" ] && [ "$admin_in_browser" = 1 ] && continue
         val=$(grep -E "^${var}=" .env 2>/dev/null | cut -d'=' -f2-)
         if [ -z "$val" ]; then
             echo -e "${YELLOW}⚠ $var is not set in .env${NC}"
@@ -125,7 +130,11 @@ if [ "$all_running" = true ]; then
     echo "  - Scheduler:    http://localhost:8001/health"
     echo "  - Vector logs:  http://localhost:8686/health"
     echo ""
-    echo "Login: admin / [your ADMIN_PASSWORD from .env]"
+    if [ "${admin_in_browser:-0}" = 1 ] && ! grep -qE '^ADMIN_PASSWORD=.+' .env 2>/dev/null; then
+        echo "Login: the admin account created in the browser (none yet? open the Web UI and create it)"
+    else
+        echo "Login: admin / [your ADMIN_PASSWORD from .env]"
+    fi
 else
     echo -e "${RED}✗ Some services are not running${NC}"
     echo ""

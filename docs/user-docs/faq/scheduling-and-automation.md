@@ -4,23 +4,31 @@
 
 ## How do I schedule a recurring task for an agent?
 
-Open the agent's detail page, go to the Schedules section, and click **Create Schedule**. Give it a name, a cron expression (for example `0 9 * * 1-5` for weekdays at 9 AM), the message or task to send, a timezone, and an optional description. You can also pick a model override (Opus, Sonnet, Haiku, Sonnet 5, Fable 5, or custom) per schedule. Each time the schedule fires, it creates an execution record with status, duration, response, and cost. See [Scheduling](../automation/scheduling.md).
+Open the agent's detail page, go to the Schedules section, and click **Create Schedule**. Give it a name, a cron expression (for example `0 9 * * 1-5` for weekdays at 9 AM), the message or task to send, a timezone, and an optional description. You can also pick a model override (Opus, Sonnet, Haiku, Sonnet 5, Fable 5.1, or custom) per schedule. Each time the schedule fires, it creates an execution record with status, duration, response, and cost. See [Scheduling](../automation/scheduling.md).
 
 ## Can I set a timezone for my schedule?
 
 Yes. Every schedule has its own timezone setting, chosen when you create or edit it, so `0 9 * * *` fires at 9 AM in that timezone rather than in UTC. The default is UTC if you don't set one. See [Scheduling](../automation/scheduling.md).
 
+## How do I know my cron expression is valid before I save the schedule?
+
+The schedule form checks the expression as you type, with the same grammar the scheduler uses. While creating, an inline error appears under the field once you leave it with an invalid expression; while editing, an invalid stored expression is flagged immediately; and **Create** (or **Update**) is disabled only while the field is non-empty *and* invalid. The presets **Daily 9 AM**, **Weekly Mon**, **Every 6h** and **Every 30m** fill the field for the common cadences. The server stays the authority — an expression the form accepts but the scheduler rejects still fails on save with the reason — and a schedule already stored with an unregistrable expression shows a warning triangle in its cron chip and never fires until fixed. See [Scheduling](../automation/scheduling.md#cron-expressions-are-checked-as-you-type).
+
+## Can a scheduled run deliver its output to a person's Workspace instead of only the execution log?
+
+Yes. Set `deliver_to_workspace_email` on the schedule over the API or with `create_agent_schedule` / `update_agent_schedule` — the UI form has no field for it, and passing `null` on an update stops delivering. The run's output then arrives as a message from the agent in that person's **Main** chat with it, rateable like any reply and delivered at most once per fire; it waits up to two minutes for a reply already in progress in that chat, and it appears on the person's next Workspace load or chat switch rather than popping up mid-conversation. You can always name yourself; naming someone else — who must be the agent's owner or someone it is shared with — takes the agent's owner or an admin. If the address can't reach the agent (never shared, share revoked, unknown), the run fails and says so on its execution row, and a malformed address is rejected when you save rather than hours later. See [Scheduling](../automation/scheduling.md#delivering-a-runs-output-to-someones-workspace).
+
 ## Why didn't my schedule fire even though it's enabled?
 
-The most common cause is the agent-level **autonomy toggle**: it's a master switch, and no schedules fire while it's off, regardless of their individual enabled state. Also check that the agent still exists and isn't deleted — schedules stop firing immediately when an agent is deleted. If the scheduler was restarted, missed runs are only caught up within a 1-hour grace window; anything older is skipped rather than fired late. See [Scheduling](../automation/scheduling.md).
+The most common cause is the agent-level **autonomy toggle**: it's a master switch, and no schedules fire while it's off, regardless of their individual enabled state. Next, look at the schedule's cron chip in the list — a warning triangle with the tooltip **Invalid cron expression** means the stored expression is one the scheduler can't register, and that schedule never fires until you fix it. Also check that the agent still exists and isn't deleted (schedules stop firing immediately when an agent is deleted) and, if the agent has **freeze schedules if sync failing** enabled, that its git sync hasn't failed three times in a row. If the scheduler was restarted, missed runs are only caught up within a 1-hour grace window; anything older is skipped rather than fired late. See [Scheduling](../automation/scheduling.md).
 
 ## What's the difference between disabling a schedule and turning off autonomy?
 
-Disabling a schedule affects just that one schedule; its siblings keep firing. The autonomy toggle is agent-level: turning it off disables all of the agent's schedules at once, and turning it on re-enables them. Use the per-schedule toggle for fine-grained control and autonomy as the emergency brake or "pause everything" switch. See [Scheduling](../automation/scheduling.md).
+Disabling a schedule affects just that one schedule; its siblings keep firing. The autonomy toggle is agent-level and a gate, not a bulk edit: nothing fires while it's off, but each schedule keeps its own enabled/disabled state (an enabled one shows a "Will not fire — autonomy off" warning), so turning autonomy back on restores exactly the schedules you had enabled. Use the per-schedule toggle for fine-grained control and autonomy as the emergency brake or "pause everything" switch. See [Scheduling](../automation/scheduling.md).
 
 ## Can I run a schedule right now without waiting for the next cron tick?
 
-Yes. Click **Run Now** on the schedule in the UI, or call `POST /api/agents/{name}/schedules/{id}/trigger` via the API. Manual triggers always fire — they bypass the pre-check hook entirely, even if the hook would have skipped the run. The result appears in the execution history like any other run. See [Scheduling](../automation/scheduling.md).
+Yes. Click **Run now** on the schedule in the UI, or call `POST /api/agents/{name}/schedules/{id}/trigger` via the API. Manual triggers always fire — they bypass the pre-check hook entirely, even if the hook would have skipped the run. The result appears in the execution history like any other run. See [Scheduling](../automation/scheduling.md).
 
 ## What happens when a schedule fires while the agent is already busy?
 
@@ -32,7 +40,11 @@ Each agent has an execution timeout cap (default 60 minutes, configurable from 1
 
 ## Do failed scheduled runs retry automatically?
 
-Yes, by default. Each schedule has `max_retries` (default 1, range 0–5) and `retry_delay_seconds` (default 60, range 30–600); set `max_retries: 0` to disable retries. Rate-limit errors use double the delay, capped at 300 seconds. Each retry creates a new execution record linked to the original via `retry_of_execution_id`, and the execution list groups retries under their parent run. See [Scheduling](../automation/scheduling.md).
+Only if you turn retries on. Each schedule has `max_retries` (range 0–5) and `retry_delay_seconds` (default 60, range 30–600). A schedule created in the UI or over the REST API starts with retries off (`max_retries: 0`); one created with the `create_agent_schedule` MCP tool starts with 1 retry. Rate-limit errors use double the delay, capped at 300 seconds. Each retry creates a new execution record linked to the original via `retry_of_execution_id`, and the execution list groups retries under their parent run. See [Scheduling](../automation/scheduling.md).
+
+## Can Trinity check that a scheduled run actually did its job?
+
+Yes, with post-run validation. Set `validation_enabled: true` on the schedule over the API, or with `create_agent_schedule` / `update_agent_schedule`; the schedule form has no field for it. After each successful run, the same agent runs one extra execution in a clean context that audits the result, and the run's `business_status` becomes `validated` or `failed_validation`. A fail or partial verdict raises one high-priority **Validation Failed** alert in the Operations queue, but it does not trigger a retry. Each validation pass is a real execution, so it costs a run; `validation_prompt` and `validation_timeout_seconds` (30–600, default 120) tune it. See [Scheduling](../automation/scheduling.md#post-run-validation).
 
 ## What happens to the execution history if I delete a schedule?
 
@@ -40,7 +52,7 @@ Deleting a schedule is a soft delete: it stops firing immediately, but the sched
 
 ## Can my agent skip a scheduled run when there's nothing to do?
 
-Yes, with the pre-check hook. If the agent's template ships an executable at `~/.trinity/pre-check`, Trinity runs it before each cron tick: empty stdout with exit 0 records a `skipped` execution at zero cost without ever invoking the model, while non-empty stdout becomes the actual task message. The hook is language-agnostic (any shebang works) and fail-open — a broken or slow hook never suppresses a run. Manual "Run Now" triggers bypass it. See [Scheduling](../automation/scheduling.md).
+Yes, with the pre-check hook. If the agent's template ships an executable at `~/.trinity/pre-check`, Trinity runs it before each cron tick: empty stdout with exit 0 records a `skipped` execution at zero cost without ever invoking the model, while non-empty stdout becomes the actual task message. The hook is language-agnostic (any shebang works) and fail-open — a broken or slow hook never suppresses a run. Manual **Run now** triggers bypass it. See [Scheduling](../automation/scheduling.md).
 
 ## Can an agent schedule itself to run again later?
 
@@ -68,7 +80,19 @@ Webhook triggers are rate-limited to 10 calls per 60-second window per webhook t
 
 ## What is an agent loop and when should I use one instead of a schedule?
 
-A loop runs the same task against one agent repeatedly, strictly one iteration at a time, up to a bounded `max_runs` (1–100) — for example "process the next backlog item" × 20. Use a loop for back-to-back bounded work sessions, agentic retry ("keep trying until the tests pass"), or short polling; use a schedule for anything recurring on a cadence slower than the loop's 1-hour delay ceiling. You start a loop from the agent's **Loops** tab, via the `run_agent_loop` MCP tool, or via REST, and each iteration is a normal execution with its own cost and timeout. See [Agent Loops](../automation/agent-loops.md).
+A loop runs the same task against one agent repeatedly, strictly one iteration at a time, up to a bounded `max_runs` (1–100) — for example "process the next backlog item" × 20. Use a loop for back-to-back bounded work sessions, agentic retry ("keep trying until the tests pass"), or short polling; use a schedule for anything recurring on a cadence slower than the loop's 1-hour delay ceiling. You start a loop from the agent's **Loops** tab, from the Workspace rail's **Loops** tab, by asking the agent in chat, via the `run_agent_loop` MCP tool, or via REST, and each iteration is a normal execution with its own cost and timeout. See [Agent Loops](../automation/agent-loops.md).
+
+## What happens to a running loop if the backend restarts?
+
+It carries on. A loop is a durable record, not an in-memory job: on boot, a loop that was between runs is picked up again, and a loop whose iteration was in flight continues from that run's outcome — nothing is dispatched twice and nothing is lost. The `interrupted` status in the lifecycle table only applies to loops from older builds, before loops became durable. See [Agent Loops](../automation/agent-loops.md#loop-lifecycle).
+
+## Can I start and watch a loop from the Workspace?
+
+Yes, if you're a platform user: open the rail's **Loops** tab in the chat and click **Start a loop** (or **Start another loop**). The small form asks for the agent (in a room, which participant), what to do each run, the number of runs, and an optional cost budget, and states the guardrails up front — it stops by itself after 3 identical replies in a row and after 3 consecutive failures, with no time limit unless you set one. Each row shows **Run N of M**, how much of each guardrail is left, **Stop** while it's active, and a status that says *why* it ended: **Done**, **Done, with errors**, **Stopped by you**, **Stopped — cost budget reached** / **time limit reached** / **it stopped making progress**, or **Failed**. External clients never see this tab, and loop runs are left out of the activity shown to them. See [Agent Loops](../automation/agent-loops.md#from-the-workspace).
+
+## Can I just tell my agent in chat to run a loop or check something every few minutes?
+
+Yes. Asking for repetition in chat starts a Trinity loop — or, for a single deferred follow-up, a reminder. The platform routes "run a loop" and "do this every few minutes" to these server-side primitives and withholds the harness's own loop and wake-up tools in headless runs, because those would report success and then never fire once the turn ended. The loop it starts is an ordinary one: it shows in the Loops tab and the Workspace rail, each iteration is an execution, and the standard guardrails apply. See [Agent Loops](../automation/agent-loops.md#asking-the-agent-to-loop).
 
 ## Can each loop iteration see the previous iteration's result?
 
@@ -82,9 +106,13 @@ Loops have several independent brakes. `max_runs` (required, capped at 100) is t
 
 That's set by the loop's failure policy, `on_failure`. The default is `abort`: the loop fails fast, stopping the moment an iteration errors. Switch to `continue` and the loop tolerates a failed iteration and moves on to the next run — but it still aborts if failures pile up, once it hits `max_consecutive_failures` (default 3) errors in a row; a successful run resets that streak. A continue-mode loop that finishes with some tolerated failures reports a `completed_with_errors` status. See [Agent Loops](../automation/agent-loops.md).
 
+## Can an agent start a loop on another agent it has no permission for?
+
+No. `run_agent_loop` applies the same permission rule as `chat_with_agent`: an agent can loop on itself, and on another agent only if it has been granted permission to call it. Without a grant, the tool refuses before any loop starts and returns an `Access denied` result. `get_loop_status` and `stop_loop` look up the loop's agent and apply the same rule, answering `Loop '<id>' not found or not accessible` on a refusal. If an agent's permission is removed while its loop runs, the agent's owner can still stop the loop from the **Loops** tab. See [Agent Loops](../automation/agent-loops.md#permission-checks-on-the-loop-tools).
+
 ## How do I run many tasks in parallel on one agent?
 
-Use fan-out: it dispatches 1–50 independent tasks to an agent concurrently (up to `max_concurrency`, default 3, max 10), waits for all of them to complete or hit the overall deadline, and returns aggregated results in input order. It's available via the `fan_out` MCP tool or `POST /api/agents/{name}/fan-out` — there is no UI, and it currently works only on the calling agent itself. Each subtask creates its own execution record sharing a common `fan_out_id`, and each consumes one of the agent's parallel slots. See [Fan-Out](../automation/fan-out.md).
+Use fan-out: it dispatches 1–50 independent tasks to an agent concurrently (up to `max_concurrency`, default 3, max 10), waits for all of them to finish, and returns aggregated results in input order. `timeout_seconds` only limits the wait — tasks still open at the deadline keep running — and `async_mode: true` skips the wait entirely and returns the `fan_out_id` to poll. It's available via the `fan_out` MCP tool or `POST /api/agents/{name}/fan-out` — there is no UI, and it currently works only on the calling agent itself. Every batch gets a server-minted `fan_out_id`; each subtask is its own execution record stamped with that id and consumes one of the agent's parallel slots, and a batch can be read back while it's still running with `get_fan_out_result` or `GET /api/agents/{name}/fan-out/{fan_out_id}`. See [Fan-Out](../automation/fan-out.md).
 
 ## What are skills and playbooks, and how do I run one?
 
@@ -93,19 +121,27 @@ A skill is a reusable capability packaged in the platform's skills library — o
 
 ## How do I find out which agents already have a given skill?
 
-The **Library** page's Skills tab (`/library?tab=skills`) shows, for every skill, an *Assigned to N agents* line with chips linking straight to each agent's Skills tab. It's bounded — the first four agents, then **+N more**. Admins see the whole fleet; everyone else sees their own and shared agents, and the wording says which. Below the listing sits **Assigned but no longer in the library**: assignments whose skill was removed upstream. That list matters because revocation works by publishing a new version without the offending skill, and the package stays on each agent until it's unassigned there. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+The **Library** page's Skills tab (`/library?tab=skills`) shows, for every skill, an *Assigned to N agents* line with chips linking straight to each agent's Skills tab. It's bounded — the first four agents, then **+N more**. Admins see the whole fleet; everyone else sees their own and shared agents, and the wording says which. Below the listing sits **Assigned but no longer in the library**: assignments whose skill was removed upstream. That list matters because revocation works by publishing a new version without the offending skill, and the package stays on each agent until you unassign it — with the **×** on its chip right there, or from the agent's Skills tab. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
 
 ## Can I assign a skill from the Library page?
 
-No — the Library is a browse-and-audit surface. Assignment stays a per-agent action on that agent's **Skills** tab, so there is exactly one place where the change is made. What the Library adds is the fleet-wide read: who holds each skill, and which assignments have outlived their skill. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+Yes. Each skill card on the Library's Skills tab has an **Assign to…** control listing the agents you may still assign it to — agents you own (an admin sees every agent), minus those that already hold it. Pick one and click **Assign**; the delivery note appears under the control: *Assigned and delivered — available now*, *applies on next start*, or a named failure. The **×** on an agent chip unassigns the skill from that agent, and it appears only where you're allowed to make the change — an agent merely shared with you shows as a holder but carries no control. Both surfaces write the same per-agent assignment, so it doesn't matter whether you start from the skill or from the agent's **Skills** tab. There is no Sync button on the Library; to retry a failed delivery, assign the same agent again. See [Skills and Playbooks](../automation/skills-and-playbooks.md#from-the-library).
 
 ## Can a skill be a whole folder of files instead of a single markdown file?
 
 Yes. A skill is a full-directory package, not just one markdown file: alongside the `SKILL.md` instructions it can carry scripts, templates, and any resource files the capability needs. When the skill is assigned, Trinity injects the entire directory into the agent, versioned by the folder's content so re-syncs only push real changes. This lets a skill ship helper code and assets, not only prose. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
 
+## Why does my playbook say "No description available"?
+
+The Playbooks tab, the `/` popup, and the chat empty state take a skill's description from the `description:` field in its `SKILL.md` frontmatter, so first check that the field is there. On an agent running an older base image, one unreadable frontmatter field blanked the whole record — most often Claude Code's comma-separated `allowed-tools: Read, Bash` — and the skill showed only its folder name. Current agent images read each field on its own, accept both the comma-separated and the list form of `allowed-tools`, and drop only the bad field, with one warning in the agent log naming the file and field. To pick that up on an existing agent, rebuild or re-pull the agent base image and start the agent cold. See [Skills and Playbooks](../automation/skills-and-playbooks.md#skill-frontmatter-and-dependency-checks).
+
+## Does a skill's `allowed-tools` frontmatter limit what the agent can do?
+
+Not in Trinity. The agent reads the field — in Claude Code's comma-separated form (`Read, Bash, Bash(git:*)`) or as a YAML list — and reports it in its skill listing, but nothing in Trinity enforces it. To restrict the tools a run may use, set allowed tools on the schedule, loop, or task that runs it. See [Skills and Playbooks](../automation/skills-and-playbooks.md#skill-frontmatter-and-dependency-checks).
+
 ## How do I assign skills to an agent, and do I need to restart it?
 
-Open the agent's detail page and go to the **Skills** tab. Pick skills from the library, save, and click **Sync now** to copy them into a running agent — or just leave it, and they arrive on the agent's next start. Each skill lands as a whole directory under `~/.claude/skills/<name>/`, so its scripts and resources come too, and the per-skill result tells you honestly whether it landed clean or is missing a declared dependency. Admins manage the *sources* the library syncs from in **Settings → Agents**; skills themselves are edited in their GitHub repository, not in Trinity. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+No restart. Open the agent's **Skills** tab, tick the skills, and click **Save assignments** — the save delivers straight away to a running agent, and the note beside the button says what happened: *delivered — available now*, *the agent is stopped, so it applies on next start*, *still installing* (a large package outlived the 20-second wait and continues in the background), or a named failure. Each skill lands as a whole directory under `~/.claude/skills/<name>/`, so its scripts and resources come too, and the per-skill result tells you honestly whether it's missing a declared binary or environment variable. **Sync now** is the repair action for a delivery that didn't land, not a required step, and every assignment change refreshes the open **Playbooks** tab and `/` autocomplete without a reload. Admins manage the *sources* the library syncs from in **Settings → Agents**; skills themselves are edited in their GitHub repository, not in Trinity. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
 
 ## How can I see whether a schedule is actually performing well?
 
@@ -114,6 +150,10 @@ Three places, no setup required. The Schedules tab shows inline stats per schedu
 ## Can the skills library sync from more than one repository?
 
 Yes. Trinity syncs from any number of GitHub repositories: a bundled public community catalog that ships pre-configured, plus custom repositories your admin adds in **Settings → Agents**. When two sources ship the same skill name, the lower-priority number wins — custom sources default to 100 and the community source to 1000, so your own repository always wins a clash. Nothing is overwritten silently: the winning skill is marked with which sources it shadows, in the library listing and as a warning at injection time. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
+## I upgraded from a single skills-library URL — where did my library go?
+
+It became a source. An install that predates multiple sources carries one legacy skills-library URL setting; on the first sync after upgrading, an install with no sources adopts that URL as a custom source named **Migrated library** (tracking the branch it tracked before) and clears the setting — nothing for an admin to do. If the install already has sources, the URL is matched against them by repository — `https://github.com/Org/repo.git`, `https://github.com/Org/repo/` and `github.com/Org/repo` all count as the same source — and nothing changes. A legacy URL naming a repository that is *not* one of your sources is refused rather than added, because adding a source is an admin action, and Trinity files one low-priority **Legacy skills-library adoption refused** heads-up in the Operations queue; clearing that row is covered in [Troubleshooting](troubleshooting.md#the-operations-queue-shows-legacy-skills-library-adoption-refused-and-got-it-doesnt-clear-it). If you want that repository, add it under **Settings → Agents → Skills Library**. See [Skills and Playbooks](../automation/skills-and-playbooks.md#upgraded-from-a-single-library-install).
 
 ## Where do skills have to live inside a source repository?
 
@@ -129,7 +169,15 @@ No. Unassigning removes the injected package, using the manifest recorded at inj
 
 ## Why is the community skills source pinned to a tag instead of tracking a branch?
 
-Because skills carry executable scripts, and with fleet re-inject on, a source tracking a branch head would put every merged upstream commit onto every agent with no human in the loop — and the community catalog accepts public contributions. The community source is therefore pinned to a tag we bump; custom sources, whose write access you control, track a branch. If a pinned tag is later moved to a different commit, Trinity **refuses** it rather than adopting it. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+Because skills carry executable scripts, and with fleet re-inject on, a source tracking a branch head would put every merged upstream commit onto every agent with no human in the loop — and the community catalog accepts public contributions. The bundled community source is therefore pinned to a release tag of the catalog that we bump; new upstream commits reach your fleet only when an admin moves the source to a newer tag — by editing its ref (`PUT /api/skills/sources/{id}`) or removing and re-adding it — and syncs. Custom sources track a branch by default, since you control who writes to them, but you can choose **Tag** under **Track** when adding one to pin it the same way. A pinned tag that later resolves to a different commit is **refused** (`moved_tag`) rather than adopted; annotated and lightweight tags are compared by the commit they point at, so a release tag that hasn't moved is never refused. See [Skills and Playbooks](../automation/skills-and-playbooks.md#supply-chain-posture-pinned-tags).
+
+## The add-project-management plugin installs nothing — where did it go?
+
+It's deprecated: it stays in the marketplace for one release as a pointer stub, and its skill now lives in agent-dev as `/agent-dev:add-project-management`. The five runtime skills it installs — `/project-init`, `/project-task`, `/project-steward`, `/project-reconcile` and `/project-intake` — are also standalone in the agent-dev plugin (now 30 skills) and mirrored into the bundled community skills catalog, so on Trinity you can assign them to a deployed agent from the Library without running the installer at all; `/project-init` materializes the project standard itself on first run. Also new in agent-dev: `/agent-dev:commit` doubles as a plain save — with no issue claimed it becomes a checkpoint commit of the agent-state files (memory, outputs, skills, `CLAUDE.md`, `template.yaml` — never `.env` or anything credential-shaped). See [Abilities Marketplace](../automation/abilities-marketplace.md#deprecated-add-project-management-v130).
+
+## Do I need to install the trinity plugin inside my agent before it can run /trinity skills?
+
+No. Trinity's agent image ships with the `abilityai` marketplace registered and `trinity@abilityai` installed, and every container boot re-installs it if it's missing — whether or not the agent's `template.yaml` declares it. That's what lets an agent created from a bare repository run `/trinity:onboard` in place and write its own declaration. A `plugins:` block that omits it never uninstalls it (the boot step only adds), and a declaration that points the `abilityai` marketplace name at another repository is ignored. An agent still on an image built before the pre-install pays one install at its next boot; an image built with `--build-arg TRINITY_PREINSTALL_PLUGINS=0` (air-gapped installs) skips the pre-install, and what the boot step couldn't fetch is reported in the agent's compatibility report rather than failing the start. See [Abilities Marketplace](../automation/abilities-marketplace.md#plugins-inside-a-deployed-agent).
 
 ## My template declares schedules — will Trinity create them?
 
@@ -137,11 +185,11 @@ Yes. A `schedules:` block in `template.yaml` is materialized as real schedules w
 
 ## What should a schedule's message contain?
 
-Ideally a single line that invokes one of the agent's skills by name — `/daily-briefing` — and nothing else: no inline instructions, arguments, or business logic. The logic then lives in the versioned playbook, so changing what a scheduled run does is an edit to the skill, and the execution history shows *which* playbook ran. A prose message is a second, unversioned copy of the procedure that drifts from the skill it describes. The abilities wizards generate schedules in this shape and `/create-agent:review` flags prose messages as findings. See [Scheduling](../automation/scheduling.md#schedules-from-a-template).
+Ideally a single line that invokes one of the agent's skills by name — `/daily-briefing` — and nothing else: no inline instructions, arguments, or business logic. The logic then lives in the versioned playbook, so changing what a scheduled run does is an edit to the skill, and the execution history shows *which* playbook ran. A prose message is a second, unversioned copy of the procedure that drifts from the skill it describes. `/create-agent:custom` generates schedules in this shape and `/create-agent:review` flags prose messages as findings. See [Scheduling](../automation/scheduling.md#schedules-from-a-template).
 
 ## My scheduled skill hangs every run and burns its whole timeout — why?
 
-The skill almost certainly asks a question at one of its decision points. On an unattended cron there is nobody to answer, so every run blocks on the prompt until the execution times out with nothing committed. The fix belongs in the skill, not in the schedule message: give it a headless run mode — the abilities convention is a `--autonomous` argument, so the schedule message becomes `/<skill> --autonomous` — in which the skill never prompts, takes the safe default at each gate, never takes a destructive path a gate was protecting, and records any non-trivial decision as a `needs-attention` line instead of guessing. The orchestrator bundle's gated skills already ship this mode. See [Abilities Marketplace](../automation/abilities-marketplace.md#playbook-calls-the-unit-of-inter-agent-work).
+The skill almost certainly asks a question at one of its decision points. On an unattended cron there is nobody to answer, so every run blocks on the prompt until the execution times out with nothing committed. The fix belongs in the skill, not in the schedule message: give it a headless run mode — the abilities convention is a `--autonomous` argument, so the schedule message becomes `/<skill> --autonomous` — in which the skill never prompts, takes the safe default at each gate, never takes a destructive path a gate was protecting, and records any non-trivial decision as a `needs-attention` line instead of guessing. The orchestrator bundle's gated skills already ship this mode. See [Abilities Marketplace](../automation/abilities-marketplace.md#playbook-calls--the-unit-of-inter-agent-work).
 
 ## Can I use a legacy timezone name like `US/Eastern` in a schedule?
 

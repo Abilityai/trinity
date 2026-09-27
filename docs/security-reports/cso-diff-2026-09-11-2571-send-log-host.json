@@ -1,0 +1,75 @@
+{
+  "version": "1.1",
+  "date": "2026-09-11",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/2571-send-log-host",
+  "issue": "abilityai/trinity#2571",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": 0,
+    "new_settings_keys": 1,
+    "new_status_fields": 4,
+    "new_stored_values": 2,
+    "new_outbound_calls": 0,
+    "new_prompt_surfaces": 0,
+    "new_log_lines": 0
+  },
+  "findings": [],
+  "appendix": [
+    {
+      "conf": 4,
+      "title": "share_url keeps its path",
+      "note": "The scrubbed configured URL drops userinfo, query and fragment but keeps the path; a token embedded as a path segment of an operator-configured URL would still ride the admin-only status. Pre-existing (the field was returned verbatim before), narrowed by this diff, and no longer rendered by the panel. Operator-controlled config, admin-only reader, no exploit path."
+    },
+    {
+      "conf": 3,
+      "title": "recorded origin can name an internal host",
+      "note": "The stored origin of a test sink (for example a Docker-internal hostname) is shown to admins in Recent sends and the delivery line. That disclosure is the fix's purpose, is admin + human-only, and carries no credential."
+    },
+    {
+      "conf": 2,
+      "title": "generic DELETE covers the new key",
+      "note": "telemetry_sharing_last_shared_host sits under the DELETE-open telemetry_sharing_ prefix by design (the reset path); deleting it alone degrades the delivery line to 'an unknown receiver'. The generic PUT still refuses the prefix, so the service stays the only writer."
+    }
+  ],
+  "supply_chain_summary": {
+    "deps_changed": 0,
+    "lockfiles_changed": 0,
+    "workflows_changed": 0
+  },
+  "filter_stats": {
+    "candidates": 3,
+    "reported": 0,
+    "refuted_or_appendix": 3
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior": "docs/security-reports/cso-diff-2026-09-10-2694-voice-call-thread-order.md",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0,
+    "direction": "flat"
+  }
+}

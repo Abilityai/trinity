@@ -13,7 +13,7 @@ table handle in ``db/tables.py``; the engine is resolved via ``db/engine.py``.
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from sqlalchemy import select, insert, delete, or_
+from sqlalchemy import select, insert, delete, or_, update
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
@@ -36,6 +36,10 @@ class SkillsOperations:
             assigned_at=datetime.fromisoformat(row["assigned_at"]),
             # ent#237: None on rows written before multi-source.
             source_id=row["source_id"],
+            # #2914: None unless the last injection recorded a name conflict.
+            delivery_status=row["delivery_status"],
+            # ent#596: the agent that made the assignment; None for a human.
+            assigned_by_agent=row["assigned_by_agent"],
         )
 
     # =========================================================================
@@ -60,12 +64,52 @@ class SkillsOperations:
                 agent_skills.c.assigned_by,
                 agent_skills.c.assigned_at,
                 agent_skills.c.source_id,
+                agent_skills.c.delivery_status,
+                agent_skills.c.assigned_by_agent,
             )
             .where(agent_skills.c.agent_name == agent_name)
             .order_by(agent_skills.c.skill_name)
         )
         with get_engine().connect() as conn:
             return [self._row_to_skill(row) for row in conn.execute(stmt).mappings()]
+
+    def set_skill_delivery_status(
+        self, agent_name: str, conflicted: List[str], resolved: List[str]
+    ) -> None:
+        """Record the inject path's verdict on the assignment rows (#2914).
+
+        `conflicted` rows are stamped `conflict`; `resolved` rows (names that
+        landed — injected, unchanged, or fallback) have the stamp cleared.
+        Names the injection could not decide on (a failed restore) are in
+        neither list and keep whatever they had: a failed sync is not a
+        resolution. One transaction, so a partially-applied verdict can't
+        outlive a crash between the two statements. Unassigned names match no
+        row and are silently ignored — the row is the only thing this writes.
+        """
+        conflicted = [n for n in conflicted if n]
+        resolved = [n for n in resolved if n]
+        if not conflicted and not resolved:
+            return
+        with get_engine().begin() as conn:
+            if conflicted:
+                conn.execute(
+                    update(agent_skills)
+                    .where(
+                        agent_skills.c.agent_name == agent_name,
+                        agent_skills.c.skill_name.in_(conflicted),
+                    )
+                    .values(delivery_status="conflict")
+                )
+            if resolved:
+                conn.execute(
+                    update(agent_skills)
+                    .where(
+                        agent_skills.c.agent_name == agent_name,
+                        agent_skills.c.skill_name.in_(resolved),
+                        agent_skills.c.delivery_status.is_not(None),
+                    )
+                    .values(delivery_status=None)
+                )
 
     def get_agent_skill_names(self, agent_name: str) -> List[str]:
         """
@@ -91,6 +135,7 @@ class SkillsOperations:
         skill_name: str,
         assigned_by: str,
         source_id: Optional[str] = None,
+        assigned_by_agent: Optional[str] = None,
     ) -> Optional[AgentSkill]:
         """
         Assign a skill to an agent.
@@ -116,6 +161,7 @@ class SkillsOperations:
             assigned_by=assigned_by,
             assigned_at=now,
             source_id=source_id,
+            assigned_by_agent=assigned_by_agent,
         )
         try:
             with get_engine().begin() as conn:
@@ -129,6 +175,7 @@ class SkillsOperations:
                 assigned_by=assigned_by,
                 assigned_at=datetime.fromisoformat(now),
                 source_id=source_id,
+                assigned_by_agent=assigned_by_agent,
             )
         except IntegrityError:
             # Skill already assigned
@@ -159,6 +206,7 @@ class SkillsOperations:
         skill_names: List[str],
         assigned_by: str,
         source_ids: Optional[Dict[str, str]] = None,
+        assigned_by_agent: Optional[str] = None,
     ) -> int:
         """
         Set skills for an agent (full replacement).
@@ -181,6 +229,37 @@ class SkillsOperations:
         source_ids = source_ids or {}
 
         with get_engine().begin() as conn:
+            # #2914: the replace is delete-all + reinsert, so a retained name
+            # would lose its recorded `conflict` on every Save — and the PUT
+            # only re-injects ADDED names, so nothing would put it back until
+            # the next start. Carry the verdict across for names that stay.
+            kept_status = {
+                row.skill_name: row.delivery_status
+                for row in conn.execute(
+                    select(agent_skills.c.skill_name, agent_skills.c.delivery_status)
+                    .where(
+                        agent_skills.c.agent_name == agent_name,
+                        agent_skills.c.delivery_status.is_not(None),
+                    )
+                )
+            }
+            # ent#596: the same delete-all + reinsert would re-stamp every KEPT
+            # name with THIS caller — so an orchestrator's next replace would
+            # make a skill a human assigned last month read as "assigned by
+            # trinity-pm, today". Attribution belongs to the act that created
+            # the assignment; a replace that keeps a name did not create it.
+            kept_by = {
+                row.skill_name: (row.assigned_by, row.assigned_at, row.assigned_by_agent)
+                for row in conn.execute(
+                    select(
+                        agent_skills.c.skill_name,
+                        agent_skills.c.assigned_by,
+                        agent_skills.c.assigned_at,
+                        agent_skills.c.assigned_by_agent,
+                    ).where(agent_skills.c.agent_name == agent_name)
+                )
+            }
+
             # Remove all existing skills for this agent
             conn.execute(
                 delete(agent_skills).where(agent_skills.c.agent_name == agent_name)
@@ -190,13 +269,18 @@ class SkillsOperations:
             for skill_name in skill_names:
                 try:
                     with conn.begin_nested():
+                        by, at, by_agent = kept_by.get(
+                            skill_name, (assigned_by, now, assigned_by_agent)
+                        )
                         conn.execute(
                             insert(agent_skills).values(
                                 agent_name=agent_name,
                                 skill_name=skill_name,
-                                assigned_by=assigned_by,
-                                assigned_at=now,
+                                assigned_by=by,
+                                assigned_at=at,
                                 source_id=source_ids.get(skill_name),
+                                delivery_status=kept_status.get(skill_name),
+                                assigned_by_agent=by_agent,
                             )
                         )
                 except IntegrityError:

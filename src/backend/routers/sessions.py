@@ -31,6 +31,7 @@ from db_models import WebFileUpload, SessionMessageInsert
 from dependencies import AuthorizedAgent, get_current_user
 from models import CreateSessionRequest, SessionMessageRequest, User
 from services.docker_service import get_agent_container
+from services.model_catalog import InvalidModelError, validate_dispatch_model
 from services.session_cleanup_service import get_session_cleanup_service
 from services.session_turn_service import (
     InflightSentinel,
@@ -289,6 +290,16 @@ async def send_session_message(
     """
     _enabled_or_404()
     session = _session_or_404(session_id, current_user, name)
+
+    # #2796: before the user row is persisted below — a turn refused for its
+    # model must not leave a user message stranded in the thread with no reply.
+    # `run_resumable_turn` splats this value into `execute_task` on BOTH the
+    # initial attempt and the cold retry, so validating the single source here
+    # covers both call sites.
+    try:
+        body.model = validate_dispatch_model(body.model)
+    except InvalidModelError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     user_email = current_user.email or current_user.username
 

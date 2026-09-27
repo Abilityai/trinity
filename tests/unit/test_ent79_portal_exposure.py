@@ -709,7 +709,11 @@ def test_portal_chat_capacity_is_429(roster_db):
 def _patch_shared_files(rows):
     from unittest.mock import patch
     import database
-    return patch.object(database.db, "list_active_shared_files_for_agent", return_value=rows)
+    # ent#549: the Files tab asks the VIEWER question now (`…_for_viewer`), not the
+    # operator's "everything this agent has out". These tests are about the URL a
+    # row is given, so they stub the accessor the reader actually calls; who a row
+    # is FOR is `test_ent549_file_audience.py`'s, over a real database.
+    return patch.object(database.db, "list_active_shared_files_for_viewer", return_value=rows)
 
 
 def test_portal_documents_scope_miss_is_404(roster_db):

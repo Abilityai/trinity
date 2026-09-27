@@ -137,7 +137,25 @@ from .execution_classification import (  # noqa: F401
 # races fire fast; 5 min is plenty. We pass `min(effective_timeout, this)`
 # to the retry so a 30-min task that ate 28 min before failing doesn't get
 # another 30 min on top.
+#
+# **This ceiling belongs to the #678 reader-race path ONLY (#2789).** That
+# retry re-dispatches a turn that never really started, so a flat 5 minutes is
+# generous. The SUB-003 post-switch retry (#792/#2638) is a different animal —
+# a full re-run of the user's turn on a fresh subscription — and it is bounded
+# by the turn's REMAINING budget instead (see `_dispatch_with_retries`). It
+# shared this constant until #2789, which killed every honest turn longer than
+# five minutes that happened to hit a seat switch mid tool-use. Do not re-point
+# the SUB-003 path at this number: `client_portal.portal_attempt_ceiling_seconds`
+# imports it to size the Workspace in-flight marker and adds it exactly once,
+# on the reader-race path's behalf.
 _AUTO_RETRY_MAX_TIMEOUT_S = 300.0
+
+# The backend's HTTP read budget is deliberately wider than the agent-side
+# budget it dispatches, so the agent's own structured 504 wins the race and we
+# terminate with its error detail instead of a bare `ReadTimeout`. One number,
+# applied identically to the first dispatch and to every retry (#2789) — the
+# retries used to collapse the two onto the same instant.
+_AGENT_HTTP_SLACK_S = 10.0
 
 
 
@@ -170,8 +188,19 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # ent#329: `operator_response` belongs here. The operator answered and moved
     # on; the resume turn runs with nobody reading its reply, so an unresolved
     # command in it is invisible without the alert.
+    #
+    # trinity-enterprise#611: `operator_ending` too — the wake for an ask that
+    # was cancelled or expired runs with nobody reading its reply, exactly like
+    # the answer's.
+    #
+    # #2845: `retry` belongs here. RETRY-001 fires it from a timer
+    # `retry_delay_seconds` after the failure, so nobody is reading its reply —
+    # even when the run it retries was started by hand. Without it, a skill that
+    # was missing all along stays silent whenever the first attempt failed
+    # before reaching the agent (capacity, timeout) and only the retry got far
+    # enough to show it.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
-     "a2a", "operator_response"}
+     "a2a", "operator_response", "operator_ending", "retry"}
 )
 
 
@@ -664,6 +693,97 @@ def build_pull_queue_payload(
     )
 
 
+async def dispatch_and_await_terminal(
+    *,
+    agent_name: str,
+    message: str,
+    triggered_by: str,
+    wait_timeout: Optional[float] = None,
+    **execute_kwargs,
+) -> TaskExecutionResult:
+    """``execute_task`` for a caller that genuinely needs the answer in-line.
+
+    The sync edge adapter #1081 Phase 4 asks for, in its smallest useful form.
+    On the push path this is exactly ``execute_task`` — the turn runs inside the
+    await and the result is the result. Under pull the dispatch returns
+    ``QUEUED`` the moment the row is on the durable queue and the turn runs later
+    in the agent's worker, so this waits for that row's terminal
+    (``sync_waiter.wait_for_sync_terminal``) and rebuilds the result from it.
+
+    That is the whole reason a trigger like ``a2a`` was stranded: its caller
+    consumes ``result.response`` to build a JSON-RPC artifact, and a queued
+    dispatch gave it nothing. It does not need a receipt to poll — it needs to
+    block correctly while the work happens somewhere else, which is a different
+    thing and one the adapter already does.
+
+    ⚠️ Under pull, nothing signals the waiter directly (the pull sink writes the
+    terminal through the CAS, it does not know about this registry), so the wake
+    comes from ``sync_waiter``'s DB-poll fallback and latency is bounded by
+    ``SYNC_WAITER_POLL_INTERVAL``. For a turn measured in seconds-to-minutes that
+    is noise, and it is deliberately not worth a second signalling path.
+
+    A wait that times out returns a FAILED result with ``TIMEOUT`` rather than
+    raising — the execution keeps running and its real terminal still lands on
+    the row, exactly as for a fan-out deadline (#2524).
+    """
+    result = await get_task_execution_service().execute_task(
+        agent_name=agent_name,
+        message=message,
+        triggered_by=triggered_by,
+        **execute_kwargs,
+    )
+    if result.status != TaskExecutionStatus.QUEUED or not result.execution_id:
+        return result
+
+    from services.sync_waiter import wait_for_sync_terminal
+
+    if wait_timeout is None:
+        try:
+            wait_timeout = float(db.get_execution_timeout(agent_name)) + 120.0
+        except Exception:  # noqa: BLE001 — a config read must not break dispatch
+            wait_timeout = 7320.0
+
+    logger.info(
+        "[TaskExecService] %s dispatch for %s queued as %s; awaiting its terminal",
+        triggered_by, agent_name, result.execution_id,
+    )
+    try:
+        await wait_for_sync_terminal(result.execution_id, wait_timeout)
+    except asyncio.TimeoutError:
+        return TaskExecutionResult(
+            execution_id=result.execution_id,
+            status=TaskExecutionStatus.FAILED,
+            response="",
+            error=f"Timed out after {int(wait_timeout)}s waiting for the queued execution",
+            error_code=TaskExecutionErrorCode.TIMEOUT,
+        )
+    return result_from_execution_row(result.execution_id) or result
+
+
+def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult]:
+    """Rebuild a ``TaskExecutionResult`` from a terminal execution row.
+
+    The row is the authority once a turn has run somewhere other than inside the
+    caller's await — under pull that is every turn. Returns None when the row is
+    gone, so the caller can fall back to whatever it already had.
+    """
+    execution = db.get_execution(execution_id)
+    if execution is None:
+        return None
+    status = getattr(execution, "status", None)
+    status = status.value if hasattr(status, "value") else str(status)
+    return TaskExecutionResult(
+        execution_id=execution_id,
+        status=status,
+        response=getattr(execution, "response", None) or "",
+        cost=getattr(execution, "cost", None),
+        context_used=getattr(execution, "context_used", None),
+        context_max=getattr(execution, "context_max", None),
+        session_id=getattr(execution, "claude_session_id", None),
+        error=getattr(execution, "error", None),
+    )
+
+
 # Strong references to fire-and-forget breaker tasks. asyncio's event loop holds
 # only a WEAK reference to a bare ``create_task`` result, so an un-referenced task
 # can be garbage-collected mid-flight (the backlog drain would silently vanish).
@@ -959,10 +1079,150 @@ class _AttemptState:
     """
 
     start_time: datetime
+    # #2789: the TURN's clock, never reset. `start_time` is re-stamped before
+    # each inline retry so `_handle_timeout` measures the attempt it is
+    # classifying; that makes it the wrong clock for a BUDGET. On the #678→#792
+    # interplay (502 → reader-race retry → 429 → switch) `start_time` had just
+    # been reset by the reader-race retry, so a SUB-003 budget derived from it
+    # measured only that retry and re-granted nearly the whole turn a third
+    # time — 6610s of slot time on a 3600s cap (merge-train review of #2817).
+    turn_started_at: Optional[datetime] = None
     retry_count: int = 0
     previous_attempt_cost: float = 0.0
     subscription_switch_attempted: bool = False
     execution_time_ms: int = 0
+    # #2638: the switch that actually happened during this turn — pre-dispatch
+    # or post-failure — carried onto `TaskExecutionResult` so a caller can say
+    # "moved to <sub>, try again" instead of "not retryable". None = none.
+    subscription_switch: Optional[dict] = None
+    # #2789: the agent-side budget actually in force for the LATEST attempt.
+    # `state.start_time` is reset before an inline retry, so `_handle_timeout`
+    # measures the retry's own elapsed time — it must judge that against the
+    # retry's own limit, not the turn's original `timeout_seconds`. Left None
+    # on the first attempt, where the two are the same thing by construction.
+    applied_timeout_seconds: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        # At construction the two clocks are the same instant; only the retries
+        # move `start_time`. Deriving here means a construction that names only
+        # `start_time` cannot silently anchor the turn budget on a reset clock.
+        if self.turn_started_at is None:
+            self.turn_started_at = self.start_time
+
+
+def _with_switch(
+    result: TaskExecutionResult, state: "_AttemptState"
+) -> TaskExecutionResult:
+    """Carry the turn's SUB-003 switch (if any) onto its result (#2638).
+
+    Applied at `execute_task`'s return sites rather than inside each terminal
+    builder, because the builders are also called from the #1083 callback path
+    where there is no attempt state — one place that knows both, instead of a
+    parameter threaded through five constructors that would be `None` on half
+    of them.
+    """
+    if state.subscription_switch:
+        result.subscription_switch = state.subscription_switch
+    return result
+
+# #2106: a transport timeout raised long before the configured limit is an
+# upstream cutoff (connection reset / read stall / pool starvation), not a
+# schedule timeout. A 30s attribution grace mirrors the issue's evidence:
+# every genuine timeout sat within 30s of the configured value.
+_TIMEOUT_ATTRIBUTION_GRACE_S = 30
+
+
+def _classify_timeout_failure(
+    elapsed_s: int,
+    timeout_seconds: Optional[int],
+    *,
+    exc: Optional[BaseException] = None,
+) -> tuple[str, Optional[TaskExecutionErrorCode]]:
+    """#2106: label a failed run as a timeout only when it actually
+    approached the configured limit.
+
+    Returns ``(error_msg, error_code)``. A genuine timeout keeps the
+    historical message shape ("Task execution timed out after N seconds")
+    and the ``TIMEOUT`` code so existing consumers keep matching; anything
+    else is recorded as a network/upstream failure with the run's real
+    duration and the limit kept as context, so operators are not misled
+    into raising a limit that was never reached.
+    """
+    if (
+        timeout_seconds is not None
+        and elapsed_s >= timeout_seconds - _TIMEOUT_ATTRIBUTION_GRACE_S
+    ):
+        return (
+            f"Task execution timed out after {timeout_seconds} seconds",
+            TaskExecutionErrorCode.TIMEOUT,
+        )
+    limit_desc = (
+        f"{timeout_seconds} seconds" if timeout_seconds is not None else "unset"
+    )
+    detail = f" ({type(exc).__name__}: {exc})" if exc is not None else ""
+    return (
+        f"Task execution aborted after {elapsed_s}s of {limit_desc} allowed{detail}",
+        TaskExecutionErrorCode.NETWORK,
+    )
+
+
+def _turn_elapsed_seconds(state: "_AttemptState") -> float:
+    """Wall-clock spent by the WHOLE turn so far — every attempt and every
+    settle delay — from the clock that is never reset."""
+    return max(0.0, (datetime.utcnow() - state.turn_started_at).total_seconds())
+
+
+def _log_retry_budget(
+    agent_name: str,
+    reason: str,
+    applied_timeout: int,
+    original_timeout: Optional[int],
+    *,
+    ceiling: Optional[float] = None,
+    elapsed_s: float = 0.0,
+) -> None:
+    """#2789: state an inline retry's budget where it is decided.
+
+    The #2789 report had to infer a self-inflicted 300s cap from the phrase
+    "aborted after 300s of 3600 seconds allowed" — the applied budget appeared
+    in no log line at all. Two causes, two sentences, because they call for
+    different reactions:
+
+    * the #678 reader-race retry is CLAMPED by a deliberate ceiling — WARNING,
+      so a timeout at that point is read as the ceiling, not as an upstream
+      cutoff or the configured limit;
+    * the SUB-003 re-run is shorter only by what the first attempt already
+      SPENT — INFO with the breakdown, since that is arithmetic, not a clamp
+      (the first version of this helper called a 30s first attempt a "clamp"
+      on every seat switch). It escalates to WARNING only when what is left is
+      under the reader-race ceiling: a re-run with under five minutes is the
+      one an operator would want to know about, because it is likely hopeless
+      and is still billed.
+
+    Silent when nothing was taken away, so a healthy turn adds no noise.
+    """
+    if original_timeout is None or applied_timeout >= int(original_timeout):
+        return
+    # Keyed on the CAUSE the caller names, never inferred from `elapsed_s`: a
+    # zero elapsed on a spend-bounded retry is not a ceiling, and the first
+    # version of this branch would have called it one.
+    if ceiling is not None and applied_timeout <= ceiling:
+        logger.warning(
+            f"[TaskExecService] {agent_name}: {reason} retry budget clamped to "
+            f"{applied_timeout}s of the turn's {int(original_timeout)}s by the "
+            f"{int(ceiling)}s ceiling — a timeout at that point is this ceiling, "
+            f"not the configured limit"
+        )
+        return
+    line = (
+        f"[TaskExecService] {agent_name}: {reason} retry budget {applied_timeout}s — "
+        f"the turn's {int(original_timeout)}s less the {int(elapsed_s)}s already spent "
+        f"(every earlier attempt and settle delay)"
+    )
+    if applied_timeout < _AUTO_RETRY_MAX_TIMEOUT_S:
+        logger.warning(line + " (under the reader-race ceiling; a re-run this short is likely hopeless and is still billed)")
+    else:
+        logger.info(line)
 
 
 class TaskExecutionService:
@@ -1009,6 +1269,8 @@ class TaskExecutionService:
         # splats straight into this signature — an unaccepted keyword here is a
         # TypeError on every Workspace turn, not a silently-dropped column.
         source_channel_client: Optional[str] = None,
+        # ent#555 — which canvas the user had open when they sent this turn.
+        open_canvas_id: Optional[str] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1089,6 +1351,7 @@ class TaskExecutionService:
                 fan_out_id=fan_out_id,
                 loop_id=loop_id,
                 subscription_id=_exec_sub_id,
+                open_canvas_id=open_canvas_id,
                 source_channel=source_channel,
                 source_channel_chat_id=source_channel_chat_id,
                 source_channel_thread=source_channel_thread,
@@ -1102,7 +1365,8 @@ class TaskExecutionService:
         # #678/#792 call-attempt bookkeeping, shared with the exception
         # handlers below (they read what the retries wrote). Created BEFORE the
         # try so no handler can NameError on a pre-dispatch exception.
-        state = _AttemptState(start_time=datetime.utcnow())
+        _now = datetime.utcnow()
+        state = _AttemptState(start_time=_now, turn_started_at=_now)
 
         # ---- #2391: does this dispatch belong on the durable queue? --------
         # Evaluated here, where every field the queued row needs is in scope.
@@ -1244,15 +1508,15 @@ class TaskExecutionService:
                     f"[TaskExecService] Agent {agent_name} ACK'd async dispatch (202) "
                     f"for execution {execution_id}; handing slot lease to result callback"
                 )
-                return TaskExecutionResult(
+                return _with_switch(TaskExecutionResult(
                     execution_id=execution_id or "",
                     status=TaskExecutionStatus.RUNNING,
                     response="",
                     dispatched_async=True,
-                )
+                ), state)
 
             # ---- 5/6/7. Finalize the synchronous response -----------------
-            return await self._finalize_sync_response(
+            return _with_switch(await self._finalize_sync_response(
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
@@ -1261,34 +1525,39 @@ class TaskExecutionService:
                 triggered_by=triggered_by,
                 response=response,
                 state=state,
-            )
+            ), state)
 
-        except httpx.TimeoutException:
-            return await self._handle_timeout(
+        except httpx.TimeoutException as e:
+            return _with_switch(await self._handle_timeout(
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
                 timeout_seconds=timeout_seconds,
                 state=state,
-            )
+                exc=e,
+            ), state)
 
         except BackendAgentCallBudgetExhausted as e:
-            return await self._handle_budget_exhausted(
+            # #2638: wrapped like every other terminal. A pre-dispatch switch
+            # can have happened before the budget was exhausted, and a caller
+            # that cannot see it tells the person their message is not
+            # retryable while the agent sits on a fresh subscription.
+            return _with_switch(await self._handle_budget_exhausted(
                 e,
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
-            )
+            ), state)
 
         except httpx.HTTPError as e:
-            return await self._handle_http_error(
+            return _with_switch(await self._handle_http_error(
                 e,
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
                 breaker_enabled=breaker_enabled,
                 state=state,
-            )
+            ), state)
 
         except Exception as e:
             error_msg = str(e)
@@ -1302,12 +1571,14 @@ class TaskExecutionService:
                 error=error_msg,
                 agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
-            return TaskExecutionResult(
+            # #2638: reachable after a pre-dispatch switch too — same reason
+            # as the budget handler above.
+            return _with_switch(TaskExecutionResult(
                 execution_id=execution_id or "",
                 status=TaskExecutionStatus.FAILED,
                 response="",
                 error=error_msg,
-            )
+            ), state)
 
         except asyncio.CancelledError:
             # Python 3.11+: CancelledError is BaseException, bypasses except Exception.
@@ -1698,7 +1969,54 @@ class TaskExecutionService:
         object rather than in locals. Transport/HTTP errors propagate to
         those handlers exactly as they did inline.
         """
-        effective_timeout = float(timeout_seconds or 600) + 10
+        effective_timeout = float(timeout_seconds or 600) + _AGENT_HTTP_SLACK_S
+
+        # #2638 AC#3: SUB-003 has always been reactive — dispatch, get refused,
+        # switch, re-issue once (#792). Everything needed to skip that first
+        # doomed attempt is already known here: the sampler's cached provider
+        # reading and the platform's own 2h 429 events both say whether the
+        # assigned subscription can serve. On the Workspace the wasted attempt
+        # is not an internal retry, it is a person watching their message fail.
+        #
+        # Best-effort by construction: `ensure_serviceable_subscription` never
+        # raises and returns None for every "cannot tell" case, so a turn that
+        # would have run still runs and #792 remains the backstop.
+        try:
+            from services.subscription_auto_switch import (
+                ensure_serviceable_subscription,
+            )
+            pre_switch = await ensure_serviceable_subscription(agent_name)
+            if pre_switch:
+                state.subscription_switch = pre_switch
+                # A turn gets at most ONE remediation, and this was it. Without
+                # this line the pre-dispatch path spends none of the budget the
+                # #792 flag exists to hold, so a turn that was moved here and
+                # then refused again would switch a SECOND time, re-issue, and
+                # burn a further rate-limit event — churning to a third
+                # never-used subscription, which is precisely the cascade the
+                # flag was introduced to stop. The except handler reads the same
+                # flag, so it also stops recording a second failure event; that
+                # is the existing rule stated at its other read site, not a new
+                # one.
+                state.subscription_switch_attempted = True
+                # The DESTINATION is deliberately not interpolated here.
+                # `_perform_auto_switch` already logs "Auto-switching agent 'X'
+                # from 'A' to 'B'" one frame down, so repeating it buys nothing —
+                # and reading a name off the switch dict makes this a sink for a
+                # value CodeQL taints from `subscription_credentials` (the row
+                # carries an encrypted token, so the whole record reads as a
+                # credential). Not worth a standing false positive on the hot
+                # path for a line that duplicates the one above it.
+                logger.warning(
+                    f"[TaskExecService] #2638 pre-dispatch switch for "
+                    f"'{agent_name}' before the first attempt"
+                )
+        except Exception as pre_err:  # noqa: BLE001 — never fail a turn from here
+            logger.error(
+                f"[TaskExecService] #2638 pre-dispatch check raised for "
+                f"'{agent_name}': {pre_err}"
+            )
+
         logger.info(f"[TaskExecService] Calling agent {agent_name} /api/task (timeout={effective_timeout}s, tools={payload['allowed_tools']}, msg_len={len(payload['message'])})")
 
         response = await agent_post_with_retry(
@@ -1746,6 +2064,18 @@ class TaskExecutionService:
                         f"retry on {agent_name} — skipping auto-retry"
                     )
                 else:
+                    # #2789: record what this attempt may actually spend, so a
+                    # terminal timeout is attributed against the ceiling that
+                    # applied rather than the operator's untouched configured
+                    # one. Inside the `else`, not above the CB gate: a retry the
+                    # breaker refuses never runs, and a budget claimed for it
+                    # would misattribute whatever terminal the original response
+                    # produces.
+                    state.applied_timeout_seconds = retry_agent_timeout
+                    _log_retry_budget(
+                        agent_name, "reader-race", retry_agent_timeout, timeout_seconds,
+                        ceiling=_AUTO_RETRY_MAX_TIMEOUT_S,
+                    )
                     state.retry_count = 1
                     prev_meta = inner_detail.get("metadata") or {}
                     num_turns_before = prev_meta.get("num_turns") or 0
@@ -1836,23 +2166,73 @@ class TaskExecutionService:
                         f"[SUB-003] Auto-switch failed for '{agent_name}': {switch_err}"
                     )
 
+                # #2638 AC#4: the switcher declined — every subscription is
+                # exhausted, refused, or skip-listed. Before giving the user a
+                # dead end, fall back to the platform API key if one is
+                # configured and the operator has left the setting on. Same
+                # one-shot budget: this rides the `subscription_switch_attempted`
+                # flag already set above, so a turn gets at most one remediation.
+                if not (switch_result and switch_result.get("switched")):
+                    try:
+                        from services.subscription_auto_switch import fallback_to_api_key
+                        switch_result = await fallback_to_api_key(agent_name)
+                    except Exception as fb_err:  # noqa: BLE001
+                        logger.error(
+                            f"[#2638] API-key fallback raised for '{agent_name}': {fb_err}"
+                        )
+
                 if switch_result and switch_result.get("switched"):
+                    # #2638 AC#5: remember it. If the one retry below also
+                    # fails, the caller has to be able to say "we moved you to
+                    # <sub>, try again" — the portal was reporting these as
+                    # not-retryable while the agent sat on a fresh subscription.
+                    state.subscription_switch = switch_result
                     state.retry_count += 1
                     # #678 R2 rollup: accumulate the failed attempt's cost so it
                     # isn't absorbed by the retry's success replacement.
                     state.previous_attempt_cost += _salvage_attempt_cost(switch_partial_meta)
                     # Cap the retry to the REMAINING original budget so a 429
-                    # after a long run can't balloon wall-clock / slot time.
-                    elapsed_s = (datetime.utcnow() - state.start_time).total_seconds()
-                    remaining_s = max(1.0, effective_timeout - elapsed_s)
-                    retry_http_timeout = min(remaining_s, _AUTO_RETRY_MAX_TIMEOUT_S)
-                    retry_agent_timeout = int(
-                        min(float(timeout_seconds or 600), retry_http_timeout)
-                    )
+                    # after a long run can't balloon wall-clock / slot time —
+                    # and to NOTHING ELSE (#2789).
+                    #
+                    # This retry is a full re-run of the user's turn on a fresh
+                    # subscription, so it earns the budget the turn was given.
+                    # It used to be clamped to `_AUTO_RETRY_MAX_TIMEOUT_S` as
+                    # well, which is the #678 reader-race ceiling for a turn
+                    # that never started: a 3600s agent got 300s, the agent
+                    # server killed its own process group at 300s mid tool-use,
+                    # and the turn was discarded after being billed. `remaining_s`
+                    # is already a hard wall-clock bound — `effective_timeout` is
+                    # the operator's own `execution_timeout_seconds` plus the HTTP
+                    # slack — so first attempt + retry can never exceed what
+                    # TIMEOUT-001 already promises. A second ceiling here bought
+                    # nothing and cost every turn longer than five minutes.
+                    #
+                    # The agent-side budget keeps the slack the first dispatch
+                    # has, so the agent's structured 504 still beats our own
+                    # ReadTimeout; without it the two land on the same instant
+                    # and the terminal loses the agent's error detail.
+                    # The budget is computed AFTER the settle delay below, from
+                    # the TURN clock (`turn_started_at`, never reset — see
+                    # `_AttemptState`): `start_time` may already have been
+                    # re-stamped by a reader-race retry, and the 3s settle is
+                    # wall-clock the turn spends too. Both were counted against
+                    # nothing before, and on the #678→#792 interplay the first
+                    # made this retry re-grant nearly the whole budget.
+                    # #2638: the destination name is deliberately NOT
+                    # interpolated. `_perform_auto_switch` logs "Auto-switching
+                    # agent 'X' from 'A' to 'B'" one frame down, so this line
+                    # only ever repeated it — and reading a name off the switch
+                    # result makes this a sink for a value CodeQL taints from
+                    # `subscription_credentials` (that row carries an encrypted
+                    # token, so the whole record reads as a credential). The
+                    # finding is a false positive about the VALUE and a true
+                    # observation about the SHAPE; dropping a redundant
+                    # interpolation is cheaper than a standing dismissal on the
+                    # execution hot path.
                     logger.warning(
                         f"[TaskExecService] SUB-003 switched '{agent_name}' "
-                        f"({switch_failure_kind}) -> "
-                        f"'{switch_result.get('new_subscription')}' — auto-retry 1/1 "
+                        f"({switch_failure_kind}) — auto-retry 1/1 "
                         f"(prev_cost=${state.previous_attempt_cost:.4f})"
                     )
                     # Best-effort audit. phase=initiated documents the retry was queued.
@@ -1881,6 +2261,19 @@ class TaskExecutionService:
                     # Small settle so a hot-reloaded token is live for the next
                     # subprocess; the retry call itself probes readiness.
                     await asyncio.sleep(_SWITCH_RETRY_DELAY_S)
+                    elapsed_s = _turn_elapsed_seconds(state)
+                    retry_http_timeout = max(1.0, effective_timeout - elapsed_s)
+                    retry_agent_timeout = max(1, int(min(
+                        float(timeout_seconds or 600),
+                        retry_http_timeout - _AGENT_HTTP_SLACK_S,
+                    )))
+                    # #2789: attribute a terminal timeout against the budget
+                    # that was actually in force for THIS attempt.
+                    state.applied_timeout_seconds = retry_agent_timeout
+                    _log_retry_budget(
+                        agent_name, "subscription-switch", retry_agent_timeout, timeout_seconds,
+                        elapsed_s=elapsed_s,
+                    )
                     retry_payload = {**payload, "timeout_seconds": retry_agent_timeout}
                     state.start_time = datetime.utcnow()
                     response = await agent_post_with_retry(
@@ -2034,12 +2427,32 @@ class TaskExecutionService:
         activity_id: Optional[str],
         timeout_seconds: Optional[int],
         state: "_AttemptState",
+        exc: Optional[BaseException] = None,
     ) -> TaskExecutionResult:
         """execute_task's httpx.TimeoutException terminal (#61 orphan kill
-        + #671/H4 CAS-gated FAILED write)."""
+        + #671/H4 CAS-gated FAILED write).
+
+        #2106: the label comes from `_classify_timeout_failure` — a timeout
+        raised long before the configured limit is an upstream cutoff, not a
+        schedule timeout, and must not be recorded as one."""
         elapsed = int((datetime.utcnow() - state.start_time).total_seconds())
-        error_msg = f"Task execution timed out after {timeout_seconds} seconds"
-        logger.error(f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s (limit={timeout_seconds}s)")
+        # #2789: `state.start_time` is reset before an inline retry, so `elapsed`
+        # measures the RETRY. Judge it against the retry's own budget — the #678
+        # ceiling, or whatever the turn had left after a SUB-003 switch — or a
+        # retry that ran its full allowance reads as an upstream cutoff against
+        # an original limit it was never given. None on the first attempt.
+        effective_limit = (
+            state.applied_timeout_seconds
+            if state.applied_timeout_seconds is not None
+            else timeout_seconds
+        )
+        error_msg, error_code = _classify_timeout_failure(
+            elapsed, effective_limit, exc=exc
+        )
+        logger.error(
+            f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s "
+            f"(limit={effective_limit}s, configured={timeout_seconds}s): {error_msg}"
+        )
 
         # Issue #61: Terminate the execution on the agent to prevent orphaned
         # Claude processes from accumulating. Best-effort — watchdog is safety net.
@@ -2059,7 +2472,7 @@ class TaskExecutionService:
             status=TaskExecutionStatus.FAILED,
             response="",
             error=error_msg,
-            error_code=TaskExecutionErrorCode.TIMEOUT,
+            error_code=error_code,
         )
 
 
@@ -2148,7 +2561,12 @@ class TaskExecutionService:
         # again — a second switch would burn another rate-limit event and churn
         # to a third never-used subscription.
         agent_status_code = getattr(getattr(e, "response", None), "status_code", None)
-        if not state.subscription_switch_attempted:
+        # #3012: Claude Code refused the model. An agent image older than #3012
+        # answers that 503, which read as auth below and rotated the agent
+        # through every subscription. No subscription can fix it — never switch.
+        from services.failure_classifier import is_model_rejection
+        model_rejected = is_model_rejection(error_msg)
+        if not state.subscription_switch_attempted and not model_rejected:
             try:
                 from services.subscription_auto_switch import (
                     handle_subscription_failure,
@@ -2172,9 +2590,34 @@ class TaskExecutionService:
         # Issue #285: Detect auth failures (HTTP 503 from agent server)
         # Return structured error code so callers can handle appropriately
         error_code = None
-        if agent_status_code == 503:
+        if model_rejected:
+            logger.warning(f"[TaskExecService] Model rejected on {agent_name}: {error_msg[:200]}")
+            error_code = TaskExecutionErrorCode.MODEL_UNSUPPORTED
+        elif agent_status_code == 503:
             logger.warning(f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.AUTH
+        elif agent_status_code == 429:
+            # #2638: a Claude subscription usage limit surfaces from the agent
+            # as 429, not 503 — and this branch classified only 503, so the code
+            # stayed None and every client-facing consumer fell through to the
+            # generic "something went wrong". `BILLING` had NO assignment site
+            # anywhere in the backend; it existed in the enum, in comments, and
+            # in the portal's gate tuple, and nothing ever produced it. That is
+            # why the half of this PR the title advertises — telling the person
+            # their turn moved to another subscription — could not fire for the
+            # symptom in the title: a Workspace turn is `triggered_by="public"`,
+            # which is not async-eligible, so it takes THIS path.
+            #
+            # Safe downstream by construction: the dispatch breaker counts
+            # `auth` only (#526 D10), so a quota 429 still cannot trip it. The
+            # #1085 shared-cause governor DOES count `billing`, which is what it
+            # was written for ("a fleet-wide Claude-API 429 storm") and has
+            # never been reachable from the sync path until now; it is behind
+            # `REDELIVERY_GOVERNOR_ENABLED`, default OFF.
+            logger.warning(
+                f"[TaskExecService] Usage limit detected on {agent_name}: {error_msg[:200]}"
+            )
+            error_code = TaskExecutionErrorCode.BILLING
 
         # #678 salvage + terminal write + side-effects live in apply_result.
         # The RAW partial_metadata and the pre-classified error_code are
@@ -2187,7 +2630,7 @@ class TaskExecutionService:
             execution_id=execution_id,
             status=TaskExecutionStatus.FAILED,
             error=error_msg,
-            error_code=error_code,  # Issue #285: AUTH (503) or None
+            error_code=error_code,  # MODEL_UNSUPPORTED (#3012) / AUTH (503) / BILLING (429, #2638) / None
             metadata=partial_metadata,
             # #1853: thread the agent's salvaged transcript + session id onto
             # the FAILED envelope so apply_result persists them (mirrors

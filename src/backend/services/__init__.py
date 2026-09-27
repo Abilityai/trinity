@@ -11,7 +11,6 @@ from .docker_service import (
 )
 from .template_service import (
     get_github_template,
-    clone_github_repo,
     extract_agent_credentials,
     generate_credential_files,
 )
@@ -24,7 +23,6 @@ __all__ = [
     "get_agent_by_name",
     "get_next_available_port",
     "get_github_template",
-    "clone_github_repo",
     "extract_agent_credentials",
     "generate_credential_files",
 ]

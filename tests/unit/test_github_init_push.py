@@ -43,7 +43,9 @@ def _load_git_service():
         for key in list(sys.modules.keys()):
             if key.startswith("services.git_service"):
                 del sys.modules[key]
-        import services.git_service as gs
+        # #1028: git_service is a package; the alias names the module that
+        # owns the functions under test, so patches land where the code looks.
+        import services.git_service.provisioning as gs
     return gs
 
 
@@ -54,8 +56,26 @@ class _FakeExec:
         self.remote_has_main = remote_has_main
         self.commit_succeeds = commit_succeeds
         self.calls: list[str] = []
+        self.scrub_execs: list[tuple] = []
 
-    async def __call__(self, container_name: str, command: str, timeout: int = 60):
+    async def __call__(self, container_name: str, command: str, timeout: int = 60,
+                       *, environment=None, user: str = "developer"):
+        # ent#615: the credential-helper install + seed sweep runs before any
+        # remote is written, and `initialize_git_in_container` refuses to
+        # proceed when a PAT was supplied but nothing resolves — so this double
+        # has to answer the probe. Matched on the report token rather than on
+        # the exec's shape, because the script is base64-injected.
+        if "TRINITY_SCRUB" in command or "base64 -d" in command:
+            self.scrub_execs.append((command, environment, user))
+            return {
+                "exit_code": 0,
+                "output": (
+                    "TRINITY_SCRUB_REPORT remotes_scrubbed=0 harvested=0 "
+                    "seeded=1 refused=0 gitmodules_hits=0 helper_ok=1 "
+                    "competing_helpers=0"
+                ),
+            }
+
         # Capture the raw git command (the bit after `cd <dir> && `)
         inner = command
         if " && " in command:
@@ -95,7 +115,10 @@ async def test_empty_remote_force_pushes():
     gs = _load_git_service()
     fake = _FakeExec(remote_has_main=False)
 
-    with patch.object(gs, "execute_command_in_container", fake):
+    with patch.object(gs, "execute_command_in_container", fake), \
+            patch.object(gs.gitignore, "execute_command_in_container", fake), \
+            patch.object(gs.remotes, "execute_command_in_container", fake), \
+            patch.object(gs.token_scrub, "execute_command_in_container", fake):
         result = await gs.initialize_git_in_container(
             agent_name="test-agent",
             github_repo="owner/repo",
@@ -123,7 +146,10 @@ async def test_existing_remote_pushes_after_commit():
     gs = _load_git_service()
     fake = _FakeExec(remote_has_main=True)
 
-    with patch.object(gs, "execute_command_in_container", fake):
+    with patch.object(gs, "execute_command_in_container", fake), \
+            patch.object(gs.gitignore, "execute_command_in_container", fake), \
+            patch.object(gs.remotes, "execute_command_in_container", fake), \
+            patch.object(gs.token_scrub, "execute_command_in_container", fake):
         result = await gs.initialize_git_in_container(
             agent_name="test-agent",
             github_repo="owner/repo",
@@ -149,7 +175,10 @@ async def test_existing_remote_reset_precedes_commit():
     gs = _load_git_service()
     fake = _FakeExec(remote_has_main=True)
 
-    with patch.object(gs, "execute_command_in_container", fake):
+    with patch.object(gs, "execute_command_in_container", fake), \
+            patch.object(gs.gitignore, "execute_command_in_container", fake), \
+            patch.object(gs.remotes, "execute_command_in_container", fake), \
+            patch.object(gs.token_scrub, "execute_command_in_container", fake):
         await gs.initialize_git_in_container(
             agent_name="test-agent",
             github_repo="owner/repo",
@@ -187,7 +216,10 @@ async def test_existing_remote_nothing_to_commit_still_pushes():
     gs = _load_git_service()
     fake = _FakeExec(remote_has_main=True, commit_succeeds=False)
 
-    with patch.object(gs, "execute_command_in_container", fake):
+    with patch.object(gs, "execute_command_in_container", fake), \
+            patch.object(gs.gitignore, "execute_command_in_container", fake), \
+            patch.object(gs.remotes, "execute_command_in_container", fake), \
+            patch.object(gs.token_scrub, "execute_command_in_container", fake):
         result = await gs.initialize_git_in_container(
             agent_name="test-agent",
             github_repo="owner/repo",

@@ -37,7 +37,9 @@ sys.path.insert(0, _BACKEND_STR)
 
 
 def _settings_source() -> str:
-    return (_BACKEND / "routers" / "settings.py").read_text(encoding="utf-8")
+    # #1028: `routers/settings.py` is the package `routers/settings/`;
+    # `reset_ops_settings` lives in its `ops` module.
+    return (_BACKEND / "routers" / "settings" / "ops.py").read_text(encoding="utf-8")
 
 
 def _reset_handler_source() -> str:
@@ -132,7 +134,11 @@ def reset_router(monkeypatch):
     """The handler with its two side-effects captured: which keys it deleted,
     and what it audited."""
     try:
-        from routers import settings as mod
+        # #1028: `routers/settings.py` is a package now. This names the module
+        # that owns the handler — the collaborators below are deliberately not
+        # re-exported on the package, so a stale patch raises instead of
+        # applying to a module nobody reads.
+        from routers.settings import ops as mod
     except ImportError:  # pragma: no cover
         pytest.skip("backend venv required")
 

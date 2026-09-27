@@ -387,7 +387,11 @@ def _card(*, tts_ready=True, enabled=True, voice_id="own", default_voice="plat")
     # card. This file is about the voice bits, so it passes the neutral values.
     return svc._row_to_card(row, tts_ready, default_voice,
                             is_platform=False, runtime="claude-code",
-                            model_context=svc._model_context())
+                            model_context=svc._model_context(),
+                            # #2695 made this defaultless for the same reason.
+                            # `True` is the neutral value: it reproduces what the
+                            # bit meant before the capability probe existed.
+                            stt_ready=True)
 
 
 def test_card_voice_available_falls_back_to_platform_default():

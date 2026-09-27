@@ -73,6 +73,12 @@ class TestGitSync:
         if response.status_code in [400, 422]:
             pytest.skip("Git not configured for agent")
 
+        # ent#162: an agent that tracks a public template with no write
+        # credentials is push-blackholed — sync answers 409, by design. There is
+        # nothing to push without a bound repo, so that is a fixture limit here.
+        if response.status_code == 409 and "write credentials" in response.text:
+            pytest.skip("Git not configured for agent: tracks a public template read-only (ent#162)")
+
         # If git is enabled, should succeed or indicate no changes
         assert_status_in(response, [200, 304, 400])
 
@@ -467,9 +473,11 @@ class TestGitPermissionsOwnerOnly:
             else:
                 pytest.skip("Git not configured for agent")
 
-        # Owner should get 200/304/400 (success, no changes, or git error)
+        # Owner should get 200/304/400 (success, no changes, or git error), or
+        # 409 when the agent tracks a public template read-only (ent#162 push
+        # blackhole) — any of these means the owner passed the ownership gate.
         # Shared user would get 403 (but we're testing as owner here)
-        assert_status_in(response, [200, 304, 400, 403])
+        assert_status_in(response, [200, 304, 400, 403, 409])
 
     def test_git_initialize_requires_owner(
         self,

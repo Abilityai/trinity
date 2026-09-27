@@ -34,6 +34,7 @@ from dependencies import (
     CurrentUser,
     assert_admin,
     assert_agent_access,
+    resolve_source_agent,
 )
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -543,15 +544,26 @@ async def trigger_schedule(
     # are attribution only — nothing authorizes on them (`AuthorizedAgent`
     # above is what actually gates this endpoint).
     #
-    # Precedence for the agent name is deliberately the REVERSE of chat.py's:
-    # `current_user.agent_name` comes from the VALIDATED agent-scoped key, so
-    # where it exists it wins and a caller cannot pin its run on a sibling
-    # agent by setting the header. The header fills only the case where it is
-    # the sole signal — a user-scoped key, whose `agent_name` is None.
+    # Precedence for the agent name: `current_user.agent_name` comes from the
+    # VALIDATED agent-scoped key, so where it exists it wins and a caller cannot
+    # pin its run on a sibling agent by setting the header. ent#614 closed the
+    # other arm: the header is routed through `resolve_source_agent`, which
+    # honours it only for a principal that can prove it names itself (an agent
+    # key, or the event loopback — which never calls this route) and refuses
+    # every other principal with a 403, so a user-scoped or system key can no
+    # longer pin a manual run on an arbitrary agent. The MCP schedules tool
+    # sends the header only for agent-scoped keys, mirroring chat.ts.
+    # ent#614: resolved unconditionally — an `or` short-circuit would skip the
+    # check for an agent principal and silently ignore a mismatched header.
+    _resolved_source = resolve_source_agent(
+        current_user, x_source_agent, endpoint=f"/api/agents/{name}/schedules/trigger"
+    )
+    _source_agent = current_user.agent_name or _resolved_source
+
     source_payload = {
         "source_user_id": current_user.id,
         "source_user_email": current_user.email,
-        "source_agent_name": current_user.agent_name or x_source_agent,
+        "source_agent_name": _source_agent,
         # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
         "source_mcp_key_id": getattr(current_user, "mcp_key_id", None),
         "source_mcp_key_name": getattr(current_user, "mcp_key_name", None),

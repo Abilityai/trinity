@@ -157,12 +157,18 @@ def render(catalog: dict, junit_dir: str | None) -> str:
             elif j["built"]:
                 state = " · no evidence"
         inv = ", ".join(j["invariants"]) or "—"
+        # `issue` may be a scalar or a list: a journey can be promised by one
+        # ticket and delivered across several (J12 is ent#477's declaration plus
+        # ent#478's write). A scalar `f"#{...}"` renders the list literal
+        # `#[477, 478]` into a generated, committed file.
+        _issues = j["issue"] if isinstance(j["issue"], list) else [j["issue"]]
+        issue_cell = ", ".join(_issue_ref(n) for n in _issues)
         harness = f"`{j['harness']}`" if j["harness"] else "—"
         rows.append(
             f"| **{j['id']}** | {j['promise']} | {j['actor']} | "
             f"{', '.join(j['lanes'])} | {j['tier']} | "
             f"{'yes' if j['built'] else '**no**'}{state} | {harness} | {inv} | "
-            f"{_issue_ref(j['issue'])} |"
+            f"{issue_cell} |"
         )
 
     out = [GENERATED_HEADER, "# Journeys\n",
@@ -193,6 +199,15 @@ def render(catalog: dict, junit_dir: str | None) -> str:
         out.append("")
         out.append(f"_Harnesses not present in `tests/registry.json`: "
                    f"{', '.join(unindexed)}._")
+
+    # A journey can hold on more than one shape of the same promise (ent#580:
+    # J01 on a claimable vs a pre-provisioned droplet). Rendered so the doc says
+    # what a harness must drive, not just that one exists.
+    variants = [(j["id"], v) for j in catalog["journeys"] for v in j.get("variants") or []]
+    if variants:
+        out += ["", "## Variants", "",
+                "A journey holds only if it holds on every shape listed for it.", ""]
+        out += [f"- **{jid} · {v['name']}** — {v['promise']}" for jid, v in variants]
     return "\n".join(out) + "\n"
 
 

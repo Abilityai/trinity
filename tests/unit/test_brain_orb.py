@@ -86,7 +86,7 @@ def client(monkeypatch):
     monkeypatch.setattr(bo, "is_brain_orb_enabled", lambda: True)
     monkeypatch.setattr(bo, "is_brain_orb_voice_enabled", lambda: True)   # #60 Phase 3
     monkeypatch.setattr(bo, "is_brain_orb_write_enabled", lambda: True)   # #61 Phase 4a
-    monkeypatch.setattr(bo, "GEMINI_API_KEY", "test-key")      # #60 Phase 3
+    monkeypatch.setattr(bo, "get_gemini_api_key", lambda: "test-key")      # #60 Phase 3
     monkeypatch.setattr(bo, "container_reload", AsyncMock())
     # #61 Phase 4a: the voice-token route resolves owner-ness for can_write. Default
     # to owner=True (fixture caller is the owner); shared-user tests override to False.
@@ -279,7 +279,7 @@ def test_voice_token_base_flag_off_404(client, monkeypatch):
 
 
 def test_voice_token_no_key_503(client, monkeypatch):
-    monkeypatch.setattr(bo, "GEMINI_API_KEY", "")
+    monkeypatch.setattr(bo, "get_gemini_api_key", lambda: "")
     r = client.post(_VOICE_TOKEN_URL)
     assert r.status_code == 503
 
@@ -496,7 +496,7 @@ def test_mint_service_uses_v1alpha_and_locks_config(monkeypatch):
             self.auth_tokens = _FakeAuthTokens()
 
     monkeypatch.setattr(svc, "_client", None)  # reset the module singleton
-    monkeypatch.setattr(svc, "GEMINI_API_KEY", "k")
+    monkeypatch.setattr(svc, "get_gemini_api_key", lambda: "k")
     monkeypatch.setattr(svc.genai, "Client", _FakeClient)
 
     out = asyncio.run(svc.mint_voice_token("cornelius", voice_name="Kore", agent_prompt=None))
@@ -948,7 +948,7 @@ def test_mint_service_adds_write_tools_when_can_write(monkeypatch):
             self.auth_tokens = _FakeAuthTokens()
 
     monkeypatch.setattr(svc, "_client", None)
-    monkeypatch.setattr(svc, "GEMINI_API_KEY", "k")
+    monkeypatch.setattr(svc, "get_gemini_api_key", lambda: "k")
     monkeypatch.setattr(svc.genai, "Client", _FakeClient)
 
     out = asyncio.run(svc.mint_voice_token("cornelius", voice_name="Kore",
@@ -1274,7 +1274,7 @@ def test_mint_service_new_session_window_shorter_than_expiry(monkeypatch):
             self.auth_tokens = _FakeAuthTokens()
 
     monkeypatch.setattr(svc, "_client", None)
-    monkeypatch.setattr(svc, "GEMINI_API_KEY", "k")
+    monkeypatch.setattr(svc, "get_gemini_api_key", lambda: "k")
     monkeypatch.setattr(svc.genai, "Client", _FakeClient)
 
     asyncio.run(svc.mint_voice_token("cornelius", voice_name="Kore", agent_prompt=None))

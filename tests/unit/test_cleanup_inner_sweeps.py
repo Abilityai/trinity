@@ -126,6 +126,11 @@ def _configure_db(db):
     # REACHED at all, which the happy-path test now asserts explicitly.
     db.count_agent_reminders_candidates.return_value = 4
     db.prune_agent_reminders.return_value = 0
+    # ent#478 metric_points. Same shape as the ent#433 sweeps above: the count
+    # feeds the guard and the prune feeds `report.total` + the WAL-checkpoint
+    # sum, so a bare MagicMock here raises on the first `> 0`.
+    db.count_metric_points_candidates.return_value = 0
+    db.prune_metric_points.return_value = 0
 
 
 def _run(svc):

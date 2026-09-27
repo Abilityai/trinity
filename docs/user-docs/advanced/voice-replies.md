@@ -19,13 +19,13 @@ This is the *outbound* counterpart of inbound voice transcription (users sending
 
 ### 1. Admin — provide a voice key (once)
 
-Set the ElevenLabs key under **Settings** (stored setting, with an env-var fallback for older deployments). Optionally set a **platform default voice** there too. Until a key resolves, the whole feature is unavailable — the `tts_available` flag is false and the agent config UI is disabled.
+Set the ElevenLabs key under **Settings → General → Voice (ElevenLabs)** (stored setting, with an env-var fallback for older deployments). Optionally set a **platform default voice** there too. Until a key resolves, the whole feature is unavailable — the `tts_available` flag is false and the agent config UI is disabled.
 
 ### 2. Owner — enable and configure the agent
 
-1. Open the agent's **Sharing** tab and its voice-replies configuration.
+1. Open the agent's **Settings** tab → **Voice** section.
 2. Turn **voice replies on** and pick a **voice** — or rely on the platform default voice. Enabling with neither an agent voice nor a platform default is rejected.
-3. Set the **per-channel allow flags** for Telegram, Slack, and WhatsApp. Each channel is independent; leave a channel off to keep it text-only.
+3. Set the **per-channel allow flags** in each channel's own panel on the **Sharing** tab (Telegram, Slack, WhatsApp). Each channel is independent; leave a channel off to keep it text-only.
 
 ### 3. Agent — opt a reply into voice
 
@@ -48,7 +48,7 @@ WhatsApp voice notes work even when the agent's file-sharing toggle is off — v
 | `/api/agents/{name}/voice-replies` | GET | `{enabled, voice_id, channels:{telegram,slack,whatsapp}, effective_voice_id, default_voice_id, available}` — `available` reflects a resolvable platform key |
 | `/api/agents/{name}/voice-replies` | PUT | Owner-only partial update of `{enabled?, voice_id?, channels?}`; 400 if none provided |
 | `/api/agents/{name}/voice-reply` | POST | Per-message delivery backing the tool; fail-soft `{delivered, channel, reason}`; 409 on an in-flight duplicate for the same turn |
-| `/api/settings/elevenlabs` | GET / PUT | Admin key + default voice: `{key_configured, key_source, default_voice_id}`; key stored encrypted, never echoed |
+| `/api/settings/elevenlabs` | GET / PUT | Admin key + default voice: `{key_configured, key_source, default_voice_id}`, plus the key's speech-to-text status for Workspace dictation (`stt_capability`, `stt_detail`, `stt_checked_at`, `stt_last_failure`); key stored encrypted, never echoed |
 
 MCP tool:
 
@@ -60,7 +60,7 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 
 ## Limitations
 
-- Voice replies cover the messaging channels (Telegram, Slack, WhatsApp) — not the web chat UI or public links.
+- Voice replies cover the messaging channels (Telegram, Slack, WhatsApp) — not the Agent Detail chat or public links. The [Workspace](../sharing-and-access/workspace.md) has its own speaker toggle (**Speak replies aloud**) that reads replies with the same agent voice; it is a viewer-side choice, not something the agent opts into.
 - Voice is per-reply — the agent decides each time; there is no way to force every reply to be spoken.
 - The voice is an ElevenLabs voice; it is unrelated to the Gemini voice used for [Voice Chat](voice-chat.md) and [VoIP calls](voip-telephony.md).
 - Synthesis cost accrues on your ElevenLabs account per character spoken.

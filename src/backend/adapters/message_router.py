@@ -42,7 +42,7 @@ from services.telegram_group_context import (  # ent#600
 from utils.helpers import iso_cutoff
 from services.docker_utils import container_exec_run
 from services.telegram_media import process_voice
-from services.upload_service import process_file_uploads, format_file_size, sanitize_filename
+from services.upload_service import process_file_uploads, format_file_size
 from adapters.base import ChannelAdapter, ChannelResponse, FileAttachment, NormalizedMessage, OutboundFile
 
 logger = logging.getLogger(__name__)
@@ -320,10 +320,6 @@ def _check_rate_limit(key: str, max_msgs: Optional[int] = None, window: Optional
 
 def _format_file_size(size_bytes: int) -> str:
     return format_file_size(size_bytes)
-
-
-def _sanitize_filename(name: str, file_id: str, used_names: set) -> str:
-    return sanitize_filename(name, file_id, used_names)
 
 
 # Filename sanitization (Issue #487)
@@ -857,6 +853,17 @@ class ChannelMessageRouter:
                 source_channel=channel,
                 source_channel_chat_id=str(message.channel_id) if message.channel_id is not None else None,
                 source_channel_thread=str(message.thread_id) if message.thread_id is not None else None,
+                # ent#549: WHICH human this turn is for — the column's meaning
+                # since ent#457. Stamped only when that is a fact: a verified
+                # speaker in a one-to-one conversation. In a GROUP `verified_email`
+                # is the UNLOCKER's address (set once per group, not per speaker),
+                # which is why MEM-001 above refuses it there too; and
+                # `source_user_email` falls back to a channel-native id. Neither
+                # may decide whose Workspace Files tab lists a file this turn
+                # shares, so `turn_audience.audience_of` reads THIS column and
+                # nothing else. Inert for completion reports: only the portal leg
+                # compares it (`channel_completion_report`).
+                source_channel_client=verified_email if (verified_email and not is_group) else None,
             )
 
             if result.status in ("failed", "cancelled"):

@@ -458,9 +458,10 @@ async def initialize_git_in_container(
     # resolves to workspace/ while a standard agent that merely keeps data
     # under workspace/ resolves to /home/developer. Answers outside
     # /home/developer are rejected.
-    # Only when there is NO repository at all does the pre-#2075 content
-    # heuristic decide (_detect_git_dir_fallback) — this init path needs a
-    # placement for a repo that does not exist yet, so it stays byte-compatible.
+    # No repository at all → NEW_REPO_ROOT = /home/developer, whatever
+    # workspace/ holds (#2938). The pre-#2075 content heuristic used to decide
+    # this and put a template's populated workspace/ repo where the agent
+    # server (which reads /home/developer only) could never see it.
     git_dir = await _detect_git_dir(container_name)
 
     # Step 2: Append any missing _GITIGNORE_PATTERNS entries to .gitignore
@@ -488,9 +489,13 @@ async def initialize_git_in_container(
         'git config --global user.name "Trinity Agent"',
         'git config --global init.defaultBranch main',
         'git init',
+        # ent#615: credential-LESS. The credential is seeded into the `trinity`
+        # credential helper's ladder BEFORE this runs (and the whole call fails
+        # honestly if it could not be placed), so `git fetch`/`git push` below
+        # authenticate without it ever entering the URL, `.git/config` or argv.
         f'git remote get-url origin >/dev/null 2>&1 && '
-        f'git remote set-url origin https://oauth2:{github_pat}@github.com/{github_repo}.git || '
-        f'git remote add origin https://oauth2:{github_pat}@github.com/{github_repo}.git',
+        f'git remote set-url origin https://github.com/{github_repo}.git || '
+        f'git remote add origin https://github.com/{github_repo}.git',
         'git add .',
         'git commit -m "Initial commit from Trinity Agent" || echo "Nothing to commit"',
         'git push -u origin main --force'
@@ -1008,18 +1013,34 @@ None - this is a one-time configuration operation
 
 ### Git Authentication
 
-Repository remote URL includes PAT:
+The remote is **credential-less** (ent#615):
 ```
-https://oauth2:{PAT}@github.com/{owner}/{name}.git
+https://github.com/{owner}/{name}.git
 ```
 
-This allows push/pull without interactive authentication.
+Push/pull authenticate without interactive auth because git asks the
+`trinity` credential helper (`/usr/local/bin/git-credential-trinity`,
+registered in `/etc/gitconfig`) over **stdin** — a channel that never reaches
+argv and is never persisted. The helper resolves, in order,
+`/home/developer/.env` → the container's baked `GITHUB_PAT` →
+`/home/developer/.trinity/git-credential`.
 
-**Security implications**:
-- PAT is visible in git remote URL inside container
-- Container compromise could expose PAT
-- Use fine-grained PATs with minimal permissions
-- Rotate PATs regularly
+**This block used to read "PAT is visible in git remote URL inside container /
+Container compromise could expose PAT" as an ACCEPTED RISK. ent#615 is its
+changelog.** The URL was also expanded into `git-remote-https`'s argv on every
+fetch and push, so the token reached `ps`, the orphan sweep's reaped-cmdline
+logging, Vector, the host log files and the logs API — i.e. another agent's
+context, which is what made it more than a container-compromise risk.
+
+**What is still true**:
+- The agent can read its own credential (`printenv`, `cat .env`, or by
+  invoking the helper). Root ownership of the helper is integrity, not
+  confidentiality. The structural fix is **ent#558 (AAuth)**.
+- Use fine-grained PATs with minimal permissions; the cheapest real reduction
+  in blast radius is a **per-agent, repo-scoped** PAT via the agent's Git tab
+  (`agent_git_config.github_pat_encrypted`), which ent#615 does not change.
+- Rotate PATs regularly — and rotate once after adopting ent#615, since every
+  pre-existing backup and log still holds what the URLs used to carry.
 
 ---
 
@@ -1127,7 +1148,7 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_git_config WHERE agent_na
 
 **Verify Directory Detection**:
 - New agents (2026-02+): Check backend logs for `Using home directory: /home/developer`
-- LEGACY agents (pre-2026-02): May show `Using workspace directory: /home/developer/workspace` if workspace exists with content
+- LEGACY agents (pre-2026-02, repo genuinely rooted at `workspace/`): logs `[LEGACY] Re-initializing an existing workspace-rooted repository`, then the agent-server verify (#2938) fails the init with a **400** — the agent server reads only `/home/developer`, so that repo can never be seen by Sync / Log / the git panel
 - Check for: `Git initialization verified successfully in {directory}`
 
 #### 3. MCP Tool Usage
@@ -1206,13 +1227,32 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_git_config WHERE agent_na
 
 **LEGACY Case** (agents created before 2026-02):
 - If the agent's repository is genuinely rooted at `/home/developer/workspace/`
-  (git's own `rev-parse --show-toplevel` says so), that directory is used
-- Backend logs: `Using workspace directory: /home/developer/workspace`
+  (git's own `rev-parse --show-toplevel` says so), that directory is used for
+  the re-init — and the agent-server verify (#2938, below) then **refuses the
+  init with a 400** and rolls the `agent_git_config` row back: the agent
+  server's status route is a bare `Path("/home/developer/.git").exists()`, so
+  a workspace-rooted repo answers `git_enabled: false` deterministically.
+  Before #2938 this case returned 200 and every later git call reported "not
+  enabled"; now the operator gets the reason. Repairing such an agent (moving
+  the repo to `/home/developer`) is an operator decision, not something init
+  does silently.
+- Backend logs: `[LEGACY] Re-initializing an existing workspace-rooted repository: /home/developer/workspace`
 - `.gitignore` merge also runs here (#458 — previously skipped)
 - Detection logic shared with `_detect_git_dir`, used by both init and the post-init Push migration (#462)
-- A populated non-git `workspace/` **data** directory no longer forces this
-  branch (#2075) — that content heuristic misrouted standard agents, and now
-  runs only when no repository exists yet (fresh-agent placement)
+- A populated non-git `workspace/` **data** directory never forces this
+  branch: #2075 stopped it misrouting agents that already had a repo, and
+  #2938 retired the content heuristic outright — a repo that does not exist
+  yet is always created at `/home/developer`, the only root the agent server
+  reads. Backend logs `[LEGACY] Re-initializing an existing workspace-rooted
+  repository` only when git itself answers `workspace/`.
+- **Init is verified through the agent server (#2938).** After the backend's
+  own `git rev-parse --git-dir`, `initialize_git_in_container` asks
+  `GET http://agent-{name}:8000/api/git/status`: `git_enabled: false` fails
+  the init with a named reason (the router answers 400 and rolls the
+  `agent_git_config` row back), an unreachable/non-JSON answer logs a warning
+  and keeps the backend verdict. The backend check alone passed by
+  construction — it ran in the directory the backend chose — which is how a
+  200 came back that the very next status poll contradicted.
 
 **Verify**:
 - Check GitHub repo contains agent files but not system files
@@ -1525,29 +1565,38 @@ The system uses smart detection to find the correct directory (in `git_service.i
    keeps a populated non-git `workspace/` data directory. An answer outside
    `/home/developer` is rejected.
 
-2. **No repository yet → legacy content heuristic** (`_detect_git_dir_fallback`,
-   verbatim pre-#2075): `/home/developer/workspace` exists AND has content ->
-   use workspace, otherwise `/home/developer`. Only `initialize_git_in_container`
-   reaches this branch — it needs a placement for a repo that does not exist yet,
-   so fresh-agent placement is unchanged.
+2. **No repository yet → `NEW_REPO_ROOT` (`/home/developer`)**, whatever
+   `workspace/` holds (#2938). The pre-#2075 content heuristic that used to
+   decide this (`workspace/` exists AND has content → `workspace/`) is gone:
+   it created the repo of any template that ships files into `workspace/`
+   where the agent server's git router — rooted at `/home/developer` only —
+   could never see it, so Sync / Log / the git panel reported "not enabled"
+   right after a 200 from init. Only `initialize_git_in_container` reaches
+   this branch; every other caller works on a repo that already exists.
 
 3. **If using home directory**: Create `.gitignore` to exclude system files
 
 **Known limitation**: an agent that was already re-initialised *while
 misdetected* now has a real `workspace/.git` — a genuine nested repo,
 indistinguishable from a legitimate legacy agent by any probe. Git's answer for
-it is `workspace/`, and this logic keeps it there; repairing those takes an
-operator decision per agent.
+it is `workspace/`, and this logic keeps it there — so the agent-server verify
+in step 4 refuses the init with the #2938 reason (the agent server reads only
+`/home/developer`); repairing those takes an operator decision per agent.
 
-4. **Verify**: Run `git rev-parse --git-dir` before creating DB record
+4. **Verify**: Run `git rev-parse --git-dir`, then ask the agent server's own
+   `GET /api/git/status` (#2938) — `git_enabled: false` fails the init with a
+   named reason; an unanswerable probe warns and keeps the backend verdict.
+   The backend-side check alone cannot catch a mis-rooted repo: it runs in
+   the directory the backend chose.
 
 > **Note**: The workspace check is LEGACY backward compatibility for agents created before February 2026. New agents do not have a workspace subdirectory.
 
 ### Git Authentication
 
-PAT embedded in remote URL allows push/pull without interactive auth:
+The remote carries no credential; the `trinity` credential helper supplies one
+per operation over stdin (ent#615):
 ```bash
-git remote add origin https://oauth2:{PAT}@github.com/{owner}/{name}.git
+git remote add origin https://github.com/{owner}/{name}.git
 ```
 
 This works with both classic and fine-grained PATs.

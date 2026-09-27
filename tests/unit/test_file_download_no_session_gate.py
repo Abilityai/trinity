@@ -70,15 +70,19 @@ def test_does_not_import_agent_requires_email(files_ast):
     for node in ast.walk(files_ast):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                assert alias.name != "_agent_requires_email", (
-                    "remove _agent_requires_email import — gate was deleted (#568)"
+                # Both spellings: #1028 renamed the canonical function to
+                # `agent_requires_email` on `public_chat_service`, and a guard
+                # that only knows the retired alias would wave the re-import
+                # through.
+                assert alias.name not in {"_agent_requires_email", "agent_requires_email"}, (
+                    f"remove {alias.name} import — gate was deleted (#568)"
                 )
 
 
 def test_validate_does_not_call_session_or_require_email(files_ast):
     """No call to validate_agent_session or _agent_requires_email anywhere."""
     fn = _function(files_ast, "_validate_download_request")
-    banned = {"_agent_requires_email", "validate_agent_session"}
+    banned = {"_agent_requires_email", "agent_requires_email", "validate_agent_session"}
     for node in ast.walk(fn):
         if isinstance(node, ast.Call):
             func = node.func

@@ -1,6 +1,7 @@
 # Frontend E2E Tests
 
-Playwright-based end-to-end tests for the Trinity frontend (#556).
+Playwright-based end-to-end tests for the Trinity frontend (#556). Where this
+layer sits among the others: [docs/testing/STRATEGY.md](../../../docs/testing/STRATEGY.md).
 
 ## Run locally
 
@@ -152,11 +153,14 @@ LOOPS_TEST_AGENT=my-agent SESSION_TEST_AGENT=my-agent PORTAL_TEST_AGENT=my-agent
 
 ## Why this layer exists
 
-The frontend has no other automated test coverage today. E2E tests catch:
+The frontend has two automated layers: the Vitest specs under
+`src/frontend/tests/unit/` (`npm run test:unit`, run by `frontend-build.yml`; they
+carry the raw-colour and loading-gate ratchets) and this Playwright layer. E2E
+tests catch:
 - Login regressions
 - Top-level routing breakage
 - Auth boundary violations exposed via the UI
 - Color drift on the design system (with visual regression)
 
-Cheaper layers (Vitest unit tests, type checking) are tracked in #556
-Phase 1 / Phase 3 — separate follow-ups.
+Type checking is still a #556 follow-up; the Vitest layer landed and lives next
+to the specs it covers.

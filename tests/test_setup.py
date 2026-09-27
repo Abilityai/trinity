@@ -91,7 +91,9 @@ class TestSetupAdminPassword:
 
         assert_status(response, 403)
         data = response.json()
-        assert "already completed" in data.get("detail", "").lower() or "setup" in data.get("detail", "").lower()
+        detail = data.get("detail", "").lower()
+        # #2715 reworded this to "This instance already has an administrator account…"
+        assert "already completed" in detail or "setup" in detail or "already has an administrator" in detail, detail
 
     def test_missing_email_rejected(self, unauthenticated_client: TrinityApiClient):
         """POST /api/setup/admin-password rejects a missing admin email (now required, #49)."""

@@ -24,7 +24,8 @@ import pytest
 # classify_conflict is a pure function — the test should exercise it without
 # needing the full backend stack to be importable.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-GIT_SERVICE_PATH = REPO_ROOT / "src" / "backend" / "services" / "git_service.py"
+# #1028: git_service is a package; classify_conflict lives in `conflicts.py`.
+GIT_SERVICE_PATH = REPO_ROOT / "src" / "backend" / "services" / "git_service" / "conflicts.py"
 
 
 def _load_git_service():

@@ -28,6 +28,7 @@ import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import type { ToolCallContext } from "../audit.js";
+import { accessDenied } from "../access.js";
 
 /** git log -N is shelled in the agent server — clamp to a sane bound (#905). */
 const GIT_LOG_MIN = 1;
@@ -97,7 +98,7 @@ export function createGitTools(client: TrinityClient, requireApiKey: boolean) {
     const access = await checkAgentAccess(apiClient, authContext, agentName);
     if (!access.allowed) {
       console.log(`[${toolName}] Access denied: ${access.reason}`);
-      return JSON.stringify({ error: "Access denied", reason: access.reason }, null, 2);
+      return accessDenied(context, { error: "Access denied", reason: access.reason });
     }
 
     // Mint one id per tool call and stamp it on the shared audit context so the

@@ -113,6 +113,11 @@ describe('ent#474 — the tab contract', () => {
       const isStatic = tab.signal === RAIL_SIGNAL_NONE
       if (isStatic) {
         expect(tab.empty, `${tab.id}: a static tab declares no empty state`).toBeNull()
+      } else if (tab.empty === null) {
+        // ent#465: a tab whose body always renders may still signal — Info's
+        // dot says suggestions are waiting in it. It can only borrow the
+        // "updated" shape; "live" means something is running.
+        expect(tab.signal, `${tab.id}: a body-always tab signals only "updated"`).toBe(RAIL_SIGNAL_UPDATED)
       } else {
         expect([RAIL_SIGNAL_LIVE, RAIL_SIGNAL_UPDATED]).toContain(tab.signal)
         expect(typeof tab.empty.title).toBe('string')
@@ -129,7 +134,7 @@ describe('ent#474 — the tab contract', () => {
     // ent#547 — Info, the static tab. Its icon must have its OWN entry in
     // `PortalRail.vue`'s ICONS map; `iconPath` falls back to `bolt` for an
     // unknown id, so a missing entry is silent and shows Work's glyph.
-    expect(tab('info')).toMatchObject({ door: RAIL_DOORS.SOLO_AGENT, signal: RAIL_SIGNAL_NONE, icon: 'info' })
+    expect(tab('info')).toMatchObject({ door: RAIL_DOORS.SOLO_AGENT, signal: RAIL_SIGNAL_UPDATED, icon: 'info', empty: null })
     expect(src('components/portal/PortalRail.vue')).toMatch(/\n\s*info:\s*'M/)
     // Each teaches its next action (design pass, "Tab contract").
     expect(railEmptyCopy(tab('loops'), ['scout'])).toMatchObject({ title: 'No loops running', action: 'Start a loop', event: 'start-loop' })
@@ -292,6 +297,21 @@ describe('ent#474 — the collapsed signal', () => {
     expect(forClient.find((s) => s.id === 'info').shape).toBeNull()
     expect(hasLiveSignal({ work: { live: 1 } }, visibleTabs(RAIL_TABS, CLIENT))).toBe(false)
     expect(hasLiveSignal({ work: { live: 1 } }, visibleTabs(RAIL_TABS, PLATFORM))).toBe(true)
+  })
+
+  it('Info lights the updated dot for waiting suggestions and says how many (ent#465)', () => {
+    const visible = visibleTabs(ALL_TABS, PLATFORM)
+    const signals = { info: { updated: true, note: '2 suggestions' } }
+    const info = collapsedSignals(signals, visible).find((s) => s.id === 'info')
+    expect(info.shape).toBe(RAIL_SIGNAL_UPDATED)
+    expect(info.title).toBe('Info · 2 suggestions')
+    expect(stripSegments(signals, visible)).toEqual([
+      { id: 'info', shape: RAIL_SIGNAL_UPDATED, text: 'Info · 2 suggestions' },
+    ])
+    // Without a note the words are the rail's usual ones.
+    expect(railTitle(tab('canvas'), { live: 0, updated: true, agents: [] })).toBe('Canvas · updated')
+    // A signal carries `note` only when one was written.
+    expect(signalFor({ info: { updated: true } }, 'info')).toEqual({ live: 0, updated: true, agents: [] })
   })
 
   it('the mobile strip says the same thing in words, and names the tabs when there is nothing to say', () => {
@@ -516,8 +536,47 @@ describe('ent#474 — the rail component (source guards)', () => {
   })
 
   it('mounts a body for exactly the active visible tab', () => {
-    expect(rail).toContain('<div v-if="active" class="flex-1 min-h-0 overflow-y-auto p-4"')
+    // ent#608: `rail-scroll` is the body's scrollbar chrome — thin, hidden at
+    // rest, revealed on hover — and rides the same class string.
+    expect(rail).toMatch(/<div\n\s+v-if="active"\n\s+class="flex-1 min-h-0 overflow-y-auto p-4 rail-scroll"/)
     expect(rail).toContain(':name="`tab-${active.id}`"')
+  })
+
+  // ent#608 — the body's scrollbar: thin, hidden at rest, revealed on hover /
+  // focus-within / while scrolling, and the reveal changes colour ONLY.
+  describe('ent#608 — the body scrollbar chrome', () => {
+    const style = rail.slice(rail.indexOf('<style scoped>'))
+
+    it('hides the thumb at rest on both engines and reveals it on hover, focus-within and scroll', () => {
+      expect(style).toMatch(/\.rail-scroll \{[^}]*scrollbar-width: thin;[^}]*scrollbar-color: transparent transparent;/)
+      expect(style).toMatch(/\.rail-scroll::-webkit-scrollbar-thumb \{[^}]*background-color: transparent;/)
+      expect(style).toMatch(/\.rail-scroll:hover,\n\s+\.rail-scroll:focus-within,\n\s+\.rail-scroll\.is-scrolling \{\n\s+scrollbar-color: var\(--rail-thumb\) transparent;/)
+      expect(style).toMatch(/\.rail-scroll:hover::-webkit-scrollbar-thumb,\n\s+\.rail-scroll:focus-within::-webkit-scrollbar-thumb,\n\s+\.rail-scroll\.is-scrolling::-webkit-scrollbar-thumb \{\n\s+background-color: var\(--rail-thumb\);/)
+      expect(rail).toContain(':class="{ \'is-scrolling\': scrolling }"')
+      expect(rail).toContain('@scroll.passive="onBodyScroll"')
+      expect(rail).toContain('clearTimeout(scrollTimer)')
+    })
+
+    it('never reflows on reveal: the revealed states set colour only, and the WebKit width is fixed', () => {
+      // Every rule whose selector carries a reveal state may set colour and nothing else.
+      const revealRules = [...style.matchAll(/((?:\.rail-scroll[^{]*(?::hover|:focus-within|\.is-scrolling)[^{]*)\{([^}]*)\})/g)]
+      expect(revealRules.length).toBeGreaterThanOrEqual(3)
+      for (const [, , body] of revealRules) {
+        const props = body.split(';').map((l) => l.trim().split(':')[0]).filter(Boolean)
+        expect(props.every((p) => p === 'scrollbar-color' || p === 'background-color')).toBe(true)
+      }
+      expect(style).toMatch(/\.rail-scroll::-webkit-scrollbar \{\n\s+width: 6px;\n\s+\}/)
+      expect(style).not.toMatch(/display:\s*none/)
+      expect(style).not.toMatch(/scrollbar-gutter/)
+    })
+
+    it('is tokens on both themes, sm-and-up only, and still under prefers-reduced-motion', () => {
+      expect(style).toMatch(/\.rail-scroll \{[^}]*--rail-thumb: theme\('colors\.gray\.500 \/ [\d.]+'\)/)
+      expect(style).toMatch(/\.dark \.rail-scroll \{[^}]*--rail-thumb: theme\('colors\.gray\.400 \/ [\d.]+'\)/)
+      expect(style).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
+      expect(style).toContain('@media (min-width: 640px)')
+      expect(style).toMatch(/@media \(prefers-reduced-motion: reduce\) \{[^}]*\.rail-scroll[^}]*transition: none/)
+    })
   })
 
   it('is the approved width in each form, with the sheet on the files-panel pattern', () => {
@@ -805,7 +864,14 @@ describe('ent#475 — the shell owns the feeds (source guards)', () => {
     // ent#525: the Work signal is store-derived through the owner now (the
     // emit is merged in by execution id), so the shell no longer spreads it.
     expect(call).toContain('workEmit: workSignal')
-    expect(portal).toContain('const railSignals = computed(() => ({ ...rail.signals.value }))')
+    // ent#465 adds ONE shell-owned entry, Info's suggestions dot; Work stays
+    // the owner's (no `work:` key is re-spread here).
+    const sigAt = portal.indexOf('const railSignals = computed(() => ({')
+    expect(sigAt).toBeGreaterThan(-1)
+    const sigBody = portal.slice(sigAt, portal.indexOf('}))', sigAt))
+    expect(sigBody).toContain('...rail.signals.value,')
+    expect(sigBody).toContain('{ info: infoSignal.value }')
+    expect(sigBody).not.toMatch(/\bwork\s*:/)
   })
 
   it('feeds nothing behind a door, nothing before the stage verdict, and does not blank a room\'s first beat', () => {

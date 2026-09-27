@@ -6,6 +6,7 @@
  */
 
 import axios from 'axios'
+import { notifyPlatformUnauthorized, readStoredToken } from '@/utils/platformSession'
 
 // PERF-269: In-flight request deduplication map
 // Key: "GET:/api/agents/context-stats" → Value: Promise
@@ -20,7 +21,7 @@ const api = axios.create({
 // Add auth token to requests
 api.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
     }
@@ -32,32 +33,19 @@ api.interceptors.request.use(
 )
 
 // Handle auth errors
+//
+// #2791: this used to be the THIRD logout implementation — it removed `token`
+// (leaving `auth0_user` behind), hard-reloaded to `/login` with no server-side
+// revoke, and carried its own copy of the bounce predicate. What "logged out"
+// meant depended on which transport happened to 401 first.
+//
+// It now reports to the one handler (`utils/platformSession.js`), which owns the
+// verdict AND the reaction — including the `stale` arm, without which this
+// interceptor would still delete a freshly re-logged-in session's token.
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
-      // #138: an external client on the workspace manages its own
-      // (verified-email) session and must never be bounced to the operator
-      // /login by a stale operator JWT — let that code handle its own 401.
-      // ent#357: an internal user's workspace session IS the platform session,
-      // so they DO get bounced. Same path, two session kinds — discriminate on
-      // the portal token, not the URL.
-      const path = window.location.pathname
-      // Who gets bounced is decided by the PLATFORM token, not the portal one
-      // (/review I1). Reading the portal token here made the answer depend on
-      // timing: `fetchRoster`'s 401 handler calls `signOut()`, which removes it,
-      // so a second concurrent 401 saw no portal token and threw an external
-      // client onto the operator /login instead of the workspace sign-in form.
-      // "Does this browser hold a platform session that just expired?" is the
-      // actual question, and it has a stable answer.
-      const onWorkspace = path.startsWith('/workspace') || path.startsWith('/portal')
-      const internalSession = !!localStorage.getItem('token')
-      if (!onWorkspace || internalSession) {
-        // Token expired or invalid - redirect to login
-        localStorage.removeItem('token')
-        window.location.href = '/login'
-      }
-    }
+    if (error.response?.status === 401) notifyPlatformUnauthorized(error)
     return Promise.reject(error)
   }
 )

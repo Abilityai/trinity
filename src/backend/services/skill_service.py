@@ -25,6 +25,7 @@ new package no longer carries. Pure packaging primitives live in
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -44,7 +45,7 @@ from services.skill_source_clone import (
     SkillSourceClone,
     redact,
 )
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 from utils.url_validation import (
     ALLOWED_SKILLS_LIBRARY_HOSTS,
@@ -63,6 +64,57 @@ except Exception:  # noqa: BLE001 — import guard
 from redis_breaker_util import SingleFlightLock  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# #2703 — how long an assign request waits for delivery before answering
+# `in_progress` and letting the injection finish in the background. The
+# axios default is 30 s (`api.js`) and a single skill restore is bounded only
+# by `_RESTORE_TIMEOUT`, so an unbounded await turns a committed row into a
+# client-side "save failed". A CONSTANT, not a knob — and literally so (the
+# #1644 rule): neither compose forwards an env var for it, and an unforwarded
+# `os.environ.get` would be inert while still reading as configurable. The
+# frontend's request timeout (45 s) is sized against this value.
+SKILL_DELIVERY_BUDGET_SECONDS = 20.0
+# One retry on `SkillInjectionBusy` before reporting it: an assign that lands
+# while the START path holds the lock would otherwise never be delivered — the
+# start read its name list before the row existed, and "applies on next start"
+# would be a lie about a start that just happened.
+_DELIVERY_BUSY_RETRY_SECONDS = 2.0
+
+# ---- agent_skills_changed thin trigger (#2703) --------------------------------
+#
+# Every writer of an agent's `~/.claude/skills/` listing tells open surfaces to
+# refetch: assign / unassign / bulk replace / manual Sync (the router paths), a
+# budget-exceeded delivery finishing in the background, and the fleet re-inject
+# sweep. It lives HERE and not in the router because two of those writers are
+# services (Invariant #1). IDENTIFIERS ONLY — `/ws` is SCOPE_ALL and unfiltered
+# (the #918 / ent#305 rule), so a payload carrying skill names would hand every
+# authenticated `/ws` client which library skills every tenant's agents run.
+# Listeners refetch through the access-controlled routes.
+_ws_manager = None
+
+
+def set_websocket_manager(ws_manager) -> None:
+    """Set the WebSocket manager for the `agent_skills_changed` trigger."""
+    global _ws_manager
+    _ws_manager = ws_manager
+
+
+async def broadcast_skills_changed(agent_name: str) -> None:
+    """Fleet-wide `agent_skills_changed` for ONE agent. Best-effort — a delivery
+    failure never fails the write that triggered it."""
+    if _ws_manager is None:
+        return
+    try:
+        await _ws_manager.broadcast(
+            json.dumps({"type": "agent_skills_changed", "agent_name": agent_name})
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("agent_skills_changed broadcast failed", exc_info=True)
+
+
+# Strong references to deliveries that outlived their request budget — asyncio
+# holds only a weak reference to a bare `create_task` (the #1083 lesson).
+_BACKGROUND_DELIVERIES: set = set()
 
 # Local path for skills library clone
 SKILLS_LIBRARY_PATH = Path("/data/skills-library")
@@ -150,6 +202,38 @@ def _scrub_pat(text: str) -> str:
 # the item's ACL and whose 5s queue-sync loop would start writing it into that
 # agent's queue file (#1644 precedent).
 RECONCILE_ALARM_AGENT_NAME = "_skills-sync"
+
+
+def _same_skills_repo(stored_url: str, normalized_url: str) -> bool:
+    """Do these two strings name the same skills repository? (#2763)
+
+    `normalized_url` has already been through `validate_skills_library_url`;
+    `stored_url` comes off a `skill_sources` row and may be in EITHER form —
+    the bundled default is seeded from a bare literal (`config.py`'s
+    `TRINITY_DEFAULT_SKILL_SOURCE`, no scheme) while a source created through
+    `POST /api/skills/sources` is stored normalized. So the stored side is
+    normalized here too rather than trusted to already be.
+
+    Fail-safe on an unusable stored value: a row whose url cannot be normalized
+    simply does not match, which lands on the refusal branch. That is the
+    conservative direction — the alternative is treating an unparseable row as
+    equal to the key and silently adopting it.
+
+    Deliberately NOT a general URL-equality helper. It collapses the
+    scheme/no-scheme split the platform itself creates, and nothing else:
+    `…/repo.git`, a trailing `/` and the bare `owner/repo` shorthand stay
+    distinct, and closing that tail is tracked separately. Widening this
+    quietly would change which strings count as "already configured", which is
+    an ent#346 decision, not a tidy-up.
+    """
+    if not stored_url or not normalized_url:
+        return False
+    if stored_url == normalized_url:
+        return True
+    try:
+        return validate_skills_library_url(stored_url) == normalized_url
+    except ValueError:
+        return False
 
 
 def _reconcile_max_removals() -> int:
@@ -519,7 +603,7 @@ class SkillService:
                 db.record_skill_source_sync(src.id, success=False, error=msg)
                 continue
 
-            auth_url = self._authenticated_url(url, github_pat)
+            clone_url, source_pat = self._clone_target(url, github_pat)
             logger.info(
                 "syncing skill source %s (%s) %s=%s",
                 src.name, src.id, src.ref_type, src.ref,
@@ -532,8 +616,9 @@ class SkillService:
             # backend restart).
             previous_sha = src.last_commit_sha
             outcome = clone.sync(
-                auth_url,
+                clone_url,
                 expected_sha=src.last_commit_sha if src.ref_type == "tag" else None,
+                github_pat=source_pat,
             )
             db.record_skill_source_sync(
                 src.id,
@@ -596,24 +681,25 @@ class SkillService:
         }
 
     @staticmethod
-    def _authenticated_url(url: str, github_pat: Optional[str]) -> str:
-        """Splice a PAT into the clone URL for a private source.
+    def _normalized_url(url: str) -> str:
+        """Absolute, CREDENTIAL-LESS clone URL for a source row.
 
-        The host is decided by PARSING, never by `"github.com" in url`
-        (CodeQL py/incomplete-url-substring-sanitization, flagged on PR #1901).
-        A substring test is satisfied by `https://evil.com/?x=github.com`, and
-        the old `.replace("https://", ...)` would then have sent the platform
-        PAT to evil.com. Not reachable today — `sync_library` validates every
-        source URL first — but "safe only because a caller three frames up
-        validates" is precisely the property that breaks when a caller is added,
-        and the blast radius here is a live GitHub credential.
+        ent#615 split this in two. It used to also splice the platform PAT into
+        the URL, which put that credential on the backend's git argv and — via
+        the `origin` git writes at clone time — at rest in
+        `/data/skills-library/*/.git/config`, on the `~/trinity-data` HOST BIND
+        MOUNT and therefore in every backup and snapshot. The PAT now travels
+        in the git child's environment (`_auth_pat_for` decides whether it
+        travels at all, and `SkillSourceClone.sync` carries it).
 
-        Shorthand (`owner/repo`, `github.com/owner/repo`) is normalised to an
-        absolute https URL FIRST, so exactly one parsed host decides the splice.
-        Telling those two shorthands apart is itself done by parsing rather than
-        by `url.startswith("github.com/")`: a host prefix test is the same class
-        of check as the substring test above, and keeping ONE way to answer
-        "which host is this" is what stops the two answers from drifting apart.
+        What remains here is normalisation. Shorthand (`owner/repo`,
+        `github.com/owner/repo`) becomes an absolute https URL, and telling
+        those two shorthands apart is done by PARSING rather than by
+        `url.startswith("github.com/")` — a host prefix test is the same class
+        of check as the `"github.com" in url` substring test CodeQL flagged on
+        PR #1901 (satisfied by `https://evil.com/?x=github.com`), and keeping
+        ONE way to answer "which host is this" is what stops the two answers
+        from drifting apart.
         """
         if "://" in url:
             absolute = url
@@ -628,18 +714,51 @@ class SkillService:
             else:
                 absolute = f"https://github.com/{url}"
 
-        if not github_pat:
-            return absolute
+        return absolute
 
-        parsed = urlparse(absolute)
-        # Exact host match against the same allowlist the SSRF guard uses — a
-        # PAT is only ever spliced for a host we know is GitHub.
+    def _clone_target(self, url: str, github_pat: Optional[str]) -> tuple:
+        """``(clone_url, pat)`` for one source — the two halves, composed.
+
+        The composition carries one rule the halves cannot: **when we are going
+        to send a credential, the URL must not carry one.** A source row may
+        hold userinfo of its own (`_adopt_legacy_clone` writes rows with no
+        validation, and `reject_embedded_credentials` only guards NEW writes),
+        and git would then send BOTH — libcurl's basic auth from the URL and
+        our `http.extraHeader` — which is the double-credential shape ent#347
+        documented as *rejected*, just spelled differently.
+
+        When we are NOT sending one, the stored userinfo is left exactly as it
+        is: for a row whose own token is the only credential it has, stripping
+        it would be this issue's own cardinal sin — removing a credential
+        without a replacement — applied to the skills library.
+        """
+        # Resolved through `self`, not the class: `_normalized_url` is the seam
+        # a test overrides per instance to let a local fixture repo path
+        # through, and a `cls.`-qualified call would silently bypass it.
+        clone_url = self._normalized_url(url)
+        pat = self._auth_pat_for(clone_url, github_pat)
+        if pat:
+            clone_url = strip_url_credentials(clone_url)
+        return clone_url, pat
+
+    @staticmethod
+    def _auth_pat_for(url: str, github_pat: Optional[str]) -> str:
+        """The PAT to hand git for ``url`` — empty for any host that is not ours.
+
+        The other half of the ent#615 split, and it keeps PR #1901's property:
+        the host is decided by PARSING and matched EXACTLY against the same
+        allowlist the SSRF guard uses, so the platform credential is only ever
+        offered to a host we know is GitHub. Moving the credential from the URL
+        to the environment does not weaken that — an `http.extraHeader` is sent
+        to whatever host git connects to, so the decision still has to be made
+        here.
+        """
+        if not github_pat:
+            return ""
+        parsed = urlparse(url)
         if parsed.scheme != "https" or (parsed.hostname or "").lower() not in ALLOWED_SKILLS_LIBRARY_HOSTS:
-            return absolute
-        # Rebuild rather than string-replace: replace() would also rewrite a
-        # second "https://" occurrence inside a path or query.
-        netloc = f"{github_pat}@{parsed.netloc}"
-        return urlunparse(parsed._replace(netloc=netloc))
+            return ""
+        return github_pat
 
     def _adopt_legacy_clone(self) -> Optional[str]:
         """Migrate a pre-ent#237 single-repo install into the source model.
@@ -680,7 +799,17 @@ class SkillService:
         # carrying a PAT would be laundered into a durable row and read back by
         # anything that lists sources (the ent#334 disclosure).
         try:
-            validate_skills_library_url(url)
+            # #2763: ASSIGN the return. `validate_skills_library_url` is a
+            # validator AND a normalizer — it turns `github.com/o/r` into
+            # `https://github.com/o/r` — and `routers/skills.py` uses it as one
+            # when it stores a source. Discarding it here meant the match below
+            # compared a NORMALIZED stored url against a RAW setting value, so
+            # the same repository written two ways never matched and this
+            # install alerted on every sync forever (#2744 is that flood).
+            #
+            # Validate the ORIGINAL for credentials — `reject_embedded_credentials`
+            # must see what was actually written, not a form we produced.
+            normalized_url = validate_skills_library_url(url)
             reject_embedded_credentials(url)
         except ValueError as e:
             # Refuse, and SAY SO. A bare `logger.warning` — what every failure
@@ -700,7 +829,21 @@ class SkillService:
             # migration for an install not yet migrated. Once any source exists
             # the install is on the source model, and the legacy key is no
             # longer a migration input — it is an unvalidated back door.
-            existing = [s for s in db.list_skill_sources() if s.url == url]
+            # #2763: normalize BOTH sides. Sources exist in both forms on a
+            # live install — the bundled default is seeded from a bare literal
+            # (`config.py`'s TRINITY_DEFAULT_SKILL_SOURCE, no scheme) while one
+            # created through `POST /api/skills/sources` is stored normalized —
+            # so normalizing only the setting would still miss half the fleet.
+            #
+            # This CANNOT weaken ent#346: a match returns an existing id and
+            # creates no row, so it is the no-op branch. The grant branch below
+            # (`count_skill_sources() == 0` -> `create_skill_source`) is
+            # untouched, and a key naming a genuinely different repo still
+            # falls through to the refusal exactly as before. Normalizing
+            # removes false positives from the detector; it does not widen what
+            # may be granted.
+            existing = [s for s in db.list_skill_sources()
+                        if _same_skills_repo(s.url, normalized_url)]
             if existing:
                 return existing[0].id
 
@@ -710,6 +853,12 @@ class SkillService:
                     "legacy skills_library_url ignored: this install already has "
                     "skills sources, so it is past migration. Add the repo via "
                     "POST /api/skills/sources if it is wanted (ent#346).",
+                    # Not a failure: the designed resting state of a migrated
+                    # install whose legacy key lingers. `sync_library` re-enters
+                    # this on EVERY sync, unattended under ent#236 auto-sync, so
+                    # a timestamped id at `high` meant one permanent
+                    # operator-unclearable row per sync, forever (#2744).
+                    steady_state=True,
                 )
                 return None
 
@@ -1465,6 +1614,8 @@ print(json.dumps(out))
         agent_name: str,
         skill_names: Optional[List[str]] = None,
         force: bool = True,
+        *,
+        assigned_only: bool = False,
     ) -> Dict[str, Any]:
         """
         Inject skills into a running agent as full directory packages.
@@ -1475,11 +1626,20 @@ print(json.dumps(out))
             force: False (agent start) skips skills whose agent-side version
                    matches the library tree SHA; True (manual sync / REST)
                    re-injects unconditionally as a repair action.
+            assigned_only: #2703 — re-read the assignment rows INSIDE the lock
+                   and skip any name no longer assigned. The delivery path sets
+                   it (its list was read before the lock; a concurrent unassign
+                   would otherwise land a package with no row). Other callers
+                   keep their explicit list verbatim.
 
         Returns:
             Dict with per-skill results:
             {success, skills_injected, skills_unchanged, skills_failed,
+             skills_conflict, conflicts: [name],
              results: {name: {success, status, files_written, error?, warnings}}}
+            status ∈ injected | unchanged | fallback | failed | conflict —
+            `conflict` (#2914) is a same-named agent-authored directory the
+            platform refused to write into; it is neither injected nor failed.
 
         Raises:
             SkillInjectionBusy: another injection holds the per-agent lock.
@@ -1499,12 +1659,15 @@ print(json.dumps(out))
 
         lock_token = self._acquire_inject_lock(agent_name)
         try:
-            return await self._inject_skills_locked(agent_name, skill_names, force)
+            return await self._inject_skills_locked(
+                agent_name, skill_names, force, assigned_only=assigned_only
+            )
         finally:
             self._release_inject_lock(lock_token, agent_name)
 
     async def _inject_skills_locked(
-        self, agent_name: str, skill_names: List[str], force: bool
+        self, agent_name: str, skill_names: List[str], force: bool,
+        *, assigned_only: bool = False,
     ) -> Dict[str, Any]:
         client = get_agent_client(agent_name)
         results: Dict[str, Dict[str, Any]] = {}
@@ -1525,6 +1688,25 @@ print(json.dumps(out))
         # The bulk-assign PUT historically persisted arbitrary strings, so the
         # ONE name guard must run before any name reaches an in-container exec.
         valid_names = [n for n in skill_names if pkg.validate_skill_name(n)]
+        # #2703: re-read assignments INSIDE the lock — the mirror of
+        # `_remove_skills_locked`'s `still_assigned` guard. A PUT on worker A
+        # computes its list, commits, and starts injecting; a DELETE on worker B
+        # commits and hits SkillInjectionBusy → deferred. Without this, A lands
+        # the package with no row behind it, until the next start's reconcile.
+        # An unreadable table trusts the caller's list (fail-open, like removal).
+        assigned_now = None
+        if assigned_only:
+            try:
+                assigned_now = set(db.get_agent_skill_names(agent_name))
+            except Exception:  # noqa: BLE001
+                assigned_now = None
+        if assigned_now is not None:
+            for gone in [n for n in valid_names if n not in assigned_now]:
+                results[gone] = {
+                    "success": True, "status": "unassigned_meanwhile",
+                    "files_written": 0, "warnings": [],
+                }
+            valid_names = [n for n in valid_names if n in assigned_now]
         agent_metas = await self._read_agent_skill_metas(agent_name, valid_names)
 
         total_cap = pkg.skills_total_max_bytes()
@@ -1540,6 +1722,8 @@ print(json.dumps(out))
         for skill_name in skill_names:
             warnings: List[str] = []
 
+            if skill_name in results:      # #2703: decided under the lock above
+                continue
             if not pkg.validate_skill_name(skill_name):
                 results[skill_name] = {
                     "success": False, "status": "failed", "files_written": 0,
@@ -1575,6 +1759,33 @@ print(json.dumps(out))
             tree_sha = tree_shas.get(clone.source_id, {}).get(skill_name)
             agent_entry = agent_metas.get(skill_name) or {}
             agent_meta = agent_entry.get("meta") if isinstance(agent_entry, dict) else None
+
+            # #2914: a directory the platform did not write is the agent's own
+            # playbook under the same bare name, NOT an older copy of this
+            # skill — the library and the agent's repo share one flat namespace
+            # on the agent side, so a name match proves nothing. Refuse before
+            # a single byte is staged: no archive, no restore, no `.gitignore`
+            # line, no untracking, and the name is left out of the CLAUDE.md
+            # Platform Skills section because the agent's copy is what runs.
+            # `force` does not override this — a manual Sync is a repair of
+            # platform-written packages, never permission to replace agent
+            # work. The verdict is recorded on the assignment row below so the
+            # Skills tab shows it to an operator who never sees this response.
+            # A platform-managed directory (meta present) keeps upgrading in
+            # place, and an unreadable probe (`agent_metas == {}`) keeps the
+            # pre-existing fail-open direction rather than refusing the whole
+            # start path on a transient exec fault.
+            if agent_entry.get("exists") and not isinstance(agent_meta, dict):
+                results[skill_name] = {
+                    "success": False, "status": "conflict", "files_written": 0,
+                    "error": (
+                        "name_conflict: the agent already has its own "
+                        f".claude/skills/{skill_name}/ (not platform-managed); "
+                        "left untouched"
+                    ),
+                    "warnings": warnings,
+                }
+                continue
 
             if (
                 not force
@@ -1640,7 +1851,7 @@ print(json.dumps(out))
             )
 
             outcome = await self._restore_skill(
-                agent_name, client, skill_name, tar_bytes, members, warnings
+                agent_name, client, skill_name, tar_bytes, members, warnings, meta
             )
             if outcome["status"] in ("injected", "fallback"):
                 injected_names.append(skill_name)
@@ -1650,20 +1861,18 @@ print(json.dumps(out))
                     # finalize_partial warnings on every old-image start.
                     exec_paths.extend(pkg.executable_paths(members))
                     # Prune only what a PREVIOUS injection wrote (manifest diff)
-                    # — never runtime artifacts or agent-authored files.
-                    if agent_entry.get("exists") and not isinstance(agent_meta, dict):
-                        warnings.append("unmanaged_dir_overwritten")
-                    else:
-                        prev = (agent_meta or {}).get("manifest")
-                        stale, truncated = pkg.compute_prune(prev, manifest, skill_name)
-                        if truncated:
-                            warnings.append("prune_truncated")
-                        for path in stale:
-                            deleted = await self._delete_agent_file(client, path)
-                            if deleted:
-                                pruned_paths.append(path)
-                            else:
-                                warnings.append(f"stale_delete_failed:{path}")
+                    # — never runtime artifacts or agent-authored files. An
+                    # unmanaged dir never reaches here (#2914 refusal above).
+                    prev = (agent_meta or {}).get("manifest")
+                    stale, truncated = pkg.compute_prune(prev, manifest, skill_name)
+                    if truncated:
+                        warnings.append("prune_truncated")
+                    for path in stale:
+                        deleted = await self._delete_agent_file(client, path)
+                        if deleted:
+                            pruned_paths.append(path)
+                        else:
+                            warnings.append(f"stale_delete_failed:{path}")
             results[skill_name] = outcome
 
         # Post-restore finalization: chmod + gitignore + untrack, one exec.
@@ -1690,6 +1899,7 @@ print(json.dumps(out))
         )
         unchanged_count = sum(1 for r in results.values() if r["status"] == "unchanged")
         error_count = sum(1 for r in results.values() if r["status"] == "failed")
+        conflict_names = sorted(n for n, r in results.items() if r["status"] == "conflict")
 
         # CLAUDE.md lists ALL assigned skills present on the agent — a
         # 1-of-19-changed start must not shrink the section to this pass's
@@ -1698,13 +1908,210 @@ print(json.dumps(out))
         if present:
             await self._update_claude_md_skills_section(client, present, results)
 
+        # #2914: the durable verdict. Stamp conflicts, clear the stamp on names
+        # that landed; a failed restore keeps whatever the row had (not a
+        # resolution). Best-effort — a row write must never fail an injection.
+        self._record_delivery_status(agent_name, conflict_names, present)
+
         return {
+            # A conflict is not an injection error: the platform did exactly
+            # what it should (nothing), and counting it as failure would raise
+            # a fleet-reinject alarm on every auto-sync for as long as the
+            # operator leaves the two same-named skills side by side.
             "success": error_count == 0,
             "skills_injected": success_count,
             "skills_unchanged": unchanged_count,
             "skills_failed": error_count,
+            "skills_conflict": len(conflict_names),
+            "conflicts": conflict_names,
             "results": results,
         }
+
+    @staticmethod
+    def _record_delivery_status(
+        agent_name: str, conflicted: List[str], resolved: List[str]
+    ) -> None:
+        if not conflicted and not resolved:
+            return
+        try:
+            db.set_skill_delivery_status(agent_name, conflicted, resolved)
+        except Exception as e:  # noqa: BLE001 — the row is a mirror, not the source
+            logger.warning(f"skill delivery_status write failed for {agent_name}: {e}")
+
+    # =========================================================================
+    # Delivery on assign (#2703)
+    # =========================================================================
+
+    async def deliver_assigned(
+        self, agent_name: str, requested: List[str]
+    ) -> Dict[str, Any]:
+        """Deliver just-assigned skills to the agent and say honestly what happened.
+
+        The counterpart of `remove_skills` on the write side — before this,
+        assigning wrote a row and stopped, and the skill reached the agent only
+        on a manual Sync or the next start, while unassigning already removed
+        the package (ent#236). Same contract as removal: the row is committed and
+        authoritative, delivery is best-effort, and NOTHING here fails the
+        caller's write.
+
+        Runs the START-PATH injection (every assigned name, `force=False`), not a
+        subset: `_inject_skills_locked` rewrites CLAUDE.md's Platform Skills
+        section to the names of the run it is in, so a subset call on an agent
+        holding ten skills would leave it advertising one. A just-assigned skill
+        has no agent-side meta and is injected; unchanged siblings cost one
+        batched metas read. The report is projected onto `requested`.
+
+        Returns `{status, reason?, conflicts?, skills: {name: {status, error?}}}`
+        where status is `injected` | `partial` | `conflict` | `pending_start` |
+        `in_progress` | `not_delivered`:
+          conflict        (#2914) every requested name collides with an
+                          agent-authored skill dir; nothing was written and the
+                          rows carry `delivery_status='conflict'`. A mixed
+                          outcome is `partial` with `conflicts` listing them
+          pending_start   the container is stopped; the start path delivers
+          in_progress     the injection outlived SKILL_DELIVERY_BUDGET_SECONDS and
+                          continues in the background (WS trigger on completion)
+          not_delivered   + reason: docker_unavailable | injection_in_progress |
+                          agent_not_ready | injection_error
+        """
+        names = sorted({n for n in requested if pkg.validate_skill_name(n)})
+        if not names:
+            return {"status": "injected", "skills": {}}
+
+        from services import docker_utils
+        try:
+            state = await docker_utils.agent_container_state_async(agent_name)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"skill delivery: container state unreadable for {agent_name}: {e}")
+            state = None
+        if state is None:
+            # Docker could not be asked — NOT "stopped". Guessing pending_start
+            # here would promise a start-path delivery that may never come.
+            return self._delivery_report(names, "not_delivered", reason="docker_unavailable")
+        if state != "running":
+            return self._delivery_report(names, "pending_start")
+
+        task = asyncio.create_task(self._deliver_with_busy_retry(agent_name))
+        done, _ = await asyncio.wait({task}, timeout=SKILL_DELIVERY_BUDGET_SECONDS)
+        if not done:
+            # Keep the work; give the caller an honest answer now. The WS
+            # trigger fires when it lands so open surfaces still converge.
+            _BACKGROUND_DELIVERIES.add(task)
+            task.add_done_callback(_BACKGROUND_DELIVERIES.discard)
+            task.add_done_callback(
+                lambda t, a=agent_name: self._finish_background_delivery(t, a)
+            )
+            return self._delivery_report(names, "in_progress")
+
+        try:
+            result = task.result()
+        except SkillInjectionBusy:
+            return self._delivery_report(names, "not_delivered", reason="injection_in_progress")
+        except Exception as e:  # noqa: BLE001 — never fail a committed assign
+            reason = "agent_not_ready" if self._looks_unreachable(e) else "injection_error"
+            logger.warning(f"skill delivery failed for {agent_name}: {e}")
+            return self._delivery_report(names, "not_delivered", reason=reason)
+
+        per = {}
+        for n in names:
+            r = (result.get("results") or {}).get(n) or {}
+            st = r.get("status")
+            if st in ("injected", "fallback", "unchanged"):
+                per[n] = {"status": "injected"}
+            elif st == "unassigned_meanwhile":
+                per[n] = {"status": "unassigned_meanwhile"}
+            elif st == "conflict":
+                # #2914: named, not folded into `failed` — the next action is
+                # different (unassign, or rename the agent's own skill), and
+                # a retry via Sync would refuse again by design.
+                per[n] = {"status": "conflict", "error": str(r.get("error") or "name_conflict")}
+            else:
+                err = str(r.get("error") or "injection_error")
+                per[n] = {
+                    "status": "failed",
+                    "error": "agent_not_ready" if self._looks_unreachable(err) else err,
+                }
+        delivered = sum(1 for v in per.values() if v["status"] == "injected")
+        conflicts = sorted(n for n, v in per.items() if v["status"] == "conflict")
+        failed = [n for n, v in per.items() if v["status"] == "failed"]
+        if delivered == len(per):
+            status = "injected"
+        elif delivered:
+            status = "partial"
+        elif conflicts and not failed:
+            status = "conflict"
+        else:
+            status = "not_delivered"
+        report = {"status": status, "skills": per}
+        if conflicts:
+            report["conflicts"] = conflicts
+        if status == "not_delivered":
+            errs = {v.get("error") for v in per.values() if v["status"] == "failed"}
+            report["reason"] = "agent_not_ready" if errs == {"agent_not_ready"} else "injection_error"
+        await self._audit_delivery(agent_name, names, report)
+        return report
+
+    @staticmethod
+    def _finish_background_delivery(task: "asyncio.Task", agent_name: str) -> None:
+        """Done-callback for a delivery that outlived the request budget.
+        Retrieves the outcome (an un-retrieved task exception is only ever
+        logged at GC, as "Task exception was never retrieved", far from the
+        cause) and fires the WS trigger either way — a failed late delivery
+        still changed nothing the listing shows, and a refetch is harmless."""
+        try:
+            result = task.result()
+            logger.info(
+                f"skill delivery for {agent_name} finished in the background: "
+                f"{result.get('skills_injected', 0)} injected, "
+                f"{result.get('skills_failed', 0)} failed"
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"background skill delivery failed for {agent_name}: {e}")
+        asyncio.ensure_future(broadcast_skills_changed(agent_name))
+
+    async def _deliver_with_busy_retry(self, agent_name: str) -> Dict[str, Any]:
+        try:
+            return await self.inject_skills(agent_name, None, force=False, assigned_only=True)
+        except SkillInjectionBusy:
+            await asyncio.sleep(_DELIVERY_BUSY_RETRY_SECONDS)
+            return await self.inject_skills(agent_name, None, force=False, assigned_only=True)
+
+    @staticmethod
+    def _delivery_report(names: List[str], status: str, reason: Optional[str] = None) -> Dict[str, Any]:
+        report: Dict[str, Any] = {"status": status, "skills": {n: {"status": status} for n in names}}
+        if reason:
+            report["reason"] = reason
+        return report
+
+    @staticmethod
+    def _looks_unreachable(err: Any) -> bool:
+        """A `running` container whose agent-server is not up yet (startup.sh
+        still cloning) answers connection-refused; that is `agent_not_ready`,
+        not an injection defect."""
+        text = str(err).lower()
+        return any(k in text for k in ("connect", "refused", "unreachable", "timed out", "timeout"))
+
+    async def _audit_delivery(self, agent_name: str, names: List[str], report: Dict[str, Any]) -> None:
+        """Mirror of `_audit_removal`: counts and names only. Never raises."""
+        try:
+            from services.platform_audit_service import platform_audit_service, AuditEventType
+            await platform_audit_service.log(
+                event_type=AuditEventType.CONFIGURATION,
+                event_action="skill_delivered",
+                source="api",
+                target_type="agent",
+                target_id=agent_name,
+                details={
+                    "trigger": "assign",
+                    "status": report.get("status"),
+                    "reason": report.get("reason"),
+                    "skills": names[:50],
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     # =========================================================================
     # Skill Removal + start-path reconciliation (ent#236)
@@ -1815,8 +2222,8 @@ print(json.dumps(out))
             if not isinstance(meta, dict):
                 # No meta ⇒ the platform never wrote this directory (an
                 # agent-authored Playbook of the same name, or the pre-#183
-                # single-file era). `unmanaged_dir_overwritten` is injection's
-                # matching concession: overwrite is recoverable, deletion is not.
+                # single-file era). Injection refuses the same directory with
+                # a `conflict` verdict (#2914); neither side ever touches it.
                 results[name] = {
                     "success": True, "status": "not_managed",
                     "files_deleted": 0, "warnings": ["unmanaged_dir_kept"],
@@ -2008,8 +2415,10 @@ print(json.dumps(out))
         except Exception as e:  # noqa: BLE001 — the alarm is decorative
             logger.warning(f"could not raise skills reconcile alarm: {e}")
 
-    def _record_adoption_failure(self, url: str, message: str) -> None:
-        """ERROR + operator alarm for a refused/failed legacy adoption (ent#346).
+    def _record_adoption_failure(
+        self, url: str, message: str, *, steady_state: bool = False
+    ) -> None:
+        """Log + operator alarm for a refused/failed legacy adoption (ent#346).
 
         Never raises — adoption is fail-soft and must not block a sync of
         already-migrated sources.
@@ -2022,31 +2431,90 @@ print(json.dumps(out))
         silently is how the refusal gets rediscovered as "skills stopped
         working".
 
-        The URL is included: it is operator-authored configuration, already
-        visible to admins via the sources API, and the alarm is useless without
-        naming what was refused. `reject_embedded_credentials` runs BEFORE this
-        on the validation path, so a credential-bearing URL is refused by a
-        message that does not echo it — the one case where echoing would leak.
+        A NEW CALL SITE MUST CHOOSE `steady_state` EXPLICITLY. The default is
+        the unbounded timestamped/`high` shape, which is correct only for a
+        genuine transient failure — nothing enforces that choice (the #1677 AST
+        guard scans call sites of `create_operator_queue_item`, not of this
+        method), so the docstring is the enforcement.
+
+        Two classes of refusal share this emitter (#2744):
+
+        * A genuine FAILURE — the URL failed validation, or adoption threw.
+          `priority: "high"` and a TIMESTAMPED id, so a repeat is visible AS a
+          repeat rather than deduped away by `create_item`'s ON CONFLICT DO
+          NOTHING. Repeat-visible here is a PRODUCT DECISION, not a claim that
+          these branches are bounded: a permanently invalid `skills_library_url`
+          re-enters the validation branch on every sync just as forever.
+        * The STEADY STATE — "this install already has sources, so it is past
+          migration": the designed resting state of every migrated install whose
+          legacy key lingers, not a failure. `priority: "low"`, `logger.info`,
+          and a STABLE id derived from the refused URL, so the `(agent_name,
+          request_id)` ON CONFLICT collapses every repeat to ONE row and an
+          operator's dismissal sticks. The family prefix is registered in
+          `operator_queue_service._RESERVED_ID_PREFIXES`, because a stable id
+          derived from an admin-visible URL is guessable and an agent could
+          otherwise pre-create it and silence the alarm (the #1632 C2 class);
+          that tuple also drives `is_platform_minted`.
+
+        The id is the sha256 of the URL, never the URL itself: `request_id` is a
+        conflict key, not a display field, and a raw URL would break the
+        id-shape (`^[A-Za-z0-9._:-]+$`) the reserved-prefix machinery assumes.
+
+        **The bound this emitter's #1677 platform-only classification rests on**
+        is: the only input is the `skills_library_url` setting, which
+        `routers/settings.py` blocks on the generic settings PUT
+        (`LEGACY_SKILLS_LIBRARY_KEYS`, 422) and no other writer reaches — so no
+        agent can drive the volume. It is NOT "admin-driven cadence": ent#236's
+        auto-sync calls the same `sync_library()` unattended on a 300s-86400s
+        timer. Keep this comment and the `_ALLOWED_CALLERS` justification in
+        `tests/unit/test_1677_operator_alert_emitters.py` in step.
+
+        The echoed URL is SCRUBBED (#2744). Naming what was refused is the whole
+        point of the alarm, but `EmbeddedCredentialError` is a `ValueError`
+        subclass, so the validation-reject branch is exactly the one a
+        PAT-bearing URL reaches — and the raw value used to land at ERROR in the
+        Vector-captured log and, durably, in `operator_queue.context` (SQLite,
+        every backup, rendered in the Operating Room). Invariant #12. The HASH
+        is still taken over the raw value: scrubbing first would collide two
+        different tokens on one repo.
         """
-        logger.error(f"[ent#346] {message} (url={url})")
+        safe_url = strip_url_credentials(url)
+        if steady_state:
+            logger.info(f"[ent#346] {message} (url={safe_url})")
+        else:
+            logger.error(f"[ent#346] {message} (url={safe_url})")
         try:
             from utils.helpers import utc_now_iso
+
+            context = {
+                "alert_type": "skills_legacy_adoption_refused",
+                "url": safe_url,
+            }
+            if steady_state:
+                # Computed INSIDE the try: `url.strip().encode()` raises
+                # AttributeError on a non-str setting value, and out here that
+                # degrades to a warning and no alarm — the fail-soft guarantee.
+                # Hoisting it above the try turns a decorative alarm into a
+                # raiser.
+                request_id = (
+                    "skills-legacy-adoption-refused-"
+                    f"{hashlib.sha256(url.strip().encode()).hexdigest()[:12]}"
+                )
+            else:
+                # Timestamped, so a repeated failure is visible as repeated
+                # rather than silently deduped by the ON CONFLICT DO NOTHING
+                # in `create_item`.
+                request_id = f"skills-legacy-adoption-{utc_now_iso()}"
 
             db.create_operator_queue_item(
                 RECONCILE_ALARM_AGENT_NAME,
                 {
-                    # Timestamped, so a repeated failure is visible as repeated
-                    # rather than silently deduped by the ON CONFLICT DO NOTHING
-                    # in `create_item`.
-                    "id": f"skills-legacy-adoption-{utc_now_iso()}",
+                    "id": request_id,
                     "type": "alert",
-                    "priority": "high",
+                    "priority": "low" if steady_state else "high",
                     "title": "Legacy skills-library adoption refused",
                     "question": message,
-                    "context": {
-                        "alert_type": "skills_legacy_adoption_refused",
-                        "url": url,
-                    },
+                    "context": context,
                     "expires_at": None,
                 },
             )
@@ -2086,10 +2554,21 @@ print(json.dumps(out))
         tar_bytes: bytes,
         members: List[Tuple[str, bytes, int]],
         warnings: List[str],
+        meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """POST one skill package to the agent restore primitive.
 
         404 (pre-#384 image) → legacy single-file SKILL.md fallback.
+
+        #2914 invariant: **a directory the platform writes always carries the
+        marker.** Marker-absence is what the inject path reads as "the agent
+        authored this" and refuses to touch, so a platform write that leaves
+        the marker behind would turn its own package into a permanent,
+        unrepairable conflict on the next sync (the merge-train finding on
+        #2920). Both marker-less paths are closed here: the legacy fallback
+        writes the marker beside SKILL.md, and a restore that drops the marker
+        member writes it back directly — and if the marker cannot be written,
+        the write is reported `failed`, never a half-managed directory.
         Other failure → ONE repair retry as delete-dir + re-restore (a
         dir→file type transition wedges restore forever otherwise, because
         restore always fails before prune could remove the dir).
@@ -2097,7 +2576,7 @@ print(json.dumps(out))
         resp = await self._post_restore(agent_name, skill_name, tar_bytes)
 
         if resp is not None and resp.status_code == 404:
-            return await self._legacy_fallback(client, skill_name, members, warnings)
+            return await self._legacy_fallback(client, skill_name, members, warnings, meta)
 
         if resp is None:
             # Transport failure (timeout / connection drop) — the agent may be
@@ -2133,14 +2612,43 @@ print(json.dumps(out))
         restored = body.get("restored") or []
         # Honest write accounting: files_written = what the agent CONFIRMED
         # restoring; anything we sent that didn't land is a named warning.
+        meta_path = f".claude/skills/{skill_name}/{pkg.META_FILENAME}"
         sent = {arcname for arcname, _c, _m in members}
-        sent.add(f".claude/skills/{skill_name}/{pkg.META_FILENAME}")
+        sent.add(meta_path)
         for missing in sorted(sent - set(restored)):
             warnings.append(f"restore_skipped:{missing}")
+        if meta_path not in restored:
+            # #2914: the package landed but its marker did not. Left like this
+            # the directory reads as agent-authored forever; write the marker
+            # back directly, and if that cannot be done say the injection
+            # FAILED — a marker-less platform dir is worse than a retry.
+            if not await self._write_marker(client, skill_name, meta):
+                return {
+                    "success": False, "status": "failed",
+                    "files_written": len(restored),
+                    "error": "marker_not_written: the package landed but "
+                             f"{pkg.META_FILENAME} could not be written; the "
+                             "directory would read as agent-authored on the next sync",
+                    "warnings": warnings,
+                }
+            warnings.append("marker_written_directly")
         return {
             "success": True, "status": "injected",
             "files_written": len(restored), "warnings": warnings,
         }
+
+    @staticmethod
+    async def _write_marker(client, skill_name: str, meta: Optional[Dict[str, Any]]) -> bool:
+        """Write `.trinity-skill.json` with one `write_file` (#2914). False on any failure."""
+        try:
+            result = await client.write_file(
+                f".claude/skills/{skill_name}/{pkg.META_FILENAME}",
+                json.dumps(meta or {}, indent=2),
+            )
+        except Exception as e:  # noqa: BLE001 — reported by the caller as a failed write
+            logger.warning(f"skill marker write failed for {skill_name}: {e}")
+            return False
+        return bool(isinstance(result, dict) and result.get("success"))
 
     async def _post_restore(self, agent_name: str, skill_name: str, tar_bytes: bytes):
         """One multipart POST to /api/agent-server/restore (the #1169 shape)."""
@@ -2161,9 +2669,14 @@ print(json.dumps(out))
 
     async def _legacy_fallback(
         self, client, skill_name: str, members: List[Tuple[str, bytes, int]],
-        warnings: List[str],
+        warnings: List[str], meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Pre-#384 image: write SKILL.md only, exactly today's behavior."""
+        """Pre-#384 image: write SKILL.md, plus the marker (#2914).
+
+        The marker's manifest is what was actually written — SKILL.md alone —
+        so a later prune on a newer image diffs against the truth, not against
+        the package the old image could not take.
+        """
         skill_md = next(
             (
                 content for arcname, content, _m in members
@@ -2193,8 +2706,22 @@ print(json.dumps(out))
                 "success": False, "status": "failed", "files_written": 0,
                 "error": result.get("error", "Write failed"), "warnings": warnings,
             }
+        legacy_meta = dict(meta or {})
+        legacy_meta["manifest"] = [f".claude/skills/{skill_name}/SKILL.md"]
+        if not await self._write_marker(client, skill_name, legacy_meta):
+            # Undo the half-write rather than leave a marker-less platform dir
+            # that the next sync would refuse as agent-authored (best-effort:
+            # the retry path rewrites SKILL.md anyway).
+            await self._delete_agent_file(client, f".claude/skills/{skill_name}/SKILL.md")
+            await self._delete_agent_file(client, f".claude/skills/{skill_name}")
+            return {
+                "success": False, "status": "failed", "files_written": 0,
+                "error": f"marker_not_written: SKILL.md was written but {pkg.META_FILENAME} "
+                         "could not be; the write was rolled back",
+                "warnings": warnings,
+            }
         return {
-            "success": True, "status": "fallback", "files_written": 1,
+            "success": True, "status": "fallback", "files_written": 2,
             "warnings": warnings,
         }
 

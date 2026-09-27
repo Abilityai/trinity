@@ -4,8 +4,8 @@
 
   ONE rendering layer: this is `CanvasPanel` — the same component, fed by the
   same client-portal store the Workspace agent page uses — per participating
-  agent. Selector, the always-shown timestamp, the "may be out of date" mark,
-  and the blocks are all its; nothing here re-renders a canvas. The audience
+  agent. Selector, the always-shown freshness line, and the blocks are all its;
+  nothing here re-renders a canvas. The audience
   narrowing is the server's and unchanged (`audience='roster'` for every
   Workspace principal, the ent#438 ruling), so an operator-only canvas never
   reaches this body.
@@ -51,7 +51,14 @@
             v-if="rows(agent).length"
             :canvases="rows(agent)"
             :fetch-detail="(id) => portal.fetchAgentCanvas(agent, id)"
+            :can-manage="canManage(agent)"
+            :delete-canvas="(id) => portal.deleteAgentCanvas(agent, id)"
+            :bulk-delete-canvases="(ids) => portal.bulkDeleteAgentCanvases(agent, ids)"
+            :pin-canvas="(id, pinned) => portal.pinAgentCanvas(agent, id, pinned)"
+            :agent-name="agent"
             viewer="client"
+            @canvas-selected="(id) => portal.setOpenCanvas(agent, id)"
+            @changed="feeds.refresh()"
           />
           <p v-else-if="participants.length > 1" class="text-xs text-gray-400">Nothing published yet.</p>
         </section>
@@ -92,6 +99,15 @@ const view = computed(() => feedView({
 const empty = computed(() => railEmptyCopy(props.tab, participants.value))
 
 function rows(agent) { return feeds.canvases[agent] || [] }
+
+// ent#553 — from the ROSTER payload, the portal's only capability channel
+// (#2128): a portal principal cannot read `/api/settings/feature-flags`, so a
+// per-agent permission has to ride on the card. Fails closed, so an external
+// client (and any agent whose card predates this field) sees a read-only
+// panel rather than controls the server would refuse.
+function canManage(agent) {
+  return !!portal.agents?.find((a) => a.name === agent)?.can_manage_canvases
+}
 function countLabel(agent) {
   const n = rows(agent).length
   return n ? `${n} ${n === 1 ? 'canvas' : 'canvases'}` : 'nothing published'

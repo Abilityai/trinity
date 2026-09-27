@@ -18,8 +18,8 @@ import { FIXTURE_LABEL, pickLabelFixture, readLabel, writeLabel } from './helper
  * toggle is guarded (grid parity) and whose Autonomy/ReadOnly toggles are
  * `invisible` by design.
  *
- * The auth storageState pre-seeds `trinity_onboarding_dismissed_v1`, so the
- * onboarding wizard never auto-opens under these tests; the explicit
+ * The auth storageState pre-seeds `trinity_first_run_closed`, so the
+ * first-run overlay (ent#581) never auto-opens under these tests; the explicit
  * `?onboarding=1` param bypasses that key (covered below).
  */
 
@@ -33,13 +33,19 @@ async function gotoList(page) {
 
 test.describe('dashboard list view (trinity-enterprise#260)', () => {
   test('@smoke mode toggle shows List and renders the system agent row', async ({ page }) => {
+    // The 1280 default with the systems rail open (its first-launch state) is
+    // the case this guards: the list is too narrow for the desktop grid there,
+    // so the tablet layout renders, and the name must still show. The row
+    // carries one name link per layout; assert on the one that renders.
     await gotoList(page)
 
     const sysRow = page.locator('[data-agent="trinity-system"]')
     await expect(sysRow).toBeVisible({ timeout: 15000 })
     await expect(sysRow).toContainText('SYSTEM')
     // Name links to the agent detail page.
-    await expect(sysRow.locator('a[href="/agents/trinity-system"]').first()).toBeVisible()
+    await expect(
+      sysRow.locator('a[href="/agents/trinity-system"]').filter({ visible: true }).first()
+    ).toBeVisible()
 
     // List-mode toolbar furniture (name search, status filter, sort).
     await expect(page.getByRole('button', { name: 'Running', exact: true })).toBeVisible()
@@ -74,9 +80,10 @@ test.describe('dashboard list view (trinity-enterprise#260)', () => {
     // `view` is stripped; `onboarding` survives the query-preserving redirect
     // AND the Dashboard's param strip (it spreads the rest of the query).
     await expect(page).toHaveURL(/\?onboarding=1$/, { timeout: 10000 })
-    // Explicit ?onboarding=1 bypasses the pre-seeded dismissal key.
-    await expect(page.locator('#onboarding-title')).toBeVisible({ timeout: 15000 })
-    // Behind the wizard, the List pane mounted.
+    // Explicit ?onboarding=1 bypasses the pre-seeded close key.
+    await expect(page.getByTestId('first-run-overlay')).toBeVisible({ timeout: 15000 })
+    await expect(page.locator('#first-run-title')).toBeVisible()
+    // Behind the overlay, the List pane mounted.
     await expect(page.getByPlaceholder('Search agents...')).toBeVisible()
   })
 
@@ -175,6 +182,14 @@ async function expectColumnsAligned(page, note) {
 
 test.describe('dashboard list column alignment + identity (#2358)', () => {
   test.describe.configure({ mode: 'serial' })
+
+  // These tests measure the DESKTOP grid, which renders when the list is at
+  // least 68rem wide (`list-wide:`), not at a window width. The systems rail
+  // opens by default and would leave a 1280 window with the tablet layout, so
+  // collapse it: 1280 and 1440 then both get the grid, as the tests assume.
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('trinity-sidebar-collapsed', 'true'))
+  })
 
   let fixtureAgent = null
   let priorLabel = null

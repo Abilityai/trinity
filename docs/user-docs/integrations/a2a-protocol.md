@@ -285,7 +285,7 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 | GET | `/a2a/{agent}/.well-known/agent-card.json` | none | Discovery card |
 | POST | `/a2a/{agent}` | Bearer MCP key | JSON-RPC task endpoint |
 
-### Outbound routes (calling out, #736)
+### Outbound routes (calling out)
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
@@ -323,6 +323,12 @@ Auth failures are transport-level `401`; exposure/allow-list failures are `404`/
 
 ## See Also
 
-- [MCP Server](mcp-server.md) — Trinity's own inter-agent protocol
+**Trinity docs:**
+
+- [MCP Server](mcp-server.md) — Trinity's own inter-agent protocol, and where the Bearer key comes from
+- [Agent Network](../collaboration/agent-network.md) — agent-to-agent calls inside one Trinity instance
+
+**External references:**
+
 - [A2A Protocol specification](https://a2a-protocol.org) — the canonical spec
 - [a2aproject/A2A](https://github.com/a2aproject/A2A) — reference implementations

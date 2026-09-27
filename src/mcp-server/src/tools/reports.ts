@@ -13,6 +13,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied, resolveActingAgent } from "../access.js";
 
 
 /**
@@ -68,18 +69,14 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
   };
 
   /**
-   * Resolve the reporting agent from the auth context. The report tool is
-   * agent-facing: it requires an agent-scoped key so a report can only ever be
-   * attributed to the calling agent (no spoofing).
+   * Resolve the reporting agent from the auth context. The report tool takes no
+   * target parameter, so a report can only ever be attributed to the identity
+   * the KEY carries — `resolveActingAgent` is that rule, shared with the canvas
+   * and metrics tools (#2975; it admits the platform orchestrator's
+   * system-scoped key, which carries `trinity-system`, and nothing else).
    */
-  const getAgentName = (authContext: McpAuthContext | undefined): string => {
-    if (authContext?.scope === "agent" && authContext.agentName) {
-      return authContext.agentName;
-    }
-    throw new Error(
-      "The report tool requires an agent-scoped API key (it publishes a report as the calling agent)."
-    );
-  };
+  const getAgentName = (authContext: McpAuthContext | undefined): string =>
+    resolveActingAgent(authContext, "The report tool");
 
   /**
    * Agent-to-agent READ gate (mirrors operator_queue.ts / executions.ts).
@@ -314,7 +311,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           const access = await checkAgentAccess(apiClient, authContext, params.agent_name);
           if (!access.allowed) {
             console.log(`[list_reports] Access denied: ${access.reason}`);
-            return JSON.stringify({ error: "Access denied", reason: access.reason }, null, 2);
+            return accessDenied(context, { error: "Access denied", reason: access.reason });
           }
         }
 
@@ -405,12 +402,12 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           if (authContext?.scope === "agent") {
             if (!owner) {
               console.error("[get_report] response carried no agent_name — refusing");
-              return JSON.stringify({ error: "Report not found" }, null, 2);
+              return accessDenied(context, { error: "Report not found" }, "response carried no agent_name — refusing");
             }
             const access = await checkAgentAccess(apiClient, authContext, owner);
             if (!access.allowed) {
               console.log(`[get_report] Access denied: ${access.reason}`);
-              return JSON.stringify({ error: "Report not found" }, null, 2);
+              return accessDenied(context, { error: "Report not found" }, access.reason);
             }
           }
 

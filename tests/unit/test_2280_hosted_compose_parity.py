@@ -18,7 +18,8 @@ So the hosted file is *generated* from prod and *guarded* here, rather than
 maintained by hand and trusted. The rule this enforces:
 
     hosted == prod, MINUS every `build:` block, PLUS a GHCR `image:` for the
-    four images Trinity builds. Nothing else may differ.
+    four images Trinity builds. Nothing else may differ — except the three
+    ent#580 environment lines in ``_HOSTED_ONLY_ENV``, exact strings.
 
 Deliberately compares the RAW yaml rather than ``docker compose config`` output:
 the raw form still contains the unexpanded ``${VAR:-default}`` strings, so a
@@ -57,6 +58,38 @@ _BUILT_SERVICES = {
 # retags it in start.sh instead. See test_start_sh_hosted_mode_pulls_agent_base.
 _AGENT_BASE_TAG = "trinity-agent-base:latest"
 _AGENT_BASE_REMOTE = "ghcr.io/abilityai/trinity-agent-base"
+
+# The ONLY intended environment divergence (trinity-enterprise#580). The
+# marketplace browser-claim runs the hosted file (via `start.sh --hosted`) and
+# never prod, so only hosted renders an explicitly blank ADMIN_PASSWORD (`?`
+# rather than `:?`) and forwards ADMIN_PASSWORD_SOURCE — the backstop that makes
+# a hand-run hosted compose with a blank password refuse /setup instead of
+# handing the instance to its first visitor. Relaxing prod too would open that
+# hole for source builds with nothing gained. Exact strings, per service:
+# (entries only prod carries, entries only hosted carries). Each must still be
+# present, so a stale allowlist fails rather than silently widening.
+_HOSTED_ONLY_ENV = {
+    "backend": (
+        ["ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}"],
+        [
+            "ADMIN_PASSWORD=${ADMIN_PASSWORD?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}",
+            "ADMIN_PASSWORD_SOURCE=${ADMIN_PASSWORD_SOURCE:-unset}",
+        ],
+    ),
+    "mcp-server": (
+        ["TRINITY_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env}"],
+        ["TRINITY_PASSWORD=${ADMIN_PASSWORD?ADMIN_PASSWORD must be set in .env}"],
+    ),
+}
+
+
+def _without(env: list, entries: list, where: str) -> list:
+    missing = [e for e in entries if e not in env]
+    assert not missing, (
+        f"{where}: allowlisted ent#580 env entries not found: {missing}. "
+        f"Update _HOSTED_ONLY_ENV rather than widening the parity check."
+    )
+    return [e for e in env if e not in entries]
 
 
 def _load(path: Path) -> dict:
@@ -146,6 +179,10 @@ def test_service_parity_wholesale(prod: dict, hosted: dict) -> None:
         hosted_svc = hosted["services"].get(name, {})
         prod_cmp = {k: v for k, v in prod_svc.items() if k not in ("build", "image")}
         hosted_cmp = {k: v for k, v in hosted_svc.items() if k != "image"}
+        if name in _HOSTED_ONLY_ENV:
+            prod_only, hosted_only = _HOSTED_ONLY_ENV[name]
+            prod_cmp["environment"] = _without(prod_cmp.get("environment") or [], prod_only, f"prod {name}")
+            hosted_cmp["environment"] = _without(hosted_cmp.get("environment") or [], hosted_only, f"hosted {name}")
         if prod_cmp != hosted_cmp:
             differing = sorted(
                 set(prod_cmp) ^ set(hosted_cmp)

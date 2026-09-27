@@ -42,6 +42,11 @@ class TestAutoSwitchSetting:
         a prior test or the dev DB explicitly set it to "false", this test
         will fail — clear the stored value first or run against a fresh DB.
         """
+        # Clear any stored value first (a sibling test in the same run, or the
+        # dev DB, may have written "false"); the default is only observable when
+        # no row exists. 404 = nothing stored, which is the state we want (#2802).
+        cleared = api_client.delete("/api/settings/auto_switch_subscriptions")
+        assert cleared.status_code in (200, 204, 404), cleared.text
         response = api_client.get("/api/subscriptions/settings/auto-switch")
         assert_status(response, 200)
         data = assert_json_response(response)

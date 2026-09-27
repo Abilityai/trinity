@@ -10,40 +10,28 @@
  * The fix deletes the list: `buildTabs()` is pure and takes the gating flags as
  * arguments, so the deep-link resolver asks it for the superset.
  *
- * That purity is what lets this be a REAL test rather than another
- * source-structure guard (this project has no @vue/test-utils, so the sibling
- * #2130 spec has to scan text). The function is extracted from the SFC and
- * executed, so what is asserted here is the behaviour that actually ships — add
- * a tab, and these tests see it.
+ * ent#479 moved `buildTabs` into `utils/agentTabs.js` and this spec IMPORTS it
+ * rather than brace-matching it out of the SFC and `new Function`-ing the text.
+ * Same executed behaviour, one less parser. The gate's own cases live in
+ * `agentTabs.spec.js`; what stays here is the deep-link WIRING, which is a
+ * property of `AgentDetail.vue` and still read from its source.
+ *
+ * @source-text-pin: the remaining reads assert how AgentDetail.vue WIRES the
+ * resolver (that `ALL_TAB_IDS` is derived from the builder rather than
+ * restated, that the late reconcile guards itself, that it runs in both
+ * lifecycle hooks). Those are call-site shape, not rendered behaviour: a mount
+ * that lands on the right tab passes identically whether the superset came
+ * from the builder or from a freshly re-typed literal, which is the #2153
+ * regression itself.
  */
 import { describe, it, expect } from 'vitest'
+import { buildTabs } from '../../src/utils/agentTabs'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 
 const SRC = fileURLToPath(new URL('../../src/views/AgentDetail.vue', import.meta.url))
 const source = readFileSync(SRC, 'utf8')
 
-/** Pull `function buildTabs(...) { ... }` out of the SFC by brace matching. */
-function extractBuildTabs() {
-  const start = source.indexOf('function buildTabs(')
-  expect(start, 'buildTabs() not found — did it get inlined back into the computed?')
-    .toBeGreaterThan(-1)
-  const open = source.indexOf('{', source.indexOf(')', start))
-  let depth = 0
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === '{') depth++
-    else if (source[i] === '}') {
-      depth--
-      if (depth === 0) {
-        // eslint-disable-next-line no-new-func
-        return new Function(`${source.slice(start, i + 1)}; return buildTabs`)()
-      }
-    }
-  }
-  throw new Error('unterminated buildTabs()')
-}
-
-const buildTabs = extractBuildTabs()
 const idsFor = (flags) => buildTabs(flags).map((t) => t.id)
 
 const OWNER = {

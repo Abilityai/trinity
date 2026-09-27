@@ -14,11 +14,9 @@ Unified access control across all channels (web, Telegram, Slack). Verified emai
 
 ![Agent Sharing tab showing Identity Proof (require verified email, open access) and Team Sharing allow-list controls](../../screenshots/agent-sharing-access.png)
 
-### Enable Email Verification
+### Email Verification
 
-1. Go to Agent Detail → **Sharing** tab.
-2. Enable **Require verified email**.
-3. Users must now verify their email before chatting.
+Verification is not a separate switch on the Sharing tab. Both positions of the **Restricted ↔ Open** control (below) require a verified email — the control writes `require_email: true` every time — so users verify before chatting either way. Turning verification off entirely (`require_email: false`) is only possible through the access-policy API.
 
 ### Fleet-Wide Default for New Agents
 

@@ -208,19 +208,40 @@ oldest-first across calls, every cut named by count and nothing pointing the
 agent at a place it cannot read. Read before `_persist_user_turn`, fail-soft,
 computed in `portal_chat` only (the streaming entry funnels through it).
 
-**No reply lands mid-call — two gates, one marker.** The tab's composer is
-inert during a call, but a reply can be in flight from another tab, a reload,
-or the headless `/chat` surface, and a reply between two spoken rows would sit
-after the cursor and hide the call's first half from the next delta. So both
-sides refuse, in words, after their uniform 404: `start_workspace_voice`
-answers **409** ("A reply is still being written — wait for it, then start the
-call.") when `get_turn_inflight` is set, and both turn entries (`portal_chat`,
-`start_portal_turn`) answer **409** (`category="voice_call_active"`, unbilled,
-retryable) through `_refuse_turn_during_voice_call` while the thread's live-call
-marker `portal_voice_active:{session}` is set — written by `start_workspace_voice`
-once the provider session exists (TTL = the cap + slack), cleared by the bridge's
-`finally` and by the REST `/stop`. Both reads are fail-open on a Redis outage:
-a call over a possibly running turn, or a turn over a possibly live call, beats
+**No reply lands mid-call once the audio bridge is up — two gates, one lease.**
+The tab's composer is inert during a call, but a reply can be in flight from
+another tab, a reload, or the headless `/chat` surface, and a reply between two
+spoken rows would sit after the cursor and hide the call's first half from the
+next delta. So both sides refuse, in words, after their uniform 404:
+`start_workspace_voice` answers **409** ("A reply is still being written — wait
+for it, then start the call.") when `get_turn_inflight` is set, and both turn
+entries (`portal_chat`, `start_portal_turn`) answer **409**
+(`category="voice_call_active"`, unbilled, retryable) through
+`_refuse_turn_during_voice_call` while the thread's live-call marker
+`portal_voice_active:{session}` is set.
+
+That marker is an **owned lease, and the audio bridge holds it** (#2700). The
+bridge arms it at connect — the first statement inside the same `try` whose
+`finally` releases it, the only placement structurally guaranteed to pair —
+stores its own `voice_session_id` as the value, renews it every 15 s on a 60 s
+TTL while it lives but never past the call's own cap, and releases it
+**unconditionally, last, and only on an owner match**, on every exit. The start
+does not arm it any more, and the rule that moved it is worth stating: *a
+marker whose only closer lives downstream of a connection that may never exist
+is an orphan generator.* `start_workspace_voice` used to write it with the cap
+as its TTL, so a start whose audio socket never opened refused every typed turn
+in that thread for ~32 minutes — from any tab and from the headless `/chat` —
+naming a call the person could not end. Three properties are load-bearing and
+none is decorative: the release must be keyed on the bridge's own pre-`try`
+local (on `ended.portal_session_id` an `ended is None` return re-strands it, the
+same defect moved); the TTL must be a renewed lease (a cap-sized TTL turns every
+crash, OOM and routine backend deploy mid-call into this same 32-minute
+symptom); and the release must be owner-matched (the key is one per **thread**,
+so an unconditional delete lets a closing bridge free the thread of a newer
+call — a reload, a second tab). The REST `/stop` still releases, idempotent and
+owner-matched, but it is an API-only path: the Workspace passes `restStop:
+false` and never calls it. Both reads are fail-open on a Redis outage: a call
+over a possibly running turn, or a turn over a possibly live call, beats
 silencing either. A client-side lock is never the second gate — it covers one
 tab (the review's finding, recorded in `docs/memory/learnings.md`).
 
@@ -329,8 +350,9 @@ stage and the canvas stays behind the strip's Canvas tab (mobile is
 trinity#710). It reads `GET /api/agents/{name}/voice/{sid}/panel` — the agent's
 `main` canvas whatever its audience — through `CanvasPanel` (one rendering
 layer), refetching when the bridge reports a panel verb finished
-(`panelVersion` bumps on `tool_result` frames whose tool is one of the six) plus
-a 3 s safety poll for boards rewritten some other way. The 300 ms poll of the
+(`panelVersion` bumps on `tool_result` frames whose tool is one of the six, and
+on a `task` frame whose state is `finished`/`failed` — a background task may
+have drawn, ent#551) plus a 3 s safety poll for boards rewritten some other way. The 300 ms poll of the
 retired page was ~6,000 reads per 30-minute call for a surface the socket
 already narrates. After the call the rail's Canvas tab shows the same board:
 a **platform principal reads every audience in the Workspace**
@@ -455,7 +477,7 @@ firing on a sub-pixel reflow would otherwise blank the orb continuously.
 | `src/backend/client_portal/{models,db,service,agent_page}.py` | `PortalRealtimeVoice`, `PortalVoiceStart{Request,Response}`, `PortalHistoryMessage.source/voice_call_id`; `add_portal_message(source, voice_call_id)`, `get_portal_messages` selects both; `_format_history_context` labels + budgets, dedup ignores spoken rows, roster field; `canvas_audience_for` |
 | `src/backend/services/voice_prompt_service.py` | the voice prompt resolver, lifted out of the router |
 | `src/backend/services/gemini_voice.py` | `VoiceSession.portal_session_id/client_email/end_reason/end_message`, Redis metadata + reconstruction of every field, `_build_live_config` (compression + resumption), `go_away` reconnect loop, `_record_turn` → `on_turn`, the T-30 s cap notice, `claim_transcript_save` |
-| `src/backend/routers/voice.py` | JWT before session lookup; `on_turn` → portal persistence (function-local import); `finally` → `persist_voice_call_end` or the claimed `_save_transcript`; `saved` frame; `status` frames carry `reason`/`message`; `/stop` never writes for a portal-bound session |
+| `src/backend/routers/voice.py` | JWT before session lookup; `on_turn` → portal persistence (function-local import); arms the live-call lease at connect, renews it, releases it unconditionally in the `finally` (#2700); `finally` → `persist_voice_call_end` or the claimed `_save_transcript`, wrapped so a raising close-out still reaches the gemini cancel / `saved` / close; `saved` frame; `status` frames carry `reason`/`message`; `/stop` never writes for a portal-bound session |
 | `src/backend/db/{schema,tables,migrations}.py`, `migrations/versions/0057_portal_messages_voice_source.py` | `enterprise_portal_messages.source`, `.voice_call_id` (nullable), both tracks |
 | `src/backend/config.py`, `docker-compose*.yml`, `.env.example` | `WORKSPACE_VOICE_MAX_DURATION` (1800) |
 | `src/frontend/src/components/portal/portalVoiceMode.js` | the pure rules: `voiceEntryState`, `voicePreflight`, `voiceHeaderLine`, `endedNotice`, `startFailureReason`, `groupVoiceBlocks`, `voiceCallLabel*`, `VOICE_SPLIT`, `isPanelTool`, `canvasChanged` |
@@ -468,12 +490,108 @@ firing on a sub-pixel reflow would otherwise blank the orb continuously.
 | `tests/unit/test_ent534_workspace_voice.py` | the backend properties above (28 tests) |
 | `src/frontend/tests/unit/portalVoiceMode.spec.js` | the pure rules + the source guards (42 tests) |
 
+## Long tasks, and how the agent speaks around them (ent#551, ent#576)
+
+A call can **start a long task, say so, keep talking, and come back with the
+result when it lands.** `run_task` on a Workspace call answers the model at
+once with a task id (`t1`, `t2`, …); the turn runs as the agent in this thread
+(ent#535) in the background, and both its rows land here stamped with the
+call's id — typed rows with an *asked during a voice call* caption, outside the
+spoken block, so the #2694 delta logic never sees them as speech. Two #2694
+seams had to learn what a call's own turn is: the live-call guard
+(`_refuse_turn_during_voice_call`) lets a turn carrying `voice_call_id` through
+— it had refused every `run_task` since #2694 landed after ent#535, so the call
+could not run a single task — and the delta cursor
+(`get_platform_rows_since_last_reply`) skips a reply that carries one, so a task
+landing mid-call cannot hide the call's first half from the next typed turn. When the task
+finishes (or fails, with its reason) the platform injects a notice into the
+live call at a **natural boundary** — the model not mid-turn, both sides quiet
+for 2.5 s, no other tool call pending; held at most 20 s — and the agent brings
+it up, naming which request it answers. The agent says what it started **once**
+(the acceptance asks for a line only if none was given), and a notice the model
+happens to read aloud is scrubbed from the transcript. At most **3** tasks run
+at once; at the cap the agent says so rather than queueing silently. If the
+model does not say what it started within 4 s of dispatch (a filler just before
+the call counts), the platform nudges it — the acknowledgement is structural,
+not a hope. Ending the call cancels nothing: a task still running completes and
+lands in the chat. The orb shows work in flight as a persistent badge naming
+the task (the `task` frame), distinct from the amber per-call badge; the canvas
+column refetches when a task lands; and the thread stays read while the call is
+on, so the sidebar never badges the conversation the person is in.
+
+The model is told **once** how to speak around tools, for the whole cycle
+(`spoken_etiquette_instruction`, built from the session's manifest): announce a
+wait, not an action (no filler for a canvas write — the drawing appearing is the
+acknowledgement); say it once (after a result, add what is new; never restate
+the announced intention; never read the canvas aloud — point and interpret);
+one narration per sequence; report a failure once, with its reason. The
+mechanics live in [voice-chat.md § VOICE-007](voice-chat.md); the requirement is
+`runtimes.md` §29.7 / §29.11.
+
+### Two first-run defects (ent#551 QA)
+
+- **A call started from a new chat died at 5 s.** `startVoiceCall` creates the
+  thread and adopts it before the call starts; the shell's route replace then
+  changes the `sessionId` prop from null to that id a moment later, and the
+  thread-change watcher — right for browser back and deep links — ended the call
+  it had just started; the 5 s was the `saved`-frame timeout inside that stop.
+  `portalVoiceMode.js::threadChangeEndsCall` is the rule now: an agent change or
+  a switch to a *different* thread ends the call; the call's own thread arriving
+  does not.
+- **The mic worklet was a `blob:` script the CSP blocks.** Every call logged
+  "Loading the script 'blob:…' violates the following Content Security Policy
+  directive" and fell back to the deprecated ScriptProcessor. The processor is a
+  static file now (`public/mic-capture.worklet.js`, `utils/audio.js::MIC_WORKLET_URL`),
+  loaded from `self`; neither CSP needs `blob:` in `script-src`.
+
 ## Known limits
 
-- The Workspace client cannot yet tell the model to *act as the agent*
-  (`run_task` is the stateless task endpoint) — #535.
+- The completion notice is a text turn on the realtime channel (the ent#534
+  cap-warning path), so "natural boundary" is decided platform-side from the
+  provider's `model_turn` / `turn_complete` / `interrupted` signals and the
+  input-transcription clock — not by the provider's own scheduling. Native
+  non-blocking function calling (`Behavior.NON_BLOCKING` + `WHEN_IDLE`) would
+  hand that decision to the model; it is not wired because its support on the
+  current Live model is unverified.
 - Mobile keeps the orb full-stage with the canvas behind the strip (trinity#710).
 - Rooms are out of scope — turn-taking with several agents is a different problem.
 - The 30-minute default is trusted only after a live call past 15 minutes on a
   real key (the reconnect path is unit-tested, not soak-tested here).
 - The JWT rides the WebSocket query string (pre-existing; debt registered).
+- **The `/start` → connect gap is unmarked.** Between the start returning and
+  the bridge arming its lease, a typed turn from a second tab or the headless
+  `/chat` can land. It posts and is answered normally — no new state, string or
+  default, and nothing is lost: spoken rows are written as they happen and the
+  post-call delta still carries everything to the agent's next typed turn. What
+  is lost is that the *voice model's opening context*, built at start time, does
+  not contain that one message — i.e. this is precisely where "a reply between
+  two spoken rows sits after the cursor and hides the call's first half" becomes
+  possible again, which is why the claim above is scoped to "once the audio
+  bridge is up". The gap is not new in kind: the start already leaves one open
+  from its `get_turn_inflight` check to the mark, spanning the prompt resolve,
+  the thread read and the provider round trip; #2700 roughly doubles it. Closing
+  it would need a grace mark at `/start` — a setter whose only release is a TTL,
+  i.e. a smaller copy of the dead end that was removed.
+- **A bridge whose peer died half-open holds the lease until the socket is torn
+  down**, bounded by the renewer's own `cap + 120 s` lifetime plus one 60 s
+  lease — today's bound plus one lease in the worst case, and ~0 s in every
+  normal one. That bound is why the renewer cannot outlive its own call. The cap
+  path is the one to watch: `useVoiceSession.js::_onEnded` neither sends
+  `{"type":"end"}` nor closes, so the socket closes only on the client's 5 s
+  `saved`-frame timeout.
+- **The marker is one key per thread**, so two deliberate concurrent calls on
+  one thread share it, and the owner match narrows that rather than closing it.
+  Two live bridges renew alternately, so the value flip-flops between their two
+  ids: a closing call frees the newer one only if its own id happened to be the
+  last write, and the newer call's next tick re-arms within 15 s. The permanent
+  free an unconditional delete would have caused is gone; a ≤15 s window in a
+  deliberately rare shape is not.
+- **A release is not durable while the lease's renewer is still alive**, which
+  is the same fact seen from two sides. The bridge cancels its renewer as the
+  first statement of its `finally`, but `asyncio.to_thread` hands the Redis
+  write to a worker thread cancellation does not reach, so a renewal already
+  inside that write can land after the release — the thread keeps refusing
+  typed turns for ≤60 s (one lease) after the call ends, self-healing, with the
+  read still fail-OPEN. The REST `/stop` sees the same thing at a coarser
+  scale: it releases, and a bridge that is still up re-arms within a tick, so
+  that path frees the thread only once the socket is gone.

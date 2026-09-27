@@ -9,7 +9,9 @@ Verified 2026-08-19 against a real stored ``sk-ant-oat01-`` setup token:
   missing user:profile scope`` — that endpoint needs an interactive-login
   token; the mechanism behind closed PR #2170). Do not resurrect it here.
 - ``POST /v1/messages`` under the same token returns the full unified header
-  set: ``{5h,7d}-utilization`` (fraction 0..1), ``-reset`` (unix seconds),
+  set: ``{5h,7d}-utilization`` (a fraction of the cap — 1.0 is the limit, and
+  it is NOT clamped: a value past 1 is honoured as >100%, matching the
+  provider's own client, #2419), ``-reset`` (unix seconds),
   per-window ``-status``, ``representative-claim``, overage status/reason.
 
 The probe is a real ``max_tokens=1`` Haiku message on the OPERATOR'S OWN
@@ -41,7 +43,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 import httpx
@@ -49,7 +51,7 @@ import httpx
 from database import db
 from db_models import HeadroomWindow, SubscriptionHeadroom, SubscriptionUsage
 from redis_breaker_util import get_breaker_redis, SingleFlightLock
-from utils.helpers import utc_now_iso
+from utils.helpers import parse_iso_timestamp, utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -122,14 +124,26 @@ def is_auto_refresh_enabled() -> bool:
 
 
 def _parse_utilization(raw: Optional[str]) -> Optional[float]:
-    """Header carries a fraction (0.15 = 15%); tolerate an already-percent value."""
+    """Header value → percent of the window's cap, 1 decimal.
+
+    The header carries a FRACTION of the cap (``0.39`` = 39%) and it is not
+    clamped: ``1.2`` is 120% — an overage plan past its limit — exactly as the
+    provider's own client reads it (``Number(value)``, ``× 100``, no ``<= 1``
+    branch). An earlier "tolerate an already-percent value" branch here turned
+    that reading into 1.2%, so an exhausted subscription displayed, alerted and
+    ranked as nearly empty (#2419). Any ``float()`` literal is accepted; a
+    non-finite or negative result is ``None`` — the guard sits on the SCALED
+    value because a finite ``1e307`` overflows only after the multiply.
+    """
     if raw is None:
         return None
     try:
-        v = float(raw)
+        pct = float(raw) * 100.0
     except (TypeError, ValueError):
         return None
-    return round(v * 100.0, 1) if v <= 1.0 else round(v, 1)
+    if not math.isfinite(pct) or pct < 0:
+        return None
+    return round(pct, 1) + 0.0  # + 0.0: a "-0.0" header would render as "-0%"
 
 
 def _parse_reset(raw: Optional[str]) -> Optional[str]:
@@ -175,6 +189,45 @@ def parse_unified_headers(headers) -> Optional[dict]:
     }
 
 
+async def _post_probe(token: str) -> httpx.Response:
+    """THE probe request: a ``max_tokens=1`` Haiku message under ``token``."""
+    async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
+        return await client.post(
+            PROBE_URL,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": "oauth-2025-04-20",
+                "anthropic-version": "2023-06-01",
+                "User-Agent": "claude-code/2.0.32",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": PROBE_MODEL,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+
+async def check_token(token: str) -> str:
+    """Validate a raw setup token BEFORE it is registered (ent#582).
+
+    The same one-message probe as the headroom snapshot, so it costs the same
+    ~dozen tokens of the operator's own quota. Returns ``ok`` | ``rate_limited``
+    (a valid token that is at a limit right now) | ``invalid_token`` (401/403)
+    | ``error`` (transport failure or any other status). Never raises, never
+    logs the token.
+    """
+    try:
+        resp = await _post_probe(token)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ent#582] token check transport failure: %s", type(e).__name__)
+        return "error"
+    if resp.status_code in (401, 403):
+        return "invalid_token"
+    return {200: "ok", 429: "rate_limited"}.get(resp.status_code, "error")
+
+
 async def _probe(subscription_id: str) -> Optional[dict]:
     """One probe call; returns the snapshot dict (with status) or None when the
     subscription has no usable token. Never raises; never logs the token."""
@@ -186,22 +239,7 @@ async def _probe(subscription_id: str) -> Optional[dict]:
 
     snapshot: Dict[str, Any] = {"fetched_at": utc_now_iso(), "status": "ok"}
     try:
-        async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
-            resp = await client.post(
-                PROBE_URL,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "anthropic-beta": "oauth-2025-04-20",
-                    "anthropic-version": "2023-06-01",
-                    "User-Agent": "claude-code/2.0.32",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": PROBE_MODEL,
-                    "max_tokens": 1,
-                    "messages": [{"role": "user", "content": "hi"}],
-                },
-            )
+        resp = await _post_probe(token)
     except Exception as e:
         logger.warning(
             "[#471] headroom probe transport failure for subscription %s: %s",
@@ -230,8 +268,40 @@ async def _probe(subscription_id: str) -> Optional[dict]:
             )
             return {"fetched_at": snapshot["fetched_at"], "status": "error"}
         return snapshot
+    _log_past_cap(subscription_id, parsed, resp.headers)
     snapshot.update(parsed)
     return snapshot
+
+
+def _log_past_cap(subscription_id: str, parsed: dict, headers) -> None:
+    """#2419 arrival signal — the only way the issue's "capture a real overage
+    header set" criterion can ever close.
+
+    No header set past the cap has been captured: every local plan carries
+    ``overage_status = rejected`` and blocks at 100%, so the fix was modelled
+    on the provider client's parser instead. When a window first reads past
+    100% this records the RAW header strings, so the modelled sample becomes a
+    real one (``SELECT * FROM subscription_headroom_history WHERE
+    five_hour_utilization_pct > 100 OR seven_day_utilization_pct > 100`` finds
+    the rows). INFO, at most one line per probe (probes are
+    ``MIN_PROBE_INTERVAL_SECONDS`` apart) — and the same line is where a
+    provider switch to percent units (``39`` → 3900%) would show up.
+    """
+    over = [
+        w for w in ("five_hour", "seven_day")
+        if ((parsed.get(w) or {}).get("utilization_pct") or 0) > 100
+    ]
+    if not over:
+        return
+    logger.info(
+        "[#2419] subscription %s reports utilization past its cap (%s): "
+        "5h-utilization=%r 7d-utilization=%r overage-status=%r status=%r "
+        "representative-claim=%r",
+        subscription_id, ",".join(over),
+        headers.get(_H + "5h-utilization"), headers.get(_H + "7d-utilization"),
+        headers.get(_H + "overage-status"), headers.get(_H + "status"),
+        headers.get(_H + "representative-claim"),
+    )
 
 
 def _read_snapshot(subscription_id: str) -> tuple:
@@ -938,6 +1008,126 @@ def rank_subscriptions(candidates, readings: Dict[str, Optional[HeadroomReading]
         if selection_verdict(readings.get(c.id))[0] != SELECTION_REFUSED
     ]
     return sorted(kept, key=lambda c: selection_sort_key(c, readings.get(c.id)))
+
+
+# ---------------------------------------------------------------------------
+# #2638 — readmitting a subscription the 2h skip-list excluded
+# ---------------------------------------------------------------------------
+#
+# The skip-list (`db.has_recent_subscription_failures`, kind-blind, 2h) is the
+# ONLY guard against #444's ping-pong, so it is not merely relaxed here. It is
+# overridden per candidate, and only on POSITIVE evidence — never on the
+# absence of evidence, which is the direction that reintroduces the bug.
+#
+# Two forms of evidence, in strength order:
+#
+#   serving_now  — a FRESH reading says the provider is not refusing this token.
+#                  This is ground truth about now (the #447 rule: a probe beats
+#                  an inference from past failures), and it is the same evidence
+#                  `rank_subscriptions` already trusts in the other direction
+#                  when it DROPS a refusing candidate.
+#
+#   window_reset — no fresh reading, but the provider's own reset instant for a
+#                  blocked window has passed AND the failure predates it. The
+#                  window the subscription failed in has rolled over, so the
+#                  event is about a quota that no longer exists.
+#
+# The instant is read from an AGED snapshot on purpose, and the asymmetry is
+# this file's own established rule (#447/#2396): a utilisation *number* decays,
+# an *instant* does not. A reset time recorded six hours ago is exactly as true
+# now as it was then.
+#
+# The failure instant must PREDATE the reset for `window_reset` to hold. Without
+# that ordering a subscription that 429'd one minute AFTER its window rolled
+# over — i.e. one that is genuinely exhausted again — would be readmitted on the
+# strength of a reset it had already consumed.
+RECOVERY_SERVING_NOW = "serving_now"
+RECOVERY_WINDOW_RESET = "window_reset"
+
+# How old a snapshot may be and still have its RESET INSTANTS believed. Bounded
+# by the snapshot's own 7-day Redis TTL rather than left unbounded: past that
+# the key is gone, so a larger number would describe nothing.
+RECOVERY_INSTANT_MAX_AGE_SECONDS = 7 * 24 * 3600
+
+
+def _instant_has_passed(instant: Optional[str], now: datetime) -> bool:
+    """Has an ISO-Z provider instant elapsed? Unparseable/absent → False.
+
+    Fail-CLOSED: this answers "may the skip-list be overridden", so anything
+    unreadable must leave the skip-list standing.
+    """
+    if not instant:
+        return False
+    try:
+        return parse_iso_timestamp(instant) <= now
+    except Exception:  # noqa: BLE001 — a provider string we cannot read proves nothing
+        return False
+
+
+def recovery_verdict(
+    fresh: Optional[HeadroomReading],
+    aged: Optional[HeadroomReading],
+    last_failure_at: Optional[str],
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[str]:
+    """May a skip-listed subscription be READMITTED as a switch candidate?
+
+    Returns the evidence name (`RECOVERY_SERVING_NOW` / `RECOVERY_WINDOW_RESET`)
+    or `None` for "leave the skip-list standing". Pure — every input is already
+    resolved by the caller, so this is testable without Redis or a clock.
+
+    `fresh` is a reading inside the DISPLAY bound (`FRESHNESS_SECONDS` — the
+    caller bounds it, the same bound the evacuation door uses); `aged` is the
+    same snapshot read with only its instants believed (see the block comment
+    above). A caller with no aged reading passes the fresh one for both.
+
+    **A serving reading readmits only if it POSTDATES the failure.** A reading
+    taken before the 429 is exactly what a subscription at the wall carries for
+    up to one refresh interval after hitting it — the normal state on a
+    two-subscription install where both just hit the wall. Readmitting on it
+    re-opens #444's ping-pong from the other side: every user turn readmits the
+    other subscription on its pre-failure "ok", switches, fails, and flaps A↔B
+    until a probe records `rate_limited`. The `window_reset` arm below already
+    orders its instant against the failure; this arm has to as well, and a
+    failure whose instant cannot be read cannot be ordered — so it readmits
+    nothing on this arm (fail closed, like the arm below).
+    """
+    now = now or datetime.now(timezone.utc)
+    failed_at = None
+    if last_failure_at:
+        try:
+            failed_at = parse_iso_timestamp(last_failure_at)
+        except Exception:  # noqa: BLE001
+            failed_at = None
+    if fresh is not None and not fresh.refusing:
+        if failed_at is not None:
+            read_at = now - timedelta(seconds=max(0, int(fresh.age_seconds or 0)))
+            if read_at > failed_at:
+                return RECOVERY_SERVING_NOW
+        # A pre-failure "ok" (or an unorderable failure) is not evidence about
+        # NOW. Fall through to the instant arm, which orders itself.
+    if fresh is not None and fresh.refusing:
+        # A fresh reading that says "still refusing" is the strongest evidence
+        # available and it points the other way. Do not fall through to the
+        # instant arm and readmit on an older, weaker signal.
+        return None
+    if aged is None or failed_at is None:
+        return None
+    for window in (aged.five_hour, aged.seven_day):
+        if window is None or not window.blocked:
+            continue
+        if not _instant_has_passed(window.resets_at, now):
+            continue
+        try:
+            if parse_iso_timestamp(window.resets_at) <= failed_at:
+                # The failure happened at or after the rollover, so the reset is
+                # already spent — this is a fresh exhaustion, not a stale one.
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        return RECOVERY_WINDOW_RESET
+    return None
 
 
 def describe_reading(reading: Optional[HeadroomReading]) -> Dict[str, Any]:
