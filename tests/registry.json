@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_fleet_sync_audit.py",
+      "feature": "#390, ent#707",
+      "added": "2026-09-27",
+      "categories": [
+        "backend",
+        "unit",
+        "git-sync",
+        "api"
+      ],
+      "description": "The fleet sync audit (GET /api/fleet/sync-audit, MCP get_fleet_sync_audit) on a real DB via db_harness. #390: find_duplicate_bindings flags agents sharing (github_repo, working_branch) with source-mode rows excluded; build_fleet_sync_audit on an empty fleet, a clean agent, a duplicate pair, unpushed_commits from ahead_working, and the accessible-name filter. trinity-enterprise#707: every pre-#707 entry key keeps its meaning and the entry adds ahead / behind / dirty_files / diverged_since / divergence_age_s / last_successful_push_at / state / reason / recommendation / binding / auto_sync_enabled / frozen (a work agent diverged 7 ahead for 26 h is red + frozen); dirty_tree comes from dirty_files and drives the summary's in_sync / dirty; the summary adds diverged / frozen / auto_sync_off / red over a mixed fleet; an agent never observed is unknown with null counts and the old unpushed_commits fallback; no raw git error text anywhere in the result (seeded marker) while the recommendation still reads it."
+    },
+    {
       "file": "unit/test_ent707_fleet_health_sync.py",
       "feature": "ent#707",
       "added": "2026-09-27",
