@@ -389,6 +389,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
       "; the backend then refuses every key but a person's (reject_non_person_principal, trinity-enterprise#611)",
   },
   get_my_ask: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent); the backend re-checks identity (trinity-enterprise#611)" },
+  ask_operator: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent), `to` is a role and never an agent; the backend re-checks identity (trinity-enterprise#611)" },
   // --- git.ts ---
   get_git_status: { kind: "in-tool", how: GIT_GATE },
   git_sync: { kind: "in-tool", how: GIT_GATE },

@@ -76,9 +76,14 @@ def _fake_db(pending=0, exists=False, create_side_effect=None):
     # empties, not MagicMock defaults — a MagicMock iterates as empty and
     # `in` is False, which would keep these suites green without exercising
     # the path (the #2826 C1 class).
-    db.get_operator_queue_sync_index_for_agent.return_value = {"open": [], "terminal": {}}
+    db.get_operator_queue_sync_index_for_agent.return_value = {"open": [], "terminal": {}, "foreign": []}
     db.set_operator_queue_sync_state.return_value = False
     db.set_operator_queue_delivery_state.return_value = False
+    # trinity-enterprise#611: the poller creates through the outcome accessor.
+    # Route it through the plain create mock, so every assertion here still
+    # counts the poller's creates and a raising create still raises.
+    db.create_operator_queue_item_with_outcome.side_effect = (
+        lambda agent, item, **kw: (db.create_operator_queue_item(agent, item, **kw), True))
     db.mark_operator_queue_unconfirmed.return_value = 0
     db.refresh_operator_queue_last_confirmed.return_value = 0
     db.mark_operator_queue_undelivered_for_stopped_agents.return_value = []
@@ -631,6 +636,10 @@ _STUB_ROW_ID = "__row_uuid__"
 
 
 class _FakeConn:
+    # trinity-enterprise#611: the create reads the INSERT result's rowcount (the
+    # `inserted` flag of create_item_with_outcome); the stub reports an insert.
+    rowcount = 1
+
     def __init__(self, scalar=0):
         self._scalar = scalar
 

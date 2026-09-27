@@ -1136,14 +1136,15 @@
     },
     {
       "file": "unit/test_1402_prompt_contract.py",
-      "feature": "#1402",
+      "feature": "#1402 / trinity-enterprise#611",
       "added": "2026-07-15",
+      "updated": "2026-09-25",
       "categories": [
         "backend",
         "prompt",
         "reliability"
       ],
-      "description": "Async operator human-gate contract (#1402): sentinel phrases (fire-and-park / End your turn / ask-before-irreversible / globally-unique derived request ids / expires_at) present in every runtime build of the platform prompt; old block-inviting wording gone; Operator Communication section MCP-name-free and byte-identical across runtimes; task-mode _mode_guidance park carve-out (chat mode unchanged); composed task prompt end-to-end; meta-prompt reference copy + agent guide kept in sync."
+      "description": "Async operator human-gate contract (#1402): sentinel phrases (fire-and-park / End your turn / ask-before-irreversible / globally-unique derived request ids / expires_at) present in every runtime build of the platform prompt; old block-inviting wording gone; Operator Communication section MCP-name-free and byte-identical across runtimes; task-mode _mode_guidance park carve-out (chat mode unchanged); composed task prompt end-to-end; meta-prompt reference copy + agent guide kept in sync. trinity-enterprise#611: the section teaches ask_operator / get_my_ask / supersedes_expired / wakes_on_ending by their bare names, the tool before the queue file, and the file as the fallback for two releases."
     },
     {
       "file": "unit/test_181_agent_display_label.py",
@@ -3376,7 +3377,7 @@
         "access-control",
         "transport"
       ],
-      "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default). trinity-enterprise#611: a second suite drives get_my_ask over the same real transport against a stub that answers key validation by bearer and records every readback — an agent key is served its OWN agent and no other, a person's user-scoped key is refused before the backend is asked anything, and the orchestrator's system key reads as trinity-system."
+      "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default). trinity-enterprise#611: a second suite drives get_my_ask over the same real transport against a stub that answers key validation by bearer and records every readback — an agent key is served its OWN agent and no other, a person's user-scoped key is refused before the backend is asked anything, and the orchestrator's system key reads as trinity-system. trinity-enterprise#611 PR B: ask_operator over the same real transport \u2014 an agent key raises as its own agent with exactly the declared fields in the body, an agent_name argument neither aims the raise at a sibling nor reaches the backend, a person's user-scoped key is refused before any backend call, the system key raises as trinity-system, and a named 422 reaches the caller with its code and extras."
     },
     {
       "file": "unit/test_2915_operator_queue_sync_honesty.py",
@@ -3418,7 +3419,29 @@
         "typescript",
         "access-control"
       ],
-      "description": "Operator-queue MCP tools: the #1101 agent-scope post-filter (pure), the #1104 respond gate and proxy (stub client), and trinity-enterprise#611 get_my_ask — identity from the key (resolveActingAgent), no agent-target parameter, the system key reads as trinity-system, user / connector / agent-less system keys refused before any backend call, backend refusals returned as structured errors, the description teaching the rider — plus the person-only wording on respond_to_operator_queue. node:test."
+      "description": "Operator-queue MCP tools: the #1101 agent-scope post-filter (pure), the #1104 respond gate and proxy (stub client), and trinity-enterprise#611 get_my_ask — identity from the key (resolveActingAgent), no agent-target parameter, the system key reads as trinity-system, user / connector / agent-less system keys refused before any backend call, backend refusals returned as structured errors, the description teaching the rider — plus the person-only wording on respond_to_operator_queue. node:test. PR B: ask_operator \u2014 raises as the key's agent (the system key as trinity-system; user / connector / agent-less system keys refused before any backend call), declares no agent-shaped parameter, forwards ONLY the declared fields whatever else the arguments carry, returns a 422 / 429 refusal as its named code and extras, keeps an unnamed validation error or a transport failure structured, and its description teaches idempotency, the re-ask link and the readback without the mcp__trinity__ prefix."
+    },
+    {
+      "file": "unit/test_ent611_native_ask.py",
+      "feature": "trinity-enterprise#611",
+      "added": "2026-09-25",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "Agent-raised asks (trinity-enterprise#611, PR B). DB layer on real SQLite: the native create is atomic per agent (replay, depth cap and insert under one lock; a six-thread race at the cap admits exactly one), stores ISO-Z deadlines and the platform columns, and a native row never takes part in the file contract (the sync index names it foreign; the responded write-back, both sweeps and Clear All treat it as outside the file); facade signature parity for the new accessors. raise_ask: named 422 refusals that write nothing, the role on the receipt and never an email, owner / provider / operator addressing, the 15-minute deadline floor, the agent never authoring the Workspace thread, replay of the first receipt with `differs` answered before every time-dependent check, the own-expired-ask re-ask link and reask_requires_link, 429 rate_limited / queue_full, one `raised` audit row by ids and a thin operator_queue_new. The route: 201 / 200 replay, only the agent itself (or the system key as trinity-system), named codes, unknown fields refused. The poller: a file entry re-using a native id is skipped before any branch (logged once), creates go through the outcome accessor with file provenance, a row it did not insert is never counted, announced or audited, and the file channel's deprecation is named once per agent."
+    },
+    {
+      "file": "unit/test_ent611_native_ask_pg.py",
+      "feature": "trinity-enterprise#611",
+      "added": "2026-09-25",
+      "categories": [
+        "backend",
+        "unit",
+        "database"
+      ],
+      "description": "The native ask create is atomic per agent on BOTH backends (trinity-enterprise#611, PR B): `requires_postgres` + the db_backend harness, so schema-parity CI runs it on real PostgreSQL. Each create is held inside its critical section (after the count, before the insert) so racers overlap deterministically: six creates at the cap admit exactly one, six retries of one id make one row, one agent's full queue never holds back another's, and the file create reports whether its ON CONFLICT DO NOTHING insert happened. Removing the pg_advisory_xact_lock / BEGIN IMMEDIATE turns the matching backend red on every run."
     },
     {
       "file": "unit/test_2845_retry_trigger_sets.py",

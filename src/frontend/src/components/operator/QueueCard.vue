@@ -46,6 +46,15 @@
               :title="syncBadge.title"
               data-testid="queue-sync-badge"
             >{{ syncBadge.label }}</BaseBadge>
+            <!-- trinity-enterprise#611 (#627 AC6): a re-ask and the expired ask it
+                 re-raises name each other — one rule
+                 (utils/operatorQueue.js::queueReaskBadges), one fact per badge. -->
+            <BaseBadge
+              v-for="b in reaskBadges"
+              :key="b.key"
+              :title="b.title"
+              :data-testid="b.key === 'reask-of' ? 'queue-reask-of' : 'queue-reasked-as'"
+            >{{ b.prefix }} <span v-if="b.id" class="min-w-0 max-w-[12rem] truncate font-mono" :title="b.id" data-testid="queue-reask-id">{{ b.id }}</span></BaseBadge>
             <span
               v-if="item.priority === 'critical' || item.priority === 'high'"
               class="text-xs px-2 py-0.5 rounded-full"
@@ -194,7 +203,7 @@ import { renderMarkdown } from '../../utils/markdown'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
-import { queueTypeLabel, queueResponseKind, queueSyncBadge } from '../../utils/operatorQueue'
+import { queueTypeLabel, queueResponseKind, queueSyncBadge, queueReaskBadges } from '../../utils/operatorQueue'
 import AgentAvatar from '../AgentAvatar.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import InlineError from '../InlineError.vue'
@@ -215,6 +224,7 @@ const agentsStore = useAgentsStore()
 const responseKind = computed(() => queueResponseKind(props.item))
 // #2915: sync/delivery/aging badge and the refused-response notice.
 const syncBadge = computed(() => queueSyncBadge(props.item))
+const reaskBadges = computed(() => queueReaskBadges(props.item, store.items))   // trinity-enterprise#611
 const diverged = computed(() => store.divergedItemId === props.item.id)
 
 const isExpanded = computed(() => store.expandedItemId === props.item.id)

@@ -1,4 +1,4 @@
-# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; get_my_ask → agent_router's self-readback)
+# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; ask_operator → agent_router's raise; get_my_ask → agent_router's self-readback)
 """
 Operator Queue API Router (OPS-001).
 
@@ -13,8 +13,14 @@ gate and map errors. Only a person ends an ask (`reject_non_person_principal`).
 
 import json
 from typing import Any, Dict, List, Optional, Set
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from models import BulkCancelRequest, ClearResolvedRequest, OperatorCancel, OperatorResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from models import (
+    BulkCancelRequest,
+    ClearResolvedRequest,
+    OperatorAskCreate,
+    OperatorCancel,
+    OperatorResponse,
+)
 
 from database import db
 from dependencies import (
@@ -82,6 +88,12 @@ def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict
     for item in items:
         for key in _PERSON_FIELDS_WITHHELD_FROM_MACHINES:
             item.pop(key, None)
+        # trinity-enterprise#611: a native ask's addressee is the person the
+        # PLATFORM resolved a role to — the email `resolved_to` also holds — so a
+        # machine does not get it back (the receipt's rule). A file entry's
+        # addressee is the agent's own input and stays (the registered residual).
+        if item.get("channel") not in (None, "file"):
+            item.pop("addressed_to_email", None)
     return items
 
 
@@ -407,8 +419,41 @@ async def get_agent_queue_items(
 
 
 # ============================================================================
-# The agent's own readback (trinity-enterprise#611)
+# The agent raises an ask, and reads it back (trinity-enterprise#611)
 # ============================================================================
+
+@agent_router.post("/{name}/operator-queue")
+async def raise_my_ask(
+    body: OperatorAskCreate,
+    response: Response,
+    name: str = Depends(get_self_acting_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """An agent asks a person for a decision — one call, validated here, stored,
+    broadcast, and answered with a receipt. No file is written.
+
+    The calling agent only, as itself (`get_self_acting_agent`): the record
+    says an agent raised it. 201 with the receipt on a create; 200 with the
+    FIRST ask's receipt (`status: "replayed"`) when this `request_id` was
+    already raised, so a retry is a no-op. Refusals carry named codes — 422
+    for a malformed ask, 429 for the caps.
+    """
+    try:
+        receipt = ask_service.raise_ask(
+            name,
+            body.model_dump(exclude_none=True),
+            raised_by="agent",
+            channel="mcp",
+            actor_user=current_user,
+        )
+    except ask_service.AskRejected as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail={"code": e.code, "message": e.message, **e.extra},
+        )
+    response.status_code = 201 if receipt["status"] == "created" else 200
+    return receipt
+
 
 @agent_router.get("/{name}/operator-queue/{request_id}")
 async def get_my_ask(
