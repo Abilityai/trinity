@@ -329,4 +329,4 @@ async def test_a_portal_session_token_is_untouched_by_the_agent_fence(monkeypatc
 
     principal = await pa.get_portal_principal(
         SimpleNamespace(), SimpleNamespace(headers={}), token="portal-token")
-    assert principal == ("client@example.com", False)
+    assert (principal.email, principal.is_platform) == ("client@example.com", False)

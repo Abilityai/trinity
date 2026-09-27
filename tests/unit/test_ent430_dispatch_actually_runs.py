@@ -19,7 +19,6 @@ scheduled.
 from __future__ import annotations
 
 import asyncio
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -94,32 +93,31 @@ async def test_the_spawn_still_works_from_the_async_operator_route(resume_mod):
 def _install(monkeypatch, *, respond_result, enabled=True):
     """Stub the DB and the roster; leave the dispatch decision real."""
     import client_portal.asks.service as svc
+    import services.ask_service as sink
 
     calls: list = []
     monkeypatch.setattr(svc, "_on_roster", lambda *a, **k: True, raising=False)
-    monkeypatch.setattr(
-        svc, "db",
-        SimpleNamespace(
-            get_operator_queue_item=lambda i: {
-                "id": i, "agent_name": "a", "type": "question",
-                "status": "pending", "options": ["PDF"],
-                "addressed_to_email": "x@example.com",
-            },
-            respond_to_operator_queue_item=lambda **kw: respond_result,
-            get_operator_resume_enabled=lambda a: enabled,
-        ),
-        raising=False,
+    fake_db = SimpleNamespace(
+        get_operator_queue_item=lambda i: {
+            "id": i, "agent_name": "a", "type": "question",
+            "status": "pending", "options": ["PDF"],
+            "addressed_to_email": "x@example.com",
+        },
+        respond_to_operator_queue_item=lambda **kw: respond_result,
+        get_operator_resume_enabled=lambda a: enabled,
     )
-    # BOTH, not one. `answer_ask` does `from services import
-    # operator_resume_service`, which resolves the PACKAGE ATTRIBUTE and shadows
-    # the `sys.modules` entry — patching only the latter leaves the real function
-    # running, which is how the first draft of this file drove the real spawn by
-    # accident. (learnings.md 2026-08-27 records this exact resolution trap.)
-    import services as services_pkg
-
-    stub = SimpleNamespace(spawn_resume_dispatch=lambda item, **kw: calls.append(item))
-    monkeypatch.setitem(sys.modules, "services.operator_resume_service", stub)
-    monkeypatch.setattr(services_pkg, "operator_resume_service", stub, raising=False)
+    # trinity-enterprise#611: `answer_ask` reads through its own `db`, and ends
+    # the ask through the ask sink, which writes, reads the opt-in and spawns
+    # the resume through ITS module globals — so both modules get the stubs.
+    # The sink binds `operator_resume_service` at import, so patching
+    # `sys.modules` or the `services` package attribute would not reach it.
+    monkeypatch.setattr(svc, "db", fake_db, raising=False)
+    monkeypatch.setattr(sink, "db", fake_db)
+    stub = SimpleNamespace(
+        spawn_resume_dispatch=lambda item, **kw: calls.append(item),
+        spawn_on_loop=lambda factory: None,   # the audit/broadcast hop: not under test here
+    )
+    monkeypatch.setattr(sink, "operator_resume_service", stub)
     return svc, calls
 
 
@@ -178,11 +176,10 @@ def test_resume_requested_is_false_when_the_spawn_raised(monkeypatch):
     def _boom(item, **kw):
         raise RuntimeError("no running event loop")
 
-    import services as services_pkg
+    import services.ask_service as sink
 
-    stub = SimpleNamespace(spawn_resume_dispatch=_boom)
-    monkeypatch.setitem(sys.modules, "services.operator_resume_service", stub)
-    monkeypatch.setattr(services_pkg, "operator_resume_service", stub, raising=False)
+    stub = SimpleNamespace(spawn_resume_dispatch=_boom, spawn_on_loop=lambda factory: None)
+    monkeypatch.setattr(sink, "operator_resume_service", stub)
     out = svc.answer_ask("q1", "x@example.com", False, "PDF", None)
     assert out.resume_requested is False, (
         "a spawn that raised still reported resume_requested=true — an ask that "

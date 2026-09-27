@@ -25,16 +25,19 @@
 
         <p class="text-sm text-gray-600 dark:text-gray-400">{{ item.title }}</p>
 
-        <!-- Response (responded/acknowledged) or terminal status (cancelled/expired, #1017) -->
+        <!-- Response (responded/acknowledged) or terminal status (cancelled/expired, #1017).
+             trinity-enterprise#611: who ended it and when, from the endings
+             ledger — one rule (utils/operatorQueue.js::queueEnding). -->
         <div class="mt-2 flex items-center gap-2">
           <span
             v-if="isTerminalWithoutResponse"
             class="inline-flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400"
+            data-testid="queue-ending"
           >
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
-            {{ item.status === 'expired' ? 'Expired' : 'Cancelled' }}
+            {{ endingText }}
           </span>
           <span v-else class="inline-flex items-center gap-1 text-xs text-status-success-700 dark:text-status-success-400">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -42,11 +45,19 @@
             </svg>
             {{ item.response }}
           </span>
-          <span v-if="item.response_text" class="text-xs text-gray-500 dark:text-gray-400">
-            &mdash; {{ item.response_text }}
+          <!-- The answer's note, or the operator's reason for cancelling. -->
+          <span v-if="note" class="text-xs text-gray-500 dark:text-gray-400">
+            &mdash; {{ note }}
           </span>
-          <span class="text-xs text-gray-500 dark:text-gray-400 ml-auto">
-            {{ timeAgo(item.responded_at || item.created_at) }}
+          <!-- When it ENDED — relative, absolute on hover. A row that ended
+               before the ledger has no ending time, and shows none rather than
+               its filing time. -->
+          <span
+            class="text-xs text-gray-500 dark:text-gray-400 ml-auto"
+            :title="endedAtAbsolute || undefined"
+            data-testid="queue-ending-when"
+          >
+            {{ endingMeta }}
           </span>
         </div>
       </div>
@@ -59,7 +70,8 @@ import { computed } from 'vue'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
-import { queueSyncBadge } from '../../utils/operatorQueue'
+import { queueSyncBadge, queueEnding, queueEndingText } from '../../utils/operatorQueue'
+import { formatLocalDateTime } from '../../utils/timestamps'
 import AgentAvatar from '../AgentAvatar.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 
@@ -74,6 +86,17 @@ const syncBadge = computed(() => queueSyncBadge(props.item))   // #2915
 const isTerminalWithoutResponse = computed(() =>
   props.item.status === 'cancelled' || props.item.status === 'expired'
 )
+const ending = computed(() => queueEnding(props.item))   // trinity-enterprise#611
+const endingText = computed(() => queueEndingText(ending.value))
+const note = computed(() => props.item.response_text || props.item.disposition_reason || '')
+const endedAtAbsolute = computed(() => (ending.value?.when ? formatLocalDateTime(ending.value.when) : ''))
+// An answer's "who" rides beside its time; a cancel / expiry names it in its label.
+const endingMeta = computed(() => {
+  const parts = []
+  if (ending.value?.kind === 'answered' && ending.value.who) parts.push(`by ${ending.value.who}`)
+  if (ending.value?.when) parts.push(timeAgo(ending.value.when))
+  return parts.join(' · ')
+})
 const agentAvatarUrl = computed(() => {
   const agent = agentsStore.agents.find(a => a.name === props.item.agent_name)
   return agent?.avatar_url || null

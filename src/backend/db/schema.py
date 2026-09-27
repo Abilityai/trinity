@@ -1668,6 +1668,18 @@ TABLES = {
             delivery_detail TEXT,
             delivery_updated_at TEXT,
             divergence_acknowledged_at TEXT,
+            disposition TEXT,
+            disposed_at TEXT,
+            disposed_by TEXT,
+            disposed_by_email TEXT,
+            disposition_reason TEXT,
+            batch_id TEXT,
+            raised_by TEXT,
+            channel TEXT,
+            to_role TEXT,
+            resolved_to TEXT,
+            proposal TEXT,
+            supersedes_expired TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,

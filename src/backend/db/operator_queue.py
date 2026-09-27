@@ -21,7 +21,7 @@ from sqlalchemy import select, update, func, and_, or_, case, delete
 
 from .engine import get_engine, make_insert
 from .tables import operator_queue
-from utils.helpers import utc_now_iso, iso_cutoff
+from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
 
 
 # #1632: generous hard "belt" caps enforced at the DB sink itself. The agent
@@ -37,6 +37,31 @@ _DB_BELT_TITLE_MAX_BYTES = 4 * 1024
 _DB_BELT_QUESTION_MAX_BYTES = 16 * 1024
 _DB_BELT_CONTEXT_MAX_BYTES = 64 * 1024
 _DB_BELT_ID_MAX = 512
+
+# trinity-enterprise#611: expiry is swept by a text comparison
+# (`expires_at < now`), so a deadline written with an offset ("…+02:00") or
+# without a zone compared hours off (Invariant #16). Bounded so the per-cycle
+# sweep never holds an unbounded write set; the rest wait for the next cycle.
+_EXPIRY_BATCH_MAX = 500
+
+
+def _iso_z_deadline(value) -> Optional[str]:
+    """A deadline as ISO-8601 UTC with a `Z` suffix; text that does not parse —
+    or lands past the year range once moved to UTC — is kept as written, and a
+    falsy value is None. Never raises: a raise here fails the create, and the
+    poller quarantines the ask instead of showing it.
+
+    Kept verbatim rather than dropped because the #2915 fingerprint
+    (`operator_queue_service._normalise_expires`) compares an unparseable value
+    as its own text — dropping it here would read as the agent rewriting the
+    deadline on every cycle.
+    """
+    if not value:
+        return None
+    try:
+        return to_utc_iso(parse_iso_timestamp(str(value)))
+    except (TypeError, ValueError, OverflowError):
+        return str(value)
 
 
 def _operator_queue_prune_predicate(
@@ -106,6 +131,21 @@ class OperatorQueueOperations:
             # #2989 review — the operator answered a diverged item knowingly; the
             # write-back delivers into the entry as it is now
             "divergence_acknowledged_at": row["divergence_acknowledged_at"],
+            # trinity-enterprise#611 — how the ask ended (NULL on a row that
+            # ended before the ledger: read the ending from `status`)
+            "disposition": row["disposition"],
+            "disposed_at": row["disposed_at"],
+            "disposed_by": row["disposed_by"],
+            "disposed_by_email": row["disposed_by_email"],
+            "disposition_reason": row["disposition_reason"],
+            "batch_id": row["batch_id"],
+            # trinity-enterprise#611 — the agent-raised ask (platform-owned)
+            "raised_by": row["raised_by"],
+            "channel": row["channel"],
+            "to_role": row["to_role"],
+            "resolved_to": json.loads(row["resolved_to"]) if row["resolved_to"] else None,
+            "proposal": json.loads(row["proposal"]) if row["proposal"] else None,
+            "supersedes_expired": row["supersedes_expired"],
         }
 
     # Columns selected for a full queue-item record, in the canonical order.
@@ -139,14 +179,38 @@ class OperatorQueueOperations:
         operator_queue.c.delivery_detail,
         operator_queue.c.delivery_updated_at,
         operator_queue.c.divergence_acknowledged_at,
+        operator_queue.c.disposition,  # trinity-enterprise#611 — the endings ledger
+        operator_queue.c.disposed_at,
+        operator_queue.c.disposed_by,
+        operator_queue.c.disposed_by_email,
+        operator_queue.c.disposition_reason,
+        operator_queue.c.batch_id,
+        operator_queue.c.raised_by,  # trinity-enterprise#611 — the agent-raised ask
+        operator_queue.c.channel,
+        operator_queue.c.to_role,
+        operator_queue.c.resolved_to,
+        operator_queue.c.proposal,
+        operator_queue.c.supersedes_expired,
     )
 
-    def create_item(self, agent_name: str, item: Dict) -> str:
+    def create_item(
+        self,
+        agent_name: str,
+        item: Dict,
+        *,
+        channel: Optional[str] = None,
+        raised_by: Optional[str] = None,
+    ) -> str:
         """Create a queue item from agent JSON data.
 
         Args:
             agent_name: The agent that created this item
             item: Queue item data from agent's operator-queue.json
+            channel / raised_by: trinity-enterprise#611 — how the ask arrived
+                (`file` | `mcp`) and who raised it (`agent` | `gate`). KEYWORD-ONLY
+                and never read from `item`: the item is agent-authored, and a
+                file entry that could carry `"channel": "mcp"` would forge its
+                own provenance. A platform alarm passes neither (NULL).
 
         Returns:
             The item ID (the platform-minted uuid of the row that actually
@@ -226,7 +290,11 @@ class OperatorQueueOperations:
             context=context_json,
             execution_id=context_execution_id,
             created_at=item.get("created_at") or utc_now_iso(),
-            expires_at=item.get("expires_at"),
+            # trinity-enterprise#611: ISO-Z at the sink, whichever path wrote it —
+            # expiry and the respond deadline compare it as text (Invariant #16).
+            expires_at=_iso_z_deadline(item.get("expires_at")),
+            channel=channel,
+            raised_by=raised_by,
             # ent#364: already validated against the agent's roster by
             # `operator_queue_service._validated_addressee`. This layer stores it;
             # it does not decide it, and it must never derive it from `context`
@@ -260,6 +328,61 @@ class OperatorQueueOperations:
             return None
         return self._row_to_item(row)
 
+    def get_item_for_agent_by_request_id(self, agent_name: str, request_id: str) -> Optional[Dict]:
+        """One agent's ask by the id the AGENT chose (trinity-enterprise#611).
+
+        The agent's own readback. Scoped to `(agent_name, request_id)` — the
+        uniqueness the #1631 index enforces — so one agent can never read
+        another's ask by guessing its id. Deliberately NOT filtered on
+        `cleared_at`: Clear All hides a row from the operator's list, and must
+        not hide how the ask ended from the agent that raised it.
+        """
+        stmt = select(*self._SELECT_COLS).where(
+            and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.request_id == request_id,
+            )
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return self._row_to_item(row) if row else None
+
+    def list_recent_endings_for_agent(
+        self,
+        agent_name: str,
+        since: str,
+        limit: int,
+        exclude_request_id_prefixes=None,
+    ) -> List[Dict]:
+        """The asks this agent raised that ENDED at or after `since`, newest first
+        (trinity-enterprise#611 — the Execution Context line).
+
+        Ids and the ending only — `request_id`, `disposition`, `disposed_at` —
+        never a title, an answer or a reason: the line reaches every composed
+        turn. Only rows that carry the ledger (a row that ended before it has no
+        ending time to show); platform alarms excluded by prefix (the agent
+        raised none of them, ent#499).
+        """
+        stmt = (
+            select(
+                operator_queue.c.request_id,
+                operator_queue.c.disposition,
+                operator_queue.c.disposed_at,
+            )
+            .where(
+                and_(
+                    operator_queue.c.agent_name == agent_name,
+                    operator_queue.c.disposition.isnot(None),
+                    operator_queue.c.disposed_at >= since,
+                    *self._not_prefixed(exclude_request_id_prefixes),
+                )
+            )
+            .order_by(operator_queue.c.disposed_at.desc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings().all()]
+
     def list_items(
         self,
         status: Optional[str] = None,
@@ -272,8 +395,14 @@ class OperatorQueueOperations:
         accessible_agent_names: Optional[Set[str]] = None,
         include_cleared: bool = False,
         addressed_to_email: Optional[str] = None,
+        hide_ended_before: Optional[str] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
+
+        hide_ended_before (trinity-enterprise#611): an ISO-Z cutoff. Rows that
+        ENDED before it are left out; pending rows are unaffected. A row's ending
+        time is `disposed_at`, else (a row that ended before the ledger) its
+        answer time, else its filing time — the only window signal such a row has.
 
         accessible_agent_names: if None, no access filter (admin). If a set,
         only items whose agent_name is in the set are returned. Empty set
@@ -332,18 +461,38 @@ class OperatorQueueOperations:
             )
         if since:
             conds.append(operator_queue.c.created_at >= since)
+        if hide_ended_before:
+            conds.append(or_(
+                operator_queue.c.status == "pending",
+                func.coalesce(
+                    operator_queue.c.disposed_at,
+                    operator_queue.c.responded_at,
+                    operator_queue.c.created_at,
+                ) >= hide_ended_before,
+            ))
 
-        # Sort: pending items by priority then age, others by created_at desc
-        status_order = case(
-            (operator_queue.c.status == "pending", 0),
-            else_=1,
-        )
+        # Sort: pending items by priority then age; ended items by WHEN THEY
+        # ENDED, newest first (trinity-enterprise#611, #627 AC6) — sorting a
+        # cancellation made this morning by the day the ask was filed buried it.
+        # A row that ended before the ledger falls back to its answer time, then
+        # to its filing time (no other timestamp exists for it).
+        is_pending = operator_queue.c.status == "pending"
+        status_order = case((is_pending, 0), else_=1)
         priority_order = case(
             (operator_queue.c.priority == "critical", 0),
             (operator_queue.c.priority == "high", 1),
             (operator_queue.c.priority == "medium", 2),
             (operator_queue.c.priority == "low", 3),
             else_=4,
+        )
+        pending_priority = case((is_pending, priority_order), else_=0)
+        sort_time = case(
+            (is_pending, operator_queue.c.created_at),
+            else_=func.coalesce(
+                operator_queue.c.disposed_at,
+                operator_queue.c.responded_at,
+                operator_queue.c.created_at,
+            ),
         )
 
         stmt = select(*self._SELECT_COLS)
@@ -352,8 +501,8 @@ class OperatorQueueOperations:
         stmt = (
             stmt.order_by(
                 status_order,
-                priority_order,
-                operator_queue.c.created_at.desc(),
+                pending_priority,
+                sort_time.desc(),
             )
             .limit(limit)
             .offset(offset)
@@ -381,6 +530,14 @@ class OperatorQueueOperations:
 
         Returns the updated item or None if not found.
 
+        trinity-enterprise#611: the same UPDATE writes the endings ledger
+        (`disposition='answered'`, `disposed_by='person'`), and the compare-and-set
+        also requires the deadline not to have passed. An answer that arrives
+        after `expires_at` but before the poller sweeps the row returns the row
+        with `_status_conflict` while its status still reads `pending` — the
+        caller names that `expired`; an approval must never land after the
+        deadline the rider calls "denied by timeout".
+
         `responded_by_id` is Optional on purpose (ent#364/ent#428): it is a
         `users` id, and an ask answered by a Workspace client has no row there.
         Writing one would be a lie in the audit trail, so a client answer is
@@ -399,6 +556,10 @@ class OperatorQueueOperations:
                     and_(
                         operator_queue.c.id == item_id,
                         operator_queue.c.status == "pending",
+                        or_(
+                            operator_queue.c.expires_at.is_(None),
+                            operator_queue.c.expires_at > now,
+                        ),
                     )
                 )
                 .values(
@@ -409,6 +570,10 @@ class OperatorQueueOperations:
                     responded_by_email=responded_by_email,
                     responded_at=now,
                     divergence_acknowledged_at=now if divergence_acknowledged else None,
+                    disposition="answered",
+                    disposed_at=now,
+                    disposed_by="person",
+                    disposed_by_email=responded_by_email,
                 )
             )
 
@@ -422,17 +587,32 @@ class OperatorQueueOperations:
                 if not row:
                     return None
                 # Item exists but not pending — lost a race (e.g. bulk-cancel
-                # landed between the router's status check and this UPDATE).
-                # Mark the conflict so the router can 409 instead of returning
-                # a 200 for a response that was never recorded (#1017).
+                # landed between the router's status check and this UPDATE) — or
+                # still pending past its deadline (#611). Mark the conflict so
+                # the caller can 409 instead of returning a 200 for a response
+                # that was never recorded (#1017).
                 item = self.get_item(item_id)
                 item["_status_conflict"] = True
                 return item
 
         return self.get_item(item_id)
 
-    def cancel_item(self, item_id: str) -> Optional[Dict]:
-        """Cancel a pending queue item."""
+    def cancel_item(
+        self,
+        item_id: str,
+        *,
+        disposed_by_email: str,
+        reason: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """Cancel a pending queue item, recording who ended it (trinity-enterprise#611).
+
+        The status flip and the endings ledger are ONE compare-and-set, the mirror
+        of `respond_to_item`: a caller that loses the race (the ask was answered,
+        cancelled or expired first) gets the row back with `_status_conflict` and
+        writes nothing, so the ending it would have recorded never overwrites the
+        one that happened. Returns None when the item does not exist.
+        """
+        now = utc_now_iso()
         with get_engine().begin() as conn:
             result = conn.execute(
                 update(operator_queue)
@@ -442,7 +622,14 @@ class OperatorQueueOperations:
                         operator_queue.c.status == "pending",
                     )
                 )
-                .values(status="cancelled")
+                .values(
+                    status="cancelled",
+                    disposition="cancelled",
+                    disposed_at=now,
+                    disposed_by="person",
+                    disposed_by_email=disposed_by_email,
+                    disposition_reason=reason,
+                )
             )
 
             if result.rowcount == 0:
@@ -451,6 +638,9 @@ class OperatorQueueOperations:
                 ).first()
                 if not exists:
                     return None
+                item = self.get_item(item_id)
+                item["_status_conflict"] = True
+                return item
 
         return self.get_item(item_id)
 
@@ -458,7 +648,10 @@ class OperatorQueueOperations:
         self,
         ids: List[str],
         accessible_agent_names: Optional[Set[str]] = None,
-    ) -> int:
+        *,
+        disposed_by_email: str,
+        reason: Optional[str] = None,
+    ) -> Dict:
         """Cancel the listed items that are still pending (#1017).
 
         Only items in `ids` are touched — the caller sends the ids it actually
@@ -469,25 +662,52 @@ class OperatorQueueOperations:
         (a zero-agent user must not be able to touch anything); non-empty =
         SQL-side IN filter.
 
-        Returns the number of items actually cancelled.
+        trinity-enterprise#611: the sweep mints ONE `batch_id` and the same
+        compare-and-set UPDATE stamps it with the endings ledger, so re-selecting
+        `id IN (:ids) AND batch_id = :b` returns exactly the rows THIS sweep
+        flipped — never a row another writer ended first (dialect-agnostic, no
+        RETURNING). Returns `{"batch_id", "rows"}`; `batch_id` is None when the
+        sweep ended nothing.
         """
+        empty = {"batch_id": None, "rows": []}
         if not ids:
-            return 0
+            return empty
         if accessible_agent_names is not None and len(accessible_agent_names) == 0:
-            return 0
+            return empty
 
+        ids = list(ids)
         conds = [
             operator_queue.c.status == "pending",
-            operator_queue.c.id.in_(list(ids)),
+            operator_queue.c.id.in_(ids),
         ]
         if accessible_agent_names is not None:
             conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
 
+        batch_id = uuid.uuid4().hex
+        now = utc_now_iso()
         with get_engine().begin() as conn:
             result = conn.execute(
-                update(operator_queue).where(and_(*conds)).values(status="cancelled")
+                update(operator_queue).where(and_(*conds)).values(
+                    status="cancelled",
+                    disposition="cancelled",
+                    disposed_at=now,
+                    disposed_by="person",
+                    disposed_by_email=disposed_by_email,
+                    disposition_reason=reason,
+                    batch_id=batch_id,
+                )
             )
-            return result.rowcount
+            if result.rowcount == 0:
+                return empty
+            rows = conn.execute(
+                select(*self._SELECT_COLS).where(
+                    and_(
+                        operator_queue.c.id.in_(ids),
+                        operator_queue.c.batch_id == batch_id,
+                    )
+                )
+            ).mappings().all()
+        return {"batch_id": batch_id, "rows": [self._row_to_item(r) for r in rows]}
 
     def clear_resolved_items(
         self,
@@ -643,25 +863,55 @@ class OperatorQueueOperations:
             ).first()
             return row[0] if row else None
 
-    def mark_expired(self) -> int:
-        """Mark pending items past their expires_at as expired.
+    def mark_expired(self) -> List[Dict]:
+        """Expire pending items past their deadline; return the rows THIS call ended.
 
-        Returns number of items expired.
+        trinity-enterprise#611: a bounded candidate select, then one
+        compare-and-set UPDATE per id (`status = 'pending'` still) that also
+        writes the ledger with `disposed_by = 'timeout'`. The rowcount of each
+        UPDATE is the identity of the winner, so two overlapping sweeps (a Redis
+        flap can briefly give two leaders) end — and later wake — each row once.
+        Edge-triggered: a second pass over the same rows ends nothing.
         """
         now = utc_now_iso()
+        candidates = (
+            select(operator_queue.c.id)
+            .where(
+                and_(
+                    operator_queue.c.status == "pending",
+                    operator_queue.c.expires_at.isnot(None),
+                    operator_queue.c.expires_at < now,
+                )
+            )
+            .order_by(operator_queue.c.expires_at.asc())
+            .limit(_EXPIRY_BATCH_MAX)
+        )
+        won = []
         with get_engine().begin() as conn:
-            result = conn.execute(
-                update(operator_queue)
-                .where(
-                    and_(
-                        operator_queue.c.status == "pending",
-                        operator_queue.c.expires_at.isnot(None),
-                        operator_queue.c.expires_at < now,
+            for (item_id,) in conn.execute(candidates).all():
+                result = conn.execute(
+                    update(operator_queue)
+                    .where(
+                        and_(
+                            operator_queue.c.id == item_id,
+                            operator_queue.c.status == "pending",
+                        )
+                    )
+                    .values(
+                        status="expired",
+                        disposition="expired",
+                        disposed_at=now,
+                        disposed_by="timeout",
                     )
                 )
-                .values(status="expired")
-            )
-            return result.rowcount
+                if result.rowcount:
+                    won.append(item_id)
+            if not won:
+                return []
+            rows = conn.execute(
+                select(*self._SELECT_COLS).where(operator_queue.c.id.in_(won))
+            ).mappings().all()
+        return [self._row_to_item(r) for r in rows]
 
     def get_stats(self, accessible_agent_names: Optional[Set[str]] = None) -> Dict:
         """Get queue statistics.

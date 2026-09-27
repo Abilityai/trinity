@@ -21,6 +21,7 @@ from models import (
     REPORT_PAYLOAD_MAX_BYTES,
 )
 from services.prompt_tier import PromptTier, resolve_prompt_tier
+from utils.helpers import iso_cutoff
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,11 @@ MAX_PLATFORM_URL_LEN = 200
 MAX_DISPLAY_NAME_LEN = 120
 MAX_ROLE_ID_LEN = 64
 MAX_STAKEHOLDER_LEN = 140
+# Ended asks (trinity-enterprise#611): the agent's own request ids, how each
+# ended and when — a bounded list, one day back.
+MAX_ENDED_ASKS = 5
+MAX_REQUEST_ID_LEN = 64
+ENDED_ASKS_WINDOW_HOURS = 24
 
 # Static platform instructions — moved from agent-side trinity.py
 PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
@@ -689,6 +695,11 @@ class ExecutionContext:
     role_id: Optional[str] = None
     stakeholders: Optional[List[str]] = None
     proactive_consent: Optional[bool] = None
+    # trinity-enterprise#611: asks this agent raised that ended in the last day —
+    # `{request_id, disposition, disposed_at}` each, no human text. Auto-filled
+    # from the DB; stateless, so a wake that was lost (a crash, a stopped agent)
+    # still reaches the agent on its next turn.
+    ended_asks: Optional[List[dict]] = None
 
     @staticmethod
     def derive_mode(triggered_by: Optional[str]) -> str:
@@ -761,6 +772,25 @@ def _render_collaborators(ctx: ExecutionContext) -> Optional[str]:
         shown = cleaned[:MAX_COLLABORATORS]
         return ", ".join(shown) + f", … ({len(cleaned) - MAX_COLLABORATORS} more)"
     return ", ".join(cleaned)
+
+
+def _render_ended_asks(ctx: ExecutionContext) -> Optional[str]:
+    """The `Ended asks` line body (trinity-enterprise#611): ids, the ending, the
+    time — no title, answer or reason, which a person wrote and this block
+    reaches every composed turn. Bounded; the rest is one tool call away."""
+    if not ctx.ended_asks:
+        return None
+    entries: List[str] = []
+    for ask in ctx.ended_asks[:MAX_ENDED_ASKS]:
+        rid = _sanitize_field(ask.get("request_id"), max_len=MAX_REQUEST_ID_LEN)
+        how = _sanitize_field(ask.get("disposition"), max_len=16)
+        when = _sanitize_field(ask.get("disposed_at"), max_len=MAX_TIMESTAMP_LEN)
+        if rid and how:
+            entries.append(" ".join(x for x in (rid, how, when) if x))
+    if not entries:
+        return None
+    more = ", and more" if len(ctx.ended_asks) > MAX_ENDED_ASKS else ""
+    return "; ".join(entries) + f"{more} — read one with get_my_ask"
 
 
 def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
@@ -876,6 +906,10 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if collaborators:
             lines.append(f"- **Collaborators**: {collaborators}")
 
+        ended_asks = _render_ended_asks(ctx)
+        if ended_asks:
+            lines.append(f"- **Ended asks (last {ENDED_ASKS_WINDOW_HOURS} h)**: {ended_asks}")
+
         timestamp = _sanitize_field(
             ctx.timestamp, max_len=MAX_TIMESTAMP_LEN
         ) or datetime.now(timezone.utc).isoformat()
@@ -919,6 +953,25 @@ def _resolve_assignment(
     from services.assignment_provider import resolve_assignment
 
     return resolve_assignment(agent_name, triggered_by) or {}
+
+
+def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
+    """This agent's asks that ended in the last day, newest first. Empty on any
+    failure — the line is omitted, never the turn (trinity-enterprise#611)."""
+    if not agent_name:
+        return []
+    try:
+        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+
+        return db.list_recent_operator_queue_endings(
+            agent_name,
+            iso_cutoff(hours=ENDED_ASKS_WINDOW_HOURS),
+            MAX_ENDED_ASKS + 1,
+            exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+        ) or []
+    except Exception as e:
+        logger.debug(f"_resolve_ended_asks({agent_name}) failed: {e}")
+        return []
 
 
 def _resolve_platform_url() -> Optional[str]:
@@ -979,7 +1032,8 @@ def compose_system_prompt(
         # caller that pre-fills BOTH collaborators and platform_url would
         # otherwise skip the whole replace block, and the assignment fields
         # would silently never render.
-        if ctx.collaborators is None or ctx.platform_url is None or needs_assignment:
+        if (ctx.collaborators is None or ctx.platform_url is None or needs_assignment
+                or ctx.ended_asks is None):
             assignment = (
                 _resolve_assignment(ctx.agent_name, ctx.triggered_by)
                 if needs_assignment
@@ -1016,6 +1070,11 @@ def compose_system_prompt(
                     ctx.proactive_consent
                     if ctx.proactive_consent is not None
                     else assignment.get("proactive_consent")
+                ),
+                ended_asks=(
+                    ctx.ended_asks
+                    if ctx.ended_asks is not None
+                    else _resolve_ended_asks(ctx.agent_name)
                 ),
             )
         block = build_execution_context(ctx)

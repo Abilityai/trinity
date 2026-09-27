@@ -106,7 +106,8 @@ from routers.paid import router as paid_router
 from routers.nevermined import router as nevermined_router
 from routers.image_generation import router as image_generation_router
 from routers.avatar import router as avatar_router
-from routers.operator_queue import router as operator_queue_router, set_websocket_manager as set_operator_queue_ws_manager
+from routers.operator_queue import router as operator_queue_router, agent_router as operator_queue_agent_router, set_websocket_manager as set_operator_queue_ws_manager
+from services.ask_service import set_websocket_manager as set_ask_service_ws_manager  # trinity-enterprise#611
 from routers.voice import router as voice_router
 from routers.voip import public_router as voip_public_router, auth_router as voip_auth_router
 from routers.event_subscriptions import router as event_subscriptions_router, set_websocket_manager as set_event_subs_ws_manager, set_filtered_websocket_manager as set_event_subs_filtered_ws_manager
@@ -310,6 +311,7 @@ set_reports_filtered_ws_manager(filtered_manager)
 set_monitoring_ws_manager(manager)
 set_monitoring_filtered_ws_manager(filtered_manager)
 set_operator_queue_ws_manager(manager)
+set_ask_service_ws_manager(manager)  # trinity-enterprise#611: the ask sink's thin triggers
 set_opqueue_sync_ws_manager(manager)
 set_event_subs_ws_manager(manager)
 set_event_subs_filtered_ws_manager(filtered_manager)
@@ -1356,6 +1358,7 @@ app.include_router(nevermined_router)  # Nevermined Admin Config (NVM-001)
 app.include_router(image_generation_router)  # Image Generation (IMG-001)
 app.include_router(avatar_router)  # Agent Avatars (AVATAR-001)
 app.include_router(operator_queue_router)  # Operator Queue (OPS-001)
+app.include_router(operator_queue_agent_router)  # an agent's own ask readback (trinity-enterprise#611)
 app.include_router(voice_router)  # Voice Chat (VOICE-001)
 app.include_router(voip_public_router)  # VoIP Telephony Media Streams WS (VOIP-001)
 app.include_router(voip_auth_router)  # VoIP Telephony binding + trigger (VOIP-001)

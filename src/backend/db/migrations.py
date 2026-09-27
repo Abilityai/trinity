@@ -3647,6 +3647,42 @@ def _migrate_operator_queue_sync_state(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_queue_ask_object(cursor, conn):
+    """trinity-enterprise#611 — the ask object: how an ask ended, and who raised it.
+
+    Twelve nullable TEXT columns, one migration for everything #611 writes (two
+    stacked revisions would double the re-parent risk, #2068).
+
+    The endings ledger: `disposition` (answered | cancelled | expired),
+    `disposed_at`, `disposed_by` (person | timeout), `disposed_by_email`,
+    `disposition_reason` (the operator's optional cancel reason) and `batch_id`
+    (one uuid per bulk-cancel sweep) — each written in the same compare-and-set
+    UPDATE that flips `status`.
+
+    The agent-raised ask: `raised_by` (agent | gate), `channel` (file | mcp),
+    `to_role`, `resolved_to` (JSON list of person refs), `proposal` (JSON) and
+    `supersedes_expired` (the predecessor row's uuid). Written only from
+    keyword-only arguments, never from an agent's file entry.
+
+    No default and no backfill: a row that ended before the ledger keeps a NULL
+    disposition and reads from `status`, never from an invented ending time.
+    """
+    for column in (
+        "disposition", "disposed_at", "disposed_by", "disposed_by_email",
+        "disposition_reason", "batch_id",
+        "raised_by", "channel", "to_role", "resolved_to", "proposal",
+        "supersedes_expired",
+    ):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for the ask object (trinity-enterprise#611)",
+        )
+    conn.commit()
+
+
 def _migrate_channel_report_client(cursor, conn):
     """ent#457 review — WHICH client a portal channel context belongs to.
 
@@ -4845,4 +4881,5 @@ MIGRATIONS = [
     ("operator_queue_sync_state", _migrate_operator_queue_sync_state),
     ("role_readiness_rollout_seed", _migrate_role_readiness_rollout_seed),
     ("auto_sync_enabled_backfill", _migrate_auto_sync_enabled_backfill),
+    ("operator_queue_ask_object", _migrate_operator_queue_ask_object),
 ]
