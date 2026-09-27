@@ -102,7 +102,7 @@ The agent header displays status (Running/Stopped), CPU and memory usage, networ
 
 Fleet-wide monitoring is available at `GET /api/monitoring/fleet-health`. Health levels, from best to worst: healthy, degraded, unhealthy, critical, unknown.
 
-- **MCP:** `get_agent_health(name)`, `get_fleet_health()`, `trigger_health_check()`
+- **MCP:** `get_agent_health(name)`, `get_fleet_health()` (includes each agent's git `sync` block), `get_fleet_sync_audit()`, `trigger_health_check()`
 
 ### Resource Allocation
 

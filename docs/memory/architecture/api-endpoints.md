@@ -148,7 +148,8 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing 
 | POST | `/api/agents/{name}/git/reset-to-main-preserve-state` | Recovery reset — see [Git Sync Health](agent-lifecycle.md#git-sync-health-389390) |
 | POST | `/api/agents/{name}/git/bind-to-own-repo` | **Bind to a repo the caller owns** (ent#109) — create it if needed, push the agent's CURRENT workspace history, repoint `origin`, persist the per-agent PAT, re-bake the container env. `OwnedAgentByName` **+ `reject_agent_principal`** (human-only), `Idempotency-Key` verb-folded. See [Post-Creation Repo Binding](agent-lifecycle.md#post-creation-repo-binding-ent109) |
 | GET | `/api/agents/{name}/git/bind-to-own-repo/status` | Resolve a binding whose HTTP response was lost — reports the DB row vs the live container's `origin` (`origin_in_sync`) rather than a remembered request (ent#109) |
-| GET | `/api/fleet/sync-audit` | Aggregate per-agent sync state + `duplicate_binding` flag (admins all; others accessible agents) |
+| GET | `/api/fleet/sync-audit` | Aggregate per-agent sync state + `duplicate_binding` flag (admins all; others accessible agents). ent#707: each entry adds the #706 columns and the verdict (`ahead`/`behind`/`dirty_files`/`diverged_since`/`divergence_age_s`/`last_successful_push_at`/`state`/`reason`/`recommendation`/`binding`/`auto_sync_enabled`/`frozen`), `dirty_tree` is real, summary adds `diverged`/`frozen`/`auto_sync_off`/`red`; MCP `get_fleet_sync_audit` |
+| GET | `/api/monitoring/status` | Fleet health (MON-001). ent#707: each agent carries a git `sync` block (null without a binding), the response a `sync_summary`, and a red agent one `sync: <reason> — <recommendation>` issue; an annotation that never changes `status` or the counts |
 
 ### Templates (2 endpoints)
 | Method | Path | Description |

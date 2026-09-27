@@ -55,7 +55,7 @@ Trinity reads the git status of every git-enabled agent once a minute. Each read
 
 ### What the sync state means
 
-Sync health measures whether the agent and its repository **agree**, not only whether the last push worked. Trinity computes one state per agent and every surface shows the same one: the dashboard dot, `GET /api/agents/sync-health`, `GET /api/agents/{name}/git/sync-state` and the `get_git_sync_state` MCP tool.
+Sync health measures whether the agent and its repository **agree**, not only whether the last push worked. Trinity computes one state per agent and every surface shows the same one: the dashboard dot, the sync chip on the Fleet tile and the **Sync** line on Agent Detail → Overview (`↑7 ↓0 · 12 dirty · pushed 3h ago` in the state colour; hover for the reason), `GET /api/agents/sync-health`, `GET /api/agents/{name}/git/sync-state`, fleet health (`GET /api/monitoring/status` and `get_fleet_health`), the fleet sync audit (`GET /api/fleet/sync-audit` and `get_fleet_sync_audit`), and the `get_git_sync_state` MCP tool. The reason never includes the raw git error text; the per-agent sync-state read still carries it as `last_error_summary`.
 
 | State | When |
 |-------|------|
@@ -176,9 +176,9 @@ Trailing slashes are stripped automatically. Defaults target `github.com` and `h
 | `/api/agents/{name}/git/bind-to-own-repo` | POST | Bind to a repository you own (owner-only, human-only) |
 | `/api/agents/{name}/git/bind-to-own-repo/status` | GET | Reconcile a binding whose response was lost |
 | `/api/agents/sync-health` | GET | Per-agent sync health for the fleet |
-| `/api/fleet/sync-audit` | GET | Fleet sync audit, including duplicate repository bindings |
+| `/api/fleet/sync-audit` | GET | Fleet sync audit, including duplicate repository bindings, ahead/behind, dirty files, last push and the sync state per agent |
 
-MCP tools: `initialize_github_sync`, `get_git_status`, `git_sync`, `get_git_log`, `git_pull`, `get_git_sync_state`, `reset_to_main_preserve_state`. Mutating tools are owner-only; a shared key gets read and pull.
+MCP tools: `initialize_github_sync`, `get_git_status`, `git_sync`, `get_git_log`, `git_pull`, `get_git_sync_state`, `reset_to_main_preserve_state`, and fleet-wide `get_fleet_sync_audit` (scoped to the agents you can access; an agent key sees its owner's). Mutating tools are owner-only; a shared key gets read and pull.
 
 There is no MCP tool for binding to your own repository — it requires your personal token.
 
