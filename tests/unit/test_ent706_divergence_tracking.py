@@ -248,3 +248,96 @@ async def test_unreachable_agent_changes_nothing(service, seed_agent, db):
     before = db.get_sync_state("alpha")
     await _poll(service, None)
     assert db.get_sync_state("alpha") == before
+
+
+# --------------------------------------------------------------------------
+# The sync_diverged operator-queue item: one per episode, only when frozen
+# --------------------------------------------------------------------------
+
+def _age_the_episode(name="alpha", hours=24, extra_seconds=60):
+    start = datetime.now(timezone.utc) - timedelta(hours=hours, seconds=extra_seconds)
+    stamp = start.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    _hrun("UPDATE agent_sync_state SET diverged_since = :s WHERE agent_name = :n",
+          s=stamp, n=name)
+    return stamp
+
+
+def _diverged_items(db, name="alpha"):
+    return [i for i in db.list_operator_queue_items(agent_name=name)
+            if i["type"] == "sync_diverged"]
+
+
+@pytest.mark.asyncio
+async def test_one_item_per_episode_across_polls(service, seed_agent, db):
+    seed_agent()
+    await _poll(service, _payload(ahead=7))
+    assert _diverged_items(db) == []  # just started: yellow, no item
+    stamp = _age_the_episode()
+    await _poll(service, _payload(ahead=7))
+    await _poll(service, _payload(ahead=7))
+    items = _diverged_items(db)
+    assert len(items) == 1
+    item = items[0]
+    assert item["priority"] == "high"
+    assert "schedules paused" in item["title"]
+    assert "diverged 0 behind / 7 ahead for 24h" in item["question"]
+    ctx = item.get("context") or {}
+    assert ctx["ahead"] == 7 and ctx["behind"] == 0
+    assert ctx["diverged_since"] == stamp
+    # Auto-sync is on, so "enable auto-sync" is not the fix; nothing is behind.
+    assert "recommendation" in ctx
+    assert "last_error_summary" not in ctx
+
+
+@pytest.mark.asyncio
+async def test_two_pollers_converge_on_one_item(service, seed_agent, db, monkeypatch):
+    """A fail-open lease (Redis down) makes every worker a leader."""
+    import services.sync_health_service as shs
+
+    seed_agent()
+    await _poll(service, _payload(ahead=7))
+    _age_the_episode()
+    other = shs.SyncHealthService(poll_interval=0)
+    await _poll(service, _payload(ahead=7))
+    await _poll(other, _payload(ahead=7))
+    assert len(_diverged_items(db)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_new_episode_gets_a_new_item(service, seed_agent, db):
+    seed_agent()
+    await _poll(service, _payload(ahead=7))
+    _age_the_episode(hours=30)
+    await _poll(service, _payload(ahead=7))
+    await _poll(service, _payload(ahead=0, behind=0))  # episode ends
+    assert db.get_sync_state("alpha")["diverged_since"] is None
+    await _poll(service, _payload(ahead=3))  # a new one begins
+    _age_the_episode(hours=25)
+    await _poll(service, _payload(ahead=3))
+    assert len(_diverged_items(db)) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "seed_kwargs",
+    [
+        {"freeze": 0},                        # control arm: flag off
+        {"source_mode": 1, "auto_sync": 0},   # a deployment never freezes
+    ],
+    ids=["freeze-flag-off", "deployment"],
+)
+async def test_no_item_unless_a_freeze_is_in_force(service, seed_agent, db, seed_kwargs):
+    """Control arm: the same seed and the same aged episode, with the freeze
+    not in force, produce ZERO items — so the item above comes from the freeze
+    and not from anything ambient."""
+    seed_agent(**seed_kwargs)
+    await _poll(service, _payload(ahead=7))
+    _age_the_episode(hours=30)
+    await _poll(service, _payload(ahead=7))
+    assert _diverged_items(db) == []
+
+
+def test_the_id_prefix_is_platform_reserved():
+    from services.operator_queue_service import _RESERVED_ID_PREFIXES
+
+    assert "sync-diverged-" in _RESERVED_ID_PREFIXES
