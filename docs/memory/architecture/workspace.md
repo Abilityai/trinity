@@ -798,7 +798,12 @@ cursorless-thread and row-cap logic is reused unchanged. Each thread with
 `unread > 0` gains `latest {kind, id, at, excerpt, outcome, title?, display_hint?}`
 and `first_unread_message_id`, only for sessions whose agent is on
 `roster_agent_names(email, include_owned=is_platform)`, bounded to the 100 most
-recent. The excerpt is markdown-stripped, credential-sanitised and ≤160 chars.
+recent. The excerpt is credential-sanitised (`utils.credential_sanitizer`), then
+markdown-stripped and ≤160 chars; a deliverable's excerpt is its stripped title.
+The route sets `response_model_exclude_none`, so an entry with no preview simply
+omits the new keys and `previews=false` is byte-identical to the ent#359 shape. A
+roster read that fails raises (the request fails loud) rather than silently
+dropping every preview.
 **No `cost`** — `PortalChatArrival` has no such field. `outcome` comes from the
 platform-written **`source = "completion:done" | "completion:failed"`** marker that
 `channel_completion_report` now stamps on its portal message; any other value
@@ -820,13 +825,19 @@ route before its first await and, on bare `/workspace` with no stage key, awaits
 `router.replace('/workspace/inbox')` inside the `try` — the stage never resolves on
 bare `/workspace` first, so no conversation flashes. `WORKSPACE_INBOX` is a new
 constant; `WORKSPACE_ROOT` stays the escape and sign-out target. The selection lives
-in its own `inboxSelection` ref and is **never** written to `activeAgentName`
+in the URL (`?tab=&item=`, read as the `inboxSelection` computed) and is **never**
+written to `activeAgentName`
 (writing that fires `ensureMainListed`, which mints a Main); `activeAgent` reads the
 selection on the Inbox route, so the rail follows the selected item and
 `railColumnReservedFor` is reused unchanged. Unread and All read **`sidebarThreads`**
 — the same projection the sidebar sums — so "came back" equals the sidebar total by
 construction; `threadsLoaded` (latched on the first successful sessions read) and
 `store.sessionsFailed` gate the empty copy, the D7 twin of `asksLoaded`/`asksFailed`.
+On desktop the tab's first row is auto-selected (so the rail column does not pop in)
+but an auto-selection is **not** a read — only an explicit open marks the chat read;
+on phone nothing is auto-selected. The pinned sidebar row is its own component,
+`PortalInboxRow.vue`. The pane's **Open canvas** button is not built (the shell has no
+cheap per-agent "has a visible canvas" fact); it is deferred.
 
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 

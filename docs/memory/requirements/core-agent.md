@@ -3555,6 +3555,8 @@ to localStorage in the clear.
   refresh keeps the list with a stale banner (§26.8, the asks read fails loud).
 - **Phone**: list and pane are successive full-width states with an explicit Back (Esc too);
   nothing is auto-selected, so the landing starts no agent feed.
+  On desktop the tab's first row is auto-selected (the rail column does not pop in on the
+  first click), but an auto-selection is never a read: only an explicit open marks a chat read.
 - **Known properties (stated, not bugs)**:
   - A viewer who has never read anything has no baseline, so nothing counts for them — a first
     deliverable included (the inherited #557 rule).

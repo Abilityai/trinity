@@ -58,7 +58,8 @@
 **The Workspace Inbox (ent#610).** Route `/workspace/inbox` (`WorkspaceInbox`) is a
 stage of the same `views/Portal.vue` shell, not a new view. `components/portal/PortalInbox.vue`
 (container: header, `OverflowTabs` Action · Unread · All, list + pane, phone collapse),
-`PortalInboxList.vue` and `PortalInboxPane.vue` compose existing surfaces — `PortalAsks`
+`PortalInboxList.vue`, `PortalInboxPane.vue` and the sidebar's pinned
+`PortalInboxRow.vue` compose existing surfaces — `PortalAsks`
 filtered to one ask by its `askIds` prop and namespaced by `testidPrefix` (default
 `portal-ask`, so every existing test id is unchanged), `PortalMarkdown`, and
 `ReportRenderer` with the `ReportSummary` fallback. **No new store** (Invariant #6):
@@ -67,10 +68,14 @@ Action reads `clientPortal.openAsks`/`asks`; Unread and All read the shell's
 passed as props exactly as the sidebar receives them. Every decidable rule is pure in
 `components/portal/portalInbox.js` (`inboxLandingTarget`, the item builders,
 `inboxCounts`, `itemKey`). Honesty fields: `asksLoaded`/`asksFailed`/`asksLoadedAt` on
-the store (PR A0) and `threadsLoaded` on the shell; the skeleton is keyed on
+the store (PR A0), `asksAbsent` (the 404/403 verdict, so an instance without asks shows
+an empty Action rather than a skeleton) and `threadsLoaded` on the shell; the skeleton is keyed on
 `viewState({hasLoaded})`, never on a loading flag. `markChatReadStrict` (rethrows) exists
-for Mark all read only; the per-row open keeps the fire-and-forget `markRead`. Opening a
-chat at an arrival is a one-shot `?anchor=m:<id>|d:<id>` read by `PortalConversation`
+for Mark all read only; the per-row open keeps the fire-and-forget `markRead`.
+`fetchSessionDeliverablesStrict` (rethrows) lets the pane tell "no deliverables"
+from "the read failed"; `fetchSessionDeliverables` stays fail-soft on top of it. Opening a
+chat at an arrival is a one-shot `?anchor=m:<id>|d:<id>` resolved by
+`composables/useConversationAnchor.js` inside `PortalConversation`
 against `data-message-id` / `data-report-id` targets, with `useStickToBottom().detach()`
 so the ResizeObserver does not re-pin the view to the bottom.
 

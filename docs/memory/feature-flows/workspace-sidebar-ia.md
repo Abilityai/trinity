@@ -242,7 +242,8 @@ renders nothing rather than a `(0)`.
 (`askCount`, `data-testid="sidebar-ask-count"`, unchanged address) and what came back
 (`totalUnread(sidebarThreads)`, `sidebar-unread-count`) — moved from the brand head to a
 pinned `router-link` to `/workspace/inbox` in the non-scrolling top block: one home per
-fact. Both badges are white on a 700 ground (the old `urgent-500` + white was 2.80:1) with
+fact. The row is its own component, `components/portal/PortalInboxRow.vue`, and the brand
+mark links to `WORKSPACE_INBOX` too. Both badges are white on a 700 ground (the old `urgent-500` + white was 2.80:1) with
 `tabular-nums`. **"new", not "replies"**: since ent#610 a count is of *arrivals* — agent
 messages and deliverables addressed to you stamped to your chat — so every title and badge
 says "new". The Inbox reads the same `sidebarThreads` projection, so its "came back" and
