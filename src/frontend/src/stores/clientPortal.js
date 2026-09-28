@@ -599,6 +599,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // client signing in on the same browser must not inherit this list.
       this.modelOptions = []
       this.rosterLoaded = false
+      // trinity-enterprise#610 (PR A0): a failed read keeps the last good list,
+      // so the list must not outlive the session it belongs to — or the next
+      // client's first failed read shows them the previous client's asks.
+      this.asks = []
+      this.asksAvailable = false
+      this.asksLoaded = false
+      this.asksFailed = false
+      this.asksLoadedAt = null
       // #2261: the primitive clears the suppression; `endSession({expired})`
       // re-arms it immediately afterwards. Keeping the clear HERE is what stops
       // a marker from outliving the session it was about.
@@ -2063,6 +2071,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       } catch (err) {
         if ([403, 404].includes(err.response?.status)) {
           this.asksAvailable = false
+          this.asksLoaded = false
           this.asksFailed = false
           this.asks = []
           return []

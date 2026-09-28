@@ -228,6 +228,34 @@ describe('an unentitled build says nothing', () => {
     expect(store.asksAvailable).toBe(false)
     expect(store.asks).toEqual([])
     expect(store.asksFailed).toBe(false)
+    // A surface that no longer exists has no "loaded" verdict either.
+    expect(store.asksLoaded).toBe(false)
+  })
+
+  // Keeping the last good list on a failure makes the list session-scoped
+  // state: it must not outlive a sign-out, or the next client on the same
+  // browser sees the previous client's asks on their first failed read.
+  it('a sign-out drops the kept list, so the next client never inherits it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
+    await store.fetchAsks()
+    expect(store.asks.map((a) => a.id)).toEqual(['a1'])
+
+    store.signOut()
+    expect(store.asks).toEqual([])
+    expect(store.asksAvailable).toBe(false)
+    expect(store.asksLoaded).toBe(false)
+    expect(store.asksFailed).toBe(false)
+    expect(store.asksLoadedAt).toBe(null)
+
+    store.portalToken = 'another-client'
+    portalHttp.get.mockRejectedValueOnce({ response: { status: 503 } })
+    await store.fetchAsks()
+
+    expect(store.asks).toEqual([])
+    expect(store.askCount).toBe(0)
+    expect(store.asksFailed).toBe(true)
+    warn.mockRestore()
   })
 
   it('does not poll at all when nobody is signed in', async () => {
