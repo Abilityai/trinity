@@ -1154,6 +1154,72 @@ def reject_non_person_principal(current_user: User) -> None:
         )
 
 
+
+# Human-only grant surfaces (#2996, trinity-enterprise#711). Two rules, both
+# ALLOWlists over `mcp_scope` that fail closed on a principal without one:
+#
+#   PERSON       `is_person_principal` above — a JWT session or the person's own
+#                `user`-scoped key. For routes that grant or change what an agent
+#                may do (autonomy, the agent-config toggles).
+#   INTERACTIVE  `is_interactive_principal` — a JWT session only. For routes that
+#                mint, bind or rotate a credential or sign-in identity: a minter
+#                must be stricter than the principal class it produces, or the
+#                PERSON rule is circular.
+#
+# These are credential-class rules, not proof of human origin: a `user` key is
+# the person's delegated credential, and a JWT counts as interactive only because
+# non-human JWTs are fenced at `get_current_user`. Both primitives additionally
+# refuse a principal carrying `vouched_source_agent` (the event-loopback JWT has
+# `mcp_scope=None`; its entry-point fence is the first layer, this the second).
+#
+# Enumeration-safe (Invariant #8, #186): the refusal depends only on the
+# principal, never on whether the addressed agent exists, so a 403 answered
+# before a path's 404 discloses nothing.
+HUMAN_ONLY_DETAIL = {
+    "code": "person_required",
+    "message": (
+        "This operation is human-only; agent- and system-scoped keys "
+        "cannot perform it"
+    ),
+}
+
+
+def assert_person(current_user: User) -> None:
+    """Refuse (403, `HUMAN_ONLY_DETAIL`) any caller that is not a PERSON.
+
+    The imperative form of `require_person`, for a handler that must run the
+    check itself. Same predicate as ent#611's `reject_non_person_principal` plus
+    the loopback refusal; the detail is neutral rather than ask-specific.
+    """
+    if not is_person_principal(current_user) or getattr(
+        current_user, "vouched_source_agent", None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=dict(HUMAN_ONLY_DETAIL),
+        )
+
+
+def require_person(current_user: User = Depends(get_current_user)) -> User:
+    """`Depends` form of `assert_person` — the PERSON rule on a route."""
+    assert_person(current_user)
+    return current_user
+
+
+def require_interactive(current_user: User = Depends(get_current_user)) -> User:
+    """`Depends` form of the INTERACTIVE rule: a JWT session only.
+
+    A key-authenticated caller gets `reject_non_interactive_principal`'s
+    existing refusal, unchanged; a loopback JWT gets `HUMAN_ONLY_DETAIL`.
+    """
+    reject_non_interactive_principal(current_user)
+    if getattr(current_user, "vouched_source_agent", None):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=dict(HUMAN_ONLY_DETAIL),
+        )
+    return current_user
+
 def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
     """Lifecycle-mutation gate for agent-scoped callers
     (trinity-enterprise#69 Part 2) — INTERIM until #948 capability tokens.
